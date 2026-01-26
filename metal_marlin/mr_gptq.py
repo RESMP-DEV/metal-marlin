@@ -13,7 +13,7 @@ minimize reconstruction error on calibration data.
 
 Usage:
     from metal_marlin.mr_gptq import MRGPTQQuantizer, QuantizationFormat
-    from metal_marlin.calibration import BartowskiCalibration
+    from metal_marlin.calibration import CalibrationDataset
 
     # Create quantizer
     quantizer = MRGPTQQuantizer(
@@ -26,7 +26,7 @@ Usage:
     )
 
     # Load calibration dataset
-    calibration = BartowskiCalibration.v3()
+    calibration = CalibrationDataset.v3()
 
     # Quantize model
     report = quantizer.quantize_model(
@@ -710,9 +710,7 @@ class MRGPTQQuantizer:
 
         # Ensure dimensions are compatible
         if in_feat % 8 != 0:
-            raise ValueError(
-                f"in_features ({in_feat}) must be divisible by 8 for Marlin packing"
-            )
+            raise ValueError(f"in_features ({in_feat}) must be divisible by 8 for Marlin packing")
         if in_feat % self.group_size != 0:
             raise ValueError(
                 f"in_features ({in_feat}) must be divisible by group_size ({self.group_size})"
@@ -884,9 +882,7 @@ class MRGPTQQuantizer:
                     total_params += tensor.size
 
                     # Check if should quantize
-                    should_quant = self._should_quantize_tensor(
-                        name, tensor, layers_to_quantize
-                    )
+                    should_quant = self._should_quantize_tensor(name, tensor, layers_to_quantize)
 
                     if should_quant:
                         if verbose:
@@ -896,9 +892,7 @@ class MRGPTQQuantizer:
                         hessian = hessians.get(name)
 
                         # Quantize layer
-                        packed, scales, meta = self.quantize_layer(
-                            tensor, hessian, layer_name=name
-                        )
+                        packed, scales, meta = self.quantize_layer(tensor, hessian, layer_name=name)
 
                         # Store packed weights and scales
                         output_tensors[name] = packed
@@ -947,9 +941,7 @@ class MRGPTQQuantizer:
         save_file(output_tensors, str(output_file))
 
         # Compute overall statistics
-        mean_rmse = (
-            float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
-        )
+        mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
 
         # Original size: FP16 per weight
         # Quantized size: 4 bits per weight + FP16 scale per group
@@ -1033,6 +1025,772 @@ class MRGPTQQuantizer:
                 return False
 
         return True
+
+    def quantize_model_with_calibration(
+        self,
+        model_path: Path,
+        calibration: CalibrationDataset,
+        tokenizer,
+        output_path: Path,
+        precision_config: MoEPrecisionConfig | None = None,
+        num_calibration_batches: int = 128,
+        batch_size: int = 4,
+        max_seq_len: int = 2048,
+        checkpoint_dir: Path | None = None,
+        resume: bool = True,
+        verbose: bool = True,
+    ) -> QuantizationReport:
+        """
+        Full MR-GPTQ pipeline with Hessian-aware quantization.
+
+        This is the main production entry point that:
+        1. Loads model for forward passes (streaming to avoid OOM)
+        2. Registers Hessian collection hooks
+        3. Runs calibration forward passes (multi-domain v3)
+        4. Applies Hadamard rotation to weights
+        5. Runs GPTQ with collected Hessians
+        6. Packs and saves quantized model
+
+        Supports:
+        - Streaming large models (loads shards on-demand)
+        - Checkpointing progress (saves after each layer)
+        - Resume from interruption
+
+        Args:
+            model_path: Path to HuggingFace model directory
+            calibration: CalibrationDataset (e.g., CalibrationDataset.v3())
+            tokenizer: HuggingFace tokenizer with encode/decode methods
+            output_path: Directory to save quantized model
+            precision_config: Per-layer precision config for MoE models
+            num_calibration_batches: Number of calibration batches to run
+            batch_size: Samples per calibration batch
+            max_seq_len: Maximum sequence length for tokenization
+            checkpoint_dir: Directory for checkpoints (default: output_path/checkpoints)
+            resume: If True, resume from checkpoint if available
+            verbose: Print progress
+
+        Returns:
+            QuantizationReport with quality metrics
+        """
+        import torch
+        from safetensors.numpy import save_file
+
+        model_path = Path(model_path)
+        output_path = Path(output_path)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        if checkpoint_dir is None:
+            checkpoint_dir = output_path / "checkpoints"
+
+        # Try to resume from checkpoint
+        checkpoint = None
+        if resume:
+            checkpoint = QuantizationCheckpoint.load(checkpoint_dir)
+            if checkpoint is not None and verbose:
+                print(f"Resuming from checkpoint: {len(checkpoint.completed_layers)} layers done")
+
+        if checkpoint is None:
+            checkpoint = QuantizationCheckpoint.create(checkpoint_dir, str(model_path))
+
+        if verbose:
+            print("=" * 60)
+            print("MR-GPTQ Quantization with Hessian Calibration")
+            print("=" * 60)
+            print(f"Model: {model_path}")
+            print(f"Output: {output_path}")
+            print(f"Format: {self.format.value}")
+            print(f"Group size: {self.group_size}")
+            print(f"Hadamard: {self.use_hadamard} (block={self.hadamard_block_size})")
+            print(f"Actorder: {self.actorder}")
+            print(f"Calibration batches: {num_calibration_batches}")
+            print()
+
+        # Step 1: Load model for inference
+        if verbose:
+            print("Step 1: Loading model for calibration...")
+
+        try:
+            from transformers import AutoModelForCausalLM
+        except ImportError as e:
+            raise ImportError(
+                "transformers library required. Install with: pip install transformers"
+            ) from e
+
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_path),
+            trust_remote_code=True,
+            torch_dtype=torch.float32,  # FP32 for accurate Hessians
+            device_map="cpu",  # Start on CPU, move to GPU per-layer
+        )
+        model.eval()
+
+        # Step 2: Register Hessian collection hooks
+        if verbose:
+            print("Step 2: Registering Hessian collection hooks...")
+
+        hessian_collector = HessianCollector(damp_ratio=self.percdamp)
+
+        # Load existing Hessian checkpoint if available
+        hessian_checkpoint_path = checkpoint_dir / "hessians"
+        if resume and hessian_checkpoint_path.exists():
+            hessian_collector.load_checkpoint(hessian_checkpoint_path)
+            if verbose:
+                print(f"  Loaded Hessian checkpoint: {len(hessian_collector._hessians)} layers")
+
+        hessian_collector.register_hooks(model)
+        if verbose:
+            print(f"  Registered hooks on {len(hessian_collector._hooks)} layers")
+
+        # Step 3: Run calibration forward passes
+        if verbose:
+            print(f"Step 3: Running {num_calibration_batches} calibration batches...")
+
+        calibration_samples = list(calibration.samples)
+        n_samples = min(len(calibration_samples), num_calibration_batches * batch_size)
+
+        with torch.no_grad():
+            for batch_idx in range(0, n_samples, batch_size):
+                batch_end = min(batch_idx + batch_size, n_samples)
+                batch_texts = calibration_samples[batch_idx:batch_end]
+
+                # Tokenize batch
+                inputs = tokenizer(
+                    batch_texts,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_seq_len,
+                    padding=True,
+                )
+
+                # Forward pass (hooks accumulate Hessians)
+                model(**inputs)
+
+                if verbose and (batch_idx // batch_size + 1) % 10 == 0:
+                    batches_done = batch_idx // batch_size + 1
+                    total_batches = (n_samples + batch_size - 1) // batch_size
+                    print(f"  Batch {batches_done}/{total_batches}")
+
+                # Checkpoint Hessians periodically
+                if (batch_idx // batch_size + 1) % 50 == 0:
+                    hessian_collector.save_checkpoint(hessian_checkpoint_path)
+
+        # Final Hessian checkpoint
+        hessian_collector.save_checkpoint(hessian_checkpoint_path)
+        hessian_collector.remove_hooks()
+
+        # Get computed Hessians
+        hessians = hessian_collector.get_hessians()
+        if verbose:
+            print(f"  Collected Hessians for {len(hessians)} layers")
+            for name, info in list(hessians.items())[:3]:
+                print(f"    {name}: {info.n_samples} samples")
+
+        # Step 4: Quantize weights with Hessians
+        if verbose:
+            print("\nStep 4: Quantizing weights with GPTQ...")
+
+        # Release model from memory
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Load weights from safetensors and quantize
+        from safetensors import safe_open
+
+        st_files = sorted(model_path.glob("*.safetensors"))
+        if not st_files:
+            raise FileNotFoundError(f"No safetensors files in {model_path}")
+
+        output_tensors: dict[str, np.ndarray] = {}
+        layer_reports: list[QuantizationLayerReport] = []
+        quantized_count = 0
+        skipped_count = 0
+        total_params = 0
+        quantized_params = 0
+
+        for st_file in st_files:
+            if verbose:
+                print(f"\n  Processing {st_file.name}...")
+
+            with safe_open(str(st_file), framework="numpy") as f:
+                for name in f.keys():
+                    # Skip already processed layers
+                    if checkpoint.is_layer_complete(name):
+                        if verbose:
+                            print(f"    Skipping (already done): {name}")
+                        continue
+
+                    tensor = f.get_tensor(name)
+                    total_params += tensor.size
+
+                    # Determine if should quantize
+                    should_quant = self._should_quantize_tensor(
+                        name, tensor, layers_to_quantize=None
+                    )
+
+                    if should_quant:
+                        checkpoint.current_layer = name
+                        checkpoint.save()
+
+                        if verbose:
+                            print(f"    Quantizing: {name} {tensor.shape}")
+
+                        # Get Hessian for this layer
+                        # Map tensor name to hook name (remove .weight suffix)
+                        hessian_name = name.replace(".weight", "")
+                        hessian_info = hessians.get(hessian_name)
+                        hessian = hessian_info.hessian if hessian_info else None
+
+                        if hessian is None:
+                            # Try alternative names
+                            for h_name in hessians:
+                                if h_name in name or name in h_name:
+                                    hessian = hessians[h_name].hessian
+                                    break
+
+                        # Quantize layer
+                        try:
+                            packed, scales, meta = self.quantize_layer(
+                                tensor, hessian, layer_name=name
+                            )
+                        except Exception as e:
+                            if verbose:
+                                print(f"      Warning: GPTQ failed ({e}), using RTN")
+                            packed, scales, meta = self.quantize_layer(
+                                tensor, hessian=None, layer_name=name
+                            )
+
+                        # Store results
+                        output_tensors[name] = packed
+                        output_tensors[f"{name}.scales"] = scales
+                        output_tensors[f"{name}.group_size"] = np.array(
+                            [self.group_size], dtype=np.int32
+                        )
+
+                        if meta.get("hadamard"):
+                            h_meta = meta["hadamard"]
+                            output_tensors[f"{name}.hadamard_block_size"] = np.array(
+                                [h_meta["block_size"]], dtype=np.int32
+                            )
+
+                        # Record stats
+                        err = meta.get("error", {})
+                        layer_reports.append(
+                            QuantizationLayerReport(
+                                name=name,
+                                shape=tensor.shape,
+                                group_size=self.group_size,
+                                format=self.format,
+                                use_hadamard=self.use_hadamard,
+                                rmse=err.get("rmse", 0.0),
+                                max_error=err.get("max_error", 0.0),
+                                mean_relative_error=err.get("mean_relative_error", 0.0),
+                            )
+                        )
+
+                        quantized_count += 1
+                        quantized_params += tensor.size
+
+                    else:
+                        if verbose:
+                            print(f"    Keeping: {name} {tensor.shape}")
+                        output_tensors[name] = tensor
+                        skipped_count += 1
+
+                    # Mark layer complete
+                    checkpoint.mark_layer_complete(name)
+
+                    # Memory cleanup
+                    gc.collect()
+
+        # Step 5: Save quantized model
+        if verbose:
+            print("\nStep 5: Saving quantized model...")
+
+        output_file = output_path / "model.safetensors"
+        save_file(output_tensors, str(output_file))
+
+        # Compute statistics
+        mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
+
+        original_bits = quantized_params * 16
+        quant_weight_bits = quantized_params * 4
+        quant_scale_bits = (quantized_params // self.group_size) * 16
+        compression_ratio = original_bits / max(quant_weight_bits + quant_scale_bits, 1)
+
+        report = QuantizationReport(
+            model_path=str(model_path),
+            output_path=str(output_path),
+            format=self.format,
+            group_size=self.group_size,
+            use_hadamard=self.use_hadamard,
+            hadamard_block_size=self.hadamard_block_size,
+            actorder=self.actorder,
+            quantized_layers=quantized_count,
+            skipped_layers=skipped_count,
+            total_params=total_params,
+            quantized_params=quantized_params,
+            compression_ratio=compression_ratio,
+            mean_rmse=mean_rmse,
+            layers=layer_reports,
+        )
+
+        # Save report
+        report_file = output_path / "quantization_report.json"
+        with open(report_file, "w") as f:
+            json.dump(report.to_dict(), f, indent=2)
+
+        if verbose:
+            print()
+            print("=" * 60)
+            print("MR-GPTQ Quantization Complete!")
+            print("=" * 60)
+            print(f"  Quantized layers: {quantized_count}")
+            print(f"  Skipped layers: {skipped_count}")
+            print(f"  Total params: {total_params / 1e9:.2f}B")
+            print(f"  Quantized params: {quantized_params / 1e9:.2f}B")
+            print(f"  Compression ratio: {compression_ratio:.2f}x")
+            print(f"  Mean RMSE: {mean_rmse:.6f}")
+            print(f"  Output: {output_file}")
+
+        return report
+
+
+# =============================================================================
+# MoE Precision Configuration
+# =============================================================================
+
+
+@dataclass
+class MoEPrecisionConfig:
+    """Per-layer precision configuration for MoE models.
+
+    MoE models have varying sensitivity across layer types:
+    - Router/gate: Critical for expert selection, keep high precision (BF16/FP16)
+    - Shared expert: Sees all tokens, moderate precision (FP4 with small group)
+    - Routed experts: Redundant (2 of 64 active), can be aggressive (FP4 large group)
+    - Attention: Position-sensitive, tight FP4 quantization
+
+    Example:
+        config = MoEPrecisionConfig.default_moe()
+        # Or create custom:
+        config = MoEPrecisionConfig(
+            router_precision="fp16",
+            expert_group_size=256,
+            attention_group_size=64,
+        )
+    """
+
+    # Router/gate precision (determines expert selection)
+    router_precision: str = "bf16"  # "fp16", "bf16", "fp4"
+
+    # Expert precision settings
+    expert_format: str = "fp4"
+    expert_group_size: int = 128
+    shared_expert_group_size: int = 64  # Tighter for shared (always active)
+
+    # Attention precision
+    attention_format: str = "fp4"
+    attention_group_size: int = 64
+
+    # MLP (dense model) precision
+    mlp_format: str = "fp4"
+    mlp_group_size: int = 128
+
+    # MTP heads (Multi-Token Prediction)
+    mtp_format: str = "fp4"
+    mtp_group_size: int = 256  # Aggressive for drafts
+
+    # Hadamard settings per layer type
+    use_hadamard_experts: bool = True
+    use_hadamard_attention: bool = True
+    hadamard_block_size: int = 64
+
+    @classmethod
+    def default_dense(cls) -> MoEPrecisionConfig:
+        """Default config for dense transformer models."""
+        return cls(
+            router_precision="fp16",
+            expert_format="fp4",
+            expert_group_size=128,
+            attention_group_size=64,
+            mlp_group_size=128,
+        )
+
+    @classmethod
+    def default_moe(cls) -> MoEPrecisionConfig:
+        """Default config for MoE models (Mixtral, etc.)."""
+        return cls(
+            router_precision="bf16",
+            expert_format="fp4",
+            expert_group_size=128,
+            shared_expert_group_size=64,
+            attention_group_size=64,
+        )
+
+    @classmethod
+    def default_moe_mtp(cls) -> MoEPrecisionConfig:
+        """Config for MoE + MTP models like GLM-4.7-Flash."""
+        return cls(
+            router_precision="bf16",
+            expert_format="fp4",
+            expert_group_size=128,
+            shared_expert_group_size=64,
+            attention_group_size=64,
+            mtp_format="fp4",
+            mtp_group_size=256,
+        )
+
+    @classmethod
+    def quality_first(cls) -> MoEPrecisionConfig:
+        """Prioritize quality over compression."""
+        return cls(
+            router_precision="fp16",
+            expert_format="fp4",
+            expert_group_size=64,
+            shared_expert_group_size=32,
+            attention_group_size=32,
+            mlp_group_size=64,
+            mtp_group_size=128,
+        )
+
+    @classmethod
+    def speed_first(cls) -> MoEPrecisionConfig:
+        """Prioritize speed/compression over quality."""
+        return cls(
+            router_precision="bf16",
+            expert_format="fp4",
+            expert_group_size=256,
+            shared_expert_group_size=128,
+            attention_group_size=128,
+            mlp_group_size=256,
+            mtp_group_size=512,
+        )
+
+
+# =============================================================================
+# Streaming Hessian Collection
+# =============================================================================
+
+
+class HessianCollector:
+    """Streaming Hessian accumulator for memory-efficient calibration.
+
+    Collects Hessian approximation (X^T @ X) incrementally during forward passes,
+    avoiding storage of all calibration activations in memory.
+
+    For a 4096-hidden model:
+    - Full activations (1000 samples, 2048 seq, FP32): 4096 * 2048 * 1000 * 4 = 33GB
+    - Streaming Hessian: 4096 * 4096 * 8 = 134MB (FP64 for precision)
+
+    Usage:
+        collector = HessianCollector()
+        collector.register_hooks(model)
+
+        for batch in calibration_data:
+            model(batch)  # Hooks accumulate automatically
+
+        hessians = collector.get_hessians()
+        collector.remove_hooks()
+    """
+
+    def __init__(
+        self,
+        damp_ratio: float = 0.01,
+        layer_patterns: list[str] | None = None,
+    ):
+        """Initialize collector.
+
+        Args:
+            damp_ratio: Damping ratio λ = damp_ratio * mean(diag(H)).
+            layer_patterns: Layer name patterns to track. If None, tracks all
+                Linear layers except embeddings/norms/lm_head.
+        """
+        self.damp_ratio = damp_ratio
+        self.layer_patterns = layer_patterns
+
+        # Running sums: layer_name -> (H_sum, n_samples)
+        self._hessians: dict[str, tuple[NDArray[np.float64], int]] = {}
+        self._hooks: list = []
+        self._layer_dims: dict[str, int] = {}  # Cache in_features per layer
+
+    def register_hooks(self, model) -> None:
+        """Register forward hooks on target layers.
+
+        Args:
+            model: PyTorch or MLX model with named_modules() method.
+        """
+        # Lazy import to avoid torch dependency when not needed
+        import torch.nn as nn
+
+        for name, module in model.named_modules():
+            if not isinstance(module, nn.Linear):
+                continue
+
+            # Skip non-weight layers
+            if not self._should_track_layer(name):
+                continue
+
+            in_features = module.in_features
+            self._layer_dims[name] = in_features
+
+            # Initialize Hessian accumulator
+            self._hessians[name] = (
+                np.zeros((in_features, in_features), dtype=np.float64),
+                0,
+            )
+
+            # Register hook
+            hook = module.register_forward_hook(self._make_hook(name))
+            self._hooks.append(hook)
+
+    def _should_track_layer(self, name: str) -> bool:
+        """Determine if a layer should have Hessian tracked."""
+        name_lower = name.lower()
+
+        # Always skip these
+        skip_patterns = [
+            "embed",
+            "embedding",
+            "norm",
+            "layernorm",
+            "rmsnorm",
+            "lm_head",
+            "output",
+            "bias",
+        ]
+        if any(p in name_lower for p in skip_patterns):
+            return False
+
+        # If custom patterns specified, check them
+        if self.layer_patterns is not None:
+            return any(p in name for p in self.layer_patterns)
+
+        # Default: track linear layers with weight
+        return True
+
+    def _make_hook(self, layer_name: str):
+        """Create forward hook for Hessian accumulation."""
+        import torch
+
+        def hook(module, input, output):
+            # Get input activations
+            if isinstance(input, tuple):
+                x = input[0]
+            else:
+                x = input
+
+            if not isinstance(x, torch.Tensor):
+                return
+
+            # Flatten to [n_tokens, in_features]
+            with torch.no_grad():
+                x_flat = x.view(-1, x.shape[-1]).float()
+                x_np = x_flat.cpu().numpy().astype(np.float64)
+
+            # Accumulate H += X^T @ X
+            H_sum, n_samples = self._hessians[layer_name]
+            H_sum += x_np.T @ x_np
+            self._hessians[layer_name] = (H_sum, n_samples + x_np.shape[0])
+
+        return hook
+
+    def remove_hooks(self) -> None:
+        """Remove all registered hooks."""
+        for hook in self._hooks:
+            hook.remove()
+        self._hooks.clear()
+
+    def get_hessians(self, apply_damping: bool = True) -> dict[str, HessianInfo]:
+        """Get computed Hessians for all tracked layers.
+
+        Args:
+            apply_damping: If True, apply diagonal damping for numerical stability.
+
+        Returns:
+            Dict mapping layer names to HessianInfo objects.
+        """
+        results = {}
+
+        for name, (H_sum, n_samples) in self._hessians.items():
+            if n_samples == 0:
+                continue
+
+            # Normalize by sample count
+            H = H_sum / n_samples
+
+            # Compute diagonal for actorder
+            diag = np.diag(H).copy()
+
+            # Apply damping
+            damp = 0.0
+            if apply_damping and diag.mean() > 0:
+                damp = self.damp_ratio * diag.mean()
+                H[np.diag_indices_from(H)] += damp
+
+            results[name] = HessianInfo(
+                hessian=H.astype(np.float32),
+                n_samples=n_samples,
+                diag=diag.astype(np.float32),
+                damp=damp,
+            )
+
+        return results
+
+    def get_single_hessian(self, layer_name: str, apply_damping: bool = True) -> HessianInfo | None:
+        """Get Hessian for a single layer.
+
+        Args:
+            layer_name: Layer name to retrieve.
+            apply_damping: Apply diagonal damping.
+
+        Returns:
+            HessianInfo or None if layer not found.
+        """
+        if layer_name not in self._hessians:
+            return None
+
+        H_sum, n_samples = self._hessians[layer_name]
+        if n_samples == 0:
+            return None
+
+        H = H_sum / n_samples
+        diag = np.diag(H).copy()
+
+        damp = 0.0
+        if apply_damping and diag.mean() > 0:
+            damp = self.damp_ratio * diag.mean()
+            H[np.diag_indices_from(H)] += damp
+
+        return HessianInfo(
+            hessian=H.astype(np.float32),
+            n_samples=n_samples,
+            diag=diag.astype(np.float32),
+            damp=damp,
+        )
+
+    def clear(self) -> None:
+        """Clear accumulated Hessians (but keep hooks)."""
+        for name in self._hessians:
+            in_features = self._layer_dims[name]
+            self._hessians[name] = (
+                np.zeros((in_features, in_features), dtype=np.float64),
+                0,
+            )
+
+    def save_checkpoint(self, path: Path) -> None:
+        """Save accumulated Hessians to disk for resume capability."""
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        for name, (H_sum, n_samples) in self._hessians.items():
+            # Sanitize layer name for filename
+            safe_name = name.replace("/", "_").replace(".", "_")
+            np.savez_compressed(
+                path / f"{safe_name}.npz",
+                H_sum=H_sum,
+                n_samples=np.array([n_samples]),
+                layer_name=name,
+            )
+
+    def load_checkpoint(self, path: Path) -> None:
+        """Load Hessians from checkpoint directory."""
+        path = Path(path)
+        if not path.exists():
+            return
+
+        for npz_file in path.glob("*.npz"):
+            data = np.load(npz_file, allow_pickle=True)
+            layer_name = str(data["layer_name"])
+            H_sum = data["H_sum"]
+            n_samples = int(data["n_samples"][0])
+
+            self._hessians[layer_name] = (H_sum, n_samples)
+            self._layer_dims[layer_name] = H_sum.shape[0]
+
+
+# =============================================================================
+# Quantization Checkpoint for Resume
+# =============================================================================
+
+
+@dataclass
+class QuantizationCheckpoint:
+    """Checkpoint state for resumable quantization.
+
+    Saves progress during long-running quantization jobs, allowing resume
+    after interruption. Stores:
+    - List of completed layers
+    - Current layer being processed
+    - Hessian checkpoint path
+    - Partial output tensors
+    """
+
+    checkpoint_dir: Path
+    model_path: str
+    completed_layers: list[str] = field(default_factory=list)
+    current_layer: str | None = None
+    hessian_checkpoint: Path | None = None
+    partial_output_file: Path | None = None
+
+    @classmethod
+    def create(cls, checkpoint_dir: Path, model_path: str) -> QuantizationCheckpoint:
+        """Create new checkpoint."""
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        return cls(checkpoint_dir=checkpoint_dir, model_path=model_path)
+
+    @classmethod
+    def load(cls, checkpoint_dir: Path) -> QuantizationCheckpoint | None:
+        """Load checkpoint from directory, or None if not found."""
+        checkpoint_dir = Path(checkpoint_dir)
+        state_file = checkpoint_dir / "state.json"
+        if not state_file.exists():
+            return None
+
+        with open(state_file) as f:
+            data = json.load(f)
+
+        return cls(
+            checkpoint_dir=checkpoint_dir,
+            model_path=data["model_path"],
+            completed_layers=data.get("completed_layers", []),
+            current_layer=data.get("current_layer"),
+            hessian_checkpoint=(
+                Path(data["hessian_checkpoint"]) if data.get("hessian_checkpoint") else None
+            ),
+            partial_output_file=(
+                Path(data["partial_output_file"]) if data.get("partial_output_file") else None
+            ),
+        )
+
+    def save(self) -> None:
+        """Save checkpoint state to disk."""
+        state = {
+            "model_path": self.model_path,
+            "completed_layers": self.completed_layers,
+            "current_layer": self.current_layer,
+            "hessian_checkpoint": (
+                str(self.hessian_checkpoint) if self.hessian_checkpoint else None
+            ),
+            "partial_output_file": (
+                str(self.partial_output_file) if self.partial_output_file else None
+            ),
+        }
+        with open(self.checkpoint_dir / "state.json", "w") as f:
+            json.dump(state, f, indent=2)
+
+    def mark_layer_complete(self, layer_name: str) -> None:
+        """Mark a layer as completed."""
+        if layer_name not in self.completed_layers:
+            self.completed_layers.append(layer_name)
+        self.current_layer = None
+        self.save()
+
+    def is_layer_complete(self, layer_name: str) -> bool:
+        """Check if a layer has been completed."""
+        return layer_name in self.completed_layers
 
 
 # =============================================================================
@@ -1118,7 +1876,7 @@ Examples:
     python -m metal_marlin.mr_gptq model/ output/ --format int4 --no-hadamard
 
     # NF4 quantization with calibration (when implemented)
-    python -m metal_marlin.mr_gptq model/ output/ --format nf4 --calibration bartowski-v3
+    python -m metal_marlin.mr_gptq model/ output/ --format nf4 --calibration v3
 """,
     )
 
@@ -1159,7 +1917,8 @@ Examples:
         help="Damping ratio for Hessian (default: 0.01)",
     )
     parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Suppress progress output",
     )
@@ -1176,7 +1935,7 @@ Examples:
         percdamp=args.percdamp,
     )
 
-    report = quantizer.quantize_model(
+    quantizer.quantize_model(
         model_path=args.model_path,
         output_path=args.output_path,
         verbose=not args.quiet,

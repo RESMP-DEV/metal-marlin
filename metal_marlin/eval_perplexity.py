@@ -389,7 +389,7 @@ def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray
 
 def rope_embed(x: np.ndarray, positions: np.ndarray, theta: float = 10000.0) -> np.ndarray:
     """Apply rotary position embeddings."""
-    seq_len, head_dim = x.shape[-2], x.shape[-1]
+    _seq_len, head_dim = x.shape[-2], x.shape[-1]
 
     # Compute frequencies
     freqs = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim))
@@ -424,7 +424,7 @@ def attention_forward(
     """Multi-head attention with RoPE."""
     batch, seq_len, hidden = x.shape
     head_dim = hidden // num_heads
-    kv_head_dim = hidden // num_kv_heads
+    hidden // num_kv_heads
 
     # Project Q, K, V
     q = x @ q_weight.T  # [batch, seq_len, hidden]
@@ -512,7 +512,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading tokenizer from {args.model_path}...")
-    tokenizer = load_tokenizer(args.model_path)
+    load_tokenizer(args.model_path)
 
     print(f"Loading WikiText-2 ({args.samples} samples)...")
     texts = load_wikitext2(args.samples)

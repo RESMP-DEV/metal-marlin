@@ -20,11 +20,15 @@ from numpy.typing import ArrayLike, NDArray
 # Feature flags
 HAS_MLX: bool = False
 HAS_TORCH: bool = False
+HAS_PYOBJC_METAL: bool = False
+HAS_MATPLOTLIB: bool = False
 
 # Module references (None when unavailable)
 mx: ModuleType | None = None
 nn: ModuleType | None = None
 torch: ModuleType | None = None
+Metal: ModuleType | None = None
+plt: ModuleType | None = None
 
 # Try importing mlx
 try:
@@ -43,6 +47,24 @@ try:
 
     torch = _torch
     HAS_TORCH = True
+except ImportError:
+    pass
+
+# Try importing pyobjc Metal framework
+try:
+    import Metal as _Metal
+
+    Metal = _Metal
+    HAS_PYOBJC_METAL = True
+except ImportError:
+    pass
+
+# Try importing matplotlib
+try:
+    import matplotlib.pyplot as _plt
+
+    plt = _plt
+    HAS_MATPLOTLIB = True
 except ImportError:
     pass
 

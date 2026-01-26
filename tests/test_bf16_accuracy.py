@@ -307,7 +307,7 @@ class TestGEMMBf16Accuracy:
         A_fp32 = np.ones((M, K), dtype=np.float32) * 0.01
         B_fp32 = np.ones((K, N), dtype=np.float32) * 0.01
 
-        ref = gemm_reference_fp32(A_fp32, B_fp32)
+        gemm_reference_fp32(A_fp32, B_fp32)
         expected_value = K * 0.01 * 0.01  # Should be ~3.2768
 
         # FP16

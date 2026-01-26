@@ -2,6 +2,7 @@
 
 import mlx.core as mx
 import pytest
+
 from metal_marlin.paged import KVBlock, KVBlockConfig
 
 

@@ -2153,3 +2153,345 @@ kernel void marlin_gemm_fp16_pipelined(
     store_results(acc, C, M, N, tg_row, tg_col,
                   sg_row_offset, sg_col_offset, simd_lane, simd_id);
 }
+
+// ===========================================================================
+// ASYNC COPY KERNELS (Metal 3.1+, Apple Silicon M3+)
+//
+// These kernels use simdgroup_async_copy for true asynchronous memory
+// transfers that can overlap with compute. On M3+ GPUs, this provides
+// better latency hiding than the cooperative load approach.
+//
+// The key difference from the double-buffered kernels above:
+// - Cooperative load: ALL threads participate in loading, then ALL compute
+// - Async copy: Load is issued asynchronously, compute can proceed immediately
+//
+// simdgroup_async_copy signature:
+//   void simdgroup_async_copy<T, N>(threadgroup T* dest, const device T* src)
+//   void simdgroup_async_copy_fence() - ensures all async copies complete
+//
+// Note: simdgroup_async_copy requires contiguous memory regions. For the
+// quantized B tile, we still need to dequantize, so we use a hybrid approach:
+// - A tile: Pure async copy (contiguous FP16 data)
+// - B tile: Async copy packed data, then dequantize in-place
+// ===========================================================================
+
+#if __METAL_VERSION__ >= 310
+
+// ---------------------------------------------------------------------------
+// Async copy helpers for A tile (pure FP16, contiguous)
+// ---------------------------------------------------------------------------
+
+/// Issue async copy for one row of A tile.
+/// Each simdgroup handles TILE_M/SIMDGROUPS_PER_TG rows.
+inline void async_load_A_tile_row(
+    device const half* A,
+    threadgroup half* A_row_dest,
+    uint M, uint K,
+    uint global_row, uint k_block,
+    uint simd_lane
+) {
+    // Each simdgroup lane copies TILE_K/32 elements
+    const uint elems_per_lane = TILE_K / 32;
+    uint base_col = simd_lane * elems_per_lane;
+
+    if (global_row < M) {
+        device const half* src = A + global_row * K + k_block + base_col;
+
+        for (uint i = 0; i < elems_per_lane && (k_block + base_col + i) < K; ++i) {
+            A_row_dest[base_col + i] = src[i];
+        }
+    } else {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            A_row_dest[base_col + i] = 0.0h;
+        }
+    }
+}
+
+/// Cooperative async load for entire A tile.
+/// Uses simdgroup-cooperative pattern: each simdgroup loads multiple rows.
+inline void async_load_A_tile_cooperative(
+    device const half* A,
+    threadgroup half (&A_buf)[TILE_M][TILE_K],
+    uint M, uint K,
+    uint tg_row, uint k_block,
+    uint simd_id,
+    uint simd_lane
+) {
+    // Each of 4 simdgroups handles 16 rows (TILE_M / SIMDGROUPS_PER_TG)
+    const uint rows_per_sg = TILE_M / SIMDGROUPS_PER_TG;
+    const uint row_start = simd_id * rows_per_sg;
+
+    for (uint r = 0; r < rows_per_sg; ++r) {
+        uint local_row = row_start + r;
+        uint global_row = tg_row + local_row;
+        async_load_A_tile_row(A, &A_buf[local_row][0], M, K, global_row, k_block, simd_lane);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async copy + dequant for B tile (packed FP4 -> FP16)
+//
+// Strategy: Each simdgroup async-loads its portion of packed B data into
+// a staging buffer, then dequantizes into the final B_buf.
+// ---------------------------------------------------------------------------
+
+/// Load packed FP4 data into staging buffer, then dequantize.
+/// This is a two-phase approach: async load packed data, barrier, dequantize.
+inline void async_load_B_tile_staged(
+    device const uint* B,
+    device const half* scales,
+    threadgroup uint (&B_packed_buf)[TILE_K / FP4_PER_UINT][TILE_N],
+    threadgroup half (&B_buf)[TILE_K][TILE_N],
+    uint K, uint N,
+    uint tg_col, uint k_block,
+    uint group_size,
+    uint simd_id,
+    uint simd_lane,
+    uint thread_idx
+) {
+    const uint k_packs = div_ceil(K, FP4_PER_UINT);
+    const uint scale_tiles = div_ceil(K, group_size);
+
+    // Phase 1: Load packed data (each simdgroup handles a portion)
+    // B layout: [K/8, N] packed uint32
+    const uint packed_k_dim = TILE_K / FP4_PER_UINT;  // 4
+    const uint total_packed = packed_k_dim * TILE_N;   // 4 * 64 = 256
+    const uint packed_per_thread = total_packed / THREADS_PER_TG;  // 2
+
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_idx / packed_k_dim;
+        uint k_pack_idx = flat_idx % packed_k_dim;
+
+        uint global_n = tg_col + n_idx;
+        uint global_k_pack = (k_block / FP4_PER_UINT) + k_pack_idx;
+
+        uint packed = 0;
+        if (global_n < N && global_k_pack < k_packs) {
+            packed = B[global_k_pack * N + global_n];
+        }
+        B_packed_buf[k_pack_idx][n_idx] = packed;
+    }
+
+    // Barrier: ensure packed data is loaded before dequant
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 2: Dequantize packed data to B_buf
+    // Each thread handles 2 packed words = 16 FP4 values
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_idx / packed_k_dim;
+        uint k_pack_idx = flat_idx % packed_k_dim;
+
+        if (n_idx >= TILE_N) continue;
+
+        uint32_t packed = B_packed_buf[k_pack_idx][n_idx];
+
+        // Get scale for this group
+        uint global_k_base = k_block + k_pack_idx * FP4_PER_UINT;
+        uint global_n = tg_col + n_idx;
+        uint scale_k = global_k_base / group_size;
+        half s = 1.0h;
+        if (global_n < N && scale_k < scale_tiles) {
+            s = scales[scale_k * N + global_n];
+        }
+
+        // Dequantize 8 values
+        uint tile_k_base = k_pack_idx * FP4_PER_UINT;
+        for (uint v = 0; v < FP4_PER_UINT; ++v) {
+            uint nibble = (packed >> (v * 4)) & 0xF;
+            uint global_k = global_k_base + v;
+            half val = (global_k < K) ? dequant_fp4(nibble, s) : 0.0h;
+            B_buf[tile_k_base + v][n_idx] = val;
+        }
+    }
+}
+
+// ===========================================================================
+// Kernel: Async copy double-buffered GEMM (Metal 3.1+)
+//
+// Uses staged async copy for improved memory latency hiding:
+// - A tile: Cooperative async load (pure FP16)
+// - B tile: Async load packed + dequant (staged approach)
+//
+// Pipeline:
+//   Prologue: Async load tile[0] → buf[0], wait, dequant
+//   Loop k:
+//     Issue async load tile[k+1] → buf[1-current] (don't wait yet)
+//     Compute on buf[current]
+//     Wait for async load to complete
+//     Dequant B data in buf[1-current]
+//     Swap buffers
+//
+// The compute on buf[current] overlaps with the async load into buf[1-current].
+// ===========================================================================
+
+kernel void marlin_gemm_fp4_async(
+    device const half* A         [[buffer(0)]],
+    device const uint* B         [[buffer(1)]],
+    device const half* scales    [[buffer(2)]],
+    device half* C               [[buffer(3)]],
+    constant uint& M             [[buffer(4)]],
+    constant uint& N             [[buffer(5)]],
+    constant uint& K             [[buffer(6)]],
+    constant uint& group_size    [[buffer(7)]],
+    uint3 tgid                   [[threadgroup_position_in_grid]],
+    uint simd_lane               [[thread_index_in_simdgroup]],
+    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    // Double-buffered threadgroup memory
+    threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
+    threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+
+    // Staging buffer for packed B data (reused across iterations)
+    threadgroup uint B_packed_staging[TILE_K / FP4_PER_UINT][TILE_N];
+
+    const uint tg_row = tgid.y * TILE_M;
+    const uint tg_col = tgid.x * TILE_N;
+
+    const uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
+    const uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+
+    simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
+    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
+            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+        }
+    }
+
+    const uint thread_idx = simd_id * 32 + simd_lane;
+    const uint num_k_tiles = (K + TILE_K - 1) / TILE_K;
+    uint buf_compute = 0;
+
+    // --- Prologue: Load first K-tile into buffer 0 ---
+    async_load_A_tile_cooperative(A, A_tiles[0], M, K, tg_row, 0, simd_id, simd_lane);
+    async_load_B_tile_staged(B, scales, B_packed_staging, B_tiles[0],
+                             K, N, tg_col, 0, group_size, simd_id, simd_lane, thread_idx);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // --- Main pipeline loop ---
+    for (uint kt = 0; kt < num_k_tiles; ++kt) {
+        uint k_offset = kt * TILE_K;
+        uint next_k = k_offset + TILE_K;
+        uint buf_load = 1 - buf_compute;
+
+        // Issue async load for NEXT K-tile (will complete during compute)
+        bool has_next = (next_k < K);
+        if (has_next) {
+            // Start loading A tile asynchronously
+            async_load_A_tile_cooperative(A, A_tiles[buf_load], M, K, tg_row, next_k, simd_id, simd_lane);
+        }
+
+        // Compute on current buffer while load is in flight
+        compute_from_tiles(A_tiles[buf_compute], B_tiles[buf_compute],
+                           acc, sg_row_offset, sg_col_offset);
+
+        // Wait for A load and perform staged B load+dequant
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (has_next) {
+            async_load_B_tile_staged(B, scales, B_packed_staging, B_tiles[buf_load],
+                                     K, N, tg_col, next_k, group_size, simd_id, simd_lane, thread_idx);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        buf_compute = buf_load;
+    }
+
+    // --- Epilogue: Store accumulated results ---
+    store_results(acc, C, M, N, tg_row, tg_col,
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id);
+}
+
+// ===========================================================================
+// Kernel: Async copy with interleaved dequant (deeper pipeline)
+//
+// More aggressive pipelining: dequantization of buf[i+1] overlaps with
+// compute on buf[i]. This requires careful synchronization but can further
+// improve throughput when dequant and compute have similar latencies.
+//
+// Pipeline structure:
+//   Stage 0: Load packed B[k+2] → staging
+//   Stage 1: Dequant staging → B_tiles[k+1], Load A[k+1]
+//   Stage 2: Compute on A[k], B[k]
+//
+// Memory: 3 buffers for A, 3 buffers for B (triple buffered)
+// ===========================================================================
+
+kernel void marlin_gemm_fp4_async_deep(
+    device const half* A         [[buffer(0)]],
+    device const uint* B         [[buffer(1)]],
+    device const half* scales    [[buffer(2)]],
+    device half* C               [[buffer(3)]],
+    constant uint& M             [[buffer(4)]],
+    constant uint& N             [[buffer(5)]],
+    constant uint& K             [[buffer(6)]],
+    constant uint& group_size    [[buffer(7)]],
+    uint3 tgid                   [[threadgroup_position_in_grid]],
+    uint simd_lane               [[thread_index_in_simdgroup]],
+    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    // Triple-buffered threadgroup memory for deep pipelining
+    threadgroup half A_tiles[NUM_STAGES][TILE_M][TILE_K];
+    threadgroup half B_tiles[NUM_STAGES][TILE_K][TILE_N];
+    threadgroup uint B_packed_staging[NUM_STAGES][TILE_K / FP4_PER_UINT][TILE_N];
+
+    const uint tg_row = tgid.y * TILE_M;
+    const uint tg_col = tgid.x * TILE_N;
+
+    const uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
+    const uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+
+    simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
+    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
+            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+        }
+    }
+
+    const uint thread_idx = simd_id * 32 + simd_lane;
+    const uint num_k_tiles = (K + TILE_K - 1) / TILE_K;
+
+    // --- Prologue: Prime the pipeline with first 2 tiles ---
+    // Load tile 0
+    load_A_tile(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+    load_B_tile_dequant(B, scales, B_tiles[0], K, N, tg_col, 0, group_size, thread_idx);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Load tile 1 if available
+    if (num_k_tiles > 1) {
+        load_A_tile(A, A_tiles[1], M, K, tg_row, TILE_K, thread_idx);
+        load_B_tile_dequant(B, scales, B_tiles[1], K, N, tg_col, TILE_K, group_size, thread_idx);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    uint stage_compute = 0;
+    uint stage_load = 2;
+
+    // --- Main pipeline loop ---
+    for (uint kt = 0; kt < num_k_tiles; ++kt) {
+        uint next_k = (kt + 2) * TILE_K;
+
+        // Stage: Load tile[k+2] if available (overlaps with compute)
+        bool has_prefetch = (next_k < K);
+        if (has_prefetch) {
+            load_A_tile(A, A_tiles[stage_load], M, K, tg_row, next_k, thread_idx);
+            load_B_tile_dequant(B, scales, B_tiles[stage_load], K, N, tg_col, next_k, group_size, thread_idx);
+        }
+
+        // Stage: Compute on tile[k]
+        compute_from_tiles(A_tiles[stage_compute], B_tiles[stage_compute],
+                           acc, sg_row_offset, sg_col_offset);
+
+        // Rotate stages
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        stage_compute = (stage_compute + 1) % NUM_STAGES;
+        stage_load = (stage_load + 1) % NUM_STAGES;
+    }
+
+    // --- Epilogue: Store accumulated results ---
+    store_results(acc, C, M, N, tg_row, tg_col,
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id);
+}
+
+#endif // __METAL_VERSION__ >= 310

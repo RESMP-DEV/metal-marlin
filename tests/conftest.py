@@ -13,6 +13,7 @@ Usage:
 """
 
 import pytest
+
 from metal_marlin._compat import HAS_MLX
 
 # Skip marker for MLX-dependent tests

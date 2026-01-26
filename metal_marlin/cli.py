@@ -67,19 +67,129 @@ def chat(model, system, quant):
 @cli.command()
 @click.option("--input", "-i", "input_path", required=True, help="Input model path")
 @click.option("--output", "-o", "output_path", required=True, help="Output path")
-@click.option("--quant", default="fp4", type=click.Choice(["fp4", "int4"]))
-@click.option("--group-size", default=128, type=int)
-def convert(input_path, output_path, quant, group_size):
-    """Convert model to Marlin format."""
-    from .safetensors_loader import convert_model_to_marlin
+@click.option(
+    "--from-format",
+    "from_format",
+    default="auto",
+    type=click.Choice(["auto", "safetensors", "gguf", "pytorch", "hf"]),
+    help="Input format (auto-detected if not specified)",
+)
+@click.option(
+    "--to-format",
+    "to_format",
+    default="marlin",
+    type=click.Choice(["marlin", "safetensors", "gguf"]),
+    help="Output format",
+)
+@click.option(
+    "--quant",
+    default="fp4",
+    type=click.Choice(QUANT_FORMATS, case_sensitive=False),
+    help="Quantization format for output",
+)
+@click.option("--group-size", "-g", default=128, type=int, help="Group size for quantization")
+@click.option(
+    "--dequant-first",
+    is_flag=True,
+    default=False,
+    help="Dequantize to FP16 before re-quantizing (for format conversion)",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def convert(
+    input_path: str,
+    output_path: str,
+    from_format: str,
+    to_format: str,
+    quant: str,
+    group_size: int,
+    dequant_first: bool,
+    verbose: bool,
+):
+    """Convert model between formats.
 
-    convert_model_to_marlin(
-        input_path,
-        output_path,
-        quant_type=quant,
-        group_size=group_size,
-    )
+    \b
+    Supported conversions:
+      - HuggingFace (safetensors/pytorch) → Marlin FP4/INT4
+      - GGUF → Marlin FP4/INT4 (dequant + requant)
+      - Marlin → safetensors (for inspection)
+
+    \b
+    Examples:
+      # Convert HF model to Marlin FP4
+      metal-marlin convert -i ./model -o ./model-marlin --quant fp4
+
+      # Convert GGUF to Marlin (dequant + requant)
+      metal-marlin convert -i model.gguf -o ./model-marlin --dequant-first
+
+      # Convert existing quantized model to different format
+      metal-marlin convert -i ./model-int4 -o ./model-fp4 --quant fp4 --dequant-first
+    """
+    if verbose:
+        click.echo(f"Converting: {input_path} → {output_path}")
+        click.echo(f"  From format: {from_format}")
+        click.echo(f"  To format:   {to_format}")
+        click.echo(f"  Quant type:  {quant}")
+        click.echo(f"  Group size:  {group_size}")
+
+    # Auto-detect input format
+    if from_format == "auto":
+        input_path_lower = input_path.lower()
+        if input_path_lower.endswith(".gguf"):
+            from_format = "gguf"
+        elif Path(input_path).is_dir():
+            # Check for safetensors or pytorch files
+            p = Path(input_path)
+            if list(p.glob("*.safetensors")):
+                from_format = "safetensors"
+            elif list(p.glob("*.bin")) or list(p.glob("*.pt")):
+                from_format = "pytorch"
+            else:
+                from_format = "hf"
+        else:
+            from_format = "safetensors"
+
+        if verbose:
+            click.echo(f"  Detected input format: {from_format}")
+
+    # Route to appropriate converter
+    if from_format == "gguf":
+        from .gguf_to_marlin import convert_gguf_to_marlin
+
+        stats = convert_gguf_to_marlin(
+            input_path,
+            output_path,
+            quant_type=quant,
+            group_size=group_size,
+            verbose=verbose,
+        )
+    elif from_format in ("safetensors", "pytorch", "hf"):
+        if dequant_first:
+            # Dequantize then requantize
+            from .hf_loader import convert_model_to_fp4
+
+            stats = convert_model_to_fp4(
+                model_path=input_path,
+                output_path=output_path,
+                group_size=group_size,
+                validate=True,
+                verbose=verbose,
+            )
+        else:
+            from .safetensors_loader import convert_model_to_marlin
+
+            stats = convert_model_to_marlin(
+                input_path,
+                output_path,
+                quant_type=quant,
+                group_size=group_size,
+            )
+    else:
+        click.echo(f"Error: Unsupported input format: {from_format}", err=True)
+        raise click.Abort()
+
     click.echo(f"Converted model saved to {output_path}")
+    if isinstance(stats, dict) and "quantized_count" in stats:
+        click.echo(f"  Quantized: {stats['quantized_count']} tensors")
 
 
 @cli.command()
@@ -101,73 +211,107 @@ def bench(model, prompt_len, gen_len, batch_size):
 
 @cli.command("quantize")
 @click.option(
-    "--input", "-i", "input_path", required=True,
-    help="Input model path (HuggingFace ID or local directory)"
+    "--input",
+    "-i",
+    "input_path",
+    required=True,
+    help="Input model path (HuggingFace ID or local directory)",
 )
 @click.option(
-    "--output", "-o", "output_path", required=True,
-    help="Output directory for quantized model"
+    "--output", "-o", "output_path", required=True, help="Output directory for quantized model"
 )
 @click.option(
-    "--method", "-m", default="rtn",
+    "--method",
+    "-m",
+    default="rtn",
     type=click.Choice(QUANT_METHODS, case_sensitive=False),
-    help="Quantization method: rtn (round-to-nearest), gptq, or mr-gptq (Marlin-Replica GPTQ with Hadamard)"
+    help="Quantization method: rtn (round-to-nearest), gptq, or mr-gptq (Marlin-Replica GPTQ with Hadamard)",
 )
 @click.option(
-    "--bits", "-b", default=4,
+    "--bits",
+    "-b",
+    default=4,
     type=click.Choice([2, 3, 4, 8], case_sensitive=False),
-    help="Bit width for quantization"
+    help="Bit width for quantization",
 )
 @click.option(
-    "--format", "-f", "quant_format", default="fp4",
+    "--format",
+    "-f",
+    "quant_format",
+    default="fp4",
     type=click.Choice(QUANT_FORMATS, case_sensitive=False),
-    help="Quantization format (fp4=E2M1, int4=symmetric, nf4=NormalFloat)"
+    help="Quantization format (fp4=E2M1, int4=symmetric, nf4=NormalFloat)",
 )
 @click.option(
-    "--group-size", "-g", default=128,
+    "--group-size",
+    "-g",
+    default=128,
     type=click.Choice([32, 64, 128, 256], case_sensitive=False),
-    help="Elements per quantization group"
+    help="Elements per quantization group",
 )
 @click.option(
-    "--calibration", "-c", default=None,
-    help="Calibration dataset: bartowski-v3, wikitext2, c4, or path to custom file"
+    "--calibration",
+    "-c",
+    default=None,
+    help="Calibration dataset: bartowski-v3, wikitext2, c4, or path to custom file",
 )
 @click.option(
-    "--samples", "-s", default=None, type=int,
-    help="Number of calibration samples (default: all available)"
+    "--samples",
+    "-s",
+    default=None,
+    type=int,
+    help="Number of calibration samples (default: all available)",
 )
 @click.option(
-    "--no-hadamard", is_flag=True, default=False,
-    help="Disable Hadamard rotation (only applies to mr-gptq method)"
+    "--no-hadamard",
+    is_flag=True,
+    default=False,
+    help="Disable Hadamard rotation (only applies to mr-gptq method)",
 )
 @click.option(
-    "--actorder/--no-actorder", default=True,
-    help="Enable activation-order quantization for GPTQ methods (default: enabled)"
+    "--actorder/--no-actorder",
+    default=True,
+    help="Enable activation-order quantization for GPTQ methods (default: enabled)",
 )
 @click.option(
-    "--damp", default=0.01, type=float,
-    help="Hessian damping factor for GPTQ methods (default: 0.01)"
+    "--damp",
+    default=0.01,
+    type=float,
+    help="Hessian damping factor for GPTQ methods (default: 0.01)",
 )
 @click.option(
-    "--mixed-precision", "mixed_precision", default=None,
+    "--mixed-precision",
+    "mixed_precision",
+    default=None,
     type=click.Choice(["dense", "moe", "moe-mtp", "quality", "speed"]),
-    help="Mixed-precision preset (auto-detected if not specified)"
+    help="Mixed-precision preset (auto-detected if not specified)",
 )
 @click.option(
-    "--layerwise", is_flag=True, default=False,
-    help="Use memory-efficient layer-wise conversion (for large models)"
+    "--layerwise",
+    is_flag=True,
+    default=False,
+    help="Use memory-efficient layer-wise conversion (for large models)",
 )
 @click.option(
-    "--validate/--no-validate", default=True,
-    help="Compute quantization error metrics (default: enabled)"
+    "--validate/--no-validate",
+    default=True,
+    help="Compute quantization error metrics (default: enabled)",
+)
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Verbose output")
+@click.option("--token", default=None, help="HuggingFace API token for gated models")
+@click.option(
+    "--workers",
+    "-w",
+    default=1,
+    type=int,
+    help="Number of parallel workers for layer processing (default: 1)",
 )
 @click.option(
-    "--verbose", "-v", is_flag=True, default=False,
-    help="Verbose output"
-)
-@click.option(
-    "--token", default=None,
-    help="HuggingFace API token for gated models"
+    "--precision-config",
+    "precision_config",
+    default=None,
+    type=click.Choice(["moe-balanced", "dense-optimal", "quality-max", "speed-max"]),
+    help="Precision configuration preset for layer-specific bit widths",
 )
 def quantize(
     input_path: str,
@@ -186,6 +330,8 @@ def quantize(
     validate: bool,
     verbose: bool,
     token: str | None,
+    workers: int,
+    precision_config: str | None,
 ):
     """Quantize a model to Metal Marlin format.
 
@@ -235,8 +381,12 @@ def quantize(
 
     # Validate format vs bits compatibility
     format_bits_map = {
-        "fp4": 4, "int4": 4, "nf4": 4,
-        "int3": 3, "int2": 2, "int8": 8,
+        "fp4": 4,
+        "int4": 4,
+        "nf4": 4,
+        "int3": 3,
+        "int2": 2,
+        "int8": 8,
     }
     expected_bits = format_bits_map.get(quant_format, bits)
     if bits != expected_bits:
@@ -267,7 +417,10 @@ def quantize(
             click.echo(f"  Damp:         {damp}")
         if mixed_precision:
             click.echo(f"  Mixed prec:   {mixed_precision}")
+        if precision_config:
+            click.echo(f"  Prec config:  {precision_config}")
         click.echo(f"  Layer-wise:   {'enabled' if layerwise else 'disabled'}")
+        click.echo(f"  Workers:      {workers}")
         click.echo("=" * 60)
 
     # Route to appropriate quantization function
@@ -280,10 +433,12 @@ def quantize(
             calibration=calibration,
             samples=samples,
             mixed_precision=mixed_precision,
+            precision_config=precision_config,
             layerwise=layerwise,
             validate=validate,
             verbose=verbose,
             token=token,
+            workers=workers,
         )
     elif method == "gptq":
         _quantize_gptq(
@@ -296,9 +451,11 @@ def quantize(
             actorder=actorder,
             damp=damp,
             mixed_precision=mixed_precision,
+            precision_config=precision_config,
             validate=validate,
             verbose=verbose,
             token=token,
+            workers=workers,
         )
     elif method == "mr-gptq":
         _quantize_mr_gptq(
@@ -312,9 +469,11 @@ def quantize(
             actorder=actorder,
             damp=damp,
             mixed_precision=mixed_precision,
+            precision_config=precision_config,
             validate=validate,
             verbose=verbose,
             token=token,
+            workers=workers,
         )
 
 
@@ -326,10 +485,12 @@ def _quantize_rtn(
     calibration: str | None,
     samples: int | None,
     mixed_precision: str | None,
+    precision_config: str | None,
     layerwise: bool,
     validate: bool,
     verbose: bool,
     token: str | None,
+    workers: int,
 ):
     """RTN (Round-to-Nearest) quantization - existing implementation."""
     from .hf_loader import (
@@ -357,6 +518,7 @@ def _quantize_rtn(
         mp_config = None
         if mixed_precision:
             from .mixed_precision import MixedPrecisionConfig as MPConfig
+
             preset_map = {
                 "dense": MPConfig.default_dense,
                 "moe": MPConfig.default_moe,
@@ -416,9 +578,11 @@ def _quantize_gptq(
     actorder: bool,
     damp: float,
     mixed_precision: str | None,
+    precision_config: str | None,
     validate: bool,
     verbose: bool,
     token: str | None,
+    workers: int,
 ):
     """GPTQ quantization with Hessian-based error compensation."""
     # Check if GPTQ implementation exists
@@ -470,9 +634,11 @@ def _quantize_mr_gptq(
     actorder: bool,
     damp: float,
     mixed_precision: str | None,
+    precision_config: str | None,
     validate: bool,
     verbose: bool,
     token: str | None,
+    workers: int,
 ):
     """MR-GPTQ quantization with Hadamard rotation and GPTQ."""
     # Check if MR-GPTQ implementation exists
@@ -537,6 +703,7 @@ def _load_calibration_dataset(
         elif calibration == "wikitext2":
             # Load WikiText-2 for calibration
             from .eval_perplexity import load_wikitext2
+
             texts = load_wikitext2(max_samples=samples)
             return CalibrationDataset(
                 samples=texts,
@@ -545,6 +712,7 @@ def _load_calibration_dataset(
             )
         elif calibration == "c4":
             from .hf_loader import _load_hf_calibration_dataset
+
             texts = _load_hf_calibration_dataset("c4", num_samples=samples)
             return CalibrationDataset(
                 samples=texts,
@@ -585,36 +753,26 @@ def _print_quantization_summary(stats: dict, output_path: str, method: str):
 
 
 @cli.command("eval")
+@click.option("--model", "-m", required=True, help="Path to quantized model")
 @click.option(
-    "--model", "-m", required=True,
-    help="Path to quantized model"
+    "--reference", "-r", default=None, help="Path to reference model for comparison (optional)"
 )
 @click.option(
-    "--reference", "-r", default=None,
-    help="Path to reference model for comparison (optional)"
-)
-@click.option(
-    "--metric", default="perplexity",
+    "--metric",
+    default="perplexity",
     type=click.Choice(["perplexity", "kl-divergence", "all"]),
-    help="Evaluation metric"
+    help="Evaluation metric",
 )
 @click.option(
-    "--dataset", "-d", default="wikitext2",
+    "--dataset",
+    "-d",
+    default="wikitext2",
     type=click.Choice(["wikitext2", "c4"]),
-    help="Evaluation dataset"
+    help="Evaluation dataset",
 )
-@click.option(
-    "--samples", "-s", default=100, type=int,
-    help="Number of evaluation samples"
-)
-@click.option(
-    "--context-length", default=2048, type=int,
-    help="Context window size for perplexity"
-)
-@click.option(
-    "--verbose", "-v", is_flag=True,
-    help="Verbose output"
-)
+@click.option("--samples", "-s", default=100, type=int, help="Number of evaluation samples")
+@click.option("--context-length", default=2048, type=int, help="Context window size for perplexity")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
 def eval_model(
     model: str,
     reference: str | None,
@@ -637,12 +795,10 @@ def eval_model(
       # KL divergence from reference
       metal-marlin eval -m ./model-fp4/ -r ./model-bf16/ --metric kl-divergence
     """
-    from .eval_perplexity import (
-        load_tokenizer,
-    )
+    from .eval_perplexity import load_tokenizer
 
     click.echo(f"Loading model: {model}")
-    tokenizer = load_tokenizer(model)
+    load_tokenizer(model)
 
     # Note: Full evaluation requires inference implementation
     # For now, provide framework and documentation
@@ -662,6 +818,170 @@ def eval_model(
     click.echo(f"Configured: {metric} on {dataset} ({samples} samples)")
     if reference:
         click.echo(f"Reference model: {reference}")
+
+
+@cli.command("analyze")
+@click.option(
+    "--input",
+    "-i",
+    "input_path",
+    required=True,
+    help="Input model path (HuggingFace ID or local directory)",
+)
+@click.option(
+    "--calibration",
+    "-c",
+    default="bartowski-v3",
+    help="Calibration dataset for sensitivity analysis",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    default="sensitivity_report.json",
+    help="Output path for sensitivity report",
+)
+@click.option("--samples", "-s", default=128, type=int, help="Number of calibration samples")
+@click.option(
+    "--layers", default=None, help="Specific layers to analyze (comma-separated, or 'all')"
+)
+@click.option("--bits", "-b", default="2,3,4,8", help="Bit widths to test (comma-separated)")
+@click.option("--formats", "-f", default="fp4,int4,nf4", help="Formats to test (comma-separated)")
+@click.option("--token", default=None, help="HuggingFace API token for gated models")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def analyze(
+    input_path: str,
+    calibration: str,
+    output_path: str,
+    samples: int,
+    layers: str | None,
+    bits: str,
+    formats: str,
+    token: str | None,
+    verbose: bool,
+):
+    """Analyze layer sensitivity to quantization.
+
+    Computes per-layer quantization error metrics across multiple bit widths
+    and formats to identify optimal precision allocation.
+
+    \b
+    Output includes:
+      - Per-layer RMSE and max error at each bit width
+      - Hessian trace (importance) for GPTQ-based methods
+      - Recommended precision config based on sensitivity
+
+    \b
+    Examples:
+      # Analyze all layers with default settings
+      metal-marlin analyze -i ./model -o sensitivity.json
+
+      # Analyze specific layers
+      metal-marlin analyze -i ./model --layers "model.layers.0,model.layers.1"
+
+      # Test specific bit widths
+      metal-marlin analyze -i ./model --bits "3,4" --formats "fp4,int4"
+
+      # Full analysis with custom calibration
+      metal-marlin analyze \\
+          --input GLM-4/glm-4-9b-chat \\
+          --calibration bartowski-v3 \\
+          --output sensitivity_report.json \\
+          --samples 256
+    """
+    import json
+    import os
+
+    if token is None:
+        token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+    # Parse bit widths and formats
+    bit_widths = [int(b.strip()) for b in bits.split(",")]
+    format_list = [f.strip() for f in formats.split(",")]
+
+    # Parse layers
+    layer_list = None
+    if layers and layers != "all":
+        layer_list = [layer.strip() for layer in layers.split(",")]
+
+    if verbose:
+        click.echo("=" * 60)
+        click.echo("Sensitivity Analysis Configuration")
+        click.echo("=" * 60)
+        click.echo(f"  Input:        {input_path}")
+        click.echo(f"  Calibration:  {calibration}")
+        click.echo(f"  Samples:      {samples}")
+        click.echo(f"  Bit widths:   {bit_widths}")
+        click.echo(f"  Formats:      {format_list}")
+        click.echo(f"  Layers:       {layer_list or 'all'}")
+        click.echo(f"  Output:       {output_path}")
+        click.echo("=" * 60)
+
+    # Load calibration dataset
+    calib_dataset = _load_calibration_dataset(calibration, samples, verbose)
+
+    # Run sensitivity analysis
+    try:
+        from .calibration import SensitivityAnalyzer
+    except ImportError:
+        click.echo(
+            "Error: SensitivityAnalyzer not yet implemented.\n"
+            "Creating placeholder report with analysis framework.",
+            err=True,
+        )
+        # Create placeholder report
+        report = {
+            "model": input_path,
+            "calibration": calibration,
+            "samples": samples,
+            "bit_widths_tested": bit_widths,
+            "formats_tested": format_list,
+            "status": "placeholder",
+            "note": "Full sensitivity analysis requires SensitivityAnalyzer implementation",
+            "framework": {
+                "per_layer_metrics": ["rmse", "max_error", "hessian_trace"],
+                "precision_recommendation": "computed from sensitivity scores",
+            },
+        }
+        Path(output_path).write_text(json.dumps(report, indent=2))
+        click.echo(f"Placeholder report written to {output_path}")
+        return
+
+    analyzer = SensitivityAnalyzer(
+        model_path=input_path,
+        calibration_data=calib_dataset,
+        token=token,
+    )
+
+    report = analyzer.analyze(
+        bit_widths=bit_widths,
+        formats=format_list,
+        layers=layer_list,
+        verbose=verbose,
+    )
+
+    # Write report
+    Path(output_path).write_text(json.dumps(report, indent=2))
+    click.echo(f"Sensitivity report written to {output_path}")
+
+    # Print summary
+    if "summary" in report:
+        click.echo()
+        click.echo("=" * 60)
+        click.echo("Sensitivity Analysis Summary")
+        click.echo("=" * 60)
+        summary = report["summary"]
+        if "most_sensitive_layers" in summary:
+            click.echo("Most sensitive layers (keep higher precision):")
+            for layer in summary["most_sensitive_layers"][:5]:
+                click.echo(f"  - {layer['name']}: error={layer['error']:.6f}")
+        if "least_sensitive_layers" in summary:
+            click.echo("Least sensitive layers (can use lower precision):")
+            for layer in summary["least_sensitive_layers"][:5]:
+                click.echo(f"  - {layer['name']}: error={layer['error']:.6f}")
+        if "recommended_config" in summary:
+            click.echo(f"Recommended config: {summary['recommended_config']}")
+        click.echo("=" * 60)
 
 
 def main():

@@ -49,7 +49,7 @@ class RoPE(nn.Module):
         """
         shape = x.shape
         seq_len = shape[2]
-        head_dim = shape[3]
+        shape[3]
 
         # Compute position indices
         positions = mx.arange(offset, offset + seq_len, dtype=mx.float32)

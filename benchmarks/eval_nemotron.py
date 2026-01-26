@@ -607,6 +607,7 @@ def _replace_linear_with_marlin_mlx(model, group_size: int) -> int:
     """Replace MLX QuantizedLinear with MarlinLinear."""
     try:
         import mlx.nn as nn
+
         from metal_marlin import MarlinLinear
     except ImportError:
         return 0

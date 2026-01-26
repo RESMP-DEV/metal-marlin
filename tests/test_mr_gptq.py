@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from metal_marlin._compat import HAS_MLX, HAS_TORCH
 
 # Add metal_marlin module to path

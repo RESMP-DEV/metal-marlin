@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from metal_marlin._compat import HAS_MLX
 
 from .reference import dequant_fp4_reference, dequant_int4_reference, gemm_reference
@@ -159,6 +160,7 @@ def metal_gemm_fp4(
         [M, N] float16 result
     """
     import mlx.core as mx
+
     from metal_marlin import quantized_linear
 
     A_mx = mx.array(A.astype(np.float16))

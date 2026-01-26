@@ -1,6 +1,6 @@
-"""Bartowski calibration dataset loader for LLM quantization.
+"""Multi-domain calibration dataset loader for LLM quantization.
 
-Bartowski calibration v3 is a multi-domain dataset (code, chat, reasoning, math)
+The v3 calibration dataset is a multi-domain dataset (code, chat, reasoning, math)
 that provides better activation ranges than WikiText-2 for LLM quantization.
 
 The dataset contains diverse samples covering:
@@ -10,10 +10,10 @@ The dataset contains diverse samples covering:
 - Literary text for natural language diversity
 
 Usage:
-    from metal_marlin.calibration import BartowskiCalibration, compute_activation_ranges
+    from metal_marlin.calibration import CalibrationDataset, compute_activation_ranges
 
     # Load calibration dataset
-    dataset = BartowskiCalibration.v3(max_samples=512)
+    dataset = CalibrationDataset.v3(max_samples=512)
 
     # Compute activation ranges for quantization
     ranges = compute_activation_ranges("path/to/model", dataset)
@@ -32,12 +32,12 @@ import numpy as np
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Bartowski calibration v3 URL
-_BARTOWSKI_V3_URL = (
+# Multi-domain calibration v3 URL
+_CALIBRATION_V3_URL = (
     "https://gist.githubusercontent.com/bartowski1182/eb213dccb3571f863da82e99418f81e8/"
     "raw/2c64bb691316d32915b188e495754ef34931ae71/calibration_datav3.txt"
 )
-_BARTOWSKI_V3_SHA256 = None  # Will be computed on first download
+_CALIBRATION_V3_SHA256 = None  # Will be computed on first download
 
 # Default cache directory
 _DEFAULT_CACHE_DIR = Path.home() / ".cache" / "metal_marlin" / "calibration"
@@ -127,8 +127,8 @@ class CalibrationDataset:
         )
 
 
-class BartowskiCalibration:
-    """Loader for Bartowski calibration datasets."""
+class CalibrationDatasetLoader:
+    """Loader for multi-domain calibration datasets."""
 
     @classmethod
     def v3(
@@ -138,14 +138,14 @@ class BartowskiCalibration:
         force_download: bool = False,
         min_sample_length: int = 100,
     ) -> CalibrationDataset:
-        """Load Bartowski calibration v3 from Gist.
+        """Load calibration v3 from Gist.
 
         The v3 dataset is a multi-domain text file containing scientific papers,
         code snippets, math problems, and literary passages. Samples are separated
         by blank lines.
 
         IMPORTANT: For accurate quantization, use ALL samples (max_samples=None).
-        Bartowski v3 contains 800+ carefully curated multi-domain samples.
+        The v3 dataset contains 800+ carefully curated multi-domain samples.
         Limiting samples reduces calibration accuracy and may hurt quantization
         quality.
 
@@ -162,11 +162,11 @@ class BartowskiCalibration:
         cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        cache_file = cache_dir / "bartowski_v3.txt"
+        cache_file = cache_dir / "calibration_v3.txt"
 
         # Download if needed
         if force_download or not cache_file.exists():
-            cls._download_file(_BARTOWSKI_V3_URL, cache_file)
+            cls._download_file(_CALIBRATION_V3_URL, cache_file)
 
         # Parse the file
         raw_text = cache_file.read_text(encoding="utf-8")
@@ -179,10 +179,10 @@ class BartowskiCalibration:
 
         return CalibrationDataset(
             samples=samples,
-            name="bartowski_calibration",
+            name="calibration_dataset",
             version="v3",
             metadata={
-                "source": _BARTOWSKI_V3_URL,
+                "source": _CALIBRATION_V3_URL,
                 "total_raw_samples": len(cls._parse_v3_text(raw_text, 0)),
                 "min_sample_length": min_sample_length,
                 "samples_used": len(samples),
@@ -252,7 +252,7 @@ class BartowskiCalibration:
 
     @staticmethod
     def _parse_v3_text(text: str, min_length: int) -> list[str]:
-        """Parse Bartowski v3 format: blank-line separated paragraphs.
+        """Parse v3 format: blank-line separated paragraphs.
 
         Consecutive non-blank lines are joined into samples.
         """
@@ -298,7 +298,7 @@ class BartowskiCalibration:
             # Try to find samples in dict
             for key in ["samples", "data", "texts", "calibration"]:
                 if key in data and isinstance(data[key], list):
-                    return BartowskiCalibration._parse_json_data(data[key])
+                    return CalibrationDatasetLoader._parse_json_data(data[key])
         return []
 
 
@@ -488,3 +488,7 @@ def load_ranges(path: str | Path) -> dict[str, tuple[float, float]]:
     path = Path(path)
     data = json.loads(path.read_text())
     return {name: (v["min"], v["max"]) for name, v in data.items()}
+
+
+# Backwards compatibility alias
+BartowskiCalibration = CalibrationDatasetLoader

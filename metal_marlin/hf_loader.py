@@ -1035,11 +1035,10 @@ def convert_onnx_to_fp4(
         print(f"  Found {len(initializers)} initializers")
 
     # Prepare calibration scales if provided
-    calibration_scales: dict[str, np.ndarray] | None = None
     if calibration is not None:
         if verbose:
             print(f"  Using calibration dataset: {calibration.name} ({len(calibration)} samples)")
-        calibration_scales = _compute_calibration_scales(initializers, calibration)
+        _compute_calibration_scales(initializers, calibration)
 
     stats: dict[str, Any] = {
         "quantized_count": 0,

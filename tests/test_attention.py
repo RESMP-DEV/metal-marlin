@@ -170,7 +170,7 @@ def test_attention_causal_mask() -> None:
 
 
 def test_attention_fp4_kv() -> None:
-    mx = _require_mlx()
+    _require_mlx()
     source = _load_metal_source()
     if "flash_attention_kv_fp4" not in source:
         pytest.skip("flash_attention_kv_fp4 kernel not available")

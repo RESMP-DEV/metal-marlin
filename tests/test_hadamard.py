@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+
 from metal_marlin.hadamard import (
     apply_hadamard_rotation,
     compute_outlier_stats,

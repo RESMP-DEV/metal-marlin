@@ -70,8 +70,7 @@ def extract_onnx_weights(
         from onnx import numpy_helper
     except ImportError as e:
         raise ImportError(
-            "onnx package is required for ONNX model loading. "
-            "Install with: pip install onnx"
+            "onnx package is required for ONNX model loading. Install with: pip install onnx"
         ) from e
 
     onnx_path = Path(onnx_path)
@@ -233,11 +232,9 @@ def get_onnx_config(onnx_path: str | Path) -> ModelConfig:
     """
     try:
         import onnx
-        from onnx import numpy_helper
     except ImportError as e:
         raise ImportError(
-            "onnx package is required for ONNX model loading. "
-            "Install with: pip install onnx"
+            "onnx package is required for ONNX model loading. Install with: pip install onnx"
         ) from e
 
     onnx_path = Path(onnx_path)
@@ -455,8 +452,7 @@ def list_onnx_tensors(onnx_path: str | Path) -> list[dict[str, Any]]:
         from onnx import TensorProto
     except ImportError as e:
         raise ImportError(
-            "onnx package is required for ONNX model loading. "
-            "Install with: pip install onnx"
+            "onnx package is required for ONNX model loading. Install with: pip install onnx"
         ) from e
 
     onnx_path = Path(onnx_path)
@@ -491,13 +487,15 @@ def list_onnx_tensors(onnx_path: str | Path) -> list[dict[str, Any]]:
             n_elements *= dim
         size_bytes = n_elements * bytes_per_elem
 
-        result.append({
-            "onnx_name": onnx_name,
-            "hf_name": hf_name,
-            "shape": shape,
-            "dtype": dtype_str,
-            "n_elements": n_elements,
-            "size_bytes": size_bytes,
-        })
+        result.append(
+            {
+                "onnx_name": onnx_name,
+                "hf_name": hf_name,
+                "shape": shape,
+                "dtype": dtype_str,
+                "n_elements": n_elements,
+                "size_bytes": size_bytes,
+            }
+        )
 
     return result

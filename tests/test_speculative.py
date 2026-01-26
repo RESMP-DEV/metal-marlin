@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import mlx.core as mx
 import numpy as np
+
 from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.speculative.draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
 from metal_marlin.speculative.engine import (
@@ -110,8 +111,8 @@ class DeterministicDraft(DraftModel):
         remainder = (1.0 - self._prob_mass) / (self._vocab_size - 1)
         for i in range(num_tokens):
             # Set all to remainder, then boost the proposed token
-            uniform = mx.full((batch_size, self._vocab_size), remainder, dtype=mx.float32)
-            token_col = mx.full((batch_size, 1), self._prob_mass, dtype=mx.float32)
+            mx.full((batch_size, self._vocab_size), remainder, dtype=mx.float32)
+            mx.full((batch_size, 1), self._prob_mass, dtype=mx.float32)
             # Place concentrated mass at the proposed token
             probs_i = mx.zeros((batch_size, self._vocab_size), dtype=mx.float32)
             for b in range(batch_size):
@@ -933,7 +934,7 @@ class TestSpeculativeEngine:
 
         streamed: list[int] = []
         prompt = mx.array([[10, 20, 30]], dtype=mx.uint32)
-        output = engine.generate_all(prompt, max_tokens=8, streamer=streamed.append)
+        engine.generate_all(prompt, max_tokens=8, streamer=streamed.append)
 
         # Streamer should have been called at least once
         assert len(streamed) >= 8

@@ -537,7 +537,7 @@ class TestQuantizedPrecision:
 
         # FP16 result: 32768.0 is representable as half, but accumulated
         # via many additions it may have precision loss
-        fp16_error = float(np.abs(
+        float(np.abs(
             result_fp16.astype(np.float32) - 32768.0
         ).max())
         # At magnitude 32768, FP16 ULP = 32, so precision is very coarse

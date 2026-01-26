@@ -701,3 +701,532 @@ def quantize_to_nf4(
         print(f"  Compression: {stats['compression_ratio']:.2f}x")
 
     return stats
+
+
+# =============================================================================
+# FP8 E4M3 Quantization (for weights)
+# =============================================================================
+
+# FP8 E4M3 format: [1 sign][4 exponent (bias=7)][3 mantissa]
+# Range: ~2^-9 to 448, with 240 distinct non-zero values
+# This format is preferred for weights due to higher precision (3-bit mantissa)
+
+# Packing factor: 4 FP8 bytes per uint32
+FP8_PER_U32 = 4
+
+
+def compute_fp8_e4m3_values() -> np.ndarray:
+    """Compute all 256 representable FP8 E4M3 values.
+
+    FP8 E4M3 format:
+    - 1 sign bit, 4 exponent bits (bias=7), 3 mantissa bits
+    - Normal: (-1)^S * 2^(E-7) * (1 + M/8) for 0 < E < 15
+    - Subnormal: (-1)^S * 2^(-6) * (M/8) for E=0, M>0
+    - Zero: E=0, M=0
+    - NaN: E=15 (all exponent bits set) - E4M3 has no infinity
+
+    Returns:
+        Array of 256 float32 values for codes 0-255.
+    """
+    values = np.zeros(256, dtype=np.float32)
+
+    for code in range(256):
+        s = (code >> 7) & 1
+        e = (code >> 3) & 0xF
+        m = code & 0x7
+
+        sign = -1.0 if s else 1.0
+
+        if e == 15:
+            # NaN (E4M3 has no infinity)
+            values[code] = np.nan
+        elif e == 0:
+            if m == 0:
+                # Zero (signed)
+                values[code] = 0.0 if s == 0 else -0.0
+            else:
+                # Subnormal: 2^(-6) * (M/8)
+                values[code] = sign * (2**-6) * (m / 8)
+        else:
+            # Normal: 2^(E-7) * (1 + M/8)
+            values[code] = sign * (2 ** (e - 7)) * (1 + m / 8)
+
+    return values
+
+
+# Precomputed FP8 E4M3 codebook (240 distinct non-NaN values)
+FP8_E4M3_VALUES: np.ndarray = compute_fp8_e4m3_values()
+
+# Maximum representable normal value in E4M3: 2^7 * (1 + 7/8) = 128 * 1.875 = 240
+FP8_E4M3_MAX = 240.0
+
+
+def _quantize_to_fp8_e4m3(normalized: np.ndarray) -> np.ndarray:
+    """Map normalized float values to nearest FP8 E4M3 codes.
+
+    Args:
+        normalized: Float array with values pre-divided by group scale.
+
+    Returns:
+        uint8 array of FP8 E4M3 codes (0-255).
+    """
+    # Clip to representable range (excluding NaN codes)
+    clipped = np.clip(normalized, -FP8_E4M3_MAX, FP8_E4M3_MAX)
+
+    # Get non-NaN codes only (codes 0-119 and 128-247 are valid)
+    # NaN codes: 120-127 (positive) and 248-255 (negative)
+    valid_mask = ~np.isnan(FP8_E4M3_VALUES)
+    valid_codes = np.where(valid_mask)[0]
+    valid_values = FP8_E4M3_VALUES[valid_mask]
+
+    # Nearest-neighbor quantization
+    flat = clipped.ravel()
+    n = len(flat)
+    chunk_size = 1 << 20
+    codes = np.empty(n, dtype=np.uint8)
+
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+        dists = np.abs(chunk[:, None] - valid_values[None, :])
+        nearest_idx = dists.argmin(axis=1)
+        codes[start:end] = valid_codes[nearest_idx].astype(np.uint8)
+
+    return codes.reshape(normalized.shape)
+
+
+def _pack_bytes_to_uint32(codes: np.ndarray) -> np.ndarray:
+    """Pack FP8 codes along the N dimension into uint32 words.
+
+    4 consecutive N-dimension bytes are packed into one uint32:
+      word = byte[0] | (byte[1] << 8) | (byte[2] << 16) | (byte[3] << 24)
+
+    Args:
+        codes: [K, N] uint8 array. N must be divisible by 4.
+
+    Returns:
+        [K, N // 4] uint32 array.
+    """
+    K, N = codes.shape
+    assert N % FP8_PER_U32 == 0, f"N={N} must be divisible by {FP8_PER_U32}"
+
+    reshaped = codes.reshape(K, N // FP8_PER_U32, FP8_PER_U32).astype(np.uint32)
+    packed = np.zeros((K, N // FP8_PER_U32), dtype=np.uint32)
+    for i in range(FP8_PER_U32):
+        packed |= reshaped[:, :, i] << (i * 8)
+    return packed
+
+
+def pack_fp8_weights(
+    weights: Any,
+    group_size: int = 128,
+    format: str = "e4m3",
+    pad_k: bool = True,
+    scales_dtype: np.dtype | None = None,
+    output_backend: Literal["numpy", "mlx", "torch"] = "numpy",
+) -> tuple[Any, Any, dict[str, Any]]:
+    """Pack float weights to FP8 format with per-group scales.
+
+    FP8 provides 2x storage vs FP4 but significantly better precision,
+    making it ideal for sensitive layers:
+    - Embedding layers
+    - First/last transformer blocks
+    - Layers with high Hessian condition number
+
+    Args:
+        weights: Weight matrix [K, N] (K = input features, N = output features).
+            Can be numpy array, MLX array, or PyTorch tensor.
+        group_size: Elements per quantization group along K. Default: 128.
+        format: FP8 format - "e4m3" (weights) or "e5m2" (activations). Default: "e4m3".
+        pad_k: If True, pad K to the next multiple of group_size when not
+               evenly divisible. If False, raise ValueError on misalignment.
+        scales_dtype: Dtype for scales array. Default: np.float16.
+        output_backend: Backend for output arrays ('numpy', 'mlx', or 'torch').
+            Default: 'numpy'.
+
+    Returns:
+        Tuple of:
+            packed: uint32 array [K_padded, N_padded // 4].
+            scales: float array [K_padded // group_size, N_padded].
+            meta: Dict with 'orig_K', 'orig_N', 'padded_K', 'padded_N',
+                  'group_size', 'quant_type' for reconstruction.
+
+    Raises:
+        ValueError: If pad_k=False and K is not divisible by group_size.
+        ValueError: If format is not "e4m3" or "e5m2".
+    """
+    if format not in ("e4m3", "e5m2"):
+        raise ValueError(f"format must be 'e4m3' or 'e5m2', got '{format}'")
+
+    if scales_dtype is None:
+        scales_dtype = np.float16
+
+    w = to_numpy(weights).astype(np.float32)
+    orig_K, orig_N = w.shape
+
+    # Pad K to multiple of group_size
+    if orig_K % group_size != 0:
+        if not pad_k:
+            raise ValueError(
+                f"K={orig_K} not divisible by group_size={group_size}. "
+                f"Set pad_k=True to pad automatically."
+            )
+        w = _pad_to_multiple(w, axis=0, multiple=group_size)
+
+    K = w.shape[0]
+
+    # Pad N to multiple of 4 for byte packing
+    N = w.shape[1]
+    if orig_N % FP8_PER_U32 != 0:
+        w = _pad_to_multiple(w, axis=1, multiple=FP8_PER_U32)
+        N = w.shape[1]
+
+    # Compute per-group scales
+    num_groups = K // group_size
+    w_grouped = w.reshape(num_groups, group_size, N)
+    group_max = np.abs(w_grouped).max(axis=1)  # [num_groups, N]
+
+    # Select max value based on format
+    if format == "e4m3":
+        max_val = FP8_E4M3_MAX
+        quantize_fn = _quantize_to_fp8_e4m3
+    else:  # e5m2
+        max_val = FP8_E5M2_MAX
+        quantize_fn = _quantize_to_fp8_e5m2
+
+    scales_np = np.where(group_max > 0, group_max / max_val, np.float32(1e-7))
+
+    # Quantize to FP8 codes
+    scales_expanded = np.repeat(scales_np, group_size, axis=0)
+    normalized = w / scales_expanded
+    codes = quantize_fn(normalized)  # [K, N] uint8
+
+    # Pack into uint32 (4 bytes per word)
+    packed_np = _pack_bytes_to_uint32(codes)
+
+    meta = {
+        "orig_K": orig_K,
+        "orig_N": orig_N,
+        "padded_K": K,
+        "padded_N": N,
+        "group_size": group_size,
+        "quant_type": f"fp8_{format}",
+    }
+
+    packed_out = from_numpy(packed_np, backend=output_backend)
+    scales_out = from_numpy(scales_np.astype(scales_dtype), backend=output_backend)
+
+    return packed_out, scales_out, meta
+
+
+def dequant_fp8_e4m3(
+    packed: Any,
+    scales: Any,
+    meta: dict[str, Any],
+    weights_dtype: np.dtype | None = None,
+    output_backend: Literal["numpy", "mlx", "torch"] = "numpy",
+) -> Any:
+    """Dequantize FP8 E4M3 weights back to float for validation.
+
+    Reverses pack_fp8_weights with format="e4m3": extracts byte codes from
+    uint32 words, maps through E4M3 codebook, applies group scales, and
+    trims padding.
+
+    Args:
+        packed: uint32 array [K_padded, N_padded // 4].
+        scales: float array [K_padded // group_size, N_padded].
+        meta: Metadata dict from pack_fp8_weights.
+        weights_dtype: Dtype for output weights. Default: np.float16.
+        output_backend: Backend for output array.
+
+    Returns:
+        Array [orig_K, orig_N] in specified dtype and backend.
+    """
+    if weights_dtype is None:
+        weights_dtype = np.float16
+
+    packed_np = to_numpy(packed)
+    scales_np = to_numpy(scales).astype(np.float32)
+
+    K = meta["padded_K"]
+    N = meta["padded_N"]
+    group_size = meta["group_size"]
+
+    # Unpack uint32 -> byte codes
+    packed_n = N // FP8_PER_U32
+    codes = np.empty((K, N), dtype=np.uint8)
+    for g in range(packed_n):
+        col_start = g * FP8_PER_U32
+        for i in range(FP8_PER_U32):
+            codes[:, col_start + i] = (
+                (packed_np[:, g] >> (i * 8)) & 0xFF
+            ).astype(np.uint8)
+
+    # Dequantize via codebook
+    values = FP8_E4M3_VALUES[codes].astype(np.float32)
+
+    # Apply per-group scales
+    scales_expanded = np.repeat(scales_np, group_size, axis=0)
+    values *= scales_expanded
+
+    # Trim padding
+    orig_K = meta["orig_K"]
+    orig_N = meta["orig_N"]
+    values_trimmed = values[:orig_K, :orig_N].astype(weights_dtype)
+
+    return from_numpy(values_trimmed, backend=output_backend)
+
+
+# =============================================================================
+# FP8 E5M2 Quantization (for activations/gradients)
+# =============================================================================
+
+# FP8 E5M2 format: [1 sign][5 exponent (bias=15)][2 mantissa]
+# Range: ~2^-16 to 57344, with 256 distinct values including Inf
+# Same exponent width as FP16, so direct bit-field rearrangement
+# This format is preferred for activations/gradients due to wider dynamic range
+
+
+def compute_fp8_e5m2_values() -> np.ndarray:
+    """Compute all 256 representable FP8 E5M2 values.
+
+    FP8 E5M2 format:
+    - 1 sign bit, 5 exponent bits (bias=15), 2 mantissa bits
+    - Normal: (-1)^S * 2^(E-15) * (1 + M/4) for 0 < E < 31
+    - Subnormal: (-1)^S * 2^(-14) * (M/4) for E=0, M>0
+    - Zero: E=0, M=0
+    - Infinity: E=31, M=0
+    - NaN: E=31, M!=0
+
+    Returns:
+        Array of 256 float32 values for codes 0-255.
+    """
+    values = np.zeros(256, dtype=np.float32)
+
+    for code in range(256):
+        s = (code >> 7) & 1
+        e = (code >> 2) & 0x1F
+        m = code & 0x3
+
+        sign = -1.0 if s else 1.0
+
+        if e == 31:
+            if m == 0:
+                # Infinity
+                values[code] = sign * np.inf
+            else:
+                # NaN
+                values[code] = np.nan
+        elif e == 0:
+            if m == 0:
+                # Zero (signed)
+                values[code] = 0.0 if s == 0 else -0.0
+            else:
+                # Subnormal: 2^(-14) * (M/4)
+                values[code] = sign * (2**-14) * (m / 4)
+        else:
+            # Normal: 2^(E-15) * (1 + M/4)
+            values[code] = sign * (2 ** (e - 15)) * (1 + m / 4)
+
+    return values
+
+
+# Precomputed FP8 E5M2 codebook
+FP8_E5M2_VALUES: np.ndarray = compute_fp8_e5m2_values()
+
+# Maximum representable finite value in E5M2: 2^15 * (1 + 3/4) = 32768 * 1.75 = 57344
+FP8_E5M2_MAX = 57344.0
+
+
+def _quantize_to_fp8_e5m2(normalized: np.ndarray) -> np.ndarray:
+    """Map normalized float values to nearest FP8 E5M2 codes.
+
+    Args:
+        normalized: Float array with values pre-divided by group scale.
+
+    Returns:
+        uint8 array of FP8 E5M2 codes (0-255).
+    """
+    # Clip to finite representable range (excluding Inf/NaN codes)
+    clipped = np.clip(normalized, -FP8_E5M2_MAX, FP8_E5M2_MAX)
+
+    # Get finite codes only
+    valid_mask = np.isfinite(FP8_E5M2_VALUES)
+    valid_codes = np.where(valid_mask)[0]
+    valid_values = FP8_E5M2_VALUES[valid_mask]
+
+    # Nearest-neighbor quantization
+    flat = clipped.ravel()
+    n = len(flat)
+    chunk_size = 1 << 20
+    codes = np.empty(n, dtype=np.uint8)
+
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunk = flat[start:end]
+        dists = np.abs(chunk[:, None] - valid_values[None, :])
+        nearest_idx = dists.argmin(axis=1)
+        codes[start:end] = valid_codes[nearest_idx].astype(np.uint8)
+
+    return codes.reshape(normalized.shape)
+
+
+def dequant_fp8_e5m2(
+    packed: Any,
+    scales: Any,
+    meta: dict[str, Any],
+    weights_dtype: np.dtype | None = None,
+    output_backend: Literal["numpy", "mlx", "torch"] = "numpy",
+) -> Any:
+    """Dequantize FP8 E5M2 weights back to float for validation.
+
+    Reverses pack_fp8_weights with format="e5m2".
+
+    Args:
+        packed: uint32 array [K_padded, N_padded // 4].
+        scales: float array [K_padded // group_size, N_padded].
+        meta: Metadata dict from pack_fp8_weights.
+        weights_dtype: Dtype for output weights. Default: np.float16.
+        output_backend: Backend for output array.
+
+    Returns:
+        Array [orig_K, orig_N] in specified dtype and backend.
+    """
+    if weights_dtype is None:
+        weights_dtype = np.float16
+
+    packed_np = to_numpy(packed)
+    scales_np = to_numpy(scales).astype(np.float32)
+
+    K = meta["padded_K"]
+    N = meta["padded_N"]
+    group_size = meta["group_size"]
+
+    # Unpack uint32 -> byte codes
+    packed_n = N // FP8_PER_U32
+    codes = np.empty((K, N), dtype=np.uint8)
+    for g in range(packed_n):
+        col_start = g * FP8_PER_U32
+        for i in range(FP8_PER_U32):
+            codes[:, col_start + i] = (
+                (packed_np[:, g] >> (i * 8)) & 0xFF
+            ).astype(np.uint8)
+
+    # Dequantize via codebook
+    values = FP8_E5M2_VALUES[codes].astype(np.float32)
+
+    # Apply per-group scales
+    scales_expanded = np.repeat(scales_np, group_size, axis=0)
+    values *= scales_expanded
+
+    # Trim padding
+    orig_K = meta["orig_K"]
+    orig_N = meta["orig_N"]
+    values_trimmed = values[:orig_K, :orig_N].astype(weights_dtype)
+
+    return from_numpy(values_trimmed, backend=output_backend)
+
+
+# =============================================================================
+# High-level FP8 model quantization
+# =============================================================================
+
+def quantize_to_fp8(
+    model_path: str | Path,
+    output_path: str | Path,
+    group_size: int = 128,
+    format: str = "e4m3",
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """Quantize model weights to FP8 format.
+
+    FP8 provides 2x storage vs FP4 but significantly better precision,
+    making it ideal for sensitive layers:
+    - Embedding layers
+    - First/last transformer blocks
+    - Layers with high Hessian condition number
+
+    Args:
+        model_path: Path to source model (safetensors or HF directory)
+        output_path: Path to save quantized model
+        group_size: Quantization group size
+        format: FP8 format - "e4m3" (weights) or "e5m2" (activations)
+        verbose: Print progress
+
+    Returns:
+        Stats dict with compression ratio, error metrics, etc.
+    """
+    from pathlib import Path as PathlibPath
+
+    from safetensors import safe_open
+    from safetensors.numpy import save_file
+
+    model_path = PathlibPath(model_path)
+    output_path = PathlibPath(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if model_path.is_file():
+        safetensors_files = [model_path]
+    else:
+        safetensors_files = sorted(model_path.glob("*.safetensors"))
+
+    if not safetensors_files:
+        raise FileNotFoundError(f"No safetensors files found in {model_path}")
+
+    stats = {
+        "quantized_count": 0,
+        "skipped_count": 0,
+        "original_bytes": 0,
+        "quantized_bytes": 0,
+        "quant_type": f"fp8_{format}",
+    }
+
+    # Skip patterns for layers that should remain full precision
+    skip_patterns = ["norm", "bias"]
+
+    for sf_path in safetensors_files:
+        if verbose:
+            print(f"  Processing: {sf_path.name}")
+
+        output_tensors = {}
+
+        with safe_open(str(sf_path), framework="numpy") as f:
+            for name in f.keys():
+                tensor = f.get_tensor(name)
+
+                should_skip = any(pat in name.lower() for pat in skip_patterns)
+                is_weight = "weight" in name.lower() and tensor.ndim == 2
+
+                if not should_skip and is_weight:
+                    K, N = tensor.shape
+                    if N % FP8_PER_U32 == 0 and K % group_size == 0:
+                        packed, scales, meta = pack_fp8_weights(
+                            tensor, group_size=group_size, format=format
+                        )
+                        output_tensors[name] = packed
+                        output_tensors[f"{name}.scales"] = scales
+                        stats["quantized_count"] += 1
+                        stats["original_bytes"] += tensor.nbytes
+                        stats["quantized_bytes"] += packed.nbytes + scales.nbytes
+                    else:
+                        output_tensors[name] = tensor
+                        stats["skipped_count"] += 1
+                else:
+                    output_tensors[name] = tensor
+                    stats["skipped_count"] += 1
+
+        suffix = f".fp8_{format}.safetensors"
+        out_file = output_path / sf_path.name.replace(".safetensors", suffix)
+        save_file(output_tensors, str(out_file))
+
+    if stats["quantized_bytes"] > 0:
+        stats["compression_ratio"] = stats["original_bytes"] / stats["quantized_bytes"]
+    else:
+        stats["compression_ratio"] = 1.0
+
+    if verbose:
+        print(f"  Quantized: {stats['quantized_count']} tensors")
+        print(f"  Skipped: {stats['skipped_count']} tensors")
+        print(f"  Compression: {stats['compression_ratio']:.2f}x")
+
+    return stats

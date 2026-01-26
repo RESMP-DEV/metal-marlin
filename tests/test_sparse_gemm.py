@@ -733,7 +733,7 @@ class TestSparseEdgeCases:
 
     def test_negative_values_handled(self) -> None:
         """Negative values are pruned by magnitude, not by value."""
-        K, N = 8, 4
+        _K, N = 8, 4
         W = np.array([
             [-1.0, -1.0, -1.0, -1.0],
             [0.1, 0.1, 0.1, 0.1],

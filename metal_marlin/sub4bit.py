@@ -27,7 +27,15 @@ Reference implementations:
 from __future__ import annotations
 
 import numpy as np
-from scipy import stats
+
+# Scipy is optional - used for NF levels and distribution analysis
+try:
+    from scipy import stats
+
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    stats = None  # type: ignore[assignment]
 
 # ============================================================================
 # INT2 Quantization (4 levels: -1.5, -0.5, 0.5, 1.5 scaled)
@@ -154,7 +162,7 @@ def quantize_int3(
     # Pad if necessary
     pad_needed = (10 - (in_feat % 10)) % 10
     if pad_needed > 0:
-        w = np.pad(w, ((0, 0), (0, pad_needed)), mode='constant', constant_values=0)
+        w = np.pad(w, ((0, 0), (0, pad_needed)), mode="constant", constant_values=0)
         in_feat_padded = in_feat + pad_needed
     else:
         in_feat_padded = in_feat
@@ -177,7 +185,7 @@ def quantize_int3(
     for g in range(n_groups):
         start = g * group_size
         end = start + group_size
-        w_scaled[:, start:end] = w[:, start:end] / scales[:, g:g+1].astype(np.float32)
+        w_scaled[:, start:end] = w[:, start:end] / scales[:, g : g + 1].astype(np.float32)
     # Handle padding region (use last group's scale)
     if pad_needed > 0:
         w_scaled[:, in_feat:] = w[:, in_feat:] / scales[:, -1:].astype(np.float32)
@@ -222,7 +230,7 @@ def dequantize_int3(
     for g in range(n_groups):
         start = g * group_size
         end = start + group_size
-        values_out[:, start:end] = values[:, start:end] * scales[:, g:g+1].astype(np.float32)
+        values_out[:, start:end] = values[:, start:end] * scales[:, g : g + 1].astype(np.float32)
 
     if original_in_feat is not None:
         values_out = values_out[:, :original_in_feat]
@@ -233,6 +241,7 @@ def dequantize_int3(
 # ============================================================================
 # NF2 Quantization (NormalFloat 2-bit: Gaussian quantiles)
 # ============================================================================
+
 
 def _compute_nf_levels(n_bits: int) -> np.ndarray:
     """
@@ -249,14 +258,29 @@ def _compute_nf_levels(n_bits: int) -> np.ndarray:
 
     These minimize MSE for Gaussian-distributed inputs, per the NF4 paper.
     """
-    n_levels = 2 ** n_bits
-    # Compute quantiles at midpoints of n_levels equal-probability bins
-    quantiles = np.linspace(0.5 / n_levels, 1 - 0.5 / n_levels, n_levels)
-    levels = stats.norm.ppf(quantiles)
+    if HAS_SCIPY:
+        n_levels = 2**n_bits
+        # Compute quantiles at midpoints of n_levels equal-probability bins
+        quantiles = np.linspace(0.5 / n_levels, 1 - 0.5 / n_levels, n_levels)
+        levels = stats.norm.ppf(quantiles)
 
-    # Normalize so max magnitude is approximately 1 (for scaling)
-    levels = levels / np.max(np.abs(levels))
-    return levels.astype(np.float32)
+        # Normalize so max magnitude is approximately 1 (for scaling)
+        levels = levels / np.max(np.abs(levels))
+        return levels.astype(np.float32)
+    else:
+        # Pre-computed values (scipy.stats.norm.ppf at standard quantiles, normalized)
+        if n_bits == 2:
+            # Quantiles: [0.125, 0.375, 0.625, 0.875] -> ppf -> normalize
+            return np.array([-1.0, -0.2970, 0.2970, 1.0], dtype=np.float32)
+        elif n_bits == 3:
+            # Quantiles: [0.0625, 0.1875, 0.3125, 0.4375, 0.5625, 0.6875, 0.8125, 0.9375]
+            return np.array(
+                [-1.0, -0.5958, -0.3290, -0.1024, 0.1024, 0.3290, 0.5958, 1.0], dtype=np.float32
+            )
+        else:
+            raise ValueError(
+                f"Unsupported n_bits={n_bits} without scipy. Install scipy for arbitrary n_bits."
+            )
 
 
 # Precomputed NF2 levels (4 values, symmetric around 0)
@@ -354,6 +378,7 @@ def dequantize_nf2(
 # NF3 Quantization (NormalFloat 3-bit: Gaussian quantiles)
 # ============================================================================
 
+
 def quantize_nf3(
     weight: np.ndarray,
     group_size: int = 64,
@@ -379,7 +404,7 @@ def quantize_nf3(
     # INT3 packs 10 values per uint32
     pad_needed = (10 - (in_feat % 10)) % 10
     if pad_needed > 0:
-        w = np.pad(w, ((0, 0), (0, pad_needed)), mode='constant', constant_values=0)
+        w = np.pad(w, ((0, 0), (0, pad_needed)), mode="constant", constant_values=0)
         in_feat_padded = in_feat + pad_needed
     else:
         in_feat_padded = in_feat
@@ -403,7 +428,7 @@ def quantize_nf3(
     for g in range(n_groups):
         start = g * group_size
         end = start + group_size
-        w_scaled[:, start:end] = w[:, start:end] / scales[:, g:g+1].astype(np.float32)
+        w_scaled[:, start:end] = w[:, start:end] / scales[:, g : g + 1].astype(np.float32)
     if pad_needed > 0:
         w_scaled[:, in_feat:] = w[:, in_feat:] / scales[:, -1:].astype(np.float32)
 
@@ -446,7 +471,7 @@ def dequantize_nf3(
     for g in range(n_groups):
         start = g * group_size
         end = start + group_size
-        values_out[:, start:end] = values[:, start:end] * scales[:, g:g+1].astype(np.float32)
+        values_out[:, start:end] = values[:, start:end] * scales[:, g : g + 1].astype(np.float32)
 
     if original_in_feat is not None:
         values_out = values_out[:, :original_in_feat]
@@ -457,6 +482,7 @@ def dequantize_nf3(
 # ============================================================================
 # Utility functions
 # ============================================================================
+
 
 def compute_quantization_error(
     original: np.ndarray,
@@ -479,10 +505,10 @@ def compute_quantization_error(
         Dict with mse, rmse, max_error, mean_relative_error
     """
     dequant_funcs = {
-        'int2': dequantize_int2,
-        'int3': dequantize_int3,
-        'nf2': dequantize_nf2,
-        'nf3': dequantize_nf3,
+        "int2": dequantize_int2,
+        "int3": dequantize_int3,
+        "nf2": dequantize_nf2,
+        "nf3": dequantize_nf3,
     }
 
     dequant_func = dequant_funcs.get(quant_type.lower())
@@ -495,7 +521,7 @@ def compute_quantization_error(
 
     # Truncate if INT3/NF3 padding was added
     if recon_f32.shape[1] < orig_f32.shape[1]:
-        orig_f32 = orig_f32[:, :recon_f32.shape[1]]
+        orig_f32 = orig_f32[:, : recon_f32.shape[1]]
 
     diff = orig_f32 - recon_f32
     mse = np.mean(diff**2)
@@ -535,9 +561,9 @@ def estimate_compression_ratio(
     original_bits = out_feat * in_feat * 16
 
     # Quantized weight bits
-    if quant_type.lower() in ('int2', 'nf2'):
+    if quant_type.lower() in ("int2", "nf2"):
         weight_bits = out_feat * in_feat * 2
-    elif quant_type.lower() in ('int3', 'nf3'):
+    elif quant_type.lower() in ("int3", "nf3"):
         weight_bits = out_feat * in_feat * 3
     else:
         raise ValueError(f"Unknown quant_type: {quant_type}")
@@ -568,23 +594,32 @@ def select_sub4bit_format(
     """
     # Analyze tensor distribution
     vals = tensor.flatten().astype(np.float32)
-    skewness = stats.skew(vals)
-    kurtosis = stats.kurtosis(vals)
+
+    if HAS_SCIPY:
+        skewness = stats.skew(vals)
+        kurtosis = stats.kurtosis(vals)
+    else:
+        # Simple numpy fallbacks for skewness and kurtosis
+        mean = np.mean(vals)
+        std = np.std(vals) + 1e-10
+        skewness = float(np.mean(((vals - mean) / std) ** 3))
+        kurtosis = float(np.mean(((vals - mean) / std) ** 4) - 3.0)  # Excess kurtosis
 
     # Normal-like distribution benefits from NF quantization
     is_gaussian_like = abs(skewness) < 0.5 and abs(kurtosis) < 1.0
 
     if target_compression >= 7.0:
         # Need aggressive compression -> 2-bit
-        return 'nf2' if (is_gaussian_like or quality_priority) else 'int2'
+        return "nf2" if (is_gaussian_like or quality_priority) else "int2"
     else:
         # Can use 3-bit for better quality
-        return 'nf3' if (is_gaussian_like or quality_priority) else 'int3'
+        return "nf3" if (is_gaussian_like or quality_priority) else "int3"
 
 
 # ============================================================================
 # Export constants for Metal shaders
 # ============================================================================
+
 
 def get_int2_lut() -> np.ndarray:
     """Get INT2 dequantization lookup table for Metal shaders."""
@@ -610,6 +645,7 @@ def get_nf3_lut() -> np.ndarray:
 # CLI / Test
 # ============================================================================
 
+
 def main():
     """Test sub-4-bit quantization on random tensor."""
     import argparse
@@ -617,10 +653,10 @@ def main():
     parser = argparse.ArgumentParser(description="Test sub-4-bit quantization")
     parser.add_argument("--shape", type=str, default="4096,4096", help="Tensor shape (out,in)")
     parser.add_argument("--group-size", type=int, default=64, help="Quantization group size")
-    parser.add_argument("--format", choices=['int2', 'int3', 'nf2', 'nf3', 'all'], default='all')
+    parser.add_argument("--format", choices=["int2", "int3", "nf2", "nf3", "all"], default="all")
     args = parser.parse_args()
 
-    shape = tuple(int(x) for x in args.shape.split(','))
+    shape = tuple(int(x) for x in args.shape.split(","))
     out_feat, in_feat = shape
 
     # Ensure divisibility
@@ -634,18 +670,18 @@ def main():
     np.random.seed(42)
     tensor = np.random.randn(out_feat, in_feat).astype(np.float32) * 0.02
 
-    formats = ['int2', 'int3', 'nf2', 'nf3'] if args.format == 'all' else [args.format]
+    formats = ["int2", "int3", "nf2", "nf3"] if args.format == "all" else [args.format]
 
     for fmt in formats:
         print(f"=== {fmt.upper()} ===")
 
-        if fmt == 'int2':
+        if fmt == "int2":
             packed, scales = quantize_int2(tensor, args.group_size)
             reconstructed = dequantize_int2(packed, scales, args.group_size)
-        elif fmt == 'int3':
+        elif fmt == "int3":
             packed, scales = quantize_int3(tensor, args.group_size)
             reconstructed = dequantize_int3(packed, scales, args.group_size)
-        elif fmt == 'nf2':
+        elif fmt == "nf2":
             packed, scales = quantize_nf2(tensor, args.group_size)
             reconstructed = dequantize_nf2(packed, scales, args.group_size)
         else:  # nf3

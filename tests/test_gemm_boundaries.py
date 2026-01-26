@@ -22,6 +22,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+
 from metal_marlin._compat import HAS_MLX
 
 # ---------------------------------------------------------------------------

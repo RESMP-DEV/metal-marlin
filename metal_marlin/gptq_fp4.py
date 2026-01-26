@@ -290,11 +290,11 @@ class FP4GPTQQuantizer:
 
         # Compute Cholesky decomposition: H = L @ L^T
         try:
-            H_chol = np.linalg.cholesky(H)
+            np.linalg.cholesky(H)
         except np.linalg.LinAlgError:
             # Add more damping if Cholesky fails
             H = H + 0.1 * np.eye(in_features, dtype=np.float32)
-            H_chol = np.linalg.cholesky(H)
+            np.linalg.cholesky(H)
 
         # Compute H^{-1} for error compensation
         H_inv = np.linalg.inv(H)

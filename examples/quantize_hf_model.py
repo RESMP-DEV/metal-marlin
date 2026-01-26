@@ -71,9 +71,10 @@ def quantize_safetensors_to_marlin(
     Returns:
         Stats dict with counts of quantized/skipped/passthrough tensors.
     """
-    from metal_marlin.quantize import pack_fp4_weights
     from safetensors import safe_open
     from safetensors.numpy import save_file
+
+    from metal_marlin.quantize import pack_fp4_weights
 
     skip_patterns = skip_patterns or {"lm_head", "embed_tokens", "wte", "wpe"}
 
@@ -171,8 +172,9 @@ def verify_accuracy(
         Dict with mean/max absolute error and mean relative error across
         the sampled layers.
     """
-    from metal_marlin.quantize import unpack_fp4_weights
     from safetensors import safe_open
+
+    from metal_marlin.quantize import unpack_fp4_weights
 
     # Load the Marlin file
     marlin_tensors = load_marlin_safetensors(marlin_path)

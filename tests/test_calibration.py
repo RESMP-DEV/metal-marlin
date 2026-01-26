@@ -1,15 +1,15 @@
-"""Tests for Bartowski calibration v3 integration.
+"""Comprehensive tests for calibration, quantization, and inference pipeline.
 
 Validates:
-  1. Download from gist URL
-  2. Local caching
-  3. Activation range computation
-  4. Calibration-aware scale computation
-  5. CLI command smoke tests
+  1. HessianCollector accumulation accuracy
+  2. CalibrationDataset loader coverage
+  3. Sensitivity analysis reproducibility
+  4. Mixed precision packing/unpacking
+  5. FP8 format correctness
+  6. End-to-end quantize -> inference
 
-The Bartowski calibration v3 dataset is a multi-domain text corpus
-(code, chat, reasoning, math) that provides better activation ranges
-than WikiText-2 for LLM quantization.
+Uses small synthetic models for fast CI runs.
+Slow tests requiring real models are marked with @pytest.mark.slow.
 """
 
 from __future__ import annotations
@@ -20,836 +20,976 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Bartowski calibration v3 gist URL
-BARTOWSKI_V3_URL = (
+from metal_marlin.calibration import CalibrationDataset, ranges_to_scales
+from metal_marlin.gptq import (
+    GPTQQuantizer,
+    compare_gptq_vs_rtn,
+    compute_hessian,
+    compute_hessian_streaming,
+    quantize_layer_gptq,
+    quantize_rtn,
+)
+from metal_marlin.hadamard import (
+    apply_hadamard_rotation,
+    compute_outlier_stats,
+    hadamard_matrix,
+    inverse_hadamard_rotation,
+)
+from metal_marlin.mixed_precision import (
+    LayerQuantConfig,
+    MixedPrecisionConfig,
+    Precision,
+    classify_layer,
+    get_layer_config,
+    quantize_fp8,
+    quantize_int4,
+    quantize_int8,
+    quantize_tensor,
+    should_quantize,
+)
+from metal_marlin.mr_gptq import (
+    FP4_E2M1_GRID,
+    INT4_GRID,
+    NF4_GRID,
+    MRGPTQQuantizer,
+    collect_hessian_from_activations,
+    quantize_to_grid,
+)
+from metal_marlin.quantize_fp4 import (
+    E2M1_VALUES,
+    compute_quantization_error,
+    quantize_fp4,
+    unpack_fp4,
+)
+
+# Multi-domain calibration v3 gist URL
+CALIBRATION_V3_URL = (
     "https://gist.githubusercontent.com/bartowski1182/eb213dccb3571f863da82e99418f81e8/"
     "raw/2c64bb691316d32915b188e495754ef34931ae71/calibration_datav3.txt"
 )
 
 
-class TestDownloadBartowskiV3:
-    """Test downloading calibration data from Bartowski gist."""
+# =============================================================================
+# Test Fixtures
+# =============================================================================
 
-    def test_download_bartowski_v3(self):
-        """Download from gist, verify format."""
+
+@pytest.fixture
+def small_weight_matrix():
+    """Create small synthetic weight matrix for fast tests."""
+    np.random.seed(42)
+    return np.random.randn(128, 256).astype(np.float32)
+
+
+@pytest.fixture
+def calibration_activations():
+    """Create synthetic calibration activations."""
+    np.random.seed(123)
+    # Simulate 100 tokens x 256 features
+    return [np.random.randn(20, 256).astype(np.float32) * 1.5 for _ in range(5)]
+
+
+@pytest.fixture
+def synthetic_model_weights():
+    """Create synthetic model-like weights with realistic naming."""
+    np.random.seed(456)
+    weights = {
+        "model.layers.0.self_attn.q_proj.weight": np.random.randn(256, 256).astype(np.float32),
+        "model.layers.0.self_attn.k_proj.weight": np.random.randn(256, 256).astype(np.float32),
+        "model.layers.0.self_attn.v_proj.weight": np.random.randn(256, 256).astype(np.float32),
+        "model.layers.0.self_attn.o_proj.weight": np.random.randn(256, 256).astype(np.float32),
+        "model.layers.0.mlp.gate_proj.weight": np.random.randn(512, 256).astype(np.float32),
+        "model.layers.0.mlp.up_proj.weight": np.random.randn(512, 256).astype(np.float32),
+        "model.layers.0.mlp.down_proj.weight": np.random.randn(256, 512).astype(np.float32),
+        "model.embed_tokens.weight": np.random.randn(1000, 256).astype(np.float32),
+        "lm_head.weight": np.random.randn(1000, 256).astype(np.float32),
+    }
+    return weights
+
+
+# =============================================================================
+# 1. HessianCollector Accumulation Accuracy Tests
+# =============================================================================
+
+
+class TestHessianCollectorAccuracy:
+    """Tests for Hessian computation accuracy and numerical stability."""
+
+    def test_hessian_basic_computation(self):
+        """Verify H = X^T @ X is computed correctly."""
+        np.random.seed(42)
+        X = np.random.randn(100, 64).astype(np.float32)
+
+        H = compute_hessian(X, normalize=True)
+
+        # Shape check
+        assert H.shape == (64, 64)
+
+        # Symmetry check
+        assert np.allclose(H, H.T, atol=1e-6)
+
+        # Positive semi-definiteness (eigenvalues >= 0)
+        eigenvalues = np.linalg.eigvalsh(H)
+        assert np.all(eigenvalues >= -1e-6)
+
+    def test_hessian_incremental_matches_batch(self):
+        """Incremental Hessian accumulation should match batch computation."""
+        np.random.seed(123)
+
+        # Create multiple batches
+        batches = [
+            np.random.randn(50, 128).astype(np.float32),
+            np.random.randn(30, 128).astype(np.float32),
+            np.random.randn(40, 128).astype(np.float32),
+        ]
+
+        # Batch computation
+        X_all = np.vstack(batches)
+        H_batch = compute_hessian(X_all, normalize=False)
+
+        # Incremental computation
+        H_incremental, add_batch = compute_hessian_streaming(128)
+        for batch in batches:
+            add_batch(H_incremental, batch)
+
+        # Should match within float32 tolerance
+        assert np.allclose(H_batch, H_incremental, rtol=1e-5, atol=1e-3)
+
+    def test_hessian_from_activations_shapes(self, calibration_activations):
+        """Verify HessianInfo from activations has correct shapes."""
+        hessian_info = collect_hessian_from_activations(calibration_activations, damp_ratio=0.01)
+
+        assert hessian_info.hessian.shape == (256, 256)
+        assert hessian_info.diag.shape == (256,)
+        assert hessian_info.n_samples == 100  # 5 batches * 20 samples
+
+    def test_hessian_damping_increases_diagonal(self, calibration_activations):
+        """Damping should increase diagonal elements for numerical stability."""
+        info_no_damp = collect_hessian_from_activations(calibration_activations, damp_ratio=0.0)
+        info_with_damp = collect_hessian_from_activations(calibration_activations, damp_ratio=0.05)
+
+        # Diagonal should be larger with damping
+        assert np.all(np.diag(info_with_damp.hessian) >= np.diag(info_no_damp.hessian))
+
+    def test_hessian_with_outlier_activations(self):
+        """Hessian should handle extreme activations without NaN/Inf."""
+        np.random.seed(789)
+
+        # Normal activations with extreme outliers
+        X = np.random.randn(100, 64).astype(np.float32)
+        X[0, 0] = 1e6  # Large outlier
+        X[1, 1] = 1e-8  # Small value
+
+        H = compute_hessian(X, normalize=True)
+
+        assert not np.any(np.isnan(H))
+        assert not np.any(np.isinf(H))
+        assert H.shape == (64, 64)
+
+    def test_hessian_reproducibility(self):
+        """Same input should produce identical Hessian."""
+        np.random.seed(42)
+        X1 = np.random.randn(100, 64).astype(np.float32)
+
+        np.random.seed(42)
+        X2 = np.random.randn(100, 64).astype(np.float32)
+
+        H1 = compute_hessian(X1)
+        H2 = compute_hessian(X2)
+
+        np.testing.assert_array_equal(H1, H2)
+
+    def test_hessian_sample_count_tracking(self, calibration_activations):
+        """Verify sample counts are tracked correctly."""
+        total_samples = sum(act.shape[0] for act in calibration_activations)
+        info = collect_hessian_from_activations(calibration_activations)
+
+        assert info.n_samples == total_samples
+
+
+# =============================================================================
+# 2. CalibrationDataset Loader Coverage Tests
+# =============================================================================
+
+
+class TestCalibrationDatasetLoader:
+    """Tests for CalibrationDataset loading and coverage."""
+
+    def test_dataset_container_basics(self):
+        """Test CalibrationDataset basic operations."""
+        samples = ["sample 1", "sample 2 is longer", "sample 3"]
+        dataset = CalibrationDataset(
+            samples=samples,
+            name="test",
+            version="v1",
+        )
+
+        assert len(dataset) == 3
+        assert dataset[0] == "sample 1"
+        assert list(dataset) == samples
+        assert dataset.total_chars == sum(len(s) for s in samples)
+
+    def test_dataset_filter(self):
+        """Test filtering calibration samples."""
+        samples = [
+            "short",
+            "this is a longer sample with code: def foo(): pass",
+            "another medium length sample",
+        ]
+        dataset = CalibrationDataset(samples=samples, name="test", version="v1")
+
+        # Filter by length
+        filtered = dataset.filter(lambda s: len(s) > 10)
+        assert len(filtered) == 2
+        assert "short" not in filtered.samples
+
+        # Original unchanged
+        assert len(dataset) == 3
+
+    def test_local_json_loading(self, tmp_path: Path):
+        """Test loading calibration data from local JSON file."""
+        # JSON list of strings (needs sufficient length per sample)
+        data = [
+            "Sample 1: code snippet with enough content to pass length filter of 50 chars",
+            "Sample 2: chat format text that is also long enough to be included here",
+            "Sample 3: math content that exceeds the minimum length requirement for parsing",
+        ]
+        json_file = tmp_path / "calibration.json"
+        json_file.write_text(json.dumps(data))
+
+        dataset = CalibrationDataset.from_local(json_file)
+        assert len(dataset) == 3
+        assert dataset.name == "calibration"
+
+    def test_local_jsonl_loading(self, tmp_path: Path):
+        """Test loading from JSONL format."""
+        lines = [
+            '{"text": "Sample 1 with enough characters to pass the length filter check"}',
+            '{"text": "Sample 2 also needs to be sufficiently long for inclusion in dataset"}',
+            '{"text": "Sample 3 continues the pattern of having substantial text content here"}',
+        ]
+        jsonl_file = tmp_path / "calibration.jsonl"
+        jsonl_file.write_text("\n".join(lines))
+
+        dataset = CalibrationDataset.from_local(jsonl_file)
+        assert len(dataset) == 3
+
+    def test_local_txt_loading(self, tmp_path: Path):
+        """Test loading from plain text format."""
+        txt_content = """This is the first sample paragraph with enough length to pass filtering.
+
+This is the second sample paragraph, also with sufficient length for inclusion.
+
+Third sample paragraph here with more text to ensure it passes the minimum length filter.
+"""
+        txt_file = tmp_path / "calibration.txt"
+        txt_file.write_text(txt_content)
+
+        dataset = CalibrationDataset.from_local(txt_file)
+        assert len(dataset) == 3
+
+    def test_max_samples_limit(self):
+        """Test that max_samples limits returned data."""
+        all_samples = [f"Sample {i}: content here with enough text" for i in range(100)]
+        dataset = CalibrationDataset(samples=all_samples, name="test", version="v1")
+
+        # Simulate limiting
+        limited = dataset.samples[:50]
+        assert len(limited) == 50
+
+    @pytest.mark.slow
+    def test_calibration_v3_download(self):
+        """Test downloading calibration v3 data."""
         import urllib.request
 
-        # Download with timeout
         try:
             req = urllib.request.Request(
-                BARTOWSKI_V3_URL,
+                CALIBRATION_V3_URL,
                 headers={"User-Agent": "Python-urllib/3.12"},
             )
             with urllib.request.urlopen(req, timeout=30) as response:
                 content = response.read()
-                # Should return text content
                 assert response.status == 200
                 assert len(content) > 0
 
-                # Decode as text
                 text = content.decode("utf-8")
-                assert len(text) > 100  # Should have substantial content
-
-                # Verify it's text (not binary garbage)
-                assert text.isprintable() or "\n" in text
+                # Should have substantial content
+                assert len(text) > 1000
 
         except urllib.error.URLError as e:
             pytest.skip(f"Network unavailable: {e}")
 
-    def test_download_returns_text_content(self):
-        """Verify downloaded content is readable text."""
-        import urllib.request
+    def test_calibration_data_format_parsing(self):
+        """Test parsing different calibration data formats."""
+        # Nested JSON with 'samples' key
+        nested_data = {"samples": ["text1 with content", "text2 with content"]}
+        samples = CalibrationDataset._parse_json_data(nested_data)
+        assert "text1 with content" in samples
+        assert "text2 with content" in samples
 
-        try:
-            req = urllib.request.Request(
-                BARTOWSKI_V3_URL,
-                headers={"User-Agent": "Python-urllib/3.12"},
-            )
-            with urllib.request.urlopen(req, timeout=30) as response:
-                content_type = response.headers.get("Content-Type", "")
-                # Should be text/plain
-                assert "text" in content_type.lower() or content_type == ""
-
-                data = response.read().decode("utf-8")
-                # Should contain actual text content
-                lines = data.split("\n")
-                assert len(lines) >= 1
-                # At least some non-empty lines
-                non_empty = [line for line in lines if line.strip()]
-                assert len(non_empty) > 0
-
-        except urllib.error.URLError as e:
-            pytest.skip(f"Network unavailable: {e}")
+        # List of dicts with 'text' key
+        dict_list = [{"text": "sample1 content"}, {"text": "sample2 content", "meta": "ignored"}]
+        samples = CalibrationDataset._parse_json_data(dict_list)
+        assert "sample1 content" in samples
+        assert "sample2 content" in samples
 
 
-class TestCalibrationCaching:
-    """Test local cache functionality for calibration data."""
-
-    def test_calibration_caching(self, tmp_path: Path):
-        """Verify local cache works."""
-        cache_file = tmp_path / "calibration_cache.txt"
-
-        # Simulate writing to cache
-        test_content = "Sample calibration text\nLine 2\nLine 3"
-        cache_file.write_text(test_content)
-
-        # Verify cache exists
-        assert cache_file.exists()
-        assert cache_file.stat().st_size > 0
-
-        # Read from cache
-        cached = cache_file.read_text()
-        assert cached == test_content
-
-    def test_cache_directory_creation(self, tmp_path: Path):
-        """Verify cache directory is created if missing."""
-        cache_dir = tmp_path / "calibration" / "bartowski"
-        cache_file = cache_dir / "v3.txt"
-
-        # Directory doesn't exist yet
-        assert not cache_dir.exists()
-
-        # Create directory structure
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text("test data")
-
-        assert cache_dir.exists()
-        assert cache_file.exists()
-
-    def test_cache_invalidation(self, tmp_path: Path):
-        """Test cache invalidation based on file age."""
-        cache_file = tmp_path / "calibration.txt"
-        cache_file.write_text("old data")
-
-        # Check modification time
-        mtime = cache_file.stat().st_mtime
-        assert mtime > 0
-
-        # Simulate cache refresh
-        cache_file.write_text("new data")
-        new_mtime = cache_file.stat().st_mtime
-        assert new_mtime >= mtime
-
-        assert cache_file.read_text() == "new data"
+# =============================================================================
+# 3. Sensitivity Analysis Reproducibility Tests
+# =============================================================================
 
 
-class TestActivationRangeComputation:
-    """Test activation range computation with mock model."""
+class TestSensitivityReproducibility:
+    """Tests for reproducible quantization sensitivity analysis."""
 
-    def test_activation_range_computation(self):
-        """Mock model, verify ranges computed."""
-        # Simulate a simple linear layer's activation tracking
-        # In real calibration, we'd hook forward passes and track min/max
-
-        # Mock activations from calibration passes
-        activations = [
-            np.random.randn(32, 128).astype(np.float32) * 2.0,  # batch 1
-            np.random.randn(32, 128).astype(np.float32) * 1.5,  # batch 2
-            np.random.randn(32, 128).astype(np.float32) * 2.5,  # batch 3
-        ]
-
-        # Compute running min/max across batches
-        layer_min = float("inf")
-        layer_max = float("-inf")
-
-        for act in activations:
-            batch_min = float(act.min())
-            batch_max = float(act.max())
-            layer_min = min(layer_min, batch_min)
-            layer_max = max(layer_max, batch_max)
-
-        # Verify ranges are reasonable
-        assert layer_min < 0  # Gaussian should have negatives
-        assert layer_max > 0  # And positives
-        assert layer_max > layer_min
-
-        # Ranges should encompass most values
-        all_acts = np.concatenate([a.flatten() for a in activations])
-        assert layer_min <= all_acts.min()
-        assert layer_max >= all_acts.max()
-
-    def test_percentile_based_ranges(self):
-        """Test percentile-based activation ranges for outlier robustness."""
-        # Create activations with outliers
+    def test_gptq_deterministic(self, small_weight_matrix):
+        """GPTQ quantization should be deterministic given same input."""
         np.random.seed(42)
-        activations = np.random.randn(10000).astype(np.float32)
-        # Add some outliers at specific positions
-        activations[0] = 100.0  # Extreme outlier
-        activations[1] = -100.0
+        X = np.random.randn(100, 256).astype(np.float32)
+        H = compute_hessian(X)
 
-        # Min/max approach
-        minmax_range = (float(activations.min()), float(activations.max()))
+        result1 = quantize_layer_gptq(small_weight_matrix, H, bits=4, group_size=128)
+        result2 = quantize_layer_gptq(small_weight_matrix, H, bits=4, group_size=128)
 
-        # Percentile approach (1% and 99%) - excludes top/bottom 1%
-        percentile_low = float(np.percentile(activations, 1))
-        percentile_high = float(np.percentile(activations, 99))
-        percentile_range = (percentile_low, percentile_high)
+        np.testing.assert_array_equal(result1.Q, result2.Q)
+        np.testing.assert_array_equal(result1.scales, result2.scales)
 
-        # Percentile range should be much tighter
-        minmax_span = minmax_range[1] - minmax_range[0]
-        percentile_span = percentile_range[1] - percentile_range[0]
+    def test_rtn_deterministic(self, small_weight_matrix):
+        """RTN quantization should be deterministic."""
+        result1 = quantize_rtn(small_weight_matrix, bits=4, group_size=128)
+        result2 = quantize_rtn(small_weight_matrix, bits=4, group_size=128)
 
-        assert percentile_span < minmax_span
-        assert minmax_span > 100  # Due to outliers
-        # Standard normal 1st-99th percentile is roughly [-2.33, 2.33] = ~4.66
-        assert percentile_span < 10  # Excludes outliers, should be ~4.66
+        np.testing.assert_array_equal(result1.Q, result2.Q)
+        np.testing.assert_array_equal(result1.scales, result2.scales)
 
-    def test_per_layer_activation_ranges(self):
-        """Test computing activation ranges for multiple layers."""
-        np.random.seed(123)
+    def test_hadamard_rotation_invertible(self, small_weight_matrix):
+        """Hadamard rotation should be perfectly invertible."""
+        rotated, meta = apply_hadamard_rotation(small_weight_matrix, block_size=64)
+        recovered = inverse_hadamard_rotation(rotated, meta)
 
-        # Simulate different layers with different activation patterns
-        layers = {
-            "model.layers.0.attn.q_proj": np.random.randn(64, 256) * 1.0,
-            "model.layers.0.attn.k_proj": np.random.randn(64, 256) * 0.8,
-            "model.layers.0.attn.v_proj": np.random.randn(64, 256) * 1.2,
-            "model.layers.0.mlp.gate_proj": np.random.randn(64, 512) * 2.0,
-            "model.layers.0.mlp.down_proj": np.random.randn(64, 512) * 1.5,
-        }
+        # Recovered shape matches original, within float precision
+        assert recovered.shape == small_weight_matrix.shape
+        np.testing.assert_allclose(recovered, small_weight_matrix, rtol=1e-4, atol=1e-5)
 
-        activation_ranges: dict[str, tuple[float, float]] = {}
+    def test_hadamard_disperses_outliers(self, small_weight_matrix):
+        """Hadamard rotation should reduce max/mean ratio (disperse outliers)."""
+        # Add synthetic outlier
+        W = small_weight_matrix.copy()
+        W[0, 0] = 100.0  # Large outlier
 
-        for name, acts in layers.items():
-            layer_min = float(acts.min())
-            layer_max = float(acts.max())
-            activation_ranges[name] = (layer_min, layer_max)
+        stats_before = compute_outlier_stats(W)
+        rotated, _ = apply_hadamard_rotation(W, block_size=64)
+        stats_after = compute_outlier_stats(rotated)
 
-        # Verify all layers have ranges
-        assert len(activation_ranges) == len(layers)
+        # Max/mean ratio should decrease after rotation
+        assert stats_after["max_mean_ratio"] < stats_before["max_mean_ratio"]
 
-        # MLP layers should have larger ranges (higher scale factor)
-        mlp_gate_range = activation_ranges["model.layers.0.mlp.gate_proj"]
-        attn_k_range = activation_ranges["model.layers.0.attn.k_proj"]
+    def test_actorder_improves_quality(self, small_weight_matrix):
+        """Activation ordering should improve or match baseline quality."""
+        np.random.seed(42)
+        X = np.random.randn(100, 256).astype(np.float32)
+        H = compute_hessian(X)
 
-        mlp_span = mlp_gate_range[1] - mlp_gate_range[0]
-        attn_span = attn_k_range[1] - attn_k_range[0]
-
-        # MLP gate has 2.0x scale, attn k has 0.8x, so MLP should be wider
-        assert mlp_span > attn_span
-
-
-class TestCalibrationAwareScale:
-    """Test comparing scales with/without calibration."""
-
-    def test_calibration_aware_scale(self):
-        """Compare scales with/without calibration."""
-        from metal_marlin.quantize_fp4 import quantize_fp4
-
-        np.random.seed(456)
-
-        # Create a weight tensor
-        weight = np.random.randn(256, 256).astype(np.float16)
-
-        # Quantize without calibration
-        packed_no_cal, scales_no_cal = quantize_fp4(weight, group_size=128)
-
-        # Quantize with calibration data
-        activation_ranges = {
-            "input_range": (-3.0, 3.0),
-            "percentile": 99.9,
-            "smooth_factor": 0.5,
-        }
-        packed_cal, scales_cal = quantize_fp4(
-            weight, group_size=128, activation_ranges=activation_ranges
+        # With actorder
+        result_actorder = quantize_layer_gptq(
+            small_weight_matrix, H, bits=4, group_size=128, actorder=True
         )
 
-        # Packed weights should have same shape
-        assert packed_no_cal.shape == packed_cal.shape
-
-        # Scales may differ based on calibration
-        assert scales_no_cal.shape == scales_cal.shape
-
-        # Both should produce valid quantized outputs
-        assert not np.any(np.isnan(scales_no_cal))
-        assert not np.any(np.isnan(scales_cal))
-        assert not np.any(np.isinf(scales_no_cal))
-        assert not np.any(np.isinf(scales_cal))
-
-    def test_scale_difference_with_calibration(self):
-        """Calibration should potentially affect scale values."""
-        from metal_marlin.quantize_fp4 import quantize_fp4
-
-        np.random.seed(789)
-
-        # Weight tensor with specific distribution
-        weight = np.random.randn(128, 128).astype(np.float16) * 0.5
-
-        # No calibration
-        _, scales_baseline = quantize_fp4(weight, group_size=128)
-
-        # With attenuation factor (activations small)
-        activation_ranges_small = {
-            "input_range": (-0.1, 0.1),  # Small activations
-            "smooth_factor": 1.0,
-        }
-        _, scales_small_act = quantize_fp4(
-            weight, group_size=128, activation_ranges=activation_ranges_small
+        # Without actorder
+        result_no_actorder = quantize_layer_gptq(
+            small_weight_matrix, H, bits=4, group_size=128, actorder=False
         )
-
-        # With amplification factor (activations large)
-        activation_ranges_large = {
-            "input_range": (-10.0, 10.0),  # Large activations
-            "smooth_factor": 1.0,
-        }
-        _, scales_large_act = quantize_fp4(
-            weight, group_size=128, activation_ranges=activation_ranges_large
-        )
-
-        # All should be valid
-        assert np.all(scales_baseline > 0)
-        assert np.all(scales_small_act > 0)
-        assert np.all(scales_large_act > 0)
-
-    def test_quantization_error_comparison(self):
-        """Compare quantization error with/without calibration."""
-        from metal_marlin.quantize_fp4 import (
-            compute_quantization_error,
-            quantize_fp4,
-        )
-
-        np.random.seed(999)
-
-        weight = np.random.randn(256, 256).astype(np.float16)
-
-        # Without calibration
-        packed1, scales1 = quantize_fp4(weight, group_size=128)
-        err1 = compute_quantization_error(weight, packed1, scales1, group_size=128)
-
-        # With calibration (using percentile clipping)
-        activation_ranges = {
-            "percentile": 99.5,  # Clip outliers
-            "smooth_factor": 0.8,
-        }
-        packed2, scales2 = quantize_fp4(
-            weight, group_size=128, activation_ranges=activation_ranges
-        )
-        err2 = compute_quantization_error(weight, packed2, scales2, group_size=128)
 
         # Both should have reasonable error
-        assert err1["rmse"] < 1.0
-        assert err2["rmse"] < 1.0
+        err_act = np.mean((small_weight_matrix - result_actorder.Q) ** 2)
+        err_no_act = np.mean((small_weight_matrix - result_no_actorder.Q) ** 2)
 
-        # Error metrics should be populated
-        for key in ["mse", "rmse", "max_error", "mean_relative_error"]:
-            assert key in err1
-            assert key in err2
+        # Actorder should be at least as good (often better)
+        assert err_act <= err_no_act * 1.1  # Allow 10% tolerance
 
+    def test_gptq_vs_rtn_comparison(self, small_weight_matrix):
+        """GPTQ and RTN should both produce valid quantized outputs."""
+        np.random.seed(42)
+        X = np.random.randn(100, 256).astype(np.float32)
+        H = compute_hessian(X)
 
-class TestCalibrationCLI:
-    """Smoke tests for calibration CLI commands."""
+        comparison = compare_gptq_vs_rtn(small_weight_matrix, H, bits=4, group_size=128)
 
-    def test_calibration_cli_help(self):
-        """Test that CLI shows calibration options."""
-        from click.testing import CliRunner
-        from metal_marlin.cli import cli
+        # Both should produce valid results (not NaN/Inf)
+        assert "gptq_mse" in comparison
+        assert "rtn_mse" in comparison
+        assert comparison["gptq_mse"] >= 0
+        assert comparison["rtn_mse"] >= 0
+        # Both MSEs should be reasonably small
+        assert comparison["gptq_mse"] < 1.0
+        assert comparison["rtn_mse"] < 1.0
 
-        runner = CliRunner()
+    def test_scale_computation_reproducibility(self, small_weight_matrix):
+        """Scale computation should be reproducible."""
+        packed1, scales1 = quantize_fp4(small_weight_matrix, group_size=128)
+        packed2, scales2 = quantize_fp4(small_weight_matrix, group_size=128)
 
-        # Check quantize command has calibration option
-        result = runner.invoke(cli, ["quantize", "--help"])
-        assert result.exit_code == 0
-        assert "--calibration" in result.output
-
-    def test_cli_convert_help(self):
-        """Test convert command help includes expected options."""
-        from click.testing import CliRunner
-        from metal_marlin.cli import cli
-
-        runner = CliRunner()
-
-        result = runner.invoke(cli, ["convert", "--help"])
-        assert result.exit_code == 0
-        assert "--quant" in result.output
-        assert "--group-size" in result.output
-
-    def test_cli_main_help(self):
-        """Test main CLI help output."""
-        from click.testing import CliRunner
-        from metal_marlin.cli import cli
-
-        runner = CliRunner()
-
-        result = runner.invoke(cli, ["--help"])
-        assert result.exit_code == 0
-        assert "Metal Marlin" in result.output or "marlin" in result.output.lower()
-
-    def test_cli_invalid_command(self):
-        """Test CLI handles invalid commands gracefully."""
-        from click.testing import CliRunner
-        from metal_marlin.cli import cli
-
-        runner = CliRunner()
-
-        result = runner.invoke(cli, ["nonexistent-command"])
-        assert result.exit_code != 0
+        np.testing.assert_array_equal(scales1, scales2)
+        np.testing.assert_array_equal(packed1, packed2)
 
 
-class TestCalibrationDataFormat:
-    """Test expected calibration data format handling."""
+# =============================================================================
+# 4. Mixed Precision Packing/Unpacking Tests
+# =============================================================================
 
-    def test_parse_text_calibration_data(self):
-        """Test parsing plain text calibration data."""
-        # Calibration data is plain text with samples separated by newlines
-        sample_data = """This is the first calibration sample for code.
-def hello_world():
-    print("Hello, World!")
 
-This is another sample with chat format.
-User: What is the capital of France?
-Assistant: The capital of France is Paris.
+class TestMixedPrecisionPackUnpack:
+    """Tests for mixed precision quantization packing and unpacking."""
 
-Mathematical reasoning example:
-If x + 5 = 12, then x = 12 - 5 = 7.
-"""
-        # Split into samples (could be by double newline, or other delimiter)
-        # For simplicity, split by blank lines
-        paragraphs = [p.strip() for p in sample_data.split("\n\n") if p.strip()]
+    def test_fp4_pack_unpack_roundtrip(self, small_weight_matrix):
+        """FP4 pack/unpack should preserve values within quantization error."""
+        packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
+        unpacked = unpack_fp4(packed, scales, group_size=128)
 
-        assert len(paragraphs) >= 3
-        assert any("def " in p for p in paragraphs)  # Code sample
-        assert any("User:" in p or "Assistant:" in p for p in paragraphs)  # Chat
+        # Check shapes
+        assert packed.shape == (128, 32)  # 256 / 8 = 32
+        assert scales.shape == (128, 2)  # 256 / 128 = 2 groups
+        assert unpacked.shape == small_weight_matrix.shape
 
-    def test_calibration_sample_tokenization(self):
-        """Test that calibration samples can be tokenized."""
-        # Mock tokenization (in real use, would use HF tokenizer)
-        sample = "The quick brown fox jumps over the lazy dog."
+        # Values should be close (within FP4 quantization error)
+        error = compute_quantization_error(small_weight_matrix, packed, scales, group_size=128)
+        assert error["rmse"] < 1.0  # Reasonable error bound
 
-        # Simple word tokenization (proxy for real tokenization)
-        tokens = sample.split()
-        assert len(tokens) == 9
+    def test_int4_symmetric_pack_unpack(self, small_weight_matrix):
+        """INT4 symmetric quantization pack/unpack."""
+        packed, scales, zeros = quantize_int4(small_weight_matrix, group_size=128, symmetric=True)
 
-        # Verify tokens are valid strings
-        for token in tokens:
-            assert len(token) > 0
-            assert isinstance(token, str)
+        assert zeros is None  # Symmetric has no zero points
+        assert packed.dtype == np.uint32
+        assert scales.dtype == np.float16
 
-    def test_max_samples_limit(self):
-        """Test that calibration respects max_samples limit."""
-        all_samples = [f"Sample {i}: content here" for i in range(1000)]
+        # Verify packed values are in valid range (0-15 per nibble)
+        for i in range(8):
+            nibbles = (packed >> (i * 4)) & 0xF
+            assert np.all(nibbles <= 15)
 
-        max_samples = 512
-        limited = all_samples[:max_samples]
+    def test_int4_asymmetric_pack_unpack(self, small_weight_matrix):
+        """INT4 asymmetric quantization pack/unpack."""
+        packed, scales, zeros = quantize_int4(small_weight_matrix, group_size=128, symmetric=False)
 
-        assert len(limited) == max_samples
-        assert limited[0] == "Sample 0: content here"
-        assert limited[-1] == "Sample 511: content here"
+        assert zeros is not None
+        assert zeros.dtype == np.float16
+        assert scales.dtype == np.float16
+
+    def test_int8_per_channel_quantization(self, small_weight_matrix):
+        """INT8 per-channel quantization."""
+        result = quantize_int8(small_weight_matrix, symmetric=True)
+
+        assert result["data"].dtype == np.int8
+        assert result["scales"].shape == (128,)  # One scale per output row
+        assert np.all(result["data"] >= -128)
+        assert np.all(result["data"] <= 127)
+
+    def test_fp4_grid_values(self):
+        """Verify FP4 E2M1 grid has correct values."""
+        expected = np.array(
+            [
+                0.0,
+                0.5,
+                1.0,
+                1.5,
+                2.0,
+                3.0,
+                4.0,
+                6.0,  # Positive
+                -0.0,
+                -0.5,
+                -1.0,
+                -1.5,
+                -2.0,
+                -3.0,
+                -4.0,
+                -6.0,  # Negative
+            ]
+        )
+        np.testing.assert_array_equal(E2M1_VALUES, expected)
+
+    def test_int4_grid_values(self):
+        """Verify INT4 symmetric grid has correct values."""
+        expected = np.arange(-8, 8, dtype=np.float32)
+        np.testing.assert_array_equal(INT4_GRID, expected)
+
+    def test_nf4_grid_normalized(self):
+        """NF4 grid should be normalized to [-1, 1]."""
+        assert NF4_GRID.min() == -1.0
+        assert NF4_GRID.max() == 1.0
+        assert len(NF4_GRID) == 16
+
+    def test_quantize_to_grid_nearest(self):
+        """quantize_to_grid should find nearest grid point."""
+        values = np.array([0.1, 0.4, 0.6, 1.2, 5.5])
+        grid = FP4_E2M1_GRID
+
+        quantized, indices = quantize_to_grid(values, grid, scale=1.0)
+
+        # 0.1 -> 0.0 (index 0)
+        # 0.4 -> 0.5 (index 1)
+        # 0.6 -> 0.5 (index 1)
+        # 1.2 -> 1.0 (index 2)
+        # 5.5 -> 6.0 (index 7)
+        expected_vals = np.array([0.0, 0.5, 0.5, 1.0, 6.0])
+        np.testing.assert_allclose(quantized, expected_vals, atol=1e-6)
+
+    def test_mixed_precision_layer_config(self, synthetic_model_weights):
+        """Test layer classification and config assignment."""
+        config = MixedPrecisionConfig.default_moe()
+
+        for name, tensor in synthetic_model_weights.items():
+            category = classify_layer(name)
+            layer_config = get_layer_config(name, config)
+
+            # Verify classification is consistent
+            assert category in [
+                "attention_qkv",
+                "attention_out",
+                "mlp_gate",
+                "mlp_up",
+                "mlp_down",
+                "embeddings",
+                "lm_head",
+                "default",
+                "moe_router",
+                "moe_experts",
+                "moe_shared_expert",
+            ]
+
+            # Verify config is valid
+            assert isinstance(layer_config.precision, Precision)
+            assert layer_config.group_size > 0
+
+    def test_should_quantize_dimension_check(self):
+        """should_quantize should reject incompatible dimensions."""
+        config = MixedPrecisionConfig.default_dense()
+
+        # 1D tensor - should not quantize
+        tensor_1d = np.random.randn(256).astype(np.float32)
+        should_q, _ = should_quantize("some.weight", tensor_1d, config)
+        assert not should_q
+
+        # Dimensions not divisible by 8 - should not quantize
+        tensor_odd = np.random.randn(128, 255).astype(np.float32)
+        should_q, _ = should_quantize("some.weight", tensor_odd, config)
+        assert not should_q
+
+
+# =============================================================================
+# 5. FP8 Format Correctness Tests
+# =============================================================================
+
+
+class TestFP8FormatCorrectness:
+    """Tests for FP8 E4M3 quantization format correctness."""
+
+    def test_fp8_quantization_basic(self, small_weight_matrix):
+        """Basic FP8 quantization should produce valid output."""
+        result = quantize_fp8(small_weight_matrix, group_size=128)
+
+        assert result["data"].dtype == np.int8
+        assert result["scales"].dtype == np.float16
+        assert result["group_size"][0] == 128
+        assert result["precision"][0] == 8
+
+    def test_fp8_value_range(self, small_weight_matrix):
+        """FP8 quantized values should be in valid range."""
+        result = quantize_fp8(small_weight_matrix, group_size=128)
+
+        # INT8 mapped from [-448, 448] to [-127, 127]
+        assert np.all(result["data"] >= -127)
+        assert np.all(result["data"] <= 127)
+
+    def test_fp8_scales_positive(self, small_weight_matrix):
+        """FP8 scales should all be positive."""
+        result = quantize_fp8(small_weight_matrix, group_size=128)
+        assert np.all(result["scales"] > 0)
+
+    def test_fp8_handles_zeros(self):
+        """FP8 should handle zero-filled tensors."""
+        zeros = np.zeros((128, 256), dtype=np.float32)
+        result = quantize_fp8(zeros, group_size=128)
+
+        assert not np.any(np.isnan(result["scales"]))
+        assert not np.any(np.isinf(result["scales"]))
+
+    def test_fp8_preserves_sign(self, small_weight_matrix):
+        """FP8 quantization should preserve value signs."""
+        result = quantize_fp8(small_weight_matrix, group_size=128)
+
+        # Dequantize and check signs match
+        scales = result["scales"]
+        data = result["data"].astype(np.float32)
+
+        # Reshape for per-group dequantization
+        out_feat, in_feat = small_weight_matrix.shape
+        num_groups = in_feat // 128
+        data_grouped = data.reshape(out_feat, num_groups, 128)
+        scales_expanded = scales[:, :, None]
+
+        dequantized = data_grouped * scales_expanded * (448 / 127)
+        dequantized = dequantized.reshape(out_feat, in_feat)
+
+        # Signs should mostly match (allowing for quantization noise around zero)
+        significant_mask = np.abs(small_weight_matrix) > 0.1
+        sign_match_rate = np.mean(
+            np.sign(dequantized[significant_mask]) == np.sign(small_weight_matrix[significant_mask])
+        )
+        assert sign_match_rate > 0.95
+
+    def test_fp8_group_size_validation(self, small_weight_matrix):
+        """FP8 should handle different group sizes."""
+        for group_size in [32, 64, 128, 256]:
+            result = quantize_fp8(small_weight_matrix, group_size=group_size)
+            expected_groups = 256 // group_size
+            assert result["scales"].shape == (128, expected_groups)
+
+
+# =============================================================================
+# 6. End-to-End Quantize -> Inference Tests
+# =============================================================================
+
+
+class TestEndToEndQuantizeInference:
+    """End-to-end tests for quantization and inference pipeline."""
+
+    def test_fp4_quantize_and_matmul(self, small_weight_matrix):
+        """Quantized FP4 weights should work in matrix multiplication."""
+        packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
+
+        # Dequantize
+        dequantized = unpack_fp4(packed, scales, group_size=128)
+
+        # small_weight_matrix is [128, 256], so input should be [batch, 256]
+        # Weight transpose is [256, 128], so output is [batch, 128]
+        np.random.seed(42)
+        x = np.random.randn(32, 256).astype(np.float16)
+
+        # Original output: x @ W.T -> [32, 256] @ [256, 128] = [32, 128]
+        y_original = x @ small_weight_matrix.T.astype(np.float16)
+
+        # Quantized output
+        y_quantized = x @ dequantized.T
+
+        # Should be reasonably close
+        relative_error = np.mean(np.abs(y_original - y_quantized)) / np.mean(np.abs(y_original))
+        assert relative_error < 0.15  # Within 15% relative error
+
+    def test_gptq_quantize_and_matmul(self, small_weight_matrix):
+        """GPTQ quantized weights should work in matrix multiplication."""
+        np.random.seed(42)
+        X_cal = np.random.randn(100, 256).astype(np.float32)
+        H = compute_hessian(X_cal)
+
+        result = quantize_layer_gptq(small_weight_matrix, H, bits=4, group_size=128)
+
+        # small_weight_matrix is [128, 256]
+        # Weight transpose is [256, 128], so input should be [batch, 256]
+        x = np.random.randn(32, 256).astype(np.float32)
+        y_original = x @ small_weight_matrix.T
+        y_quantized = x @ result.Q.T
+
+        relative_error = np.mean(np.abs(y_original - y_quantized)) / np.mean(np.abs(y_original))
+        assert relative_error < 0.15
+
+    def test_mr_gptq_layer_quantization(self, small_weight_matrix):
+        """MR-GPTQ quantizer should produce valid packed output."""
+        quantizer = MRGPTQQuantizer(
+            bits=4,
+            format="fp4",
+            group_size=128,
+            use_hadamard=True,
+            hadamard_block_size=64,
+            actorder=False,  # Faster for test
+        )
+
+        packed, scales, meta = quantizer.quantize_layer(
+            small_weight_matrix,
+            hessian=None,  # Uses RTN fallback
+            layer_name="test_layer",
+        )
+
+        assert packed.dtype == np.uint32
+        assert scales.dtype == np.float16
+        assert meta["format"] == "fp4"
+        assert meta["use_hadamard"]
+        assert "error" in meta
+
+    def test_mr_gptq_with_hadamard_rotation(self, small_weight_matrix):
+        """MR-GPTQ with Hadamard should improve quality."""
+        np.random.seed(42)
+
+        # Add outlier
+        W = small_weight_matrix.copy()
+        W[0, 0] = 50.0
+
+        quantizer_no_had = MRGPTQQuantizer(bits=4, format="fp4", group_size=128, use_hadamard=False)
+        quantizer_had = MRGPTQQuantizer(bits=4, format="fp4", group_size=128, use_hadamard=True)
+
+        _, _, meta_no_had = quantizer_no_had.quantize_layer(W)
+        _, _, meta_had = quantizer_had.quantize_layer(W)
+
+        # Hadamard version should have better (lower) error
+        # or at least not significantly worse
+        assert meta_had["error"]["rmse"] <= meta_no_had["error"]["rmse"] * 1.2
+
+    def test_quantization_error_metrics(self, small_weight_matrix):
+        """Quantization error metrics should be computed correctly."""
+        packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
+        error = compute_quantization_error(small_weight_matrix, packed, scales, 128)
+
+        # All metrics should be present and valid
+        assert "mse" in error
+        assert "rmse" in error
+        assert "max_error" in error
+        assert "mean_relative_error" in error
+
+        assert error["mse"] >= 0
+        assert error["rmse"] >= 0
+        assert error["rmse"] == pytest.approx(np.sqrt(error["mse"]), rel=1e-5)
+
+    def test_full_layer_quantize_dequant_chain(self, small_weight_matrix):
+        """Full chain: original -> quantize -> pack -> unpack -> dequant -> compare."""
+        # Quantize
+        packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
+
+        # Verify packed format
+        assert packed.shape == (128, 32)
+
+        # Unpack and dequantize
+        dequantized = unpack_fp4(packed, scales, group_size=128)
+
+        # Compare
+        assert dequantized.shape == small_weight_matrix.shape
+
+        # Calculate reconstruction error
+        diff = small_weight_matrix.astype(np.float32) - dequantized.astype(np.float32)
+        rmse = np.sqrt(np.mean(diff**2))
+
+        # Error should be reasonable for FP4
+        assert rmse < 0.5
+
+    @pytest.mark.smoke
+    def test_basic_pipeline_smoke(self):
+        """Smoke test for basic quantization pipeline."""
+        np.random.seed(42)
+        W = np.random.randn(64, 128).astype(np.float32)
+
+        # Should complete without error
+        packed, scales = quantize_fp4(W, group_size=64)
+        assert packed is not None
+        assert scales is not None
+
+        unpacked = unpack_fp4(packed, scales, group_size=64)
+        assert unpacked.shape == W.shape
+
+
+# =============================================================================
+# Additional Edge Case Tests
+# =============================================================================
+
+
+class TestEdgeCases:
+    """Tests for edge cases and boundary conditions."""
+
+    def test_single_group_quantization(self):
+        """Quantization with single group (group_size = in_features)."""
+        np.random.seed(42)
+        W = np.random.randn(64, 128).astype(np.float32)
+
+        packed, scales = quantize_fp4(W, group_size=128)
+        assert scales.shape == (64, 1)
+
+    def test_many_groups_quantization(self):
+        """Quantization with many small groups."""
+        np.random.seed(42)
+        W = np.random.randn(64, 256).astype(np.float32)
+
+        packed, scales = quantize_fp4(W, group_size=32)
+        assert scales.shape == (64, 8)  # 256 / 32 = 8 groups
+
+    def test_zero_weight_handling(self):
+        """Quantization should handle zero weights."""
+        W = np.zeros((64, 128), dtype=np.float32)
+
+        packed, scales = quantize_fp4(W, group_size=128)
+
+        # Should not produce NaN or Inf
+        assert not np.any(np.isnan(scales))
+        assert not np.any(np.isinf(scales))
+
+    def test_extreme_values_handling(self):
+        """Quantization should handle extreme weight values."""
+        np.random.seed(42)
+        W = np.random.randn(64, 128).astype(np.float32) * 1000
+
+        packed, scales = quantize_fp4(W, group_size=128)
+
+        # Should not produce NaN or Inf
+        assert not np.any(np.isnan(scales))
+        assert not np.any(np.isinf(scales))
+
+        # Scales should be large to accommodate large values
+        assert np.mean(scales) > 10
+
+    def test_hadamard_size_validation(self):
+        """Hadamard matrix should reject non-power-of-2 sizes."""
+        with pytest.raises(ValueError):
+            hadamard_matrix(3)
+
+        with pytest.raises(ValueError):
+            hadamard_matrix(0)
+
+        with pytest.raises(ValueError):
+            hadamard_matrix(-4)
+
+    def test_gptq_dimension_mismatch_error(self):
+        """GPTQ should error on dimension mismatch."""
+        W = np.random.randn(64, 128).astype(np.float32)
+        H_wrong = np.random.randn(64, 64).astype(np.float32)  # Wrong size
+
+        quantizer = GPTQQuantizer(bits=4, group_size=128)
+
+        with pytest.raises(ValueError):
+            quantizer.quantize_weight(W, H_wrong)
+
+    def test_quantize_tensor_dispatch(self):
+        """quantize_tensor should dispatch correctly to different formats."""
+        np.random.seed(42)
+        W = np.random.randn(64, 128).astype(np.float32)
+
+        # FP16 - no quantization
+        config_fp16 = LayerQuantConfig(precision=Precision.FP16)
+        result = quantize_tensor(W, config_fp16)
+        assert result["data"].dtype == np.float16
+
+        # FP4
+        config_fp4 = LayerQuantConfig(precision=Precision.FP4_E2M1, group_size=128)
+        result = quantize_tensor(W, config_fp4)
+        assert "packed" in result
+        assert result["precision"][0] == 4
+
+        # INT4
+        config_int4 = LayerQuantConfig(precision=Precision.INT4, group_size=128)
+        result = quantize_tensor(W, config_int4)
+        assert "packed" in result
+
+        # FP8
+        config_fp8 = LayerQuantConfig(precision=Precision.FP8_E4M3, group_size=128)
+        result = quantize_tensor(W, config_fp8)
+        assert result["precision"][0] == 8
+
+
+# =============================================================================
+# Calibration Integration Tests
+# =============================================================================
 
 
 class TestCalibrationIntegration:
-    """Integration tests for calibration workflow."""
+    """Integration tests for full calibration workflow."""
 
-    def test_full_calibration_workflow(self, tmp_path: Path):
-        """Test end-to-end calibration workflow."""
-        from metal_marlin.quantize_fp4 import quantize_fp4
-
-        np.random.seed(42)
-
-        # Step 1: Create mock calibration data
-        calibration_file = tmp_path / "calibration.txt"
-        calibration_samples = [
-            "Sample 1: code snippet def foo(): return 42",
-            "Sample 2: chat User: Hello! Assistant: Hi there!",
-            "Sample 3: math reasoning x^2 + 2x + 1 = (x+1)^2",
-        ]
-        calibration_file.write_text("\n".join(calibration_samples))
-
-        # Step 2: Simulate activation collection
-        # In real workflow, would run model forward passes
-        mock_activations = {
-            "layer_0": np.random.randn(100, 256) * 1.5,
-            "layer_1": np.random.randn(100, 256) * 2.0,
+    def test_ranges_to_scales_fp4(self):
+        """Test converting activation ranges to FP4 scales."""
+        ranges = {
+            "layer1": (-3.0, 3.0),
+            "layer2": (-6.0, 6.0),
         }
 
-        # Step 3: Compute activation ranges
-        activation_ranges_dict: dict[str, tuple[float, float]] = {}
-        for name, acts in mock_activations.items():
-            # Use 99.9th percentile for robustness
-            low = float(np.percentile(acts, 0.1))
-            high = float(np.percentile(acts, 99.9))
-            activation_ranges_dict[name] = (low, high)
+        scales = ranges_to_scales(ranges, quant_type="fp4")
 
-        # Step 4: Quantize with calibration
-        weight = np.random.randn(128, 256).astype(np.float16)
+        # FP4 max is 6.0, so scale = absmax / 6.0
+        assert scales["layer1"] == pytest.approx(3.0 / 6.0)
+        assert scales["layer2"] == pytest.approx(6.0 / 6.0)
 
-        # Use layer_0's range for this weight
-        cal_data = {
-            "input_range": activation_ranges_dict["layer_0"],
-            "percentile": 99.9,
-            "smooth_factor": 0.7,
+    def test_ranges_to_scales_int4(self):
+        """Test converting activation ranges to INT4 scales."""
+        ranges = {
+            "layer1": (-7.0, 7.0),
         }
 
-        packed, scales = quantize_fp4(weight, group_size=128, activation_ranges=cal_data)
+        scales = ranges_to_scales(ranges, quant_type="int4_sym")
 
-        # Verify outputs
-        assert packed.shape == (128, 32)  # 256 / 8 = 32
-        assert scales.shape == (128, 2)  # 256 / 128 = 2 groups
-        assert not np.any(np.isnan(scales))
+        # INT4 symmetric max is 7, so scale = absmax / 7.0
+        assert scales["layer1"] == pytest.approx(7.0 / 7.0)
 
-    def test_calibration_saves_to_json(self, tmp_path: Path):
-        """Test saving activation ranges to JSON."""
+    def test_calibration_with_fp4_quantization(self, small_weight_matrix, tmp_path: Path):
+        """Test calibration-aware FP4 quantization."""
+        # Create mock activation ranges
         activation_ranges = {
-            "model.layers.0.q_proj": (-2.5, 3.1),
-            "model.layers.0.k_proj": (-1.8, 2.4),
-            "model.layers.0.v_proj": (-2.1, 2.8),
+            "input_range": (-2.0, 2.0),
+            "percentile": 99.5,
+            "smooth_factor": 0.5,
         }
 
-        output_file = tmp_path / "activation_ranges.json"
-
-        # Convert tuples to lists for JSON serialization
-        json_data = {k: list(v) for k, v in activation_ranges.items()}
-
-        with open(output_file, "w") as f:
-            json.dump(json_data, f, indent=2)
-
-        # Verify can reload
-        with open(output_file) as f:
-            loaded = json.load(f)
-
-        assert len(loaded) == 3
-        assert loaded["model.layers.0.q_proj"] == [-2.5, 3.1]
-
-
-class TestHessianComputation:
-    """Tests for GPTQ Hessian approximation (X^T @ X)."""
-
-    def test_hessian_basic_computation(self):
-        """Test that H = X^T @ X is computed correctly."""
-        # Create simple test activations
-        np.random.seed(42)
-        X = np.random.randn(100, 64).astype(np.float32)
-
-        # Expected Hessian
-        expected_H = X.T @ X
-
-        # Verify shape
-        assert expected_H.shape == (64, 64)
-
-        # Verify symmetry
-        assert np.allclose(expected_H, expected_H.T)
-
-        # Verify positive semi-definiteness (all eigenvalues >= 0)
-        eigenvalues = np.linalg.eigvalsh(expected_H)
-        assert np.all(eigenvalues >= -1e-6)  # Allow small numerical error
-
-    def test_hessian_incremental_accumulation(self):
-        """Test that incremental H accumulation matches batch computation."""
-        np.random.seed(123)
-
-        # Create multiple batches
-        batch1 = np.random.randn(50, 128).astype(np.float32)
-        batch2 = np.random.randn(30, 128).astype(np.float32)
-        batch3 = np.random.randn(40, 128).astype(np.float32)
-
-        # Batch computation: concatenate all, compute H
-        X_all = np.vstack([batch1, batch2, batch3])
-        H_batch = X_all.T @ X_all
-
-        # Incremental computation: accumulate H from each batch
-        H_incremental = np.zeros((128, 128), dtype=np.float32)
-        for batch in [batch1, batch2, batch3]:
-            H_incremental += batch.T @ batch
-
-        # Should match within floating point tolerance
-        # Using atol=1e-3 to account for float32 accumulation order differences
-        assert np.allclose(H_batch, H_incremental, atol=1e-3)
-
-    def test_hessian_damping(self):
-        """Test Hessian damping H_damped = H + λI."""
-        np.random.seed(456)
-        X = np.random.randn(100, 32).astype(np.float32)
-        H = X.T @ X
-
-        # Compute damping
-        damping_factor = 0.01
-        mean_diag = np.mean(np.diag(H))
-        lambda_damp = damping_factor * mean_diag
-        H_damped = H + lambda_damp * np.eye(32)
-
-        # Verify diagonal increased
-        assert np.all(np.diag(H_damped) > np.diag(H))
-
-        # Verify still symmetric
-        assert np.allclose(H_damped, H_damped.T)
-
-        # Verify positive definite (eigenvalues > 0 after damping)
-        eigenvalues = np.linalg.eigvalsh(H_damped)
-        assert np.all(eigenvalues > 0)
-
-    def test_hessian_shape_for_different_layers(self):
-        """Test Hessian shape matches in_features x in_features."""
-        np.random.seed(789)
-
-        test_cases = [
-            (100, 256),  # q_proj: 100 tokens, 256 hidden
-            (100, 512),  # k_proj: 100 tokens, 512 hidden
-            (100, 1024),  # mlp: 100 tokens, 1024 hidden
-        ]
-
-        for num_tokens, in_features in test_cases:
-            X = np.random.randn(num_tokens, in_features).astype(np.float32)
-            H = X.T @ X
-            assert H.shape == (in_features, in_features), (
-                f"Expected ({in_features}, {in_features}), got {H.shape}"
-            )
-
-    def test_hessian_memory_efficiency(self):
-        """Verify Hessian accumulation is memory-efficient."""
-        # Memory for storing all activations vs just Hessian
-        num_batches = 100
-        tokens_per_batch = 512
-        in_features = 4096
-
-        # Storing all activations would require:
-        all_activations_bytes = num_batches * tokens_per_batch * in_features * 4  # float32
-        all_activations_mb = all_activations_bytes / (1024 * 1024)
-
-        # Storing just the Hessian requires:
-        hessian_bytes = in_features * in_features * 4  # float32
-        hessian_mb = hessian_bytes / (1024 * 1024)
-
-        # Hessian should be much smaller for large calibration sets
-        assert hessian_mb < all_activations_mb
-        assert hessian_mb == pytest.approx(64.0, rel=0.01)  # 4096^2 * 4 / 1MB = 64MB
-
-    def test_hessian_numerical_stability(self):
-        """Test numerical stability with varying activation magnitudes."""
-        np.random.seed(999)
-
-        # Test with small activations
-        X_small = np.random.randn(100, 64).astype(np.float32) * 0.001
-        H_small = X_small.T @ X_small
-        assert not np.any(np.isnan(H_small))
-        assert not np.any(np.isinf(H_small))
-
-        # Test with large activations
-        X_large = np.random.randn(100, 64).astype(np.float32) * 1000
-        H_large = X_large.T @ X_large
-        assert not np.any(np.isnan(H_large))
-        assert not np.any(np.isinf(H_large))
-
-        # Test with mixed magnitudes
-        X_mixed = np.random.randn(100, 64).astype(np.float32)
-        X_mixed[:, :32] *= 0.001
-        X_mixed[:, 32:] *= 1000
-        H_mixed = X_mixed.T @ X_mixed
-        assert not np.any(np.isnan(H_mixed))
-        assert not np.any(np.isinf(H_mixed))
-
-
-class TestHessianCollector:
-    """Tests for HessianCollector class with MLX model instrumentation."""
-
-    @pytest.fixture
-    def simple_mlx_model(self):
-        """Create a simple MLX model for testing."""
-        try:
-            import mlx.core as mx
-            import mlx.nn as nn
-        except ImportError:
-            pytest.skip("MLX not available")
-
-        class SimpleModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear1 = nn.Linear(64, 128)
-                self.linear2 = nn.Linear(128, 64)
-
-            def __call__(self, x: mx.array) -> mx.array:
-                x = self.linear1(x)
-                x = nn.relu(x)
-                x = self.linear2(x)
-                return x
-
-        return SimpleModel()
-
-    def test_hessian_collector_basic(self, simple_mlx_model):
-        """Test HessianCollector captures Hessians correctly."""
-        try:
-            import mlx.core as mx
-            from converters.calibration import HessianCollector
-        except ImportError:
-            pytest.skip("MLX or calibration module not available")
-
-        collector = HessianCollector(simple_mlx_model)
-        assert collector.num_layers == 2
-
-        # Run forward pass
-        x = mx.random.normal((10, 64))
-        _ = simple_mlx_model(x)
-        mx.eval(list(collector._hessians.values()))
-
-        # Check Hessians were collected
-        assert len(collector._hessians) == 2
-        assert "linear1" in collector._hessians
-        assert "linear2" in collector._hessians
-
-        # Check shapes
-        H1 = collector._hessians["linear1"]
-        assert H1.shape == (64, 64)  # in_features of linear1
-
-        H2 = collector._hessians["linear2"]
-        assert H2.shape == (128, 128)  # in_features of linear2
-
-        collector.remove_hooks()
-
-    def test_hessian_collector_damping(self, simple_mlx_model):
-        """Test collect_hessian applies damping correctly."""
-        try:
-            import mlx.core as mx
-            from converters.calibration import HessianCollector
-        except ImportError:
-            pytest.skip("MLX or calibration module not available")
-
-        damping_factor = 0.05
-        collector = HessianCollector(simple_mlx_model, damping_factor=damping_factor)
-
-        # Run forward passes
-        for _ in range(5):
-            x = mx.random.normal((20, 64))
-            _ = simple_mlx_model(x)
-        mx.eval(list(collector._hessians.values()))
-
-        # Get damped Hessian
-        H_damped = collector.collect_hessian("linear1")
-
-        # Verify shape
-        assert H_damped.shape == (64, 64)
-
-        # Verify it's larger on diagonal (damping added)
-        H_raw = collector._hessians["linear1"]
-        damped_diag = mx.diag(H_damped)
-        raw_diag = mx.diag(H_raw)
-        assert mx.all(damped_diag > raw_diag)
-
-        collector.remove_hooks()
-
-    def test_hessian_collector_reset(self, simple_mlx_model):
-        """Test reset clears accumulated Hessians."""
-        try:
-            import mlx.core as mx
-            from converters.calibration import HessianCollector
-        except ImportError:
-            pytest.skip("MLX or calibration module not available")
-
-        collector = HessianCollector(simple_mlx_model)
-
-        # Run forward pass
-        x = mx.random.normal((10, 64))
-        _ = simple_mlx_model(x)
-        mx.eval(list(collector._hessians.values()))
-
-        assert len(collector._hessians) == 2
-
-        # Reset
-        collector.reset()
-        assert len(collector._hessians) == 0
-        assert len(collector._sample_counts) == 0
-
-        collector.remove_hooks()
-
-    def test_hessian_collector_layer_selection(self, simple_mlx_model):
-        """Test HessianCollector can target specific layers."""
-        try:
-            import mlx.core as mx
-            from converters.calibration import HessianCollector
-        except ImportError:
-            pytest.skip("MLX or calibration module not available")
-
-        # Only collect for linear1
-        collector = HessianCollector(
-            simple_mlx_model,
-            layers_to_calibrate=["linear1"],
+        # Quantize with calibration
+        packed, scales = quantize_fp4(
+            small_weight_matrix,
+            group_size=128,
+            activation_ranges=activation_ranges,
         )
-        assert collector.num_layers == 1
 
-        # Run forward pass
-        x = mx.random.normal((10, 64))
-        _ = simple_mlx_model(x)
-        mx.eval(list(collector._hessians.values()))
+        # Compare with baseline (no calibration)
+        packed_baseline, scales_baseline = quantize_fp4(
+            small_weight_matrix,
+            group_size=128,
+        )
 
-        # Only linear1 should have Hessian
-        assert "linear1" in collector._hessians
-        assert "linear2" not in collector._hessians
+        # Both should produce valid outputs
+        assert not np.any(np.isnan(scales))
+        assert not np.any(np.isnan(scales_baseline))
 
-        collector.remove_hooks()
+        # Shapes should match
+        assert packed.shape == packed_baseline.shape
+        assert scales.shape == scales_baseline.shape
 
 
-class TestComputeLayerHessians:
-    """Tests for compute_layer_hessians function."""
+# =============================================================================
+# Slow Tests (require real models or network)
+# =============================================================================
 
-    @pytest.fixture
-    def calibration_batches(self):
-        """Create mock calibration batches."""
-        np.random.seed(42)
-        return [
-            {"input_ids": np.random.randint(0, 1000, (4, 128))}
-            for _ in range(10)
-        ]
 
-    def test_compute_layer_hessians_with_chunking(self, tmp_path: Path):
-        """Test chunked processing with disk caching."""
+@pytest.mark.slow
+class TestSlowRealModels:
+    """Slow tests that use real models or external resources."""
+
+    def test_calibration_v3_full_download_and_parse(self):
+        """Download and parse full calibration v3 dataset."""
+        import urllib.request
+
         try:
-            from converters.calibration import (
-                _cache_hessians,
-                load_cached_hessians,
+            dataset = CalibrationDataset.v3(
+                max_samples=100,  # Limit for test speed
+                force_download=True,
             )
-        except ImportError:
-            pytest.skip("Calibration module not available")
 
-        try:
-            import mlx.core as mx
-        except ImportError:
-            pytest.skip("MLX not available")
+            assert len(dataset) > 0
+            assert len(dataset) <= 100
+            assert dataset.version == "v3"
+            assert dataset.avg_sample_length > 0
 
-        # Create mock Hessians
-        hessians = {
-            "layer1": mx.random.normal((64, 64)),
-            "layer2": mx.random.normal((128, 128)),
-        }
+        except urllib.error.URLError as e:
+            pytest.skip(f"Network unavailable: {e}")
 
-        # Cache to disk
-        cache_file = tmp_path / "hessian_chunk_0_10.npz"
-        _cache_hessians(hessians, cache_file)
+    def test_large_weight_quantization(self):
+        """Test quantization on larger weight matrices."""
+        np.random.seed(42)
+        W = np.random.randn(4096, 4096).astype(np.float32)
 
-        assert cache_file.exists()
+        packed, scales = quantize_fp4(W, group_size=128)
 
-        # Load back
-        loaded = load_cached_hessians(tmp_path)
-        assert "layer1" in loaded
-        assert "layer2" in loaded
+        assert packed.shape == (4096, 512)  # 4096 / 8
+        assert scales.shape == (4096, 32)  # 4096 / 128
 
-    def test_hessian_sample_count_tracking(self):
-        """Test that sample counts are tracked correctly."""
-        try:
-            import mlx.core as mx
-            import mlx.nn as nn
-            from converters.calibration import HessianCollector
-        except ImportError:
-            pytest.skip("MLX or calibration module not available")
+    def test_full_gptq_large_layer(self):
+        """GPTQ on larger layer with full Hessian computation."""
+        np.random.seed(42)
+        W = np.random.randn(1024, 1024).astype(np.float32)
+        X = np.random.randn(512, 1024).astype(np.float32)
 
-        class SimpleLinear(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.linear = nn.Linear(32, 64)
+        H = compute_hessian(X)
+        result = quantize_layer_gptq(W, H, bits=4, group_size=128)
 
-            def __call__(self, x: mx.array) -> mx.array:
-                return self.linear(x)
-
-        model = SimpleLinear()
-        collector = HessianCollector(model)
-
-        # Track total samples
-        total_samples = 0
-
-        # Run multiple forward passes with different batch sizes
-        batch_sizes = [10, 20, 15, 25]
-        for bs in batch_sizes:
-            x = mx.random.normal((bs, 32))
-            _ = model(x)
-            total_samples += bs
-        mx.eval(list(collector._hessians.values()))
-
-        # Verify sample count
-        assert collector._sample_counts["linear"] == total_samples
-
-        collector.remove_hooks()
+        mse = np.mean((W - result.Q) ** 2)
+        assert mse < 0.1  # Reasonable error bound

@@ -136,7 +136,7 @@ def group_tokens_by_expert(
     # Use scatter_add pattern: for each expert e, count occurrences
     # Since mx doesn't have scatter_add, we use a different approach:
     # Sort the expert_ids and count changes
-    sorted_experts = expert_ids_flat[sorted_indices]
+    expert_ids_flat[sorted_indices]
 
     # expert_offsets[e] = number of assignments with expert_id < e
     # We can compute this by finding where each expert starts in sorted order
@@ -146,7 +146,7 @@ def group_tokens_by_expert(
 
     # Count occurrences of each expert
     # Use one-hot encoding and sum
-    one_hot = mx.zeros((total_assignments, num_experts), dtype=mx.int32)
+    mx.zeros((total_assignments, num_experts), dtype=mx.int32)
 
     # Scatter 1s at expert positions
     # Since MLX doesn't have scatter, use alternative:
@@ -186,7 +186,7 @@ def group_tokens_by_expert_full(
         MoEDispatchInfo with all indexing tensors for dispatch and scatter.
     """
     batch_size, top_k = expert_ids.shape
-    total_assignments = batch_size * top_k
+    batch_size * top_k
 
     sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert(
         expert_ids, num_experts
@@ -330,7 +330,7 @@ def compute_load_balancing_loss(
     Returns:
         Scalar load balancing loss.
     """
-    batch_size = expert_ids.shape[0]
+    expert_ids.shape[0]
 
     # f_e: fraction of tokens routed to each expert
     expert_counts = compute_expert_load(expert_ids, num_experts).astype(mx.float32)

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+
 from metal_marlin._compat import HAS_MLX
 
 # Add metal_marlin package to path
@@ -34,6 +35,7 @@ pytestmark = pytest.mark.skipif(not HAS_MLX, reason="Requires MLX (Apple Silicon
 # Import MLX modules only after skip check
 if HAS_MLX:
     import mlx.core as mx
+
     from metal_marlin import pack_fp4_weights, quantized_linear
     from metal_marlin.quantize import pack_fp4_weights as pack_fp4_weights_padded
 
@@ -106,7 +108,7 @@ def reference_u4_gemm(
     Returns:
         Output [M, N]
     """
-    M = A.shape[0]
+    A.shape[0]
     # Dequantize weights to [K, N]
     W = np.zeros((K, N), dtype=np.float32)
     k_packs = K // 8
@@ -879,7 +881,7 @@ class TestFP8DequantEdgeCases:
         """All FP8 codes produce valid outputs (finite except inf/nan)."""
         for code in range(256):
             val = ref_fp8_e5m2_dequant(code)
-            S = (code >> 7) & 1
+            (code >> 7) & 1
             E = (code >> 2) & 0x1F
             M = code & 0x3
 

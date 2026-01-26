@@ -263,7 +263,7 @@ class GPTQQuantizer:
             # Lazy batch update: propagate errors to columns outside this block
             if block_end < in_features:
                 # Accumulated error for this block
-                block_error = Q[:, block_start:block_end] - W[:, block_start:block_end]
+                Q[:, block_start:block_end] - W[:, block_start:block_end]
 
                 # Actually the error has already been incorporated into W within the block
                 # For lazy batch, we need to apply the accumulated H_inv updates to remaining cols
@@ -433,7 +433,7 @@ def pack_gptq_int4(
     out_features, in_features = Q.shape
 
     # Requantize to integer codes
-    num_groups = in_features // group_size
+    in_features // group_size
 
     # Interleave scales to match column order
     scales_expanded = np.repeat(scales, group_size, axis=0).T  # [out, in]

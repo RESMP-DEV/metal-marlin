@@ -185,7 +185,7 @@ class BatchedModelRunner:
             Logits for the last token of each sequence [num_seqs, vocab_size].
         """
         num_seqs = len(batch.seq_starts)
-        total_tokens = int(batch.input_ids.shape[0])
+        int(batch.input_ids.shape[0])
 
         # Token embedding
         hidden = self.model.embed_tokens(batch.input_ids)  # [total_tokens, hidden_size]
@@ -321,7 +321,7 @@ class BatchedModelRunner:
         Returns:
             Tensor with RoPE applied [total_tokens, num_heads, head_dim].
         """
-        head_dim = x.shape[-1]
+        x.shape[-1]
         dims = rope.dims
 
         # Compute inverse frequencies

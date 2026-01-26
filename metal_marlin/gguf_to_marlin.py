@@ -265,7 +265,7 @@ def reorder_for_simdgroup(packed: np.ndarray, N: int) -> np.ndarray:
     Returns:
         Reordered array with same shape.
     """
-    K_packed = packed.shape[0]
+    packed.shape[0]
 
     # Number of 8-column tiles
     n_tiles = N // MARLIN_TILE_N
@@ -381,7 +381,7 @@ def dequant_marlin(
         [K, N] FP16 array.
     """
     # Unpack uint32 -> 4 bytes
-    K_packed = K // 8
+    K // 8
     byte0 = (packed_weights & 0xFF).astype(np.uint8)
     byte1 = ((packed_weights >> 8) & 0xFF).astype(np.uint8)
     byte2 = ((packed_weights >> 16) & 0xFF).astype(np.uint8)

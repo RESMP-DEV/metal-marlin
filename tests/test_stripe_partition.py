@@ -619,9 +619,8 @@ class TestLoadBalance:
 
     def test_stripe_vs_2d_tile_count(self) -> None:
         """Stripe dispatch processes the same number of total tiles as 2D dispatch."""
-        M, N, K = 128, 4096, 4096
+        M, N, _K = 128, 4096, 4096
         parallel = 1
-        num_tgs = 40
 
         m_tiles = (M + TILE_M - 1) // TILE_M
         n_tiles = (N + TILE_N - 1) // TILE_N
@@ -714,7 +713,7 @@ class TestStripedEdgeCases:
         B_dequant = dequant_fp4_array(packed, scales, K, N, group_size)
         packed_reshaped = packed.reshape(K // FP4_PER_UINT, N)
 
-        ref = (A.astype(np.float32) @ B_dequant.astype(np.float32)).astype(np.float16)
+        (A.astype(np.float32) @ B_dequant.astype(np.float32)).astype(np.float16)
 
         A_mx = mx.array(A)
         B_packed_mx = mx.array(packed_reshaped)

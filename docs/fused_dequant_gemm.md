@@ -16,21 +16,21 @@ memory before any simdgroup can begin computing.
 
 ```
                     ┌──────────────────────────────────────────────────┐
-                    │              Threadgroup Memory                   │
-                    │                                                   │
-                    │   A_tile[64][32]         B_tile[32][64]           │
-                    │   (4096 bytes)           (4096 bytes)             │
-                    │                                                   │
+                    │              Threadgroup Memory                  │
+                    │                                                  │
+                    │   A_tile[64][32]         B_tile[32][64]          │
+                    │   (4096 bytes)           (4096 bytes)            │
+                    │                                                  │
                     └──────────────────────────────────────────────────┘
                               ▲                        ▲
                               │                        │
                     ┌─────────┴─────────┐   ┌─────────┴──────────────┐
-                    │  Cooperative Load  │   │  Cooperative Dequant   │
-                    │  (128 threads)     │   │  (128 threads)         │
+                    │  Cooperative Load  │   │  Cooperative Dequant  │
+                    │  (128 threads)     │   │  (128 threads)        │
                     └─────────┬─────────┘   │                        │
-                              │             │  B_packed[K/8, N]       │
-                              │             │  → unpack FP4 nibbles   │
-   Global Memory:             │             │  → dequant with scale   │
+                              │             │  B_packed[K/8, N]      │
+                              │             │  → unpack FP4 nibble   │
+   Global Memory:             │             │  → dequant with scale  │
    A[M, K]  ──────────────────┘             │  → store to B_tile     │
    B[K/8, N] ──────────────────────────────>│                        │
    scales[K/gs, N] ────────────────────────>└────────────────────────┘
@@ -40,12 +40,12 @@ memory before any simdgroup can begin computing.
                     ╚══════════════════════════════════════════════════╝
 
                     ┌──────────────────────────────────────────────────┐
-                    │              Simdgroup Compute                    │
-                    │                                                   │
+                    │              Simdgroup Compute                   │
+                    │                                                  │
                     │   simdgroup_load(a_frag, &A_tile[...])           │
                     │   simdgroup_load(b_frag, &B_tile[...])           │
-                    │   simdgroup_multiply_accumulate(...)              │
-                    │                                                   │
+                    │   simdgroup_multiply_accumulate(...)             │
+                    │                                                  │
                     └──────────────────────────────────────────────────┘
 ```
 
@@ -61,19 +61,19 @@ directly from global memory into a per-simdgroup 128-byte staging buffer.
 
 ```
                     ┌────────────────────────────────────────────────────┐
-                    │              Threadgroup Memory                     │
-                    │                                                     │
-                    │   A_tile[64][32]           B_staging[4][8][8]       │
-                    │   (4096 bytes)             (512 bytes total)        │
-                    │                            128B per simdgroup       │
+                    │              Threadgroup Memory                    │
+                    │                                                    │
+                    │   A_tile[64][32]           B_staging[4][8][8]      │
+                    │   (4096 bytes)             (512 bytes total)       │
+                    │                            128B per simdgroup      │
                     └────────────────────────────────────────────────────┘
                               ▲                        ▲
                               │                        │
                     ┌─────────┴─────────┐   ┌─────────┴──────────────────┐
-                    │  Cooperative Load  │   │  Per-Simdgroup Dequant     │
-                    │  (128 threads)     │   │  (lanes 0-7 only)          │
+                    │  Cooperative Load  │   │  Per-Simdgroup Dequant    │
+                    │  (128 threads)     │   │  (lanes 0-7 only)         │
                     └─────────┬─────────┘   │                            │
-                              │             │  lane i loads B[..., col+i] │
+                              │             │  lane i loads B[..., col+i]│
    Global Memory:             │             │  → dequant 8 FP4 values    │
    A[M, K]  ──────────────────┘             │  → write column to staging │
    B[K/8, N] ──────────────────────────────>│                            │
@@ -85,12 +85,12 @@ directly from global memory into a per-simdgroup 128-byte staging buffer.
                     ╚═════════════════════════════════════════════════════╝
 
                     ┌────────────────────────────────────────────────────┐
-                    │              Simdgroup Compute                      │
-                    │                                                     │
+                    │              Simdgroup Compute                     │
+                    │                                                    │
                     │   simdgroup_load(a_frag, &A_tile[...])             │
                     │   simdgroup_load(b_frag, &B_staging[sg_id][...])   │
-                    │   simdgroup_multiply_accumulate(...)                │
-                    │                                                     │
+                    │   simdgroup_multiply_accumulate(...)               │
+                    │                                                    │
                     └────────────────────────────────────────────────────┘
 ```
 

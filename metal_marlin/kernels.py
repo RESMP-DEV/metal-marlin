@@ -44,6 +44,7 @@ elif TYPE_CHECKING:
     # For static analysis only
     import mlx.core as mx
 
+    from .autotuning import TileConfig
     from .dtypes import get_default_config
 
 
@@ -60,6 +61,7 @@ if not HAS_MLX:
     # GEMM kernels
     marlin_gemm_fp4 = _mlx_required
     marlin_gemm_fused_fp4 = _mlx_required
+    marlin_gemm_fp4_tuned = _mlx_required
     marlin_gemm_int4 = _mlx_required
     marlin_gemm_fused_u4 = _mlx_required
 
@@ -159,7 +161,7 @@ inline void dequant_u4x8(uint32_t packed, half scale, half zero_point, thread ha
     // Cast to float to avoid Metal compiler rounding bug with half in inline functions
     float fscale = (float)scale;
     float fzero = (float)zero_point;
-    
+
     half2 bias = as_type<half2>(FUSED_MAGIC_BIAS);
 
     uint32_t n0 = (packed & FUSED_LO_MASK) | FUSED_MAGIC_BIAS;
@@ -913,6 +915,7 @@ _DEQUANT_INT3_SOURCE = """
 _fp4_gemm_kernel: object | None = None
 _fp4_gemm_fp32acc_kernel: object | None = None
 _fp4_gemm_single_stage_kernel: object | None = None
+_fp4_gemm_kernel_cache: dict[str, object] = {}
 _int4_gemm_kernel: object | None = None
 _dequant_fp4_kernel: object | None = None
 _dequant_u4_standalone_kernel: object | None = None
@@ -932,6 +935,21 @@ def _get_fp4_gemm_kernel() -> object:
             ensure_row_contiguous=True,
         )
     return _fp4_gemm_kernel
+
+
+def _get_fp4_gemm_kernel_for_config(name: str) -> object:
+    kernel = _fp4_gemm_kernel_cache.get(name)
+    if kernel is None:
+        kernel = mx.fast.metal_kernel(
+            name=name,
+            input_names=["A", "B_packed", "scales"],
+            output_names=["out"],
+            source=_FP4_GEMM_SOURCE,
+            header=_GEMM_HEADER,
+            ensure_row_contiguous=True,
+        )
+        _fp4_gemm_kernel_cache[name] = kernel
+    return kernel
 
 
 def _get_fp4_gemm_fp32acc_kernel() -> object:
@@ -1127,6 +1145,8 @@ def marlin_gemm_fp4(
     scales: mx.array,
     group_size: int = 32,
     dtype: mx.Dtype | None = None,
+    autotune: bool = True,
+    tile_config: TileConfig | None = None,
 ) -> mx.array:
     """
     FP4 fused dequant-GEMM: C = A @ dequant(B_packed, scales).
@@ -1158,13 +1178,19 @@ def marlin_gemm_fp4(
     A_2d = A.reshape(M, K).astype(dtype)
     N = B_packed.shape[1]
 
-    grid_x = (N + TILE_N - 1) // TILE_N
-    grid_y = (M + TILE_M - 1) // TILE_M
+    if tile_config is None and autotune:
+        try:
+            from .autotuning import get_heuristic_config, get_tuned_config
 
-    kernel = _get_fp4_gemm_kernel()
-    outputs = kernel(
-        inputs=[A_2d, B_packed, scales],
-        template=[
+            tile_config = get_tuned_config(M, N, K, group_size=group_size)
+        except Exception:
+            tile_config = get_heuristic_config(M, N, K, group_size=group_size)
+
+    if tile_config is None:
+        grid_x = (N + TILE_N - 1) // TILE_N
+        grid_y = (M + TILE_M - 1) // TILE_M
+        kernel = _get_fp4_gemm_kernel()
+        template = [
             ("M", M),
             ("N", N),
             ("K", K),
@@ -1177,15 +1203,58 @@ def marlin_gemm_fp4(
             ("SG_N_TILES", SG_N_TILES),
             ("FP4_PER_UINT", FP4_PER_UINT),
             ("NUM_BUFFERS", NUM_BUFFERS),
-        ],
+        ]
+        threadgroup = (THREADS_PER_TG, 1, 1)
+    else:
+        grid_x = (N + tile_config.tile_n - 1) // tile_config.tile_n
+        grid_y = (M + tile_config.tile_m - 1) // tile_config.tile_m
+        kernel_name = f"marlin_gemm_fp4_{tile_config.name}"
+        kernel = _get_fp4_gemm_kernel_for_config(kernel_name)
+        template = [
+            ("M", M),
+            ("N", N),
+            ("K", K),
+            ("GROUP_SIZE", group_size),
+            ("TILE_M", tile_config.tile_m),
+            ("TILE_N", tile_config.tile_n),
+            ("TILE_K", tile_config.tile_k),
+            ("SIMDGROUPS_PER_TG", tile_config.simdgroups_per_tg),
+            ("SG_M_TILES", tile_config.sg_m_tiles),
+            ("SG_N_TILES", tile_config.sg_n_tiles),
+            ("FP4_PER_UINT", tile_config.fp4_per_uint),
+            ("NUM_BUFFERS", tile_config.num_buffers),
+        ]
+        threadgroup = (tile_config.threads_per_tg, 1, 1)
+
+    outputs = kernel(
+        inputs=[A_2d, B_packed, scales],
+        template=template,
         grid=(grid_x, grid_y, 1),
-        threadgroup=(THREADS_PER_TG, 1, 1),
+        threadgroup=threadgroup,
         output_shapes=[(M, N)],
         output_dtypes=[dtype],
     )
 
     out_shape = list(orig_shape[:-1]) + [N]
     return outputs[0].reshape(out_shape)
+
+
+def marlin_gemm_fp4_tuned(
+    A: mx.array,
+    B_packed: mx.array,
+    scales: mx.array,
+    group_size: int = 32,
+    dtype: mx.Dtype | None = None,
+) -> mx.array:
+    """FP4 fused dequant-GEMM using runtime autotuned tile parameters."""
+    return marlin_gemm_fp4(
+        A,
+        B_packed,
+        scales,
+        group_size=group_size,
+        dtype=dtype,
+        autotune=True,
+    )
 
 
 def marlin_gemm_fused_fp4(
@@ -2642,3 +2711,500 @@ def hadamard_transform(
     )
 
     return outputs[0].reshape(orig_shape)
+
+
+# ---------------------------------------------------------------------------
+# Decode GEMV kernels (optimized for M=1)
+# ---------------------------------------------------------------------------
+
+# Decode kernel header - shared primitives
+_DECODE_GEMV_HEADER = """
+#include <metal_stdlib>
+#include <metal_simdgroup>
+using namespace metal;
+
+// FP4 E2M1 branchless dequant (same as main GEMM header)
+inline half dequant_fp4_scalar_decode(uint nibble) {
+    uint sign_bit = (nibble >> 3) & 1;
+    uint exp_bits = (nibble >> 1) & 0x3;
+    uint man_bit  = nibble & 1;
+
+    half sub_mag = half(man_bit) * half(0.25h);
+    half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
+    half magnitude = select(norm_mag, sub_mag, exp_bits == 0);
+    return select(magnitude, -magnitude, bool(sign_bit));
+}
+
+inline half dequant_fp4_scaled_decode(uint nibble, float scale) {
+    return (half)(float(dequant_fp4_scalar_decode(nibble)) * scale);
+}
+
+inline uint div_ceil_decode(uint a, uint b) {
+    return (a + b - 1) / b;
+}
+"""
+
+# Source for decode GEMV with 256-wide tiles (2 columns per thread)
+_DECODE_GEMV_FP4_SOURCE = """
+    // Decode GEMV kernel for M=1
+    // C[1,N] = A[1,K] @ dequant(B[K/8,N], scales[K/group_size,N])
+    //
+    // Grid: (ceil(N / 256), 1, 1)
+    // Threadgroup: 128 threads
+
+    const uint TILE_N = 256;
+    const uint COLS_PER_THREAD = 2;
+    const uint FP4_PER_UINT = 8;
+
+    uint tgid = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x;
+
+    uint col_base = tgid * TILE_N + tid * COLS_PER_THREAD;
+    uint col0 = col_base;
+    uint col1 = col_base + 1;
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+
+    uint k_packs = K / FP4_PER_UINT;
+
+    // Stream through K dimension
+    for (uint k_base = 0; k_base < K; k_base += FP4_PER_UINT) {
+        uint pack_idx = k_base / FP4_PER_UINT;
+        uint group_idx = k_base / GROUP_SIZE;
+
+        // Load 8 A values (shared across all columns)
+        half a_vals[8];
+        #pragma unroll
+        for (uint i = 0; i < 8; i++) {
+            uint k_idx = k_base + i;
+            a_vals[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+        }
+
+        // Process column 0
+        if (col0 < N && pack_idx < k_packs) {
+            uint packed0 = B[pack_idx * N + col0];
+            half scale0 = scales[group_idx * N + col0];
+            float fscale0 = (float)scale0;
+
+            #pragma unroll
+            for (uint i = 0; i < 8; i++) {
+                if ((k_base + i) < K) {
+                    uint nibble = (packed0 >> (i * 4)) & 0xF;
+                    half w_val = dequant_fp4_scaled_decode(nibble, fscale0);
+                    acc0 += float(a_vals[i]) * float(w_val);
+                }
+            }
+        }
+
+        // Process column 1
+        if (col1 < N && pack_idx < k_packs) {
+            uint packed1 = B[pack_idx * N + col1];
+            half scale1 = scales[group_idx * N + col1];
+            float fscale1 = (float)scale1;
+
+            #pragma unroll
+            for (uint i = 0; i < 8; i++) {
+                if ((k_base + i) < K) {
+                    uint nibble = (packed1 >> (i * 4)) & 0xF;
+                    half w_val = dequant_fp4_scaled_decode(nibble, fscale1);
+                    acc1 += float(a_vals[i]) * float(w_val);
+                }
+            }
+        }
+    }
+
+    // Store results
+    if (col0 < N) {
+        out[col0] = half(acc0);
+    }
+    if (col1 < N) {
+        out[col1] = half(acc1);
+    }
+"""
+
+# Source for decode GEMV with 512-wide tiles (4 columns per thread)
+_DECODE_GEMV_FP4_WIDE_SOURCE = """
+    // Wide decode GEMV kernel for M=1
+    // Better memory coalescing with 4 columns per thread
+    //
+    // Grid: (ceil(N / 512), 1, 1)
+    // Threadgroup: 128 threads
+
+    const uint TILE_N = 512;
+    const uint COLS_PER_THREAD = 4;
+    const uint FP4_PER_UINT = 8;
+
+    uint tgid = threadgroup_position_in_grid.x;
+    uint tid = thread_position_in_threadgroup.x;
+
+    uint col_base = tgid * TILE_N + tid * COLS_PER_THREAD;
+
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+    uint k_packs = K / FP4_PER_UINT;
+
+    // Stream through K dimension
+    for (uint k_base = 0; k_base < K; k_base += FP4_PER_UINT) {
+        uint pack_idx = k_base / FP4_PER_UINT;
+        uint group_idx = k_base / GROUP_SIZE;
+
+        // Load 8 A values
+        half a_vals[8];
+        #pragma unroll
+        for (uint i = 0; i < 8; i++) {
+            uint k_idx = k_base + i;
+            a_vals[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+        }
+
+        // Process 4 columns
+        #pragma unroll
+        for (uint c = 0; c < 4; c++) {
+            uint col = col_base + c;
+            if (col < N && pack_idx < k_packs) {
+                uint packed = B[pack_idx * N + col];
+                half scale = scales[group_idx * N + col];
+                float fscale = (float)scale;
+
+                #pragma unroll
+                for (uint i = 0; i < 8; i++) {
+                    if ((k_base + i) < K) {
+                        uint nibble = (packed >> (i * 4)) & 0xF;
+                        half w_val = dequant_fp4_scaled_decode(nibble, fscale);
+                        acc[c] += float(a_vals[i]) * float(w_val);
+                    }
+                }
+            }
+        }
+    }
+
+    // Store 4 outputs
+    #pragma unroll
+    for (uint c = 0; c < 4; c++) {
+        uint col = col_base + c;
+        if (col < N) {
+            out[col] = half(acc[c]);
+        }
+    }
+"""
+
+# Source for batched decode GEMV (M=1..8 sequences)
+_DECODE_GEMV_FP4_BATCHED_SOURCE = """
+    // Batched decode GEMV for M=1..8 sequences
+    // Each thread handles one (row, col) output element
+    //
+    // Grid: (ceil(N / 32), M, 1)
+    // Threadgroup: (32, 4, 1)
+
+    const uint FP4_PER_UINT = 8;
+
+    uint row = threadgroup_position_in_grid.y;
+    uint col = threadgroup_position_in_grid.x * 32 + thread_position_in_threadgroup.x;
+
+    if (row >= M || col >= N) return;
+
+    float acc = 0.0f;
+    uint k_packs = K / FP4_PER_UINT;
+
+    // Base pointer for this row's activations
+    device const half* A_row = A + row * K;
+
+    // Stream through K
+    for (uint k_base = 0; k_base < K; k_base += FP4_PER_UINT) {
+        uint pack_idx = k_base / FP4_PER_UINT;
+        uint group_idx = k_base / GROUP_SIZE;
+
+        if (pack_idx >= k_packs) break;
+
+        uint packed = B[pack_idx * N + col];
+        half scale = scales[group_idx * N + col];
+        float fscale = (float)scale;
+
+        #pragma unroll
+        for (uint i = 0; i < 8; i++) {
+            uint k_idx = k_base + i;
+            if (k_idx < K) {
+                half a_val = A_row[k_idx];
+                uint nibble = (packed >> (i * 4)) & 0xF;
+                half w_val = dequant_fp4_scaled_decode(nibble, fscale);
+                acc += float(a_val) * float(w_val);
+            }
+        }
+    }
+
+    out[row * N + col] = half(acc);
+"""
+
+# Cached decode kernel objects
+_decode_gemv_fp4_kernel: object | None = None
+_decode_gemv_fp4_wide_kernel: object | None = None
+_decode_gemv_fp4_batched_kernel: object | None = None
+
+
+def _get_decode_gemv_fp4_kernel() -> object:
+    """Get or create the standard decode GEMV kernel (256-wide tiles)."""
+    global _decode_gemv_fp4_kernel
+    if _decode_gemv_fp4_kernel is None:
+        _decode_gemv_fp4_kernel = mx.fast.metal_kernel(
+            name="decode_gemv_fp4",
+            input_names=["A", "B", "scales"],
+            output_names=["out"],
+            source=_DECODE_GEMV_FP4_SOURCE,
+            header=_DECODE_GEMV_HEADER,
+            ensure_row_contiguous=True,
+        )
+    return _decode_gemv_fp4_kernel
+
+
+def _get_decode_gemv_fp4_wide_kernel() -> object:
+    """Get or create the wide decode GEMV kernel (512-wide tiles)."""
+    global _decode_gemv_fp4_wide_kernel
+    if _decode_gemv_fp4_wide_kernel is None:
+        _decode_gemv_fp4_wide_kernel = mx.fast.metal_kernel(
+            name="decode_gemv_fp4_wide",
+            input_names=["A", "B", "scales"],
+            output_names=["out"],
+            source=_DECODE_GEMV_FP4_WIDE_SOURCE,
+            header=_DECODE_GEMV_HEADER,
+            ensure_row_contiguous=True,
+        )
+    return _decode_gemv_fp4_wide_kernel
+
+
+def _get_decode_gemv_fp4_batched_kernel() -> object:
+    """Get or create the batched decode GEMV kernel (M=1..8)."""
+    global _decode_gemv_fp4_batched_kernel
+    if _decode_gemv_fp4_batched_kernel is None:
+        _decode_gemv_fp4_batched_kernel = mx.fast.metal_kernel(
+            name="decode_gemv_fp4_batched",
+            input_names=["A", "B", "scales"],
+            output_names=["out"],
+            source=_DECODE_GEMV_FP4_BATCHED_SOURCE,
+            header=_DECODE_GEMV_HEADER,
+            ensure_row_contiguous=True,
+        )
+    return _decode_gemv_fp4_batched_kernel
+
+
+def decode_gemv_fp4(
+    A: mx.array,
+    B_packed: mx.array,
+    scales: mx.array,
+    group_size: int = 128,
+    dtype: mx.Dtype | None = None,
+) -> mx.array:
+    """
+    Decode GEMV for M=1: C[1,N] = A[1,K] @ dequant(B[K/8,N], scales).
+
+    Optimized for single-token decode phase where M=1. Uses TILE_N=256
+    with 2 columns per thread for good cache utilization.
+
+    Expected speedup vs marlin_gemm_fp4 for M=1: ~3-4x.
+
+    Args:
+        A: Activation vector [K] or [1, K].
+        B_packed: Packed FP4 weights [K/8, N] as uint32.
+        scales: Per-group scales [K/group_size, N].
+        group_size: Number of K-elements per quantization group.
+        dtype: Output dtype. If None, uses DTypeConfig default (bf16).
+
+    Returns:
+        Output vector [N] or [1, N] depending on input shape.
+    """
+    if dtype is None:
+        dtype = get_default_config().mlx_activations
+
+    # Normalize input shape
+    squeeze_output = False
+    if A.ndim == 1:
+        A = A.reshape(1, -1)
+        squeeze_output = True
+
+    M, K = A.shape
+    K_packed, N = B_packed.shape
+
+    if K != K_packed * FP4_PER_UINT:
+        raise ValueError(f"K mismatch: A has K={K}, B_packed implies K={K_packed * FP4_PER_UINT}")
+
+    if M > 1:
+        # Use batched kernel for M > 1
+        return decode_gemv_fp4_batched(A, B_packed, scales, group_size, dtype)
+
+    # Single-token decode
+    A_flat = A.reshape(-1).astype(dtype)
+
+    kernel = _get_decode_gemv_fp4_kernel()
+    grid_x = (N + 255) // 256
+
+    outputs = kernel(
+        inputs=[A_flat, B_packed, scales],
+        template=[
+            ("K", K),
+            ("N", N),
+            ("GROUP_SIZE", group_size),
+        ],
+        grid=(grid_x, 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[(N,)],
+        output_dtypes=[dtype],
+    )
+
+    result = outputs[0]
+    if not squeeze_output:
+        result = result.reshape(1, N)
+    return result
+
+
+def decode_gemv_fp4_wide(
+    A: mx.array,
+    B_packed: mx.array,
+    scales: mx.array,
+    group_size: int = 128,
+    dtype: mx.Dtype | None = None,
+) -> mx.array:
+    """
+    Wide decode GEMV for M=1 with better memory coalescing.
+
+    Uses TILE_N=512 with 4 columns per thread. Better for larger N
+    where memory bandwidth is the bottleneck.
+
+    Args:
+        A: Activation vector [K] or [1, K].
+        B_packed: Packed FP4 weights [K/8, N] as uint32.
+        scales: Per-group scales [K/group_size, N].
+        group_size: Number of K-elements per quantization group.
+        dtype: Output dtype. If None, uses DTypeConfig default (bf16).
+
+    Returns:
+        Output vector [N] or [1, N] depending on input shape.
+    """
+    if dtype is None:
+        dtype = get_default_config().mlx_activations
+
+    # Normalize input shape
+    squeeze_output = False
+    if A.ndim == 1:
+        A = A.reshape(1, -1)
+        squeeze_output = True
+
+    M, K = A.shape
+    K_packed, N = B_packed.shape
+
+    if K != K_packed * FP4_PER_UINT:
+        raise ValueError(f"K mismatch: A has K={K}, B_packed implies K={K_packed * FP4_PER_UINT}")
+
+    if M > 1:
+        return decode_gemv_fp4_batched(A, B_packed, scales, group_size, dtype)
+
+    A_flat = A.reshape(-1).astype(dtype)
+
+    kernel = _get_decode_gemv_fp4_wide_kernel()
+    grid_x = (N + 511) // 512
+
+    outputs = kernel(
+        inputs=[A_flat, B_packed, scales],
+        template=[
+            ("K", K),
+            ("N", N),
+            ("GROUP_SIZE", group_size),
+        ],
+        grid=(grid_x, 1, 1),
+        threadgroup=(128, 1, 1),
+        output_shapes=[(N,)],
+        output_dtypes=[dtype],
+    )
+
+    result = outputs[0]
+    if not squeeze_output:
+        result = result.reshape(1, N)
+    return result
+
+
+def decode_gemv_fp4_batched(
+    A: mx.array,
+    B_packed: mx.array,
+    scales: mx.array,
+    group_size: int = 128,
+    dtype: mx.Dtype | None = None,
+) -> mx.array:
+    """
+    Batched decode GEMV for M=1..8 sequences.
+
+    For small batch decode where multiple sequences are generating
+    in parallel. Each thread handles one (row, col) output element.
+
+    Args:
+        A: Activations [M, K] where M <= 8.
+        B_packed: Packed FP4 weights [K/8, N] as uint32.
+        scales: Per-group scales [K/group_size, N].
+        group_size: Number of K-elements per quantization group.
+        dtype: Output dtype. If None, uses DTypeConfig default (bf16).
+
+    Returns:
+        Output matrix [M, N].
+    """
+    if dtype is None:
+        dtype = get_default_config().mlx_activations
+
+    if A.ndim == 1:
+        A = A.reshape(1, -1)
+
+    M, K = A.shape
+    K_packed, N = B_packed.shape
+
+    if K != K_packed * FP4_PER_UINT:
+        raise ValueError(f"K mismatch: A has K={K}, B_packed implies K={K_packed * FP4_PER_UINT}")
+
+    if M > 8:
+        # Fall back to full GEMM for larger batches
+        return marlin_gemm_fp4(A, B_packed, scales, group_size, dtype)
+
+    A_2d = A.astype(dtype)
+
+    kernel = _get_decode_gemv_fp4_batched_kernel()
+    grid_x = (N + 31) // 32
+
+    outputs = kernel(
+        inputs=[A_2d, B_packed, scales],
+        template=[
+            ("M", M),
+            ("K", K),
+            ("N", N),
+            ("GROUP_SIZE", group_size),
+        ],
+        grid=(grid_x, M, 1),
+        threadgroup=(32, 4, 1),
+        output_shapes=[(M, N)],
+        output_dtypes=[dtype],
+    )
+
+    return outputs[0]
+
+
+def select_decode_kernel(M: int, N: int, K: int) -> str:
+    """
+    Select optimal decode kernel based on problem dimensions.
+
+    Args:
+        M: Batch size (typically 1 for decode).
+        N: Output dimension.
+        K: Input dimension.
+
+    Returns:
+        Kernel name to use:
+        - "decode_gemv_fp4": Standard M=1 decode (256-wide tiles)
+        - "decode_gemv_fp4_wide": M=1 with larger N (512-wide tiles)
+        - "decode_gemv_fp4_batched": M=2..8 small batch decode
+        - "marlin_gemm_fp4": M > 8, fall back to full GEMM
+    """
+    if M > 8:
+        return "marlin_gemm_fp4"
+
+    if M > 1:
+        return "decode_gemv_fp4_batched"
+
+    # M == 1 decode
+    if N >= 512:
+        return "decode_gemv_fp4_wide"
+    else:
+        return "decode_gemv_fp4"

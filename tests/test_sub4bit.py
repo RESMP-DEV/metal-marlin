@@ -18,7 +18,14 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy import stats
+
+try:
+    from scipy import stats
+
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    stats = None  # type: ignore[assignment]
 
 # Add metal_marlin package to path
 _ROOT = Path(__file__).resolve().parent.parent
@@ -341,7 +348,7 @@ class TestINT3:
         tensor = np.random.randn(32, in_feat).astype(np.float32) * 0.02
 
         packed, scales = quantize_int3(tensor, group_size=group_size)
-        reconstructed = dequantize_int3(packed, scales, group_size=group_size)
+        dequantize_int3(packed, scales, group_size=group_size)
 
         assert scales.shape[1] == in_feat // group_size
 
@@ -351,7 +358,7 @@ class TestINT3:
         tensor = np.random.randn(8, 64).astype(np.float32) * 0.02  # 64 not divisible by 10
 
         packed, scales = quantize_int3(tensor, group_size=64)
-        reconstructed = dequantize_int3(packed, scales, group_size=64)
+        dequantize_int3(packed, scales, group_size=64)
 
         # Should work with padding
         assert packed.shape[1] == 7  # ceil(64/10) = 7
@@ -382,6 +389,7 @@ class TestNF2:
         for i in range(2):
             np.testing.assert_almost_equal(NF2_LEVELS[i], -NF2_LEVELS[3 - i], decimal=5)
 
+    @pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
     def test_levels_from_gaussian_quantiles(self):
         """Verify NF2 levels are based on Gaussian quantiles."""
         # NF2 uses quantiles at 12.5%, 37.5%, 62.5%, 87.5%
@@ -444,7 +452,7 @@ class TestNF2:
         # NF2 is designed for Gaussian; relative error should be comparable or better
         # Note: for 2-bit quantization, the advantage is subtle; mainly test both work
         rel_err_g = rmse_gaussian / np.std(gaussian)
-        rel_err_u = rmse_uniform / np.std(uniform)
+        rmse_uniform / np.std(uniform)
 
         # Allow some tolerance; the key is that both work
         assert rel_err_g < 1.0, f"Gaussian relative error {rel_err_g} too high"
@@ -475,7 +483,7 @@ class TestNF2:
         tensor = np.random.randn(32, in_feat).astype(np.float32) * 0.02
 
         packed, scales = quantize_nf2(tensor, group_size=group_size)
-        reconstructed = dequantize_nf2(packed, scales, group_size=group_size)
+        dequantize_nf2(packed, scales, group_size=group_size)
 
         assert scales.shape[1] == in_feat // group_size
 
@@ -494,6 +502,7 @@ class TestNF3:
         for i in range(4):
             np.testing.assert_almost_equal(NF3_LEVELS[i], -NF3_LEVELS[7 - i], decimal=5)
 
+    @pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
     def test_levels_from_gaussian_quantiles(self):
         """Verify NF3 levels are based on Gaussian quantiles."""
         n_levels = 8
@@ -580,7 +589,7 @@ class TestNF3:
         tensor = np.random.randn(32, in_feat).astype(np.float32) * 0.02
 
         packed, scales = quantize_nf3(tensor, group_size=group_size)
-        reconstructed = dequantize_nf3(packed, scales, group_size=group_size)
+        dequantize_nf3(packed, scales, group_size=group_size)
 
         assert scales.shape[1] == in_feat // group_size
 

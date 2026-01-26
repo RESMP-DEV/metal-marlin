@@ -391,7 +391,7 @@ class SpeculativeEngine:
         all_tokens: list[int] = input_ids[0].tolist()
 
         for step in self.generate(input_ids, max_tokens=max_tokens, target_cache=target_cache):
-            batch_size = step.new_tokens.shape[0]
+            step.new_tokens.shape[0]
             # Extract valid tokens from first batch element
             n_new = int(step.num_new_tokens[0].item())
             for j in range(n_new):

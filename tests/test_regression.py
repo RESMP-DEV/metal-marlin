@@ -327,7 +327,6 @@ class TestNumericalStability:
         mm = _get_metal_marlin()
 
         N = K = 128
-        M = 1
 
         # Create identity weights [N, K] (square)
         W_identity = mx.eye(N, dtype=mx.float16)

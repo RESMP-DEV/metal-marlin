@@ -290,7 +290,7 @@ def evaluate_kl_from_paths(
 
     if verbose:
         print(f"Loading tokenizer from {original_path}...")
-    tokenizer = load_tokenizer(original_path)
+    load_tokenizer(original_path)
 
     if texts is None:
         if verbose:

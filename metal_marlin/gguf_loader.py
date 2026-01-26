@@ -843,7 +843,7 @@ def dequant_iq3_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
         sb_data = raw[:, sb_start:sb_start + 12]
 
         qs = sb_data[:, :6]  # 3-bit codes (6 bytes = 16 x 3 bits, for 32 elements in pairs)
-        qh = sb_data[:, 6:10]  # High bits
+        sb_data[:, 6:10]  # High bits
         signs = sb_data[:, 10:12]  # Sign bits
 
         for g in range(4):

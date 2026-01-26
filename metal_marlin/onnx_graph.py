@@ -492,7 +492,7 @@ def _has_basic_transformer_pattern(
     # Core transformer ops
     has_matmul = "MatMul" in op_type_set or "Gemm" in op_type_set
     has_softmax = "Softmax" in op_type_set
-    has_norm = "LayerNormalization" in op_type_set or any(
+    "LayerNormalization" in op_type_set or any(
         "norm" in op.lower() for op in op_type_set
     )
 

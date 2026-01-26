@@ -27,8 +27,9 @@ import mlx.core as mx
 import numpy as np
 import onnx
 import pytest
-from metal_marlin.quantize import pack_fp4_weights, unpack_fp4_weights
 from onnx import TensorProto, helper, numpy_helper
+
+from metal_marlin.quantize import pack_fp4_weights, unpack_fp4_weights
 
 # Load onnx_executor directly to avoid safetensors_loader import issues
 _spec = importlib.util.spec_from_file_location(

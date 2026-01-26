@@ -133,6 +133,7 @@ def replace_linear_with_marlin(model: Any, group_size: int = 32) -> None:
         group_size: FP4 quantization group size for Marlin packing.
     """
     import mlx.nn as nn
+
     from metal_marlin import MarlinLinear
 
     def _replace_recursive(module: Any, path: str = "") -> int:

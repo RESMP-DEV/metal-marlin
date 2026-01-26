@@ -107,6 +107,22 @@ class MixedPrecisionConfig:
         default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 256)  # Aggressive
     )
 
+    # MLA (Multi-head Latent Attention) layers - GLM-4.7-Flash architecture
+    # Query latent projections (q_a_proj, q_b_proj)
+    mla_q_a: LayerQuantConfig = field(
+        default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 64)  # More sensitive
+    )
+    mla_q_b: LayerQuantConfig = field(
+        default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 64)
+    )
+    # KV latent projections (kv_a_proj, kv_b_proj) - critical for compressed KV cache
+    mla_kv_a: LayerQuantConfig = field(
+        default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 64)  # Tight for KV quality
+    )
+    mla_kv_b: LayerQuantConfig = field(
+        default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 64)
+    )
+
     @classmethod
     def default_dense(cls) -> MixedPrecisionConfig:
         """Config for standard dense transformer (Llama, Mistral, etc.)."""
@@ -186,6 +202,56 @@ class MixedPrecisionConfig:
         )
 
     @classmethod
+    def default_mla(cls) -> MixedPrecisionConfig:
+        """
+        Config optimized for MLA (Multi-head Latent Attention) models.
+
+        MLA uses compressed KV cache via latent projections:
+        - q_a_proj: Query down-projection (hidden → q_lora_rank)
+        - q_b_proj: Query up-projection (q_lora_rank → num_heads * head_dim)
+        - kv_a_proj: KV down-projection (hidden → kv_lora_rank + qk_rope_head_dim)
+        - kv_b_proj: KV up-projection (kv_lora_rank → num_heads * 2 * head_dim)
+
+        Based on eval_glm4_flash.py analysis:
+        - Query latent layers (q_a_proj, q_b_proj) are most sensitive
+        - KV latent layers benefit significantly from Hadamard rotation
+        - Tighter group sizes (64) recommended for latent projections
+        """
+        return cls(
+            # MLA latent projections - critical for attention quality
+            mla_q_a=LayerQuantConfig(Precision.FP4_E2M1, 64),  # Most sensitive
+            mla_q_b=LayerQuantConfig(Precision.FP4_E2M1, 64),
+            mla_kv_a=LayerQuantConfig(Precision.FP4_E2M1, 64),  # KV compression input
+            mla_kv_b=LayerQuantConfig(Precision.FP4_E2M1, 64),  # KV compression output
+            # Standard output projection less sensitive
+            attention_out=LayerQuantConfig(Precision.FP4_E2M1, 128),
+            # If model also has MoE (like GLM-4.7-Flash)
+            moe_router=LayerQuantConfig(Precision.BF16),
+            moe_shared_expert=LayerQuantConfig(Precision.FP4_E2M1, 64),
+            moe_experts=LayerQuantConfig(Precision.FP4_E2M1, 128),
+        )
+
+    @classmethod
+    def quality_mla(cls) -> MixedPrecisionConfig:
+        """
+        High-quality MLA config - minimal quality loss.
+
+        For applications where attention quality is critical.
+        Uses FP16 for the query down-projection (most sensitive layer).
+        """
+        return cls(
+            # Keep q_a_proj at FP16 - directly affects attention scores
+            mla_q_a=LayerQuantConfig(Precision.BF16),
+            mla_q_b=LayerQuantConfig(Precision.FP4_E2M1, 32),
+            mla_kv_a=LayerQuantConfig(Precision.FP4_E2M1, 32),
+            mla_kv_b=LayerQuantConfig(Precision.FP4_E2M1, 64),
+            attention_out=LayerQuantConfig(Precision.FP4_E2M1, 64),
+            moe_router=LayerQuantConfig(Precision.BF16),
+            moe_shared_expert=LayerQuantConfig(Precision.FP4_E2M1, 32),
+            moe_experts=LayerQuantConfig(Precision.FP4_E2M1, 64),
+        )
+
+    @classmethod
     def quality_first(cls) -> MixedPrecisionConfig:
         """Prioritize quality over compression."""
         return cls(
@@ -213,6 +279,212 @@ class MixedPrecisionConfig:
             moe_experts=LayerQuantConfig(Precision.FP4_E2M1, 256),
             mtp_heads=LayerQuantConfig(Precision.FP4_E2M1, 512),
         )
+
+
+# ============================================================================
+# MoE-Specific Precision Configuration
+# ============================================================================
+
+
+class LayerSensitivity(Enum):
+    """Layer sensitivity to quantization based on empirical analysis."""
+
+    CRITICAL = "critical"  # Must keep high precision (router, embeddings)
+    HIGH = "high"  # Sensitive to quantization (attention, shared expert)
+    MEDIUM = "medium"  # Moderate sensitivity (most MLP layers)
+    LOW = "low"  # Tolerant to aggressive quantization (cold experts, MTP heads)
+
+
+@dataclass
+class MoEPrecisionConfig:
+    """Precision configuration optimized for MoE models."""
+
+    # Router: Always high precision - determines expert selection
+    router_precision: Precision = Precision.FP16
+    router_group_size: int = 0  # No quantization
+
+    # Shared expert: Moderate precision (sees all tokens)
+    shared_expert_precision: Precision = Precision.FP4_E2M1
+    shared_expert_group_size: int = 64
+
+    # Routed experts: Can be aggressive (sparse activation)
+    routed_expert_precision: Precision = Precision.FP4_E2M1
+    routed_expert_group_size: int = 128
+    routed_expert_min_bits: int = 3  # Allow 3-bit for redundant experts
+
+    # Attention: Layer-specific
+    attention_qkv_precision: Precision = Precision.FP4_E2M1
+    attention_qkv_group_size: int = 64
+    attention_o_precision: Precision = Precision.FP4_E2M1
+    attention_o_group_size: int = 128
+
+    # Embeddings
+    embed_precision: Precision = Precision.FP8_E4M3
+
+    @classmethod
+    def quality(cls) -> MoEPrecisionConfig:
+        """Prioritize accuracy - tighter quantization with smaller groups."""
+        return cls(
+            router_precision=Precision.FP16,
+            router_group_size=0,
+            shared_expert_precision=Precision.FP4_E2M1,
+            shared_expert_group_size=32,
+            routed_expert_precision=Precision.FP4_E2M1,
+            routed_expert_group_size=64,
+            routed_expert_min_bits=4,
+            attention_qkv_precision=Precision.FP4_E2M1,
+            attention_qkv_group_size=32,
+            attention_o_precision=Precision.FP4_E2M1,
+            attention_o_group_size=64,
+            embed_precision=Precision.BF16,
+        )
+
+    @classmethod
+    def balanced(cls) -> MoEPrecisionConfig:
+        """Default trade-off between quality and size."""
+        return cls()  # Use default values
+
+    @classmethod
+    def size(cls) -> MoEPrecisionConfig:
+        """Minimize memory - aggressive quantization."""
+        return cls(
+            router_precision=Precision.FP16,  # Router stays precise
+            router_group_size=0,
+            shared_expert_precision=Precision.FP4_E2M1,
+            shared_expert_group_size=128,
+            routed_expert_precision=Precision.INT3,
+            routed_expert_group_size=128,
+            routed_expert_min_bits=2,
+            attention_qkv_precision=Precision.FP4_E2M1,
+            attention_qkv_group_size=128,
+            attention_o_precision=Precision.FP4_E2M1,
+            attention_o_group_size=256,
+            embed_precision=Precision.FP8_E4M3,
+        )
+
+    def to_mixed_precision_config(self) -> MixedPrecisionConfig:
+        """Convert to MixedPrecisionConfig for compatibility."""
+        return MixedPrecisionConfig(
+            embeddings=LayerQuantConfig(self.embed_precision),
+            lm_head=LayerQuantConfig(Precision.BF16),
+            norms=LayerQuantConfig(Precision.BF16),
+            attention_qkv=LayerQuantConfig(
+                self.attention_qkv_precision, self.attention_qkv_group_size
+            ),
+            attention_out=LayerQuantConfig(
+                self.attention_o_precision, self.attention_o_group_size
+            ),
+            moe_router=LayerQuantConfig(self.router_precision, self.router_group_size),
+            moe_shared_expert=LayerQuantConfig(
+                self.shared_expert_precision, self.shared_expert_group_size
+            ),
+            moe_experts=LayerQuantConfig(
+                self.routed_expert_precision, self.routed_expert_group_size
+            ),
+        )
+
+
+class LayerPrecisionSelector:
+    """Select precision based on layer sensitivity analysis."""
+
+    # Default sensitivity mappings
+    DEFAULT_SENSITIVITY: dict[str, LayerSensitivity] = {
+        "router": LayerSensitivity.CRITICAL,
+        "gate": LayerSensitivity.CRITICAL,
+        "embed": LayerSensitivity.CRITICAL,
+        "lm_head": LayerSensitivity.CRITICAL,
+        "norm": LayerSensitivity.CRITICAL,
+        "shared_expert": LayerSensitivity.HIGH,
+        "attention": LayerSensitivity.HIGH,
+        "qkv": LayerSensitivity.HIGH,
+        "o_proj": LayerSensitivity.MEDIUM,
+        "mlp": LayerSensitivity.MEDIUM,
+        "expert": LayerSensitivity.LOW,
+        "mtp": LayerSensitivity.LOW,
+        "draft": LayerSensitivity.LOW,
+    }
+
+    # Precision recommendations by sensitivity
+    PRECISION_BY_SENSITIVITY: dict[LayerSensitivity, tuple[Precision, int]] = {
+        LayerSensitivity.CRITICAL: (Precision.BF16, 0),
+        LayerSensitivity.HIGH: (Precision.FP4_E2M1, 64),
+        LayerSensitivity.MEDIUM: (Precision.FP4_E2M1, 128),
+        LayerSensitivity.LOW: (Precision.FP4_E2M1, 256),
+    }
+
+    def __init__(
+        self,
+        sensitivity_profile: dict[str, LayerSensitivity] | None = None,
+        moe_config: MoEPrecisionConfig | None = None,
+    ):
+        """
+        Initialize selector with custom sensitivity profile.
+
+        Args:
+            sensitivity_profile: Custom layer name -> sensitivity mapping.
+                                 Falls back to DEFAULT_SENSITIVITY for unmatched layers.
+            moe_config: MoE-specific precision config to use instead of defaults.
+        """
+        self.sensitivity_profile = sensitivity_profile or {}
+        self.moe_config = moe_config
+
+    def _get_sensitivity(self, layer_name: str) -> LayerSensitivity:
+        """Determine layer sensitivity from name patterns."""
+        name_lower = layer_name.lower()
+
+        # Check custom profile first
+        for pattern, sensitivity in self.sensitivity_profile.items():
+            if pattern in name_lower:
+                return sensitivity
+
+        # Fall back to defaults
+        for pattern, sensitivity in self.DEFAULT_SENSITIVITY.items():
+            if pattern in name_lower:
+                return sensitivity
+
+        return LayerSensitivity.MEDIUM  # Default
+
+    def get_precision(self, layer_name: str) -> tuple[Precision, int]:
+        """
+        Return (precision, group_size) for layer.
+
+        Uses MoE config if available, otherwise falls back to sensitivity-based lookup.
+        """
+        name_lower = layer_name.lower()
+
+        # Use MoE config for specific layer types if available
+        if self.moe_config is not None:
+            if "router" in name_lower or "gate.weight" in name_lower:
+                return (self.moe_config.router_precision, self.moe_config.router_group_size)
+            if "shared_expert" in name_lower:
+                return (
+                    self.moe_config.shared_expert_precision,
+                    self.moe_config.shared_expert_group_size,
+                )
+            if "expert" in name_lower and "shared" not in name_lower:
+                return (
+                    self.moe_config.routed_expert_precision,
+                    self.moe_config.routed_expert_group_size,
+                )
+            if any(p in name_lower for p in ["q_proj", "k_proj", "v_proj", "qkv"]):
+                return (
+                    self.moe_config.attention_qkv_precision,
+                    self.moe_config.attention_qkv_group_size,
+                )
+            if "o_proj" in name_lower or "out_proj" in name_lower:
+                return (self.moe_config.attention_o_precision, self.moe_config.attention_o_group_size)
+            if "embed" in name_lower:
+                # Embeddings don't use group quantization
+                return (self.moe_config.embed_precision, 0)
+
+        # Fall back to sensitivity-based precision
+        sensitivity = self._get_sensitivity(layer_name)
+        return self.PRECISION_BY_SENSITIVITY[sensitivity]
+
+    def get_layer_config(self, layer_name: str) -> LayerQuantConfig:
+        """Get LayerQuantConfig for compatibility with existing APIs."""
+        precision, group_size = self.get_precision(layer_name)
+        return LayerQuantConfig(precision=precision, group_size=group_size)
 
 
 # Layer name pattern matching
@@ -264,6 +536,27 @@ LAYER_PATTERNS = {
         "multi_token",
         "auxiliary_head",
         "draft_head",
+    ],
+    # MLA (Multi-head Latent Attention) patterns - GLM-4.7-Flash uses these
+    # These have compressed KV cache via latent projections
+    "mla_q_a": [
+        "q_a_proj",
+        "q_down_proj",
+        "query_a_proj",
+    ],
+    "mla_q_b": [
+        "q_b_proj",
+        "q_up_proj",
+        "query_b_proj",
+    ],
+    "mla_kv_a": [
+        "kv_a_proj",
+        "kv_down_proj",
+        "kv_a_layernorm",
+    ],
+    "mla_kv_b": [
+        "kv_b_proj",
+        "kv_up_proj",
     ],
     # Attention patterns
     "attention_qkv": [

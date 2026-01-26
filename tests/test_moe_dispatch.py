@@ -2,6 +2,7 @@
 
 import mlx.core as mx
 import numpy as np
+
 from metal_marlin.moe_dispatch import (
     compute_expert_load,
     compute_load_balancing_loss,
@@ -259,7 +260,7 @@ class TestGatherAndScatter:
         # Need to create outputs in sorted order
         # After sorting by expert:
         # - Expert 0 assignments come first, then Expert 1
-        gathered_activations = mx.zeros(
+        mx.zeros(
             (batch_size * top_k, out_dim), dtype=mx.float32
         )
 
@@ -328,7 +329,6 @@ class TestLoadBalancingLoss:
         """Test loss when load is perfectly balanced."""
         batch_size = 4
         num_experts = 2
-        top_k = 1
 
         # Each expert gets exactly 2 tokens
         expert_ids = mx.array([[0], [1], [0], [1]], dtype=mx.int32)
@@ -347,7 +347,6 @@ class TestLoadBalancingLoss:
         """Test loss increases with imbalanced load."""
         batch_size = 4
         num_experts = 2
-        top_k = 1
 
         # All tokens to expert 0
         expert_ids = mx.array([[0], [0], [0], [0]], dtype=mx.int32)
@@ -366,9 +365,7 @@ class TestLoadBalancingLoss:
 
     def test_loss_with_skewed_probs(self):
         """Test loss is higher when probs match skewed routing."""
-        batch_size = 4
         num_experts = 2
-        top_k = 1
 
         # All tokens to expert 0
         expert_ids = mx.array([[0], [0], [0], [0]], dtype=mx.int32)

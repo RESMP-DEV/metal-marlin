@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import mlx.core as mx
 import pytest
+
 from metal_marlin.expert_cache import (
     CacheEntry,
     ExpertCache,

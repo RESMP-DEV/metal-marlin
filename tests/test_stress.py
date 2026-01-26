@@ -13,6 +13,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
 import mlx.core as mx
+
 from metal_marlin import pack_fp4_weights
 from metal_marlin.metal_marlin import quantized_linear as marlin_gemm_fp4
 from metal_marlin.quantize import pack_fp4_weights as pack_fp4_weights_padded

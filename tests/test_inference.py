@@ -6,6 +6,7 @@ architecture like Llama.
 """
 
 import pytest
+
 from metal_marlin._compat import HAS_MLX
 
 # Skip entire module if MLX unavailable
@@ -15,6 +16,7 @@ pytestmark = pytest.mark.skipif(not HAS_MLX, reason="Requires MLX (Apple Silicon
 if HAS_MLX:
     import mlx.core as mx
     import mlx.nn as nn
+
     from metal_marlin.generate import GenerationConfig, generate
     from metal_marlin.kv_cache import CacheConfig, KVCache
 
