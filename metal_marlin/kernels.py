@@ -919,7 +919,7 @@ if HAS_METAL and HAS_MPS:
     from ._buffer_pool import MetalBufferPool
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
-    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[torch.Tensor, Any] = weakref.WeakKeyDictionary()
+    _WEIGHT_BUFFER_CACHE: dict[int, Any] = {}  # data_ptr -> MTLBuffer
 
     class MarlinGemmDispatcher:
         """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
@@ -1095,8 +1095,9 @@ if HAS_METAL and HAS_MPS:
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
-        if cache and tensor in _WEIGHT_BUFFER_CACHE:
-            return _WEIGHT_BUFFER_CACHE[tensor]
+        cache_key = tensor.data_ptr()
+        if cache and cache_key in _WEIGHT_BUFFER_CACHE:
+            return _WEIGHT_BUFFER_CACHE[cache_key]
 
         if tensor.is_mps:
             staging = mps_tensor_to_metal_buffer(tensor, device)
@@ -1110,7 +1111,7 @@ if HAS_METAL and HAS_MPS:
             private_buf = _private_buffer_from_bytes(lib, device, data)
 
         if cache:
-            _WEIGHT_BUFFER_CACHE[tensor] = private_buf
+            _WEIGHT_BUFFER_CACHE[cache_key] = private_buf
         return private_buf
 
     def _params_buffer(lib: MetalKernelLibrary, device: Any, params: np.ndarray) -> Any:
