@@ -330,6 +330,8 @@ kernel void gemm_fp4_optimized(
 
                 #pragma unroll
                 for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+                    // simdgroup_multiply_accumulate is the core SIMD intrinsic that
+                    // maps 8x8 tiles to Apple Silicon's matrix pipeline.
                     simdgroup_multiply_accumulate(acc[mi][ni], a_frag[mi], b_frag, acc[mi][ni]);
                 }
             }

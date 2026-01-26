@@ -17,9 +17,15 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
-# Ensure framework is importable from benchmarks directory
+# Ensure metal_marlin + framework are importable from project layout
+_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(_ROOT))
 sys.path.insert(0, str(Path(__file__).parent))
 from framework import mps_sync  # noqa: E402
+
+from metal_marlin._compat import HAS_MPSGRAPH, HAS_PYOBJC_METAL  # noqa: E402
+from metal_marlin.flash_attention_v2 import flash_attention_v2  # noqa: E402
+from metal_marlin.fused_attention_mps import fused_scaled_dot_product_attention  # noqa: E402
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 50
@@ -107,6 +113,48 @@ def benchmark_reference_attention(
     return _time_kernel(fn)
 
 
+def benchmark_flash_attention_v2(
+    batch: int,
+    heads: int,
+    seq_q: int,
+    seq_k: int,
+    head_dim: int,
+) -> float:
+    """Benchmark Metal Marlin Flash Attention V2."""
+    q = torch.randn(batch, heads, seq_q, head_dim, dtype=torch.float16, device="mps")
+    k = torch.randn(batch, heads, seq_k, head_dim, dtype=torch.float16, device="mps")
+    v = torch.randn(batch, heads, seq_k, head_dim, dtype=torch.float16, device="mps")
+    mps_sync()
+
+    scale = 1.0 / math.sqrt(head_dim)
+
+    def fn() -> torch.Tensor:
+        return flash_attention_v2(q, k, v, scale=scale, causal=True)
+
+    return _time_kernel(fn)
+
+
+def benchmark_fused_mpsgraph(
+    batch: int,
+    heads: int,
+    seq_q: int,
+    seq_k: int,
+    head_dim: int,
+) -> float:
+    """Benchmark MPSGraph scaledDotProductAttention."""
+    q = torch.randn(batch, heads, seq_q, head_dim, dtype=torch.float16, device="mps")
+    k = torch.randn(batch, heads, seq_k, head_dim, dtype=torch.float16, device="mps")
+    v = torch.randn(batch, heads, seq_k, head_dim, dtype=torch.float16, device="mps")
+    mps_sync()
+
+    scale = 1.0 / math.sqrt(head_dim)
+
+    def fn() -> torch.Tensor:
+        return fused_scaled_dot_product_attention(q, k, v, scale=scale, causal=True)
+
+    return _time_kernel(fn)
+
+
 def benchmark_sdpa_gqa(
     batch: int,
     heads_q: int,
@@ -168,6 +216,23 @@ def benchmark_attention() -> None:
             f"Ref={t_ref:.3f}ms ({tflops_ref:.2f} TFLOPS), "
             f"Speedup={speedup:.2f}x"
         )
+
+    if HAS_PYOBJC_METAL:
+        print()
+        print("=" * 70)
+        print("Flash Attention V2 vs MPSGraph SDPA (Causal)")
+        print("=" * 70)
+        for batch, heads, seq_q, seq_k, head_dim in configs:
+            t_flash = benchmark_flash_attention_v2(batch, heads, seq_q, seq_k, head_dim)
+            line = (
+                f"B={batch} H={heads} Sq={seq_q:>5} Sk={seq_k:>5} D={head_dim}: "
+                f"FlashV2={t_flash:.3f}ms"
+            )
+            if HAS_MPSGRAPH:
+                t_mps = benchmark_fused_mpsgraph(batch, heads, seq_q, seq_k, head_dim)
+                speedup = t_flash / t_mps
+                line += f", MPSGraph={t_mps:.3f}ms, Speedup={speedup:.2f}x"
+            print(line)
 
 
 def benchmark_gqa() -> None:

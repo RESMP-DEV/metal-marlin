@@ -49,6 +49,7 @@ _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from metal_marlin._compat import HAS_TORCH, torch  # noqa: E402
+from metal_marlin.calibration import CalibrationDataset  # noqa: E402
 from metal_marlin.calibration.sensitivity import (  # noqa: E402
     CONDITION_CRITICAL,
     CONDITION_SENSITIVE,
@@ -1099,6 +1100,7 @@ def run_sensitivity_benchmark(
     local_model_path: Path | None = None,
     quantized_model_path: Path | None = None,
     num_samples: int = 50,
+    calibration_samples: int = 128,
     context_lengths: list[int] | None = None,
     run_quality: bool = True,
     run_throughput: bool = True,
@@ -1191,11 +1193,18 @@ def run_sensitivity_benchmark(
         sensitivity_profile = {}
         sens_counts = {"fp8": 0, "fp4": 0, "int2": 0, "fp16": 0, "bf16": 0}
     else:
-        print("Computing sensitivity profile...")
+        # Load calibration dataset for real Hessian computation
+        print("Loading calibration v3 dataset...")
+        calibration_data = CalibrationDataset.v3(max_samples=calibration_samples)
+        print(f"  Loaded {len(calibration_data)} calibration samples")
+
+        print("\nComputing sensitivity profile with real Hessians...")
         sensitivity_profile = compute_model_sensitivity_profile(
             model_path,
-            calibration_data=None,  # Use weight-only analysis for speed
+            calibration_data=calibration_data,
             compute_hessians=True,
+            max_calibration_samples=calibration_samples,
+            calibration_batch_size=4,
             verbose=verbose,
         )
 
@@ -1455,6 +1464,12 @@ def main():
         help="Number of WikiText samples for perplexity",
     )
     parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=128,
+        help="Number of Bartowski v3 samples for Hessian computation (default: 128)",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -1557,6 +1572,7 @@ def main():
         local_model_path=args.local_model,
         quantized_model_path=args.quantized_model,
         num_samples=args.samples,
+        calibration_samples=args.calibration_samples,
         context_lengths=context_lengths,
         run_quality=run_quality,
         run_throughput=run_throughput,

@@ -1,6 +1,8 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#pragma metal performance_hint(fast_math)
+
 // ============================================================================
 // BFloat16 (BF16) Compatibility Layer for Apple Metal
 // ============================================================================
@@ -164,6 +166,11 @@ inline float bf16_to_float(bf16_t v) {
     return float(v);
 }
 
+/// Convert raw BF16 bits (uint16 storage) to FP32.
+inline float bf16_bits_to_float(ushort bits) {
+    return as_type<float>(uint(bits) << 16);
+}
+
 /// Convert BF16 to FP16 (half).
 /// May lose precision (BF16 has 7 mantissa bits, FP16 has 10, but BF16 has
 /// much wider exponent range). Values outside FP16 range will saturate to
@@ -189,17 +196,29 @@ inline bf16_t bf16_from_half(half h) {
 // Vectorized BF16 operations (uint16 storage in registers)
 // ============================================================================
 
+/// Convert 4 packed BF16 values (stored as ushort4) to float4 using direct
+/// bit manipulation (no FP16 intermediate).
+///
+/// @param packed  4 BF16 values in uint16 storage
+/// @return        4 FP32 values
+inline float4 bf16x4_to_float4_direct(ushort4 packed) {
+    ushort lane = ushort(simd_lane_id);
+    ushort4 lane_vals = ushort4(
+        simd_shuffle(packed.x, lane),
+        simd_shuffle(packed.y, lane),
+        simd_shuffle(packed.z, lane),
+        simd_shuffle(packed.w, lane)
+    );
+    uint4 widened = uint4(lane_vals) << 16;
+    return as_type<float4>(widened);
+}
+
 /// Convert 4 packed BF16 values (stored as ushort4) to float4.
 ///
 /// @param packed  4 BF16 values in uint16 storage
 /// @return        4 FP32 values
 inline float4 bf16x4_to_float4(ushort4 packed) {
-    return float4(
-        as_type<float>(uint(packed.x) << 16),
-        as_type<float>(uint(packed.y) << 16),
-        as_type<float>(uint(packed.z) << 16),
-        as_type<float>(uint(packed.w) << 16)
-    );
+    return bf16x4_to_float4_direct(packed);
 }
 
 /// Convert 4 FP32 values to packed BF16 (ushort4) with truncation.
@@ -219,13 +238,29 @@ inline ushort4 float4_to_bf16x4_rtz(float4 vals) {
 ///
 /// @param vals  4 FP32 values
 /// @return      4 BF16 values in uint16 storage (correctly rounded)
+inline ushort4 float4_to_bf16x4_rne_direct(float4 vals) {
+    uint4 f_bits = as_type<uint4>(vals);
+    uint4 exp_bits = (f_bits >> 23) & 0xFFu;
+    uint4 mantissa = f_bits & 0x007FFFFFu;
+    uint4 round_bias = 0x8000u + ((f_bits >> 16) & 1u);
+
+    uint4 rounded = f_bits + round_bias;
+    ushort4 rne_bits = ushort4(rounded >> 16);
+
+    bool4 is_special = exp_bits == uint4(0xFFu);
+    bool4 is_nan = is_special & (mantissa != uint4(0u));
+    bool4 is_inf = is_special & (mantissa == uint4(0u));
+
+    ushort4 trunc_bits = ushort4(f_bits >> 16);
+    ushort4 nan_bits = trunc_bits | ushort4(0x0040u);
+
+    ushort4 result = select(rne_bits, trunc_bits, is_inf);
+    result = select(result, nan_bits, is_nan);
+    return result;
+}
+
 inline ushort4 float4_to_bf16x4_rne(float4 vals) {
-    return ushort4(
-        bf16_from_float_rne(vals.x).bits,
-        bf16_from_float_rne(vals.y).bits,
-        bf16_from_float_rne(vals.z).bits,
-        bf16_from_float_rne(vals.w).bits
-    );
+    return float4_to_bf16x4_rne_direct(vals);
 }
 
 /// Convert 4 packed BF16 values to half4.
@@ -241,6 +276,33 @@ inline half4 bf16x4_to_half4(ushort4 packed) {
 // ============================================================================
 // BF16 activation storage: pack/unpack for simdgroup GEMM integration
 // ============================================================================
+
+/// Load 8 BF16 activation values from a device buffer and convert to float4 pairs
+/// without going through FP16.
+///
+/// @param src       Pointer to BF16 values (ushort storage)
+/// @param offset    Element offset into the buffer
+/// @param out_lo    Output: first 4 values as float4
+/// @param out_hi    Output: last 4 values as float4
+inline void bf16_load_as_float8_direct(device const ushort *src,
+                                       uint offset,
+                                       thread float4 &out_lo,
+                                       thread float4 &out_hi) {
+    ushort4 lo_packed = ushort4(src[offset],     src[offset + 1],
+                                src[offset + 2], src[offset + 3]);
+    ushort4 hi_packed = ushort4(src[offset + 4], src[offset + 5],
+                                src[offset + 6], src[offset + 7]);
+
+    out_lo = bf16x4_to_float4_direct(lo_packed);
+    out_hi = bf16x4_to_float4_direct(hi_packed);
+}
+
+inline void bf16_load_as_float8(device const ushort *src,
+                                uint offset,
+                                thread float4 &out_lo,
+                                thread float4 &out_hi) {
+    bf16_load_as_float8_direct(src, offset, out_lo, out_hi);
+}
 
 /// Load 8 BF16 activation values from a device buffer and convert to half4 pairs.
 /// Intended for use in fused GEMM kernels where activations are stored in BF16
@@ -267,6 +329,26 @@ inline void bf16_load_as_half8(device const ushort *src,
     out_hi = bf16x4_to_half4(hi_packed);
 }
 
+/// Load 8 BF16 values and convert directly to float (no FP16 intermediate).
+/// Intended for FP32 accumulation paths.
+///
+/// @param src       Pointer to BF16 values (ushort storage)
+/// @param offset    Element offset into the buffer
+/// @param out_lo    Output: first 4 values as float4
+/// @param out_hi    Output: last 4 values as float4
+inline void bf16_load_as_float8(device const ushort *src,
+                                uint offset,
+                                thread float4 &out_lo,
+                                thread float4 &out_hi) {
+    ushort4 lo_packed = ushort4(src[offset],     src[offset + 1],
+                                src[offset + 2], src[offset + 3]);
+    ushort4 hi_packed = ushort4(src[offset + 4], src[offset + 5],
+                                src[offset + 6], src[offset + 7]);
+
+    out_lo = bf16x4_to_float4(lo_packed);
+    out_hi = bf16x4_to_float4(hi_packed);
+}
+
 /// Store 8 half values as BF16 to a device buffer (with RNE rounding).
 /// Intended for writing GEMM outputs back to BF16 activation memory.
 ///
@@ -290,6 +372,61 @@ inline void bf16_store_from_half8(device ushort *dst,
     dst[offset + 5] = hi_packed.y;
     dst[offset + 6] = hi_packed.z;
     dst[offset + 7] = hi_packed.w;
+}
+
+/// Store 8 float values directly as BF16 (RNE rounding, no FP16 intermediate).
+/// Intended for FP32 accumulator output paths.
+///
+/// @param dst       Pointer to BF16 output buffer (ushort storage)
+/// @param offset    Element offset into the buffer
+/// @param lo        First 4 values (float4)
+/// @param hi        Last 4 values (float4)
+inline void bf16_store_from_float8(device ushort *dst,
+                                   uint offset,
+                                   float4 lo,
+                                   float4 hi) {
+    ushort4 lo_packed = float4_to_bf16x4_rne(lo);
+    ushort4 hi_packed = float4_to_bf16x4_rne(hi);
+
+    dst[offset]     = lo_packed.x;
+    dst[offset + 1] = lo_packed.y;
+    dst[offset + 2] = lo_packed.z;
+    dst[offset + 3] = lo_packed.w;
+    dst[offset + 4] = hi_packed.x;
+    dst[offset + 5] = hi_packed.y;
+    dst[offset + 6] = hi_packed.z;
+    dst[offset + 7] = hi_packed.w;
+}
+
+/// Store 8 float values as BF16 to a device buffer (with RNE rounding).
+/// Intended for writing FP32 outputs back to BF16 activation memory.
+///
+/// @param dst       Pointer to BF16 output buffer (ushort storage)
+/// @param offset    Element offset into the buffer
+/// @param lo        First 4 values (float4)
+/// @param hi        Last 4 values (float4)
+inline void bf16_store_from_float8_direct(device ushort *dst,
+                                          uint offset,
+                                          float4 lo,
+                                          float4 hi) {
+    ushort4 lo_packed = float4_to_bf16x4_rne_direct(lo);
+    ushort4 hi_packed = float4_to_bf16x4_rne_direct(hi);
+
+    dst[offset]     = lo_packed.x;
+    dst[offset + 1] = lo_packed.y;
+    dst[offset + 2] = lo_packed.z;
+    dst[offset + 3] = lo_packed.w;
+    dst[offset + 4] = hi_packed.x;
+    dst[offset + 5] = hi_packed.y;
+    dst[offset + 6] = hi_packed.z;
+    dst[offset + 7] = hi_packed.w;
+}
+
+inline void bf16_store_from_float8(device ushort *dst,
+                                   uint offset,
+                                   float4 lo,
+                                   float4 hi) {
+    bf16_store_from_float8_direct(dst, offset, lo, hi);
 }
 
 // ============================================================================
@@ -400,4 +537,29 @@ kernel void bf16_roundtrip_test(
 
     output[tid] = roundtripped;
     errors[tid] = abs(original - roundtripped);
+}
+
+/// Test kernel that uses the direct BF16 load/store helpers on float4 pairs.
+kernel void bf16_roundtrip_direct_float8(
+    device const float4 *input  [[buffer(0)]],
+    device float4 *output       [[buffer(1)]],
+    device ushort *scratch      [[buffer(2)]],
+    constant uint &num_elements [[buffer(3)]],
+    uint tid                    [[thread_position_in_grid]])
+{
+    uint base_idx = tid * 8u;
+    if (base_idx >= num_elements) return;
+
+    uint vec_idx = tid * 2u;
+    float4 lo = input[vec_idx];
+    float4 hi = input[vec_idx + 1u];
+
+    bf16_store_from_float8_direct(scratch, base_idx, lo, hi);
+
+    thread float4 out_lo;
+    thread float4 out_hi;
+    bf16_load_as_float8_direct(scratch, base_idx, out_lo, out_hi);
+
+    output[vec_idx] = out_lo;
+    output[vec_idx + 1u] = out_hi;
 }

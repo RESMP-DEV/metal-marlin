@@ -21,8 +21,10 @@ Usage:
 
 from __future__ import annotations
 
-from .cache import detect_gpu
-from .tile_search import DEFAULT_CONFIG, TILE_CONFIGS, TileConfig
+import re
+
+from .cache import GPUFingerprint, detect_gpu
+from .tile_search import DEFAULT_CONFIG, GPU_FAMILY_TILE_CONFIG, TILE_CONFIGS, TileConfig
 
 
 def get_heuristic_config(
@@ -59,9 +61,19 @@ def get_heuristic_config(
         gpu = detect_gpu()
         gpu_cores = gpu_cores or gpu.cores
         memory_gb = memory_gb or gpu.memory_gb
+    else:
+        gpu = detect_gpu()
+
+    family_id = _gpu_family_id(gpu)
 
     # Classify problem size
     problem_class = _classify_problem(M, N, K)
+
+    # M3+ favors larger tiles and arithmetic intensity over occupancy.
+    if family_id >= 9 and problem_class in {"medium", "large", "xlarge"}:
+        m3_config = _select_m3plus_config(M, N, K)
+        if m3_config is not None:
+            return m3_config
 
     # Select configuration based on problem class and hardware
     if problem_class == "tiny":
@@ -267,6 +279,73 @@ def _heuristic_xlarge(M: int, N: int, K: int, gpu_cores: int) -> TileConfig:
         return _heuristic_large(M, N, K, gpu_cores)
 
 
+def _gpu_family_id(gpu: GPUFingerprint) -> int:
+    """Map GPU fingerprint to a simplified family id.
+
+    Family IDs:
+    - 7: M1
+    - 8: M2
+    - 9: M3+
+    """
+    name = gpu.name.lower()
+    if "m4" in name or "m3" in name:
+        return 9
+    if "m2" in name:
+        return 8
+    if "m1" in name:
+        return 7
+
+    match = re.search(r"(\d+)", gpu.metal_family)
+    if match:
+        family_num = int(match.group(1))
+        if family_num >= 8:
+            return 9
+        if family_num == 7:
+            return 7
+
+    return 7
+
+
+def _find_tile_config(tile_m: int, tile_n: int, tile_k: int) -> TileConfig | None:
+    for config in TILE_CONFIGS:
+        if (
+            config.tile_m == tile_m
+            and config.tile_n == tile_n
+            and config.tile_k == tile_k
+        ):
+            return config
+    return None
+
+
+def _family_profile_config(family_id: int) -> TileConfig | None:
+    profile = GPU_FAMILY_TILE_CONFIG.get(family_id)
+    if not profile:
+        return None
+    return _find_tile_config(
+        profile["TILE_M"],
+        profile["TILE_N"],
+        profile["TILE_K"],
+    )
+
+
+def _select_m3plus_config(M: int, N: int, K: int) -> TileConfig | None:
+    """Prefer larger tiles on M3+ to favor arithmetic intensity."""
+    profile = _family_profile_config(9)
+    if profile and M >= profile.tile_m and N >= profile.tile_n and K >= profile.tile_k:
+        return profile
+
+    if M >= 128 and N >= 64 and K >= 32:
+        config = _find_tile_config(128, 64, 32)
+        if config is not None:
+            return config
+    if M >= 64 and N >= 128 and K >= 32:
+        config = _find_tile_config(64, 128, 32)
+        if config is not None:
+            return config
+
+    return None
+
+
 def get_decode_config(
     N: int, K: int, batch_size: int = 1, gpu_cores: int | None = None
 ) -> TileConfig:
@@ -345,12 +424,19 @@ def get_prefill_config(
     Returns:
         TileConfig optimized for prefill workload.
     """
+    gpu = detect_gpu()
     if gpu_cores is None:
-        gpu_cores = detect_gpu().cores
+        gpu_cores = gpu.cores
+    family_id = _gpu_family_id(gpu)
 
     M = batch_size * seq_len
 
     # Prefill typically has large M, use larger tiles
+    if family_id >= 9:
+        m3_config = _select_m3plus_config(M, N, K)
+        if m3_config is not None:
+            return m3_config
+
     if M >= 512:
         return _heuristic_large(M, N, K, gpu_cores)
     elif M >= 128:
@@ -411,7 +497,11 @@ def estimate_throughput(
 
 
 def select_best_heuristic(
-    M: int, N: int, K: int, configs: list[TileConfig] | None = None
+    M: int,
+    N: int,
+    K: int,
+    configs: list[TileConfig] | None = None,
+    gpu: GPUFingerprint | None = None,
 ) -> TileConfig:
     """Select the best config from a list using heuristic scoring.
 
@@ -428,7 +518,8 @@ def select_best_heuristic(
     if configs is None:
         configs = TILE_CONFIGS
 
-    gpu = detect_gpu()
+    gpu = gpu or detect_gpu()
+    family_id = _gpu_family_id(gpu)
     best_config = DEFAULT_CONFIG
     best_score = -float("inf")
 
@@ -446,7 +537,10 @@ def select_best_heuristic(
         occupancy_factor = metrics["occupancy"]
 
         # Compute score: weighted combination
-        score = occupancy_factor * 0.6 + min(1.0, tile_size_factor) * 0.4
+        if family_id >= 9:
+            score = occupancy_factor * 0.4 + min(1.0, tile_size_factor) * 0.6
+        else:
+            score = occupancy_factor * 0.6 + min(1.0, tile_size_factor) * 0.4
 
         # Bonus for good parallelism ratio
         if metrics["parallelism_ratio"] >= 2.0:

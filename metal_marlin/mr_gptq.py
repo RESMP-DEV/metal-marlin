@@ -920,9 +920,7 @@ class MRGPTQQuantizer:
                         layer_kurtosis = None
                         if self.use_hadamard and self.hadamard_kurtosis_threshold is not None:
                             layer_kurtosis = _compute_excess_kurtosis(tensor)
-                            apply_hadamard = (
-                                layer_kurtosis >= self.hadamard_kurtosis_threshold
-                            )
+                            apply_hadamard = layer_kurtosis >= self.hadamard_kurtosis_threshold
 
                         # Quantize layer
                         packed, scales, meta = self.quantize_layer(
@@ -1453,7 +1451,7 @@ class MoEPrecisionConfig:
     def default_dense(cls) -> MoEPrecisionConfig:
         """Default config for dense transformer models."""
         return cls(
-            router_precision="fp16",
+            router_precision="bf16",
             expert_format="fp4",
             expert_group_size=128,
             attention_group_size=64,
@@ -1488,7 +1486,7 @@ class MoEPrecisionConfig:
     def quality_first(cls) -> MoEPrecisionConfig:
         """Prioritize quality over compression."""
         return cls(
-            router_precision="fp16",
+            router_precision="bf16",
             expert_format="fp4",
             expert_group_size=64,
             shared_expert_group_size=32,

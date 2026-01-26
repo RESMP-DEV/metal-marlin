@@ -2,9 +2,9 @@
 Mixed-precision quantization for transformer models.
 
 Different layers have vastly different sensitivity to quantization:
-- Embeddings, norms, lm_head: Keep FP16 (small relative to model)
+- Embeddings, norms, lm_head: Keep BF16 (small relative to model, larger dynamic range)
 - Attention Q/K/V/O: Sensitive to position encoding, use FP8 or tight FP4
-- Router/gating (MoE): Critical for expert selection, keep FP16 or FP8
+- Router/gating (MoE): Critical for expert selection, keep BF16
 - Expert MLPs (MoE): Redundant (2 of 64 active), aggressive FP4 ok
 - MTP heads: Just need "good enough" drafts, aggressive FP4 with large groups
 
@@ -17,10 +17,19 @@ For MTP (Multi-Token Prediction):
 - Auxiliary heads predict N future tokens in parallel
 - Verified by main model, so approximation is fine
 - Can use larger group sizes (256+) for higher compression
+
+Precision Notes:
+- BF16 and FP16 have identical performance on Apple Silicon (~14.8 TFLOPS on M4 Max)
+- BF16 has 8× larger dynamic range (±3.4×10³⁸ vs ±65,504) - prefer BF16 on M3/M4
+- FP32 accumulation improves numerical stability for long-K GEMMs and avoids BF16 -> FP16 -> FP32 round-trips
+- FP32 accumulators cost more registers, so use them for stability-critical paths (routers, logits, long-context)
+- FP16 may be needed on M1/M2 for compatibility or to avoid potential BF16 codegen issues
+- See docs/metal_half_precision_bug.md for Metal compiler issues with half-precision inline functions
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -31,8 +40,8 @@ import numpy as np
 class Precision(Enum):
     """Quantization precision levels."""
 
-    FP16 = "fp16"  # Keep original (16 bits)
-    BF16 = "bf16"  # Brain float16 (16 bits, larger dynamic range)
+    FP16 = "fp16"  # IEEE 754 half (M1/M2 compatible, see docs/metal_half_precision_bug.md)
+    BF16 = "bf16"  # Brain float16 (larger dynamic range, preferred on M3/M4)
     FP8_E4M3 = "fp8"  # 8-bit float (NVIDIA FP8)
     FP4_E2M1 = "fp4"  # 4-bit float (Marlin MXFP4)
     INT8 = "int8"  # 8-bit integer (per-channel scales)
@@ -43,6 +52,43 @@ class Precision(Enum):
     INT2 = "int2"  # 2-bit integer (4 levels, 50% smaller than INT4)
     NF3 = "nf3"  # NormalFloat 3-bit (Gaussian quantiles, better for Gaussian weights)
     NF2 = "nf2"  # NormalFloat 2-bit (Gaussian quantiles, most aggressive)
+
+
+def _is_m1_or_m2() -> bool:
+    try:
+        from .profiling.occupancy import AppleSiliconGPU, detect_gpu
+    except Exception:
+        return False
+
+    gpu = detect_gpu()
+    return gpu in {
+        AppleSiliconGPU.M1,
+        AppleSiliconGPU.M1_PRO,
+        AppleSiliconGPU.M1_MAX,
+        AppleSiliconGPU.M1_ULTRA,
+        AppleSiliconGPU.M2,
+        AppleSiliconGPU.M2_PRO,
+        AppleSiliconGPU.M2_MAX,
+        AppleSiliconGPU.M2_ULTRA,
+    }
+
+
+def _is_m3_or_newer() -> bool:
+    try:
+        from .profiling.occupancy import AppleSiliconGPU, detect_gpu
+    except Exception:
+        return False
+
+    gpu = detect_gpu()
+    return gpu in {
+        AppleSiliconGPU.M3,
+        AppleSiliconGPU.M3_PRO,
+        AppleSiliconGPU.M3_MAX,
+        AppleSiliconGPU.M3_ULTRA,
+        AppleSiliconGPU.M4,
+        AppleSiliconGPU.M4_PRO,
+        AppleSiliconGPU.M4_MAX,
+    }
 
 
 @dataclass
@@ -66,6 +112,9 @@ class MixedPrecisionConfig:
     default: LayerQuantConfig = field(
         default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 128)
     )
+
+    # Activation precision for GEMM dispatch
+    activation_precision: Precision = Precision.BF16
 
     # Critical layers - keep high precision (BF16 preferred for larger dynamic range)
     embeddings: LayerQuantConfig = field(default_factory=lambda: LayerQuantConfig(Precision.BF16))
@@ -127,6 +176,28 @@ class MixedPrecisionConfig:
     def default_dense(cls) -> MixedPrecisionConfig:
         """Config for standard dense transformer (Llama, Mistral, etc.)."""
         return cls()
+
+    def select_activation_dtype(self) -> str:
+        """Select activation dtype string based on config and hardware."""
+        if self.activation_precision not in (Precision.BF16, Precision.FP16):
+            return self.activation_precision.value
+
+        if self.activation_precision == Precision.BF16 and _is_m1_or_m2():
+            warnings.warn(
+                "BF16 activations selected on pre-M3 Apple Silicon; "
+                "falling back to FP16 kernels for stability.",
+                RuntimeWarning,
+            )
+            return Precision.FP16.value
+
+        return self.activation_precision.value
+
+    def select_gemm_kernel_variant(self) -> str:
+        """Return GEMM kernel variant name based on activation precision."""
+        activation_dtype = self.select_activation_dtype()
+        if activation_dtype == Precision.BF16.value and _is_m3_or_newer():
+            return "bf16_fp32acc"
+        return "fp16"
 
     @classmethod
     def default_moe(cls) -> MixedPrecisionConfig:
@@ -237,10 +308,10 @@ class MixedPrecisionConfig:
         High-quality MLA config - minimal quality loss.
 
         For applications where attention quality is critical.
-        Uses FP16 for the query down-projection (most sensitive layer).
+        Uses BF16 for the query down-projection (most sensitive layer).
         """
         return cls(
-            # Keep q_a_proj at FP16 - directly affects attention scores
+            # Keep q_a_proj at BF16 - directly affects attention scores
             mla_q_a=LayerQuantConfig(Precision.BF16),
             mla_q_b=LayerQuantConfig(Precision.FP4_E2M1, 32),
             mla_kv_a=LayerQuantConfig(Precision.FP4_E2M1, 32),
@@ -300,7 +371,7 @@ class MoEPrecisionConfig:
     """Precision configuration optimized for MoE models."""
 
     # Router: Always high precision - determines expert selection
-    router_precision: Precision = Precision.FP16
+    router_precision: Precision = Precision.BF16
     router_group_size: int = 0  # No quantization
 
     # Shared expert: Moderate precision (sees all tokens)
@@ -325,7 +396,7 @@ class MoEPrecisionConfig:
     def quality(cls) -> MoEPrecisionConfig:
         """Prioritize accuracy - tighter quantization with smaller groups."""
         return cls(
-            router_precision=Precision.FP16,
+            router_precision=Precision.BF16,
             router_group_size=0,
             shared_expert_precision=Precision.FP4_E2M1,
             shared_expert_group_size=32,
@@ -348,7 +419,7 @@ class MoEPrecisionConfig:
     def size(cls) -> MoEPrecisionConfig:
         """Minimize memory - aggressive quantization."""
         return cls(
-            router_precision=Precision.FP16,  # Router stays precise
+            router_precision=Precision.BF16,  # Router stays precise
             router_group_size=0,
             shared_expert_precision=Precision.FP4_E2M1,
             shared_expert_group_size=128,
@@ -631,7 +702,7 @@ def should_quantize(
     Determine if/how to quantize a tensor.
 
     Returns:
-        (should_quantize, config) - False if precision is FP16 or tensor not suitable
+        (should_quantize, config) - False if precision is BF16/FP16 or tensor not suitable
     """
     layer_config = get_layer_config(name, config)
 
@@ -951,7 +1022,7 @@ def analyze_model_layers(
         category = classify_layer(name)
         should_q, layer_cfg = should_quantize(name, tensor, config)
 
-        precision = layer_cfg.precision if should_q else Precision.FP16
+        precision = layer_cfg.precision if should_q else Precision.BF16
 
         stats["total_params"] += params
         stats["by_precision"][precision.value] += params

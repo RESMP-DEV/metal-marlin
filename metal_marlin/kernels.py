@@ -911,7 +911,216 @@ INT3_PER_UINT = 10  # 30 bits used / 3 bits = 10 values per uint32 (2 bits unuse
 # ---------------------------------------------------------------------------
 
 if HAS_METAL and HAS_MPS:
+    import Foundation
     import Metal
+
+    from ._buffer_pool import MetalBufferPool
+
+    _STAGING_POOLS: dict[int, MetalBufferPool] = {}
+    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[torch.Tensor, Any] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    class MarlinGemmDispatcher:
+        """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
+
+        def __init__(self, lib: MetalKernelLibrary | None = None) -> None:
+            require_mps()
+            self._lib = lib or get_default_library()
+            self._compiled: dict[tuple[str, tuple[str, ...] | None], Any | None] = {}
+            self._gemm_fp16: Any | None = None
+            self._gemm_bf16_fp32acc: Any | None = None
+            self._compile_gemm_kernels()
+
+        @staticmethod
+        def _apply_compile_options(source: str, compile_options: list[str] | None) -> str:
+            if not compile_options:
+                return source
+            defines: list[str] = []
+            for opt in compile_options:
+                if not opt.startswith("-D"):
+                    continue
+                define = opt[2:]
+                if "=" in define:
+                    name, value = define.split("=", 1)
+                else:
+                    name, value = define, "1"
+                defines.append(f"#define {name} {value}")
+            if not defines:
+                return source
+            return "\n".join(defines) + "\n" + source
+
+        def _compile_kernel(
+            self,
+            function_name: str,
+            *,
+            source_name: str = "marlin_gemm",
+            compile_options: list[str] | None = None,
+        ) -> Any | None:
+            key = (function_name, tuple(compile_options) if compile_options else None)
+            if key in self._compiled:
+                return self._compiled[key]
+
+            try:
+                if compile_options:
+                    source = get_shader_source(source_name)
+                    source = self._apply_compile_options(source, compile_options)
+                    tag = "_".join(opt.replace("-", "").replace("=", "_") for opt in compile_options)
+                    library_name = f"{source_name}:{function_name}:{tag}"
+                    self._lib.compile_source(library_name, source)
+                    pipeline = self._lib.get_pipeline(function_name, library_name)
+                else:
+                    try:
+                        pipeline = self._lib.get_pipeline(function_name, source_name)
+                    except KeyError:
+                        source = get_shader_source(source_name)
+                        self._lib.compile_source(source_name, source)
+                        pipeline = self._lib.get_pipeline(function_name, source_name)
+            except Exception:
+                pipeline = None
+
+            self._compiled[key] = pipeline
+            return pipeline
+
+        def _compile_gemm_kernels(self) -> None:
+            self._gemm_fp16 = self._compile_kernel("marlin_gemm_fp16")
+            if self._gemm_fp16 is None:
+                self._gemm_fp16 = self._compile_kernel("marlin_gemm_fp16_pipelined")
+            self._gemm_bf16_fp32acc = self._compile_kernel(
+                "marlin_gemm_fp32acc",
+                compile_options=["-DUSE_BF16_INPUTS=1"],
+            )
+
+        def dispatch_gemm(
+            self,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            M: int,
+            N: int,
+            K: int,
+            *,
+            activation_dtype: str = "fp16",
+        ) -> torch.Tensor:
+            if activation_dtype == "bf16" and self._gemm_bf16_fp32acc is not None:
+                return self._dispatch_bf16_path(A, B, M, N, K)
+            return self._dispatch_fp16_path(A, B, M, N, K)
+
+        def _dispatch_fp16_path(
+            self, A: torch.Tensor, B: torch.Tensor, M: int, N: int, K: int
+        ) -> torch.Tensor:
+            return self._dispatch_kernel(self._gemm_fp16, A, B, M, N, K, torch.float16)
+
+        def _dispatch_bf16_path(
+            self, A: torch.Tensor, B: torch.Tensor, M: int, N: int, K: int
+        ) -> torch.Tensor:
+            return self._dispatch_kernel(self._gemm_bf16_fp32acc, A, B, M, N, K, torch.bfloat16)
+
+        def _dispatch_kernel(
+            self,
+            kernel: Any | None,
+            A: torch.Tensor,
+            B: torch.Tensor,
+            M: int,
+            N: int,
+            K: int,
+            dtype: torch.dtype,
+        ) -> torch.Tensor:
+            if kernel is None:
+                raise RuntimeError("GEMM kernel pipeline is unavailable.")
+
+            A_contig = A.to(dtype=dtype).contiguous()
+            B_contig = B.to(dtype=dtype).contiguous()
+            output = torch.empty((M, N), dtype=dtype, device="mps")
+
+            device = self._lib.device
+            A_buf = _private_buffer_from_tensor(A_contig, self._lib, device, cache=False)
+            B_buf = _private_buffer_from_tensor(B_contig, self._lib, device, cache=True)
+            C_buf = mps_tensor_to_metal_buffer(output, device)
+
+            grid_m = (M + TILE_M - 1) // TILE_M
+            grid_n = (N + TILE_N - 1) // TILE_N
+
+            self._lib._dispatch(
+                kernel,
+                (grid_n, grid_m, 1),
+                (THREADS_PER_TG, 1, 1),
+                A_buf,
+                B_buf,
+                C_buf,
+                M,
+                N,
+                K,
+            )
+            return output
+
+    def _get_staging_pool(device: Any) -> MetalBufferPool:
+        pool = _STAGING_POOLS.get(id(device))
+        if pool is None:
+            pool = MetalBufferPool(
+                device, storage_mode=Metal.MTLResourceStorageModeManaged
+            )
+            _STAGING_POOLS[id(device)] = pool
+        return pool
+
+    def _blit_copy(
+        lib: MetalKernelLibrary, source: Any, destination: Any, size: int
+    ) -> None:
+        command_buffer = lib.command_queue.commandBuffer()
+        blit = command_buffer.blitCommandEncoder()
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+            source, 0, destination, 0, size
+        )
+        blit.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+    def _private_buffer_from_bytes(
+        lib: MetalKernelLibrary, device: Any, data: bytes
+    ) -> Any:
+        size = len(data)
+        staging = _get_staging_pool(device).get(size)
+        contents = staging.contents()
+        view = memoryview(contents.as_buffer(staging.length()))
+        view[:size] = data
+        staging.didModifyRange_(Foundation.NSMakeRange(0, size))
+
+        private_buf = device.newBufferWithLength_options_(
+            size, Metal.MTLResourceStorageModePrivate
+        )
+        _blit_copy(lib, staging, private_buf, size)
+        _get_staging_pool(device).release(staging)
+        return private_buf
+
+    def _private_buffer_from_tensor(
+        tensor: torch.Tensor,
+        lib: MetalKernelLibrary,
+        device: Any,
+        *,
+        cache: bool,
+    ) -> Any:
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        if cache and tensor in _WEIGHT_BUFFER_CACHE:
+            return _WEIGHT_BUFFER_CACHE[tensor]
+
+        if tensor.is_mps:
+            staging = mps_tensor_to_metal_buffer(tensor, device)
+            size = staging.length()
+            private_buf = device.newBufferWithLength_options_(
+                size, Metal.MTLResourceStorageModePrivate
+            )
+            _blit_copy(lib, staging, private_buf, size)
+        else:
+            data = tensor.detach().cpu().numpy().tobytes()
+            private_buf = _private_buffer_from_bytes(lib, device, data)
+
+        if cache:
+            _WEIGHT_BUFFER_CACHE[tensor] = private_buf
+        return private_buf
+
+    def _params_buffer(lib: MetalKernelLibrary, device: Any, params: np.ndarray) -> Any:
+        return _private_buffer_from_bytes(lib, device, params.tobytes())
 
     def pack_fp4_weights(
         weight: torch.Tensor,
@@ -1119,7 +1328,6 @@ if HAS_METAL and HAS_MPS:
         require_mps()
 
         lib = get_default_library()
-        _ensure_kernel_compiled(lib, "fp4_gemm", _FP4_GEMM_KERNEL)
 
         orig_shape = A.shape
         K = orig_shape[-1]
@@ -1130,37 +1338,15 @@ if HAS_METAL and HAS_MPS:
         A_2d = A.reshape(M, K).half().contiguous()
         N = B_packed.shape[1]
 
-        # Allocate output
-        C = torch.empty((M, N), dtype=torch.float16, device="mps")
+        M_dispatch = round_up(M, 8)
+        if M_dispatch != M:
+            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
 
-        device = lib.device
-
-        # Convert tensors to Metal buffers
-        A_buf = mps_tensor_to_metal_buffer(A_2d, device)
-        B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-        S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
-        C_buf = mps_tensor_to_metal_buffer(C, device)
-
-        # Create params buffer
-        params = np.array([M, N, K, group_size], dtype=np.uint32)
-        params_buf = device.newBufferWithBytes_length_options_(
-            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
+        C = dispatch_gemm_fp4(
+            lib, A_2d, B_packed, scales, M_dispatch, N, K, group_size
         )
-
-        # Compute grid
-        grid_m = (M + TILE_M - 1) // TILE_M
-        grid_n = (N + TILE_N - 1) // TILE_N
-
-        # Dispatch
-        dispatch_kernel(
-            lib,
-            function_name="marlin_gemm_fp4",
-            grid=(grid_n, grid_m, 1),
-            threadgroup=(THREADS_PER_TG, 1, 1),
-            buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
-            wait=True,
-        )
-
+        if M_dispatch != M:
+            C = C[:M, :]
         out_shape = list(orig_shape[:-1]) + [N]
         return C.reshape(out_shape)
 
@@ -1216,22 +1402,29 @@ if HAS_METAL and HAS_MPS:
         A_2d = A.reshape(M, K).half().contiguous()
         N = B_packed.shape[1]
 
-        C = torch.empty((M, N), dtype=torch.float16, device="mps")
+        M_dispatch = round_up(M, 8)
+        if M_dispatch != M:
+            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
+
+        C = torch.empty((M_dispatch, N), dtype=torch.float16, device="mps")
 
         device = lib.device
 
-        A_buf = mps_tensor_to_metal_buffer(A_2d, device)
-        B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-        S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
-        Z_buf = mps_tensor_to_metal_buffer(zeros.half().contiguous(), device)
+        A_buf = _private_buffer_from_tensor(A_2d, lib, device, cache=False)
+        B_packed_contig = B_packed.contiguous()
+        B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+        scales_half = scales if scales.dtype == torch.float16 else scales.half()
+        scales_half = scales_half.contiguous()
+        S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
+        zeros_half = zeros if zeros.dtype == torch.float16 else zeros.half()
+        zeros_half = zeros_half.contiguous()
+        Z_buf = _private_buffer_from_tensor(zeros_half, lib, device, cache=True)
         C_buf = mps_tensor_to_metal_buffer(C, device)
 
-        params = np.array([M, N, K, group_size], dtype=np.uint32)
-        params_buf = device.newBufferWithBytes_length_options_(
-            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-        )
+        params = np.array([M_dispatch, N, K, group_size], dtype=np.uint32)
+        params_buf = _params_buffer(lib, device, params)
 
-        grid_m = (M + TILE_M - 1) // TILE_M
+        grid_m = (M_dispatch + TILE_M - 1) // TILE_M
         grid_n = (N + TILE_N - 1) // TILE_N
 
         dispatch_kernel(
@@ -1242,6 +1435,9 @@ if HAS_METAL and HAS_MPS:
             buffers=[A_buf, B_buf, S_buf, Z_buf, C_buf, params_buf],
             wait=True,
         )
+
+        if M_dispatch != M:
+            C = C[:M, :]
 
         out_shape = list(orig_shape[:-1]) + [N]
         return C.reshape(out_shape)
@@ -1287,14 +1483,15 @@ if HAS_METAL and HAS_MPS:
 
         device = lib.device
 
-        B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-        S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
+        B_packed_contig = B_packed.contiguous()
+        B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+        scales_half = scales if scales.dtype == torch.float16 else scales.half()
+        scales_half = scales_half.contiguous()
+        S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
         out_buf = mps_tensor_to_metal_buffer(out, device)
 
         params = np.array([K, N, group_size], dtype=np.uint32)
-        params_buf = device.newBufferWithBytes_length_options_(
-            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-        )
+        params_buf = _params_buffer(lib, device, params)
 
         dispatch_kernel(
             lib,
@@ -1521,13 +1718,11 @@ if HAS_METAL and HAS_MPS:
 
         device = lib.device
 
-        x_buf = mps_tensor_to_metal_buffer(x_2d, device)
+        x_buf = _private_buffer_from_tensor(x_2d, lib, device, cache=False)
         out_buf = mps_tensor_to_metal_buffer(out, device)
 
         params = np.array([n, 1 if normalize else 0], dtype=np.uint32)
-        params_buf = device.newBufferWithBytes_length_options_(
-            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-        )
+        params_buf = _params_buffer(lib, device, params)
 
         # Select kernel based on block size
         kernel_name = f"hadamard_{block_size}"
@@ -1592,15 +1787,16 @@ if HAS_METAL and HAS_MPS:
 
         device = lib.device
 
-        A_buf = mps_tensor_to_metal_buffer(A_flat, device)
-        B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-        S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
+        A_buf = _private_buffer_from_tensor(A_flat, lib, device, cache=False)
+        B_packed_contig = B_packed.contiguous()
+        B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+        scales_half = scales if scales.dtype == torch.float16 else scales.half()
+        scales_half = scales_half.contiguous()
+        S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
         out_buf = mps_tensor_to_metal_buffer(out, device)
 
         params = np.array([K, N, group_size], dtype=np.uint32)
-        params_buf = device.newBufferWithBytes_length_options_(
-            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-        )
+        params_buf = _params_buffer(lib, device, params)
 
         grid_x = (N + 255) // 256
 

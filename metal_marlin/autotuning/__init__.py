@@ -55,6 +55,7 @@ from .heuristics import (
 )
 from .tile_search import (
     DEFAULT_CONFIG,
+    GPU_FAMILY_TILE_CONFIG,
     TILE_CONFIGS,
     BenchmarkResult,
     TileConfig,
@@ -89,5 +90,6 @@ __all__ = [
     "select_best_heuristic",
     # Constants
     "DEFAULT_CONFIG",
+    "GPU_FAMILY_TILE_CONFIG",
     "TILE_CONFIGS",
 ]

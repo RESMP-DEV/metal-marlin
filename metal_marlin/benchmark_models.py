@@ -142,11 +142,19 @@ def detect_model_type(config: Any) -> str:
 
     Returns: "dense", "moe", or "moe-mtp"
     """
-    is_moe = getattr(config, "is_moe", False) or (
-        getattr(config, "num_experts", None) is not None and config.num_experts > 1
+    # Check various MoE config field names used by different models
+    num_experts = (
+        getattr(config, "num_experts", None)
+        or getattr(config, "n_routed_experts", None)  # GLM-4.7-Flash style
+        or getattr(config, "num_local_experts", None)  # Mixtral style
     )
-    has_mtp = getattr(config, "has_mtp", False) or (
-        getattr(config, "num_mtp_heads", None) is not None and config.num_mtp_heads > 0
+    is_moe = getattr(config, "is_moe", False) or (num_experts is not None and num_experts > 1)
+    has_mtp = (
+        getattr(config, "has_mtp", False)
+        or (getattr(config, "num_mtp_heads", None) is not None and config.num_mtp_heads > 0)
+        or (
+            getattr(config, "num_nextn_predict_layers", None) is not None  # GLM MTP
+        )
     )
 
     if is_moe and has_mtp:
@@ -307,9 +315,9 @@ def load_calibration_data(calibration: str) -> list[str]:
                     break
             return texts
         except Exception:
-            calibration = "wikitext-2"
+            calibration = "bartowski-v3"
 
-    # Default: wikitext-2 (full training split)
+    # Default: bartowski-v3 (multi-domain)
     from .eval_perplexity import load_wikitext2
 
     return load_wikitext2()
@@ -358,9 +366,9 @@ def load_eval_data(
                     break
             return texts
         except Exception:
-            dataset = "wikitext-2"
+            dataset = "bartowski-v3"
 
-    # Default: wikitext-2
+    # Default: bartowski-v3 (multi-domain)
     from .eval_perplexity import load_wikitext2
 
     return load_wikitext2(num_samples)
@@ -467,7 +475,7 @@ def benchmark_model(
     """
     import tempfile
 
-    from .hf_loader import convert_model_to_fp4, download_model, load_model_config
+    from .hf_loader import download_model, load_model_config
 
     if verbose:
         print(f"[1/7] Loading model config: {model_id}")
@@ -532,7 +540,7 @@ def benchmark_model(
     # Quantize to Metal Marlin FP4
     # =========================================================================
     if verbose:
-        print("[5/7] Quantizing to Metal Marlin FP4")
+        print("[5/7] Quantizing to Metal Marlin FP4 (parallel)")
 
     if output_dir is None:
         temp_dir = tempfile.mkdtemp(prefix="metal_marlin_")
@@ -542,7 +550,11 @@ def benchmark_model(
         output_dir.mkdir(parents=True, exist_ok=True)
 
     quant_start = time.perf_counter()
-    stats = convert_model_to_fp4(
+
+    # Use parallel quantization with RAM management
+    from .hf_loader import convert_model_parallel
+
+    stats = convert_model_parallel(
         model_path,
         output_dir,
         group_size=128,
@@ -927,6 +939,118 @@ def _download_gguf_model(
     return output_path, size_gb
 
 
+def _run_llama_cpp_perplexity(
+    gguf_path: Path,
+    max_length: int,
+    verbose: bool = True,
+) -> float | None:
+    """
+    Run actual llama.cpp perplexity via CLI if available.
+
+    Looks for llama-perplexity or llama.cpp/build/bin/llama-perplexity.
+
+    Returns:
+        Perplexity value or None if llama.cpp not available
+    """
+    import shutil
+    import subprocess
+
+    # Try to find llama-perplexity binary
+    llama_perplexity = shutil.which("llama-perplexity")
+    if not llama_perplexity:
+        # Check common build locations
+        common_paths = [
+            Path.home() / "llama.cpp" / "build" / "bin" / "llama-perplexity",
+            Path.home() / "llama.cpp" / "llama-perplexity",
+            Path("/usr/local/bin/llama-perplexity"),
+            Path("/opt/homebrew/bin/llama-perplexity"),
+        ]
+        for p in common_paths:
+            if p.exists():
+                llama_perplexity = str(p)
+                break
+
+    if not llama_perplexity:
+        return None
+
+    if verbose:
+        print(f"  Using llama.cpp CLI: {llama_perplexity}")
+
+    # Create a small test file for perplexity
+    import tempfile
+
+    test_text = """The quick brown fox jumps over the lazy dog.
+Machine learning is transforming software development.
+Python is a popular programming language for data science.
+Neural networks can approximate complex functions."""
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write(test_text)
+        test_file = f.name
+
+    try:
+        # Run perplexity computation
+        result = subprocess.run(
+            [
+                llama_perplexity,
+                "-m",
+                str(gguf_path),
+                "-f",
+                test_file,
+                "-c",
+                str(max_length),
+                "--chunks",
+                "4",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout
+        )
+
+        if result.returncode == 0:
+            # Parse output for perplexity value
+            # llama.cpp outputs: "perplexity: X.XXXX"
+            for line in result.stdout.split("\n"):
+                if "perplexity:" in line.lower() or "ppl" in line.lower():
+                    parts = line.split()
+                    for i, part in enumerate(parts):
+                        if "perplexity" in part.lower() or part == "ppl":
+                            try:
+                                # Next part should be the number
+                                ppl = float(parts[i + 1].strip(",:="))
+                                if verbose:
+                                    print(f"  llama.cpp PPL: {ppl:.4f}")
+                                return ppl
+                            except (IndexError, ValueError):
+                                pass
+            # Try final perplexity line format
+            for line in reversed(result.stdout.split("\n")):
+                if "final" in line.lower() and "ppl" in line.lower():
+                    try:
+                        # Format: "Final estimate: PPL = X.XXXX"
+                        ppl = float(line.split("=")[-1].strip())
+                        if verbose:
+                            print(f"  llama.cpp PPL: {ppl:.4f}")
+                        return ppl
+                    except ValueError:
+                        pass
+
+        if verbose:
+            print(f"  Warning: llama.cpp perplexity failed: {result.stderr[:200]}")
+        return None
+
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print("  Warning: llama.cpp perplexity timed out")
+        return None
+    except Exception as e:
+        if verbose:
+            print(f"  Warning: llama.cpp perplexity error: {e}")
+        return None
+    finally:
+        Path(test_file).unlink(missing_ok=True)
+
+
 def _benchmark_gguf(
     gguf_path: Path,
     texts: list[str],
@@ -934,7 +1058,10 @@ def _benchmark_gguf(
     verbose: bool = True,
 ) -> tuple[float, float, float]:
     """
-    Benchmark GGUF model using llama-cpp-python.
+    Benchmark GGUF model using llama.cpp CLI or llama-cpp-python.
+
+    Prefers llama.cpp CLI for accurate perplexity, falls back to Python bindings
+    for throughput measurement and estimates for perplexity.
 
     Args:
         gguf_path: Path to GGUF file
@@ -945,8 +1072,11 @@ def _benchmark_gguf(
     Returns:
         (perplexity, throughput_tok_s, memory_gb)
     """
+    # Try llama.cpp CLI first for accurate perplexity
+    ppl = _run_llama_cpp_perplexity(gguf_path, max_length, verbose)
+    use_cli_ppl = ppl is not None
 
-    # Try llama-cpp-python first
+    # Try llama-cpp-python for throughput
     try:
         from llama_cpp import Llama
 
@@ -961,18 +1091,19 @@ def _benchmark_gguf(
             verbose=False,
         )
 
-        # Note: llama-cpp-python doesn't expose per-token logits easily.
-        # For production use, you'd call llama.cpp CLI `perplexity` command.
-        # Here we use estimates based on quant type from community benchmarks.
-        quant_name = gguf_path.stem.split("-")[-1].upper()
-        ppl_estimates = {
-            "Q4_K_M": 7.5,
-            "Q4_0": 8.0,
-            "IQ4_XS": 7.3,
-            "Q5_K_M": 7.0,
-            "Q6_K": 6.8,
-        }
-        ppl = ppl_estimates.get(quant_name, 7.5)
+        # If we didn't get CLI perplexity, use estimates
+        if not use_cli_ppl:
+            quant_name = gguf_path.stem.split("-")[-1].upper()
+            ppl_estimates = {
+                "Q4_K_M": 7.5,
+                "Q4_0": 8.0,
+                "IQ4_XS": 7.3,
+                "Q5_K_M": 7.0,
+                "Q6_K": 6.8,
+            }
+            ppl = ppl_estimates.get(quant_name, 7.5)
+            if verbose:
+                print(f"  GGUF PPL (estimated): {ppl:.4f}")
 
         # Measure throughput
         if verbose:
@@ -1229,9 +1360,9 @@ def main():
     parser.add_argument(
         "--calibration",
         type=str,
-        default="wikitext-2",
-        choices=["wikitext-2", "bartowski-v3", "c4"],
-        help="Calibration/evaluation dataset",
+        default="bartowski-v3",
+        choices=["bartowski-v3", "wikitext-2", "c4"],
+        help="Calibration/evaluation dataset (default: bartowski-v3)",
     )
     parser.add_argument(
         "--samples",

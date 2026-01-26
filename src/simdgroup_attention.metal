@@ -33,8 +33,99 @@
 
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
+#include "bf16_compat.metal"
 
 using namespace metal;
+
+#ifdef USE_BF16_INPUTS
+using input_t = bf16_t;
+using output_t = ushort;
+using simdgroup_matrix_t = simdgroup_matrix<float, 8, 8>;
+#else
+using input_t = half;
+using output_t = half;
+using simdgroup_matrix_t = simdgroup_matrix<half, 8, 8>;
+#endif
+
+inline half4 half4_load(device const half* src) {
+    return *reinterpret_cast<device const half4*>(src);
+}
+
+#ifdef USE_BF16_INPUTS
+inline float4 bf16_load_as_float4(device const ushort* src) {
+    ushort4 packed = *reinterpret_cast<device const ushort4*>(src);
+    return bf16x4_to_float4(packed);
+}
+
+inline float input_to_float(input_t v) {
+    return bf16_to_float(v);
+}
+
+inline float4 load_input4(device const input_t* src) {
+    return bf16_load_as_float4(reinterpret_cast<device const ushort*>(src));
+}
+
+inline float4 load_input4(threadgroup const input_t* src) {
+    ushort4 packed = *reinterpret_cast<threadgroup const ushort4*>(src);
+    return bf16x4_to_float4(packed);
+}
+
+inline void bf16_store_from_float8(device ushort* dst, float4 lo, float4 hi) {
+    ushort4 lo_packed = float4_to_bf16x4_rne(lo);
+    ushort4 hi_packed = float4_to_bf16x4_rne(hi);
+    *reinterpret_cast<device ushort4*>(dst) = lo_packed;
+    *reinterpret_cast<device ushort4*>(dst + 4) = hi_packed;
+}
+
+inline void store_output_scalar(device ushort* dst, uint idx, float val) {
+    dst[idx] = bf16_from_float_rne(val).bits;
+}
+#else
+inline float input_to_float(input_t v) {
+    return float(v);
+}
+
+inline float4 load_input4(device const input_t* src) {
+    return float4(half4_load(reinterpret_cast<device const half*>(src)));
+}
+
+inline float4 load_input4(threadgroup const input_t* src) {
+    return float4(*reinterpret_cast<threadgroup const half4*>(src));
+}
+
+inline void store_output_scalar(device half* dst, uint idx, float val) {
+    dst[idx] = half(val);
+}
+#endif
+
+#ifdef USE_BF16_INPUTS
+inline void store_output_bf16_vectorized(device ushort* dst,
+                                         uint base,
+                                         uint lane_id,
+                                         uint elems_per_lane,
+                                         thread const float* vals,
+                                         uint head_dim) {
+    if (elems_per_lane == 4 && ((lane_id & 1u) == 0u)) {
+        uint d0 = lane_id * elems_per_lane;
+        float4 lo = float4(vals[0], vals[1], vals[2], vals[3]);
+        float4 hi = float4(simd_shuffle_xor(vals[0], 1),
+                           simd_shuffle_xor(vals[1], 1),
+                           simd_shuffle_xor(vals[2], 1),
+                           simd_shuffle_xor(vals[3], 1));
+        if (d0 + 7 < head_dim) {
+            bf16_store_from_float8(dst + base + d0, lo, hi);
+            return;
+        }
+    }
+
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        uint d = lane_id * elems_per_lane + i;
+        if (d < head_dim) {
+            store_output_scalar(dst, base + d, vals[i]);
+        }
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Tile dimensions for simdgroup-based attention
@@ -91,8 +182,8 @@ inline float simd_sum_fast(float val) {
 // ---------------------------------------------------------------------------
 
 kernel void simdgroup_attention_qk(
-    device const half* Q          [[buffer(0)]],   // [batch, heads, seq_q, head_dim]
-    device const half* K          [[buffer(1)]],   // [batch, heads, seq_k, head_dim]
+    device const input_t* Q       [[buffer(0)]],   // [batch, heads, seq_q, head_dim]
+    device const input_t* K       [[buffer(1)]],   // [batch, heads, seq_k, head_dim]
     device half* S                [[buffer(2)]],   // [batch, heads, seq_q, seq_k]
     constant uint& batch          [[buffer(3)]],
     constant uint& num_heads      [[buffer(4)]],
@@ -140,8 +231,8 @@ kernel void simdgroup_attention_qk(
     // Threadgroup memory for Q and K tiles
     // Q tile: [TILE_Q_SG][head_dim]
     // K tile: [TILE_K_SG][head_dim] (double-buffered)
-    threadgroup half Q_tile[TILE_Q_SG][HEAD_DIM_MAX_SG];
-    threadgroup half K_tile[2][TILE_K_SG][HEAD_DIM_MAX_SG];
+    threadgroup input_t Q_tile[TILE_Q_SG][HEAD_DIM_MAX_SG];
+    threadgroup input_t K_tile[2][TILE_K_SG][HEAD_DIM_MAX_SG];
 
     // Cooperative Q tile load (entire threadgroup loads the Q block)
     {
@@ -157,7 +248,7 @@ kernel void simdgroup_attention_qk(
                     Q_tile[q_row][q_col] = Q[b * stride_b + head * stride_h +
                                              global_q_row * stride_q + q_col];
                 } else {
-                    Q_tile[q_row][q_col] = half(0);
+                    Q_tile[q_row][q_col] = input_t(0.0f);
                 }
             }
         }
@@ -175,7 +266,7 @@ kernel void simdgroup_attention_qk(
                 if (k_row < seq_k) {
                     K_tile[0][k_row][k_col] = K[k_base + k_row * k_stride_k + k_col];
                 } else {
-                    K_tile[0][k_row][k_col] = half(0);
+                    K_tile[0][k_row][k_col] = input_t(0.0f);
                 }
             }
         }
@@ -204,7 +295,7 @@ kernel void simdgroup_attention_qk(
                     if (global_k_row < seq_k) {
                         K_tile[buf_load][k_row][k_col] = K[k_base + global_k_row * k_stride_k + k_col];
                     } else {
-                        K_tile[buf_load][k_row][k_col] = half(0);
+                        K_tile[buf_load][k_row][k_col] = input_t(0.0f);
                     }
                 }
             }
@@ -270,8 +361,8 @@ kernel void simdgroup_attention_qk(
                         for (uint i = 0; i < elems_per_lane; ++i) {
                             uint d = simd_lane * elems_per_lane + i;
                             if (d < head_dim) {
-                                float q_val = float(Q_tile[simd_id * Q_ROWS_PER_SG + qi][d]);
-                                float k_val = float(K_tile[buf_compute][k_local_start + ki][d]);
+                                float q_val = input_to_float(Q_tile[simd_id * Q_ROWS_PER_SG + qi][d]);
+                                float k_val = input_to_float(K_tile[buf_compute][k_local_start + ki][d]);
                                 dot += q_val * k_val;
                             }
                         }
@@ -334,10 +425,10 @@ constant constexpr uint KV_TILE_FA = 32;        // K/V rows per tile
 constant constexpr uint THREADS_FA = 128;       // 4 simdgroups
 
 kernel void simdgroup_flash_attention(
-    device const half* Q          [[buffer(0)]],
-    device const half* K          [[buffer(1)]],
-    device const half* V          [[buffer(2)]],
-    device half* O                [[buffer(3)]],
+    device const input_t* Q       [[buffer(0)]],
+    device const input_t* K       [[buffer(1)]],
+    device const input_t* V       [[buffer(2)]],
+    device output_t* O            [[buffer(3)]],
     constant uint& batch          [[buffer(4)]],
     constant uint& num_heads      [[buffer(5)]],
     constant uint& seq_q          [[buffer(6)]],
@@ -369,9 +460,9 @@ kernel void simdgroup_flash_attention(
     const uint k_stride_k = head_dim;
 
     // Threadgroup memory
-    threadgroup half Q_tile[Q_ROWS_PER_TG_FA][HEAD_DIM_MAX_SG];
-    threadgroup half K_tile[2][KV_TILE_FA][HEAD_DIM_MAX_SG];
-    threadgroup half V_tile[2][KV_TILE_FA][HEAD_DIM_MAX_SG];
+    threadgroup input_t Q_tile[Q_ROWS_PER_TG_FA][HEAD_DIM_MAX_SG];
+    threadgroup input_t K_tile[2][KV_TILE_FA][HEAD_DIM_MAX_SG];
+    threadgroup input_t V_tile[2][KV_TILE_FA][HEAD_DIM_MAX_SG];
 
     // Load Q tile cooperatively
     {
@@ -387,7 +478,7 @@ kernel void simdgroup_flash_attention(
                     Q_tile[q_row][q_col] = Q[b * q_stride_b + head * q_stride_h +
                                              global_q * q_stride_q + q_col];
                 } else {
-                    Q_tile[q_row][q_col] = half(0);
+                    Q_tile[q_row][q_col] = input_t(0.0f);
                 }
             }
         }
@@ -408,8 +499,8 @@ kernel void simdgroup_flash_attention(
                     V_tile[0][kv_row][kv_col] = V[b * k_stride_b + head * k_stride_h +
                                                    kv_row * k_stride_k + kv_col];
                 } else {
-                    K_tile[0][kv_row][kv_col] = half(0);
-                    V_tile[0][kv_row][kv_col] = half(0);
+                    K_tile[0][kv_row][kv_col] = input_t(0.0f);
+                    V_tile[0][kv_row][kv_col] = input_t(0.0f);
                 }
             }
         }
@@ -429,8 +520,8 @@ kernel void simdgroup_flash_attention(
     float q1_reg[HEAD_DIM_MAX_SG / 32];
     for (uint i = 0; i < elems_per_lane; ++i) {
         uint d = simd_lane * elems_per_lane + i;
-        q0_reg[i] = has_q0 ? float(Q_tile[my_q0][d]) : 0.0f;
-        q1_reg[i] = has_q1 ? float(Q_tile[my_q1][d]) : 0.0f;
+        q0_reg[i] = has_q0 ? input_to_float(Q_tile[my_q0][d]) : 0.0f;
+        q1_reg[i] = has_q1 ? input_to_float(Q_tile[my_q1][d]) : 0.0f;
     }
 
     // Online softmax state (per query row)
@@ -465,8 +556,8 @@ kernel void simdgroup_flash_attention(
                         V_tile[buf_load][kv_row][kv_col] = V[b * k_stride_b + head * k_stride_h +
                                                              global_kv * k_stride_k + kv_col];
                     } else {
-                        K_tile[buf_load][kv_row][kv_col] = half(0);
-                        V_tile[buf_load][kv_row][kv_col] = half(0);
+                        K_tile[buf_load][kv_row][kv_col] = input_t(0.0f);
+                        V_tile[buf_load][kv_row][kv_col] = input_t(0.0f);
                     }
                 }
             }
@@ -485,7 +576,7 @@ kernel void simdgroup_flash_attention(
             float dot1 = 0.0f;
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = simd_lane * elems_per_lane + i;
-                float k_val = float(K_tile[buf_compute][ki][d]);
+                float k_val = input_to_float(K_tile[buf_compute][ki][d]);
                 dot0 += q0_reg[i] * k_val;
                 dot1 += q1_reg[i] * k_val;
             }
@@ -523,7 +614,7 @@ kernel void simdgroup_flash_attention(
             l0 += p;
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = simd_lane * elems_per_lane + i;
-                o0_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                o0_acc[i] += p * input_to_float(V_tile[buf_compute][ki][d]);
             }
         }
         m0 = m0_new;
@@ -542,7 +633,7 @@ kernel void simdgroup_flash_attention(
             l1 += p;
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = simd_lane * elems_per_lane + i;
-                o1_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                o1_acc[i] += p * input_to_float(V_tile[buf_compute][ki][d]);
             }
         }
         m1 = m1_new;
@@ -559,14 +650,36 @@ kernel void simdgroup_flash_attention(
     for (uint i = 0; i < elems_per_lane; ++i) {
         uint d = simd_lane * elems_per_lane + i;
         if (d < head_dim) {
+#ifdef USE_BF16_INPUTS
+            // Store via vectorized BF16 path below.
+#else
             if (has_q0) {
-                O[o_offset + (q_row_base + my_q0) * q_stride_q + d] = half(o0_acc[i] * inv_l0);
+                store_output_scalar(O, o_offset + (q_row_base + my_q0) * q_stride_q + d, o0_acc[i] * inv_l0);
             }
             if (has_q1) {
-                O[o_offset + (q_row_base + my_q1) * q_stride_q + d] = half(o1_acc[i] * inv_l1);
+                store_output_scalar(O, o_offset + (q_row_base + my_q1) * q_stride_q + d, o1_acc[i] * inv_l1);
             }
+#endif
         }
     }
+#ifdef USE_BF16_INPUTS
+    if (has_q0) {
+        float out_vals0[HEAD_DIM_MAX_SG / 32];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals0[i] = o0_acc[i] * inv_l0;
+        }
+        const uint o_row0 = o_offset + (q_row_base + my_q0) * q_stride_q;
+        store_output_bf16_vectorized(O, o_row0, simd_lane, elems_per_lane, out_vals0, head_dim);
+    }
+    if (has_q1) {
+        float out_vals1[HEAD_DIM_MAX_SG / 32];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals1[i] = o1_acc[i] * inv_l1;
+        }
+        const uint o_row1 = o_offset + (q_row_base + my_q1) * q_stride_q;
+        store_output_bf16_vectorized(O, o_row1, simd_lane, elems_per_lane, out_vals1, head_dim);
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -579,9 +692,9 @@ kernel void simdgroup_flash_attention(
 // ---------------------------------------------------------------------------
 
 kernel void simdgroup_attention_pv(
-    device const half* P          [[buffer(0)]],   // [batch, heads, seq_q, seq_k]
-    device const half* V          [[buffer(1)]],   // [batch, heads, seq_k, head_dim]
-    device half* O                [[buffer(2)]],   // [batch, heads, seq_q, head_dim]
+    device const input_t* P       [[buffer(0)]],   // [batch, heads, seq_q, seq_k]
+    device const input_t* V       [[buffer(1)]],   // [batch, heads, seq_k, head_dim]
+    device output_t* O            [[buffer(2)]],   // [batch, heads, seq_q, head_dim]
     constant uint& batch          [[buffer(3)]],
     constant uint& num_heads      [[buffer(4)]],
     constant uint& seq_q          [[buffer(5)]],
@@ -618,15 +731,23 @@ kernel void simdgroup_attention_pv(
     const uint o_stride_q = head_dim;
 
     // Threadgroup memory for P and V tiles
-    threadgroup half P_tile[TILE_Q_SG][TILE_K_SG];  // [query_rows, k_tile]
-    threadgroup half V_tile[2][TILE_K_SG][HEAD_DIM_MAX_SG];  // double-buffered
+    threadgroup input_t P_tile[TILE_Q_SG][TILE_K_SG];  // [query_rows, k_tile]
+    threadgroup input_t V_tile[2][TILE_K_SG][HEAD_DIM_MAX_SG];  // double-buffered
+#ifdef USE_BF16_INPUTS
+    threadgroup float P_frag_smem[SIMDGROUPS_ATT_SG][8][8];
+    threadgroup float V_frag_smem[SIMDGROUPS_ATT_SG][8][8];
+#endif
 
     // Initialize accumulators (8×head_dim per simdgroup)
     // We accumulate in 8×8 simdgroup_matrix tiles
     const uint hd_tiles = head_dim / 8;
-    simdgroup_matrix<half, 8, 8> acc[HEAD_DIM_MAX_SG / 8];
+    simdgroup_matrix_t acc[HEAD_DIM_MAX_SG / 8];
     for (uint hi = 0; hi < hd_tiles; ++hi) {
+#ifdef USE_BF16_INPUTS
+        acc[hi] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+#else
         acc[hi] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+#endif
     }
 
     // Preload first V tile
@@ -642,7 +763,7 @@ kernel void simdgroup_attention_pv(
                     V_tile[0][k_row][v_col] = V[b * v_stride_b + head * v_stride_h +
                                                  k_row * v_stride_k + v_col];
                 } else {
-                    V_tile[0][k_row][v_col] = half(0);
+                    V_tile[0][k_row][v_col] = input_t(0.0f);
                 }
             }
         }
@@ -672,7 +793,7 @@ kernel void simdgroup_attention_pv(
                         P_tile[p_row][p_col] = P[b * p_stride_b + head * p_stride_h +
                                                   global_q * p_stride_q + global_k];
                     } else {
-                        P_tile[p_row][p_col] = half(0);
+                        P_tile[p_row][p_col] = input_t(0.0f);
                     }
                 }
             }
@@ -693,7 +814,7 @@ kernel void simdgroup_attention_pv(
                         V_tile[buf_load][k_row][v_col] = V[b * v_stride_b + head * v_stride_h +
                                                            global_k * v_stride_k + v_col];
                     } else {
-                        V_tile[buf_load][k_row][v_col] = half(0);
+                        V_tile[buf_load][k_row][v_col] = input_t(0.0f);
                     }
                 }
             }
@@ -707,6 +828,49 @@ kernel void simdgroup_attention_pv(
         // Tile in 8×8 blocks along K and head_dim dimensions
         const uint k_blocks = k_len / 8;
         for (uint kb = 0; kb < k_blocks; ++kb) {
+#ifdef USE_BF16_INPUTS
+            // Load P fragment: P[sg_q_offset:sg_q_offset+8, kb*8:(kb+1)*8]
+            if (simd_lane < 8) {
+                uint row = simd_lane;
+                float4 lo = load_input4(&P_tile[simd_id * Q_ROWS_PER_SG + row][kb * 8]);
+                float4 hi = load_input4(&P_tile[simd_id * Q_ROWS_PER_SG + row][kb * 8 + 4]);
+                P_frag_smem[simd_id][row][0] = lo.x;
+                P_frag_smem[simd_id][row][1] = lo.y;
+                P_frag_smem[simd_id][row][2] = lo.z;
+                P_frag_smem[simd_id][row][3] = lo.w;
+                P_frag_smem[simd_id][row][4] = hi.x;
+                P_frag_smem[simd_id][row][5] = hi.y;
+                P_frag_smem[simd_id][row][6] = hi.z;
+                P_frag_smem[simd_id][row][7] = hi.w;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            simdgroup_matrix_t p_frag;
+            simdgroup_load(p_frag, &P_frag_smem[simd_id][0][0], 8);
+
+            // For each head_dim block, load V fragment and accumulate
+            for (uint hi = 0; hi < hd_tiles; ++hi) {
+                if (simd_lane < 8) {
+                    uint row = simd_lane;
+                    float4 v_lo = load_input4(&V_tile[buf_compute][kb * 8 + row][hi * 8]);
+                    float4 v_hi = load_input4(&V_tile[buf_compute][kb * 8 + row][hi * 8 + 4]);
+                    V_frag_smem[simd_id][row][0] = v_lo.x;
+                    V_frag_smem[simd_id][row][1] = v_lo.y;
+                    V_frag_smem[simd_id][row][2] = v_lo.z;
+                    V_frag_smem[simd_id][row][3] = v_lo.w;
+                    V_frag_smem[simd_id][row][4] = v_hi.x;
+                    V_frag_smem[simd_id][row][5] = v_hi.y;
+                    V_frag_smem[simd_id][row][6] = v_hi.z;
+                    V_frag_smem[simd_id][row][7] = v_hi.w;
+                }
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+
+                simdgroup_matrix_t v_frag;
+                simdgroup_load(v_frag, &V_frag_smem[simd_id][0][0], 8);
+
+                simdgroup_multiply_accumulate(acc[hi], p_frag, v_frag, acc[hi]);
+            }
+#else
             // Load P fragment: P[sg_q_offset:sg_q_offset+8, kb*8:(kb+1)*8]
             simdgroup_matrix<half, 8, 8> p_frag;
             simdgroup_load(p_frag, &P_tile[simd_id * Q_ROWS_PER_SG][kb * 8], TILE_K_SG);
@@ -718,6 +882,7 @@ kernel void simdgroup_attention_pv(
 
                 simdgroup_multiply_accumulate(acc[hi], p_frag, v_frag, acc[hi]);
             }
+#endif
         }
 
         // Handle remaining K elements (if K tile not multiple of 8)
@@ -728,13 +893,47 @@ kernel void simdgroup_attention_pv(
     }
 
     // Store results - store each simdgroup_matrix tile to global memory
+#ifdef USE_BF16_INPUTS
+    threadgroup float out_staging[8][8];
+#else
     threadgroup half out_staging[8][8];
+#endif
 
     for (uint hi = 0; hi < hd_tiles; ++hi) {
         // Store accumulator to threadgroup staging buffer
         simdgroup_store(acc[hi], &out_staging[0][0], 8);
         simdgroup_barrier(mem_flags::mem_threadgroup);
 
+#ifdef USE_BF16_INPUTS
+        if (simd_lane < 8) {
+            uint local_q = simd_lane;
+            uint global_q = sg_q_start + local_q;
+            uint global_d = hi * 8;
+            if (global_q < seq_q && global_d + 7 < head_dim) {
+                float4 lo = float4(out_staging[local_q][0],
+                                   out_staging[local_q][1],
+                                   out_staging[local_q][2],
+                                   out_staging[local_q][3]);
+                float4 hi_vals = float4(out_staging[local_q][4],
+                                        out_staging[local_q][5],
+                                        out_staging[local_q][6],
+                                        out_staging[local_q][7]);
+                bf16_store_from_float8(O + b * o_stride_b + head * o_stride_h +
+                                           global_q * o_stride_q + global_d,
+                                       lo, hi_vals);
+            } else if (global_q < seq_q) {
+                for (uint local_d = 0; local_d < 8; ++local_d) {
+                    uint g_d = global_d + local_d;
+                    if (g_d < head_dim) {
+                        store_output_scalar(O,
+                                            b * o_stride_b + head * o_stride_h +
+                                                global_q * o_stride_q + g_d,
+                                            out_staging[local_q][local_d]);
+                    }
+                }
+            }
+        }
+#else
         // Write to global memory (each thread writes 2 elements)
         for (uint elem = simd_lane; elem < 64; elem += 32) {
             uint local_q = elem / 8;
@@ -747,6 +946,7 @@ kernel void simdgroup_attention_pv(
                   global_q * o_stride_q + global_d] = out_staging[local_q][local_d];
             }
         }
+#endif
         simdgroup_barrier(mem_flags::mem_threadgroup);
     }
 }

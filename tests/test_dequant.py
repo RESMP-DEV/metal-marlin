@@ -384,6 +384,97 @@ def _compile_fp8_shader():
     return device, library
 
 
+def _compile_bf16_shader():
+    """Compile the bf16_compat.metal shader and return (device, library)."""
+    import Metal
+
+    device = Metal.MTLCreateSystemDefaultDevice()
+    assert device is not None, "No Metal device found"
+
+    shader_path = Path(__file__).parent.parent / "src" / "bf16_compat.metal"
+    source = shader_path.read_text()
+    options = Metal.MTLCompileOptions.new()
+    options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
+    library, err = device.newLibraryWithSource_options_error_(source, options, None)
+    assert err is None, f"Metal compile error: {err}"
+    return device, library
+
+
+def _bf16_rne_bits(val: np.float32) -> np.uint16:
+    bits = np.array([val], dtype=np.float32).view(np.uint32)[0]
+    exp_bits = (bits >> 23) & 0xFF
+    mantissa = bits & 0x007FFFFF
+
+    if exp_bits == 0xFF:
+        if mantissa != 0:
+            return np.uint16((bits >> 16) | 0x0040)
+        return np.uint16(bits >> 16)
+
+    rounding = np.uint32(0x8000 + ((bits >> 16) & 1))
+    rounded = np.uint32(bits + rounding)
+    return np.uint16(rounded >> 16)
+
+
+def _bf16_roundtrip(val: np.float32) -> np.float32:
+    bf16_bits = np.uint32(_bf16_rne_bits(val)) << 16
+    return np.array([bf16_bits], dtype=np.uint32).view(np.float32)[0]
+
+
+def run_metal_bf16_direct_roundtrip(values: np.ndarray) -> np.ndarray:
+    """Run bf16_roundtrip_direct_float8 kernel on Metal hardware."""
+    import Metal
+
+    values = np.asarray(values, dtype=np.float32)
+    assert values.size % 8 == 0, "Input length must be a multiple of 8"
+
+    device, library = _compile_bf16_shader()
+    func = library.newFunctionWithName_("bf16_roundtrip_direct_float8")
+    assert func is not None
+    pipeline, err = device.newComputePipelineStateWithFunction_error_(func, None)
+    assert err is None
+
+    input_bytes = values.tobytes()
+    buf_input = device.newBufferWithBytes_length_options_(
+        input_bytes, len(input_bytes), Metal.MTLResourceStorageModeShared
+    )
+
+    output_size = values.nbytes
+    buf_output = device.newBufferWithLength_options_(
+        output_size, Metal.MTLResourceStorageModeShared
+    )
+
+    scratch_size = values.size * 2
+    buf_scratch = device.newBufferWithLength_options_(
+        scratch_size, Metal.MTLResourceStorageModeShared
+    )
+
+    buf_num_elements = device.newBufferWithBytes_length_options_(
+        np.array([values.size], dtype=np.uint32).tobytes(),
+        4,
+        Metal.MTLResourceStorageModeShared,
+    )
+
+    queue = device.newCommandQueue()
+    cmd_buf = queue.commandBuffer()
+    encoder = cmd_buf.computeCommandEncoder()
+    encoder.setComputePipelineState_(pipeline)
+    encoder.setBuffer_offset_atIndex_(buf_input, 0, 0)
+    encoder.setBuffer_offset_atIndex_(buf_output, 0, 1)
+    encoder.setBuffer_offset_atIndex_(buf_scratch, 0, 2)
+    encoder.setBuffer_offset_atIndex_(buf_num_elements, 0, 3)
+
+    num_threads = values.size // 8
+    encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+        Metal.MTLSizeMake(num_threads, 1, 1), Metal.MTLSizeMake(1, 1, 1)
+    )
+    encoder.endEncoding()
+    cmd_buf.commit()
+    cmd_buf.waitUntilCompleted()
+
+    raw = _read_metal_buffer(buf_output, output_size)
+    return np.frombuffer(raw, dtype=np.float32).copy()
+
+
 def run_metal_fp4_all_codes() -> np.ndarray:
     """Run test_fp4_all_codes kernel, returns 16 FP16 values."""
     import Metal
@@ -1554,6 +1645,33 @@ class TestMetalFP8E5M2Kernel:
                 assert np.isinf(ref_out[i])
             else:
                 assert m_bits == e_bits
+
+
+# ============================================================================
+# Test: BF16 compatibility kernels (skipped if PyObjC unavailable)
+# ============================================================================
+
+
+@pytest.mark.skipif(not _check_metal_available(), reason="Metal API (PyObjC) not available")
+class TestMetalBF16Compat:
+    """Verify BF16 direct load/store conversions."""
+
+    def test_direct_roundtrip_float8(self):
+        values = np.array(
+            [0.0, -0.0, 1.0, -2.5, 3.14159, 1e-8, np.inf, np.nan],
+            dtype=np.float32,
+        )
+        expected = np.array([_bf16_roundtrip(v) for v in values], dtype=np.float32)
+        metal_out = run_metal_bf16_direct_roundtrip(values)
+
+        assert metal_out.shape == expected.shape
+        for got, exp in zip(metal_out, expected):
+            if np.isnan(exp):
+                assert np.isnan(got)
+            else:
+                got_bits = np.array([got], dtype=np.float32).view(np.uint32)[0]
+                exp_bits = np.array([exp], dtype=np.float32).view(np.uint32)[0]
+                assert got_bits == exp_bits
 
 
 # ============================================================================

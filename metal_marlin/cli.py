@@ -272,10 +272,7 @@ def bench(model, prompt_len, gen_len, batch_size):
     "--hadamard-kurtosis-threshold",
     default=None,
     type=float,
-    help=(
-        "Apply Hadamard only when excess kurtosis exceeds this threshold "
-        "(mr-gptq only)."
-    ),
+    help=("Apply Hadamard only when excess kurtosis exceeds this threshold (mr-gptq only)."),
 )
 @click.option(
     "--actorder/--no-actorder",
@@ -423,10 +420,7 @@ def quantize(
         if method == "mr-gptq":
             click.echo(f"  Hadamard:     {'disabled' if no_hadamard else 'enabled'}")
             if hadamard_kurtosis_threshold is not None:
-                click.echo(
-                    "  Hadamard kurtosis threshold: "
-                    f"{hadamard_kurtosis_threshold}"
-                )
+                click.echo(f"  Hadamard kurtosis threshold: {hadamard_kurtosis_threshold}")
         if method in ("gptq", "mr-gptq"):
             click.echo(f"  Act-order:    {'enabled' if actorder else 'disabled'}")
             click.echo(f"  Damp:         {damp}")
@@ -784,9 +778,9 @@ def _print_quantization_summary(stats: dict, output_path: str, method: str):
 @click.option(
     "--dataset",
     "-d",
-    default="wikitext2",
-    type=click.Choice(["wikitext2", "c4"]),
-    help="Evaluation dataset",
+    default="bartowski-v3",
+    type=click.Choice(["bartowski-v3", "wikitext2", "c4"]),
+    help="Evaluation dataset (bartowski-v3 recommended)",
 )
 @click.option("--samples", "-s", default=100, type=int, help="Number of evaluation samples")
 @click.option("--context-length", default=2048, type=int, help="Context window size for perplexity")

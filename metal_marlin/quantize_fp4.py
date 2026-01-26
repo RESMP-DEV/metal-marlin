@@ -98,6 +98,7 @@ def quantize_fp4(
     weight: np.ndarray,
     group_size: int = 128,
     activation_ranges: dict[str, tuple[float, float]] | None = None,
+    marlin_layout: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Quantize a 2D weight matrix to FP4 E2M1 with per-group scales.
@@ -114,7 +115,7 @@ def quantize_fp4(
 
     Args:
         weight: FP16/FP32 weight tensor, shape [out_features, in_features]
-        group_size: Elements per quantization group (along in_features axis)
+        group_size: Elements per quantization group (along reduction axis)
         activation_ranges: Optional dict with calibration data:
             - "input_range": (min, max) of input activations seen during calibration
             - "output_range": (min, max) of output activations (optional, for validation)
@@ -122,25 +123,50 @@ def quantize_fp4(
               for robust outlier handling (e.g., 99.9 clips top 0.1%)
             - "smooth_factor": float in [0, 1], blend between weight-only and
               calibration-aware scales (0 = weight-only, 1 = fully calibrated)
+        marlin_layout: If True (default), output Marlin-compatible layout:
+            - packed: [K/8, N] where K=in_features, N=out_features
+            - scales: [K/group_size, N]
+            This transposes the weight and packs along K (input features).
+            If False, use legacy layout [out_features, in_features/8].
 
     Returns:
-        (packed_weights, scales) where:
-        - packed_weights: uint32 array, shape [out_features, in_features // 8]
-          (8 FP4 values packed per uint32)
-        - scales: float16 array, shape [out_features, in_features // group_size]
+        (packed_weights, scales) where layout depends on marlin_layout flag.
     """
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
-    if in_feat % 8 != 0:
-        raise ValueError(f"in_features ({in_feat}) must be divisible by 8")
-    if in_feat % group_size != 0:
-        raise ValueError(f"in_features ({in_feat}) must be divisible by group_size ({group_size})")
+    # For Marlin layout, transpose to [K, N] = [in_feat, out_feat]
+    # and quantize/pack along K (axis 0)
+    if marlin_layout:
+        w = w.T  # [in_feat, out_feat] = [K, N]
+        K, N = w.shape
+        pack_axis_size = K
+        other_axis_size = N
+    else:
+        K, N = in_feat, out_feat  # For error messages
+        pack_axis_size = in_feat
+        other_axis_size = out_feat
 
-    n_groups = in_feat // group_size
+    if pack_axis_size % 8 != 0:
+        raise ValueError(f"Pack axis ({pack_axis_size}) must be divisible by 8")
+    if pack_axis_size % group_size != 0:
+        raise ValueError(
+            f"Pack axis ({pack_axis_size}) must be divisible by group_size ({group_size})"
+        )
 
-    # Reshape for per-group processing: [out_feat, n_groups, group_size]
-    w_grouped = w.reshape(out_feat, n_groups, group_size)
+    n_groups = pack_axis_size // group_size
+
+    # Reshape for per-group processing
+    # marlin_layout: w is [K, N], groups along K → [n_groups, group_size, N]
+    # legacy:        w is [out, in], groups along in → [out, n_groups, group_size]
+    if marlin_layout:
+        # [K, N] → [n_groups, group_size, N]
+        w_grouped = w.reshape(n_groups, group_size, other_axis_size)
+        group_axis = 1  # group elements along axis 1
+    else:
+        # [out, in] → [out, n_groups, group_size]
+        w_grouped = w.reshape(other_axis_size, n_groups, group_size)
+        group_axis = 2  # group elements along axis 2
 
     # Compute per-group scales (max abs value → scale to [-6, 6])
     # FP4 E2M1 max representable magnitude is 6.0
@@ -153,9 +179,11 @@ def quantize_fp4(
         # Compute weight-based scales (baseline)
         if percentile < 100.0:
             # Use percentile for robust outlier handling
-            group_max_weight = np.percentile(np.abs(w_grouped), percentile, axis=2, keepdims=True)
+            group_max_weight = np.percentile(
+                np.abs(w_grouped), percentile, axis=group_axis, keepdims=True
+            )
         else:
-            group_max_weight = np.max(np.abs(w_grouped), axis=2, keepdims=True)
+            group_max_weight = np.max(np.abs(w_grouped), axis=group_axis, keepdims=True)
 
         group_max_weight = np.maximum(group_max_weight, 1e-7)
 
@@ -198,72 +226,128 @@ def quantize_fp4(
             group_max = group_max_weight
     else:
         # Standard weight-only quantization
-        group_max = np.max(np.abs(w_grouped), axis=2, keepdims=True)
+        group_max = np.max(np.abs(w_grouped), axis=group_axis, keepdims=True)
         group_max = np.maximum(group_max, 1e-7)  # Avoid division by zero
 
-    scales = (group_max / 6.0).astype(np.float16).squeeze(-1)  # [out_feat, n_groups]
+    # Squeeze and compute scales
+    # marlin_layout: group_max is [n_groups, 1, N] → scales [n_groups, N]
+    # legacy:        group_max is [out, n_groups, 1] → scales [out, n_groups]
+    scales = (group_max / 6.0).astype(np.float16).squeeze(group_axis)
 
     # Scale weights to [-6, 6] range per group
-    w_scaled = w_grouped / (scales[:, :, None].astype(np.float32))
-    w_scaled = w_scaled.reshape(out_feat, in_feat)
+    w_scaled = w_grouped / group_max.astype(np.float32) * 6.0
+
+    # Reshape back to 2D for quantization
+    if marlin_layout:
+        w_scaled = w_scaled.reshape(pack_axis_size, other_axis_size)  # [K, N]
+    else:
+        w_scaled = w_scaled.reshape(other_axis_size, pack_axis_size)  # [out, in]
 
     # Quantize to FP4 indices
-    fp4_indices = quantize_to_fp4(w_scaled)  # [out_feat, in_feat], dtype=uint8
+    fp4_indices = quantize_to_fp4(w_scaled)  # same shape as w_scaled
 
     # Pack 8 FP4 values into each uint32
     # Layout: [v0, v1, v2, v3, v4, v5, v6, v7] → bits [3:0, 7:4, 11:8, 15:12, 19:16, 23:20, 27:24, 31:28]
-    packed = np.zeros((out_feat, in_feat // 8), dtype=np.uint32)
-    for i in range(8):
-        packed |= fp4_indices[:, i::8].astype(np.uint32) << (i * 4)
+    if marlin_layout:
+        # Pack along axis 0 (K): [K, N] → [K/8, N]
+        packed = np.zeros((pack_axis_size // 8, other_axis_size), dtype=np.uint32)
+        for i in range(8):
+            packed |= fp4_indices[i::8, :].astype(np.uint32) << (i * 4)
+    else:
+        # Pack along axis 1 (in_feat): [out, in] → [out, in/8]
+        packed = np.zeros((other_axis_size, pack_axis_size // 8), dtype=np.uint32)
+        for i in range(8):
+            packed |= fp4_indices[:, i::8].astype(np.uint32) << (i * 4)
 
     return packed, scales
 
 
-def unpack_fp4(packed: np.ndarray, scales: np.ndarray, group_size: int = 128) -> np.ndarray:
+def unpack_fp4(
+    packed: np.ndarray,
+    scales: np.ndarray,
+    group_size: int = 128,
+    marlin_layout: bool | None = None,
+) -> np.ndarray:
     """
     Unpack and dequantize FP4 weights back to float16.
 
-    Supports two scale layouts:
-    - Original layout: scales [out_feat, n_groups] where n_groups = in_feat // group_size
-    - Metal layout: scales [out_feat // group_size, in_feat] for GPU-optimized access
+    Supports two layouts:
+    - Legacy layout: packed [out_feat, in_feat // 8], scales [out_feat, n_groups]
+      Packs along input dimension (axis 1). Returns [out_feat, in_feat].
+    - Marlin layout: packed [K/8, N], scales [K/group_size, N]
+      Packs along K dimension (axis 0). Returns [K, N] which needs transpose
+      to get original [out_feat, in_feat].
 
     Args:
-        packed: uint32 packed weights [out_feat, in_feat // 8]
-        scales: float16 scales (either layout, auto-detected)
+        packed: uint32 packed weights
+        scales: float16 scales
         group_size: Elements per group
+        marlin_layout: If None, auto-detect from scale shapes.
+            If True, expect Marlin layout [K/8, N].
+            If False, expect legacy layout [out, in/8].
 
     Returns:
-        Dequantized float16 weights [out_feat, in_feat]
+        Dequantized float16 weights. Shape depends on layout:
+        - Legacy: [out_feat, in_feat]
+        - Marlin: [K, N] (transpose back to get original shape)
     """
-    out_feat = packed.shape[0]
-    in_feat = packed.shape[1] * 8
+    # Auto-detect layout if not specified
+    if marlin_layout is None:
+        # Marlin layout: packed [K/8, N], scales [K/gs, N]
+        # K = packed.shape[0] * 8, N = packed.shape[1]
+        # scales.shape should be [K/gs, N] = [packed.shape[0] * 8 / gs, packed.shape[1]]
+        K_expected = packed.shape[0] * 8
+        N_expected = packed.shape[1]
+        n_groups_K = K_expected // group_size
+        if scales.shape == (n_groups_K, N_expected):
+            marlin_layout = True
+        else:
+            marlin_layout = False
 
-    # Unpack 8 FP4 values from each uint32
-    fp4_indices = np.zeros((out_feat, in_feat), dtype=np.uint8)
-    for i in range(8):
-        fp4_indices[:, i::8] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
+    if marlin_layout:
+        # Marlin layout: packed [K/8, N], scales [K/gs, N]
+        # Packing is along K (axis 0)
+        K = packed.shape[0] * 8
+        N = packed.shape[1]
 
-    # Dequantize indices to base values
-    values = dequantize_fp4(fp4_indices)  # [out_feat, in_feat]
+        # Unpack 8 FP4 values from each uint32 along K dimension
+        fp4_indices = np.zeros((K, N), dtype=np.uint8)
+        for i in range(8):
+            # Each packed value at [k_group, n] contains 8 consecutive K values
+            fp4_indices[i::8, :] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
 
-    # Detect scale layout from shape
-    if scales.shape[0] == out_feat // group_size and scales.shape[1] == in_feat:
-        # Metal layout: scales [out_feat // group_size, in_feat]
-        # Groups are along output dimension (K)
-        n_groups_k = out_feat // group_size
-        values = values.reshape(n_groups_k, group_size, in_feat)
+        # Dequantize indices to base values
+        values = dequantize_fp4(fp4_indices)  # [K, N]
+
+        # Apply scales: scales [K/gs, N]
+        n_groups = K // group_size
+        values = values.reshape(n_groups, group_size, N)
         scales_expanded = scales[:, None, :].astype(np.float32)
         values = values * scales_expanded
-        values = values.reshape(out_feat, in_feat)
+        values = values.reshape(K, N)
+
+        return values.astype(np.float16)
     else:
-        # Original layout: scales [out_feat, n_groups] where n_groups = in_feat // group_size
+        # Legacy layout: packed [out_feat, in_feat // 8], scales [out_feat, n_groups]
+        out_feat = packed.shape[0]
+        in_feat = packed.shape[1] * 8
+
+        # Unpack 8 FP4 values from each uint32 along in_feat dimension
+        fp4_indices = np.zeros((out_feat, in_feat), dtype=np.uint8)
+        for i in range(8):
+            fp4_indices[:, i::8] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
+
+        # Dequantize indices to base values
+        values = dequantize_fp4(fp4_indices)  # [out_feat, in_feat]
+
+        # Apply scales: scales [out_feat, n_groups] where n_groups = in_feat // group_size
         n_groups = in_feat // group_size
         values = values.reshape(out_feat, n_groups, group_size)
         scales_expanded = scales[:, :, None].astype(np.float32)
         values = values * scales_expanded
         values = values.reshape(out_feat, in_feat)
 
-    return values.astype(np.float16)
+        return values.astype(np.float16)
 
 
 def compute_quantization_error(
@@ -271,9 +355,38 @@ def compute_quantization_error(
     packed: np.ndarray,
     scales: np.ndarray,
     group_size: int = 128,
+    marlin_layout: bool | None = None,
 ) -> dict[str, float]:
-    """Compute quantization error metrics."""
-    reconstructed = unpack_fp4(packed, scales, group_size)
+    """Compute quantization error metrics.
+
+    Args:
+        original: Original weight tensor [out_feat, in_feat].
+        packed: Packed FP4 weights.
+        scales: Per-group scales.
+        group_size: Quantization group size.
+        marlin_layout: If None, auto-detect. If True, packed is [K/8, N]
+            where K=in_feat, N=out_feat. If False, packed is [out, in/8].
+
+    Returns:
+        Dict with mse, rmse, max_error, mean_relative_error.
+    """
+    reconstructed = unpack_fp4(packed, scales, group_size, marlin_layout=marlin_layout)
+
+    # If Marlin layout, reconstructed is [K, N] = [in_feat, out_feat]
+    # Need to transpose back to [out_feat, in_feat] for comparison
+    if marlin_layout is None:
+        # Auto-detect same way as unpack_fp4
+        K_expected = packed.shape[0] * 8
+        N_expected = packed.shape[1]
+        n_groups_K = K_expected // group_size
+        if scales.shape == (n_groups_K, N_expected):
+            marlin_layout = True
+        else:
+            marlin_layout = False
+
+    if marlin_layout:
+        reconstructed = reconstructed.T  # [K, N] -> [N, K] = [out_feat, in_feat]
+
     orig_f32 = original.astype(np.float32)
     recon_f32 = reconstructed.astype(np.float32)
 

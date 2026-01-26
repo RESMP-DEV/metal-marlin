@@ -19,6 +19,15 @@ Optimizations:
     - Specialized decode kernel for autoregressive generation
     - GQA/MQA kernels that load K/V once for multiple Q heads
 
+Precision:
+    Currently uses FP16 (torch.float16) for attention computation because
+    the Metal shaders use `half` type. BF16 input tensors are converted to
+    FP16 before dispatch. This is acceptable because attention scores are
+    bounded softmax outputs, and the FP16 range is sufficient.
+
+    TODO: Add native BF16 shader variants using Metal's `bfloat` type
+    (available on M3+) for end-to-end BF16 compute.
+
 Usage:
     from metal_marlin.flash_attention_v2 import flash_attention_v2
 

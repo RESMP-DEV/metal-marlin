@@ -35,6 +35,7 @@
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 #include <metal_atomic>
+#include "bf16_compat.metal"
 
 // --- MLX Compatibility: Close any open scope from utils.h ---
 // This is intentionally empty but ensures clean scope boundary
@@ -387,6 +388,25 @@ inline void prefetch_A_tile_hint(
     }
 }
 
+inline void prefetch_A_tile_hint_bf16(
+    device const ushort* A,
+    uint M, uint K,
+    uint tg_row, uint k_block,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
+    uint flat_idx = thread_idx * elems_per_thread;
+    uint row = flat_idx / TILE_K;
+    uint col = flat_idx % TILE_K;
+    uint global_row = tg_row + row;
+    uint global_col = k_block + col;
+
+    if (global_row < M && global_col < K) {
+        volatile ushort sink = A[global_row * K + global_col];
+        (void)sink;
+    }
+}
+
 inline void prefetch_B_tile_hint(
     device const uint* B,
     device const half* scales,
@@ -415,6 +435,111 @@ inline void prefetch_B_tile_hint(
     if (global_n < N && b_row < k_packs && global_k_base < K) {
         volatile uint sink = B[b_row * N + global_n];
         (void)sink;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP32 tile load/dequant helpers (for BF16 activations + FP32 accumulate)
+// ---------------------------------------------------------------------------
+
+inline float safe_dequant_fp4_to_float(uint nibble, float scale) {
+    float raw = float(dequant_fp4_bitwise(nibble));
+    float result = raw * scale;
+    return isfinite(result) ? result : 0.0f;
+}
+
+inline void unpack_fp4x8_fp32(uint packed, float scale, thread float* out) {
+    for (uint i = 0; i < 8; ++i) {
+        uint nibble = (packed >> (i * 4)) & 0xF;
+        out[i] = safe_dequant_fp4_to_float(nibble, scale);
+    }
+}
+
+inline void load_B_tile_dequant_fp32(
+    device const uint* B,
+    device const half* scales,
+    threadgroup float (&B_buf)[TILE_K][TILE_N],
+    uint K, uint N,
+    uint tg_col, uint k_block,
+    uint group_size,
+    uint thread_idx
+) {
+    const uint scale_tiles = div_ceil(K, group_size);
+    const uint k_packs = div_ceil(K, FP4_PER_UINT);
+    const uint packed_per_thread = (TILE_K * TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (TILE_K / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (TILE_K / FP4_PER_UINT);
+
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+
+        uint scale_k = global_k_base / group_size;
+        float s = 1.0f;
+        if (global_n < N && global_k_base < K && scale_k < scale_tiles) {
+            s = float(scales[scale_k * N + global_n]);
+        }
+
+        uint packed = 0;
+        uint b_row = global_k_base / FP4_PER_UINT;
+        if (global_n < N && b_row < k_packs && global_k_base < K) {
+            packed = B[b_row * N + global_n];
+        }
+
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        float vals[8];
+        unpack_fp4x8_fp32(packed, s, vals);
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K; ++v) {
+            if (n_idx < TILE_N) {
+                uint global_k = global_k_base + v;
+                B_buf[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : 0.0f;
+            }
+        }
+    }
+}
+
+inline void load_A_tile_bf16_fp32(
+    device const ushort* A,
+    threadgroup float (&A_buf)[TILE_M][TILE_K],
+    uint M, uint K,
+    uint tg_row, uint k_block,
+    uint thread_idx
+) {
+    const uint blocks_per_thread = (TILE_M * TILE_K) / (THREADS_PER_TG * 8);
+    const uint blocks_per_row = TILE_K / 8;
+    for (uint i = 0; i < blocks_per_thread; ++i) {
+        uint block_idx = thread_idx * blocks_per_thread + i;
+        uint row = block_idx / blocks_per_row;
+        uint col_block = block_idx % blocks_per_row;
+        uint col = col_block * 8;
+        uint global_row = tg_row + row;
+        uint global_col = k_block + col;
+
+        float4 lo = float4(0.0f);
+        float4 hi = float4(0.0f);
+        if (global_row < M && (global_col + 7) < K) {
+            bf16_load_as_float8(A, global_row * K + global_col, lo, hi);
+        } else {
+            for (uint v = 0; v < 8; ++v) {
+                uint gcol = global_col + v;
+                float val = 0.0f;
+                if (global_row < M && gcol < K) {
+                    val = bf16_bits_to_float(A[global_row * K + gcol]);
+                }
+                A_buf[row][col + v] = val;
+            }
+            continue;
+        }
+
+        A_buf[row][col + 0] = lo.x;
+        A_buf[row][col + 1] = lo.y;
+        A_buf[row][col + 2] = lo.z;
+        A_buf[row][col + 3] = lo.w;
+        A_buf[row][col + 4] = hi.x;
+        A_buf[row][col + 5] = hi.y;
+        A_buf[row][col + 6] = hi.z;
+        A_buf[row][col + 7] = hi.w;
     }
 }
 
@@ -617,6 +742,37 @@ inline void compute_from_tiles_fp32(
                                &B_buf[kt * 8][sg_col_offset + ni * 8],
                                TILE_N);
 
+                // simdgroup_multiply_accumulate is the SIMD primitive backing
+                // the FP32 accumulator path for BF16 stability and speed.
+                simdgroup_multiply_accumulate(acc[mi][ni],
+                                              a_frag,
+                                              b_frag,
+                                              acc[mi][ni]);
+            }
+        }
+    }
+}
+
+inline void compute_from_tiles_fp32_full(
+    threadgroup const float (&A_buf)[TILE_M][TILE_K],
+    threadgroup const float (&B_buf)[TILE_K][TILE_N],
+    thread simdgroup_matrix<float, 8, 8> acc[SG_M_TILES][SG_N_TILES],
+    uint sg_row_offset,
+    uint sg_col_offset
+) {
+    for (uint kt = 0; kt < K_TILES; ++kt) {
+        for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+            simdgroup_matrix<float, 8, 8> a_frag;
+            simdgroup_load(a_frag,
+                           &A_buf[sg_row_offset + mi * 8][kt * 8],
+                           TILE_K);
+
+            for (uint ni = 0; ni < SG_N_TILES; ++ni) {
+                simdgroup_matrix<float, 8, 8> b_frag;
+                simdgroup_load(b_frag,
+                               &B_buf[kt * 8][sg_col_offset + ni * 8],
+                               TILE_N);
+
                 simdgroup_multiply_accumulate(acc[mi][ni],
                                               a_frag,
                                               b_frag,
@@ -664,6 +820,57 @@ inline void store_results_fp32(
                 if (gr < M && gc < N) {
                     // Read FP32 from staging, convert to FP16
                     C[gr * N + gc] = half(staging[r][c]);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
+inline void store_results_fp32_bf16(
+    thread simdgroup_matrix<float, 8, 8> acc[SG_M_TILES][SG_N_TILES],
+    device ushort* C,
+    uint M, uint N,
+    uint tg_row, uint tg_col,
+    uint sg_row_offset, uint sg_col_offset,
+    uint simd_lane,
+    threadgroup float (&staging)[8][8]
+) {
+    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+        uint out_row = tg_row + sg_row_offset + mi * 8;
+        if (out_row >= M) {
+            continue;
+        }
+        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
+            uint out_col = tg_col + sg_col_offset + ni * 8;
+            if (out_col >= N) {
+                continue;
+            }
+
+            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (out_row + 8 <= M && out_col + 8 <= N) {
+                if (simd_lane < 8) {
+                    float4 lo = float4(staging[simd_lane][0],
+                                       staging[simd_lane][1],
+                                       staging[simd_lane][2],
+                                       staging[simd_lane][3]);
+                    float4 hi = float4(staging[simd_lane][4],
+                                       staging[simd_lane][5],
+                                       staging[simd_lane][6],
+                                       staging[simd_lane][7]);
+                    bf16_store_from_float8(C, (out_row + simd_lane) * N + out_col, lo, hi);
+                }
+            } else {
+                for (uint elem = simd_lane; elem < 64; elem += 32) {
+                    uint r = elem / 8;
+                    uint c = elem % 8;
+                    uint gr = out_row + r;
+                    uint gc = out_col + c;
+                    if (gr < M && gc < N) {
+                        C[gr * N + gc] = bf16_from_float_rne(staging[r][c]).bits;
+                    }
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -771,10 +978,20 @@ kernel void marlin_gemm_fp4(
 // ===========================================================================
 
 kernel void marlin_gemm_fp4_fp32acc(
-    device const half* A         [[buffer(0)]],  // [M, K] activations (row-major)
+    device const
+#if defined(USE_BF16_INPUTS)
+        ushort* A               [[buffer(0)]],  // [M, K] BF16 activations
+#else
+        half* A                 [[buffer(0)]],  // [M, K] FP16 activations
+#endif
     device const uint* B         [[buffer(1)]],  // [K/8, N] packed FP4 weights
     device const half* scales    [[buffer(2)]],  // [K/group_size, N] per-group scales
-    device half* C               [[buffer(3)]],  // [M, N] output (row-major)
+    device
+#if defined(USE_BF16_OUTPUTS)
+        ushort* C               [[buffer(3)]],  // [M, N] BF16 output
+#else
+        half* C                 [[buffer(3)]],  // [M, N] FP16 output
+#endif
     constant uint& M             [[buffer(4)]],
     constant uint& N             [[buffer(5)]],
     constant uint& K             [[buffer(6)]],
@@ -784,8 +1001,14 @@ kernel void marlin_gemm_fp4_fp32acc(
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
     // Double-buffered threadgroup memory
-    threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
+    threadgroup
+#if defined(USE_BF16_INPUTS)
+        float A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
+    threadgroup float B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+#else
+        half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+#endif
     threadgroup float staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
@@ -806,8 +1029,13 @@ kernel void marlin_gemm_fp4_fp32acc(
     uint buf_compute = 0;
 
     // --- Prologue: Load first K-tile into buffer 0 ---
+    #if defined(USE_BF16_INPUTS)
+    load_A_tile_bf16_fp32(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+    load_B_tile_dequant_fp32(B, scales, B_tiles[0], K, N, tg_col, 0, group_size, thread_idx);
+    #else
     load_A_tile(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
     load_B_tile_dequant(B, scales, B_tiles[0], K, N, tg_col, 0, group_size, thread_idx);
+    #endif
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // --- Main pipeline loop ---
@@ -818,23 +1046,42 @@ kernel void marlin_gemm_fp4_fp32acc(
 
         // Software prefetch hint for the NEXT K-tile, then load into alternate buffer.
         if (next_k < K) {
+            #if defined(USE_BF16_INPUTS)
+            prefetch_A_tile_hint_bf16(A, M, K, tg_row, next_k, thread_idx);
+            #else
             prefetch_A_tile_hint(A, M, K, tg_row, next_k, thread_idx);
+            #endif
             prefetch_B_tile_hint(B, scales, K, N, tg_col, next_k, group_size, thread_idx);
+            #if defined(USE_BF16_INPUTS)
+            load_A_tile_bf16_fp32(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
+            load_B_tile_dequant_fp32(B, scales, B_tiles[buf_load], K, N, tg_col, next_k, group_size, thread_idx);
+            #else
             load_A_tile(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
             load_B_tile_dequant(B, scales, B_tiles[buf_load], K, N, tg_col, next_k, group_size, thread_idx);
+            #endif
         }
 
         // Compute on current buffer (FP32 accumulation)
+        #if defined(USE_BF16_INPUTS)
+        compute_from_tiles_fp32_full(A_tiles[buf_compute], B_tiles[buf_compute],
+                                     acc, sg_row_offset, sg_col_offset);
+        #else
         compute_from_tiles_fp32(A_tiles[buf_compute], B_tiles[buf_compute],
                                 acc, sg_row_offset, sg_col_offset);
+        #endif
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
     // --- Store ---
+    #if defined(USE_BF16_OUTPUTS)
+    store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
+                            sg_row_offset, sg_col_offset, simd_lane, staging);
+    #else
     store_results_fp32(acc, C, M, N, tg_row, tg_col,
                        sg_row_offset, sg_col_offset, simd_lane, staging);
+    #endif
 }
 
 // ===========================================================================
@@ -1060,15 +1307,16 @@ kernel void marlin_gemm_divergent_fp4(
 //
 // Load → barrier → compute → barrier → loop
 //
-// No overlap between memory loads and compute. Useful as:
+// Uses double-buffered tile loads for load/compute overlap without async copy.
+// Still useful as:
 //   1. Correctness reference for pipelined kernels
 //   2. Performance baseline to measure pipelining benefit
 //   3. Debugging aid (simpler control flow, deterministic execution order)
 //
-// Uses single-buffered threadgroup memory (half the footprint of pipelined):
-//   A_tile: 64 * 32 * 2B = 4096 bytes
-//   B_tile: 32 * 64 * 2B = 4096 bytes
-//   Total = 8192 bytes
+// Uses double-buffered threadgroup memory to overlap load/compute:
+//   A_tiles: 2 * 64 * 32 * 2B = 8192 bytes
+//   B_tiles: 2 * 32 * 64 * 2B = 8192 bytes
+//   Total = 16384 bytes
 //
 // Dispatch: Grid ceil(N/64) x ceil(M/64), threadgroup 128 threads.
 // ===========================================================================
@@ -1086,9 +1334,9 @@ kernel void marlin_gemm_fp4_single_stage(
     uint simd_lane               [[thread_index_in_simdgroup]],
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
-    // Single buffer (no double-buffering)
-    threadgroup half A_tile[TILE_M][TILE_K];
-    threadgroup half B_tile[TILE_K][TILE_N];
+    // Double-buffered tiles to overlap loads and compute
+    threadgroup half A_tiles[2][TILE_M][TILE_K];
+    threadgroup half B_tiles[2][TILE_K][TILE_N];
     threadgroup half staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
@@ -1109,23 +1357,35 @@ kernel void marlin_gemm_fp4_single_stage(
 
     const uint thread_idx = simd_id * 32 + simd_lane;
 
-    // --- Main K-reduction loop (single-stage: load, barrier, compute, barrier) ---
-    for (uint k_block = 0; k_block < K; k_block += TILE_K) {
-        // Load A tile (cooperative across all 128 threads)
-        load_A_tile(A, A_tile, M, K, tg_row, k_block, thread_idx);
+    const uint k_tiles = div_ceil(K, TILE_K);
+    uint buf_idx = 0;
 
-        // Load and dequant B tile (cooperative, fused FP4→FP16)
-        load_B_tile_dequant(B, scales, B_tile, K, N, tg_col, k_block,
+    if (k_tiles > 0) {
+        // Initial tile load
+        load_A_tile(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+        load_B_tile_dequant(B, scales, B_tiles[0], K, N, tg_col, 0,
                             group_size, thread_idx);
-
-        // Wait for all loads to complete
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // Compute: each simdgroup does its portion of the tile multiply
-        compute_from_tiles(A_tile, B_tile, acc, sg_row_offset, sg_col_offset);
+        // --- Main K-reduction loop (double-buffered) ---
+        for (uint kt = 0; kt < k_tiles; ++kt) {
+            uint k_block = kt * TILE_K;
+            uint next_k = k_block + TILE_K;
+            uint buf_load = 1 - buf_idx;
 
-        // Wait for compute to finish before next iteration overwrites tiles
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (next_k < K) {
+                load_A_tile(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
+                load_B_tile_dequant(B, scales, B_tiles[buf_load], K, N, tg_col, next_k,
+                                    group_size, thread_idx);
+            }
+
+            // Compute on current buffer
+            compute_from_tiles(A_tiles[buf_idx], B_tiles[buf_idx],
+                               acc, sg_row_offset, sg_col_offset);
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
     // --- Store accumulated results ---
@@ -1154,8 +1414,8 @@ kernel void marlin_gemm_fp16_single_stage(
     uint simd_lane               [[thread_index_in_simdgroup]],
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
-    threadgroup half A_tile[TILE_M][TILE_K];
-    threadgroup half B_tile[TILE_K][TILE_N];
+    threadgroup half A_tiles[2][TILE_M][TILE_K];
+    threadgroup half B_tiles[2][TILE_K][TILE_N];
     threadgroup half staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
@@ -1172,13 +1432,29 @@ kernel void marlin_gemm_fp16_single_stage(
 
     const uint thread_idx = simd_id * 32 + simd_lane;
 
-    for (uint k_block = 0; k_block < K; k_block += TILE_K) {
-        load_A_tile(A, A_tile, M, K, tg_row, k_block, thread_idx);
-        load_B_tile_fp16(B, B_tile, K, N, tg_col, k_block, thread_idx);
+    const uint k_tiles = div_ceil(K, TILE_K);
+    uint buf_idx = 0;
 
+    if (k_tiles > 0) {
+        load_A_tile(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+        load_B_tile_fp16(B, B_tiles[0], K, N, tg_col, 0, thread_idx);
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        compute_from_tiles(A_tile, B_tile, acc, sg_row_offset, sg_col_offset);
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint kt = 0; kt < k_tiles; ++kt) {
+            uint k_block = kt * TILE_K;
+            uint next_k = k_block + TILE_K;
+            uint buf_load = 1 - buf_idx;
+
+            if (next_k < K) {
+                load_A_tile(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
+                load_B_tile_fp16(B, B_tiles[buf_load], K, N, tg_col, next_k, thread_idx);
+            }
+
+            compute_from_tiles(A_tiles[buf_idx], B_tiles[buf_idx],
+                               acc, sg_row_offset, sg_col_offset);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
     store_results(acc, C, M, N, tg_row, tg_col,
@@ -1233,9 +1509,9 @@ kernel void marlin_gemm_fp4_striped(
     uint simd_lane                   [[thread_index_in_simdgroup]],
     uint simd_id                     [[simdgroup_index_in_threadgroup]]
 ) {
-    // Single-buffered threadgroup memory (one work unit at a time per TG)
-    threadgroup half A_tile[TILE_M][TILE_K];
-    threadgroup half B_tile[TILE_K][TILE_N];
+    // Double-buffered threadgroup memory (one work unit at a time per TG)
+    threadgroup half A_tiles[2][TILE_M][TILE_K];
+    threadgroup half B_tiles[2][TILE_K][TILE_N];
 
     // -----------------------------------------------------------------------
     // Stripe partitioning: compute which output tiles this threadgroup handles
@@ -1293,11 +1569,14 @@ kernel void marlin_gemm_fp4_striped(
         // -------------------------------------------------------------------
         // Main K-loop (only over this slice's range)
         // -------------------------------------------------------------------
-        for (uint k_block = k_start; k_block < k_end; k_block += TILE_K) {
-            const uint k_remaining = min(TILE_K, k_end - k_block);
+        const uint k_iters = div_ceil(k_end - k_start, TILE_K);
+        uint buf_idx = 0;
 
-            // Load A tile
+        if (k_iters > 0) {
+            // Initial tile load
             {
+                const uint k_block = k_start;
+                const uint k_remaining = min(TILE_K, k_end - k_block);
                 const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
                 for (uint i = 0; i < elems_per_thread; ++i) {
                     uint flat_idx = thread_idx * elems_per_thread + i;
@@ -1310,12 +1589,9 @@ kernel void marlin_gemm_fp4_striped(
                     if (global_row < M && global_col < K && col < k_remaining) {
                         val = A[global_row * K + global_col];
                     }
-                    A_tile[row][col] = val;
+                    A_tiles[0][row][col] = val;
                 }
-            }
 
-            // Load + dequantize B tile
-            {
                 const uint packed_per_thread = (TILE_K * TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
                 for (uint i = 0; i < packed_per_thread; ++i) {
                     uint flat_packed_idx = thread_idx * packed_per_thread + i;
@@ -1342,11 +1618,10 @@ kernel void marlin_gemm_fp4_striped(
                     unpack_fp4x8(packed, s, vals);
                     for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K; ++v) {
                         if (n_idx < TILE_N) {
-                            // Zero-fill beyond k_remaining for partial last tile
                             if (tile_k_base + v >= k_remaining) {
-                                B_tile[tile_k_base + v][n_idx] = 0.0h;
+                                B_tiles[0][tile_k_base + v][n_idx] = 0.0h;
                             } else {
-                                B_tile[tile_k_base + v][n_idx] = vals[v];
+                                B_tiles[0][tile_k_base + v][n_idx] = vals[v];
                             }
                         }
                     }
@@ -1355,30 +1630,91 @@ kernel void marlin_gemm_fp4_striped(
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            // Compute via simdgroup MMA
-            uint active_k_tiles = div_ceil(k_remaining, 8u);
-            for (uint kt = 0; kt < active_k_tiles; ++kt) {
-                for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-                    simdgroup_matrix<half, 8, 8> a_frag;
-                    simdgroup_load(a_frag,
-                                   &A_tile[sg_row_offset + mi * 8][kt * 8],
-                                   TILE_K);
+            for (uint kt = 0; kt < k_iters; ++kt) {
+                uint k_block = k_start + kt * TILE_K;
+                uint k_remaining = min(TILE_K, k_end - k_block);
+                uint next_k = k_block + TILE_K;
+                uint buf_load = 1 - buf_idx;
 
-                    for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-                        simdgroup_matrix<half, 8, 8> b_frag;
-                        simdgroup_load(b_frag,
-                                       &B_tile[kt * 8][sg_col_offset + ni * 8],
-                                       TILE_N);
+                if (next_k < k_end) {
+                    const uint next_remaining = min(TILE_K, k_end - next_k);
+                    const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
+                    for (uint i = 0; i < elems_per_thread; ++i) {
+                        uint flat_idx = thread_idx * elems_per_thread + i;
+                        uint row = flat_idx / TILE_K;
+                        uint col = flat_idx % TILE_K;
+                        uint global_row = tg_row + row;
+                        uint global_col = next_k + col;
 
-                        simdgroup_multiply_accumulate(acc[mi][ni],
-                                                      a_frag,
-                                                      b_frag,
-                                                      acc[mi][ni]);
+                        half val = 0.0h;
+                        if (global_row < M && global_col < K && col < next_remaining) {
+                            val = A[global_row * K + global_col];
+                        }
+                        A_tiles[buf_load][row][col] = val;
+                    }
+
+                    const uint packed_per_thread = (TILE_K * TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
+                    for (uint i = 0; i < packed_per_thread; ++i) {
+                        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+                        uint n_idx = flat_packed_idx / (TILE_K / FP4_PER_UINT);
+                        uint k_group_in_tile = flat_packed_idx % (TILE_K / FP4_PER_UINT);
+
+                        uint global_n = tg_col + n_idx;
+                        uint global_k_base = next_k + k_group_in_tile * FP4_PER_UINT;
+
+                        uint scale_k = global_k_base / group_size;
+                        half s = 1.0h;
+                        if (global_n < N && global_k_base < K && scale_k < div_ceil(K, group_size)) {
+                            s = scales[scale_k * N + global_n];
+                        }
+
+                        uint packed = 0;
+                        uint b_row = global_k_base / FP4_PER_UINT;
+                        if (global_n < N && b_row < div_ceil(K, FP4_PER_UINT) && global_k_base < k_end) {
+                            packed = B[b_row * N + global_n];
+                        }
+
+                        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+                        half vals[8];
+                        unpack_fp4x8(packed, s, vals);
+                        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K; ++v) {
+                            if (n_idx < TILE_N) {
+                                if (tile_k_base + v >= next_remaining) {
+                                    B_tiles[buf_load][tile_k_base + v][n_idx] = 0.0h;
+                                } else {
+                                    B_tiles[buf_load][tile_k_base + v][n_idx] = vals[v];
+                                }
+                            }
+                        }
                     }
                 }
-            }
 
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+                // Compute via simdgroup MMA
+                uint active_k_tiles = div_ceil(k_remaining, 8u);
+                for (uint kt_inner = 0; kt_inner < active_k_tiles; ++kt_inner) {
+                    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
+                        simdgroup_matrix<half, 8, 8> a_frag;
+                        simdgroup_load(a_frag,
+                                       &A_tiles[buf_idx][sg_row_offset + mi * 8][kt_inner * 8],
+                                       TILE_K);
+
+                        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
+                            simdgroup_matrix<half, 8, 8> b_frag;
+                            simdgroup_load(b_frag,
+                                           &B_tiles[buf_idx][kt_inner * 8][sg_col_offset + ni * 8],
+                                           TILE_N);
+
+                            simdgroup_multiply_accumulate(acc[mi][ni],
+                                                          a_frag,
+                                                          b_frag,
+                                                          acc[mi][ni]);
+                        }
+                    }
+                }
+
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                buf_idx = buf_load;
+            }
         }
 
         // -------------------------------------------------------------------
@@ -1693,7 +2029,7 @@ kernel void marlin_gemm_fused_fp4(
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
     // --- Memory allocation ---
-    threadgroup half A_tile[TILE_M][TILE_K];                // 4096B shared
+    threadgroup half A_tiles[2][TILE_M][TILE_K];            // 2x4096B shared
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];   // 512B per-sg
     threadgroup half staging[8][8];
 
@@ -1716,9 +2052,11 @@ kernel void marlin_gemm_fused_fp4(
     // Main K-reduction loop
     // =========================================================================
 
-    for (uint k_block = 0; k_block < K; k_block += TILE_K) {
+    const uint k_tiles = div_ceil(K, TILE_K);
+    uint buf_idx = 0;
 
-        // --- Cooperative A tile load (all 128 threads) ---
+    if (k_tiles > 0) {
+        // Initial A tile load
         {
             const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;  // 16
             for (uint i = 0; i < elems_per_thread; ++i) {
@@ -1726,39 +2064,66 @@ kernel void marlin_gemm_fused_fp4(
                 uint row = flat_idx / TILE_K;
                 uint col = flat_idx % TILE_K;
                 uint global_row = tg_row + row;
-                uint global_col = k_block + col;
+                uint global_col = col;
 
                 half val = (global_row < M && global_col < K)
                            ? A[global_row * K + global_col]
                            : half(0.0h);
-                A_tile[row][col] = val;
+                A_tiles[0][row][col] = val;
             }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        // =====================================================================
-        // Inner loop: fused dequant + compute
-        //
-        // For each K sub-tile (kt = 0..3, covering 8 K values each):
-        //   For each output tile (mi, ni):
-        //     1. simdgroup_load A fragment from A_tile
-        //     2. Lanes 0-7 load+dequant one column each of B sub-tile
-        //     3. Write to B_staging
-        //     4. simdgroup_barrier (NOT threadgroup_barrier)
-        //     5. simdgroup_load B fragment from B_staging
-        //     6. simdgroup_multiply_accumulate
-        // =====================================================================
+        for (uint k_tile = 0; k_tile < k_tiles; ++k_tile) {
+            uint k_block = k_tile * TILE_K;
+            uint next_k = k_block + TILE_K;
+            uint buf_load = 1 - buf_idx;
 
-        for (uint kt = 0; kt < K_TILES; ++kt) {
-            uint k_sub_base = k_block + kt * 8;
+            if (next_k < K) {
+                const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
+                for (uint i = 0; i < elems_per_thread; ++i) {
+                    uint flat_idx = thread_idx * elems_per_thread + i;
+                    uint row = flat_idx / TILE_K;
+                    uint col = flat_idx % TILE_K;
+                    uint global_row = tg_row + row;
+                    uint global_col = next_k + col;
+
+                    half val = (global_row < M && global_col < K)
+                               ? A[global_row * K + global_col]
+                               : half(0.0h);
+                    A_tiles[buf_load][row][col] = val;
+                }
+            }
+
+            // =====================================================================
+            // Inner loop: fused dequant + compute
+            //
+            // For each K sub-tile (kt = 0..3, covering 8 K values each):
+            //   For each output tile (mi, ni):
+            //     1. simdgroup_load A fragment from A_tiles[buf_idx]
+            //     2. Lanes 0-7 load+dequant one column each of B sub-tile
+            //     3. Write to B_staging
+            //     4. simdgroup_barrier (NOT threadgroup_barrier)
+            //     5. simdgroup_load B fragment from B_staging
+            //     6. simdgroup_multiply_accumulate
+            // =====================================================================
+
+            for (uint kt = 0; kt < K_TILES; ++kt) {
+                uint k_sub_base = k_block + kt * 8;
             uint k_pack_idx = k_sub_base / FP4_PER_UINT;
             uint group_idx = k_sub_base / group_size;
 
             for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-                simdgroup_matrix<half, 8, 8> a_frag;
+                simdgroup_matrix<
+#if defined(USE_BF16_INPUTS)
+                    float
+#else
+                    half
+#endif
+                    , 8, 8> a_frag;
                 simdgroup_load(a_frag,
-                               &A_tile[sg_row_offset + mi * 8][kt * 8],
+                               &A_tiles[buf_idx][sg_row_offset + mi * 8][kt * 8],
                                TILE_K);
 
                 for (uint ni = 0; ni < SG_N_TILES; ++ni) {
@@ -1799,9 +2164,11 @@ kernel void marlin_gemm_fused_fp4(
                                                   a_frag, b_frag, acc[mi][ni]);
                 }
             }
-        }
+            }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
     // =========================================================================
@@ -1820,10 +2187,20 @@ kernel void marlin_gemm_fused_fp4(
 // ===========================================================================
 
 kernel void marlin_gemm_fused_fp4_fp32acc(
-    device const half* A         [[buffer(0)]],   // [M, K] row-major FP16
+    device const
+#if defined(USE_BF16_INPUTS)
+        ushort* A               [[buffer(0)]],   // [M, K] row-major BF16
+#else
+        half* A                 [[buffer(0)]],   // [M, K] row-major FP16
+#endif
     device const uint* B         [[buffer(1)]],   // [K/8, N] packed FP4
     device const half* scales    [[buffer(2)]],   // [K/group_size, N]
-    device half* C               [[buffer(3)]],   // [M, N] row-major FP16
+    device
+#if defined(USE_BF16_OUTPUTS)
+        ushort* C               [[buffer(3)]],   // [M, N] row-major BF16
+#else
+        half* C                 [[buffer(3)]],   // [M, N] row-major FP16
+#endif
     constant uint& M             [[buffer(4)]],
     constant uint& N             [[buffer(5)]],
     constant uint& K             [[buffer(6)]],
@@ -1833,8 +2210,14 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
     // --- Memory allocation ---
-    threadgroup half A_tile[TILE_M][TILE_K];
+    threadgroup
+#if defined(USE_BF16_INPUTS)
+        float A_tiles[2][TILE_M][TILE_K];
+    threadgroup float B_staging[SIMDGROUPS_PER_TG][8][8];
+#else
+        half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];
+#endif
     threadgroup float staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
@@ -1852,8 +2235,14 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
     const uint thread_idx = simd_id * 32 + simd_lane;
     const uint k_packs = div_ceil(K, FP4_PER_UINT);
 
-    for (uint k_block = 0; k_block < K; k_block += TILE_K) {
-        // --- Cooperative A tile load ---
+    const uint k_tiles = div_ceil(K, TILE_K);
+    uint buf_idx = 0;
+
+    if (k_tiles > 0) {
+        // Initial A tile load
+        #if defined(USE_BF16_INPUTS)
+        load_A_tile_bf16_fp32(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+        #else
         {
             const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
             for (uint i = 0; i < elems_per_thread; ++i) {
@@ -1861,26 +2250,52 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
                 uint row = flat_idx / TILE_K;
                 uint col = flat_idx % TILE_K;
                 uint global_row = tg_row + row;
-                uint global_col = k_block + col;
+                uint global_col = col;
 
                 half val = (global_row < M && global_col < K)
                            ? A[global_row * K + global_col]
                            : half(0.0h);
-                A_tile[row][col] = val;
+                A_tiles[0][row][col] = val;
             }
         }
+        #endif
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint kt = 0; kt < K_TILES; ++kt) {
-            uint k_sub_base = k_block + kt * 8;
+        for (uint k_tile = 0; k_tile < k_tiles; ++k_tile) {
+            uint k_block = k_tile * TILE_K;
+            uint next_k = k_block + TILE_K;
+            uint buf_load = 1 - buf_idx;
+
+            if (next_k < K) {
+                #if defined(USE_BF16_INPUTS)
+                load_A_tile_bf16_fp32(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
+                #else
+                const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
+                for (uint i = 0; i < elems_per_thread; ++i) {
+                    uint flat_idx = thread_idx * elems_per_thread + i;
+                    uint row = flat_idx / TILE_K;
+                    uint col = flat_idx % TILE_K;
+                    uint global_row = tg_row + row;
+                    uint global_col = next_k + col;
+
+                    half val = (global_row < M && global_col < K)
+                               ? A[global_row * K + global_col]
+                               : half(0.0h);
+                    A_tiles[buf_load][row][col] = val;
+                }
+                #endif
+            }
+
+            for (uint kt = 0; kt < K_TILES; ++kt) {
+                uint k_sub_base = k_block + kt * 8;
             uint k_pack_idx = k_sub_base / FP4_PER_UINT;
             uint group_idx = k_sub_base / group_size;
 
             for (uint mi = 0; mi < SG_M_TILES; ++mi) {
                 simdgroup_matrix<half, 8, 8> a_frag;
                 simdgroup_load(a_frag,
-                               &A_tile[sg_row_offset + mi * 8][kt * 8],
+                               &A_tiles[buf_idx][sg_row_offset + mi * 8][kt * 8],
                                TILE_K);
 
                 for (uint ni = 0; ni < SG_N_TILES; ++ni) {
@@ -1888,8 +2303,21 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
 
                     if (simd_lane < 8) {
                         uint b_col = b_col_base + simd_lane;
+#if defined(USE_BF16_INPUTS)
+                        float dequant_vals[8];
+                        if (b_col < N && k_pack_idx < k_packs) {
+                            uint32_t packed = B[k_pack_idx * N + b_col];
+                            float scale = float(scales[group_idx * N + b_col]);
+                            for (uint v = 0; v < 8; ++v) {
+                                uint nibble = (packed >> (v * 4)) & 0xF;
+                                dequant_vals[v] = safe_dequant_fp4_to_float(nibble, scale);
+                            }
+                        } else {
+                            for (uint v = 0; v < 8; ++v)
+                                dequant_vals[v] = 0.0f;
+                        }
+#else
                         half dequant_vals[8];
-
                         if (b_col < N && k_pack_idx < k_packs) {
                             uint32_t packed = B[k_pack_idx * N + b_col];
                             half scale = scales[group_idx * N + b_col];
@@ -1898,27 +2326,40 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
                             for (uint v = 0; v < 8; ++v)
                                 dequant_vals[v] = half(0.0h);
                         }
-
+#endif
                         for (uint row = 0; row < 8; ++row)
                             B_staging[simd_id][row][simd_lane] = dequant_vals[row];
                     }
 
                     simdgroup_barrier(mem_flags::mem_threadgroup);
 
-                    simdgroup_matrix<half, 8, 8> b_frag;
+                    simdgroup_matrix<
+#if defined(USE_BF16_INPUTS)
+                        float
+#else
+                        half
+#endif
+                        , 8, 8> b_frag;
                     simdgroup_load(b_frag, &B_staging[simd_id][0][0], 8);
 
                     simdgroup_multiply_accumulate(acc[mi][ni],
                                                   a_frag, b_frag, acc[mi][ni]);
                 }
             }
-        }
+            }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
+    #if defined(USE_BF16_OUTPUTS)
+    store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
+                            sg_row_offset, sg_col_offset, simd_lane, staging);
+    #else
     store_results_fp32(acc, C, M, N, tg_row, tg_col,
                        sg_row_offset, sg_col_offset, simd_lane, staging);
+    #endif
 }
 
 // ===========================================================================
@@ -1942,7 +2383,7 @@ kernel void marlin_gemm_fused_u4(
     uint simd_lane               [[thread_index_in_simdgroup]],
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
-    threadgroup half A_tile[TILE_M][TILE_K];
+    threadgroup half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];
     threadgroup half staging[8][8];
 
@@ -1959,7 +2400,10 @@ kernel void marlin_gemm_fused_u4(
     const uint thread_idx = simd_id * 32 + simd_lane;
     const uint k_packs = div_ceil(K, FP4_PER_UINT);
 
-    for (uint k_block = 0; k_block < K; k_block += TILE_K) {
+    const uint k_tiles = div_ceil(K, TILE_K);
+    uint buf_idx = 0;
+
+    if (k_tiles > 0) {
         {
             const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
             for (uint i = 0; i < elems_per_thread; ++i) {
@@ -1967,26 +2411,47 @@ kernel void marlin_gemm_fused_u4(
                 uint row = flat_idx / TILE_K;
                 uint col = flat_idx % TILE_K;
                 uint global_row = tg_row + row;
-                uint global_col = k_block + col;
+                uint global_col = col;
 
                 half val = (global_row < M && global_col < K)
                            ? A[global_row * K + global_col]
                            : half(0.0h);
-                A_tile[row][col] = val;
+                A_tiles[0][row][col] = val;
             }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        for (uint kt = 0; kt < K_TILES; ++kt) {
-            uint k_sub_base = k_block + kt * 8;
+        for (uint k_tile = 0; k_tile < k_tiles; ++k_tile) {
+            uint k_block = k_tile * TILE_K;
+            uint next_k = k_block + TILE_K;
+            uint buf_load = 1 - buf_idx;
+
+            if (next_k < K) {
+                const uint elems_per_thread = (TILE_M * TILE_K) / THREADS_PER_TG;
+                for (uint i = 0; i < elems_per_thread; ++i) {
+                    uint flat_idx = thread_idx * elems_per_thread + i;
+                    uint row = flat_idx / TILE_K;
+                    uint col = flat_idx % TILE_K;
+                    uint global_row = tg_row + row;
+                    uint global_col = next_k + col;
+
+                    half val = (global_row < M && global_col < K)
+                               ? A[global_row * K + global_col]
+                               : half(0.0h);
+                    A_tiles[buf_load][row][col] = val;
+                }
+            }
+
+            for (uint kt = 0; kt < K_TILES; ++kt) {
+                uint k_sub_base = k_block + kt * 8;
             uint k_pack_idx = k_sub_base / FP4_PER_UINT;
             uint group_idx = k_sub_base / group_size;
 
             for (uint mi = 0; mi < SG_M_TILES; ++mi) {
                 simdgroup_matrix<half, 8, 8> a_frag;
                 simdgroup_load(a_frag,
-                               &A_tile[sg_row_offset + mi * 8][kt * 8],
+                               &A_tiles[buf_idx][sg_row_offset + mi * 8][kt * 8],
                                TILE_K);
 
                 for (uint ni = 0; ni < SG_N_TILES; ++ni) {
@@ -2020,9 +2485,11 @@ kernel void marlin_gemm_fused_u4(
                                                   a_frag, b_frag, acc[mi][ni]);
                 }
             }
-        }
+            }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
     store_results(acc, C, M, N, tg_row, tg_col,

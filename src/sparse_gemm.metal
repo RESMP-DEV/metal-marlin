@@ -421,8 +421,8 @@ kernel void marlin_gemm_sparse_fp4_fused(
     uint simd_lane                   [[thread_index_in_simdgroup]],
     uint simd_id                     [[simdgroup_index_in_threadgroup]]
 ) {
-    // A tile in threadgroup memory (shared across simdgroups)
-    threadgroup half A_tile[SP_TILE_M][SP_TILE_K];
+    // Double-buffered A tile in threadgroup memory (shared across simdgroups)
+    threadgroup half A_tiles[2][SP_TILE_M][SP_TILE_K];
     // Per-simdgroup B staging for the current 8x8 sub-tile
     threadgroup half B_staging[SP_SIMDGROUPS_PER_TG][8][8];
 
@@ -443,9 +443,11 @@ kernel void marlin_gemm_sparse_fp4_fused(
     // Main K-reduction loop
     // =========================================================================
 
-    for (uint k_block = 0; k_block < K; k_block += SP_TILE_K) {
+    const uint k_tiles = div_ceil(K, SP_TILE_K);
+    uint buf_idx = 0;
 
-        // --- Cooperative A tile load (all 128 threads) ---
+    if (k_tiles > 0) {
+        // Initial A tile load
         {
             const uint elems_per_thread = (SP_TILE_M * SP_TILE_K) / SP_THREADS_PER_TG;
             for (uint i = 0; i < elems_per_thread; ++i) {
@@ -453,12 +455,12 @@ kernel void marlin_gemm_sparse_fp4_fused(
                 uint row = flat_idx / SP_TILE_K;
                 uint col = flat_idx % SP_TILE_K;
                 uint global_row = tg_row + row;
-                uint global_col = k_block + col;
+                uint global_col = col;
 
                 half val = (global_row < M && global_col < K)
                            ? A[global_row * K + global_col]
                            : half(0.0h);
-                A_tile[row][col] = val;
+                A_tiles[0][row][col] = val;
             }
         }
 
@@ -474,13 +476,34 @@ kernel void marlin_gemm_sparse_fp4_fused(
         //   by reading metadata + compressed values and scattering.
         // =====================================================================
 
-        for (uint kt = 0; kt < SP_K_TILES; ++kt) {
-            uint k_sub_base = k_block + kt * 8;  // Dense K start for this sub-tile
+        for (uint k_tile = 0; k_tile < k_tiles; ++k_tile) {
+            uint k_block = k_tile * SP_TILE_K;
+            uint next_k = k_block + SP_TILE_K;
+            uint buf_load = 1 - buf_idx;
+
+            if (next_k < K) {
+                const uint elems_per_thread = (SP_TILE_M * SP_TILE_K) / SP_THREADS_PER_TG;
+                for (uint i = 0; i < elems_per_thread; ++i) {
+                    uint flat_idx = thread_idx * elems_per_thread + i;
+                    uint row = flat_idx / SP_TILE_K;
+                    uint col = flat_idx % SP_TILE_K;
+                    uint global_row = tg_row + row;
+                    uint global_col = next_k + col;
+
+                    half val = (global_row < M && global_col < K)
+                               ? A[global_row * K + global_col]
+                               : half(0.0h);
+                    A_tiles[buf_load][row][col] = val;
+                }
+            }
+
+            for (uint kt = 0; kt < SP_K_TILES; ++kt) {
+                uint k_sub_base = k_block + kt * 8;  // Dense K start for this sub-tile
 
             for (uint mi = 0; mi < SP_SG_M_TILES; ++mi) {
                 simdgroup_matrix<half, 8, 8> a_frag;
                 simdgroup_load(a_frag,
-                               &A_tile[sg_row_offset + mi * 8][kt * 8],
+                               &A_tiles[buf_idx][sg_row_offset + mi * 8][kt * 8],
                                SP_TILE_K);
 
                 for (uint ni = 0; ni < SP_SG_N_TILES; ++ni) {
@@ -557,7 +580,9 @@ kernel void marlin_gemm_sparse_fp4_fused(
             }
         }
 
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            buf_idx = buf_load;
+        }
     }
 
     // =========================================================================

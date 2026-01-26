@@ -533,7 +533,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Evaluate model perplexity")
     parser.add_argument("model_path", help="Path to model directory")
-    parser.add_argument("--samples", type=int, default=100, help="WikiText-2 samples")
+    parser.add_argument("--samples", type=int, default=100, help="Evaluation samples")
     parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
 
@@ -542,7 +542,7 @@ def main():
     print(f"Loading tokenizer from {args.model_path}...")
     load_tokenizer(args.model_path)
 
-    print(f"Loading WikiText-2 ({args.samples} samples)...")
+    print(f"Loading evaluation data ({args.samples} samples)...")
     texts = load_wikitext2(args.samples)
     print(f"  Loaded {len(texts)} samples")
 

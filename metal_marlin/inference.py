@@ -1,7 +1,10 @@
 import torch
 from transformers import AutoTokenizer
 
-from .models import QuantizedGLM4MoE, QuantizedLlama, QuantizedQwen3
+from .models import QuantizedGLM4MoE, QuantizedLlama
+from .models.nemotron import QuantizedNemotron
+from .models.qwen3_dense import QuantizedQwen3Dense
+from .models.qwen3_moe import QuantizedQwen3MoE
 from .quantized_loader import QuantizedModel
 
 
@@ -10,8 +13,10 @@ class MetalInferenceEngine:
 
     MODEL_CLASSES = {
         "glm4_moe_lite": QuantizedGLM4MoE,
-        "qwen3_moe": QuantizedQwen3,
         "llama": QuantizedLlama,
+        "qwen3": QuantizedQwen3Dense,
+        "qwen3_moe": QuantizedQwen3MoE,
+        "nemotron_h": QuantizedNemotron,
     }
 
     def __init__(self, model_path: str, device: str = "mps"):

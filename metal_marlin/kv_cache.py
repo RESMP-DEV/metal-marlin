@@ -151,9 +151,12 @@ class KVCache:
         self.config = config
         self.batch_size = batch_size
         self.seq_len = 0  # Current sequence length
+        self.cache_position = 0  # Next write position (tracks seq_len)
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
         self.device = device
         self._fp8_scale_method = config.fp8_scale_method
+        self._update_id = 0
+        self._last_eviction_update_id = -1
 
         # Allocate cache for all layers
         # Shape: [batch, num_kv_heads, max_seq_len, head_dim]
@@ -292,12 +295,17 @@ class KVCache:
             Output dtype is activations dtype from dtype_config (for attention computation).
         """
         new_seq_len = k_new.shape[2]
-        end_pos = self.seq_len + new_seq_len
+        if new_seq_len > self.config.max_seq_len:
+            # Keep the most recent window when a single update exceeds capacity.
+            k_new = k_new[:, :, -self.config.max_seq_len :, :]
+            v_new = v_new[:, :, -self.config.max_seq_len :, :]
+            new_seq_len = self.config.max_seq_len
+            self._reset_positions()
 
-        if end_pos > self.config.max_seq_len:
-            raise ValueError(
-                f"Sequence length {end_pos} exceeds max_seq_len {self.config.max_seq_len}"
-            )
+        self._maybe_evict(new_seq_len)
+
+        start_pos = self.cache_position
+        end_pos = start_pos + new_seq_len
 
         act_dtype = _get_torch_dtype(self.dtype_config.activations)
 
@@ -306,11 +314,11 @@ class KVCache:
             k_packed, k_scale = self._quantize_fp4(k_new)
             v_packed, v_scale = self._quantize_fp4(v_new)
 
-            # Update cache slices (in-place for efficiency)
-            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_packed
-            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_packed
-            self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_scale
-            self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_scale
+            # Update cache slices in-place (MPS uses sliceUpdateDataTensor under the hood).
+            self._slice_update(self.k_cache[layer_idx], k_packed, start_pos, new_seq_len)
+            self._slice_update(self.v_cache[layer_idx], v_packed, start_pos, new_seq_len)
+            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp4(
@@ -328,10 +336,10 @@ class KVCache:
             v_quant, v_scale = self._quantize_fp8(v_new)
 
             # Update cache slices (in-place)
-            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_quant
-            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_quant
-            self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_scale
-            self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_scale
+            self._slice_update(self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
+            self._slice_update(self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
+            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp8(
@@ -345,9 +353,10 @@ class KVCache:
 
         else:
             # Direct storage using kv_cache dtype
-            storage_dtype = _get_torch_dtype(self.dtype_config.kv_cache)
-            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_new.to(storage_dtype)
-            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_new.to(storage_dtype)
+            storage_dtype_str = getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            storage_dtype = _get_torch_dtype(storage_dtype_str)
+            self._slice_update(self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype)
+            self._slice_update(self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype)
 
             # Return in activations dtype for attention computation
             k_full = self.k_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
@@ -358,10 +367,12 @@ class KVCache:
     def advance(self, num_tokens: int = 1) -> None:
         """Advance sequence position after processing tokens."""
         self.seq_len += num_tokens
+        self.cache_position = self.seq_len
+        self._update_id += 1
 
     def reset(self) -> None:
         """Clear cache for new sequence."""
-        self.seq_len = 0
+        self._reset_positions()
 
     def get_kv(self, layer_idx: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Get current cached K, V for a layer (dequantized if needed).
@@ -420,6 +431,62 @@ class KVCache:
             * self.config.num_layers
         )
         return elements * bytes_per_element / 1024 / 1024
+
+    def _reset_positions(self) -> None:
+        self.seq_len = 0
+        self.cache_position = 0
+        self._update_id = 0
+        self._last_eviction_update_id = -1
+
+    def _maybe_evict(self, new_seq_len: int) -> None:
+        """Evict old entries when cache would overflow."""
+        end_pos = self.cache_position + new_seq_len
+        if end_pos <= self.config.max_seq_len:
+            return
+        if self._last_eviction_update_id == self._update_id:
+            return
+
+        overflow = end_pos - self.config.max_seq_len
+        self._shift_cache_left(overflow)
+        self._last_eviction_update_id = self._update_id
+
+    def _shift_cache_left(self, shift: int) -> None:
+        if shift <= 0 or self.seq_len == 0:
+            return
+        new_len = max(self.seq_len - shift, 0)
+
+        def _shift_list(tensors: list[torch.Tensor]) -> None:
+            for tensor in tensors:
+                if new_len == 0:
+                    continue
+                tensor[:, :, :new_len, :] = tensor[:, :, shift : shift + new_len, :]
+
+        _shift_list(self.k_cache)
+        _shift_list(self.v_cache)
+        if self.k_scales is not None:
+            _shift_list(self.k_scales)
+        if self.v_scales is not None:
+            _shift_list(self.v_scales)
+
+        self.seq_len = new_len
+        self.cache_position = new_len
+
+    def _slice_update(
+        self,
+        target: torch.Tensor,
+        update: torch.Tensor,
+        start: int,
+        length: int,
+        dtype_override: torch.dtype | None = None,
+    ) -> None:
+        """In-place slice update without reallocating the cache tensor."""
+        if dtype_override is not None and update.dtype != dtype_override:
+            update = update.to(dtype_override)
+        elif update.dtype != target.dtype:
+            update = update.to(target.dtype)
+        if not update.is_contiguous():
+            update = update.contiguous()
+        target.narrow(2, start, length).copy_(update)
 
     def _quantize_fp4(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP4 packed format."""

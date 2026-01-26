@@ -12,6 +12,11 @@ from .memory import (
     get_system_memory,
     should_reduce_allocation,
 )
+from .padding import (
+    pad_numpy_2d,
+    pad_torch_2d,
+    round_up,
+)
 from .prefetch import (
     AdaptivePrefetcher,
     SystemMemoryInfo,
@@ -34,4 +39,8 @@ __all__ = [
     "SystemMemoryInfo",
     "TensorMetadata",
     "get_system_memory_detailed",
+    # Padding helpers
+    "pad_numpy_2d",
+    "pad_torch_2d",
+    "round_up",
 ]

@@ -41,6 +41,7 @@ from .metal_dispatch import (
     dispatch_gemm_fp8,
     dispatch_gemm_int2,
     get_default_library,
+    mps_tensor_to_metal_buffer,
 )
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,11 @@ def require_mps() -> None:
             "Metal inference requires PyTorch with MPS backend.\n"
             "Ensure you're on Apple Silicon with PyTorch >= 2.0"
         )
+
+
+def _mps_buffer(tensor: torch.Tensor, device: Any) -> Any:
+    """Get a zero-copy MTLBuffer for an MPS tensor."""
+    return mps_tensor_to_metal_buffer(tensor, device)
 
 
 # ---------------------------------------------------------------------------

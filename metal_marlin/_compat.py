@@ -22,11 +22,13 @@ HAS_TORCH: bool = False
 HAS_MPS: bool = False
 HAS_PYOBJC_METAL: bool = False
 HAS_MATPLOTLIB: bool = False
+HAS_MPSGRAPH: bool = False
 
 # Module references (None when unavailable)
 torch: ModuleType | None = None
 Metal: ModuleType | None = None
 plt: ModuleType | None = None
+MPSGraph: ModuleType | None = None
 
 # Try importing torch
 try:
@@ -44,6 +46,15 @@ try:
 
     Metal = _Metal
     HAS_PYOBJC_METAL = True
+except ImportError:
+    pass
+
+# Try importing MPSGraph framework
+try:
+    import MetalPerformanceShadersGraph as _MPSGraph
+
+    MPSGraph = _MPSGraph
+    HAS_MPSGRAPH = True
 except ImportError:
     pass
 

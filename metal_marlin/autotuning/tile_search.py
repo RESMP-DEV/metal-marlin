@@ -133,6 +133,16 @@ TILE_CONFIGS: list[TileConfig] = [
     TileConfig(
         tile_m=32,
         tile_n=32,
+        tile_k=16,
+        simdgroups_per_tg=2,
+        threads_per_tg=64,
+        sg_m_tiles=2,
+        sg_n_tiles=2,
+        num_buffers=2,
+    ),
+    TileConfig(
+        tile_m=32,
+        tile_n=32,
         tile_k=32,
         simdgroups_per_tg=2,
         threads_per_tg=64,
@@ -227,6 +237,14 @@ DEFAULT_CONFIG = TileConfig(
     sg_n_tiles=4,
     num_buffers=2,
 )
+
+# GPU family profiles for default tile sizing.
+# Family IDs map to Apple GPU families (7=M1, 8=M2, 9=M3+).
+GPU_FAMILY_TILE_CONFIG: dict[int, dict[str, int]] = {
+    7: {"TILE_M": 32, "TILE_N": 32, "TILE_K": 16},
+    8: {"TILE_M": 64, "TILE_N": 64, "TILE_K": 32},
+    9: {"TILE_M": 128, "TILE_N": 128, "TILE_K": 32},
+}
 
 
 @dataclass

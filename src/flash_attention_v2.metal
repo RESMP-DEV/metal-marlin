@@ -41,7 +41,77 @@
 //     O = O / l_new
 
 #include <metal_stdlib>
+#include "bf16_compat.metal"
 using namespace metal;
+
+#ifdef USE_BF16_INPUTS
+using input_t = bf16_t;
+using output_t = ushort;
+#else
+using input_t = half;
+using output_t = half;
+#endif
+
+inline half4 half4_load(device const half* src) {
+    return *reinterpret_cast<device const half4*>(src);
+}
+
+#ifdef USE_BF16_INPUTS
+inline float4 bf16_load_as_float4(device const ushort* src) {
+    ushort4 packed = *reinterpret_cast<device const ushort4*>(src);
+    return bf16x4_to_float4(packed);
+}
+
+inline float input_to_float(input_t v) {
+    return bf16_to_float(v);
+}
+
+inline void bf16_store_from_float8(device ushort* dst, float4 lo, float4 hi) {
+    ushort4 lo_packed = float4_to_bf16x4_rne(lo);
+    ushort4 hi_packed = float4_to_bf16x4_rne(hi);
+    *reinterpret_cast<device ushort4*>(dst) = lo_packed;
+    *reinterpret_cast<device ushort4*>(dst + 4) = hi_packed;
+}
+
+inline void store_output_scalar(device ushort* dst, uint idx, float val) {
+    dst[idx] = bf16_from_float_rne(val).bits;
+}
+
+inline void store_output_bf16_vectorized(device ushort* dst,
+                                         uint base,
+                                         uint lane_id,
+                                         uint elems_per_lane,
+                                         thread const float* vals,
+                                         uint head_dim) {
+    if (elems_per_lane == 4 && ((lane_id & 1u) == 0u)) {
+        uint d0 = lane_id * elems_per_lane;
+        float4 lo = float4(vals[0], vals[1], vals[2], vals[3]);
+        float4 hi = float4(simd_shuffle_xor(vals[0], 1),
+                           simd_shuffle_xor(vals[1], 1),
+                           simd_shuffle_xor(vals[2], 1),
+                           simd_shuffle_xor(vals[3], 1));
+        if (d0 + 7 < head_dim) {
+            bf16_store_from_float8(dst + base + d0, lo, hi);
+            return;
+        }
+    }
+
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        uint d = lane_id * elems_per_lane + i;
+        if (d < head_dim) {
+            store_output_scalar(dst, base + d, vals[i]);
+        }
+    }
+}
+#else
+inline float input_to_float(input_t v) {
+    return float(v);
+}
+
+inline void store_output_scalar(device half* dst, uint idx, float val) {
+    dst[idx] = half(val);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Configuration for Apple Silicon M4 Max
@@ -241,10 +311,10 @@ struct AttentionParams {
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2(
-    device const half* Q            [[buffer(0)]],
-    device const half* K            [[buffer(1)]],
-    device const half* V            [[buffer(2)]],
-    device half* O                  [[buffer(3)]],
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
     constant AttentionParams& params [[buffer(4)]],
     uint3 tgid                      [[threadgroup_position_in_grid]],
     uint tid                        [[thread_index_in_threadgroup]],
@@ -290,9 +360,9 @@ kernel void flash_attention_v2(
     // For head_dim=128, use smaller tiles or single buffer
     // ---------------------------------------------------------------------------
 
-    threadgroup half Q_tile[TILE_Q][HEAD_DIM_128];
-    threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
-    threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t Q_tile[TILE_Q][HEAD_DIM_128];
+    threadgroup input_t K_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t V_tile[2][TILE_KV][HEAD_DIM_128];
 
     // ---------------------------------------------------------------------------
     // Cooperative Q tile load (all threads participate)
@@ -346,7 +416,7 @@ kernel void flash_attention_v2(
         uint q_row = sg_q_start + r;
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
-            q_reg[r][i] = float(Q_tile[q_row][d]);
+            q_reg[r][i] = input_to_float(Q_tile[q_row][d]);
         }
     }
 
@@ -470,12 +540,21 @@ kernel void flash_attention_v2(
 
         float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
 
+        const uint o_row_base = o_base + (sg_q_start + r) * q_stride_s;
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[r][i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_row_base, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_base + (sg_q_start + r) * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+                store_output_scalar(O, o_row_base + d, o_acc[r][i] * inv_l);
             }
         }
+#endif
     }
 }
 
@@ -484,10 +563,10 @@ kernel void flash_attention_v2(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_causal(
-    device const half* Q            [[buffer(0)]],
-    device const half* K            [[buffer(1)]],
-    device const half* V            [[buffer(2)]],
-    device half* O                  [[buffer(3)]],
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
     constant AttentionParams& params [[buffer(4)]],
     uint3 tgid                      [[threadgroup_position_in_grid]],
     uint tid                        [[thread_index_in_threadgroup]],
@@ -521,9 +600,9 @@ kernel void flash_attention_v2_causal(
     const uint q_base = batch_idx * q_stride_b + head_q * q_stride_h + q_start * q_stride_s;
     const uint kv_base = batch_idx * k_stride_b + head_kv * k_stride_h;
 
-    threadgroup half Q_tile[TILE_Q][HEAD_DIM_128];
-    threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
-    threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t Q_tile[TILE_Q][HEAD_DIM_128];
+    threadgroup input_t K_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t V_tile[2][TILE_KV][HEAD_DIM_128];
 
     // Load Q tile
     {
@@ -561,7 +640,7 @@ kernel void flash_attention_v2_causal(
         uint q_row = sg_q_start + r;
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
-            q_reg[r][i] = float(Q_tile[q_row][d]);
+            q_reg[r][i] = input_to_float(Q_tile[q_row][d]);
         }
     }
 
@@ -624,7 +703,7 @@ kernel void flash_attention_v2_causal(
                 float dot = 0.0f;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    dot += q_reg[r][i] * float(K_tile[buf][ki][d]);
+                    dot += q_reg[r][i] * input_to_float(K_tile[buf][ki][d]);
                 }
                 dot = simd_sum(dot);
 
@@ -677,12 +756,21 @@ kernel void flash_attention_v2_causal(
 
         float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
 
+        const uint o_row_base = o_base + (sg_q_start + r) * q_stride_s;
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[r][i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_row_base, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_base + (sg_q_start + r) * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+                store_output_scalar(O, o_row_base + d, o_acc[r][i] * inv_l);
             }
         }
+#endif
     }
 }
 
@@ -697,10 +785,10 @@ kernel void flash_attention_v2_causal(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_decode(
-    device const half* Q            [[buffer(0)]],
-    device const half* K            [[buffer(1)]],
-    device const half* V            [[buffer(2)]],
-    device half* O                  [[buffer(3)]],
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
     constant uint& num_seqs         [[buffer(4)]],
     constant uint& num_heads_q      [[buffer(5)]],
     constant uint& num_heads_kv     [[buffer(6)]],
@@ -735,15 +823,35 @@ kernel void flash_attention_v2_decode(
     float q_reg[HEAD_DIM_128 / SIMD_SIZE];
 
     if (sg_id == 0) {
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            uint d = lane_id * elems_per_lane + i;
-            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        if (elems_per_lane == 4) {
+            uint d = lane_id * elems_per_lane;
+            if (d + 3 < head_dim) {
+#ifdef USE_BF16_INPUTS
+                float4 q_vals = bf16_load_as_float4(reinterpret_cast<device const ushort*>(Q + q_offset + d));
+#else
+                float4 q_vals = float4(half4_load(reinterpret_cast<device const half*>(Q + q_offset + d)));
+#endif
+                q_reg[0] = q_vals.x;
+                q_reg[1] = q_vals.y;
+                q_reg[2] = q_vals.z;
+                q_reg[3] = q_vals.w;
+            } else {
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d_tail = d + i;
+                    q_reg[i] = (d_tail < head_dim) ? input_to_float(Q[q_offset + d_tail]) : 0.0f;
+                }
+            }
+        } else {
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                uint d = lane_id * elems_per_lane + i;
+                q_reg[i] = (d < head_dim) ? input_to_float(Q[q_offset + d]) : 0.0f;
+            }
         }
     }
 
     // Threadgroup memory for K/V (double-buffered)
-    threadgroup half K_smem[2][TILE_KV][HEAD_DIM_128];
-    threadgroup half V_smem[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t K_smem[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t V_smem[2][TILE_KV][HEAD_DIM_128];
 
     // Online softmax state
     float m_prev = -INFINITY;
@@ -848,13 +956,20 @@ kernel void flash_attention_v2_decode(
     if (sg_id == 0) {
         const uint o_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
         float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_offset, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_offset + d] = half(o_acc[i] * inv_l);
+                store_output_scalar(O, o_offset + d, o_acc[i] * inv_l);
             }
         }
+#endif
     }
 }
 
@@ -869,10 +984,10 @@ kernel void flash_attention_v2_decode(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_gqa(
-    device const half* Q            [[buffer(0)]],
-    device const half* K            [[buffer(1)]],
-    device const half* V            [[buffer(2)]],
-    device half* O                  [[buffer(3)]],
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
     constant AttentionParams& params [[buffer(4)]],
     uint3 tgid                      [[threadgroup_position_in_grid]],
     uint tid                        [[thread_index_in_threadgroup]],
@@ -909,8 +1024,8 @@ kernel void flash_attention_v2_gqa(
     const uint kv_base = batch_idx * k_stride_b + head_kv * k_stride_h;
 
     // K/V tiles are shared across all Q heads in this group
-    threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
-    threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t K_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t V_tile[2][TILE_KV][HEAD_DIM_128];
 
     // Each simdgroup handles one Q head within the GQA group
     // With 4 simdgroups and potentially gqa_ratio=16, we need multiple passes
@@ -941,7 +1056,7 @@ kernel void flash_attention_v2_gqa(
             l_prev[r] = 0.0f;
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = lane_id * elems_per_lane + i;
-                q_reg[r][i] = float(Q[q_base + r * q_stride_s + d]);
+                q_reg[r][i] = input_to_float(Q[q_base + r * q_stride_s + d]);
                 o_acc[r][i] = 0.0f;
             }
         }
@@ -996,7 +1111,7 @@ kernel void flash_attention_v2_gqa(
                     float dot = 0.0f;
                     for (uint i = 0; i < elems_per_lane; ++i) {
                         uint d = lane_id * elems_per_lane + i;
-                        dot += q_reg[r][i] * float(K_tile[buf][ki][d]);
+                        dot += q_reg[r][i] * input_to_float(K_tile[buf][ki][d]);
                     }
                     dot = simd_sum(dot);
                     scores[ki] = dot * scale;
@@ -1034,7 +1149,7 @@ kernel void flash_attention_v2_gqa(
                     l_prev[r] += p;
                     for (uint i = 0; i < elems_per_lane; ++i) {
                         uint d = lane_id * elems_per_lane + i;
-                        o_acc[r][i] += p * float(V_tile[buf][ki][d]);
+                        o_acc[r][i] += p * input_to_float(V_tile[buf][ki][d]);
                     }
                 }
 
@@ -1050,12 +1165,21 @@ kernel void flash_attention_v2_gqa(
 
         for (uint r = 0; r < q_rows; ++r) {
             float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
+            const uint o_row_base = o_base + r * q_stride_s;
+#ifdef USE_BF16_INPUTS
+            float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                out_vals[i] = o_acc[r][i] * inv_l;
+            }
+            store_output_bf16_vectorized(O, o_row_base, lane_id, elems_per_lane, out_vals, head_dim);
+#else
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = lane_id * elems_per_lane + i;
                 if (d < head_dim) {
-                    O[o_base + r * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+                    store_output_scalar(O, o_row_base + d, o_acc[r][i] * inv_l);
                 }
             }
+#endif
         }
     }
 }
@@ -1068,10 +1192,10 @@ kernel void flash_attention_v2_gqa(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_mqa(
-    device const half* Q            [[buffer(0)]],
-    device const half* K            [[buffer(1)]],
-    device const half* V            [[buffer(2)]],
-    device half* O                  [[buffer(3)]],
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
     constant AttentionParams& params [[buffer(4)]],
     uint3 tgid                      [[threadgroup_position_in_grid]],
     uint tid                        [[thread_index_in_threadgroup]],
@@ -1110,8 +1234,8 @@ kernel void flash_attention_v2_mqa(
     const uint kv_base = batch_idx * k_stride_b;  // Single KV head
 
     // Shared K/V tiles
-    threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
-    threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t K_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup input_t V_tile[2][TILE_KV][HEAD_DIM_128];
 
     // Per-simdgroup state
     const uint elems_per_lane = head_dim / SIMD_SIZE;
@@ -1126,7 +1250,7 @@ kernel void flash_attention_v2_mqa(
         l_prev[r] = 0.0f;
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
-            q_reg[r][i] = float(Q[q_base + r * q_stride_s + d]);
+            q_reg[r][i] = input_to_float(Q[q_base + r * q_stride_s + d]);
             o_acc[r][i] = 0.0f;
         }
     }
@@ -1182,7 +1306,7 @@ kernel void flash_attention_v2_mqa(
                 float dot = 0.0f;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    dot += q_reg[r][i] * float(K_tile[buf][ki][d]);
+                    dot += q_reg[r][i] * input_to_float(K_tile[buf][ki][d]);
                 }
                 dot = simd_sum(dot);
                 scores[ki] = dot * scale;
@@ -1220,7 +1344,7 @@ kernel void flash_attention_v2_mqa(
                 l_prev[r] += p;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    o_acc[r][i] += p * float(V_tile[buf][ki][d]);
+                    o_acc[r][i] += p * input_to_float(V_tile[buf][ki][d]);
                 }
             }
 
@@ -1236,12 +1360,21 @@ kernel void flash_attention_v2_mqa(
 
     for (uint r = 0; r < q_rows; ++r) {
         float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
+        const uint o_row_base = o_base + r * q_stride_s;
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[r][i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_row_base, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_base + r * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+                store_output_scalar(O, o_row_base + d, o_acc[r][i] * inv_l);
             }
         }
+#endif
     }
 }
 
@@ -1267,12 +1400,12 @@ kernel void flash_attention_v2_mqa(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_fp8_kv(
-    device const half* Q                [[buffer(0)]],
+    device const input_t* Q             [[buffer(0)]],
     device const uint8_t* K_fp8         [[buffer(1)]],
     device const uint8_t* V_fp8         [[buffer(2)]],
     device const half* K_scales         [[buffer(3)]],
     device const half* V_scales         [[buffer(4)]],
-    device half* O                      [[buffer(5)]],
+    device output_t* O                  [[buffer(5)]],
     constant uint& num_seqs             [[buffer(6)]],
     constant uint& num_heads_q          [[buffer(7)]],
     constant uint& num_heads_kv         [[buffer(8)]],
@@ -1312,9 +1445,29 @@ kernel void flash_attention_v2_fp8_kv(
     float q_reg[HEAD_DIM_128 / SIMD_SIZE];
 
     if (sg_id == 0) {
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            uint d = lane_id * elems_per_lane + i;
-            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        if (elems_per_lane == 4) {
+            uint d = lane_id * elems_per_lane;
+            if (d + 3 < head_dim) {
+#ifdef USE_BF16_INPUTS
+                float4 q_vals = bf16_load_as_float4(reinterpret_cast<device const ushort*>(Q + q_offset + d));
+#else
+                float4 q_vals = float4(half4_load(reinterpret_cast<device const half*>(Q + q_offset + d)));
+#endif
+                q_reg[0] = q_vals.x;
+                q_reg[1] = q_vals.y;
+                q_reg[2] = q_vals.z;
+                q_reg[3] = q_vals.w;
+            } else {
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d_tail = d + i;
+                    q_reg[i] = (d_tail < head_dim) ? input_to_float(Q[q_offset + d_tail]) : 0.0f;
+                }
+            }
+        } else {
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                uint d = lane_id * elems_per_lane + i;
+                q_reg[i] = (d < head_dim) ? input_to_float(Q[q_offset + d]) : 0.0f;
+            }
         }
     }
 
@@ -1447,13 +1600,20 @@ kernel void flash_attention_v2_fp8_kv(
     if (sg_id == 0) {
         const uint o_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
         float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_offset, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_offset + d] = half(o_acc[i] * inv_l);
+                store_output_scalar(O, o_offset + d, o_acc[i] * inv_l);
             }
         }
+#endif
     }
 }
 
@@ -1465,12 +1625,12 @@ kernel void flash_attention_v2_fp8_kv(
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_v2_fp8_kv_causal(
-    device const half* Q                [[buffer(0)]],
+    device const input_t* Q             [[buffer(0)]],
     device const uint8_t* K_fp8         [[buffer(1)]],
     device const uint8_t* V_fp8         [[buffer(2)]],
     device const half* K_scales         [[buffer(3)]],
     device const half* V_scales         [[buffer(4)]],
-    device half* O                      [[buffer(5)]],
+    device output_t* O                  [[buffer(5)]],
     constant AttentionParams& params    [[buffer(6)]],
     uint3 tgid                          [[threadgroup_position_in_grid]],
     uint tid                            [[thread_index_in_threadgroup]],
@@ -1510,11 +1670,11 @@ kernel void flash_attention_v2_fp8_kv_causal(
     const uint kv_base = batch_idx * k_stride_b + head_kv * k_stride_h;
     const uint scale_base = batch_idx * scale_stride_b + head_kv * scale_stride_h;
 
-    threadgroup half Q_tile[TILE_Q][HEAD_DIM_128];
+    threadgroup input_t Q_tile[TILE_Q][HEAD_DIM_128];
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
     threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
 
-    // Load Q tile (FP16, no dequantization needed)
+    // Load Q tile
     {
         const uint elems = q_rows * head_dim;
         const uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
@@ -1550,7 +1710,7 @@ kernel void flash_attention_v2_fp8_kv_causal(
         uint q_row = sg_q_start + r;
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
-            q_reg[r][i] = float(Q_tile[q_row][d]);
+            q_reg[r][i] = input_to_float(Q_tile[q_row][d]);
         }
     }
 
@@ -1626,7 +1786,7 @@ kernel void flash_attention_v2_fp8_kv_causal(
                 float dot = 0.0f;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    dot += q_reg[r][i] * float(K_tile[buf][ki][d]);
+                    dot += q_reg[r][i] * input_to_float(K_tile[buf][ki][d]);
                 }
                 dot = simd_sum(dot);
 
@@ -1658,7 +1818,7 @@ kernel void flash_attention_v2_fp8_kv_causal(
                 l_prev[r] += p;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    o_acc[r][i] += p * float(V_tile[buf][ki][d]);
+                    o_acc[r][i] += p * input_to_float(V_tile[buf][ki][d]);
                 }
             }
 
@@ -1677,12 +1837,20 @@ kernel void flash_attention_v2_fp8_kv_causal(
         if (global_q >= seq_q) continue;
 
         float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
-
+        const uint o_row_base = o_base + (sg_q_start + r) * q_stride_s;
+#ifdef USE_BF16_INPUTS
+        float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            out_vals[i] = o_acc[r][i] * inv_l;
+        }
+        store_output_bf16_vectorized(O, o_row_base, lane_id, elems_per_lane, out_vals, head_dim);
+#else
         for (uint i = 0; i < elems_per_lane; ++i) {
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
-                O[o_base + (sg_q_start + r) * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+                store_output_scalar(O, o_row_base + d, o_acc[r][i] * inv_l);
             }
         }
+#endif
     }
 }

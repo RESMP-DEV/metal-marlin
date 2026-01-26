@@ -29,6 +29,8 @@ Note:
 
 from __future__ import annotations
 
+import os
+import weakref
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -57,6 +59,78 @@ except ImportError:
     HAS_MPS = False
     torch = None
 
+if HAS_METAL:
+    from ._buffer_pool import MetalBufferPool
+
+    _STAGING_POOLS: dict[int, MetalBufferPool] = {}
+    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[Any, Any] = (
+        weakref.WeakKeyDictionary()
+    )
+
+    def _get_staging_pool(device: Any) -> MetalBufferPool:
+        pool = _STAGING_POOLS.get(id(device))
+        if pool is None:
+            pool = MetalBufferPool(device, storage_mode=Metal.MTLResourceStorageModeManaged)
+            _STAGING_POOLS[id(device)] = pool
+        return pool
+
+    def _blit_copy(
+        lib: MetalKernelLibrary, source: Any, destination: Any, size: int
+    ) -> None:
+        command_buffer = lib.command_queue.commandBuffer()
+        blit = command_buffer.blitCommandEncoder()
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+            source, 0, destination, 0, size
+        )
+        blit.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+    def _private_buffer_from_bytes(
+        lib: MetalKernelLibrary, device: Any, data: bytes
+    ) -> Any:
+        size = len(data)
+        staging = _get_staging_pool(device).get(size)
+        contents = staging.contents()
+        view = memoryview(contents.as_buffer(staging.length()))
+        view[:size] = data
+        staging.didModifyRange_(Foundation.NSMakeRange(0, size))
+
+        private_buf = device.newBufferWithLength_options_(
+            size, Metal.MTLResourceStorageModePrivate
+        )
+        _blit_copy(lib, staging, private_buf, size)
+        _get_staging_pool(device).release(staging)
+        return private_buf
+
+    def _private_buffer_from_tensor(
+        tensor: torch.Tensor,
+        lib: MetalKernelLibrary,
+        device: Any,
+        *,
+        cache: bool,
+    ) -> Any:
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        if cache and tensor in _WEIGHT_BUFFER_CACHE:
+            return _WEIGHT_BUFFER_CACHE[tensor]
+
+        if tensor.is_mps:
+            staging = mps_tensor_to_metal_buffer(tensor, device)
+            size = staging.length()
+            private_buf = device.newBufferWithLength_options_(
+                size, Metal.MTLResourceStorageModePrivate
+            )
+            _blit_copy(lib, staging, private_buf, size)
+        else:
+            data = tensor.detach().cpu().numpy().tobytes()
+            private_buf = _private_buffer_from_bytes(lib, device, data)
+
+        if cache:
+            _WEIGHT_BUFFER_CACHE[tensor] = private_buf
+        return private_buf
+
 
 def require_metal() -> None:
     """Raise if Metal/PyObjC is not available."""
@@ -74,6 +148,18 @@ def require_mps() -> None:
             "Metal dispatch requires PyTorch with MPS backend.\n"
             "Ensure you're on Apple Silicon with PyTorch >= 2.0"
         )
+
+
+def get_gpu_family(device: Any) -> int:
+    """Return Apple GPU family (7=M1, 8=M2, 9=M3+)."""
+    require_metal()
+    apple9 = getattr(Metal, "MTLGPUFamilyApple9", None)
+    apple8 = getattr(Metal, "MTLGPUFamilyApple8", None)
+    if apple9 is not None and device.supportsFamily_(apple9):
+        return 9
+    if apple8 is not None and device.supportsFamily_(apple8):
+        return 8
+    return 7
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +406,28 @@ class MetalKernelLibrary:
     ) -> torch.Tensor:
         """Fused FP4 dequantize + GEMM using marlin_gemm kernel."""
         M = input.shape[0]
+        orig_N = N
+
+        pad_m = 0
+        pad_n = 0
+        if _padding_enabled(None):
+            packed_k = weight.shape[0] * 8
+            packed_n = weight.shape[1]
+            scales_k = scales.shape[0] * group_size
+            scales_n = scales.shape[1]
+
+            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+            n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
+
+            input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
+            input, _ = _pad_tensor_to_size(input, 1, k_target)
+            weight = _pad_packed_fp4(weight, k_target, n_target)
+            scales = _pad_scales(scales, k_target, n_target, group_size)
+
+            M = input.shape[0]
+            N = n_target
+            K = k_target
+            pad_n = N - orig_N if N >= orig_N else 0
 
         # Allocate output
         output = torch.empty((M, N), dtype=input.dtype, device=input.device)
@@ -340,7 +448,7 @@ class MetalKernelLibrary:
         # Dispatch
         self._dispatch(
             kernel,
-            (grid_m, grid_n, 1),
+            (grid_n, grid_m, 1),
             (THREADS_PER_TG, 1, 1),
             input_buf,
             weight_buf,
@@ -352,6 +460,9 @@ class MetalKernelLibrary:
             group_size,
         )
 
+        if pad_m or pad_n:
+            output = unpad(output, 0, pad_m)
+            output = unpad(output, 1, pad_n)
         return output
 
     def int4_gemm(
@@ -359,13 +470,41 @@ class MetalKernelLibrary:
         input: torch.Tensor,  # [M, K] input activations
         weight: torch.Tensor,  # Packed INT4 weights
         scales: torch.Tensor,  # Per-group scales
-        zeros: torch.Tensor,  # Per-group zero points
         N: int,  # Output features
         K: int,  # Input features
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused INT4 dequantize + GEMM using marlin_gemm kernel."""
         M = input.shape[0]
+        orig_N = N
+
+        pad_m = 0
+        pad_n = 0
+        if _padding_enabled(None):
+            packed_k = weight.shape[0] * 8
+            packed_n = weight.shape[1]
+            scales_k = scales.shape[0] * group_size
+            scales_n = scales.shape[1]
+
+            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+            n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
+
+            input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
+            input, _ = _pad_tensor_to_size(input, 1, k_target)
+            weight = _pad_packed_fp4(weight, k_target, n_target)
+            scales = _pad_scales(scales, k_target, n_target, group_size)
+
+            M = input.shape[0]
+            N = n_target
+            K = k_target
+            pad_n = N - orig_N if N >= orig_N else 0
+
+        zeros = torch.full(
+            scales.shape,
+            8.0,
+            dtype=scales.dtype,
+            device=scales.device,
+        )
 
         output = torch.empty((M, N), dtype=input.dtype, device=input.device)
 
@@ -382,7 +521,7 @@ class MetalKernelLibrary:
 
         self._dispatch(
             kernel,
-            (grid_m, grid_n, 1),
+            (grid_n, grid_m, 1),
             (THREADS_PER_TG, 1, 1),
             input_buf,
             weight_buf,
@@ -395,6 +534,74 @@ class MetalKernelLibrary:
             group_size,
         )
 
+        if pad_m or pad_n:
+            output = unpad(output, 0, pad_m)
+            output = unpad(output, 1, pad_n)
+        return output
+
+    def int2_gemm(
+        self,
+        input: torch.Tensor,  # [M, K] input activations
+        weight: torch.Tensor,  # Packed INT2 weights
+        scales: torch.Tensor,  # Per-group scales
+        N: int,  # Output features
+        K: int,  # Input features
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Fused INT2 dequantize + GEMM using marlin_gemm kernel."""
+        M = input.shape[0]
+        orig_N = N
+
+        pad_m = 0
+        pad_n = 0
+        if _padding_enabled(None):
+            packed_k = weight.shape[0]
+            packed_n = weight.shape[1] * 16
+            scales_k = scales.shape[0] * group_size
+            scales_n = scales.shape[1]
+
+            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+            n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 16))
+
+            input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
+            input, _ = _pad_tensor_to_size(input, 1, k_target)
+            weight = _pad_packed_n(weight, k_target, n_target, 16)
+            scales = _pad_scales(scales, k_target, n_target, group_size)
+
+            M = input.shape[0]
+            N = n_target
+            K = k_target
+            pad_n = N - orig_N if N >= orig_N else 0
+
+        output = torch.empty((M, N), dtype=input.dtype, device=input.device)
+
+        kernel = self.get_kernel("marlin_gemm", "marlin_gemm_int2")
+
+        input_buf = self._get_metal_buffer(input)
+        weight_buf = self._get_metal_buffer(weight)
+        scales_buf = self._get_metal_buffer(scales)
+        output_buf = self._get_metal_buffer(output)
+
+        grid_m = (M + TILE_M - 1) // TILE_M
+        grid_n = (N + TILE_N - 1) // TILE_N
+
+        self._dispatch(
+            kernel,
+            (grid_n, grid_m, 1),
+            (THREADS_PER_TG, 1, 1),
+            input_buf,
+            weight_buf,
+            scales_buf,
+            output_buf,
+            M,
+            N,
+            K,
+            group_size,
+        )
+
+        if pad_m or pad_n:
+            output = unpad(output, 0, pad_m)
+            output = unpad(output, 1, pad_n)
         return output
 
 
@@ -520,6 +727,107 @@ TILE_N = 64
 TILE_K = 32
 THREADS_PER_TG = 128
 
+# Padding config (set METAL_MARLIN_GEMM_PADDING=0 to disable)
+_ENABLE_GEMM_PADDING = os.getenv("METAL_MARLIN_GEMM_PADDING", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+)
+_PAD_MULTIPLE = 8
+
+
+def _padding_enabled(override: bool | None) -> bool:
+    if override is None:
+        return _ENABLE_GEMM_PADDING
+    return override
+
+
+def _round_up(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def _pad_tensor_to_size(tensor: torch.Tensor, dim: int, size: int) -> tuple[torch.Tensor, int]:
+    dim = dim % tensor.dim()
+    current = tensor.size(dim)
+    if current == size:
+        return tensor, 0
+    if current > size:
+        raise ValueError(f"Cannot pad dim {dim} from {current} to smaller size {size}")
+    pad_size = size - current
+    new_shape = list(tensor.shape)
+    new_shape[dim] = size
+    padded = torch.zeros(new_shape, dtype=tensor.dtype, device=tensor.device)
+    slices = [slice(None)] * tensor.dim()
+    slices[dim] = slice(0, current)
+    padded[tuple(slices)] = tensor
+    return padded, pad_size
+
+
+def _pad_scales(
+    scales: torch.Tensor,
+    k_target: int,
+    n_target: int,
+    group_size: int,
+) -> torch.Tensor:
+    if k_target % group_size != 0:
+        raise ValueError(
+            f"k_target={k_target} must be divisible by group_size={group_size} for scales"
+        )
+    k_groups_target = k_target // group_size
+    if scales.shape[0] > k_groups_target or scales.shape[1] > n_target:
+        raise ValueError(
+            "scales shape is larger than requested padded dimensions: "
+            f"{scales.shape} vs ({k_groups_target}, {n_target})"
+        )
+    padded = torch.zeros(
+        (k_groups_target, n_target),
+        dtype=scales.dtype,
+        device=scales.device,
+    )
+    padded[: scales.shape[0], : scales.shape[1]] = scales
+    return padded
+
+
+def _pad_packed_fp4(
+    packed: torch.Tensor,
+    k_target: int,
+    n_target: int,
+) -> torch.Tensor:
+    k_packs_target = k_target // 8
+    if packed.shape[0] > k_packs_target or packed.shape[1] > n_target:
+        raise ValueError(
+            "packed FP4 shape is larger than requested padded dimensions: "
+            f"{packed.shape} vs ({k_packs_target}, {n_target})"
+        )
+    padded = torch.zeros(
+        (k_packs_target, n_target),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    padded[: packed.shape[0], : packed.shape[1]] = packed
+    return padded
+
+
+def _pad_packed_n(
+    packed: torch.Tensor,
+    k_target: int,
+    n_target: int,
+    pack_factor: int,
+) -> torch.Tensor:
+    n_packed_target = n_target // pack_factor
+    if packed.shape[0] > k_target or packed.shape[1] > n_packed_target:
+        raise ValueError(
+            "packed shape is larger than requested padded dimensions: "
+            f"{packed.shape} vs ({k_target}, {n_packed_target})"
+        )
+    padded = torch.zeros(
+        (k_target, n_packed_target),
+        dtype=packed.dtype,
+        device=packed.device,
+    )
+    padded[: packed.shape[0], : packed.shape[1]] = packed
+    return padded
+
 
 def dispatch_gemm_fp4(
     lib: MetalKernelLibrary,
@@ -530,6 +838,7 @@ def dispatch_gemm_fp4(
     N: int,
     K: int,
     group_size: int = 32,
+    enable_padding: bool | None = None,
 ) -> torch.Tensor:
     """Dispatch FP4 quantized GEMM: C = A @ dequant(B).
 
@@ -542,6 +851,7 @@ def dispatch_gemm_fp4(
         N: Columns of B (output features)
         K: Inner dimension (input features)
         group_size: Quantization group size
+        enable_padding: Override padding config (None uses env default)
 
     Returns:
         Output tensor [M, N], fp16, MPS
@@ -549,22 +859,52 @@ def dispatch_gemm_fp4(
     require_mps()
 
     device = lib.device
+    gpu_family = get_gpu_family(device)
+    if gpu_family >= 9:
+        kernel_name = "marlin_gemm_fused_fp4"
+    else:
+        kernel_name = "marlin_gemm_fp4"
+
+    orig_M = M
+    orig_N = N
+    pad_m = 0
+    pad_n = 0
+    if _padding_enabled(enable_padding):
+        packed_k = B_packed.shape[0] * 8
+        packed_n = B_packed.shape[1]
+        scales_k = scales.shape[0] * group_size
+        scales_n = scales.shape[1]
+
+        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+        n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
+
+        A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
+        A, _ = _pad_tensor_to_size(A, 1, k_target)
+        B_packed = _pad_packed_fp4(B_packed, k_target, n_target)
+        scales = _pad_scales(scales, k_target, n_target, group_size)
+
+        M = A.shape[0]
+        N = n_target
+        K = k_target
+        pad_n = N - orig_N if N >= orig_N else 0
 
     # Allocate output
     C = torch.empty((M, N), dtype=torch.float16, device="mps")
 
     # Convert tensors to Metal buffers
-    A_buf = mps_tensor_to_metal_buffer(A.half().contiguous(), device)
-    B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-    S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
+    A_half = A.half().contiguous()
+    A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
+    B_packed_contig = B_packed.contiguous()
+    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    scales_half = scales if scales.dtype == torch.float16 else scales.half()
+    scales_half = scales_half.contiguous()
+    S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
     C_buf = mps_tensor_to_metal_buffer(C, device)
 
     # Create params buffer (struct matching kernel expectations)
     # struct GemmParams { uint M, N, K, group_size; }
     params = np.array([M, N, K, group_size], dtype=np.uint32)
-    params_buf = device.newBufferWithBytes_length_options_(
-        params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-    )
+    params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
 
     # Compute grid
     grid_m = (M + TILE_M - 1) // TILE_M
@@ -573,13 +913,16 @@ def dispatch_gemm_fp4(
     # Dispatch
     dispatch_kernel(
         lib,
-        function_name="marlin_gemm_fp4",
-        grid=(grid_m, grid_n, 1),
+        function_name=kernel_name,
+        grid=(grid_n, grid_m, 1),
         threadgroup=(THREADS_PER_TG, 1, 1),
         buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
         wait=True,
     )
 
+    if pad_m or pad_n:
+        C = unpad(C, 0, pad_m)
+        C = unpad(C, 1, pad_n)
     return C
 
 
@@ -592,6 +935,7 @@ def dispatch_gemm_fp8(
     N: int,
     K: int,
     group_size: int = 128,
+    enable_padding: bool | None = None,
 ) -> torch.Tensor:
     """Dispatch FP8 E4M3 quantized GEMM: C = A @ dequant(B).
 
@@ -601,17 +945,42 @@ def dispatch_gemm_fp8(
 
     device = lib.device
 
+    orig_M = M
+    orig_N = N
+    pad_m = 0
+    pad_n = 0
+    if _padding_enabled(enable_padding):
+        packed_k = B_packed.shape[0]
+        packed_n = B_packed.shape[1] * 4
+        scales_k = scales.shape[0] * group_size
+        scales_n = scales.shape[1]
+
+        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+        n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 4))
+
+        A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
+        A, _ = _pad_tensor_to_size(A, 1, k_target)
+        B_packed = _pad_packed_n(B_packed, k_target, n_target, 4)
+        scales = _pad_scales(scales, k_target, n_target, group_size)
+
+        M = A.shape[0]
+        N = n_target
+        K = k_target
+        pad_n = N - orig_N if N >= orig_N else 0
+
     C = torch.empty((M, N), dtype=torch.float16, device="mps")
 
-    A_buf = mps_tensor_to_metal_buffer(A.half().contiguous(), device)
-    B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-    S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
+    A_half = A.half().contiguous()
+    A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
+    B_packed_contig = B_packed.contiguous()
+    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    scales_half = scales if scales.dtype == torch.float16 else scales.half()
+    scales_half = scales_half.contiguous()
+    S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
     C_buf = mps_tensor_to_metal_buffer(C, device)
 
     params = np.array([M, N, K, group_size], dtype=np.uint32)
-    params_buf = device.newBufferWithBytes_length_options_(
-        params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-    )
+    params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
 
     grid_m = (M + TILE_M - 1) // TILE_M
     grid_n = (N + TILE_N - 1) // TILE_N
@@ -625,6 +994,9 @@ def dispatch_gemm_fp8(
         wait=True,
     )
 
+    if pad_m or pad_n:
+        C = unpad(C, 0, pad_m)
+        C = unpad(C, 1, pad_n)
     return C
 
 
@@ -637,6 +1009,7 @@ def dispatch_gemm_int2(
     N: int,
     K: int,
     group_size: int = 128,
+    enable_padding: bool | None = None,
 ) -> torch.Tensor:
     """Dispatch INT2 quantized GEMM: C = A @ dequant(B).
 
@@ -646,17 +1019,42 @@ def dispatch_gemm_int2(
 
     device = lib.device
 
+    orig_M = M
+    orig_N = N
+    pad_m = 0
+    pad_n = 0
+    if _padding_enabled(enable_padding):
+        packed_k = B_packed.shape[0]
+        packed_n = B_packed.shape[1] * 16
+        scales_k = scales.shape[0] * group_size
+        scales_n = scales.shape[1]
+
+        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+        n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 16))
+
+        A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
+        A, _ = _pad_tensor_to_size(A, 1, k_target)
+        B_packed = _pad_packed_n(B_packed, k_target, n_target, 16)
+        scales = _pad_scales(scales, k_target, n_target, group_size)
+
+        M = A.shape[0]
+        N = n_target
+        K = k_target
+        pad_n = N - orig_N if N >= orig_N else 0
+
     C = torch.empty((M, N), dtype=torch.float16, device="mps")
 
-    A_buf = mps_tensor_to_metal_buffer(A.half().contiguous(), device)
-    B_buf = mps_tensor_to_metal_buffer(B_packed.contiguous(), device)
-    S_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
+    A_half = A.half().contiguous()
+    A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
+    B_packed_contig = B_packed.contiguous()
+    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    scales_half = scales if scales.dtype == torch.float16 else scales.half()
+    scales_half = scales_half.contiguous()
+    S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
     C_buf = mps_tensor_to_metal_buffer(C, device)
 
     params = np.array([M, N, K, group_size], dtype=np.uint32)
-    params_buf = device.newBufferWithBytes_length_options_(
-        params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
-    )
+    params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
 
     grid_m = (M + TILE_M - 1) // TILE_M
     grid_n = (N + TILE_N - 1) // TILE_N
@@ -672,6 +1070,9 @@ def dispatch_gemm_int2(
         wait=True,
     )
 
+    if pad_m or pad_n:
+        C = unpad(C, 0, pad_m)
+        C = unpad(C, 1, pad_n)
     return C
 
 

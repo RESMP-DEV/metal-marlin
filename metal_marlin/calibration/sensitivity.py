@@ -50,7 +50,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    from .bartowski import BartowskiCalibration
+    pass
 
 
 @dataclass
@@ -391,11 +391,224 @@ def analyze_layer_sensitivity(
 # ============================================================================
 
 
+def _get_memory_budget(target_pct: float = 0.80) -> int:
+    """Get memory budget in bytes based on available system memory."""
+    import psutil
+
+    mem = psutil.virtual_memory()
+    available = mem.available
+    return int(available * target_pct)
+
+
+def _compute_hessians_layerwise(
+    model_path: str | Path,
+    calibration_data: Any,
+    batch_size: int = 2,
+    max_seq_len: int = 512,
+    layers_per_pass: int = 8,
+    memory_fraction: float = 0.80,
+    verbose: bool = True,
+) -> dict[str, NDArray[np.float64]]:
+    """Compute Hessians layer-by-layer to avoid OOM on unified memory systems.
+
+    Instead of hooking all layers at once (which accumulates 377 Hessian matrices),
+    this processes layers in groups:
+    1. Hook only N layers at a time
+    2. Run calibration forward passes
+    3. Collect Hessians for those layers
+    4. Unhook, move to next group
+
+    This reduces peak memory from O(all_layers) to O(layers_per_pass).
+
+    Args:
+        model_path: Path to HuggingFace model directory.
+        calibration_data: CalibrationDataset with text samples.
+        batch_size: Batch size for forward passes (small to save memory).
+        max_seq_len: Maximum sequence length (shorter = less memory).
+        layers_per_pass: Number of layers to hook simultaneously.
+        memory_fraction: Fraction of available memory to use.
+        verbose: Print progress.
+
+    Returns:
+        Dict mapping layer names to Hessian matrices.
+    """
+    import gc
+
+    from .hooks import CalibrationHooks
+
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as e:
+        raise ImportError("transformers required. pip install transformers") from e
+
+    from .._compat import HAS_TORCH, torch
+
+    if not HAS_TORCH or torch is None:
+        raise ImportError("PyTorch is required")
+
+    model_path = Path(model_path)
+    memory_budget = _get_memory_budget(memory_fraction)
+    memory_budget_gb = memory_budget / (1024**3)
+
+    if verbose:
+        print(f"Layer-wise Hessian computation: {model_path}")
+        print(f"  Memory budget: {memory_budget_gb:.1f} GB")
+        print(f"  Layers per pass: {layers_per_pass}")
+        print(f"  Batch size: {batch_size}, max_seq_len: {max_seq_len}")
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # Determine device
+    device = (
+        "mps"
+        if torch.backends.mps.is_available()
+        else "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    if verbose:
+        print(f"  Device: {device}")
+        print("  Loading model...")
+
+    # Load model
+    model = AutoModelForCausalLM.from_pretrained(
+        str(model_path),
+        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+        device_map=device,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+    )
+    model.eval()
+
+    # Pre-tokenize calibration data
+    samples = list(calibration_data)
+    if verbose:
+        print(f"  Calibration samples: {len(samples)}")
+
+    # Get all Linear layer names
+    import torch.nn as nn
+
+    all_linear_layers = [
+        (name, module) for name, module in model.named_modules() if isinstance(module, nn.Linear)
+    ]
+
+    if verbose:
+        print(f"  Total linear layers: {len(all_linear_layers)}")
+
+    # Process in groups
+    all_hessians: dict[str, NDArray[np.float64]] = {}
+    num_groups = (len(all_linear_layers) + layers_per_pass - 1) // layers_per_pass
+
+    for group_idx in range(num_groups):
+        start_idx = group_idx * layers_per_pass
+        end_idx = min((group_idx + 1) * layers_per_pass, len(all_linear_layers))
+        group_layers = all_linear_layers[start_idx:end_idx]
+        group_names = {name for name, _ in group_layers}
+
+        if verbose:
+            print(f"\n  Pass {group_idx + 1}/{num_groups}: layers {start_idx}-{end_idx - 1}")
+
+        # Create hooks for just this group
+        hooks = CalibrationHooks(damping=0.01)
+
+        def layer_filter(name: str, module: Any) -> bool:
+            return name in group_names
+
+        num_hooked = hooks.register_linear_hooks(model, layer_filter=layer_filter)
+
+        if verbose:
+            print(f"    Hooked {num_hooked} layers")
+
+        # Run calibration batches
+        num_batches = (len(samples) + batch_size - 1) // batch_size
+
+        with torch.no_grad():
+            for i in range(num_batches):
+                batch_start = i * batch_size
+                batch_end = min((i + 1) * batch_size, len(samples))
+                batch_texts = samples[batch_start:batch_end]
+
+                encodings = tokenizer(
+                    batch_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=max_seq_len,
+                )
+                input_ids = encodings["input_ids"].to(device)
+                attention_mask = encodings.get("attention_mask")
+                if attention_mask is not None:
+                    attention_mask = attention_mask.to(device)
+
+                try:
+                    _ = model(input_ids=input_ids, attention_mask=attention_mask)
+                except Exception as e:
+                    if verbose:
+                        print(f"    Warning: batch {i} failed: {e}")
+                    continue
+
+        # Collect and store Hessians for this group
+        group_hessians = hooks.get_hessians(apply_damping=True)
+        all_hessians.update(group_hessians)
+
+        if verbose:
+            sample_counts = hooks.get_sample_counts()
+            avg_samples = sum(sample_counts.values()) // max(len(sample_counts), 1)
+            print(f"    Collected {len(group_hessians)} Hessians (~{avg_samples} samples each)")
+
+        # Cleanup this group's hooks
+        hooks.remove_hooks()
+        del hooks
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
+    # Final cleanup
+    del model
+    gc.collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+    if verbose:
+        print(f"\n  Total Hessians collected: {len(all_hessians)}")
+
+    return all_hessians
+
+
+def _compute_hessians_with_model(
+    model_path: str | Path,
+    calibration_data: Any,
+    batch_size: int = 2,
+    max_seq_len: int = 512,
+    memory_fraction: float = 0.80,
+    verbose: bool = True,
+) -> dict[str, NDArray[np.float64]]:
+    """Compute real Hessians by running calibration data through the model.
+
+    Uses layer-wise processing to avoid OOM on unified memory systems.
+    """
+    return _compute_hessians_layerwise(
+        model_path=model_path,
+        calibration_data=calibration_data,
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+        layers_per_pass=8,  # Process 8 layers at a time
+        memory_fraction=memory_fraction,
+        verbose=verbose,
+    )
+
+
 def compute_model_sensitivity_profile(
     model_path: str | Path,
-    calibration_data: BartowskiCalibration | None = None,
+    calibration_data: Any | None = None,
     layers_to_analyze: list[str] | None = None,
     compute_hessians: bool = True,
+    max_calibration_samples: int | None = 128,
+    calibration_batch_size: int = 4,
     verbose: bool = True,
 ) -> dict[str, LayerSensitivity]:
     """Generate full model sensitivity analysis.
@@ -443,14 +656,19 @@ def compute_model_sensitivity_profile(
         print(f"Analyzing model: {model_path}")
         print(f"  Calibration data: {'provided' if calibration_data else 'none'}")
         print(f"  Compute Hessians: {compute_hessians}")
+        print(f"  Shards: {len(st_files)}")
         print()
 
-    # Phase 1: Collect all weight tensors and compute basic stats
+    # Phase 1: Collect all weight tensors and compute basic stats (parallel loading)
     weight_stats: dict[str, tuple[NDArray[np.floating[Any]], float, float, dict[str, float]]] = {}
 
-    for st_file in st_files:
-        if verbose:
-            print(f"Loading {st_file.name}...")
+    def _load_shard(
+        st_file: Path,
+    ) -> dict[str, tuple[NDArray[np.floating[Any]], float, float, dict[str, float]]]:
+        """Load and process a single safetensors shard."""
+        shard_stats: dict[
+            str, tuple[NDArray[np.floating[Any]], float, float, dict[str, float]]
+        ] = {}
 
         with safe_open(str(st_file), framework="numpy") as f:
             for name in f.keys():
@@ -486,7 +704,36 @@ def compute_model_sensitivity_profile(
 
                 # Compute weight stats
                 variance, outlier_ratio, metrics = _compute_weight_stats(tensor)
-                weight_stats[name] = (tensor, variance, outlier_ratio, metrics)
+                shard_stats[name] = (tensor, variance, outlier_ratio, metrics)
+
+        return shard_stats
+
+    # Parallel load shards
+    import concurrent.futures
+    import os
+
+    # Use min of shard count or CPU count (capped at 8 to avoid memory pressure)
+    max_workers = min(len(st_files), os.cpu_count() or 4, 8)
+
+    if verbose:
+        print(f"Loading {len(st_files)} shards with {max_workers} workers...")
+
+    loaded_count = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_file = {executor.submit(_load_shard, f): f for f in st_files}
+        for future in concurrent.futures.as_completed(future_to_file):
+            st_file = future_to_file[future]
+            try:
+                shard_stats = future.result()
+                weight_stats.update(shard_stats)
+                loaded_count += 1
+                if verbose:
+                    print(
+                        f"  [{loaded_count}/{len(st_files)}] {st_file.name}: {len(shard_stats)} tensors"
+                    )
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Failed to load {st_file.name}: {e}")
 
     if verbose:
         print(f"Found {len(weight_stats)} weight tensors")
@@ -497,33 +744,40 @@ def compute_model_sensitivity_profile(
     if compute_hessians and calibration_data is not None:
         if verbose:
             print("\nComputing Hessians from calibration data...")
-            print("  (This requires model inference - using simplified estimation)")
 
-        # For a full implementation, we would:
-        # 1. Load the model
-        # 2. Run calibration samples through it
-        # 3. Hook layer inputs to compute X^T @ X
-        #
-        # For now, we estimate Hessian stats from weight distributions
-        # This is less accurate but much faster
+        # Limit calibration samples if specified
+        calib_samples = calibration_data
+        if max_calibration_samples is not None and len(calibration_data) > max_calibration_samples:
+            calib_samples = calibration_data[:max_calibration_samples]
+            if verbose:
+                print(f"  Using {max_calibration_samples} of {len(calibration_data)} samples")
 
-        for name, (weight, _, _, _) in weight_stats.items():
-            # Simplified Hessian estimation: assume uniform activation distribution
-            # This gives H ≈ I scaled by estimated activation magnitude
-            in_features = weight.shape[1]
-
-            # Estimate activation scale from weight magnitude
-            # (layers with larger weights often have larger activations)
-            weight_scale = np.std(weight)
-            estimated_activation_var = weight_scale**2
-
-            # Create diagonal Hessian approximation
-            hessians[name] = np.diag(
-                np.full(in_features, estimated_activation_var, dtype=np.float64)
+        # Compute real Hessians by running the model
+        try:
+            hessians = _compute_hessians_with_model(
+                model_path=model_path,
+                calibration_data=calib_samples,
+                batch_size=calibration_batch_size,
+                max_seq_len=2048,
+                verbose=verbose,
             )
+            if verbose:
+                print(f"  Computed real Hessians for {len(hessians)} layers")
+        except Exception as e:
+            if verbose:
+                print(f"  Warning: Hessian computation failed: {e}")
+                print("  Falling back to weight-based estimation...")
 
-        if verbose:
-            print(f"  Estimated Hessians for {len(hessians)} layers")
+            # Fallback: estimate from weight statistics
+            for name, (weight, _, _, _) in weight_stats.items():
+                in_features = weight.shape[1]
+                weight_scale = np.std(weight)
+                estimated_activation_var = weight_scale**2
+                hessians[name] = np.diag(
+                    np.full(in_features, estimated_activation_var, dtype=np.float64)
+                )
+            if verbose:
+                print(f"  Estimated Hessians for {len(hessians)} layers")
 
     # Phase 3: Compute sensitivity for each layer
     if verbose:

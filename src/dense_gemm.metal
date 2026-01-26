@@ -22,6 +22,7 @@
 
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
+#include "bf16_compat.metal"
 
 using namespace metal;
 
@@ -88,11 +89,24 @@ inline half dequant_fp4_scaled(uint nibble, half scale) {
     return isfinite(result) ? (half)result : half(0.0h);
 }
 
+inline float dequant_fp4_scaled_fp32(uint nibble, half scale) {
+    float result = float(dequant_fp4_dense(nibble)) * float(scale);
+    return isfinite(result) ? result : 0.0f;
+}
+
 inline void unpack_fp4x8(uint packed, half scale, thread half* out) {
     #pragma unroll
     for (uint i = 0; i < 8; ++i) {
         uint nibble = (packed >> (i * 4)) & 0xF;
         out[i] = dequant_fp4_scaled(nibble, scale);
+    }
+}
+
+inline void unpack_fp4x8_fp32(uint packed, half scale, thread float* out) {
+    #pragma unroll
+    for (uint i = 0; i < 8; ++i) {
+        uint nibble = (packed >> (i * 4)) & 0xF;
+        out[i] = dequant_fp4_scaled_fp32(nibble, scale);
     }
 }
 
@@ -350,6 +364,147 @@ inline void load_B_tile_dequant_small(
     }
 }
 
+inline void load_A_tile_small_bf16_fp32(
+    device const ushort* A,
+    threadgroup float (&A_buf)[SMALL_TILE_M][SMALL_TILE_K],
+    uint M, uint K,
+    uint tg_row, uint k_block,
+    uint thread_idx
+) {
+    const uint blocks_per_row = SMALL_TILE_K / 8;
+    const uint total_blocks = SMALL_TILE_M * blocks_per_row;
+    if (thread_idx >= total_blocks) {
+        return;
+    }
+
+    uint block_idx = thread_idx;
+    uint row = block_idx / blocks_per_row;
+    uint col = (block_idx % blocks_per_row) * 8;
+    uint global_row = tg_row + row;
+    uint global_col = k_block + col;
+
+    float4 lo = float4(0.0f);
+    float4 hi = float4(0.0f);
+    if (global_row < M && (global_col + 7) < K) {
+        bf16_load_as_float8(A, global_row * K + global_col, lo, hi);
+    } else {
+        for (uint v = 0; v < 8; ++v) {
+            uint gcol = global_col + v;
+            float val = 0.0f;
+            if (global_row < M && gcol < K) {
+                val = bf16_bits_to_float(A[global_row * K + gcol]);
+            }
+            A_buf[row][col + v] = val;
+        }
+        return;
+    }
+
+    A_buf[row][col + 0] = lo.x;
+    A_buf[row][col + 1] = lo.y;
+    A_buf[row][col + 2] = lo.z;
+    A_buf[row][col + 3] = lo.w;
+    A_buf[row][col + 4] = hi.x;
+    A_buf[row][col + 5] = hi.y;
+    A_buf[row][col + 6] = hi.z;
+    A_buf[row][col + 7] = hi.w;
+}
+
+inline void load_B_tile_dequant_small_fp32(
+    device const uint* B,
+    device const half* scales,
+    threadgroup float (&B_buf)[SMALL_TILE_K][SMALL_TILE_N],
+    uint K, uint N,
+    uint tg_col, uint k_block,
+    uint group_size,
+    uint thread_idx
+) {
+    const uint num_groups = div_ceil(K, group_size);
+    const uint k_packs = div_ceil(K, FP4_PER_UINT);
+    const uint packed_per_thread =
+        (SMALL_TILE_K * SMALL_TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
+
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (SMALL_TILE_K / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (SMALL_TILE_K / FP4_PER_UINT);
+
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+
+        uint scale_k = global_k_base / group_size;
+        half s = half(1.0h);
+        if (global_n < N && global_k_base < K && scale_k < num_groups) {
+            s = scales[scale_k * N + global_n];
+        }
+
+        uint packed = 0;
+        uint b_row = global_k_base / FP4_PER_UINT;
+        if (global_n < N && b_row < k_packs && global_k_base < K) {
+            packed = B[b_row * N + global_n];
+        }
+
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        float vals[8];
+        unpack_fp4x8_fp32(packed, s, vals);
+        #pragma unroll
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < SMALL_TILE_K; ++v) {
+            if (n_idx < SMALL_TILE_N) {
+                uint global_k = global_k_base + v;
+                B_buf[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : 0.0f;
+            }
+        }
+    }
+}
+
+inline void store_small_batch_fp32_bf16(
+    thread simdgroup_matrix<float, 8, 8> acc[SMALL_SG_M_TILES][SMALL_SG_N_TILES],
+    device ushort* C,
+    uint M, uint N,
+    uint tg_row, uint tg_col,
+    uint sg_row_offset, uint sg_col_offset,
+    uint simd_lane,
+    threadgroup float (&staging)[8][8]
+) {
+    for (uint mi = 0; mi < SMALL_SG_M_TILES; ++mi) {
+        for (uint ni = 0; ni < SMALL_SG_N_TILES; ++ni) {
+            uint out_row = tg_row + sg_row_offset + mi * 8;
+            uint out_col = tg_col + sg_col_offset + ni * 8;
+
+            if (out_row >= M || out_col >= N) {
+                continue;
+            }
+
+            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            if (out_row + 8 <= M && out_col + 8 <= N) {
+                if (simd_lane < 8) {
+                    float4 lo = float4(staging[simd_lane][0],
+                                       staging[simd_lane][1],
+                                       staging[simd_lane][2],
+                                       staging[simd_lane][3]);
+                    float4 hi = float4(staging[simd_lane][4],
+                                       staging[simd_lane][5],
+                                       staging[simd_lane][6],
+                                       staging[simd_lane][7]);
+                    bf16_store_from_float8(C, (out_row + simd_lane) * N + out_col, lo, hi);
+                }
+            } else {
+                for (uint elem = simd_lane; elem < 64; elem += 32) {
+                    uint r = elem / 8;
+                    uint c = elem % 8;
+                    uint gr = out_row + r;
+                    uint gc = out_col + c;
+                    if (gr < M && gc < N) {
+                        C[gr * N + gc] = bf16_from_float_rne(staging[r][c]).bits;
+                    }
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // dense_gemm_small_batch_fp4 - Optimized for M=1-16
 //
@@ -461,6 +616,87 @@ kernel void dense_gemm_small_batch_fp4(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// dense_gemm_small_batch_fp4_fp32acc - BF16 input/output with FP32 accumulation
+//
+// Uses float tiles and simdgroup_matrix<float> fragments to avoid FP16
+// intermediates. Intended for BF16 benchmarking.
+// ---------------------------------------------------------------------------
+
+kernel void dense_gemm_small_batch_fp4_fp32acc(
+    device const ushort* A       [[buffer(0)]],
+    device const uint* B         [[buffer(1)]],
+    device const half* scales    [[buffer(2)]],
+    device ushort* C             [[buffer(3)]],
+    constant uint& M             [[buffer(4)]],
+    constant uint& N             [[buffer(5)]],
+    constant uint& K             [[buffer(6)]],
+    constant uint& group_size    [[buffer(7)]],
+    uint3 tgid                   [[threadgroup_position_in_grid]],
+    uint simd_lane               [[thread_index_in_simdgroup]],
+    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup float A_tiles[NUM_BUFFERS][SMALL_TILE_M][SMALL_TILE_K];
+    threadgroup float B_tiles[NUM_BUFFERS][SMALL_TILE_K][SMALL_TILE_N];
+    threadgroup float staging[8][8];
+
+    const uint tg_row = tgid.y * SMALL_TILE_M;
+    const uint tg_col = tgid.x * SMALL_TILE_N;
+
+    const uint sg_row_offset = (simd_id / 2) * 8;
+    const uint sg_col_offset = (simd_id % 2) * 64;
+
+    simdgroup_matrix<float, 8, 8> acc[SMALL_SG_M_TILES][SMALL_SG_N_TILES];
+    for (uint mi = 0; mi < SMALL_SG_M_TILES; ++mi) {
+        for (uint ni = 0; ni < SMALL_SG_N_TILES; ++ni) {
+            acc[mi][ni] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
+        }
+    }
+
+    const uint thread_idx = simd_id * 32 + simd_lane;
+    const uint num_k_tiles = div_ceil(K, SMALL_TILE_K);
+    uint buf_compute = 0;
+
+    load_A_tile_small_bf16_fp32(A, A_tiles[0], M, K, tg_row, 0, thread_idx);
+    load_B_tile_dequant_small_fp32(B, scales, B_tiles[0], K, N, tg_col, 0, group_size, thread_idx);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint kt = 0; kt < num_k_tiles; ++kt) {
+        uint k_offset = kt * SMALL_TILE_K;
+        uint next_k = k_offset + SMALL_TILE_K;
+        uint buf_load = 1 - buf_compute;
+
+        if (next_k < K) {
+            load_A_tile_small_bf16_fp32(A, A_tiles[buf_load], M, K, tg_row, next_k, thread_idx);
+            load_B_tile_dequant_small_fp32(B, scales, B_tiles[buf_load], K, N, tg_col, next_k, group_size, thread_idx);
+        }
+
+        for (uint kst = 0; kst < SMALL_K_TILES; ++kst) {
+            for (uint mi = 0; mi < SMALL_SG_M_TILES; ++mi) {
+                simdgroup_matrix<float, 8, 8> a_frag;
+                simdgroup_load(a_frag,
+                               &A_tiles[buf_compute][sg_row_offset + mi * 8][kst * 8],
+                               SMALL_TILE_K);
+
+                for (uint ni = 0; ni < SMALL_SG_N_TILES; ++ni) {
+                    simdgroup_matrix<float, 8, 8> b_frag;
+                    simdgroup_load(b_frag,
+                                   &B_tiles[buf_compute][kst * 8][sg_col_offset + ni * 8],
+                                   SMALL_TILE_N);
+
+                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf_compute = buf_load;
+    }
+
+    store_small_batch_fp32_bf16(acc, C, M, N, tg_row, tg_col,
+                                sg_row_offset, sg_col_offset, simd_lane, staging);
 }
 
 // ===========================================================================
