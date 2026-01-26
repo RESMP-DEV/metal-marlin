@@ -15,14 +15,14 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    import mlx.core as mx
+from numpy.typing import NDArray
 
 
 class TokenModality(Enum):
     """Modality type for tokens in a block."""
+
     TEXT = "text"
     IMAGE = "image"
     CROSS_ATTENTION = "cross_attention"  # For models with separate cross-attn KV
@@ -97,12 +97,14 @@ class SequenceModality:
         block_indices: list[int],
     ) -> None:
         """Register an image token region."""
-        self.image_regions.append(ImageRegion(
-            start_pos=start_pos,
-            num_tokens=num_tokens,
-            image_hash=image_hash,
-            block_indices=block_indices,
-        ))
+        self.image_regions.append(
+            ImageRegion(
+                start_pos=start_pos,
+                num_tokens=num_tokens,
+                image_hash=image_hash,
+                block_indices=block_indices,
+            )
+        )
 
     def add_text_range(self, start: int, end: int) -> None:
         """Register a text token range."""
@@ -138,9 +140,7 @@ class BlockAllocator:
 
     def __init__(self, num_blocks: int):
         self.num_blocks = num_blocks
-        self.blocks: list[BlockState] = [
-            BlockState(block_idx=i) for i in range(num_blocks)
-        ]
+        self.blocks: list[BlockState] = [BlockState(block_idx=i) for i in range(num_blocks)]
         self._free_list: list[int] = list(range(num_blocks - 1, -1, -1))
 
     @property
@@ -364,9 +364,7 @@ class MultimodalBlockAllocator:
             block_indices.append(idx)
 
         # Update prefix cache
-        cache_entries = [
-            (idx, self.blocks[idx].valid_end) for idx in block_indices
-        ]
+        cache_entries = [(idx, self.blocks[idx].valid_end) for idx in block_indices]
         self._prefix_cache[image_hash] = cache_entries
 
         return block_indices
@@ -483,9 +481,7 @@ class MultimodalBlockAllocator:
 
     def get_stats(self) -> dict[str, int | float]:
         """Return allocator statistics."""
-        total_cached_blocks = sum(
-            len(blocks) for blocks in self._prefix_cache.values()
-        )
+        total_cached_blocks = sum(len(blocks) for blocks in self._prefix_cache.values())
         return {
             "num_blocks": self.num_blocks,
             "num_free": self.num_free,
@@ -527,7 +523,7 @@ class VisionEncoderCache:
         self.max_memory_bytes = max_memory_bytes
 
         # Cache: hash → (tensor, num_tokens, memory_bytes, access_count)
-        self._cache: dict[str, tuple[mx.array, int, int, int]] = {}
+        self._cache: dict[str, tuple[NDArray[Any], int, int, int]] = {}
         self._total_memory = 0
         self._access_order: list[str] = []  # For LRU eviction
 
@@ -540,7 +536,7 @@ class VisionEncoderCache:
         """
         return hashlib.sha256(image_bytes).hexdigest()
 
-    def get(self, image_hash: str) -> tuple[mx.array, int] | None:
+    def get(self, image_hash: str) -> tuple[NDArray[Any], int] | None:
         """Retrieve cached encoder output.
 
         Args:
@@ -565,7 +561,7 @@ class VisionEncoderCache:
     def put(
         self,
         image_hash: str,
-        encoder_output: mx.array,
+        encoder_output: NDArray[Any],
         num_tokens: int,
     ) -> bool:
         """Cache a vision encoder output.
@@ -574,7 +570,7 @@ class VisionEncoderCache:
 
         Args:
             image_hash: Hash of the image content.
-            encoder_output: Vision encoder output tensor.
+            encoder_output: Vision encoder output tensor (numpy array).
             num_tokens: Number of image tokens generated.
 
         Returns:
@@ -638,8 +634,7 @@ class VisionEncoderCache:
             "memory_used_bytes": self._total_memory,
             "max_memory_bytes": self.max_memory_bytes,
             "memory_utilization": (
-                self._total_memory / self.max_memory_bytes
-                if self.max_memory_bytes > 0 else 0.0
+                self._total_memory / self.max_memory_bytes if self.max_memory_bytes > 0 else 0.0
             ),
             "total_accesses": total_accesses,
         }

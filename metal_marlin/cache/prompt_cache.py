@@ -62,8 +62,6 @@ from typing import Any
 
 import numpy as np
 
-from .._compat import HAS_MLX, mx
-
 
 class StorageTier(Enum):
     """Hierarchical storage tiers for cached blocks."""
@@ -479,12 +477,7 @@ class PrefixCache:
             return new_kv
 
         if concat_fn is None:
-            # Check first array type to determine concat function
-            first_array = prefix_kv[0][0] if prefix_kv and prefix_kv[0] else None
-            if HAS_MLX and first_array is not None and isinstance(first_array, mx.array):
-                concat_fn = lambda a, b: mx.concatenate([a, b], axis=1)  # noqa: E731
-            else:
-                concat_fn = lambda a, b: np.concatenate([a, b], axis=1)  # noqa: E731
+            concat_fn = lambda a, b: np.concatenate([a, b], axis=1)  # noqa: E731
 
         # Concatenate block-wise first (within prefix)
         num_layers = len(prefix_kv[0])
@@ -650,14 +643,8 @@ class PrefixCache:
         block.disk_path = disk_path
         block.tier = StorageTier.DISK
 
-        # Convert MLX arrays to numpy for serialization
-        data_to_save = []
-        if block.kv_data:
-            for layer_data in block.kv_data:
-                if HAS_MLX and isinstance(layer_data, mx.array):
-                    data_to_save.append(np.array(layer_data))
-                else:
-                    data_to_save.append(layer_data)
+        # Save numpy arrays
+        data_to_save = block.kv_data if block.kv_data else []
 
         with open(disk_path, "wb") as f:
             pickle.dump(data_to_save, f)
@@ -668,13 +655,7 @@ class PrefixCache:
             raise ValueError(f"Disk cache file not found for block {block.block_hash}")
 
         with open(block.disk_path, "rb") as f:
-            numpy_data = pickle.load(f)  # noqa: S301 - trusted cache file
-
-        # Convert back to MLX if available
-        if HAS_MLX:
-            block.kv_data = [mx.array(arr) for arr in numpy_data]
-        else:
-            block.kv_data = numpy_data
+            block.kv_data = pickle.load(f)  # noqa: S301 - trusted cache file
 
     def __repr__(self) -> str:
         with self._lock:

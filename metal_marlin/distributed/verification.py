@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .._compat import HAS_MLX, mx, to_numpy
+from .._compat import HAS_MPS, HAS_TORCH, to_numpy, torch
 from .device_mesh import DeviceMesh
 from .tensor_parallel import ParallelMode, TensorParallelLinear
 
@@ -113,11 +113,10 @@ def verify_tensor_parallel_linear(
     x_np = rng.standard_normal(input_shape).astype(np.float32)
 
     # Reference forward
-    if HAS_MLX and mx is not None:
-        x_ref = mx.array(x_np)
+    if HAS_TORCH and torch is not None:
+        x_ref = torch.from_numpy(x_np)
         y_ref = reference(x_ref)
-        mx.eval(y_ref)
-        y_ref_np = np.array(y_ref)
+        y_ref_np = to_numpy(y_ref)
     else:
         y_ref_np = reference(x_np)
         if not isinstance(y_ref_np, np.ndarray):
@@ -207,9 +206,7 @@ def verify_column_parallel(
 
     # Create tensor parallel version
     mesh = DeviceMesh.cpu_only(tp_size)
-    tp_linear = TensorParallelLinear.from_marlin_linear(
-        reference, mesh, ParallelMode.COLUMN
-    )
+    tp_linear = TensorParallelLinear.from_marlin_linear(reference, mesh, ParallelMode.COLUMN)
 
     # Verify
     return verify_tensor_parallel_linear(
@@ -275,9 +272,7 @@ def verify_row_parallel(
 
     # Create tensor parallel version
     mesh = DeviceMesh.cpu_only(tp_size)
-    tp_linear = TensorParallelLinear.from_marlin_linear(
-        reference, mesh, ParallelMode.ROW
-    )
+    tp_linear = TensorParallelLinear.from_marlin_linear(reference, mesh, ParallelMode.ROW)
 
     # Verify
     return verify_tensor_parallel_linear(
@@ -333,12 +328,16 @@ def verify_collective_operations(
         passed=np.allclose(ref_mean, par_mean),
         max_abs_diff=float(np.max(np.abs(ref_mean - par_mean))),
         mean_abs_diff=float(np.mean(np.abs(ref_mean - par_mean))),
-        max_rel_diff=float(np.max(np.abs(ref_mean - par_mean) / np.maximum(np.abs(ref_mean), 1e-8))),
+        max_rel_diff=float(
+            np.max(np.abs(ref_mean - par_mean) / np.maximum(np.abs(ref_mean), 1e-8))
+        ),
     )
 
     # Test all-gather
-    shards = [rng.standard_normal((tensor_shape[0] // num_shards, tensor_shape[1])).astype(np.float32)
-              for _ in range(num_shards)]
+    shards = [
+        rng.standard_normal((tensor_shape[0] // num_shards, tensor_shape[1])).astype(np.float32)
+        for _ in range(num_shards)
+    ]
     ref_gather = np.concatenate(shards, axis=0)
     par_gather = all_gather(shards, dim=0)
 
@@ -346,13 +345,15 @@ def verify_collective_operations(
         passed=np.allclose(ref_gather, par_gather),
         max_abs_diff=float(np.max(np.abs(ref_gather - par_gather))),
         mean_abs_diff=float(np.mean(np.abs(ref_gather - par_gather))),
-        max_rel_diff=float(np.max(np.abs(ref_gather - par_gather) / np.maximum(np.abs(ref_gather), 1e-8))),
+        max_rel_diff=float(
+            np.max(np.abs(ref_gather - par_gather) / np.maximum(np.abs(ref_gather), 1e-8))
+        ),
     )
 
     # Test scatter
     full_tensor = rng.standard_normal(tensor_shape).astype(np.float32)
     shard_size = tensor_shape[0] // num_shards
-    ref_scatter = [full_tensor[i * shard_size:(i + 1) * shard_size] for i in range(num_shards)]
+    ref_scatter = [full_tensor[i * shard_size : (i + 1) * shard_size] for i in range(num_shards)]
     par_scatter = scatter(full_tensor, dim=0, num_devices=num_shards)
 
     all_match = all(np.allclose(r, p) for r, p in zip(ref_scatter, par_scatter))
@@ -443,8 +444,8 @@ def run_verification_suite(
         if not result.passed:
             all_passed = False
 
-    # Test CPU+GPU split if GPU available
-    if HAS_MLX:
+    # Test CPU+GPU split if GPU available (MPS on Apple Silicon)
+    if HAS_MPS:
         if verbose:
             print("\n4. CPU+GPU Split Mode")
             print("-" * 40)
@@ -479,7 +480,7 @@ def run_verification_suite(
         if verbose:
             print("\n4. CPU+GPU Split Mode")
             print("-" * 40)
-            print("  SKIPPED (MLX not available)")
+            print("  SKIPPED (MPS not available)")
 
     # Summary
     if verbose:

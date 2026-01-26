@@ -7,6 +7,9 @@ decode phase. Supports configurable precision via DTypeConfig:
 - Quantized: FP8 for 2x memory savings on long context
 - FP4 for maximum compression (4x savings)
 
+Uses PyTorch MPS backend with direct Metal kernel dispatch for Apple Silicon
+acceleration. No MLX dependency.
+
 Usage:
     from metal_marlin.kv_cache import KVCache, CacheConfig
     from metal_marlin.dtypes import DTypeConfig, memory_efficient_config
@@ -37,11 +40,52 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
-
-import mlx.core as mx
+from typing import TYPE_CHECKING, Literal
 
 from .dtypes import DTypeConfig, get_default_config
+
+# PyTorch MPS import with availability check
+try:
+    import torch
+
+    HAS_TORCH = True
+    HAS_MPS = torch.backends.mps.is_available()
+except ImportError:
+    HAS_TORCH = False
+    HAS_MPS = False
+    torch = None
+
+if TYPE_CHECKING:
+    import torch
+
+
+def require_mps(feature: str = "KV cache") -> None:
+    """Raise if PyTorch MPS is not available."""
+    if not HAS_TORCH:
+        raise RuntimeError(f"{feature} requires PyTorch. Install with: pip install torch")
+    if not HAS_MPS:
+        raise RuntimeError(
+            f"{feature} requires PyTorch MPS backend. "
+            "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+        )
+
+
+# Mapping from dtype config strings to PyTorch dtypes
+_DTYPE_TO_TORCH: dict[str, torch.dtype] = {}
+if HAS_TORCH:
+    _DTYPE_TO_TORCH = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+        "fp8": torch.float16,  # PyTorch doesn't have native fp8, use fp16 storage
+    }
+
+
+def _get_torch_dtype(dtype_str: str) -> torch.dtype:
+    """Convert dtype string to PyTorch dtype."""
+    if not HAS_TORCH:
+        raise RuntimeError("PyTorch not available")
+    return _DTYPE_TO_TORCH[dtype_str]
 
 
 @dataclass
@@ -70,7 +114,7 @@ class CacheConfig:
 
 class KVCache:
     """
-    Key-Value cache for transformer inference.
+    Key-Value cache for transformer inference using PyTorch MPS.
 
     Supports:
     - Standard MHA (num_heads == num_kv_heads)
@@ -90,11 +134,15 @@ class KVCache:
         config: CacheConfig,
         batch_size: int = 1,
         dtype_config: DTypeConfig | None = None,
+        device: str = "mps",
     ):
+        require_mps("KV cache")
+
         self.config = config
         self.batch_size = batch_size
         self.seq_len = 0  # Current sequence length
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
+        self.device = device
 
         # Allocate cache for all layers
         # Shape: [batch, num_kv_heads, max_seq_len, head_dim]
@@ -109,35 +157,40 @@ class KVCache:
         self._quantize_mode = config.quantize_mode
 
         if config.quantize_mode == "fp4":
-            # FP4 quantized cache - pack 8 values per uint32
+            # FP4 quantized cache - pack 8 values per int32
             packed_shape = (
                 batch_size,
                 config.num_kv_heads,
                 config.max_seq_len,
-                config.head_dim // 8,  # 8 FP4 values per uint32
+                config.head_dim // 8,  # 8 FP4 values per int32
             )
-            self.k_cache = [
-                mx.zeros(packed_shape, dtype=mx.uint32) for _ in range(config.num_layers)
+            self.k_cache: list[torch.Tensor] = [
+                torch.zeros(packed_shape, dtype=torch.int32, device=device)
+                for _ in range(config.num_layers)
             ]
-            self.v_cache = [
-                mx.zeros(packed_shape, dtype=mx.uint32) for _ in range(config.num_layers)
+            self.v_cache: list[torch.Tensor] = [
+                torch.zeros(packed_shape, dtype=torch.int32, device=device)
+                for _ in range(config.num_layers)
             ]
-            # Per-row scales for dequantization (use scales dtype from config)
+            # Per-row scales for dequantization
+            scale_dtype = _get_torch_dtype(self.dtype_config.scales)
             scale_shape = (
                 batch_size,
                 config.num_kv_heads,
                 config.max_seq_len,
                 1,
             )
-            self.k_scales = [
-                mx.zeros(scale_shape, dtype=self.dtype_config.mlx_scales) for _ in range(config.num_layers)
+            self.k_scales: list[torch.Tensor] | None = [
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
-            self.v_scales = [
-                mx.zeros(scale_shape, dtype=self.dtype_config.mlx_scales) for _ in range(config.num_layers)
+            self.v_scales: list[torch.Tensor] | None = [
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
         elif config.quantize_mode == "fp8":
             # FP8 quantized cache - store as uint8 with per-row scales
-            # MLX doesn't have native fp8, so we simulate with uint8 + scales
+            # PyTorch doesn't have native fp8 on MPS, so we simulate with uint8 + scales
             fp8_shape = (
                 batch_size,
                 config.num_kv_heads,
@@ -145,12 +198,15 @@ class KVCache:
                 config.head_dim,
             )
             self.k_cache = [
-                mx.zeros(fp8_shape, dtype=mx.uint8) for _ in range(config.num_layers)
+                torch.zeros(fp8_shape, dtype=torch.uint8, device=device)
+                for _ in range(config.num_layers)
             ]
             self.v_cache = [
-                mx.zeros(fp8_shape, dtype=mx.uint8) for _ in range(config.num_layers)
+                torch.zeros(fp8_shape, dtype=torch.uint8, device=device)
+                for _ in range(config.num_layers)
             ]
             # Per-row scales for FP8 dequantization
+            scale_dtype = _get_torch_dtype(self.dtype_config.scales)
             scale_shape = (
                 batch_size,
                 config.num_kv_heads,
@@ -158,18 +214,23 @@ class KVCache:
                 1,
             )
             self.k_scales = [
-                mx.zeros(scale_shape, dtype=self.dtype_config.mlx_scales) for _ in range(config.num_layers)
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
             self.v_scales = [
-                mx.zeros(scale_shape, dtype=self.dtype_config.mlx_scales) for _ in range(config.num_layers)
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
         else:
             # Full precision cache using kv_cache dtype from config
+            storage_dtype = _get_torch_dtype(self.dtype_config.kv_cache)
             self.k_cache = [
-                mx.zeros(cache_shape, dtype=self.dtype_config.mlx_kv_cache) for _ in range(config.num_layers)
+                torch.zeros(cache_shape, dtype=storage_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
             self.v_cache = [
-                mx.zeros(cache_shape, dtype=self.dtype_config.mlx_kv_cache) for _ in range(config.num_layers)
+                torch.zeros(cache_shape, dtype=storage_dtype, device=device)
+                for _ in range(config.num_layers)
             ]
             self.k_scales = None
             self.v_scales = None
@@ -177,9 +238,9 @@ class KVCache:
     def update(
         self,
         layer_idx: int,
-        k_new: mx.array,  # [batch, num_kv_heads, new_seq_len, head_dim]
-        v_new: mx.array,
-    ) -> tuple[mx.array, mx.array]:
+        k_new: torch.Tensor,  # [batch, num_kv_heads, new_seq_len, head_dim]
+        v_new: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Update cache with new K, V and return full cached K, V.
 
@@ -200,137 +261,71 @@ class KVCache:
                 f"Sequence length {end_pos} exceeds max_seq_len {self.config.max_seq_len}"
             )
 
+        act_dtype = _get_torch_dtype(self.dtype_config.activations)
+
         if self._quantize_mode == "fp4":
             # Quantize and store as FP4
             k_packed, k_scale = self._quantize_fp4(k_new)
             v_packed, v_scale = self._quantize_fp4(v_new)
 
-            # Update cache slices
-            self.k_cache[layer_idx] = mx.concatenate(
-                [
-                    self.k_cache[layer_idx][:, :, : self.seq_len, :],
-                    k_packed,
-                    self.k_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_cache[layer_idx] = mx.concatenate(
-                [
-                    self.v_cache[layer_idx][:, :, : self.seq_len, :],
-                    v_packed,
-                    self.v_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.k_scales[layer_idx] = mx.concatenate(
-                [
-                    self.k_scales[layer_idx][:, :, : self.seq_len, :],
-                    k_scale,
-                    self.k_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_scales[layer_idx] = mx.concatenate(
-                [
-                    self.v_scales[layer_idx][:, :, : self.seq_len, :],
-                    v_scale,
-                    self.v_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
+            # Update cache slices (in-place for efficiency)
+            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_packed
+            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_packed
+            self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_scale
+            self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_scale
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp4(
                 self.k_cache[layer_idx][:, :, :end_pos, :],
                 self.k_scales[layer_idx][:, :, :end_pos, :],
-            )
+            ).to(act_dtype)
             v_full = self._dequant_fp4(
                 self.v_cache[layer_idx][:, :, :end_pos, :],
                 self.v_scales[layer_idx][:, :, :end_pos, :],
-            )
+            ).to(act_dtype)
+
         elif self._quantize_mode == "fp8":
             # Quantize and store as FP8
             k_quant, k_scale = self._quantize_fp8(k_new)
             v_quant, v_scale = self._quantize_fp8(v_new)
 
-            # Update cache slices
-            self.k_cache[layer_idx] = mx.concatenate(
-                [
-                    self.k_cache[layer_idx][:, :, : self.seq_len, :],
-                    k_quant,
-                    self.k_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_cache[layer_idx] = mx.concatenate(
-                [
-                    self.v_cache[layer_idx][:, :, : self.seq_len, :],
-                    v_quant,
-                    self.v_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.k_scales[layer_idx] = mx.concatenate(
-                [
-                    self.k_scales[layer_idx][:, :, : self.seq_len, :],
-                    k_scale,
-                    self.k_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_scales[layer_idx] = mx.concatenate(
-                [
-                    self.v_scales[layer_idx][:, :, : self.seq_len, :],
-                    v_scale,
-                    self.v_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
+            # Update cache slices (in-place)
+            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_quant
+            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_quant
+            self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_scale
+            self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_scale
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp8(
                 self.k_cache[layer_idx][:, :, :end_pos, :],
                 self.k_scales[layer_idx][:, :, :end_pos, :],
-            )
+            ).to(act_dtype)
             v_full = self._dequant_fp8(
                 self.v_cache[layer_idx][:, :, :end_pos, :],
                 self.v_scales[layer_idx][:, :, :end_pos, :],
-            )
+            ).to(act_dtype)
+
         else:
             # Direct storage using kv_cache dtype
-            # Note: MLX doesn't support in-place slice assignment, so we concatenate
-            self.k_cache[layer_idx] = mx.concatenate(
-                [
-                    self.k_cache[layer_idx][:, :, : self.seq_len, :],
-                    k_new.astype(self.dtype_config.mlx_kv_cache),
-                    self.k_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_cache[layer_idx] = mx.concatenate(
-                [
-                    self.v_cache[layer_idx][:, :, : self.seq_len, :],
-                    v_new.astype(self.dtype_config.mlx_kv_cache),
-                    self.v_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
+            storage_dtype = _get_torch_dtype(self.dtype_config.kv_cache)
+            self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_new.to(storage_dtype)
+            self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_new.to(storage_dtype)
 
             # Return in activations dtype for attention computation
-            k_full = self.k_cache[layer_idx][:, :, :end_pos, :].astype(self.dtype_config.mlx_activations)
-            v_full = self.v_cache[layer_idx][:, :, :end_pos, :].astype(self.dtype_config.mlx_activations)
+            k_full = self.k_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
+            v_full = self.v_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
 
         return k_full, v_full
 
-    def advance(self, num_tokens: int = 1):
+    def advance(self, num_tokens: int = 1) -> None:
         """Advance sequence position after processing tokens."""
         self.seq_len += num_tokens
 
-    def reset(self):
+    def reset(self) -> None:
         """Clear cache for new sequence."""
         self.seq_len = 0
 
-    def get_kv(self, layer_idx: int) -> tuple[mx.array | None, mx.array | None]:
+    def get_kv(self, layer_idx: int) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Get current cached K, V for a layer (dequantized if needed).
 
         Returns tensors in activations dtype from dtype_config.
@@ -338,27 +333,29 @@ class KVCache:
         if self.seq_len == 0:
             return None, None
 
+        act_dtype = _get_torch_dtype(self.dtype_config.activations)
+
         if self._quantize_mode == "fp4":
             k = self._dequant_fp4(
                 self.k_cache[layer_idx][:, :, : self.seq_len, :],
                 self.k_scales[layer_idx][:, :, : self.seq_len, :],
-            )
+            ).to(act_dtype)
             v = self._dequant_fp4(
                 self.v_cache[layer_idx][:, :, : self.seq_len, :],
                 self.v_scales[layer_idx][:, :, : self.seq_len, :],
-            )
+            ).to(act_dtype)
         elif self._quantize_mode == "fp8":
             k = self._dequant_fp8(
                 self.k_cache[layer_idx][:, :, : self.seq_len, :],
                 self.k_scales[layer_idx][:, :, : self.seq_len, :],
-            )
+            ).to(act_dtype)
             v = self._dequant_fp8(
                 self.v_cache[layer_idx][:, :, : self.seq_len, :],
                 self.v_scales[layer_idx][:, :, : self.seq_len, :],
-            )
+            ).to(act_dtype)
         else:
-            k = self.k_cache[layer_idx][:, :, : self.seq_len, :].astype(self.dtype_config.mlx_activations)
-            v = self.v_cache[layer_idx][:, :, : self.seq_len, :].astype(self.dtype_config.mlx_activations)
+            k = self.k_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
+            v = self.v_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
 
         return k, v
 
@@ -386,11 +383,11 @@ class KVCache:
         )
         return elements * bytes_per_element / 1024 / 1024
 
-    def _quantize_fp4(self, tensor: mx.array) -> tuple[mx.array, mx.array]:
+    def _quantize_fp4(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP4 packed format."""
         # Find max absolute value per row for scaling
-        abs_max = mx.max(mx.abs(tensor), axis=-1, keepdims=True)
-        abs_max = mx.maximum(abs_max, 1e-8)  # Avoid division by zero
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
+        abs_max = torch.clamp(abs_max, min=1e-8)  # Avoid division by zero
 
         # Scale to [-1, 1] range
         # FP4 E2M1 max value is 6.0 (1.5 * 2^2)
@@ -398,84 +395,76 @@ class KVCache:
         scaled = tensor / scale
 
         # Clamp to FP4 range
-        scaled = mx.clip(scaled, -6.0, 6.0)
+        scaled = torch.clamp(scaled, -6.0, 6.0)
 
-        # Quantize to FP4 (simplified - in practice use proper rounding)
-        # This is a placeholder - real implementation would pack 8 values per uint32
-        # For now, we store as uint8 per value and pack later
-        quantized = mx.round(scaled * 2.0).astype(mx.int8)  # Scale to use more bits
-        quantized = mx.clip(quantized + 8, 0, 15).astype(mx.uint8)
+        # Quantize to 4-bit (scale to use integer range 0-15)
+        quantized = torch.round(scaled * 2.0).to(torch.int8)
+        quantized = torch.clamp(quantized + 8, 0, 15).to(torch.uint8)
 
-        # Pack 8 values per uint32
-        # Reshape to [..., head_dim // 8, 8]
+        # Pack 8 values per int32
         batch, heads, seq, dim = tensor.shape
-        reshaped = quantized.reshape(batch, heads, seq, dim // 8, 8)
+        reshaped = quantized.view(batch, heads, seq, dim // 8, 8)
 
-        # Pack (simplified)
-        packed = mx.zeros((batch, heads, seq, dim // 8), dtype=mx.uint32)
+        # Pack using bit shifts
+        packed = torch.zeros(
+            (batch, heads, seq, dim // 8),
+            dtype=torch.int32,
+            device=tensor.device,
+        )
         for i in range(8):
-            packed = packed | (reshaped[..., i].astype(mx.uint32) << (i * 4))
+            packed = packed | (reshaped[..., i].to(torch.int32) << (i * 4))
 
-        return packed, scale.astype(self.dtype_config.mlx_scales)
+        scale_dtype = _get_torch_dtype(self.dtype_config.scales)
+        return packed, scale.to(scale_dtype)
 
-    def _dequant_fp4(self, packed: mx.array, scale: mx.array) -> mx.array:
-        """Dequantize FP4 packed tensor to activations dtype."""
+    def _dequant_fp4(self, packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize FP4 packed tensor to float."""
         batch, heads, seq, packed_dim = packed.shape
         dim = packed_dim * 8
-        out_dtype = self.dtype_config.mlx_activations
 
-        # Unpack (simplified)
-        unpacked = mx.zeros((batch, heads, seq, dim), dtype=out_dtype)
+        # Unpack 8 values from each int32
+        unpacked_list = []
         for i in range(8):
             nibble = (packed >> (i * 4)) & 0xF
             # Convert 4-bit unsigned to signed centered at 8
-            signed = nibble.astype(out_dtype) - 8.0
-            unpacked = mx.concatenate(
-                [
-                    unpacked[..., : packed_dim * i],
-                    (signed * scale.astype(out_dtype) / 2.0).reshape(batch, heads, seq, -1),
-                    unpacked[..., packed_dim * (i + 1) :],
-                ],
-                axis=-1,
-            )
+            signed = nibble.float() - 8.0
+            # Scale back and apply per-row scale
+            unpacked_list.append(signed)
 
-        # Proper unpack would use index operations
-        # This is simplified placeholder
-        return unpacked
+        # Stack and reshape
+        unpacked = torch.stack(unpacked_list, dim=-1)  # [..., packed_dim, 8]
+        unpacked = unpacked.view(batch, heads, seq, dim)  # [..., dim]
 
-    def _quantize_fp8(self, tensor: mx.array) -> tuple[mx.array, mx.array]:
+        # Apply scale and undo the 2.0 scaling
+        return unpacked * scale.float() / 2.0
+
+    def _quantize_fp8(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP8 E4M3 format (simulated with uint8 + scale).
 
         Uses E4M3 representation: 4 exponent bits, 3 mantissa bits.
         Max representable value is 448, min is ~2e-9.
         """
         # Find max absolute value per row for scaling
-        abs_max = mx.max(mx.abs(tensor), axis=-1, keepdims=True)
-        abs_max = mx.maximum(abs_max, 1e-8)  # Avoid division by zero
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
+        abs_max = torch.clamp(abs_max, min=1e-8)  # Avoid division by zero
 
         # E4M3 max value is 448
         scale = abs_max / 448.0
         scaled = tensor / scale
 
         # Clamp to E4M3 range and quantize to 8-bit signed
-        # Range is approximately [-448, 448] in E4M3
-        scaled = mx.clip(scaled, -448.0, 448.0)
+        scaled = torch.clamp(scaled, -448.0, 448.0)
 
         # Convert to uint8 with offset (128-centered for signed range)
-        # This is a simplified linear quantization; true E4M3 would use
-        # non-linear encoding but MLX doesn't support native FP8
-        # Use float arithmetic to avoid overflow, then convert to uint8
-        quantized_float = mx.round(scaled / 448.0 * 127.0) + 128.0
-        quantized = mx.clip(quantized_float, 0, 255).astype(mx.uint8)
+        quantized = torch.round(scaled / 448.0 * 127.0) + 128.0
+        quantized = torch.clamp(quantized, 0, 255).to(torch.uint8)
 
-        return quantized, scale.astype(self.dtype_config.mlx_scales)
+        scale_dtype = _get_torch_dtype(self.dtype_config.scales)
+        return quantized, scale.to(scale_dtype)
 
-    def _dequant_fp8(self, quantized: mx.array, scale: mx.array) -> mx.array:
-        """Dequantize FP8 tensor to activations dtype."""
-        out_dtype = self.dtype_config.mlx_activations
-
+    def _dequant_fp8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize FP8 tensor to float."""
         # Reverse the quantization: uint8 centered at 128 -> signed -> scaled
-        signed = quantized.astype(out_dtype) - 128.0
-        dequant = signed / 127.0 * 448.0 * scale.astype(out_dtype)
-
+        signed = quantized.float() - 128.0
+        dequant = signed / 127.0 * 448.0 * scale.float()
         return dequant

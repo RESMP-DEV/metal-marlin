@@ -52,13 +52,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-
-if TYPE_CHECKING:
-    import mlx.core as mx
 
 
 class PrecisionLevel(Enum):
@@ -257,15 +254,13 @@ class ExpertLoadProfiler:
         for layer_idx in range(num_layers):
             for expert_id in range(num_experts):
                 key = (layer_idx, expert_id)
-                self._stats[key] = ExpertLoadStats(
-                    expert_id=expert_id, layer_idx=layer_idx
-                )
+                self._stats[key] = ExpertLoadStats(expert_id=expert_id, layer_idx=layer_idx)
 
     def record_batch(
         self,
         layer_idx: int,
-        expert_ids: NDArray[np.int32] | mx.array,
-        probs: NDArray[np.float32] | mx.array | None = None,
+        expert_ids: NDArray[np.int32] | Any,
+        probs: NDArray[np.float32] | Any | None = None,
     ) -> None:
         """Record routing decisions for a batch.
 
@@ -396,15 +391,13 @@ class InputDiversityAnalyzer:
         for layer_idx in range(num_layers):
             for expert_id in range(num_experts):
                 key = (layer_idx, expert_id)
-                self._stats[key] = InputDiversityStats(
-                    expert_id=expert_id, layer_idx=layer_idx
-                )
+                self._stats[key] = InputDiversityStats(expert_id=expert_id, layer_idx=layer_idx)
 
     def record_activations(
         self,
         layer_idx: int,
-        activations: NDArray[np.float32] | mx.array,
-        expert_ids: NDArray[np.int32] | mx.array,
+        activations: NDArray[np.float32] | Any,
+        expert_ids: NDArray[np.int32] | Any,
     ) -> None:
         """Record input activations for diversity analysis.
 
@@ -479,9 +472,7 @@ class ExpertPrecisionMap:
 
     def get_precision(self, layer_idx: int, expert_id: int) -> PrecisionLevel:
         """Get precision for an expert."""
-        return self._precision_map.get(
-            (layer_idx, expert_id), PrecisionLevel.FP4_G128
-        )
+        return self._precision_map.get((layer_idx, expert_id), PrecisionLevel.FP4_G128)
 
     def get_layer_precisions(self, layer_idx: int) -> dict[int, PrecisionLevel]:
         """Get precision map for a layer."""
@@ -606,9 +597,8 @@ class AdaptivePrecisionMapper:
         )
 
         for layer_idx in range(self.load_profiler.num_layers):
-            is_boundary = (
-                boundary_layers_bf16
-                and (layer_idx == 0 or layer_idx == self.load_profiler.num_layers - 1)
+            is_boundary = boundary_layers_bf16 and (
+                layer_idx == 0 or layer_idx == self.load_profiler.num_layers - 1
             )
 
             for expert_id in range(self.load_profiler.num_experts):
@@ -651,7 +641,9 @@ class AdaptivePrecisionMapper:
 
         # Combine traffic and diversity into a single importance score
         traffic_score = activation_rate / max(self.traffic_thresholds[0], 0.01)
-        importance = (1 - self.diversity_weight) * traffic_score + self.diversity_weight * diversity_score
+        importance = (
+            1 - self.diversity_weight
+        ) * traffic_score + self.diversity_weight * diversity_score
 
         # Map importance to precision level
         high_thresh, med_thresh, low_thresh = self.traffic_thresholds
@@ -692,9 +684,7 @@ class AdaptivePrecisionMapper:
 
         return {
             "total_experts": total_experts,
-            "precision_distribution": {
-                prec.value: count for prec, count in level_counts.items()
-            },
+            "precision_distribution": {prec.value: count for prec, count in level_counts.items()},
             "average_bits": precision_map.average_bits(),
             "vs_uniform_fp4": {
                 "uniform_bits": 4.0,

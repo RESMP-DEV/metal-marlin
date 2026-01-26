@@ -1,12 +1,9 @@
 # Integration Guide
 
-## MLX Integration
-
-### Basic Usage
+## Basic Usage
 
 ```python
 from metal_marlin import MarlinLinear, quantize_model
-import mlx.nn as nn
 
 # Option 1: Replace individual layers
 model.fc = MarlinLinear.from_linear(model.fc, quant_type="fp4")
@@ -15,9 +12,11 @@ model.fc = MarlinLinear.from_linear(model.fc, quant_type="fp4")
 quantize_model(model, quant_type="fp4", group_size=128)
 ```
 
-### Custom Model
+## Custom Model
 
 ```python
+import torch.nn as nn
+
 class MyModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -25,8 +24,8 @@ class MyModel(nn.Module):
         self.linear1 = MarlinLinear(4096, 4096, quant_type="fp4")
         self.linear2 = MarlinLinear(4096, 11008, quant_type="fp4")
 
-    def __call__(self, x):
-        x = mx.gelu(self.linear1(x))
+    def forward(self, x):
+        x = torch.nn.functional.gelu(self.linear1(x))
         return self.linear2(x)
 ```
 
@@ -61,12 +60,8 @@ from metal_marlin import quantize_model
 
 model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
 
-# Convert to MLX
-import mlx.utils
-mlx_model = mlx.utils.convert_from_torch(model)
-
-# Quantize
-quantize_model(mlx_model, quant_type="fp4")
+# Quantize directly
+quantize_model(model, quant_type="fp4")
 ```
 
 ## Saving and Loading Quantized Models

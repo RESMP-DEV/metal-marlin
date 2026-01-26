@@ -1,10 +1,8 @@
 """Tests for MoE capacity factor adjustment."""
 
-import math
-
-import mlx.core as mx
 import numpy as np
 import pytest
+import torch
 
 from metal_marlin.capacity import (
     CapacityAnalyzer,
@@ -69,22 +67,20 @@ class TestCountExpertAssignments:
     def test_uniform_distribution(self):
         """Test counting with uniform distribution."""
         # Each expert gets exactly 2 assignments
-        expert_ids = mx.array([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=mx.int32)
-        counts = count_expert_assignments(expert_ids, num_experts=4)
-        mx.eval(counts)
+        expert_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32)
+        counts = count_expert_assignments(expert_ids.numpy(), num_experts=4)
 
         expected = np.array([2, 2, 2, 2], dtype=np.int32)
-        np.testing.assert_array_equal(np.array(counts), expected)
+        np.testing.assert_array_equal(counts, expected)
 
     def test_skewed_distribution(self):
         """Test counting with skewed distribution."""
         # Expert 0 gets most assignments
-        expert_ids = mx.array([[0, 0], [0, 1], [0, 0]], dtype=mx.int32)
-        counts = count_expert_assignments(expert_ids, num_experts=4)
-        mx.eval(counts)
+        expert_ids = torch.tensor([[0, 0], [0, 1], [0, 0]], dtype=torch.int32)
+        counts = count_expert_assignments(expert_ids.numpy(), num_experts=4)
 
         expected = np.array([5, 1, 0, 0], dtype=np.int32)
-        np.testing.assert_array_equal(np.array(counts), expected)
+        np.testing.assert_array_equal(counts, expected)
 
 
 class TestCapacityAnalyzer:
@@ -95,8 +91,8 @@ class TestCapacityAnalyzer:
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=2.0, top_k=2)
 
         # Uniform distribution, well under capacity
-        expert_ids = mx.array([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=mx.int32)
-        info = analyzer.record_batch(expert_ids)
+        expert_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32)
+        info = analyzer.record_batch(expert_ids.numpy())
 
         assert info.dropped_tokens == 0
         assert info.drop_rate == 0.0
@@ -111,8 +107,8 @@ class TestCapacityAnalyzer:
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=2)
 
         # Expert 0 gets 6 assignments, capacity is ceil(4*2*1.0/4)=2
-        expert_ids = mx.array([[0, 0], [0, 0], [0, 0], [1, 2]], dtype=mx.int32)
-        info = analyzer.record_batch(expert_ids)
+        expert_ids = torch.tensor([[0, 0], [0, 0], [0, 0], [1, 2]], dtype=torch.int32)
+        info = analyzer.record_batch(expert_ids.numpy())
 
         # Capacity = 2, expert 0 has 6 assignments -> 4 overflow
         assert info.dropped_tokens == 4
@@ -128,13 +124,13 @@ class TestCapacityAnalyzer:
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
         # Batch 1: no overflow
-        expert_ids1 = mx.array([[0], [1], [2], [3]], dtype=mx.int32)
-        info1 = analyzer.record_batch(expert_ids1)
+        expert_ids1 = torch.tensor([[0], [1], [2], [3]], dtype=torch.int32)
+        info1 = analyzer.record_batch(expert_ids1.numpy())
         assert info1.dropped_tokens == 0
 
         # Batch 2: overflow
-        expert_ids2 = mx.array([[0], [0], [0], [0]], dtype=mx.int32)
-        info2 = analyzer.record_batch(expert_ids2)
+        expert_ids2 = torch.tensor([[0], [0], [0], [0]], dtype=torch.int32)
+        info2 = analyzer.record_batch(expert_ids2.numpy())
         assert info2.dropped_tokens > 0
 
         stats = analyzer.get_stats()
@@ -145,8 +141,8 @@ class TestCapacityAnalyzer:
         """Test analyzer reset."""
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
-        expert_ids = mx.array([[0], [0], [0], [0]], dtype=mx.int32)
-        analyzer.record_batch(expert_ids)
+        expert_ids = torch.tensor([[0], [0], [0], [0]], dtype=torch.int32)
+        analyzer.record_batch(expert_ids.numpy())
 
         stats_before = analyzer.get_stats()
         assert stats_before.total_batches > 0
@@ -161,8 +157,8 @@ class TestAnalyzeOverflowRate:
 
     def test_single_batch(self):
         """Test analysis of single batch."""
-        expert_ids = mx.array([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=mx.int32)
-        stats = analyze_overflow_rate(expert_ids, num_experts=4, capacity_factor=2.0)
+        expert_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32)
+        stats = analyze_overflow_rate(expert_ids.numpy(), num_experts=4, capacity_factor=2.0)
 
         assert stats.total_batches == 1
         assert stats.overall_drop_rate == 0.0
@@ -170,8 +166,8 @@ class TestAnalyzeOverflowRate:
     def test_batch_list(self):
         """Test analysis of batch list."""
         batches = [
-            mx.array([[0, 1], [2, 3]], dtype=mx.int32),
-            mx.array([[0, 0], [0, 0]], dtype=mx.int32),
+            torch.tensor([[0, 1], [2, 3]], dtype=torch.int32).numpy(),
+            torch.tensor([[0, 0], [0, 0]], dtype=torch.int32).numpy(),
         ]
         stats = analyze_overflow_rate(batches, num_experts=4, capacity_factor=1.0)
 
@@ -188,8 +184,10 @@ class TestAutoTuneCapacity:
         batches = []
         for _ in range(20):
             # Skewed distribution - some experts get more load
-            expert_ids = np.random.choice(8, size=(32, 2), p=[0.3, 0.2, 0.15, 0.1, 0.08, 0.07, 0.05, 0.05])
-            batches.append(mx.array(expert_ids, dtype=mx.int32))
+            expert_ids = np.random.choice(
+                8, size=(32, 2), p=[0.3, 0.2, 0.15, 0.1, 0.08, 0.07, 0.05, 0.05]
+            )
+            batches.append(expert_ids.astype(np.int32))
 
         factor = auto_tune_capacity(
             batches, num_experts=8, target_drop_rate=0.01, min_factor=1.0, max_factor=4.0
@@ -208,8 +206,7 @@ class TestAutoTuneCapacity:
         """Test when min_factor already satisfies target."""
         # Uniform distribution - low factor should work
         batches = [
-            mx.array([[i % 8, (i + 1) % 8] for i in range(8)], dtype=mx.int32)
-            for _ in range(10)
+            np.array([[i % 8, (i + 1) % 8] for i in range(8)], dtype=np.int32) for _ in range(10)
         ]
 
         factor = auto_tune_capacity(
@@ -244,7 +241,9 @@ class TestDynamicCapacity:
         dyn = DynamicCapacity(num_experts=4, top_k=2, config=config)
 
         # Create batches with heavy overflow
-        high_overflow_batch = mx.array([[0, 0], [0, 0], [0, 0], [0, 0]], dtype=mx.int32)
+        high_overflow_batch = torch.tensor(
+            [[0, 0], [0, 0], [0, 0], [0, 0]], dtype=torch.int32
+        ).numpy()
 
         initial_factor = dyn.current_factor
         for _ in range(10):
@@ -266,7 +265,9 @@ class TestDynamicCapacity:
         dyn = DynamicCapacity(num_experts=8, top_k=2, config=config)
 
         # Create batches with no overflow (uniform distribution)
-        uniform_batch = mx.array([[i % 8, (i + 1) % 8] for i in range(8)], dtype=mx.int32)
+        uniform_batch = torch.tensor(
+            [[i % 8, (i + 1) % 8] for i in range(8)], dtype=torch.int32
+        ).numpy()
 
         initial_factor = dyn.current_factor
         for _ in range(15):
@@ -279,7 +280,7 @@ class TestDynamicCapacity:
         """Test get_stats returns expected fields."""
         dyn = DynamicCapacity(num_experts=8, top_k=2)
 
-        expert_ids = mx.array([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=mx.int32)
+        expert_ids = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=torch.int32).numpy()
         dyn.update(expert_ids)
 
         stats = dyn.get_stats()
@@ -294,7 +295,7 @@ class TestDynamicCapacity:
         dyn = DynamicCapacity(num_experts=8, top_k=2, config=config)
 
         # Run some updates
-        expert_ids = mx.array([[0, 0], [0, 0], [0, 0], [0, 0]], dtype=mx.int32)
+        expert_ids = torch.tensor([[0, 0], [0, 0], [0, 0], [0, 0]], dtype=torch.int32).numpy()
         for _ in range(10):
             dyn.update(expert_ids)
 
@@ -312,12 +313,12 @@ class TestDynamicCapacityFunction:
         """Test that capacity adapts to actual load."""
         # Uniform load - same batch size for fair comparison
         # 4 tokens, each routes to 2 different experts -> each expert gets 2 assignments
-        uniform_ids = mx.array([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=mx.int32)
+        uniform_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32).numpy()
         capacity_uniform = dynamic_capacity(uniform_ids, num_experts=4)
 
         # Skewed load (all to one expert) - same batch size
         # 4 tokens, all to expert 0 -> expert 0 gets 8 assignments
-        skewed_ids = mx.array([[0, 0], [0, 0], [0, 0], [0, 0]], dtype=mx.int32)
+        skewed_ids = torch.tensor([[0, 0], [0, 0], [0, 0], [0, 0]], dtype=torch.int32).numpy()
         capacity_skewed = dynamic_capacity(skewed_ids, num_experts=4)
 
         # With same batch size, skewed requires higher capacity because max_load is 8 vs 2
@@ -328,11 +329,9 @@ class TestDynamicCapacityFunction:
     def test_respects_bounds(self):
         """Test that capacity respects min/max bounds."""
         # Very skewed load
-        expert_ids = mx.array([[0, 0] for _ in range(64)], dtype=mx.int32)
+        expert_ids = torch.tensor([[0, 0] for _ in range(64)], dtype=torch.int32).numpy()
 
-        capacity = dynamic_capacity(
-            expert_ids, num_experts=8, min_factor=1.0, max_factor=2.0
-        )
+        capacity = dynamic_capacity(expert_ids, num_experts=8, min_factor=1.0, max_factor=2.0)
 
         min_capacity = compute_expert_capacity(64, 8, 1.0, 2)
         max_capacity = compute_expert_capacity(64, 8, 2.0, 2)
@@ -341,7 +340,9 @@ class TestDynamicCapacityFunction:
 
     def test_target_utilization(self):
         """Test that target utilization adds headroom."""
-        expert_ids = mx.array([[i % 4, (i + 1) % 4] for i in range(8)], dtype=mx.int32)
+        expert_ids = torch.tensor(
+            [[i % 4, (i + 1) % 4] for i in range(8)], dtype=torch.int32
+        ).numpy()
 
         # Lower utilization target means more headroom
         capacity_90 = dynamic_capacity(expert_ids, num_experts=4, target_utilization=0.9)
@@ -359,11 +360,11 @@ class TestCapacityStatsProperties:
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
         # First batch: no overflow
-        expert_ids1 = mx.array([[0], [1], [2], [3]], dtype=mx.int32)
+        expert_ids1 = torch.tensor([[0], [1], [2], [3]], dtype=torch.int32).numpy()
         analyzer.record_batch(expert_ids1)
 
         # Second batch: overflow
-        expert_ids2 = mx.array([[0], [0], [0], [0]], dtype=mx.int32)
+        expert_ids2 = torch.tensor([[0], [0], [0], [0]], dtype=torch.int32).numpy()
         analyzer.record_batch(expert_ids2)
 
         stats = analyzer.get_stats()
@@ -375,9 +376,9 @@ class TestCapacityStatsProperties:
 
         # Expert 0 overflows 3 times, expert 1 overflows 2 times
         for _ in range(3):
-            analyzer.record_batch(mx.array([[0], [0], [0], [0]], dtype=mx.int32))
+            analyzer.record_batch(torch.tensor([[0], [0], [0], [0]], dtype=torch.int32).numpy())
         for _ in range(2):
-            analyzer.record_batch(mx.array([[1], [1], [1], [1]], dtype=mx.int32))
+            analyzer.record_batch(torch.tensor([[1], [1], [1], [1]], dtype=torch.int32).numpy())
 
         stats = analyzer.get_stats()
         top = stats.top_overflow_experts(k=2)

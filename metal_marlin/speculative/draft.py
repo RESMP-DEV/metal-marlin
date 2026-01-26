@@ -21,7 +21,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Protocol
 
-import mlx.core as mx
+import torch
+from torch import Tensor
 
 from ..kv_cache import KVCache
 
@@ -29,7 +30,7 @@ from ..kv_cache import KVCache
 class CausalLMDraft(Protocol):
     """Protocol for models usable as draft models."""
 
-    def __call__(self, input_ids: mx.array, kv_cache: KVCache | None = None) -> mx.array: ...
+    def __call__(self, input_ids: Tensor, kv_cache: KVCache | None = None) -> Tensor: ...
     def create_kv_cache(self) -> KVCache: ...
 
 
@@ -44,8 +45,8 @@ class DraftOutput:
             to compute acceptance probabilities.
     """
 
-    tokens: mx.array  # [batch, num_speculative]
-    probs: mx.array   # [batch, num_speculative, vocab_size]
+    tokens: Tensor  # [batch, num_speculative]
+    probs: Tensor  # [batch, num_speculative, vocab_size]
 
 
 class DraftModel(ABC):
@@ -59,7 +60,7 @@ class DraftModel(ABC):
     @abstractmethod
     def speculate(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
@@ -96,15 +97,18 @@ class SmallModelDraft(DraftModel):
     tokens or simply reset and re-prefill.
     """
 
-    def __init__(self, model: CausalLMDraft, max_speculative: int = 4):
+    def __init__(
+        self, model: CausalLMDraft, max_speculative: int = 4, device: torch.device | None = None
+    ):
         self.model = model
         self.max_speculative = max_speculative
         self._cache: KVCache | None = None
         self._cache_seq_len: int = 0
+        self.device = device or torch.device("cpu")
 
     def speculate(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
@@ -115,8 +119,8 @@ class SmallModelDraft(DraftModel):
         if self._cache is None:
             self._cache = self.model.create_kv_cache()
 
-        tokens: list[mx.array] = []
-        probs: list[mx.array] = []
+        tokens: list[Tensor] = []
+        probs: list[Tensor] = []
 
         # Run the draft model autoregressively
         current_ids = input_ids
@@ -125,8 +129,8 @@ class SmallModelDraft(DraftModel):
             # Take logits for last position: [batch, vocab]
             last_logits = logits[:, -1, :]
 
-            next_probs = mx.softmax(last_logits, axis=-1)
-            next_token = mx.argmax(next_probs, axis=-1)  # [batch]
+            next_probs = torch.softmax(last_logits, dim=-1)
+            next_token = torch.argmax(next_probs, dim=-1)  # [batch]
 
             tokens.append(next_token)
             probs.append(next_probs)
@@ -136,8 +140,8 @@ class SmallModelDraft(DraftModel):
             current_ids = next_token.reshape(batch_size, 1)
 
         return DraftOutput(
-            tokens=mx.stack(tokens, axis=1),   # [batch, num_tokens]
-            probs=mx.stack(probs, axis=1),     # [batch, num_tokens, vocab]
+            tokens=torch.stack(tokens, dim=1),  # [batch, num_tokens]
+            probs=torch.stack(probs, dim=1),  # [batch, num_tokens, vocab]
         )
 
     def reset(self) -> None:
@@ -147,7 +151,7 @@ class SmallModelDraft(DraftModel):
         self._cache = None
         self._cache_seq_len = 0
 
-    def sync_after_accept(self, accepted_tokens: mx.array) -> None:
+    def sync_after_accept(self, accepted_tokens: Tensor) -> None:
         """Feed accepted tokens into draft cache to keep it synchronized.
 
         After the target model accepts some subset of the draft's proposals,
@@ -181,11 +185,14 @@ class NGramDraft(DraftModel):
     rejection with fallback to the target model's own prediction.
     """
 
-    def __init__(self, ngram_size: int = 3, vocab_size: int = 32000):
+    def __init__(
+        self, ngram_size: int = 3, vocab_size: int = 32000, device: torch.device | None = None
+    ):
         self.ngram_size = ngram_size
         self.vocab_size = vocab_size
         self.ngram_counts: dict[tuple[int, ...], dict[int, int]] = {}
         self._history: list[int] = []
+        self.device = device or torch.device("cpu")
 
     def update_ngrams(self, token_ids: list[int]) -> None:
         """Update n-gram statistics from newly generated tokens.
@@ -197,9 +204,11 @@ class NGramDraft(DraftModel):
         """
         self._history.extend(token_ids)
         # Build n-grams from the extended history
-        for i in range(max(0, len(self._history) - self.ngram_size - len(token_ids)),
-                       len(self._history) - self.ngram_size):
-            context = tuple(self._history[i:i + self.ngram_size])
+        for i in range(
+            max(0, len(self._history) - self.ngram_size - len(token_ids)),
+            len(self._history) - self.ngram_size,
+        ):
+            context = tuple(self._history[i : i + self.ngram_size])
             next_token = self._history[i + self.ngram_size]
             if context not in self.ngram_counts:
                 self.ngram_counts[context] = {}
@@ -209,7 +218,7 @@ class NGramDraft(DraftModel):
 
     def speculate(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
@@ -222,19 +231,19 @@ class NGramDraft(DraftModel):
             return self._uniform_fallback(batch_size, num_tokens)
 
         # Work with first batch element (n-gram draft is not naturally batched)
-        context_ids = input_ids[0, -self.ngram_size:].tolist()
+        context_ids = input_ids[0, -self.ngram_size :].tolist()
 
         tokens: list[int] = []
-        probs_list: list[mx.array] = []
+        probs_list: list[Tensor] = []
 
         for _ in range(num_tokens):
-            context = tuple(context_ids[-self.ngram_size:])
+            context = tuple(context_ids[-self.ngram_size :])
             counts = self.ngram_counts.get(context)
 
             if counts:
                 # Build probability distribution from counts
                 total = sum(counts.values())
-                prob_dist = mx.zeros((self.vocab_size,), dtype=mx.float32)
+                prob_dist = torch.zeros(self.vocab_size, dtype=torch.float32, device=self.device)
                 for tok, count in counts.items():
                     if tok < self.vocab_size:
                         prob_dist[tok] = count / total
@@ -243,10 +252,16 @@ class NGramDraft(DraftModel):
                 best_token = max(counts, key=counts.get)  # type: ignore[arg-type]
                 if best_token >= self.vocab_size:
                     best_token = 0
-                    prob_dist = mx.ones((self.vocab_size,), dtype=mx.float32) / self.vocab_size
+                    prob_dist = (
+                        torch.ones(self.vocab_size, dtype=torch.float32, device=self.device)
+                        / self.vocab_size
+                    )
             else:
                 # No n-gram match: uniform distribution, predict token 0
-                prob_dist = mx.ones((self.vocab_size,), dtype=mx.float32) / self.vocab_size
+                prob_dist = (
+                    torch.ones(self.vocab_size, dtype=torch.float32, device=self.device)
+                    / self.vocab_size
+                )
                 best_token = 0
 
             tokens.append(best_token)
@@ -256,13 +271,15 @@ class NGramDraft(DraftModel):
             context_ids.append(best_token)
 
         # Stack into batch-compatible shapes
-        tokens_arr = mx.array(tokens, dtype=mx.uint32).reshape(1, num_tokens)
-        probs_arr = mx.stack(probs_list, axis=0).reshape(1, num_tokens, self.vocab_size)
+        tokens_arr = torch.tensor(tokens, dtype=torch.long, device=self.device).reshape(
+            1, num_tokens
+        )
+        probs_arr = torch.stack(probs_list, dim=0).reshape(1, num_tokens, self.vocab_size)
 
         # Broadcast to batch dimension if needed
         if batch_size > 1:
-            tokens_arr = mx.broadcast_to(tokens_arr, (batch_size, num_tokens))
-            probs_arr = mx.broadcast_to(probs_arr, (batch_size, num_tokens, self.vocab_size))
+            tokens_arr = tokens_arr.expand(batch_size, num_tokens)
+            probs_arr = probs_arr.expand(batch_size, num_tokens, self.vocab_size)
 
         return DraftOutput(tokens=tokens_arr, probs=probs_arr)
 
@@ -273,9 +290,9 @@ class NGramDraft(DraftModel):
 
     def _uniform_fallback(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Return uniform distributions when no context is available."""
-        tokens = mx.zeros((batch_size, num_tokens), dtype=mx.uint32)
-        probs = mx.broadcast_to(
-            mx.ones((1, 1, self.vocab_size), dtype=mx.float32) / self.vocab_size,
-            (batch_size, num_tokens, self.vocab_size),
-        )
+        tokens = torch.zeros(batch_size, num_tokens, dtype=torch.long, device=self.device)
+        probs = (
+            torch.ones(1, 1, self.vocab_size, dtype=torch.float32, device=self.device)
+            / self.vocab_size
+        ).expand(batch_size, num_tokens, self.vocab_size)
         return DraftOutput(tokens=tokens, probs=probs)

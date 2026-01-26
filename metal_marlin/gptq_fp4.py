@@ -33,8 +33,7 @@ from numpy.typing import NDArray
 # Positive half: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0  (indices 0-7)
 # Negative half: -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0  (indices 8-15)
 FP4_GRID: NDArray[np.float32] = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=np.float32,
 )
 
@@ -134,9 +133,7 @@ def compute_optimal_fp4_scale(
 
     elif method == "mse_grid":
         base_scale = max_abs / FP4_MAX
-        scale_candidates = np.linspace(
-            base_scale * 0.5, base_scale * 1.5, grid_points
-        )
+        scale_candidates = np.linspace(base_scale * 0.5, base_scale * 1.5, grid_points)
 
         best_scale = base_scale
         best_mse = float("inf")
@@ -156,14 +153,14 @@ def compute_optimal_fp4_scale(
         for _ in range(10):
             indices, quantized = quantize_to_fp4_grid_vectorized(w_flat, scale)
             error = w_flat - quantized
-            mse = np.mean(error ** 2)
+            mse = np.mean(error**2)
 
             if mse < 1e-12:
                 break
 
             grid_values = FP4_GRID[indices]
             gradient = -2.0 * np.mean(error * grid_values)
-            hessian = 2.0 * np.mean(grid_values ** 2)
+            hessian = 2.0 * np.mean(grid_values**2)
 
             if abs(hessian) < 1e-12:
                 break
@@ -306,9 +303,7 @@ class FP4GPTQQuantizer:
             gs = g * self.group_size
             ge = gs + self.group_size
             for row in range(out_features):
-                scales[g, row] = compute_optimal_fp4_scale(
-                    W[row, gs:ge], method=self.scale_method
-                )
+                scales[g, row] = compute_optimal_fp4_scale(W[row, gs:ge], method=self.scale_method)
 
         # Work on a copy of W for GPTQ error compensation
         W_work = W.copy()
@@ -468,9 +463,7 @@ def dequantize_fp4_gptq(
     for g in range(n_packed):
         col_start = g * FP4_PER_U32
         for i in range(FP4_PER_U32):
-            indices[:, col_start + i] = (
-                (packed[:, g] >> (i * 4)) & 0xF
-            ).astype(np.uint8)
+            indices[:, col_start + i] = ((packed[:, g] >> (i * 4)) & 0xF).astype(np.uint8)
 
     # Transpose to [N, K] layout
     indices_T = indices.T
@@ -557,9 +550,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Test FP4 GPTQ quantization")
-    parser.add_argument(
-        "--shape", type=str, default="1024,1024", help="Weight shape (out,in)"
-    )
+    parser.add_argument("--shape", type=str, default="1024,1024", help="Weight shape (out,in)")
     parser.add_argument("--group-size", type=int, default=128, help="Group size")
     parser.add_argument(
         "--scale-method",

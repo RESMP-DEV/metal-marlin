@@ -70,9 +70,9 @@ def prune_to_2_4(
 
     # Gather the kept values using advanced indexing
     block_idx = np.arange(num_blocks)[:, None]  # [num_blocks, 1]
-    n_idx = np.arange(N)[None, :]               # [1, N]
+    n_idx = np.arange(N)[None, :]  # [1, N]
 
-    val0 = blocks[block_idx, keep_first, n_idx]   # [num_blocks, N]
+    val0 = blocks[block_idx, keep_first, n_idx]  # [num_blocks, N]
     val1 = blocks[block_idx, keep_second, n_idx]  # [num_blocks, N]
 
     # Pack kept values: interleave as [val0_block0, val1_block0, val0_block1, ...]
@@ -84,9 +84,7 @@ def prune_to_2_4(
     # Pack metadata: 2-bit indices per kept element
     # Bits [1:0] = keep_first position (0-3)
     # Bits [3:2] = keep_second position (0-3)
-    metadata = (keep_first & 0x3).astype(np.uint8) | (
-        (keep_second & 0x3).astype(np.uint8) << 2
-    )
+    metadata = (keep_first & 0x3).astype(np.uint8) | ((keep_second & 0x3).astype(np.uint8) << 2)
 
     return sparse_weights, metadata
 
@@ -157,12 +155,12 @@ def measure_pruning_loss(
     pruned_f32 = pruned.astype(np.float32)
 
     diff = orig_f32 - pruned_f32
-    mse = float(np.mean(diff ** 2))
+    mse = float(np.mean(diff**2))
     rmse = float(np.sqrt(mse))
 
     orig_norm = float(np.linalg.norm(orig_f32))
     diff_norm = float(np.linalg.norm(diff))
-    relative_error = diff_norm / orig_norm if orig_norm > 0 else float('inf')
+    relative_error = diff_norm / orig_norm if orig_norm > 0 else float("inf")
 
     num_zeros = int(np.sum(pruned_f32 == 0))
     sparsity = num_zeros / pruned_f32.size

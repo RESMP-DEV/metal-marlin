@@ -41,10 +41,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import mlx.core as mx
+from ._compat import HAS_TORCH, require_torch
 
-if TYPE_CHECKING:
-    pass
+if HAS_TORCH:
+    import torch
+elif TYPE_CHECKING:
+    import torch
 
 
 @dataclass
@@ -59,6 +61,7 @@ class TileKey:
     The tile_idx encodes both row and column tile indices packed into one int:
         tile_idx = row_tile * num_col_tiles + col_tile
     """
+
     layer_idx: int
     expert_id: int
     tile_idx: int
@@ -79,8 +82,9 @@ class TileKey:
 @dataclass
 class CacheEntry:
     """A cached dequantized tile with metadata."""
+
     key: TileKey
-    data: mx.array
+    data: torch.Tensor
     size_bytes: int
     access_count: int = 0
     last_access: float = field(default_factory=time.time)
@@ -94,6 +98,7 @@ class CacheEntry:
 @dataclass
 class ExpertStats:
     """Activation statistics for a single expert."""
+
     expert_id: int
     activation_count: int = 0
     total_tokens: int = 0
@@ -129,6 +134,7 @@ class ExpertStats:
 @dataclass
 class LayerStats:
     """Per-layer statistics for cache tuning."""
+
     layer_idx: int
     expert_stats: dict[int, ExpertStats] = field(default_factory=dict)
     cache_hits: int = 0
@@ -170,6 +176,11 @@ class LayerStats:
         return [eid for eid, _ in hot]
 
 
+def _tensor_nbytes(tensor: torch.Tensor) -> int:
+    """Get the size of a tensor in bytes."""
+    return tensor.numel() * tensor.element_size()
+
+
 class ExpertCache:
     """LRU cache for dequantized expert tiles with intelligent prefetching.
 
@@ -200,6 +211,8 @@ class ExpertCache:
         enable_prefetch: bool = True,
         prefetch_k: int = 4,
     ):
+        require_torch("ExpertCache")
+
         self.num_experts = num_experts
         self.num_layers = num_layers
         self.cache_size_bytes = cache_size_mb * 1024 * 1024
@@ -225,15 +238,15 @@ class ExpertCache:
         self._lock = threading.RLock()
 
         # Prefetch queue: tiles to dequantize in background
-        self._prefetch_queue: list[tuple[TileKey, Callable[[], mx.array]]] = []
+        self._prefetch_queue: list[tuple[TileKey, Callable[[], torch.Tensor]]] = []
 
     def get_expert_tile(
         self,
         layer_idx: int,
         expert_id: int,
         tile_idx: int,
-        dequant_fn: Callable[[], mx.array],
-    ) -> mx.array:
+        dequant_fn: Callable[[], torch.Tensor],
+    ) -> torch.Tensor:
         """Get a dequantized expert tile, using cache if available.
 
         If the tile is cached, returns immediately. Otherwise, calls dequant_fn
@@ -246,7 +259,7 @@ class ExpertCache:
             dequant_fn: Callable that returns the dequantized tile if not cached
 
         Returns:
-            Dequantized tile as mx.array
+            Dequantized tile as torch.Tensor
         """
         key = TileKey(layer_idx, expert_id, tile_idx)
 
@@ -270,7 +283,9 @@ class ExpertCache:
 
         # Dequantization outside lock (can be slow)
         tile_data = dequant_fn()
-        mx.eval(tile_data)  # Ensure computation completes
+        # Synchronize if on MPS/CUDA to ensure computation completes
+        if tile_data.device.type in ("mps", "cuda"):
+            torch.mps.synchronize() if tile_data.device.type == "mps" else torch.cuda.synchronize()
 
         with self._lock:
             # Add to cache
@@ -278,13 +293,13 @@ class ExpertCache:
 
             return tile_data
 
-    def _put(self, key: TileKey, data: mx.array) -> None:
+    def _put(self, key: TileKey, data: torch.Tensor) -> None:
         """Add a tile to the cache, evicting if necessary.
 
         Must be called with lock held.
         """
         # Calculate size
-        size_bytes = data.nbytes
+        size_bytes = _tensor_nbytes(data)
 
         # Evict if necessary
         while self._current_size + size_bytes > self.cache_size_bytes and self._cache:
@@ -322,7 +337,7 @@ class ExpertCache:
     def record_expert_activation(
         self,
         layer_idx: int,
-        expert_ids: mx.array,
+        expert_ids: torch.Tensor,
     ) -> None:
         """Record which experts were activated for a batch.
 
@@ -332,14 +347,14 @@ class ExpertCache:
 
         Args:
             layer_idx: Transformer layer index
-            expert_ids: Array of activated expert IDs, shape [batch, top_k]
+            expert_ids: Tensor of activated expert IDs, shape [batch, top_k]
         """
         with self._lock:
             layer_stats = self._layer_stats[layer_idx]
             batch_size = expert_ids.shape[0]
 
-            # Convert to numpy for iteration
-            ids = list(expert_ids.reshape(-1).tolist())
+            # Convert to list for iteration
+            ids = expert_ids.reshape(-1).tolist()
 
             # Count activations per expert
             counts: dict[int, int] = {}
@@ -379,7 +394,7 @@ class ExpertCache:
         layer_idx: int,
         expert_id: int,
         tile_indices: list[int],
-        dequant_fn: Callable[[int], mx.array],
+        dequant_fn: Callable[[int], torch.Tensor],
     ) -> None:
         """Speculatively prefetch tiles for an expert.
 
@@ -426,7 +441,9 @@ class ExpertCache:
         # Dequantize outside lock
         for key, fn in items_to_process:
             data = fn()
-            mx.eval(data)
+            # Synchronize if on MPS/CUDA
+            if data.device.type in ("mps", "cuda"):
+                torch.mps.synchronize() if data.device.type == "mps" else torch.cuda.synchronize()
 
             with self._lock:
                 # Double-check before adding
@@ -448,7 +465,8 @@ class ExpertCache:
         """
         with self._lock:
             keys_to_remove = [
-                key for key in self._cache
+                key
+                for key in self._cache
                 if key.layer_idx == layer_idx and key.expert_id == expert_id
             ]
 
@@ -468,9 +486,7 @@ class ExpertCache:
             Number of tiles evicted
         """
         with self._lock:
-            keys_to_remove = [
-                key for key in self._cache if key.layer_idx == layer_idx
-            ]
+            keys_to_remove = [key for key in self._cache if key.layer_idx == layer_idx]
 
             for key in keys_to_remove:
                 entry = self._cache.pop(key)
@@ -556,7 +572,9 @@ class ExpertCache:
                     "size_mb": self.size_mb,
                     "max_size_mb": self.cache_size_bytes / (1024 * 1024),
                     "num_entries": self.num_entries,
-                    "utilization": self._current_size / self.cache_size_bytes if self.cache_size_bytes > 0 else 0.0,
+                    "utilization": self._current_size / self.cache_size_bytes
+                    if self.cache_size_bytes > 0
+                    else 0.0,
                 },
                 "config": {
                     "num_experts": self.num_experts,

@@ -285,7 +285,7 @@ Current Metal Marlin kernels handle byte-level models without modification:
 | Local GEMM | `marlin_gemm_fp4` | Smaller matrices (d_local < d_global) |
 | Global attention | `flash_attention_kv_fp4` | Longer sequences (T/P) |
 | Local attention | `flash_attention` | Short sequences (P), no quantization needed |
-| Embedding lookup | MLX built-in | 256-entry table, trivial |
+| Embedding lookup | Standard lookup | 256-entry table, trivial |
 
 ### New Kernel Requirements
 

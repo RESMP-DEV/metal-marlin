@@ -48,7 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .._compat import HAS_MLX, mx, to_numpy
+from .._compat import to_numpy
 from .device_mesh import Device, DeviceMesh, move_to_device
 
 if TYPE_CHECKING:
@@ -137,11 +137,7 @@ class PipelineStage:
         return x
 
     def __repr__(self) -> str:
-        return (
-            f"PipelineStage(id={self.stage_id}, "
-            f"layers={len(self.layers)}, "
-            f"device={self.device})"
-        )
+        return f"PipelineStage(id={self.stage_id}, layers={len(self.layers)}, device={self.device})"
 
 
 class PipelineParallel:
@@ -210,8 +206,7 @@ class PipelineParallel:
 
         if len(layers) < num_stages:
             raise ValueError(
-                f"Cannot create {num_stages} pipeline stages from "
-                f"{len(layers)} layers"
+                f"Cannot create {num_stages} pipeline stages from {len(layers)} layers"
             )
 
         # Evenly distribute layers
@@ -297,13 +292,7 @@ class PipelineParallel:
             microbatches = next_batches
 
         # Concatenate outputs
-        output = np.concatenate(microbatches, axis=0)
-
-        # Convert back to MLX if needed
-        if HAS_MLX and mx is not None:
-            output = mx.array(output)
-
-        return output
+        return np.concatenate(microbatches, axis=0)
 
     def _forward_1f1b(self, inputs: Any, **kwargs: Any) -> Any:
         """1F1B-style forward: interleaved processing (inference-only).
@@ -344,12 +333,7 @@ class PipelineParallel:
 
             outputs.append(x)
 
-        output = np.concatenate(outputs, axis=0)
-
-        if HAS_MLX and mx is not None:
-            output = mx.array(output)
-
-        return output
+        return np.concatenate(outputs, axis=0)
 
     def get_stage_memory_usage(self) -> list[int]:
         """Estimate memory usage per stage.
@@ -375,8 +359,7 @@ class PipelineParallel:
 
     def __repr__(self) -> str:
         lines = [
-            f"PipelineParallel(num_stages={len(self.stages)}, "
-            f"schedule={self.config.schedule!r}):"
+            f"PipelineParallel(num_stages={len(self.stages)}, schedule={self.config.schedule!r}):"
         ]
         for stage in self.stages:
             lines.append(f"  {stage}")

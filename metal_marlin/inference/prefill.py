@@ -13,6 +13,8 @@ This module provides:
 
 Target: Match vLLM prefill throughput on M4 Max (>10K tok/s for 7B models).
 
+Backend: PyTorch MPS + Metal dispatch (no MLX dependency)
+
 Usage:
     from metal_marlin.inference.prefill import (
         chunked_prefill,
@@ -45,12 +47,38 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
 
-from .._compat import mx
+import torch
+import torch.nn.functional as F
+
+from .._compat import HAS_TORCH
 
 if TYPE_CHECKING:
-    import mlx.core as mx  # noqa: F811
-
     from ..kv_cache import KVCache
+
+
+# ---------------------------------------------------------------------------
+# Backend availability
+# ---------------------------------------------------------------------------
+
+
+def _check_mps() -> bool:
+    """Check if MPS backend is available."""
+    return HAS_TORCH and torch.backends.mps.is_available()
+
+
+def require_mps(feature: str = "this operation") -> None:
+    """Raise RuntimeError if MPS is not available."""
+    if not _check_mps():
+        raise RuntimeError(
+            f"MPS backend is required for {feature}. "
+            "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+        )
+
+
+def _sync_mps() -> None:
+    """Synchronize MPS device."""
+    if _check_mps():
+        torch.mps.synchronize()
 
 
 # ---------------------------------------------------------------------------
@@ -118,10 +146,10 @@ class PrefillModel(Protocol):
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: torch.Tensor,
         kv_cache: KVCache | None = None,
-        attention_mask: mx.array | None = None,
-    ) -> mx.array:
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Forward pass returning logits."""
         ...
 
@@ -137,11 +165,11 @@ class PrefillModel(Protocol):
 
 def chunked_prefill(
     model: PrefillModel,
-    input_ids: mx.array,
+    input_ids: torch.Tensor,
     kv_cache: KVCache | None = None,
     config: PrefillConfig | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> tuple[mx.array, PrefillStats]:
+) -> tuple[torch.Tensor, PrefillStats]:
     """Process a prompt in memory-aware chunks.
 
     For long prompts (>4K tokens), processing the entire sequence at once
@@ -175,8 +203,8 @@ def chunked_prefill(
 
     Example:
         # Long prompt (32K tokens)
-        prompt = tokenizer(long_text, return_tensors="np")
-        input_ids = mx.array(prompt["input_ids"])
+        prompt = tokenizer(long_text, return_tensors="pt")
+        input_ids = prompt["input_ids"].to("mps")
 
         # Chunked prefill with progress
         def on_progress(done, total):
@@ -208,8 +236,7 @@ def chunked_prefill(
 
     if seq_len > kv_cache.config.max_seq_len:
         raise ValueError(
-            f"Prompt length {seq_len} exceeds cache max_seq_len "
-            f"{kv_cache.config.max_seq_len}"
+            f"Prompt length {seq_len} exceeds cache max_seq_len {kv_cache.config.max_seq_len}"
         )
 
     # Determine chunk boundaries
@@ -244,7 +271,7 @@ def chunked_prefill(
         all_logits.append(chunk_logits)
 
         # Force evaluation to get accurate timing
-        mx.eval(chunk_logits)
+        _sync_mps()
 
         chunk_time_ms = (time.perf_counter() - chunk_start_time) * 1000
         stats.chunk_times_ms.append(chunk_time_ms)
@@ -254,7 +281,7 @@ def chunked_prefill(
             progress_callback(end_pos, seq_len)
 
     # Concatenate logits from all chunks
-    logits = mx.concatenate(all_logits, axis=1)
+    logits = torch.cat(all_logits, dim=1)
 
     # Finalize stats
     stats.prefill_time_ms = (time.perf_counter() - start_time) * 1000
@@ -267,11 +294,11 @@ def chunked_prefill(
 
 def _simple_prefill(
     model: PrefillModel,
-    input_ids: mx.array,
+    input_ids: torch.Tensor,
     kv_cache: KVCache,
     config: PrefillConfig,
     stats: PrefillStats,
-) -> tuple[mx.array, PrefillStats]:
+) -> tuple[torch.Tensor, PrefillStats]:
     """Single-pass prefill for short prompts."""
     seq_len = input_ids.shape[1]
     stats.num_chunks = 1
@@ -280,7 +307,7 @@ def _simple_prefill(
 
     logits = model(input_ids, kv_cache=kv_cache)
     kv_cache.advance(seq_len)
-    mx.eval(logits)
+    _sync_mps()
 
     stats.prefill_time_ms = (time.perf_counter() - start_time) * 1000
     stats.tokens_per_second = seq_len / (stats.prefill_time_ms / 1000)
@@ -323,8 +350,8 @@ def _estimate_peak_memory(
 
 
 def parallel_kv_write(
-    keys: list[mx.array],
-    values: list[mx.array],
+    keys: list[torch.Tensor],
+    values: list[torch.Tensor],
     kv_cache: KVCache,
     layer_indices: list[int] | None = None,
 ) -> None:
@@ -375,8 +402,7 @@ def parallel_kv_write(
 
     if len(layer_indices) != num_layers:
         raise ValueError(
-            f"layer_indices ({len(layer_indices)}) doesn't match "
-            f"keys/values count ({num_layers})"
+            f"layer_indices ({len(layer_indices)}) doesn't match keys/values count ({num_layers})"
         )
 
     # Validate layer indices
@@ -385,26 +411,24 @@ def parallel_kv_write(
         if idx < 0 or idx >= max_layer:
             raise ValueError(f"Layer index {idx} out of range [0, {max_layer})")
 
-    # Batch the writes using MLX's lazy evaluation
+    # Batch the writes - PyTorch operations are already lazy/batched
     # All update operations are queued and executed together
     for i, layer_idx in enumerate(layer_indices):
         k = keys[i]
         v = values[i]
 
-        # Direct cache update - this creates computation graph nodes
-        # but doesn't execute until mx.eval()
+        # Direct cache update
         _update_cache_slot(kv_cache, layer_idx, k, v)
 
-    # Single evaluation for all updates
-    # This allows MLX to optimize the writes together
-    mx.eval(kv_cache.k_cache + kv_cache.v_cache)
+    # Single sync for all updates
+    _sync_mps()
 
 
 def _update_cache_slot(
     kv_cache: KVCache,
     layer_idx: int,
-    k_new: mx.array,
-    v_new: mx.array,
+    k_new: torch.Tensor,
+    v_new: torch.Tensor,
 ) -> None:
     """Update a single layer's cache slot (internal).
 
@@ -417,8 +441,7 @@ def _update_cache_slot(
 
     if end_pos > kv_cache.config.max_seq_len:
         raise ValueError(
-            f"Sequence length {end_pos} exceeds max_seq_len "
-            f"{kv_cache.config.max_seq_len}"
+            f"Sequence length {end_pos} exceeds max_seq_len {kv_cache.config.max_seq_len}"
         )
 
     # Use the cache's native update which handles quantization
@@ -441,13 +464,13 @@ class BatchedKVResult:
         compute_time_ms: Time to compute all projections.
     """
 
-    keys: list[mx.array]
-    values: list[mx.array]
+    keys: list[torch.Tensor]
+    values: list[torch.Tensor]
     compute_time_ms: float = 0.0
 
 
 def batched_kv_projection(
-    hidden_states: mx.array,
+    hidden_states: torch.Tensor,
     layers: list[Any],  # List of transformer layers with attention
     rope_offset: int = 0,
 ) -> BatchedKVResult:
@@ -496,7 +519,7 @@ def batched_kv_projection(
     keys = []
     values = []
 
-    # Queue all projections (lazy evaluation)
+    # Queue all projections (PyTorch handles lazy evaluation)
     for layer in layers:
         attn = layer.self_attn if hasattr(layer, "self_attn") else layer.attn
 
@@ -507,9 +530,9 @@ def batched_kv_projection(
         # Reshape to attention format [batch, num_kv_heads, seq, head_dim]
         batch_size, seq_len, _ = hidden_states.shape
         k = k.reshape(batch_size, seq_len, attn.num_kv_heads, attn.head_dim)
-        k = k.transpose(0, 2, 1, 3)
+        k = k.transpose(1, 2)
         v = v.reshape(batch_size, seq_len, attn.num_kv_heads, attn.head_dim)
-        v = v.transpose(0, 2, 1, 3)
+        v = v.transpose(1, 2)
 
         # Apply RoPE to keys
         if hasattr(attn, "rope"):
@@ -518,8 +541,8 @@ def batched_kv_projection(
         keys.append(k)
         values.append(v)
 
-    # Single evaluation for all
-    mx.eval(keys + values)
+    # Single sync for all
+    _sync_mps()
 
     compute_time_ms = (time.perf_counter() - start_time) * 1000
 
@@ -532,12 +555,12 @@ def batched_kv_projection(
 
 
 def flash_prefill_attention(
-    query: mx.array,
-    key: mx.array,
-    value: mx.array,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
     scale: float | None = None,
     causal: bool = True,
-) -> mx.array:
+) -> torch.Tensor:
     """Flash Attention for prefill phase.
 
     Standard attention materializes the full [seq, seq] attention matrix,
@@ -574,25 +597,27 @@ def flash_prefill_attention(
     batch, num_heads, seq_len, head_dim = query.shape
     num_kv_heads = key.shape[1]
     kv_len = key.shape[2]
+    device = query.device
+    dtype = query.dtype
 
     if scale is None:
-        scale = head_dim ** -0.5
+        scale = head_dim**-0.5
 
     # GQA expansion if needed
     if num_kv_heads < num_heads:
         repeat_factor = num_heads // num_kv_heads
-        key = mx.repeat(key, repeat_factor, axis=1)
-        value = mx.repeat(value, repeat_factor, axis=1)
+        key = key.repeat_interleave(repeat_factor, dim=1)
+        value = value.repeat_interleave(repeat_factor, dim=1)
 
-    # Try to use MLX's scaled_dot_product_attention if available
+    # Try to use PyTorch's scaled_dot_product_attention if available
     # This may use Flash Attention internally on supported hardware
     try:
-        # MLX 0.10+ has sdpa with flash attention backend
+        # PyTorch 2.0+ has sdpa with flash attention backend
         if causal:
             # Create causal mask
-            mask = mx.triu(
-                mx.full((seq_len, kv_len), float("-inf"), dtype=query.dtype),
-                k=1,
+            mask = torch.triu(
+                torch.full((seq_len, kv_len), float("-inf"), dtype=dtype, device=device),
+                diagonal=1,
             )
             mask = mask[None, None, :, :]  # [1, 1, seq, kv]
         else:
@@ -600,12 +625,12 @@ def flash_prefill_attention(
 
         # Standard attention with mask
         # Q @ K^T / sqrt(d)
-        scores = (query @ key.transpose(0, 1, 3, 2)) * scale
+        scores = (query @ key.transpose(-2, -1)) * scale
 
         if mask is not None:
             scores = scores + mask
 
-        attn_weights = mx.softmax(scores, axis=-1)
+        attn_weights = F.softmax(scores, dim=-1)
         output = attn_weights @ value
 
         return output
@@ -616,24 +641,26 @@ def flash_prefill_attention(
 
 
 def _flash_attention_ref(
-    query: mx.array,
-    key: mx.array,
-    value: mx.array,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
     scale: float,
     causal: bool,
-) -> mx.array:
+) -> torch.Tensor:
     """Reference Flash Attention implementation (tiled, O(n) memory)."""
     batch, num_heads, seq_len, head_dim = query.shape
     kv_len = key.shape[2]
+    device = query.device
+    dtype = query.dtype
 
     # Tile sizes (balance memory vs compute)
     tile_q = min(64, seq_len)
     tile_kv = min(64, kv_len)
 
     # Output accumulator and softmax normalization
-    output = mx.zeros_like(query)
-    row_max = mx.full((batch, num_heads, seq_len, 1), float("-inf"), dtype=query.dtype)
-    row_sum = mx.zeros((batch, num_heads, seq_len, 1), dtype=query.dtype)
+    output = torch.zeros_like(query)
+    row_max = torch.full((batch, num_heads, seq_len, 1), float("-inf"), dtype=dtype, device=device)
+    row_sum = torch.zeros((batch, num_heads, seq_len, 1), dtype=dtype, device=device)
 
     # Process in tiles
     for q_start in range(0, seq_len, tile_q):
@@ -642,67 +669,82 @@ def _flash_attention_ref(
 
         for kv_start in range(0, kv_len, tile_kv):
             kv_end = min(kv_start + tile_kv, kv_len)
-            k_tile = key[:, :, kv_start:kv_end, :]   # [B, H, tile_kv, D]
+            k_tile = key[:, :, kv_start:kv_end, :]  # [B, H, tile_kv, D]
             v_tile = value[:, :, kv_start:kv_end, :]
 
             # QK^T for this tile
-            scores = (q_tile @ k_tile.transpose(0, 1, 3, 2)) * scale
+            scores = (q_tile @ k_tile.transpose(-2, -1)) * scale
 
             # Causal masking within tile
             if causal:
-                q_indices = mx.arange(q_start, q_end)[:, None]
-                kv_indices = mx.arange(kv_start, kv_end)[None, :]
+                q_indices = torch.arange(q_start, q_end, device=device)[:, None]
+                kv_indices = torch.arange(kv_start, kv_end, device=device)[None, :]
                 causal_mask = kv_indices > q_indices
-                scores = mx.where(
+                scores = torch.where(
                     causal_mask[None, None, :, :],
-                    mx.array(float("-inf")),
+                    torch.tensor(float("-inf"), device=device),
                     scores,
                 )
 
             # Online softmax update
-            tile_max = mx.max(scores, axis=-1, keepdims=True)
+            tile_max = torch.max(scores, dim=-1, keepdim=True).values
             old_max = row_max[:, :, q_start:q_end, :]
-            new_max = mx.maximum(old_max, tile_max)
+            new_max = torch.maximum(old_max, tile_max)
 
             # Rescale existing accumulator
-            rescale = mx.exp(old_max - new_max)
+            rescale = torch.exp(old_max - new_max)
             output_slice = output[:, :, q_start:q_end, :]
-            output = mx.concatenate([
-                output[:, :, :q_start, :],
-                output_slice * rescale,
-                output[:, :, q_end:, :],
-            ], axis=2)
+            output = torch.cat(
+                [
+                    output[:, :, :q_start, :],
+                    output_slice * rescale,
+                    output[:, :, q_end:, :],
+                ],
+                dim=2,
+            )
 
             row_sum_slice = row_sum[:, :, q_start:q_end, :]
-            row_sum = mx.concatenate([
-                row_sum[:, :, :q_start, :],
-                row_sum_slice * rescale,
-                row_sum[:, :, q_end:, :],
-            ], axis=2)
+            row_sum = torch.cat(
+                [
+                    row_sum[:, :, :q_start, :],
+                    row_sum_slice * rescale,
+                    row_sum[:, :, q_end:, :],
+                ],
+                dim=2,
+            )
 
             # Compute attention for this tile
-            exp_scores = mx.exp(scores - new_max)
-            tile_sum = mx.sum(exp_scores, axis=-1, keepdims=True)
+            exp_scores = torch.exp(scores - new_max)
+            tile_sum = torch.sum(exp_scores, dim=-1, keepdim=True)
             tile_out = exp_scores @ v_tile
 
             # Accumulate
-            output = mx.concatenate([
-                output[:, :, :q_start, :],
-                output[:, :, q_start:q_end, :] + tile_out,
-                output[:, :, q_end:, :],
-            ], axis=2)
+            output = torch.cat(
+                [
+                    output[:, :, :q_start, :],
+                    output[:, :, q_start:q_end, :] + tile_out,
+                    output[:, :, q_end:, :],
+                ],
+                dim=2,
+            )
 
-            row_sum = mx.concatenate([
-                row_sum[:, :, :q_start, :],
-                row_sum[:, :, q_start:q_end, :] + tile_sum,
-                row_sum[:, :, q_end:, :],
-            ], axis=2)
+            row_sum = torch.cat(
+                [
+                    row_sum[:, :, :q_start, :],
+                    row_sum[:, :, q_start:q_end, :] + tile_sum,
+                    row_sum[:, :, q_end:, :],
+                ],
+                dim=2,
+            )
 
-            row_max = mx.concatenate([
-                row_max[:, :, :q_start, :],
-                new_max,
-                row_max[:, :, q_end:, :],
-            ], axis=2)
+            row_max = torch.cat(
+                [
+                    row_max[:, :, :q_start, :],
+                    new_max,
+                    row_max[:, :, q_end:, :],
+                ],
+                dim=2,
+            )
 
     # Normalize
     output = output / (row_sum + 1e-8)
@@ -733,10 +775,10 @@ class SpeculativePrefillConfig:
 
 def speculative_prefill(
     model: PrefillModel,
-    input_ids: mx.array,
+    input_ids: torch.Tensor,
     kv_cache: KVCache,
     config: SpeculativePrefillConfig | None = None,
-) -> tuple[mx.array, list[int]]:
+) -> tuple[torch.Tensor, list[int]]:
     """Prefill with speculative continuation caching.
 
     After standard prefill, attempts to predict and cache the most likely
@@ -780,25 +822,25 @@ def speculative_prefill(
 
     # Get probability distribution for next token
     next_logits = logits[:, -1, :]  # [1, vocab_size]
-    probs = mx.softmax(next_logits, axis=-1)
+    probs = F.softmax(next_logits, dim=-1)
 
     for _ in range(config.num_speculative_tokens):
         # Check if top prediction is confident enough
-        max_prob = float(mx.max(probs).item())
+        max_prob = float(probs.max().item())
         if max_prob < config.confidence_threshold:
             break
 
         # Get top token
-        top_token = int(mx.argmax(probs, axis=-1).item())
+        top_token = int(probs.argmax(dim=-1).item())
         speculative_tokens.append(top_token)
 
         # Forward speculative token through model
-        spec_input = mx.array([[top_token]])
+        spec_input = torch.tensor([[top_token]], device=input_ids.device, dtype=input_ids.dtype)
         spec_logits = model(spec_input, kv_cache=kv_cache)
         kv_cache.advance(1)
 
         # Update probs for next speculation
-        probs = mx.softmax(spec_logits[:, -1, :], axis=-1)
+        probs = F.softmax(spec_logits[:, -1, :], dim=-1)
 
     return logits, speculative_tokens
 

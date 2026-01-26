@@ -31,10 +31,10 @@ from time import time
 class RequestStatus(Enum):
     """Lifecycle states for a generation request."""
 
-    PENDING = auto()    # Waiting for prefill
-    RUNNING = auto()    # Actively generating tokens
+    PENDING = auto()  # Waiting for prefill
+    RUNNING = auto()  # Actively generating tokens
     PREEMPTED = auto()  # Swapped out due to memory pressure
-    FINISHED = auto()   # Completed (EOS, max_tokens, or stop sequence)
+    FINISHED = auto()  # Completed (EOS, max_tokens, or stop sequence)
 
 
 @dataclass

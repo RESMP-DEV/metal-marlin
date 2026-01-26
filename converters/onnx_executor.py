@@ -11,13 +11,13 @@ Architecture:
    - MatMul/Gemm -> marlin_gemm_fp4 (if weights are quantized)
    - Fused MHA -> MarlinAttention (decomposed Q/K/V pattern)
    - Attention op -> flash_attention_metal (native ONNX Attention)
-   - LayerNorm, RoPE, etc. -> MLX standard ops
+   - LayerNorm, RoPE, etc. -> PyTorch standard ops
 
 This approach supports any transformer architecture that uses standard ONNX ops,
 without needing model-specific code like llama.py or mistral.py.
 
 Requirements:
-    pip install onnx onnxruntime
+    pip install onnx onnxruntime torch
 """
 
 from __future__ import annotations
@@ -26,16 +26,26 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import torch
+import torch.nn.functional as F
+
 if TYPE_CHECKING:
-    import mlx.core as mx
+    pass
 
 # Re-export pack_fp4_weights for convenience
 try:
-    from ..metal_marlin import pack_fp4_weights
+    from ..metal_marlin import pack_fp4_weights_cpu as pack_fp4_weights
 except ImportError:
-    from metal_marlin import pack_fp4_weights
+    from metal_marlin import pack_fp4_weights_cpu as pack_fp4_weights
 
 __all__ = ["ONNXExecutor", "load_onnx_model", "pack_fp4_weights"]
+
+
+def _get_device() -> torch.device:
+    """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 @dataclass
@@ -87,7 +97,7 @@ class ONNXGraph:
     nodes: list[ONNXNode]
     inputs: list[str]
     outputs: list[str]
-    initializers: dict[str, mx.array]  # Weight tensors
+    initializers: dict[str, torch.Tensor]  # Weight tensors
 
 
 class ONNXExecutor:
@@ -113,6 +123,7 @@ class ONNXExecutor:
         for pattern in self._mha_patterns:
             self._fused_node_indices.update(pattern.node_indices)
         self._op_dispatch = self._build_dispatch_table()
+        self._device = _get_device()
 
     @classmethod
     def from_file(cls, path: str | Path, quantize: bool = True) -> ONNXExecutor:
@@ -133,7 +144,7 @@ class ONNXExecutor:
 
         return cls(graph)
 
-    def __call__(self, **inputs: mx.array) -> dict[str, mx.array]:
+    def __call__(self, **inputs: torch.Tensor) -> dict[str, torch.Tensor]:
         """Execute the graph on given inputs.
 
         Args:
@@ -143,7 +154,7 @@ class ONNXExecutor:
             Dict of output tensor names to values
         """
         # Tensor value map: starts with inputs + initializers
-        values: dict[str, mx.array] = {**self.graph.initializers, **inputs}
+        values: dict[str, torch.Tensor] = {**self.graph.initializers, **inputs}
 
         # Build index mapping: entry_idx -> pattern for fast lookup
         entry_to_pattern: dict[int, MHAPattern] = {p.entry_idx: p for p in self._mha_patterns}
@@ -171,7 +182,7 @@ class ONNXExecutor:
         # Return requested outputs
         return {name: values[name] for name in self.graph.outputs}
 
-    def _dispatch_node(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _dispatch_node(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Dispatch a single node to the appropriate kernel."""
         handler = self._op_dispatch.get(node.op_type)
         if handler is None:
@@ -217,7 +228,7 @@ class ONNXExecutor:
             "MultiHeadAttention": self._handle_fused_attention_dispatch,
         }
 
-    def _handle_fused_attention(self, pattern: MHAPattern, values: dict[str, mx.array]) -> mx.array:
+    def _handle_fused_attention(self, pattern: MHAPattern, values: dict[str, torch.Tensor]) -> torch.Tensor:
         """Execute a detected MHA pattern as a single fused MarlinAttention call.
 
         Instead of running ~14 individual ops (Q/K/V projections, reshapes,
@@ -250,12 +261,15 @@ class ONNXExecutor:
         _load_proj_weights(attn.v_proj, pattern.v_weight, self.graph, self.quantized_weights)
         _load_proj_weights(attn.o_proj, pattern.o_weight, self.graph, self.quantized_weights)
 
+        # Move attention module to device
+        attn = attn.to(self._device)
+
         # Run fused attention (no KV cache, no mask for now)
         return attn(hidden_states)
 
     def _handle_fused_attention_dispatch(
-        self, node: ONNXNode, inputs: list[mx.array]
-    ) -> list[mx.array]:
+        self, node: ONNXNode, inputs: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
         """Handle explicit MultiHeadAttention op (custom domain or fused graph).
 
         This handles the case where an ONNX graph has already been fused into
@@ -283,13 +297,16 @@ class ONNXExecutor:
                 weight_name = node.inputs[weight_idx]
                 _load_proj_weights(proj, weight_name, self.graph, self.quantized_weights)
 
+        # Move attention module to device
+        attn = attn.to(self._device)
+
         return [attn(hidden_states)]
 
-    def _handle_attention_op(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
-        """Handle native ONNX Attention op via flash_attention_metal kernel.
+    def _handle_attention_op(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Handle native ONNX Attention op via scaled_dot_product_attention.
 
         The ONNX Attention op computes scaled dot-product attention directly.
-        We dispatch to flash_attention_metal for O(N) memory and fused softmax.
+        We dispatch to PyTorch's optimized SDPA for O(N) memory and fused softmax.
 
         ONNX Attention op inputs:
             - query: [batch, num_heads, seq_q, head_dim]
@@ -297,10 +314,8 @@ class ONNXExecutor:
             - value: [batch, num_heads, seq_k, head_dim]
             - Optional: mask, scale
 
-        We reshape to match flash_attention_metal's expected layout.
+        We reshape to match SDPA's expected layout.
         """
-        from ..metal_marlin.metal_marlin import flash_attention_metal
-
         query = inputs[0]
         key = inputs[1]
         value = inputs[2]
@@ -316,27 +331,23 @@ class ONNXExecutor:
         num_q_heads = query.shape[1] if query.ndim == 4 else 1
         num_kv_heads = key.shape[1] if key.ndim == 4 else 1
 
-        if causal and num_q_heads > num_kv_heads:
-            # GQA + causal -> use specialized kernel variant
-            output = flash_attention_metal(
-                query,
-                key,
-                value,
-                scale=scale,
-                causal=True,
-                num_kv_heads=num_kv_heads,
-            )
-        elif causal:
-            output = flash_attention_metal(query, key, value, scale=scale, causal=True)
-        else:
-            output = flash_attention_metal(query, key, value, scale=scale, causal=False)
+        # Expand K/V for GQA if needed
+        if num_q_heads > num_kv_heads:
+            repeat_factor = num_q_heads // num_kv_heads
+            key = key.repeat_interleave(repeat_factor, dim=1)
+            value = value.repeat_interleave(repeat_factor, dim=1)
+
+        # Use PyTorch's optimized scaled_dot_product_attention
+        output = F.scaled_dot_product_attention(
+            query, key, value,
+            scale=scale,
+            is_causal=causal,
+        )
 
         return [output]
 
-    def _handle_matmul(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_matmul(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle MatMul - use quantized kernel if weights are quantized."""
-        import mlx.core as mx
-
         a, b = inputs
 
         # Check if B is a quantized weight
@@ -351,12 +362,10 @@ class ONNXExecutor:
             return [quantized_linear(a, packed, scales, group_size=32)]
 
         # Fall back to standard matmul
-        return [mx.matmul(a, b)]
+        return [torch.matmul(a, b)]
 
-    def _handle_gemm(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_gemm(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Gemm (MatMul + bias)."""
-        import mlx.core as mx
-
         a, b = inputs[:2]
         bias = inputs[2] if len(inputs) > 2 else None
 
@@ -366,23 +375,21 @@ class ONNXExecutor:
         trans_b = node.attrs.get("transB", 0)
 
         if trans_a:
-            a = mx.transpose(a)
+            a = a.T
         if trans_b:
-            b = mx.transpose(b)
+            b = b.T
 
-        result = alpha * mx.matmul(a, b)
+        result = alpha * torch.matmul(a, b)
         if bias is not None:
             result = result + beta * bias
         return [result]
 
-    def _handle_layernorm(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_layernorm(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle LayerNormalization.
 
         ONNX LayerNormalization has inputs: X, Scale, [Bias]
         Bias is optional (can be 2 or 3 inputs).
         """
-        import mlx.core as mx
-
         x = inputs[0]
         scale = inputs[1]
         bias = inputs[2] if len(inputs) > 2 else None
@@ -400,112 +407,95 @@ class ONNXExecutor:
         ndim = x.ndim
         axes = [(a % ndim) for a in axes]
 
-        mean = mx.mean(x, axis=axes, keepdims=True)
-        var = mx.var(x, axis=axes, keepdims=True)
-        normalized = (x - mean) / mx.sqrt(var + epsilon)
+        # Compute mean and variance
+        mean = x.mean(dim=axes, keepdim=True)
+        var = x.var(dim=axes, keepdim=True, unbiased=False)
+        normalized = (x - mean) / torch.sqrt(var + epsilon)
         result = normalized * scale
         if bias is not None:
             result = result + bias
         return [result]
 
-    def _handle_softmax(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_softmax(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Softmax."""
-        import mlx.core as mx
-
         x = inputs[0]
         axis = node.attrs.get("axis", -1)
-        return [mx.softmax(x, axis=axis)]
+        return [F.softmax(x, dim=axis)]
 
-    def _handle_mul(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_mul(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise multiply."""
         return [inputs[0] * inputs[1]]
 
-    def _handle_add(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_add(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise add."""
         return [inputs[0] + inputs[1]]
 
-    def _handle_reshape(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_reshape(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Reshape."""
-        import mlx.core as mx
-
         x, shape = inputs
-        return [mx.reshape(x, shape.tolist())]
+        return [x.reshape(shape.tolist())]
 
-    def _handle_transpose(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_transpose(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Transpose."""
-        import mlx.core as mx
-
         x = inputs[0]
         perm = node.attrs.get("perm")
-        return [mx.transpose(x, axes=perm)]
+        if perm:
+            return [x.permute(perm)]
+        # Default: reverse all dimensions
+        return [x.T]
 
     # -------------------------------------------------------------------------
     # Activation functions
     # -------------------------------------------------------------------------
 
-    def _handle_relu(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_relu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReLU activation."""
-        import mlx.core as mx
+        return [F.relu(inputs[0])]
 
-        return [mx.maximum(inputs[0], 0)]
-
-    def _handle_sigmoid(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_sigmoid(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Sigmoid activation."""
-        import mlx.core as mx
+        return [torch.sigmoid(inputs[0])]
 
-        return [mx.sigmoid(inputs[0])]
-
-    def _handle_tanh(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_tanh(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Tanh activation."""
-        import mlx.core as mx
+        return [torch.tanh(inputs[0])]
 
-        return [mx.tanh(inputs[0])]
-
-    def _handle_gelu(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_gelu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle GELU activation (approximate or exact based on attrs)."""
-        import mlx.nn as nn
-
         x = inputs[0]
         approximate = node.attrs.get("approximate", "none")
         if approximate == "tanh":
-            # Fast approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-            return [nn.gelu_approx(x)]
+            # Fast approximation
+            return [F.gelu(x, approximate="tanh")]
         else:
-            # Exact: x * 0.5 * (1 + erf(x / sqrt(2)))
-            return [nn.gelu(x)]
+            # Exact
+            return [F.gelu(x, approximate="none")]
 
-    def _handle_silu(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_silu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle SiLU/Swish activation: x * sigmoid(x)."""
-        import mlx.core as mx
-
-        x = inputs[0]
-        return [x * mx.sigmoid(x)]
+        return [F.silu(inputs[0])]
 
     # -------------------------------------------------------------------------
     # Additional element-wise operations
     # -------------------------------------------------------------------------
 
-    def _handle_sub(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_sub(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise subtract."""
         return [inputs[0] - inputs[1]]
 
-    def _handle_div(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_div(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise divide."""
         return [inputs[0] / inputs[1]]
 
-    def _handle_pow(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_pow(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise power."""
-        import mlx.core as mx
+        return [torch.pow(inputs[0], inputs[1])]
 
-        return [mx.power(inputs[0], inputs[1])]
-
-    def _handle_sqrt(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_sqrt(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise sqrt."""
-        import mlx.core as mx
+        return [torch.sqrt(inputs[0])]
 
-        return [mx.sqrt(inputs[0])]
-
-    def _handle_neg(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_neg(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle negation."""
         return [-inputs[0]]
 
@@ -513,43 +503,38 @@ class ONNXExecutor:
     # Shape operations
     # -------------------------------------------------------------------------
 
-    def _handle_squeeze(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_squeeze(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Squeeze - remove dimensions of size 1."""
-        import mlx.core as mx
-
         x = inputs[0]
         axes = node.attrs.get("axes")
         if axes is None and len(inputs) > 1:
             # ONNX opset >= 13: axes as second input
             axes = inputs[1].tolist()
         if axes is not None:
-            return [mx.squeeze(x, axis=axes)]
-        return [mx.squeeze(x)]
+            # Squeeze specific dimensions
+            for ax in sorted(axes, reverse=True):  # Reverse to handle index shifts
+                x = x.squeeze(ax)
+            return [x]
+        return [x.squeeze()]
 
-    def _handle_unsqueeze(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_unsqueeze(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Unsqueeze - add dimensions of size 1."""
-        import mlx.core as mx
-
         x = inputs[0]
         axes = node.attrs.get("axes")
         if axes is None and len(inputs) > 1:
             axes = inputs[1].tolist()
         if axes:
             for ax in sorted(axes):
-                x = mx.expand_dims(x, axis=ax)
+                x = x.unsqueeze(ax)
         return [x]
 
-    def _handle_concat(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_concat(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Concat - concatenate tensors along axis."""
-        import mlx.core as mx
-
         axis = node.attrs.get("axis", 0)
-        return [mx.concatenate(inputs, axis=axis)]
+        return [torch.cat(inputs, dim=axis)]
 
-    def _handle_split(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_split(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Split - split tensor into chunks."""
-        import mlx.core as mx
-
         x = inputs[0]
         axis = node.attrs.get("axis", 0)
         num_outputs = node.attrs.get("num_outputs")
@@ -560,36 +545,26 @@ class ONNXExecutor:
 
         if split is not None:
             # Split into specified sizes
-            results = []
-            start = 0
-            for size in split:
-                slices = [slice(None)] * x.ndim
-                slices[axis] = slice(start, start + size)
-                results.append(x[tuple(slices)])
-                start += size
-            return results
+            return list(torch.split(x, split, dim=axis))
         elif num_outputs:
             # Split into equal parts
-            return list(mx.split(x, num_outputs, axis=axis))
+            chunk_size = x.shape[axis] // num_outputs
+            return list(torch.split(x, chunk_size, dim=axis))
         else:
             return [x]
 
-    def _handle_gather(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_gather(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Gather - select slices from tensor."""
-        import mlx.core as mx
-
         data, indices = inputs
         axis = node.attrs.get("axis", 0)
-        return [mx.take(data, indices, axis=axis)]
+        return [torch.index_select(data, axis, indices.flatten()).reshape(*indices.shape, *data.shape[axis+1:])]
 
     # -------------------------------------------------------------------------
     # Reduction operations
     # -------------------------------------------------------------------------
 
-    def _handle_reduce_mean(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_reduce_mean(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReduceMean."""
-        import mlx.core as mx
-
         x = inputs[0]
         axes = node.attrs.get("axes")
         keepdims = bool(node.attrs.get("keepdims", 1))
@@ -597,12 +572,10 @@ class ONNXExecutor:
         if axes is None and len(inputs) > 1:
             axes = inputs[1].tolist()
 
-        return [mx.mean(x, axis=axes, keepdims=keepdims)]
+        return [x.mean(dim=axes, keepdim=keepdims)]
 
-    def _handle_reduce_sum(self, node: ONNXNode, inputs: list[mx.array]) -> list[mx.array]:
+    def _handle_reduce_sum(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReduceSum."""
-        import mlx.core as mx
-
         x = inputs[0]
         axes = node.attrs.get("axes")
         keepdims = bool(node.attrs.get("keepdims", 1))
@@ -610,7 +583,7 @@ class ONNXExecutor:
         if axes is None and len(inputs) > 1:
             axes = inputs[1].tolist()
 
-        return [mx.sum(x, axis=axes, keepdims=keepdims)]
+        return [x.sum(dim=axes, keepdim=keepdims)]
 
 
 # ---------------------------------------------------------------------------
@@ -979,10 +952,8 @@ def _load_proj_weights(
         proj_layer.weight_packed = packed
         proj_layer.scales = scales
     elif weight_name in graph.initializers:
-        from ..metal_marlin import pack_fp4_weights
-
         weight = graph.initializers[weight_name]
-        packed, scales = pack_fp4_weights(weight, group_size=proj_layer.group_size)
+        packed, scales, _ = pack_fp4_weights(weight, group_size=proj_layer.group_size)
         proj_layer.weight_packed = packed
         proj_layer.scales = scales
 
@@ -1006,11 +977,11 @@ def load_onnx_model(path: str | Path) -> ONNXGraph:
     except ImportError as e:
         raise ImportError("pip install onnx to use ONNX model loading") from e
 
-    import mlx.core as mx
-
     model = onnx.load(str(path))
     onnx.checker.check_model(model)
     graph = model.graph
+
+    device = _get_device()
 
     # Parse nodes
     nodes = [
@@ -1028,7 +999,7 @@ def load_onnx_model(path: str | Path) -> ONNXGraph:
     initializers = {}
     for init in graph.initializer:
         np_array = onnx.numpy_helper.to_array(init)
-        initializers[init.name] = mx.array(np_array)
+        initializers[init.name] = torch.from_numpy(np_array).to(device)
 
     # Parse inputs/outputs
     input_names = [i.name for i in graph.input if i.name not in initializers]
@@ -1070,12 +1041,6 @@ def _quantize_linear_weights(graph: ONNXGraph) -> dict[str, tuple]:
     Returns:
         Dict of {weight_name: (packed_weights, scales)}
     """
-    # Handle both package import and direct module load
-    try:
-        from ..metal_marlin import pack_fp4_weights
-    except ImportError:
-        from metal_marlin import pack_fp4_weights
-
     quantized = {}
 
     for node in graph.nodes:
@@ -1090,9 +1055,8 @@ def _quantize_linear_weights(graph: ONNXGraph) -> dict[str, tuple]:
                 # For Gemm with transB=1, weight is already [N, K].
                 trans_b = node.attrs.get("transB", 0) if node.op_type == "Gemm" else 0
                 if not trans_b:
-                    import mlx.core as mx
-                    weight = mx.transpose(weight)
-                packed, scales = pack_fp4_weights(weight, group_size=32)
+                    weight = weight.T
+                packed, scales, _ = pack_fp4_weights(weight, group_size=32)
                 quantized[weight_name] = (packed, scales)
 
     return quantized

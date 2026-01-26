@@ -11,8 +11,8 @@
 +-------------------------------+----------------------------------+
                                 |
 +-------------------------------v----------------------------------+
-|                    MLX Custom Kernel Bridge                       |
-|            mx.fast.metal_kernel("marlin_gemm_fp4")               |
+|                  Metal Kernel Dispatcher                          |
+|     metal_dispatch.py (PyObjC + PyTorch MPS buffer interop)      |
 +-------------------------------+----------------------------------+
                                 |
 +-------------------------------v----------------------------------+
@@ -287,3 +287,110 @@ Signed S4 (offset binary): stored = actual + 8
 | `atomicAdd(float)` | Not natively available | Use lock-based reduction |
 | Grid-stride loop | Stripe partitioning | 1D dispatch |
 | Stream/kernel overlap | CommandBuffer pipelining | Different paradigm |
+
+## Metal Dispatch Architecture
+
+The `metal_dispatch.py` module provides direct Metal kernel dispatch using PyObjC, with zero-copy interop between PyTorch MPS tensors and Metal buffers.
+
+### Components
+
+```
++-------------------+     +--------------------+     +------------------+
+|  MetalKernel      |     |  PyTorch MPS       |     |  Metal Buffers   |
+|  Library          |     |  Tensors           |     |  (shared memory) |
++-------------------+     +--------------------+     +------------------+
+        |                         |                          |
+        v                         v                          v
++------------------------------------------------------------------+
+|                    dispatch_kernel()                              |
+|  1. Get compute pipeline state from cache                        |
+|  2. Create command buffer + encoder                               |
+|  3. Bind buffers at indices                                       |
+|  4. Dispatch with grid/threadgroup dimensions                     |
+|  5. Optionally wait for completion                                |
++------------------------------------------------------------------+
+```
+
+### PyTorch MPS Integration
+
+MPS tensors share their underlying Metal buffers, enabling zero-copy kernel dispatch:
+
+```python
+import torch
+from metal_marlin.metal_dispatch import (
+    MetalKernelLibrary,
+    dispatch_gemm_fp4,
+    mps_tensor_to_metal_buffer,
+)
+
+# Load and compile shaders
+lib = MetalKernelLibrary.from_source_dir()
+
+# Create MPS tensors (on Apple Silicon GPU)
+A = torch.randn(1024, 4096, dtype=torch.float16, device="mps")
+B_packed = torch.randint(0, 256, (512, 4096), dtype=torch.int32, device="mps")
+scales = torch.randn(128, 4096, dtype=torch.float16, device="mps")
+
+# Dispatch quantized GEMM
+C = dispatch_gemm_fp4(lib, A, B_packed, scales, M=1024, N=4096, K=4096)
+```
+
+### Buffer Binding
+
+The dispatcher converts PyTorch MPS tensors to Metal buffers without copying:
+
+```python
+def mps_tensor_to_metal_buffer(tensor: torch.Tensor, device) -> MTLBuffer:
+    """Create Metal buffer sharing MPS tensor memory."""
+    storage = tensor.untyped_storage()
+    ptr = storage.data_ptr()
+    size = storage.nbytes()
+
+    # No-copy buffer creation from existing memory
+    return device.newBufferWithBytesNoCopy_length_options_deallocator_(
+        ptr, size, Metal.MTLResourceStorageModeShared, None
+    )
+```
+
+### Kernel Dispatch Pattern
+
+```python
+from metal_marlin.metal_dispatch import dispatch_kernel, MetalKernelLibrary
+
+lib = MetalKernelLibrary.from_source_dir()
+
+# Compute grid dimensions
+TILE_M, TILE_N = 64, 64
+THREADS_PER_TG = 128
+grid_m = (M + TILE_M - 1) // TILE_M
+grid_n = (N + TILE_N - 1) // TILE_N
+
+# Dispatch with explicit buffer binding
+dispatch_kernel(
+    lib,
+    function_name="marlin_gemm_fp4",
+    grid=(grid_m, grid_n, 1),
+    threadgroup=(THREADS_PER_TG, 1, 1),
+    buffers=[A_buf, B_buf, scales_buf, output_buf, params_buf],
+    wait=True,
+)
+```
+
+### Requirements
+
+- macOS with Apple Silicon (M1/M2/M3/M4)
+- PyTorch >= 2.0 with MPS backend
+- PyObjC Metal bindings:
+  ```bash
+  pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders
+  ```
+
+### Advantages Over MLX
+
+| Aspect | PyTorch MPS + metal_dispatch | MLX |
+|--------|------------------------------|-----|
+| Ecosystem | Full PyTorch ecosystem, HuggingFace | Limited, Apple-only |
+| Custom kernels | Direct Metal control | `mx.fast.metal_kernel` wrapper |
+| Buffer sharing | Zero-copy with MPS tensors | Own memory allocator |
+| Debugging | Metal debugger, GPU frame capture | Limited tooling |
+| Deployment | Standard PyTorch model loading | Separate export required |

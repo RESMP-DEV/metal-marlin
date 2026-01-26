@@ -212,7 +212,7 @@ def _build_nfa_from_parsed(nfa: NFA, parsed: list, start: int) -> NFAFragment:
             # Dot - any character except newline
             end = nfa.new_state()
             for c in range(32, 127):
-                if c != ord('\n'):
+                if c != ord("\n"):
                     nfa.add_transition(current_start, end, chr(c))
             fragment = NFAFragment(current_start, end)
             current_start = end
@@ -652,6 +652,7 @@ class RegexProcessor(BaseLogitProcessor):
         Returns:
             Set of valid token IDs
         """
+
         # Check cache
         def compute_valid() -> set[int]:
             valid: set[int] = set()

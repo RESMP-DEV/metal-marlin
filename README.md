@@ -2,153 +2,155 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-## What This Does
+Supports FP4/FP8/INT4/INT3/INT2 weights, quantized KV cache, and 2:4 structured sparsity. Loads from HuggingFace, Safetensors, GGUF, or ONNX.
 
-Metal Marlin lets you run quantized LLMs on Apple Silicon using optimized Metal shaders. You don't need to understand GPU programming—just install, quantize (or convert), and run.
+## Requirements
 
-**Weight formats:** FP4, FP8, INT4, INT3, INT2 with per-group scales  
-**KV cache:** FP4/INT4 quantized (3.8× memory savings for long context)  
-**Sparsity:** 2:4 structured sparse with fused metadata decode  
-**Input formats:** HuggingFace, Safetensors, GGUF, ONNX  
-**Framework:** NumPy-only core, MLX optional for inference
+- macOS 13.0+ (Ventura or later)
+- Apple Silicon (M1/M2/M3/M4)
+- Python 3.11 or 3.12
 
 ## Installation
 
 ```bash
-# Using pip
-pip install numpy safetensors huggingface_hub
-
-# Using uv (recommended)
-uv pip install numpy safetensors huggingface_hub
-
-# For Metal inference (recommended)
-pip install mlx  # or: uv pip install mlx
-
-# For PyTorch interop (optional)
-pip install torch  # or: uv pip install torch
+uv pip install numpy safetensors huggingface_hub torch \
+    pyobjc-core pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders
 ```
 
 ## Quick Start
 
-### Convert an Existing Model
+### Quantize a Model
 
 ```bash
-# From HuggingFace (with calibration)
-python -m metal_marlin.hf_loader convert meta-llama/Llama-3.2-1B ./llama-fp4 \
-    --calibration bartowski-v3
-
-# From GGUF
-python -m metal_marlin.gguf_to_marlin model.gguf ./model-marlin/
-
-# From safetensors (using CLI)
-python -m metal_marlin convert --input ./model/ --output ./model-fp4/
-```
-
-### Quantize Your Own Model
-
-```bash
-# Recommended: MR-GPTQ with built-in calibration
 python -m metal_marlin quantize \
-    --input Qwen/Qwen3-32B \
-    --output Qwen3-32B-FP4 \
+    --input Qwen/Qwen3-4B \
+    --output Qwen3-4B-FP4 \
     --method mr-gptq \
     --calibration bartowski-v3
-
-# Fast: Round-to-nearest (no calibration needed)
-python -m metal_marlin quantize \
-    --input Qwen/Qwen3-32B \
-    --output Qwen3-32B-FP4 \
-    --method rtn
 ```
 
-For MoE models, add `--mixed-precision moe` to keep routers in full precision.
-
-### Python API
+### Run Inference
 
 ```python
-from metal_marlin.quantize import pack_fp4_weights
-from metal_marlin.kernels import marlin_gemm_fp4
-import numpy as np
+from metal_marlin.inference import MetalInferenceEngine
+from metal_marlin.safetensors_loader import load_model
 
-# Quantize weights
-weight = np.random.randn(4096, 4096).astype(np.float16)
-packed, scales = pack_fp4_weights(weight, group_size=128)
-
-# Run GEMM
-output = marlin_gemm_fp4(activations, packed, scales, group_size=128)
+model = load_model("./Qwen3-4B-FP4")
+engine = MetalInferenceEngine(model)
+output = engine.generate("The capital of France is", max_tokens=50)
+print(output)
 ```
 
-### Mixed-Precision for MoE
+## Architecture
 
-```python
-from metal_marlin.mixed_precision import MixedPrecisionConfig
+Metal Marlin uses **PyTorch MPS + native Metal shaders** (via PyObjC), not MLX.
 
-config = MixedPrecisionConfig.default_moe()
-# Automatically keeps routers in BF16, experts in FP4
+**Why not MLX?** MLX's built-in quantization uses round-to-nearest with uniform affine levels, no calibration. At 3-bit, this produces 38% worse perplexity than GGUF's calibration-aware methods. Metal Marlin uses GPTQ/AWQ-class quantization with Hessian-informed rounding and per-layer mixed precision. See [Why Not MLX?](docs/why_not_mlx.md) for benchmarks.
+
+**How Metal dispatch works:**
+
 ```
+PyTorch MPS tensors → zero-copy MTLBuffer sharing → custom Metal shaders → results back to PyTorch
+```
+
+The `metal_dispatch.py` module compiles `.metal` shader sources at runtime via PyObjC, creates compute pipelines, and dispatches kernels directly. MPS tensors share their underlying Metal buffers with no copy, enabling tight integration between PyTorch's tensor operations and custom quantized GEMM kernels.
+
+**Quantization formats supported:**
+
+| Format | Bits | Use Case |
+|--------|------|----------|
+| FP4 (E2M1) | 4 | Primary format for weights |
+| FP8 (E4M3, E5M2) | 8 | Higher quality, larger models |
+| INT4 (U4, S4) | 4 | GPTQ-compatible weights |
+| INT3, INT2 | 3, 2 | Extreme compression for cold MoE experts |
+| NF4, NF3, NF2 | 4, 3, 2 | QLoRA normal-float formats |
+| 2:4 Sparse | variable | Structured sparsity (1.6× compression) |
+
+KV cache quantization (FP4/INT4) is also supported, fused into attention kernels.
 
 ## How It Works
 
-Metal Marlin ports [Marlin](https://arxiv.org/abs/2312.07723) (NVIDIA's fast quantized GEMM kernels) to Apple Silicon. The key technique is **bitwise dequantization**—weights are unpacked using ALU operations instead of lookup tables, which eliminates memory bandwidth bottlenecks.
-
-The Metal shaders handle all the GPU complexity. From Python, you just call functions.
-
-## Key Features
-
-**Quantized KV Cache:** For long-context inference, the KV cache dominates memory. FP4/INT4 KV cache reduces memory from 4GB to ~1GB at 4K context (32 layers), with dequantization fused into flash attention kernels.
-
-**2:4 Structured Sparsity:** For pruned models, 2:4 sparse format stores only 2 values per 4-element block with metadata. Achieves 1.6× compression with metadata decode interleaved with dequantization to hide latency.
-
-**Chip-Specific Kernels:** Separate shader variants tuned for M1/M2/M3/M4 memory hierarchies and occupancy targets.
+Metal Marlin ports [Marlin](https://arxiv.org/abs/2408.11743) (fast quantized GEMM kernels for CUDA) to Apple Silicon. Weights are unpacked using ALU operations instead of lookup tables, eliminating memory bandwidth bottlenecks.
 
 ## Documentation
 
-**Getting Started**
-- [Why Metal Marlin?](docs/why_not_mlx.md) — Comparison with MLX's native quantization
-- [Calibration Guide](docs/calibration.md) — Dataset selection and custom calibration
+- **[Getting Started](docs/getting_started.md)** — Full walkthrough: install, quantize, run, verify
+- [Calibration Guide](docs/calibration.md) — Custom calibration datasets for higher quality
+- [Mixed Precision](docs/mixed_precision.md) — Per-layer precision for MoE models
+- [Architecture](docs/architecture.md) — How Metal Marlin works internally
+- [Why Not MLX?](docs/why_not_mlx.md) — Design decision: PyTorch MPS + native Metal
 - [Troubleshooting](docs/troubleshooting.md) — Common issues and fixes
-
-**Deep Dives**
-- [MR-GPTQ Algorithm](docs/mr_gptq.md) — How Hessian-aware quantization works
-- [Architecture](docs/architecture.md) — System design overview
-- [CUDA to Metal Porting](docs/cuda_metal_mapping.md) — How we translated the kernels
-
-**Specialized Topics**
-- [KV Cache](docs/kv_cache.md) — Quantized KV cache for long-context inference
-- [Sparse Format](docs/sparse_format.md) — 2:4 structured sparsity implementation
-- [MoE Architecture](docs/moe_architecture.md) — Mixture-of-Experts support
-- [Mixed Precision](docs/mixed_precision.md) — Per-layer precision configuration
-- [vLLM Comparison](docs/vllm_comparison.md) — Feature parity notes
-
-## Project Structure
-
-```
-metal_marlin/
-├── src/                    # Metal shaders (30+ kernels)
-│   ├── marlin_gemm.metal   # Core quantized GEMM
-│   ├── flash_attention.metal
-│   ├── moe_*.metal         # MoE dispatch kernels
-│   └── sparse_gemm.metal   # 2:4 structured sparsity
-├── metal_marlin/           # Python package
-│   ├── cli.py              # Command-line interface
-│   ├── quantize.py         # Weight packing and quantization
-│   ├── kernels.py          # Python bindings to Metal
-│   ├── mixed_precision.py  # Per-layer precision config
-│   ├── mr_gptq.py          # MR-GPTQ quantization
-│   ├── hf_loader.py        # HuggingFace model loading
-│   └── gguf_to_marlin.py   # GGUF format conversion
-├── converters/             # Format conversion tools
-├── docs/                   # Documentation (20+ guides)
-├── tests/                  # Test suite (~1400 tests)
-├── benchmarks/             # Performance benchmarks
-└── examples/               # Usage examples
-```
 
 ## References
 
-- [Marlin](https://arxiv.org/abs/2312.07723) — Original CUDA kernels this is based on
-- [GPTQ](https://arxiv.org/abs/2210.17323) — Hessian-aware quantization
-- [QuaRot](https://arxiv.org/abs/2404.00456) — Hadamard rotation for better quality
+- [Marlin](https://arxiv.org/abs/2408.11743) — Mixed-precision auto-regressive kernels (Frantar et al., 2024)
+- [GPTQ](https://arxiv.org/abs/2210.17323) — Hessian-aware post-training quantization (Frantar et al., 2022)
+- [AWQ](https://arxiv.org/abs/2306.00978) — Activation-aware weight quantization (Lin et al., 2023)
+- [SmoothQuant](https://arxiv.org/abs/2211.10438) — Activation smoothing for W8A8 (Xiao et al., 2022)
+- [QuaRot](https://arxiv.org/abs/2404.00456) — Hadamard rotation for outlier-free quantization
+- [FlashAttention](https://arxiv.org/abs/2205.14135) — IO-aware exact attention (Dao et al., 2022)
+- [vLLM](https://arxiv.org/abs/2309.06180) — PagedAttention for KV cache (Kwon et al., 2023)
+- [2:4 Sparsity](https://arxiv.org/abs/2104.08378) — Sparse Tensor Core design (Mishra et al., 2021)
+
+## Citations
+
+```bibtex
+@article{frantar2024marlin,
+  title={MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models},
+  author={Frantar, Elias and Castro, Roberto L. and Chen, Jiale and Hoefler, Torsten and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2408.11743},
+  year={2024}
+}
+
+@article{frantar2022gptq,
+  title={GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers},
+  author={Frantar, Elias and Ashkboos, Saleh and Hoefler, Torsten and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2210.17323},
+  year={2022}
+}
+
+@inproceedings{lin2024awq,
+  title={AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration},
+  author={Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Chen, Wei-Ming and Wang, Wei-Chen and Xiao, Guangxuan and Dang, Xingyu and Gan, Chuang and Han, Song},
+  booktitle={MLSys},
+  year={2024}
+}
+
+@inproceedings{xiao2023smoothquant,
+  title={SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models},
+  author={Xiao, Guangxuan and Lin, Ji and Seznec, Mickael and Wu, Hao and Demouth, Julien and Han, Song},
+  booktitle={ICML},
+  year={2023}
+}
+
+@article{ashkboos2024quarot,
+  title={QuaRot: Outlier-Free 4-Bit Inference in Rotated LLMs},
+  author={Ashkboos, Saleh and Mohtashami, Amirkeivan and Croci, Maximilian L. and Li, Bo and Jaggi, Martin and Alistarh, Dan and Hoefler, Torsten and Hensman, James},
+  journal={arXiv preprint arXiv:2404.00456},
+  year={2024}
+}
+
+@inproceedings{dao2022flashattention,
+  title={FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness},
+  author={Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
+  booktitle={NeurIPS},
+  year={2022}
+}
+
+@inproceedings{kwon2023vllm,
+  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
+  author={Kwon, Woosuk and Li, Zhuohan and Zhuang, Siyuan and Sheng, Ying and Zheng, Lianmin and Yu, Cody Hao and Gonzalez, Joseph E. and Zhang, Hao and Stoica, Ion},
+  booktitle={SOSP},
+  year={2023}
+}
+
+@article{mishra2021sparse,
+  title={Accelerating Sparse Deep Neural Networks},
+  author={Mishra, Asit and Latorre, Jorge Albericio and Pool, Jeff and Stosic, Darko and Stosic, Dusan and Venkatesh, Ganesh and Yu, Chong and Micikevicius, Paulius},
+  journal={arXiv preprint arXiv:2104.08378},
+  year={2021}
+}
+```
 
 ## Status
 

@@ -57,11 +57,17 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
-import mlx.core as mx
 import numpy as np
 
+from .._compat import HAS_TORCH, torch
+
 if TYPE_CHECKING:
+    import torch as torch_typing  # noqa: F401 - used for TensorType alias
+
     from metal_marlin.expert_cache import ExpertCache
+
+# Type alias for tensors - use torch.Tensor when available
+TensorType = "torch_typing.Tensor" if TYPE_CHECKING else Any
 
 
 class PrefetchStrategy(Enum):
@@ -220,9 +226,26 @@ class PrefetchStats:
         }
 
 
+def _tensor_to_list(tensor: TensorType | list[int]) -> list[int]:
+    """Convert a tensor to a list of ints.
+
+    Args:
+        tensor: PyTorch tensor or list of ints
+
+    Returns:
+        List of expert IDs
+    """
+    if isinstance(tensor, list):
+        return tensor
+    if HAS_TORCH and torch is not None and isinstance(tensor, torch.Tensor):
+        return tensor.reshape(-1).tolist()
+    # Fallback for numpy arrays or other array-likes
+    return list(np.asarray(tensor).reshape(-1))
+
+
 def predict_next_experts(
-    current_routing: mx.array | list[int],
-    attention_pattern: mx.array | None = None,
+    current_routing: TensorType | list[int],
+    attention_pattern: TensorType | None = None,
     history: RoutingHistory | None = None,
     num_experts: int = 64,
     strategy: PrefetchStrategy = PrefetchStrategy.TOP_K_RECENCY,
@@ -238,6 +261,7 @@ def predict_next_experts(
     Args:
         current_routing: Expert IDs selected for current token.
             Shape: [top_k] or [batch, top_k] for batched inference.
+            Can be a PyTorch tensor or list.
         attention_pattern: Optional attention weights from current token.
             Shape: [num_heads, seq_len] or [batch, num_heads, seq_len].
             Used for attention-guided prediction.
@@ -252,7 +276,7 @@ def predict_next_experts(
         List of predicted expert IDs, sorted by confidence.
 
     Example:
-        >>> current_routing = mx.array([3, 7])  # Current token uses experts 3, 7
+        >>> current_routing = torch.tensor([3, 7])  # Current token uses experts 3, 7
         >>> predicted = predict_next_experts(
         ...     current_routing,
         ...     strategy=PrefetchStrategy.REPEAT,
@@ -260,11 +284,8 @@ def predict_next_experts(
         ... )
         >>> print(predicted)  # [3, 7] - assumes same experts
     """
-    # Convert to list if MLX array
-    if isinstance(current_routing, mx.array):
-        routing = current_routing.reshape(-1).tolist()
-    else:
-        routing = list(current_routing)
+    # Convert to list
+    routing = _tensor_to_list(current_routing)
 
     if strategy == PrefetchStrategy.REPEAT:
         # Simplest: assume next token uses same experts
@@ -381,7 +402,7 @@ class AsyncExpertLoader:
         self,
         layer_idx: int,
         expert_id: int,
-        load_fn: Callable[[], mx.array],
+        load_fn: Callable[[], TensorType],
     ) -> None:
         """Submit expert for background loading.
 
@@ -390,7 +411,7 @@ class AsyncExpertLoader:
         Args:
             layer_idx: Layer index of the expert.
             expert_id: Expert ID within the layer.
-            load_fn: Function that loads and returns the expert weights.
+            load_fn: Function that loads and returns the expert weights as a tensor.
         """
         if self._executor is None:
             self.start()
@@ -414,19 +435,19 @@ class AsyncExpertLoader:
         self,
         layer_idx: int,
         expert_id: int,
-        load_fn: Callable[[], mx.array],
-    ) -> mx.array | None:
+        load_fn: Callable[[], TensorType],
+    ) -> TensorType | None:
         """Load expert weights (runs in background thread).
 
-        Note: mx.eval() is intentionally NOT called here because MLX operations
-        are not thread-safe. The caller should synchronize MLX evaluations
-        on the main thread after wait_all() returns.
+        Note: For PyTorch MPS, tensor operations should be performed on the
+        main thread for thread safety. The load_fn should return a CPU tensor
+        or handle synchronization appropriately.
         """
         try:
             weights = load_fn()
-            # NOTE: Do NOT call mx.eval() here - MLX is not thread-safe.
-            # The weights will be lazily evaluated when accessed on the main thread.
-            # This is safe because MLX graphs are immutable once created.
+            # NOTE: For MPS tensors, the caller should synchronize appropriately.
+            # This is safe because we're just loading/dequantizing weights,
+            # and the actual use happens on the main thread after wait_all().
 
             # If cache available, the cache would be updated via the dequant_fn
             # callback pattern in get_expert_tile
@@ -466,7 +487,7 @@ class AsyncExpertLoader:
 def async_load_experts(
     layer_idx: int,
     expert_ids: list[int],
-    load_fn: Callable[[int, int], mx.array],
+    load_fn: Callable[[int, int], TensorType],
     loader: AsyncExpertLoader | None = None,
     num_threads: int = 2,
 ) -> AsyncExpertLoader:
@@ -479,6 +500,7 @@ def async_load_experts(
         layer_idx: Layer containing the experts.
         expert_ids: List of expert IDs to prefetch.
         load_fn: Function (layer_idx, expert_id) -> weights to load experts.
+            Should return a PyTorch tensor.
         loader: Optional existing AsyncExpertLoader to reuse.
         num_threads: Number of threads if creating new loader.
 
@@ -538,7 +560,7 @@ class ExpertPrefetcher:
         self,
         num_experts: int,
         num_layers: int,
-        load_fn: Callable[[int, int], mx.array] | None = None,
+        load_fn: Callable[[int, int], TensorType] | None = None,
         cache: ExpertCache | None = None,
         config: PrefetchConfig | None = None,
     ):
@@ -548,6 +570,7 @@ class ExpertPrefetcher:
             num_experts: Number of experts per MoE layer.
             num_layers: Number of MoE layers in the model.
             load_fn: Function (layer_idx, expert_id) -> weights to load experts.
+                     Should return a PyTorch tensor.
                      If None, prefetching is prediction-only (no loading).
             cache: Optional ExpertCache for caching prefetched experts.
             config: Prefetch configuration. Uses defaults if not provided.
@@ -578,7 +601,7 @@ class ExpertPrefetcher:
         # Track last predictions for accuracy measurement
         self._last_predictions: dict[int, list[int]] = {}
 
-    def record_routing(self, layer_idx: int, expert_ids: mx.array | list[int]) -> None:
+    def record_routing(self, layer_idx: int, expert_ids: TensorType | list[int]) -> None:
         """Record a routing decision.
 
         Call this after the router selects experts for the current token.
@@ -587,12 +610,10 @@ class ExpertPrefetcher:
         Args:
             layer_idx: Layer index.
             expert_ids: Selected expert IDs, shape [top_k] or [batch, top_k].
+                Can be a PyTorch tensor or list.
         """
         # Convert to list
-        if isinstance(expert_ids, mx.array):
-            ids = expert_ids.reshape(-1).tolist()
-        else:
-            ids = list(expert_ids)
+        ids = _tensor_to_list(expert_ids)
 
         # Check previous prediction accuracy
         if self.config.enable_stats and layer_idx in self._last_predictions:
@@ -605,13 +626,14 @@ class ExpertPrefetcher:
     def predict_next_experts(
         self,
         layer_idx: int,
-        attention_pattern: mx.array | None = None,
+        attention_pattern: TensorType | None = None,
     ) -> list[int]:
         """Predict experts for the next token.
 
         Args:
             layer_idx: Layer index.
             attention_pattern: Optional attention weights for attention-guided prediction.
+                Can be a PyTorch tensor.
 
         Returns:
             List of predicted expert IDs.
@@ -669,8 +691,8 @@ class ExpertPrefetcher:
     def step(
         self,
         layer_idx: int,
-        expert_ids: mx.array | list[int],
-        attention_pattern: mx.array | None = None,
+        expert_ids: TensorType | list[int],
+        attention_pattern: TensorType | None = None,
     ) -> list[int]:
         """Combined record + predict + prefetch step.
 
@@ -682,6 +704,7 @@ class ExpertPrefetcher:
         Args:
             layer_idx: Layer index.
             expert_ids: Current token's selected expert IDs.
+                Can be a PyTorch tensor or list.
             attention_pattern: Optional attention weights.
 
         Returns:
@@ -782,6 +805,8 @@ class ExpertLRUCache:
     this caches complete expert weight matrices. Useful for smaller
     models or when tile-level caching adds overhead.
 
+    Uses PyTorch tensors for storage.
+
     Args:
         max_size_mb: Maximum cache size in megabytes.
         num_layers: Number of MoE layers.
@@ -790,7 +815,7 @@ class ExpertLRUCache:
     def __init__(self, max_size_mb: int = 512, num_layers: int = 28):
         self.max_size_bytes = max_size_mb * 1024 * 1024
         self.num_layers = num_layers
-        self._cache: OrderedDict[tuple[int, int], mx.array] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, int], TensorType] = OrderedDict()
         self._size_bytes = 0
         self._lock = threading.Lock()
 
@@ -798,7 +823,14 @@ class ExpertLRUCache:
         self.hits = 0
         self.misses = 0
 
-    def get(self, layer_idx: int, expert_id: int) -> mx.array | None:
+    def _get_tensor_size(self, tensor: TensorType) -> int:
+        """Get size of a tensor in bytes."""
+        if HAS_TORCH and torch is not None and isinstance(tensor, torch.Tensor):
+            return tensor.element_size() * tensor.numel()
+        # Fallback for numpy arrays
+        return int(np.asarray(tensor).nbytes)
+
+    def get(self, layer_idx: int, expert_id: int) -> TensorType | None:
         """Get expert weights from cache."""
         key = (layer_idx, expert_id)
         with self._lock:
@@ -809,16 +841,16 @@ class ExpertLRUCache:
             self.misses += 1
             return None
 
-    def put(self, layer_idx: int, expert_id: int, weights: mx.array) -> None:
+    def put(self, layer_idx: int, expert_id: int, weights: TensorType) -> None:
         """Add expert weights to cache."""
         key = (layer_idx, expert_id)
-        size = weights.nbytes
+        size = self._get_tensor_size(weights)
 
         with self._lock:
             # Evict if needed
             while self._size_bytes + size > self.max_size_bytes and self._cache:
                 _, evicted = self._cache.popitem(last=False)
-                self._size_bytes -= evicted.nbytes
+                self._size_bytes -= self._get_tensor_size(evicted)
 
             # Don't cache if too large
             if size > self.max_size_bytes:
@@ -832,15 +864,18 @@ class ExpertLRUCache:
         self,
         layer_idx: int,
         expert_id: int,
-        load_fn: Callable[[], mx.array],
-    ) -> mx.array:
+        load_fn: Callable[[], TensorType],
+    ) -> TensorType:
         """Get from cache or load and cache."""
         cached = self.get(layer_idx, expert_id)
         if cached is not None:
             return cached
 
         weights = load_fn()
-        mx.eval(weights)
+        # Synchronize if MPS tensor
+        if HAS_TORCH and torch is not None and isinstance(weights, torch.Tensor):
+            if weights.device.type == "mps":
+                torch.mps.synchronize()
         self.put(layer_idx, expert_id, weights)
         return weights
 
@@ -859,7 +894,7 @@ class ExpertLRUCache:
                 key = (layer_idx, expert_id)
                 if key in self._cache:
                     weights = self._cache.pop(key)
-                    self._size_bytes -= weights.nbytes
+                    self._size_bytes -= self._get_tensor_size(weights)
                     return 1
                 return 0
 
@@ -867,7 +902,7 @@ class ExpertLRUCache:
             keys_to_remove = [k for k in self._cache if k[0] == layer_idx]
             for key in keys_to_remove:
                 weights = self._cache.pop(key)
-                self._size_bytes -= weights.nbytes
+                self._size_bytes -= self._get_tensor_size(weights)
             return len(keys_to_remove)
 
     def clear(self) -> None:

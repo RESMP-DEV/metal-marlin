@@ -57,7 +57,7 @@ def prune_to_2_4(
 
     for block in range(num_blocks):
         block_start = block * 4
-        block_vals = W[block_start:block_start + 4, :]  # [4, N]
+        block_vals = W[block_start : block_start + 4, :]  # [4, N]
         abs_vals = np.abs(block_vals)
 
         for col in range(N):
@@ -107,12 +107,12 @@ def prune_to_nm(
 
     for block in range(num_blocks):
         block_start = block * m
-        block_vals = W[block_start:block_start + m, :]
+        block_vals = W[block_start : block_start + m, :]
         abs_vals = np.abs(block_vals)
 
         for col in range(N_cols):
             indices = np.argsort(abs_vals[:, col])
-            keep = sorted(indices[m - n:])  # top-n by magnitude
+            keep = sorted(indices[m - n :])  # top-n by magnitude
 
             for i, k in enumerate(keep):
                 sparse_row = block * n + i
@@ -193,7 +193,12 @@ class TestMetadataEncoding:
     """Validate 2:4 metadata encode/decode roundtrip."""
 
     ALL_VALID_PATTERNS: list[tuple[int, int]] = [
-        (0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3),
+        (0, 1),
+        (0, 2),
+        (0, 3),
+        (1, 2),
+        (1, 3),
+        (2, 3),
     ]
 
     def test_all_six_patterns_encode_decode(self) -> None:
@@ -208,10 +213,10 @@ class TestMetadataEncoding:
     def test_nibble_values_match_sparse_metal(self) -> None:
         """Encoded nibble values match those documented in sparse.metal."""
         expected = {
-            (0, 1): 4,   # 0b0100
-            (0, 2): 8,   # 0b1000
+            (0, 1): 4,  # 0b0100
+            (0, 2): 8,  # 0b1000
             (0, 3): 12,  # 0b1100
-            (1, 2): 9,   # 0b1001
+            (1, 2): 9,  # 0b1001
             (1, 3): 13,  # 0b1101
             (2, 3): 14,  # 0b1110
         }
@@ -272,7 +277,7 @@ class TestPruneTo24:
                 W_reconstructed[block * 4 + pos1, col] = W_sparse[block * 2 + 1, col]
 
         for block in range(num_blocks):
-            block_slice = W_reconstructed[block * 4:(block + 1) * 4, :]
+            block_slice = W_reconstructed[block * 4 : (block + 1) * 4, :]
             nnz_per_col = np.count_nonzero(block_slice, axis=0)
             assert np.all(nnz_per_col == 2), (
                 f"Block {block}: expected 2 nonzeros per column, "
@@ -288,7 +293,7 @@ class TestPruneTo24:
 
         num_blocks = K // 4
         for block in range(num_blocks):
-            block_vals = W[block * 4:(block + 1) * 4, :]
+            block_vals = W[block * 4 : (block + 1) * 4, :]
             for col in range(N):
                 abs_vals = np.abs(block_vals[:, col])
                 top2_indices = set(np.argsort(abs_vals)[2:])
@@ -313,9 +318,7 @@ class TestPruneTo24:
                 nibble = int(meta[block, col])
                 pos0 = nibble & 0x3
                 pos1 = (nibble >> 2) & 0x3
-                assert pos0 < pos1, (
-                    f"Block {block}, col {col}: pos0={pos0} >= pos1={pos1}"
-                )
+                assert pos0 < pos1, f"Block {block}, col {col}: pos0={pos0} >= pos1={pos1}"
 
     def test_k_not_divisible_by_4_raises(self) -> None:
         W = np.random.randn(30, 16).astype(np.float16)
@@ -510,11 +513,10 @@ class TestNMSparsityPatterns:
         # Check mask has exactly n True per m-element group
         num_blocks = K // m
         for block in range(num_blocks):
-            block_mask = mask[block * m:(block + 1) * m, :]
+            block_mask = mask[block * m : (block + 1) * m, :]
             nnz_per_col = block_mask.sum(axis=0)
             assert np.all(nnz_per_col == n), (
-                f"Block {block}: expected {n} nonzeros, got unique counts "
-                f"{np.unique(nnz_per_col)}"
+                f"Block {block}: expected {n} nonzeros, got unique counts {np.unique(nnz_per_col)}"
             )
 
     @pytest.mark.parametrize("n,m", [(1, 4), (2, 4), (4, 8)])
@@ -555,16 +557,15 @@ class TestNMSparsityPatterns:
 
         num_blocks = K // m
         for block in range(num_blocks):
-            block_vals = W[block * m:(block + 1) * m, :]
-            block_mask = mask[block * m:(block + 1) * m, :]
+            block_vals = W[block * m : (block + 1) * m, :]
+            block_mask = mask[block * m : (block + 1) * m, :]
 
             for col in range(N_cols):
                 abs_vals = np.abs(block_vals[:, col])
-                top_n_idx = set(np.argsort(abs_vals)[m - n:])
+                top_n_idx = set(np.argsort(abs_vals)[m - n :])
                 kept_idx = set(np.where(block_mask[:, col])[0])
                 assert kept_idx == top_n_idx, (
-                    f"Block {block}, col {col}: kept {kept_idx}, "
-                    f"expected top-{n}: {top_n_idx}"
+                    f"Block {block}, col {col}: kept {kept_idx}, expected top-{n}: {top_n_idx}"
                 )
 
     def test_2_4_specific_reconstruction(self) -> None:
@@ -586,11 +587,14 @@ class TestNMSparsityPatterns:
 
         # Method 2: prune_to_nm with mask
         _, mask = prune_to_nm(W, n=2, m=4)
-        W_masked = (W.astype(np.float32) * mask)
+        W_masked = W.astype(np.float32) * mask
 
         # Both methods should produce the same pruned matrix
         np.testing.assert_allclose(
-            W_reconstructed, W_masked, rtol=1e-3, atol=1e-4,
+            W_reconstructed,
+            W_masked,
+            rtol=1e-3,
+            atol=1e-4,
             err_msg="prune_to_2_4 and prune_to_nm(2,4) produce different results",
         )
 
@@ -676,7 +680,7 @@ class TestSparseVsDenseThroughput:
 
         # Report timing (informational, not a hard assertion since numpy
         # doesn't benefit from sparse structure the way a GPU kernel does)
-        print(f"\n  Dense GEMM ({K}x{N}): {dense_time*1000:.2f} ms")
+        print(f"\n  Dense GEMM ({K}x{N}): {dense_time * 1000:.2f} ms")
         print(f"  Memory savings: {byte_ratio:.2f}x (sparse {sparse_bytes} vs dense {dense_bytes})")
 
 
@@ -734,16 +738,19 @@ class TestSparseEdgeCases:
     def test_negative_values_handled(self) -> None:
         """Negative values are pruned by magnitude, not by value."""
         _K, N = 8, 4
-        W = np.array([
-            [-1.0, -1.0, -1.0, -1.0],
-            [0.1, 0.1, 0.1, 0.1],
-            [-5.0, -5.0, -5.0, -5.0],  # Largest magnitude
-            [3.0, 3.0, 3.0, 3.0],      # Second largest
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-        ], dtype=np.float16)
+        W = np.array(
+            [
+                [-1.0, -1.0, -1.0, -1.0],
+                [0.1, 0.1, 0.1, 0.1],
+                [-5.0, -5.0, -5.0, -5.0],  # Largest magnitude
+                [3.0, 3.0, 3.0, 3.0],  # Second largest
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            dtype=np.float16,
+        )
 
         W_sparse, meta = prune_to_2_4(W)
 

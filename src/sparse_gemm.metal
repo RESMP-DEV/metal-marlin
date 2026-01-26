@@ -264,6 +264,7 @@ inline void sparse_compute_from_tiles(
 inline void sparse_store_results(
     thread simdgroup_matrix<half, 8, 8> acc[SP_SG_M_TILES][SP_SG_N_TILES],
     device half* C,
+    threadgroup half (&staging)[8][8],
     uint M, uint N,
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
@@ -279,7 +280,6 @@ inline void sparse_store_results(
                                 C + out_row * N + out_col,
                                 N);
             } else if (out_row < M && out_col < N) {
-                threadgroup half staging[8][8];
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -336,6 +336,7 @@ kernel void marlin_gemm_sparse_fp4(
     // Double-buffered threadgroup memory
     threadgroup half A_tiles[SP_NUM_BUFFERS][SP_TILE_M][SP_TILE_K];
     threadgroup half B_tiles[SP_NUM_BUFFERS][SP_TILE_K][SP_TILE_N];
+    threadgroup half store_staging[8][8];  // Staging buffer for edge-case stores
 
     const uint tg_row = tgid.y * SP_TILE_M;
     const uint tg_col = tgid.x * SP_TILE_N;
@@ -380,7 +381,7 @@ kernel void marlin_gemm_sparse_fp4(
     }
 
     // --- Store results ---
-    sparse_store_results(acc, C, M, N, tg_row, tg_col,
+    sparse_store_results(acc, C, store_staging, M, N, tg_row, tg_col,
                          sg_row_offset, sg_col_offset, simd_lane);
 }
 

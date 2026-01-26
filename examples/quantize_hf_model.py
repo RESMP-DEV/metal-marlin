@@ -15,7 +15,7 @@ Usage:
     python quantize_hf_model.py --group-size 64 --output ./phi2_fp4.marlin.safetensors
 
 Requirements:
-    pip install mlx safetensors transformers huggingface_hub numpy
+    pip install torch safetensors transformers huggingface_hub numpy
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ import sys
 import time
 from pathlib import Path
 
-import mlx.core as mx
 import numpy as np
+import torch
 
 
 def download_safetensors(model_id: str, cache_dir: Path | None = None) -> list[Path]:
@@ -86,7 +86,7 @@ def quantize_safetensors_to_marlin(
         with safe_open(str(sf_path), framework="numpy") as f:
             for name in f.keys():
                 tensor_np = f.get_tensor(name)
-                tensor = mx.array(tensor_np)
+                tensor = torch.from_numpy(tensor_np)
 
                 # Decide whether to quantize this tensor
                 is_weight = "weight" in name and tensor.ndim == 2
@@ -105,12 +105,11 @@ def quantize_safetensors_to_marlin(
                     # pack_fp4_weights expects [out_features, in_features] and
                     # transposes internally, so pass tensor.T
                     packed, scales, _meta = pack_fp4_weights(
-                        tensor, group_size=group_size
+                        tensor, group_size=group_size, output_backend="numpy"
                     )
-                    mx.eval(packed, scales)
 
-                    output_tensors[f"{name}.packed"] = np.array(packed)
-                    output_tensors[f"{name}.scales"] = np.array(scales)
+                    output_tensors[f"{name}.packed"] = packed
+                    output_tensors[f"{name}.scales"] = scales
                     stats["quantized"] += 1
                 else:
                     output_tensors[name] = tensor_np
@@ -126,21 +125,21 @@ def quantize_safetensors_to_marlin(
 
 def load_marlin_safetensors(
     path: Path,
-) -> dict[str, mx.array | tuple[mx.array, mx.array]]:
+) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
     """Load a .marlin.safetensors file, reconstructing packed weight pairs.
 
     Returns a dict where:
       - Quantized layers: key -> (packed_weights, scales)
-      - Other tensors: key -> mx.array
+      - Other tensors: key -> torch.Tensor
     """
     from safetensors import safe_open
 
-    raw: dict[str, mx.array] = {}
+    raw: dict[str, torch.Tensor] = {}
     with safe_open(str(path), framework="numpy") as f:
         for name in f.keys():
-            raw[name] = mx.array(f.get_tensor(name))
+            raw[name] = torch.from_numpy(f.get_tensor(name))
 
-    result: dict[str, mx.array | tuple[mx.array, mx.array]] = {}
+    result: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
     seen_packed: set[str] = set()
 
     for name in sorted(raw.keys()):
@@ -211,7 +210,8 @@ def verify_accuracy(
         packed, scales = marlin_tensors[name]
 
         # Reconstruct meta for unpack
-        K_padded, N_packed = np.array(packed).shape
+        packed_np = packed.numpy()
+        K_padded, N_packed = packed_np.shape
         N_padded = N_packed * 8
         meta = {
             "orig_K": original.shape[0],
@@ -221,9 +221,8 @@ def verify_accuracy(
             "group_size": group_size,
         }
 
-        dequantized = unpack_fp4_weights(packed, scales, meta)
-        mx.eval(dequantized)
-        deq_np = np.array(dequantized.astype(mx.float32))
+        dequantized = unpack_fp4_weights(packed, scales, meta, output_backend="numpy")
+        deq_np = dequantized.astype(np.float32)
 
         # Compute error metrics
         abs_err = np.abs(original - deq_np)

@@ -152,9 +152,7 @@ class TestOutlierDispersal:
         # Hadamard spreads the outlier across 64 elements
         assert W_rot.max() < outlier_value / 2
         # Energy is conserved (due to orthonormality)
-        np.testing.assert_allclose(
-            np.sum(W ** 2), np.sum(W_rot ** 2), rtol=1e-4
-        )
+        np.testing.assert_allclose(np.sum(W**2), np.sum(W_rot**2), rtol=1e-4)
 
     @pytest.mark.smoke
     def test_max_mean_ratio_reduced(self) -> None:
@@ -181,8 +179,8 @@ class TestOutlierDispersal:
 
         W_rot, _ = apply_hadamard_rotation(W, block_size=64)
 
-        energy_before = np.sum(W ** 2)
-        energy_after = np.sum(W_rot ** 2)
+        energy_before = np.sum(W**2)
+        energy_after = np.sum(W_rot**2)
         np.testing.assert_allclose(energy_before, energy_after, rtol=1e-4)
 
     def test_channel_wise_variance_more_uniform(self) -> None:
@@ -243,7 +241,7 @@ class TestLLMScaleDimensions:
     @pytest.mark.parametrize(
         "K,N",
         [
-            (4096, 4096),   # Typical hidden dim
+            (4096, 4096),  # Typical hidden dim
             (4096, 11008),  # Llama MLP up-projection
             (11008, 4096),  # Llama MLP down-projection
             (4096, 32000),  # Vocabulary projection

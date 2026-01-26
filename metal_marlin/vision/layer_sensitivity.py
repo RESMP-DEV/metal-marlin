@@ -143,7 +143,9 @@ class VisionLayerInfo:
             return VisionLayerType.CROSS_ATTENTION
 
         # Attention layers
-        if any(p in name_lower for p in ["q_proj", "k_proj", "v_proj", "qkv", "query", "key", "value"]):
+        if any(
+            p in name_lower for p in ["q_proj", "k_proj", "v_proj", "qkv", "query", "key", "value"]
+        ):
             return VisionLayerType.ATTENTION_QKV
         if "o_proj" in name_lower or "out_proj" in name_lower:
             return VisionLayerType.ATTENTION_OUT
@@ -322,7 +324,7 @@ def analyze_vision_layer_sensitivity(
         # Compute statistics
         w_mean = np.mean(w)
         w_std = np.std(w)
-        w_min, w_max = np.min(w), np.max(w)
+        _w_min, _w_max = np.min(w), np.max(w)  # Reserved for future use
 
         # Outlier ratio (values > 3 std)
         outlier_mask = np.abs(w - w_mean) > 3 * w_std
@@ -417,8 +419,7 @@ def analyze_vision_layer_sensitivity(
 
     # Calculate average bits
     total_bits = sum(
-        l.layer_info.num_params * _precision_to_bits(l.recommended_precision)
-        for l in layers
+        l.layer_info.num_params * _precision_to_bits(l.recommended_precision) for l in layers
     )
     avg_bits = total_bits / total_params if total_params > 0 else 16
 
@@ -465,7 +466,7 @@ def _simulate_fp4_error(weight: NDArray[np.floating], group_size: int = 128) -> 
 
         error = np.mean((group - dequantized) ** 2)
         total_error += error * len(group)
-        total_weight += np.mean(group ** 2) * len(group)
+        total_weight += np.mean(group**2) * len(group)
 
     return np.sqrt(total_error / (total_weight + 1e-8))
 
@@ -483,7 +484,7 @@ def _simulate_fp8_error(weight: NDArray[np.floating]) -> float:
     dequantized = quantized * scale
 
     mse = np.mean((w - dequantized) ** 2)
-    variance = np.mean(w ** 2)
+    variance = np.mean(w**2)
 
     return np.sqrt(mse / (variance + 1e-8))
 
@@ -509,7 +510,7 @@ def _simulate_int4_error(weight: NDArray[np.floating], group_size: int = 128) ->
 
         error = np.mean((group - dequantized) ** 2)
         total_error += error * len(group)
-        total_weight += np.mean(group ** 2) * len(group)
+        total_weight += np.mean(group**2) * len(group)
 
     return np.sqrt(total_error / (total_weight + 1e-8))
 

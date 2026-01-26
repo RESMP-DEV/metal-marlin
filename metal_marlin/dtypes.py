@@ -4,17 +4,17 @@ This module provides a unified dtype configuration system that allows consistent
 dtype handling across all components: quantization, kernels, inference, attention,
 and KV cache.
 
-MLX is optional - numpy dtype operations work without it. MLX dtypes return None
-when MLX is not installed.
+PyTorch is optional - numpy dtype operations work without it. PyTorch dtypes return
+None when PyTorch is not installed.
 
 Usage:
     from metal_marlin.dtypes import (
         DTypeConfig,
-        get_mlx_dtype,
+        get_torch_dtype,
         get_numpy_dtype,
-        numpy_dtype_for_mlx,
-        mlx_dtype_to_str,
-        HAS_MLX,
+        numpy_dtype_for_torch,
+        torch_dtype_to_str,
+        HAS_TORCH,
     )
 
     # Create config with custom dtypes
@@ -24,20 +24,20 @@ Usage:
         kv_cache="fp8",
     )
 
-    # Get MLX dtype for activations (None if MLX unavailable)
-    act_dtype = config.mlx_activations  # mx.bfloat16 or None
+    # Get PyTorch dtype for activations (None if PyTorch unavailable)
+    act_dtype = config.torch_activations  # torch.bfloat16 or None
 
     # Get numpy dtype for scales (always works)
     scale_dtype = get_numpy_dtype(config.scales)  # np.float16 or np.float32
 
-    # Convert MLX dtype to numpy dtype for storage
-    # (useful when you have an MLX array and need numpy storage format)
-    if HAS_MLX:
-        np_dtype = numpy_dtype_for_mlx(mx.bfloat16)  # np.float16 (numpy storage)
+    # Convert PyTorch dtype to numpy dtype for storage
+    # (useful when you have a PyTorch tensor and need numpy storage format)
+    if HAS_TORCH:
+        np_dtype = numpy_dtype_for_torch(torch.bfloat16)  # np.float16 (numpy storage)
 
-    # Convert MLX dtype to string name
-    if HAS_MLX:
-        dtype_str = mlx_dtype_to_str(mx.bfloat16)  # "bf16"
+    # Convert PyTorch dtype to string name
+    if HAS_TORCH:
+        dtype_str = torch_dtype_to_str(torch.bfloat16)  # "bf16"
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-from ._compat import HAS_MLX, mx
+from ._compat import HAS_TORCH, torch
 
 # Type aliases for dtype string literals
 WeightDType = Literal["fp16", "bf16"]
@@ -84,39 +84,39 @@ class DTypeConfig:
     kv_cache: KVCacheDType = "bf16"
 
     @property
-    def mlx_weights(self) -> Any | None:
-        """Get MLX dtype for weights. Returns None if MLX unavailable."""
-        if not HAS_MLX:
+    def torch_weights(self) -> Any | None:
+        """Get PyTorch dtype for weights. Returns None if PyTorch unavailable."""
+        if not HAS_TORCH:
             return None
-        return _STR_TO_MLX[self.weights]
+        return _STR_TO_TORCH[self.weights]
 
     @property
-    def mlx_activations(self) -> Any | None:
-        """Get MLX dtype for activations. Returns None if MLX unavailable."""
-        if not HAS_MLX:
+    def torch_activations(self) -> Any | None:
+        """Get PyTorch dtype for activations. Returns None if PyTorch unavailable."""
+        if not HAS_TORCH:
             return None
-        return _STR_TO_MLX[self.activations]
+        return _STR_TO_TORCH[self.activations]
 
     @property
-    def mlx_accumulation(self) -> Any | None:
-        """Get MLX dtype for accumulation. Returns None if MLX unavailable."""
-        if not HAS_MLX:
+    def torch_accumulation(self) -> Any | None:
+        """Get PyTorch dtype for accumulation. Returns None if PyTorch unavailable."""
+        if not HAS_TORCH:
             return None
-        return _STR_TO_MLX[self.accumulation]
+        return _STR_TO_TORCH[self.accumulation]
 
     @property
-    def mlx_scales(self) -> Any | None:
-        """Get MLX dtype for scales. Returns None if MLX unavailable."""
-        if not HAS_MLX:
+    def torch_scales(self) -> Any | None:
+        """Get PyTorch dtype for scales. Returns None if PyTorch unavailable."""
+        if not HAS_TORCH:
             return None
-        return _STR_TO_MLX[self.scales]
+        return _STR_TO_TORCH[self.scales]
 
     @property
-    def mlx_kv_cache(self) -> Any | None:
-        """Get MLX dtype for KV cache. Returns None if MLX unavailable."""
-        if not HAS_MLX:
+    def torch_kv_cache(self) -> Any | None:
+        """Get PyTorch dtype for KV cache. Returns None if PyTorch unavailable."""
+        if not HAS_TORCH:
             return None
-        return _STR_TO_MLX[self.kv_cache]
+        return _STR_TO_TORCH[self.kv_cache]
 
     @property
     def numpy_weights(self) -> np.dtype:
@@ -159,15 +159,15 @@ class DTypeConfig:
         return _STR_TO_METAL[self.scales]
 
 
-# Mapping from string dtype names to MLX dtypes
-# Populated only when MLX is available
-_STR_TO_MLX: dict[str, Any] = {}
-if HAS_MLX and mx is not None:
-    _STR_TO_MLX = {
-        "fp16": mx.float16,
-        "bf16": mx.bfloat16,
-        "fp32": mx.float32,
-        "fp8": mx.float16,  # MLX doesn't have native fp8, use fp16 for storage
+# Mapping from string dtype names to PyTorch dtypes
+# Populated only when PyTorch is available
+_STR_TO_TORCH: dict[str, Any] = {}
+if HAS_TORCH and torch is not None:
+    _STR_TO_TORCH = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+        "fp8": torch.float16,  # PyTorch fp8 requires specific hardware, use fp16 fallback
     }
 
 # Mapping from string dtype names to numpy dtypes
@@ -186,49 +186,46 @@ _STR_TO_METAL: dict[str, str] = {
     "fp8": "half",  # Metal doesn't have native fp8
 }
 
-# Mapping from MLX dtype to numpy dtype
+# Mapping from PyTorch dtype to numpy dtype
 # Note: numpy doesn't have native bf16, so we use fp16 for storage
-# The actual bf16<->fp32 conversion happens in MLX
-# Populated only when MLX is available
-_MLX_TO_NUMPY: dict[Any, np.dtype] = {}
-_MLX_TO_STR: dict[Any, str] = {}
+# The actual bf16<->fp32 conversion happens in PyTorch
+# Populated only when PyTorch is available
+_TORCH_TO_NUMPY: dict[Any, np.dtype] = {}
+_TORCH_TO_STR: dict[Any, str] = {}
 
-if HAS_MLX and mx is not None:
-    _MLX_TO_NUMPY = {
-        mx.float16: np.float16,
-        mx.bfloat16: np.float16,  # numpy storage; MLX handles actual bf16
-        mx.float32: np.float32,
+if HAS_TORCH and torch is not None:
+    _TORCH_TO_NUMPY = {
+        torch.float16: np.float16,
+        torch.bfloat16: np.float16,  # numpy storage; PyTorch handles actual bf16
+        torch.float32: np.float32,
     }
-    _MLX_TO_STR = {
-        mx.float16: "fp16",
-        mx.bfloat16: "bf16",
-        mx.float32: "fp32",
+    _TORCH_TO_STR = {
+        torch.float16: "fp16",
+        torch.bfloat16: "bf16",
+        torch.float32: "fp32",
     }
 
 
-def get_mlx_dtype(dtype_str: str) -> Any:
-    """Convert dtype string to MLX dtype.
+def get_torch_dtype(dtype_str: str) -> Any:
+    """Convert dtype string to PyTorch dtype.
 
     Args:
         dtype_str: One of "fp16", "bf16", "fp32", "fp8"
 
     Returns:
-        Corresponding MLX dtype
+        Corresponding PyTorch dtype
 
     Raises:
-        ImportError: If MLX is not available
+        ImportError: If PyTorch is not available
         ValueError: If dtype_str is not recognized
     """
-    if not HAS_MLX:
-        raise ImportError(
-            "MLX is not available. Install with: pip install mlx"
-        )
-    if dtype_str not in _STR_TO_MLX:
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is not available. Install with: pip install torch")
+    if dtype_str not in _STR_TO_TORCH:
         raise ValueError(
-            f"Unknown dtype: {dtype_str!r}. "
-            f"Valid options: {list(_STR_TO_MLX.keys())}"
+            f"Unknown dtype: {dtype_str!r}. Valid options: {list(_STR_TO_TORCH.keys())}"
         )
-    return _STR_TO_MLX[dtype_str]
+    return _STR_TO_TORCH[dtype_str]
 
 
 def get_numpy_dtype(dtype_str: str) -> np.dtype:
@@ -245,8 +242,7 @@ def get_numpy_dtype(dtype_str: str) -> np.dtype:
     """
     if dtype_str not in _STR_TO_NUMPY:
         raise ValueError(
-            f"Unknown dtype: {dtype_str!r}. "
-            f"Valid options: {list(_STR_TO_NUMPY.keys())}"
+            f"Unknown dtype: {dtype_str!r}. Valid options: {list(_STR_TO_NUMPY.keys())}"
         )
     return _STR_TO_NUMPY[dtype_str]
 
@@ -265,70 +261,63 @@ def get_metal_type(dtype_str: str) -> str:
     """
     if dtype_str not in _STR_TO_METAL:
         raise ValueError(
-            f"Unknown dtype: {dtype_str!r}. "
-            f"Valid options: {list(_STR_TO_METAL.keys())}"
+            f"Unknown dtype: {dtype_str!r}. Valid options: {list(_STR_TO_METAL.keys())}"
         )
     return _STR_TO_METAL[dtype_str]
 
 
-def numpy_dtype_for_mlx(mlx_dtype: Any) -> np.dtype:
-    """Convert MLX dtype to corresponding numpy dtype for storage.
+def numpy_dtype_for_torch(torch_dtype: Any) -> np.dtype:
+    """Convert PyTorch dtype to corresponding numpy dtype for storage.
 
-    This is useful when you have an MLX array and need to store it in numpy
+    This is useful when you have a PyTorch tensor and need to store it in numpy
     format. Note that bf16 maps to fp16 for numpy storage since numpy doesn't
-    have native bfloat16 support; the actual bf16 semantics are preserved in MLX.
+    have native bfloat16 support; the actual bf16 semantics are preserved in PyTorch.
 
     Args:
-        mlx_dtype: MLX dtype (mx.float16, mx.bfloat16, mx.float32)
+        torch_dtype: PyTorch dtype (torch.float16, torch.bfloat16, torch.float32)
 
     Returns:
         Corresponding numpy dtype for storage
 
     Raises:
-        ImportError: If MLX is not available
-        ValueError: If mlx_dtype is not recognized
+        ImportError: If PyTorch is not available
+        ValueError: If torch_dtype is not recognized
 
     Examples:
-        >>> if HAS_MLX:
-        ...     numpy_dtype_for_mlx(mx.float16)  # numpy.float16
-        ...     numpy_dtype_for_mlx(mx.bfloat16)  # numpy.float16 (numpy storage)
-        ...     numpy_dtype_for_mlx(mx.float32)  # numpy.float32
+        >>> if HAS_TORCH:
+        ...     numpy_dtype_for_torch(torch.float16)  # numpy.float16
+        ...     numpy_dtype_for_torch(torch.bfloat16)  # numpy.float16 (numpy storage)
+        ...     numpy_dtype_for_torch(torch.float32)  # numpy.float32
     """
-    if not HAS_MLX:
-        raise ImportError(
-            "MLX is not available. Install with: pip install mlx"
-        )
-    if mlx_dtype not in _MLX_TO_NUMPY:
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is not available. Install with: pip install torch")
+    if torch_dtype not in _TORCH_TO_NUMPY:
         raise ValueError(
-            f"Unknown MLX dtype: {mlx_dtype!r}. "
-            f"Valid options: {list(_MLX_TO_NUMPY.keys())}"
+            f"Unknown PyTorch dtype: {torch_dtype!r}. Valid options: {list(_TORCH_TO_NUMPY.keys())}"
         )
-    return _MLX_TO_NUMPY[mlx_dtype]
+    return _TORCH_TO_NUMPY[torch_dtype]
 
 
-def mlx_dtype_to_str(mlx_dtype: Any) -> str:
-    """Convert MLX dtype to string name.
+def torch_dtype_to_str(torch_dtype: Any) -> str:
+    """Convert PyTorch dtype to string name.
 
     Args:
-        mlx_dtype: MLX dtype (mx.float16, mx.bfloat16, mx.float32)
+        torch_dtype: PyTorch dtype (torch.float16, torch.bfloat16, torch.float32)
 
     Returns:
         String name ("fp16", "bf16", "fp32")
 
     Raises:
-        ImportError: If MLX is not available
-        ValueError: If mlx_dtype is not recognized
+        ImportError: If PyTorch is not available
+        ValueError: If torch_dtype is not recognized
     """
-    if not HAS_MLX:
-        raise ImportError(
-            "MLX is not available. Install with: pip install mlx"
-        )
-    if mlx_dtype not in _MLX_TO_STR:
+    if not HAS_TORCH:
+        raise ImportError("PyTorch is not available. Install with: pip install torch")
+    if torch_dtype not in _TORCH_TO_STR:
         raise ValueError(
-            f"Unknown MLX dtype: {mlx_dtype!r}. "
-            f"Valid options: {list(_MLX_TO_STR.keys())}"
+            f"Unknown PyTorch dtype: {torch_dtype!r}. Valid options: {list(_TORCH_TO_STR.keys())}"
         )
-    return _MLX_TO_STR[mlx_dtype]
+    return _TORCH_TO_STR[torch_dtype]
 
 
 # Global default configuration

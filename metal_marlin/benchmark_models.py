@@ -30,6 +30,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
+from ._compat import HAS_TORCH, torch
+
 # Published FP16 perplexity values from model cards / papers
 # Source: HuggingFace model cards, original papers, community benchmarks
 PUBLISHED_FP16_PPL: dict[str, float] = {
@@ -516,7 +520,9 @@ def benchmark_model(
 
     # Load evaluation subset for perplexity (calibration uses full dataset)
     eval_texts = load_eval_data(calibration, samples)
-    ppl_gguf, throughput_gguf, memory_gguf = _benchmark_gguf(gguf_path, eval_texts, max_length, verbose)
+    ppl_gguf, throughput_gguf, memory_gguf = _benchmark_gguf(
+        gguf_path, eval_texts, max_length, verbose
+    )
 
     if verbose:
         print(f"  GGUF PPL: {ppl_gguf:.4f}")
@@ -648,6 +654,37 @@ def benchmark_model(
     return result
 
 
+def _get_torch_device() -> str:
+    """Get the best available torch device."""
+    if not HAS_TORCH or torch is None:
+        return "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _synchronize_device(device: str) -> None:
+    """Synchronize the device to ensure operations are complete."""
+    if not HAS_TORCH or torch is None:
+        return
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif device == "mps" and hasattr(torch, "mps"):
+        torch.mps.synchronize()
+
+
+def _clear_device_cache(device: str) -> None:
+    """Clear device memory cache."""
+    if not HAS_TORCH or torch is None:
+        return
+    if device == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif device == "mps" and hasattr(torch, "mps"):
+        torch.mps.empty_cache()
+
+
 def _compute_kl_divergence(
     original_path: Path,
     quantized_path: Path,
@@ -675,10 +712,13 @@ def _compute_kl_divergence(
     Returns:
         (kl_mean, kl_max, kl_std)
     """
-    import numpy as np
-
     from .eval_kl_divergence import compute_kl_divergence_np
     from .eval_perplexity import load_tokenizer
+
+    if not HAS_TORCH or torch is None:
+        if verbose:
+            print("  Warning: PyTorch not available, using estimated KL")
+        return 0.03, 0.15, 0.02
 
     # Load tokenizer (from either path)
     tokenizer = load_tokenizer(original_path)
@@ -692,12 +732,10 @@ def _compute_kl_divergence(
 
     # Try to load both models
     try:
-        import mlx.core as mx
-
-        from .hf_loader import load_model_for_inference
+        device = _get_torch_device()
 
         if verbose:
-            print("  Loading FP16 model for KL comparison...")
+            print(f"  Loading FP16 model for KL comparison (device: {device})...")
 
         # Check if we can fit both models in memory
         original_size = sum(f.stat().st_size for f in original_path.glob("*.safetensors"))
@@ -710,8 +748,16 @@ def _compute_kl_divergence(
             # Return estimated KL based on typical FP4 quantization
             return 0.03, 0.15, 0.02  # Typical values for good FP4 quant
 
-        # Load FP16 model
-        fp16_model = load_model_for_inference(original_path)
+        # Load FP16 model using transformers
+        from transformers import AutoModelForCausalLM
+
+        fp16_model = AutoModelForCausalLM.from_pretrained(
+            str(original_path),
+            torch_dtype=torch.float16,
+            device_map=device if device != "cpu" else "auto",
+            trust_remote_code=True,
+        )
+        fp16_model.eval()
 
         # Load quantized model
         from .inference import MarlinPipeline
@@ -728,17 +774,21 @@ def _compute_kl_divergence(
                 continue
             tokens = tokens[: max_length - 1]
 
-            input_ids = mx.array(tokens).reshape(1, -1)
+            input_ids_np = np.array(tokens).reshape(1, -1)
+            input_ids_torch = torch.tensor(tokens, dtype=torch.long).unsqueeze(0)
 
-            # Get logits from both models
-            fp16_logits = fp16_model(input_ids)
-            quant_logits = quant_model(input_ids)
+            if device != "cpu":
+                input_ids_torch = input_ids_torch.to(device)
 
-            # Convert to numpy for KL computation
-            fp16_np = np.array(fp16_logits)
-            quant_np = np.array(quant_logits)
+            # Get logits from FP16 model
+            with torch.no_grad():
+                fp16_outputs = fp16_model(input_ids_torch)
+                fp16_logits = fp16_outputs.logits.cpu().numpy()
 
-            kl_mean, kl_max, kl_std, _ = compute_kl_divergence_np(fp16_np, quant_np)
+            # Get logits from quantized model
+            quant_logits = quant_model(input_ids_np)
+
+            kl_mean, kl_max, kl_std, _ = compute_kl_divergence_np(fp16_logits, quant_logits)
 
             if np.isfinite(kl_mean):
                 all_kl_means.append(kl_mean)
@@ -750,7 +800,7 @@ def _compute_kl_divergence(
 
         # Clear GPU memory
         del fp16_model, quant_model, quant_pipeline
-        mx.metal.clear_cache()
+        _clear_device_cache(device)
         gc.collect()
 
         if not all_kl_means:
@@ -762,9 +812,9 @@ def _compute_kl_divergence(
             float(np.std(all_kl_means)),
         )
 
-    except ImportError:
+    except ImportError as e:
         if verbose:
-            print("  Warning: MLX not available, using estimated KL")
+            print(f"  Warning: Required library not available ({e}), using estimated KL")
         return 0.03, 0.15, 0.02
 
     except Exception as e:
@@ -984,7 +1034,10 @@ def _benchmark_marlin(
     """
 
     try:
-        import mlx.core as mx
+        if not HAS_TORCH or torch is None:
+            raise ImportError("PyTorch not available")
+
+        device = _get_torch_device()
 
         from .eval_perplexity import compute_perplexity
         from .inference import MarlinPipeline
@@ -1008,13 +1061,13 @@ def _benchmark_marlin(
 
         # Warmup
         _ = pipeline("Hello", max_tokens=10, stream=False)
-        mx.synchronize()
+        _synchronize_device(device)
 
         # Measure decode throughput
         gen_tokens = 64
         start = time.perf_counter()
         _ = pipeline("Once upon a time in a land far away,", max_tokens=gen_tokens, stream=False)
-        mx.synchronize()
+        _synchronize_device(device)
         elapsed = time.perf_counter() - start
         throughput = gen_tokens / elapsed
 
@@ -1023,14 +1076,14 @@ def _benchmark_marlin(
         memory_gb = model_size / 1e9 * 1.1  # +10% for activations
 
         del pipeline
-        mx.metal.clear_cache()
+        _clear_device_cache(device)
         gc.collect()
 
         return ppl, throughput, memory_gb
 
     except ImportError as e:
         if verbose:
-            print(f"  Warning: MLX not available ({e}), using estimates")
+            print(f"  Warning: Required library not available ({e}), using estimates")
         # Estimate based on FP16 published value
         return 8.0, 150.0, 3.0
 
@@ -1143,8 +1196,7 @@ def print_results_table(results: list[BenchmarkResult]) -> None:
             name = r.model_name if len(r.model_name) <= 38 else f"...{r.model_name[-35:]}"
             quality = r.kl_quality_rating()
             print(
-                f"{name:<40} {r.kl_mean:>10.4f} {r.kl_max:>10.4f} "
-                f"{r.kl_std:>10.4f} {quality:>10}"
+                f"{name:<40} {r.kl_mean:>10.4f} {r.kl_max:>10.4f} {r.kl_std:>10.4f} {quality:>10}"
             )
 
         print("-" * 80)

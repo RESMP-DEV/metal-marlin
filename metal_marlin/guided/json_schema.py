@@ -266,7 +266,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
                 self._char_to_tokens[first_char].add(token_id)
 
                 # Also track tokens that are exact matches for common patterns
-                if token_text in ('true', 'false', 'null', '{', '}', '[', ']', ':', ',', '"'):
+                if token_text in ("true", "false", "null", "{", "}", "[", "]", ":", ",", '"'):
                     if token_text not in self._prefix_tokens:
                         self._prefix_tokens[token_text] = set()
                     self._prefix_tokens[token_text].add(token_id)
@@ -285,12 +285,12 @@ class JSONSchemaProcessor(BaseLogitProcessor):
             self._digit_tokens |= self._char_to_tokens.get(c, set())
 
         self._string_start_tokens = self._char_to_tokens.get('"', set())
-        self._object_start_tokens = self._char_to_tokens.get('{', set())
-        self._array_start_tokens = self._char_to_tokens.get('[', set())
-        self._colon_tokens = self._char_to_tokens.get(':', set())
-        self._comma_tokens = self._char_to_tokens.get(',', set())
-        self._object_end_tokens = self._char_to_tokens.get('}', set())
-        self._array_end_tokens = self._char_to_tokens.get(']', set())
+        self._object_start_tokens = self._char_to_tokens.get("{", set())
+        self._array_start_tokens = self._char_to_tokens.get("[", set())
+        self._colon_tokens = self._char_to_tokens.get(":", set())
+        self._comma_tokens = self._char_to_tokens.get(",", set())
+        self._object_end_tokens = self._char_to_tokens.get("}", set())
+        self._array_end_tokens = self._char_to_tokens.get("]", set())
 
     def reset(self) -> None:
         """Reset state for new generation."""
@@ -340,7 +340,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         state = ctx.state
 
         # Skip whitespace in most states
-        if char in ' \t\n\r' and state not in (JSONState.STRING_CONTENT, JSONState.STRING_ESCAPE):
+        if char in " \t\n\r" and state not in (JSONState.STRING_CONTENT, JSONState.STRING_ESCAPE):
             return
 
         if state == JSONState.START:
@@ -376,23 +376,27 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         """Handle character at start of value."""
         vtype = self._context.schema.value_type
 
-        if char == '{' and vtype in (JSONValueType.OBJECT, JSONValueType.ANY):
+        if char == "{" and vtype in (JSONValueType.OBJECT, JSONValueType.ANY):
             self._context.state = JSONState.OBJECT_OPEN
-        elif char == '[' and vtype in (JSONValueType.ARRAY, JSONValueType.ANY):
+        elif char == "[" and vtype in (JSONValueType.ARRAY, JSONValueType.ANY):
             self._context.state = JSONState.ARRAY_OPEN
         elif char == '"' and vtype in (JSONValueType.STRING, JSONValueType.ANY):
             self._context.state = JSONState.STRING_CONTENT
             self._context.string_buffer = ""
-        elif char in '-0123456789' and vtype in (JSONValueType.NUMBER, JSONValueType.INTEGER, JSONValueType.ANY):
+        elif char in "-0123456789" and vtype in (
+            JSONValueType.NUMBER,
+            JSONValueType.INTEGER,
+            JSONValueType.ANY,
+        ):
             self._context.state = JSONState.NUMBER_INT
             self._context.number_buffer = char
-        elif char == 't' and vtype in (JSONValueType.BOOLEAN, JSONValueType.ANY):
+        elif char == "t" and vtype in (JSONValueType.BOOLEAN, JSONValueType.ANY):
             # Start of 'true' - would need multi-char handling
             pass
-        elif char == 'f' and vtype in (JSONValueType.BOOLEAN, JSONValueType.ANY):
+        elif char == "f" and vtype in (JSONValueType.BOOLEAN, JSONValueType.ANY):
             # Start of 'false'
             pass
-        elif char == 'n' and vtype in (JSONValueType.NULL, JSONValueType.ANY):
+        elif char == "n" and vtype in (JSONValueType.NULL, JSONValueType.ANY):
             # Start of 'null'
             pass
 
@@ -401,7 +405,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         if char == '"':
             self._context.state = JSONState.OBJECT_KEY
             self._context.string_buffer = ""
-        elif char == '}':
+        elif char == "}":
             # Empty object - check required fields
             self._pop_context()
 
@@ -411,14 +415,14 @@ class JSONSchemaProcessor(BaseLogitProcessor):
             # End of key
             self._context.current_key = self._context.string_buffer
             self._context.state = JSONState.OBJECT_COLON
-        elif char == '\\':
+        elif char == "\\":
             self._context.state = JSONState.STRING_ESCAPE
         else:
             self._context.string_buffer += char
 
     def _handle_object_colon(self, char: str) -> None:
         """Handle character expecting colon."""
-        if char == ':':
+        if char == ":":
             self._context.state = JSONState.OBJECT_VALUE
 
     def _handle_object_value(self, char: str) -> None:
@@ -427,7 +431,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         key = self._context.current_key
         value_schema = self._context.schema.properties.get(
             key,
-            SchemaNode(JSONValueType.ANY) if self._context.schema.additional_properties else None
+            SchemaNode(JSONValueType.ANY) if self._context.schema.additional_properties else None,
         )
         if value_schema:
             new_context = JSONParseContext(
@@ -440,14 +444,14 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
     def _handle_object_comma(self, char: str) -> None:
         """Handle character expecting comma or }."""
-        if char == ',':
+        if char == ",":
             self._context.state = JSONState.OBJECT_OPEN
-        elif char == '}':
+        elif char == "}":
             self._pop_context()
 
     def _handle_array_open(self, char: str) -> None:
         """Handle character after [."""
-        if char == ']':
+        if char == "]":
             # Empty array
             self._pop_context()
         else:
@@ -475,10 +479,10 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
     def _handle_array_comma(self, char: str) -> None:
         """Handle character expecting comma or ]."""
-        if char == ',':
+        if char == ",":
             self._context.array_index += 1
             self._context.state = JSONState.ARRAY_VALUE
-        elif char == ']':
+        elif char == "]":
             self._pop_context()
 
     def _handle_string_content(self, char: str) -> None:
@@ -486,7 +490,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         if char == '"':
             # End of string
             self._complete_value()
-        elif char == '\\':
+        elif char == "\\":
             self._context.state = JSONState.STRING_ESCAPE
         else:
             self._context.string_buffer += char
@@ -494,17 +498,17 @@ class JSONSchemaProcessor(BaseLogitProcessor):
     def _handle_string_escape(self, char: str) -> None:
         """Handle character after backslash."""
         # Accept any escape sequence character
-        self._context.string_buffer += '\\' + char
+        self._context.string_buffer += "\\" + char
         self._context.state = JSONState.STRING_CONTENT
 
     def _handle_number_int(self, char: str) -> None:
         """Handle character in integer part of number."""
-        if char in '0123456789':
+        if char in "0123456789":
             self._context.number_buffer += char
-        elif char == '.':
+        elif char == ".":
             self._context.number_buffer += char
             self._context.state = JSONState.NUMBER_FRAC
-        elif char in 'eE':
+        elif char in "eE":
             self._context.number_buffer += char
             self._context.state = JSONState.NUMBER_EXP
         else:
@@ -514,9 +518,9 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
     def _handle_number_frac(self, char: str) -> None:
         """Handle character in fractional part of number."""
-        if char in '0123456789':
+        if char in "0123456789":
             self._context.number_buffer += char
-        elif char in 'eE':
+        elif char in "eE":
             self._context.number_buffer += char
             self._context.state = JSONState.NUMBER_EXP
         else:
@@ -525,7 +529,7 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
     def _handle_number_exp(self, char: str) -> None:
         """Handle character in exponent part of number."""
-        if char in '0123456789+-':
+        if char in "0123456789+-":
             self._context.number_buffer += char
         else:
             self._complete_value()
@@ -650,14 +654,14 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
         if value_type in (JSONValueType.NUMBER, JSONValueType.INTEGER, JSONValueType.ANY):
             valid |= self._digit_tokens
-            valid |= self._char_to_tokens.get('-', set())
+            valid |= self._char_to_tokens.get("-", set())
 
         if value_type in (JSONValueType.BOOLEAN, JSONValueType.ANY):
-            valid |= self._char_to_tokens.get('t', set())  # true
-            valid |= self._char_to_tokens.get('f', set())  # false
+            valid |= self._char_to_tokens.get("t", set())  # true
+            valid |= self._char_to_tokens.get("f", set())  # false
 
         if value_type in (JSONValueType.NULL, JSONValueType.ANY):
-            valid |= self._char_to_tokens.get('n', set())  # null
+            valid |= self._char_to_tokens.get("n", set())  # null
 
         return valid
 
@@ -673,11 +677,14 @@ class JSONSchemaProcessor(BaseLogitProcessor):
         valid |= self._string_start_tokens
 
         # Escape start
-        valid |= self._char_to_tokens.get('\\', set())
+        valid |= self._char_to_tokens.get("\\", set())
 
         # Regular printable characters (excluding control chars and quotes)
         for c in string.printable:
-            if c not in '"\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f':
+            if (
+                c
+                not in '"\\\x00\x01\x02\x03\x04\x05\x06\x07\x08\x0b\x0c\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f'
+            ):
                 valid |= self._char_to_tokens.get(c, set())
 
         return valid
@@ -698,9 +705,9 @@ class JSONSchemaProcessor(BaseLogitProcessor):
 
         if state == JSONState.NUMBER_INT:
             # Can start fractional or exponent part
-            valid |= self._char_to_tokens.get('.', set())
-            valid |= self._char_to_tokens.get('e', set())
-            valid |= self._char_to_tokens.get('E', set())
+            valid |= self._char_to_tokens.get(".", set())
+            valid |= self._char_to_tokens.get("e", set())
+            valid |= self._char_to_tokens.get("E", set())
             # Number terminators (will complete number)
             valid |= self._comma_tokens
             valid |= self._object_end_tokens
@@ -708,16 +715,16 @@ class JSONSchemaProcessor(BaseLogitProcessor):
             valid |= self._whitespace_tokens
 
         elif state == JSONState.NUMBER_FRAC:
-            valid |= self._char_to_tokens.get('e', set())
-            valid |= self._char_to_tokens.get('E', set())
+            valid |= self._char_to_tokens.get("e", set())
+            valid |= self._char_to_tokens.get("E", set())
             valid |= self._comma_tokens
             valid |= self._object_end_tokens
             valid |= self._array_end_tokens
             valid |= self._whitespace_tokens
 
         elif state == JSONState.NUMBER_EXP:
-            valid |= self._char_to_tokens.get('+', set())
-            valid |= self._char_to_tokens.get('-', set())
+            valid |= self._char_to_tokens.get("+", set())
+            valid |= self._char_to_tokens.get("-", set())
             valid |= self._comma_tokens
             valid |= self._object_end_tokens
             valid |= self._array_end_tokens

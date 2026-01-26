@@ -25,8 +25,7 @@ from ._compat import from_numpy, to_numpy
 # Positive: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
 # Negative: -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0
 E2M1_VALUES: np.ndarray = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=np.float32,
 )
 
@@ -45,7 +44,7 @@ def _pad_to_multiple(arr: np.ndarray, axis: int, multiple: int) -> np.ndarray:
     pad_amount = multiple - (current % multiple)
     pad_widths = [(0, 0)] * arr.ndim
     pad_widths[axis] = (0, pad_amount)
-    return np.pad(arr, pad_widths, mode='constant', constant_values=0)
+    return np.pad(arr, pad_widths, mode="constant", constant_values=0)
 
 
 def _quantize_to_e2m1(
@@ -246,9 +245,9 @@ def unpack_fp4_weights(
     for g in range(packed_n):
         col_start = g * FP4_PER_U32
         for i in range(FP4_PER_U32):
-            indices_correct[:, col_start + i] = (
-                (packed_np[:, g] >> (i * 4)) & 0xF
-            ).astype(np.uint8)
+            indices_correct[:, col_start + i] = ((packed_np[:, g] >> (i * 4)) & 0xF).astype(
+                np.uint8
+            )
 
     # Dequantize via codebook
     values = E2M1_VALUES[indices_correct].astype(np.float32)
@@ -517,6 +516,7 @@ def pack_nf4_weights(
 # High-level model quantization functions
 # =============================================================================
 
+
 def quantize_to_int4(
     model_path: str | Path,
     output_path: str | Path,
@@ -580,9 +580,7 @@ def quantize_to_int4(
                 if not should_skip and is_weight:
                     K, N = tensor.shape
                     if N % 8 == 0 and K % group_size == 0:
-                        packed, scales, meta = pack_int4_weights(
-                            tensor, group_size=group_size
-                        )
+                        packed, scales, meta = pack_int4_weights(tensor, group_size=group_size)
                         output_tensors[name] = packed
                         output_tensors[f"{name}.scales"] = scales
                         stats["quantized_count"] += 1
@@ -672,9 +670,7 @@ def quantize_to_nf4(
                 if not should_skip and is_weight:
                     K, N = tensor.shape
                     if N % 8 == 0 and K % group_size == 0:
-                        packed, scales, meta = pack_nf4_weights(
-                            tensor, group_size=group_size
-                        )
+                        packed, scales, meta = pack_nf4_weights(tensor, group_size=group_size)
                         output_tensors[name] = packed
                         output_tensors[f"{name}.scales"] = scales
                         stats["quantized_count"] += 1
@@ -958,9 +954,7 @@ def dequant_fp8_e4m3(
     for g in range(packed_n):
         col_start = g * FP8_PER_U32
         for i in range(FP8_PER_U32):
-            codes[:, col_start + i] = (
-                (packed_np[:, g] >> (i * 8)) & 0xFF
-            ).astype(np.uint8)
+            codes[:, col_start + i] = ((packed_np[:, g] >> (i * 8)) & 0xFF).astype(np.uint8)
 
     # Dequantize via codebook
     values = FP8_E4M3_VALUES[codes].astype(np.float32)
@@ -1108,9 +1102,7 @@ def dequant_fp8_e5m2(
     for g in range(packed_n):
         col_start = g * FP8_PER_U32
         for i in range(FP8_PER_U32):
-            codes[:, col_start + i] = (
-                (packed_np[:, g] >> (i * 8)) & 0xFF
-            ).astype(np.uint8)
+            codes[:, col_start + i] = ((packed_np[:, g] >> (i * 8)) & 0xFF).astype(np.uint8)
 
     # Dequantize via codebook
     values = FP8_E5M2_VALUES[codes].astype(np.float32)
@@ -1130,6 +1122,7 @@ def dequant_fp8_e5m2(
 # =============================================================================
 # High-level FP8 model quantization
 # =============================================================================
+
 
 def quantize_to_fp8(
     model_path: str | Path,

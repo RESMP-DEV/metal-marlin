@@ -318,7 +318,9 @@ def convert_model_to_fp4(
             )
         if verbose:
             print(f"Using calibration data with {len(calib_data.layer_ranges)} layers")
-            print(f"  Percentile: {calib_data.percentile}, Smooth factor: {calib_data.smooth_factor}")
+            print(
+                f"  Percentile: {calib_data.percentile}, Smooth factor: {calib_data.smooth_factor}"
+            )
 
     # If it's a HF model ID, download first
     if not model_path.exists():
@@ -753,7 +755,13 @@ def convert_model_layerwise(
         else:
             mixed_precision = MPConfig.default_dense()
         if verbose:
-            preset = "moe-mtp" if config.is_moe and config.has_mtp else "moe" if config.is_moe else "dense"
+            preset = (
+                "moe-mtp"
+                if config.is_moe and config.has_mtp
+                else "moe"
+                if config.is_moe
+                else "dense"
+            )
             print(f"Using mixed-precision preset: {preset}")
 
     # Copy config and tokenizer files
@@ -1120,8 +1128,10 @@ def convert_onnx_to_fp4(
         "source_file": onnx_path.name,
         "group_size": group_size,
         "mixed_precision_preset": (
-            "moe-mtp" if _detect_mtp_heads(graph) and _detect_moe_architecture(graph)
-            else "moe" if _detect_moe_architecture(graph)
+            "moe-mtp"
+            if _detect_mtp_heads(graph) and _detect_moe_architecture(graph)
+            else "moe"
+            if _detect_moe_architecture(graph)
             else "dense"
         ),
         "quantized_count": stats["quantized_count"],
@@ -1337,8 +1347,7 @@ def _load_hf_calibration_dataset(name: str, num_samples: int | None = None) -> l
         from datasets import load_dataset
     except ImportError:
         raise ImportError(
-            f"datasets package required for {name} calibration. "
-            "Install with: pip install datasets"
+            f"datasets package required for {name} calibration. Install with: pip install datasets"
         )
 
     if name == "wikitext2":
@@ -1624,6 +1633,7 @@ def convert_model_with_calibration(
         src = model_path / fname
         if src.exists():
             import shutil
+
             shutil.copy(src, output_path / fname)
 
     stats: dict[str, Any] = {
@@ -1803,7 +1813,8 @@ Examples:
         help="Calibration data source: bartowski-v3, wikitext2, c4, or file path (default: bartowski-v3)",
     )
     cal_parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         default="activation_ranges.json",
         help="Output path for activation ranges JSON (default: activation_ranges.json)",
     )
@@ -1818,7 +1829,8 @@ Examples:
         help="HuggingFace API token for gated models",
     )
     cal_parser.add_argument(
-        "-q", "--quiet",
+        "-q",
+        "--quiet",
         action="store_true",
         help="Suppress progress output",
     )
@@ -2021,6 +2033,7 @@ Examples:
             mp_config = None
             if args.mixed_precision:
                 from .mixed_precision import MixedPrecisionConfig as MPConfig
+
                 preset_map = {
                     "dense": MPConfig.default_dense,
                     "moe": MPConfig.default_moe,
@@ -2072,6 +2085,7 @@ Examples:
         mp_config = None
         if args.mixed_precision:
             from .mixed_precision import MixedPrecisionConfig as MPConfig
+
             preset_map = {
                 "dense": MPConfig.default_dense,
                 "moe": MPConfig.default_moe,

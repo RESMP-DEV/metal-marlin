@@ -117,34 +117,33 @@ def parse_bnf_grammar(text: str, start_symbol: str | None = None) -> Grammar:
 
     # Remove comments and blank lines
     lines = []
-    for line in text.strip().split('\n'):
-        line = line.split('#')[0].strip()
+    for line in text.strip().split("\n"):
+        line = line.split("#")[0].strip()
         if line:
             lines.append(line)
 
     # Join continuation lines
-    full_text = ' '.join(lines)
+    full_text = " ".join(lines)
 
     # Parse rules
-    rule_pattern = re.compile(r'<(\w+)>\s*::=\s*(.+?)(?=<\w+>\s*::=|$)')
+    rule_pattern = re.compile(r"<(\w+)>\s*::=\s*(.+?)(?=<\w+>\s*::=|$)")
     for match in rule_pattern.finditer(full_text):
         lhs = match.group(1)
         rhs_text = match.group(2)
         non_terminals.add(lhs)
 
         # Split alternatives
-        alternatives = rhs_text.split('|')
+        alternatives = rhs_text.split("|")
         for alt in alternatives:
             symbols = _parse_rhs(alt.strip())
             for sym in symbols:
-                if sym.startswith('<') and sym.endswith('>'):
+                if sym.startswith("<") and sym.endswith(">"):
                     non_terminals.add(sym[1:-1])
                 else:
                     terminals.add(sym)
             # Store rule with angle brackets stripped from non-terminals
             processed_rhs = tuple(
-                s[1:-1] if s.startswith('<') and s.endswith('>') else s
-                for s in symbols
+                s[1:-1] if s.startswith("<") and s.endswith(">") else s for s in symbols
             )
             rules.append(CFGRule(lhs, processed_rhs))
 
@@ -156,7 +155,7 @@ def parse_bnf_grammar(text: str, start_symbol: str | None = None) -> Grammar:
             raise ValueError("Empty grammar")
 
     # Convert non-terminal references to plain names
-    processed_terminals = {t for t in terminals if not (t.startswith('<') and t.endswith('>'))}
+    processed_terminals = {t for t in terminals if not (t.startswith("<") and t.endswith(">"))}
 
     return Grammar(
         rules=rules,
@@ -192,43 +191,43 @@ def _parse_rhs(text: str) -> list[str]:
             i += 1
             start = i
             while i < n and text[i] != quote:
-                if text[i] == '\\':
+                if text[i] == "\\":
                     i += 2
                 else:
                     i += 1
             symbols.append(text[start:i])
             i += 1  # Skip closing quote
 
-        elif text[i] == '<':
+        elif text[i] == "<":
             # Non-terminal
             start = i
-            while i < n and text[i] != '>':
+            while i < n and text[i] != ">":
                 i += 1
-            symbols.append(text[start:i + 1])
+            symbols.append(text[start : i + 1])
             i += 1
 
-        elif text[i] == '[':
+        elif text[i] == "[":
             # Character class
             start = i
-            while i < n and text[i] != ']':
+            while i < n and text[i] != "]":
                 i += 1
-            symbols.append(text[start:i + 1])
+            symbols.append(text[start : i + 1])
             i += 1
 
-        elif text[i] == '\\':
+        elif text[i] == "\\":
             # Escape sequence (\d, \w, etc.)
-            symbols.append(text[i:i + 2])
+            symbols.append(text[i : i + 2])
             i += 2
 
-        elif text[i] == '.':
+        elif text[i] == ".":
             # Any character
-            symbols.append('.')
+            symbols.append(".")
             i += 1
 
         else:
             # Bare word
             start = i
-            while i < n and not text[i].isspace() and text[i] not in '"\'<>[].\\|':
+            while i < n and not text[i].isspace() and text[i] not in "\"'<>[].\\|":
                 i += 1
             if start < i:
                 symbols.append(text[start:i])
@@ -270,7 +269,7 @@ class EarleyItem:
 
     def __repr__(self) -> str:
         rhs_with_dot = list(self.rule.rhs)
-        rhs_with_dot.insert(self.dot, '•')
+        rhs_with_dot.insert(self.dot, "•")
         return f"[{self.start}] {self.rule.lhs} -> {' '.join(rhs_with_dot)}"
 
 
@@ -403,9 +402,7 @@ class EarleyParser:
         """Check if parse is complete (accepts empty continuation)."""
         pos = len(self.chart) - 1
         for item in self.chart[pos]:
-            if (item.is_complete and
-                item.rule.lhs == self.grammar.start_symbol and
-                item.start == 0):
+            if item.is_complete and item.rule.lhs == self.grammar.start_symbol and item.start == 0:
                 return True
         return False
 
@@ -530,21 +527,21 @@ class GrammarProcessor(BaseLogitProcessor):
             return True
 
         # Character class matching
-        if terminal.startswith('[') and terminal.endswith(']'):
+        if terminal.startswith("[") and terminal.endswith("]"):
             pattern = f"^{terminal}$"
             return any(re.match(pattern, c) for c in token_text)
 
         # Regex escape sequences
-        if terminal.startswith('\\'):
-            if terminal == '\\d':
+        if terminal.startswith("\\"):
+            if terminal == "\\d":
                 return any(c.isdigit() for c in token_text)
-            elif terminal == '\\w':
-                return any(c.isalnum() or c == '_' for c in token_text)
-            elif terminal == '\\s':
+            elif terminal == "\\w":
+                return any(c.isalnum() or c == "_" for c in token_text)
+            elif terminal == "\\s":
                 return any(c.isspace() for c in token_text)
 
         # Any character
-        if terminal == '.':
+        if terminal == ".":
             return len(token_text) > 0
 
         return False

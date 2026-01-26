@@ -13,9 +13,11 @@ For M4 with simdgroup, 16 aligns well with 32-wide SIMD.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any
 
-import mlx.core as mx
+import numpy as np
+from numpy.typing import NDArray
 
 
 @dataclass(frozen=True)
@@ -25,12 +27,12 @@ class KVBlockConfig:
     block_size: int = 16  # Tokens per block
     num_heads: int = 32
     head_dim: int = 128  # Common for Llama models
-    dtype: mx.Dtype = field(default=mx.float16)
+    dtype: np.dtype = np.dtype(np.float16)
 
     @property
     def memory_bytes(self) -> int:
         """Memory footprint of one block in bytes."""
-        elem_size = 2 if self.dtype == mx.float16 else 4
+        elem_size = self.dtype.itemsize
         return 2 * self.block_size * self.num_heads * self.head_dim * elem_size
 
     @property
@@ -42,7 +44,7 @@ class KVBlockConfig:
 class KVBlock:
     """Fixed-size KV cache block for paged attention.
 
-    MLX arrays are immutable, so append operations produce new arrays.
+    NumPy arrays are used for storage, allowing in-place mutation.
     The block tracks how many token slots are filled and manages
     copy-on-write semantics via reference counting.
 
@@ -54,17 +56,17 @@ class KVBlock:
 
     def __init__(self, config: KVBlockConfig | None = None) -> None:
         self.config = config or KVBlockConfig()
-        self._data: mx.array | None = None
+        self._data: NDArray[Any] | None = None
         self._token_count: int = 0
         self._ref_count: int = 0
 
     def allocate(self) -> None:
         """Allocate block memory."""
-        self._data = mx.zeros(self.config.shape, dtype=self.config.dtype)
+        self._data = np.zeros(self.config.shape, dtype=self.config.dtype)
         self._token_count = 0
 
     @property
-    def data(self) -> mx.array | None:
+    def data(self) -> NDArray[Any] | None:
         """The underlying storage array."""
         return self._data
 
@@ -87,7 +89,7 @@ class KVBlock:
         self._ref_count = max(0, self._ref_count - 1)
         return self._ref_count
 
-    def append_kv(self, k: mx.array, v: mx.array) -> int:
+    def append_kv(self, k: NDArray[Any], v: NDArray[Any]) -> int:
         """Append K,V for a single token.
 
         Args:
@@ -105,32 +107,16 @@ class KVBlock:
         if self._token_count >= self.config.block_size:
             raise RuntimeError("Block is full")
 
-        # MLX is functional; we build updated slices and reassemble.
         idx = self._token_count
-        k_plane = self._data[0]
-        v_plane = self._data[1]
-
-        # Replace row `idx` in each plane.
-        k_plane = mx.concatenate([
-            k_plane[:idx],
-            mx.expand_dims(k, axis=0),
-            k_plane[idx + 1:],
-        ], axis=0)
-        v_plane = mx.concatenate([
-            v_plane[:idx],
-            mx.expand_dims(v, axis=0),
-            v_plane[idx + 1:],
-        ], axis=0)
-
-        self._data = mx.stack([k_plane, v_plane], axis=0)
+        self._data[0, idx] = k
+        self._data[1, idx] = v
         self._token_count += 1
         return self.config.block_size - self._token_count
 
-    def append_kv_batch(self, keys: mx.array, values: mx.array) -> int:
+    def append_kv_batch(self, keys: NDArray[Any], values: NDArray[Any]) -> int:
         """Append multiple token KV pairs at once.
 
-        More efficient than repeated single appends since it performs
-        one array reconstruction instead of N.
+        More efficient than repeated single appends.
 
         Args:
             keys: Key tensor of shape [num_tokens, num_heads, head_dim].
@@ -154,25 +140,12 @@ class KVBlock:
 
         idx = self._token_count
         end = idx + num_tokens
-        k_plane = self._data[0]
-        v_plane = self._data[1]
-
-        k_plane = mx.concatenate([
-            k_plane[:idx],
-            keys,
-            k_plane[end:],
-        ], axis=0)
-        v_plane = mx.concatenate([
-            v_plane[:idx],
-            values,
-            v_plane[end:],
-        ], axis=0)
-
-        self._data = mx.stack([k_plane, v_plane], axis=0)
+        self._data[0, idx:end] = keys
+        self._data[1, idx:end] = values
         self._token_count += num_tokens
         return self.config.block_size - self._token_count
 
-    def get_kv(self) -> tuple[mx.array, mx.array]:
+    def get_kv(self) -> tuple[NDArray[Any], NDArray[Any]]:
         """Get the filled portion of K and V.
 
         Returns:
@@ -183,7 +156,7 @@ class KVBlock:
         """
         if self._data is None:
             raise RuntimeError("Block not allocated")
-        return self._data[0, :self._token_count], self._data[1, :self._token_count]
+        return self._data[0, : self._token_count], self._data[1, : self._token_count]
 
     @property
     def is_full(self) -> bool:
@@ -208,7 +181,7 @@ class KVBlock:
     def reset(self) -> None:
         """Clear block contents without deallocating."""
         if self._data is not None:
-            self._data = mx.zeros(self.config.shape, dtype=self.config.dtype)
+            self._data.fill(0)
         self._token_count = 0
         self._ref_count = 0
 
@@ -216,9 +189,7 @@ class KVBlock:
         """Create an independent copy of this block (for CoW)."""
         new_block = KVBlock(config=self.config)
         if self._data is not None:
-            # MLX arrays are already immutable/refcounted, but we want
-            # logical independence for the mutable wrapper state.
-            new_block._data = self._data
+            new_block._data = self._data.copy()
             new_block._token_count = self._token_count
         return new_block
 

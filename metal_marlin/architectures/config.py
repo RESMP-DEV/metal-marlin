@@ -161,12 +161,8 @@ class HybridArchitectureConfig:
     mlp_quant: LayerQuantConfig = field(
         default_factory=lambda: LayerQuantConfig(Precision.FP4_E2M1, 128)
     )
-    embed_quant: LayerQuantConfig = field(
-        default_factory=lambda: LayerQuantConfig(Precision.BF16)
-    )
-    norm_quant: LayerQuantConfig = field(
-        default_factory=lambda: LayerQuantConfig(Precision.BF16)
-    )
+    embed_quant: LayerQuantConfig = field(default_factory=lambda: LayerQuantConfig(Precision.BF16))
+    norm_quant: LayerQuantConfig = field(default_factory=lambda: LayerQuantConfig(Precision.BF16))
 
     # General model settings
     rms_norm_eps: float = 1e-6
@@ -187,8 +183,7 @@ class HybridArchitectureConfig:
         # Auto-fill layer_configs if not provided
         if self.layer_configs is None and self.layer_types:
             self.layer_configs = [
-                self._create_layer_config(lt, idx)
-                for idx, lt in enumerate(self.layer_types)
+                self._create_layer_config(lt, idx) for idx, lt in enumerate(self.layer_types)
             ]
 
     def _create_layer_config(
@@ -368,10 +363,7 @@ def _parse_layer_type(name: str) -> HybridLayerType:
         "shared": HybridLayerType.SHARED_ATTENTION,
     }
     if name_lower not in mapping:
-        raise ValueError(
-            f"Unknown layer type: {name}. "
-            f"Supported: {list(mapping.keys())}"
-        )
+        raise ValueError(f"Unknown layer type: {name}. Supported: {list(mapping.keys())}")
     return mapping[name_lower]
 
 

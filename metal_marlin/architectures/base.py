@@ -2,6 +2,10 @@
 
 Defines the common interface that all layer types (Attention, Mamba, Hyena, etc.)
 must implement to be used in hybrid models.
+
+This module is framework-agnostic at runtime but provides PyTorch type hints
+for static analysis. Tensor types use `Any` at runtime to support multiple
+backends (PyTorch, NumPy) without hard dependencies.
 """
 
 from __future__ import annotations
@@ -11,15 +15,13 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from .._compat import HAS_MLX
-
-if HAS_MLX:
-    import mlx.core as mx
-else:
-    mx = None
-
 if TYPE_CHECKING:
+    import torch
+
     from ..kv_cache import KVCache
+
+    # Type alias for tensor-like objects (torch.Tensor or numpy.ndarray)
+    TensorLike = torch.Tensor | Any
 
 
 class HybridLayerType(Enum):
@@ -62,15 +64,17 @@ class LayerState:
         layer_idx: Which layer this state belongs to.
         kv_cache: Optional KV cache for attention layers.
         ssm_state: Optional SSM state tensor [batch, d_state, d_model].
+            Typically torch.Tensor on MPS/CUDA or numpy.ndarray.
         conv_state: Optional convolution state buffer [batch, d_conv, d_model].
+            Typically torch.Tensor on MPS/CUDA or numpy.ndarray.
         metadata: Additional layer-specific state info.
     """
 
     state_type: StateType
     layer_idx: int
     kv_cache: KVCache | None = None
-    ssm_state: Any | None = None  # mx.array when MLX available
-    conv_state: Any | None = None  # mx.array when MLX available
+    ssm_state: Any | None = None  # torch.Tensor or numpy.ndarray
+    conv_state: Any | None = None  # torch.Tensor or numpy.ndarray
     metadata: dict[str, Any] | None = None
 
     @classmethod
@@ -131,6 +135,8 @@ class LayerProtocol(Protocol):
 
     This allows the HybridBlock to dispatch to different layer types
     while maintaining a consistent interface for inference.
+
+    Tensor arguments accept torch.Tensor (MPS/CUDA/CPU) or numpy.ndarray.
     """
 
     layer_type: HybridLayerType
@@ -140,7 +146,7 @@ class LayerProtocol(Protocol):
     @abstractmethod
     def __call__(
         self,
-        hidden_states: Any,  # mx.array or np.ndarray
+        hidden_states: Any,  # torch.Tensor or numpy.ndarray
         position_ids: Any | None = None,
         state: LayerState | None = None,
         attention_mask: Any | None = None,
@@ -149,6 +155,7 @@ class LayerProtocol(Protocol):
 
         Args:
             hidden_states: Input tensor [batch, seq_len, hidden_size].
+                Can be torch.Tensor (MPS/CUDA/CPU) or numpy.ndarray.
             position_ids: Optional position IDs for position-dependent layers.
             state: Optional layer state from previous timestep.
             attention_mask: Optional mask for attention layers.
@@ -268,9 +275,7 @@ def estimate_hybrid_state_memory(
     total_per_seq = 0
 
     for layer_type in layer_types:
-        state_info = get_layer_state_size(
-            layer_type, hidden_size, d_state, d_conv
-        )
+        state_info = get_layer_state_size(layer_type, hidden_size, d_state, d_conv)
         total_fixed += state_info["fixed_bytes"]
         if state_info["grows_with_seq"]:
             total_per_seq += state_info["per_token_bytes"]
@@ -278,11 +283,8 @@ def estimate_hybrid_state_memory(
     return {
         "fixed_state_bytes": total_fixed * batch_size,
         "kv_cache_bytes": total_per_seq * batch_size * max_seq_len,
-        "total_bytes": (total_fixed * batch_size
-                       + total_per_seq * batch_size * max_seq_len),
-        "num_attention_layers": sum(
-            1 for t in layer_types if t == HybridLayerType.ATTENTION
-        ),
+        "total_bytes": (total_fixed * batch_size + total_per_seq * batch_size * max_seq_len),
+        "num_attention_layers": sum(1 for t in layer_types if t == HybridLayerType.ATTENTION),
         "num_ssm_layers": sum(
             1 for t in layer_types if t in (HybridLayerType.MAMBA, HybridLayerType.MAMBA2)
         ),

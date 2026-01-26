@@ -40,16 +40,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 import numpy as np
+import torch
 
-from .._compat import HAS_MLX
+from .._compat import HAS_MPS
 
-if HAS_MLX:
-    import mlx.core as mx
-elif TYPE_CHECKING:
-    import mlx.core as mx
+# Default device for MoE dispatch operations
+_DEFAULT_DEVICE: str = "mps" if HAS_MPS else "cpu"
 
 
 class ExpertForward(Protocol):
@@ -57,9 +56,9 @@ class ExpertForward(Protocol):
 
     def __call__(
         self,
-        activations: mx.array,
+        activations: torch.Tensor,
         expert_id: int,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Forward pass for a single expert.
 
         Args:
@@ -90,10 +89,11 @@ class DispatchInfo:
         top_k: Number of experts per token
         num_experts: Total number of experts
     """
-    sorted_token_indices: mx.array
-    sorted_expert_slots: mx.array
-    expert_offsets: mx.array
-    inverse_indices: mx.array
+
+    sorted_token_indices: torch.Tensor
+    sorted_expert_slots: torch.Tensor
+    expert_offsets: torch.Tensor
+    inverse_indices: torch.Tensor
     num_tokens: int
     top_k: int
     num_experts: int
@@ -113,6 +113,7 @@ class DispatchInfo:
 @dataclass
 class DispatchStats:
     """Statistics from a dispatch operation for profiling."""
+
     num_tokens: int
     top_k: int
     num_experts: int
@@ -123,9 +124,9 @@ class DispatchStats:
 
 
 def group_tokens_by_expert(
-    expert_ids_or_tokens: mx.array,
-    num_experts_or_routing_weights: int | tuple[mx.array, ...] | dict[str, mx.array],
-) -> DispatchInfo | tuple[mx.array, DispatchInfo]:
+    expert_ids_or_tokens: torch.Tensor,
+    num_experts_or_routing_weights: int | tuple[torch.Tensor, ...] | dict[str, torch.Tensor],
+) -> DispatchInfo | tuple[torch.Tensor, DispatchInfo]:
     """Group tokens by their assigned expert for batched execution.
 
     Given expert assignments [batch, top_k], produces indexing tensors that
@@ -152,7 +153,7 @@ def group_tokens_by_expert(
         If called with (tokens, routing_weights), returns (grouped_tokens, DispatchInfo).
 
     Example:
-        >>> expert_ids = mx.array([[2, 0], [1, 2], [0, 1]])  # 3 tokens, top_k=2
+        >>> expert_ids = torch.tensor([[2, 0], [1, 2], [0, 1]], device="mps")  # 3 tokens, top_k=2
         >>> info = group_tokens_by_expert(expert_ids, num_experts=3)
         >>> # Tokens are now grouped:
         >>> # Expert 0: token 0 (slot 1), token 2 (slot 0)
@@ -172,39 +173,36 @@ def group_tokens_by_expert(
 
 
 def _group_tokens_by_expert_ids(
-    expert_ids: mx.array,
+    expert_ids: torch.Tensor,
     num_experts: int,
 ) -> DispatchInfo:
     """Implementation for expert-id grouping used by all call paths."""
+    device = expert_ids.device
     batch_size, top_k = expert_ids.shape
     total_assignments = batch_size * top_k
 
     # Flatten to [batch * top_k]
-    expert_ids_flat = expert_ids.reshape(-1).astype(mx.int32)
+    expert_ids_flat = expert_ids.reshape(-1).to(torch.int64)
 
     # Create stable sort key: expert_id * total + original_position
     # This ensures stable sorting within each expert group
-    positions = mx.arange(total_assignments, dtype=mx.int32)
+    positions = torch.arange(total_assignments, dtype=torch.int64, device=device)
     sort_keys = expert_ids_flat * total_assignments + positions
 
     # Argsort for expert-grouped order
-    sorted_indices = mx.argsort(sort_keys)
+    sorted_indices = torch.argsort(sort_keys)
 
     # Compute which token and slot each sorted position came from
     sorted_token_indices = sorted_indices // top_k
     sorted_expert_slots = sorted_indices % top_k
 
-    # Compute expert offsets using one-hot counting
-    expert_range = mx.arange(num_experts, dtype=mx.int32)
-    matches = expert_ids_flat[:, None] == expert_range[None, :]  # [total, num_experts]
-    expert_counts = mx.sum(matches.astype(mx.int32), axis=0)  # [num_experts]
-    expert_offsets = mx.concatenate([
-        mx.array([0], dtype=mx.int32),
-        mx.cumsum(expert_counts),
-    ])
+    # Compute expert offsets using bincount (more efficient than one-hot)
+    expert_counts = torch.bincount(expert_ids_flat, minlength=num_experts)
+    expert_offsets = torch.zeros(num_experts + 1, dtype=torch.int64, device=device)
+    expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)
 
     # Inverse mapping: argsort of sorted_indices
-    inverse_indices = mx.argsort(sorted_indices)
+    inverse_indices = torch.argsort(sorted_indices)
 
     return DispatchInfo(
         sorted_token_indices=sorted_token_indices,
@@ -218,8 +216,8 @@ def _group_tokens_by_expert_ids(
 
 
 def _extract_expert_ids(
-    routing_weights: tuple[mx.array, ...] | dict[str, mx.array] | mx.array,
-) -> tuple[mx.array, int]:
+    routing_weights: tuple[torch.Tensor, ...] | dict[str, torch.Tensor] | torch.Tensor,
+) -> tuple[torch.Tensor, int]:
     """Extract expert_ids and infer num_experts from routing payload."""
     if isinstance(routing_weights, dict):
         expert_ids = routing_weights.get("expert_ids") or routing_weights.get("indices")
@@ -236,16 +234,16 @@ def _extract_expert_ids(
         num_experts = None
 
     if num_experts is None:
-        num_experts = int(mx.max(expert_ids).item()) + 1
+        num_experts = int(expert_ids.max().item()) + 1
 
     return expert_ids, int(num_experts)
 
 
 def gather_tokens_for_expert(
-    activations: mx.array,
+    activations: torch.Tensor,
     dispatch_info: DispatchInfo,
     expert_id: int,
-) -> mx.array:
+) -> torch.Tensor:
     """Gather activations for a specific expert's assigned tokens.
 
     Args:
@@ -261,7 +259,11 @@ def gather_tokens_for_expert(
 
     if start == end:
         # No tokens assigned to this expert
-        return mx.zeros((0, activations.shape[1]), dtype=activations.dtype)
+        return torch.zeros(
+            (0, activations.shape[1]),
+            dtype=activations.dtype,
+            device=activations.device,
+        )
 
     # Get token indices for this expert
     token_indices = dispatch_info.sorted_token_indices[start:end]
@@ -270,10 +272,10 @@ def gather_tokens_for_expert(
 
 
 def dispatch_to_experts(
-    activations_or_grouped: mx.array | tuple[mx.array, DispatchInfo],
+    activations_or_grouped: torch.Tensor | tuple[torch.Tensor, DispatchInfo],
     dispatch_info_or_experts: DispatchInfo | Sequence[ExpertForward],
     expert_forward: ExpertForward | None = None,
-) -> mx.array:
+) -> torch.Tensor:
     """Execute batched forward pass through all active experts.
 
     For each expert that received at least one token:
@@ -299,11 +301,8 @@ def dispatch_to_experts(
         activations = activations_or_grouped
         num_experts = dispatch_info.num_experts
 
-        # Force evaluation of expert_offsets to allow Python indexing
-        mx.eval(dispatch_info.expert_offsets)
-
         # Collect outputs from each expert in order (already sorted by expert)
-        output_chunks: list[mx.array] = []
+        output_chunks: list[torch.Tensor] = []
 
         for expert_id in range(num_experts):
             start = int(dispatch_info.expert_offsets[expert_id].item())
@@ -327,7 +326,7 @@ def dispatch_to_experts(
             raise ValueError("No tokens assigned to any expert")
 
         # Concatenate all outputs (already in sorted order)
-        return mx.concatenate(output_chunks, axis=0)
+        return torch.cat(output_chunks, dim=0)
 
     if expert_forward is not None:
         raise ValueError("expert_forward must be None when passing experts list")
@@ -341,8 +340,6 @@ def dispatch_to_experts(
 
     if len(experts) < num_experts:
         raise ValueError("experts list shorter than num_experts")
-
-    mx.eval(dispatch_info.expert_offsets)
 
     output_chunks = []
     for expert_id in range(num_experts):
@@ -358,14 +355,16 @@ def dispatch_to_experts(
     if not output_chunks:
         raise ValueError("No tokens assigned to any expert")
 
-    return mx.concatenate(output_chunks, axis=0)
+    return torch.cat(output_chunks, dim=0)
 
 
 def combine_expert_outputs(
-    expert_outputs: mx.array,
-    expert_probs_or_routing_weights: mx.array | tuple[mx.array, DispatchInfo] | dict[str, mx.array],
+    expert_outputs: torch.Tensor,
+    expert_probs_or_routing_weights: torch.Tensor
+    | tuple[torch.Tensor, DispatchInfo]
+    | dict[str, torch.Tensor],
     dispatch_info: DispatchInfo | None = None,
-) -> mx.array:
+) -> torch.Tensor:
     """Combine weighted expert outputs back to original token order.
 
     For each token:
@@ -383,9 +382,7 @@ def combine_expert_outputs(
         [batch, out_dim] combined outputs in original token order
     """
     if dispatch_info is None:
-        expert_probs, dispatch_info = _extract_probs_and_info(
-            expert_probs_or_routing_weights
-        )
+        expert_probs, dispatch_info = _extract_probs_and_info(expert_probs_or_routing_weights)
     else:
         expert_probs = expert_probs_or_routing_weights
 
@@ -401,21 +398,21 @@ def combine_expert_outputs(
     ]
 
     # Weight outputs by routing probabilities
-    weighted_outputs = expert_outputs * probs_for_sorted[:, None]
+    weighted_outputs = expert_outputs * probs_for_sorted.unsqueeze(1)
 
     # Reorder from sorted to original flat order using inverse_indices
     weighted_original = weighted_outputs[dispatch_info.inverse_indices]
 
     # Reshape to [batch, top_k, out_dim] and sum over top_k
     weighted_reshaped = weighted_original.reshape(batch_size, top_k, out_dim)
-    combined = mx.sum(weighted_reshaped, axis=1)
+    combined = weighted_reshaped.sum(dim=1)
 
     return combined
 
 
 def _extract_probs_and_info(
-    routing_weights: tuple[mx.array, DispatchInfo] | dict[str, mx.array],
-) -> tuple[mx.array, DispatchInfo]:
+    routing_weights: tuple[torch.Tensor, DispatchInfo] | dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, DispatchInfo]:
     """Extract expert_probs and dispatch_info from routing payload."""
     if isinstance(routing_weights, dict):
         expert_probs = routing_weights.get("expert_probs") or routing_weights.get("probs")
@@ -437,7 +434,9 @@ def _extract_probs_and_info(
     return expert_probs, dispatch_info
 
 
-def _call_expert(expert_fn: ExpertForward, activations: mx.array, expert_id: int) -> mx.array:
+def _call_expert(
+    expert_fn: ExpertForward, activations: torch.Tensor, expert_id: int
+) -> torch.Tensor:
     """Call an expert with (activations, expert_id) or (activations)."""
     try:
         return expert_fn(activations, expert_id)
@@ -478,11 +477,11 @@ class TokenDispatcher:
 
     def dispatch(
         self,
-        hidden_states: mx.array,
-        expert_ids: mx.array,
-        expert_probs: mx.array,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_probs: torch.Tensor,
         expert_forward: ExpertForward,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Execute MoE forward pass with efficient token batching.
 
         Args:
@@ -516,13 +515,13 @@ class TokenDispatcher:
 
     def dispatch_with_shared_expert(
         self,
-        hidden_states: mx.array,
-        expert_ids: mx.array,
-        expert_probs: mx.array,
+        hidden_states: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_probs: torch.Tensor,
         expert_forward: ExpertForward,
         shared_expert_forward: ExpertForward,
         shared_expert_weight: float = 1.0,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Execute MoE forward pass with a shared expert.
 
         Some architectures (DeepSeek-V2, Qwen-MoE) have a "shared" expert that
@@ -556,9 +555,7 @@ class TokenDispatcher:
 
     def _collect_stats(self, dispatch_info: DispatchInfo) -> None:
         """Collect dispatch statistics."""
-        mx.eval(dispatch_info.expert_offsets)
-
-        offsets = np.array(dispatch_info.expert_offsets)
+        offsets = dispatch_info.expert_offsets.cpu().numpy()
         loads = np.diff(offsets)
 
         active_experts = int(np.sum(loads > 0))
@@ -572,7 +569,8 @@ class TokenDispatcher:
             max_expert_load=int(np.max(loads)) if len(loads) > 0 else 0,
             min_expert_load=int(np.min(nonzero_loads)) if len(nonzero_loads) > 0 else 0,
             load_imbalance=float(np.std(nonzero_loads) / np.mean(nonzero_loads))
-            if len(nonzero_loads) > 1 else 0.0,
+            if len(nonzero_loads) > 1
+            else 0.0,
         )
 
     @property
@@ -586,7 +584,7 @@ class TokenDispatcher:
         return self._last_stats
 
 
-def compute_expert_load(expert_ids: mx.array, num_experts: int) -> mx.array:
+def compute_expert_load(expert_ids: torch.Tensor, num_experts: int) -> torch.Tensor:
     """Compute load (token count) per expert.
 
     Args:
@@ -594,19 +592,17 @@ def compute_expert_load(expert_ids: mx.array, num_experts: int) -> mx.array:
         num_experts: Total number of experts
 
     Returns:
-        [num_experts] int32 token counts per expert
+        [num_experts] int64 token counts per expert
     """
-    flat_ids = expert_ids.reshape(-1).astype(mx.int32)
-    expert_range = mx.arange(num_experts, dtype=mx.int32)
-    matches = flat_ids[:, None] == expert_range[None, :]
-    return mx.sum(matches.astype(mx.int32), axis=0)
+    flat_ids = expert_ids.reshape(-1).to(torch.int64)
+    return torch.bincount(flat_ids, minlength=num_experts)
 
 
 def compute_load_balancing_loss(
-    router_probs: mx.array,
-    expert_ids: mx.array,
+    router_probs: torch.Tensor,
+    expert_ids: torch.Tensor,
     num_experts: int,
-) -> mx.array:
+) -> torch.Tensor:
     """Compute auxiliary load balancing loss for MoE training.
 
     Uses the Switch Transformer formulation:
@@ -623,15 +619,13 @@ def compute_load_balancing_loss(
     Returns:
         Scalar load balancing loss
     """
-    expert_ids.shape[0]
-
     # f_e: fraction of tokens routed to each expert
-    expert_counts = compute_expert_load(expert_ids, num_experts).astype(mx.float32)
-    total_assignments = float(expert_ids.size)
+    expert_counts = compute_expert_load(expert_ids, num_experts).to(torch.float32)
+    total_assignments = float(expert_ids.numel())
     f = expert_counts / total_assignments
 
     # P_e: average probability per expert
-    P = mx.mean(router_probs, axis=0)
+    P = router_probs.mean(dim=0)
 
     # Loss = num_experts * dot(f, P)
-    return num_experts * mx.sum(f * P)
+    return num_experts * (f * P).sum()

@@ -23,7 +23,7 @@ This file implements approach 1 (Python skeleton) and documents the C++ interfac
 needed for approach 2.
 
 Requirements:
-    pip install onnxruntime onnxruntime-extensions
+    pip install onnxruntime onnxruntime-extensions torch
 
 Usage:
     from converters.ort_marlin_provider import create_session
@@ -54,6 +54,68 @@ if TYPE_CHECKING:
 # Custom op domain for all Metal Marlin operations
 DOMAIN = "com.metal_marlin"
 OPSET_VERSION = 1
+
+# Check PyTorch MPS availability
+try:
+    import torch
+
+    HAS_TORCH = True
+    HAS_MPS = torch.backends.mps.is_available()
+except ImportError:
+    HAS_TORCH = False
+    HAS_MPS = False
+    torch = None
+
+
+def _to_mps_tensor(arr: NDArray[Any], dtype: torch.dtype | None = None) -> torch.Tensor:
+    """Convert numpy array to PyTorch MPS tensor.
+
+    Args:
+        arr: Input numpy array.
+        dtype: Optional torch dtype. If None, infers from numpy dtype.
+
+    Returns:
+        PyTorch tensor on MPS device.
+    """
+    if not HAS_MPS or torch is None:
+        raise RuntimeError("PyTorch MPS is required for Metal kernel dispatch")
+
+    # Map numpy dtypes to torch dtypes
+    dtype_map = {
+        np.float16: torch.float16,
+        np.float32: torch.float32,
+        np.uint32: torch.int32,  # MPS doesn't have native uint32
+        np.int32: torch.int32,
+    }
+
+    if dtype is None:
+        np_dtype = arr.dtype.type
+        dtype = dtype_map.get(np_dtype, torch.float32)
+
+    # Convert to tensor (ensure contiguous)
+    tensor = torch.from_numpy(np.ascontiguousarray(arr))
+
+    # Handle uint32 -> int32 view for MPS compatibility
+    if arr.dtype == np.uint32:
+        tensor = tensor.view(torch.int32)
+
+    return tensor.to(device="mps", dtype=dtype if dtype != torch.int32 else None)
+
+
+def _from_mps_tensor(tensor: torch.Tensor, dtype: np.dtype = np.float16) -> NDArray[Any]:
+    """Convert PyTorch MPS tensor to numpy array.
+
+    Args:
+        tensor: PyTorch tensor (must be on MPS device).
+        dtype: Target numpy dtype.
+
+    Returns:
+        numpy array with specified dtype.
+    """
+    if torch is None:
+        raise RuntimeError("PyTorch is required")
+
+    return tensor.cpu().numpy().astype(dtype)
 
 
 class MarlinQuantizedMatMulOp:
@@ -107,24 +169,29 @@ class MarlinQuantizedMatMulOp:
         This crosses the Python/Metal boundary. For production use, the C++
         custom op path eliminates this overhead entirely.
         """
-        import mlx.core as mx
+        if not HAS_MPS:
+            raise RuntimeError(
+                "PyTorch MPS is required for Metal kernel dispatch. "
+                "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+            )
 
-        # Convert numpy -> MLX arrays (zero-copy when possible on Metal)
-        a_mx = mx.array(A)
-        b_mx = mx.array(B_packed)
-        s_mx = mx.array(scales)
+        # Import Metal Marlin kernel functions
+        try:
+            from ..metal_marlin.kernels import marlin_gemm_fp4
+        except ImportError:
+            from metal_marlin.kernels import marlin_gemm_fp4
+
+        # Convert numpy -> PyTorch MPS tensors
+        a_mps = _to_mps_tensor(A, torch.float16)
+        b_mps = _to_mps_tensor(B_packed)  # uint32 as int32 view
+        s_mps = _to_mps_tensor(scales, torch.float16)
 
         # Dispatch to Metal Marlin kernel
-        try:
-            from ..metal_marlin import quantized_linear
-        except ImportError:
-            from metal_marlin import quantized_linear
+        result = marlin_gemm_fp4(a_mps, b_mps, s_mps, group_size)
 
-        result = quantized_linear(a_mx, b_mx, s_mx, group_size)
-
-        # Force evaluation and convert back to numpy
-        mx.eval(result)
-        return np.array(result, dtype=np.float16)
+        # Synchronize and convert back to numpy
+        torch.mps.synchronize()
+        return _from_mps_tensor(result, np.float16)
 
 
 class MarlinQuantizedLinearOp:
@@ -170,24 +237,29 @@ class MarlinQuantizedLinearOp:
         group_size: int = 32,
     ) -> NDArray[np.float16]:
         """Execute quantized linear via Metal Marlin."""
-        import mlx.core as mx
-
-        x_mx = mx.array(X)
-        w_mx = mx.array(W_packed)
-        s_mx = mx.array(scales)
+        if not HAS_MPS:
+            raise RuntimeError(
+                "PyTorch MPS is required for Metal kernel dispatch. "
+                "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+            )
 
         try:
-            from ..metal_marlin import quantized_linear
+            from ..metal_marlin.kernels import marlin_gemm_fp4
         except ImportError:
-            from metal_marlin import quantized_linear
+            from metal_marlin.kernels import marlin_gemm_fp4
 
-        result = quantized_linear(x_mx, w_mx, s_mx, group_size)
+        x_mps = _to_mps_tensor(X, torch.float16)
+        w_mps = _to_mps_tensor(W_packed)
+        s_mps = _to_mps_tensor(scales, torch.float16)
+
+        result = marlin_gemm_fp4(x_mps, w_mps, s_mps, group_size)
 
         if bias is not None and bias.size > 0:
-            result = result + mx.array(bias)
+            bias_mps = _to_mps_tensor(bias, torch.float16)
+            result = result + bias_mps
 
-        mx.eval(result)
-        return np.array(result, dtype=np.float16)
+        torch.mps.synchronize()
+        return _from_mps_tensor(result, np.float16)
 
 
 class MarlinFlashAttentionOp:
@@ -233,29 +305,48 @@ class MarlinFlashAttentionOp:
         causal: int = 1,
         num_kv_heads: int = 0,
     ) -> NDArray[np.float16]:
-        """Execute flash attention via Metal Marlin."""
-        import mlx.core as mx
+        """Execute flash attention via Metal Marlin.
 
-        q_mx = mx.array(Q)
-        k_mx = mx.array(K)
-        v_mx = mx.array(V)
+        Uses PyTorch's scaled_dot_product_attention as the Metal flash attention
+        kernel is still using MLX internally. For full Metal performance, the
+        flash_attention_v2.metal kernel needs to be integrated with PyTorch MPS.
+        """
+        if not HAS_MPS:
+            raise RuntimeError(
+                "PyTorch MPS is required for Metal kernel dispatch. "
+                "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+            )
+
+        # Convert to MPS tensors
+        q_mps = _to_mps_tensor(Q, torch.float16)
+        k_mps = _to_mps_tensor(K, torch.float16)
+        v_mps = _to_mps_tensor(V, torch.float16)
 
         if scale < 0:
             head_dim = Q.shape[-1]
             scale = float(head_dim**-0.5)
 
-        try:
-            from ..metal_marlin.metal_marlin import flash_attention_metal
-        except ImportError:
-            from metal_marlin.metal_marlin import flash_attention_metal
+        # Handle GQA by repeating KV heads
+        if num_kv_heads > 0 and num_kv_heads != q_mps.shape[1]:
+            num_heads_q = q_mps.shape[1]
+            repeat_factor = num_heads_q // num_kv_heads
+            k_mps = k_mps.repeat_interleave(repeat_factor, dim=1)
+            v_mps = v_mps.repeat_interleave(repeat_factor, dim=1)
 
-        kwargs: dict[str, Any] = {"scale": scale, "causal": bool(causal)}
-        if num_kv_heads > 0:
-            kwargs["num_kv_heads"] = num_kv_heads
+        # Use PyTorch's scaled dot product attention
+        # This will use Metal Performance Shaders under the hood on MPS
+        result = torch.nn.functional.scaled_dot_product_attention(
+            q_mps,
+            k_mps,
+            v_mps,
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=bool(causal),
+            scale=scale,
+        )
 
-        result = flash_attention_metal(q_mx, k_mx, v_mx, **kwargs)
-        mx.eval(result)
-        return np.array(result, dtype=np.float16)
+        torch.mps.synchronize()
+        return _from_mps_tensor(result, np.float16)
 
 
 # All ops in the custom domain
@@ -318,7 +409,9 @@ def register_marlin_ops_ortextensions() -> None:
         scale = float(kwargs.get("scale", -1.0))
         causal = int(kwargs.get("causal", 1))
         num_kv_heads = int(kwargs.get("num_kv_heads", 0))
-        return MarlinFlashAttentionOp.compute(Q, K, V, scale=scale, causal=causal, num_kv_heads=num_kv_heads)
+        return MarlinFlashAttentionOp.compute(
+            Q, K, V, scale=scale, causal=causal, num_kv_heads=num_kv_heads
+        )
 
 
 def create_session(

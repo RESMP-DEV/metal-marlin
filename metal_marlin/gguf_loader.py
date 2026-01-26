@@ -44,24 +44,14 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-# MLX is optional - GGUF loading works with pure numpy
-HAS_MLX = False
-mx: ModuleType | None = None
-
-try:
-    import mlx.core as _mx
-    mx = _mx
-    HAS_MLX = True
-except ImportError:
-    pass
+from ._compat import HAS_TORCH, torch
 
 if TYPE_CHECKING:
-    import mlx.core as mx  # noqa: F811 - for type hints only
+    import torch as torch_typing
 
 # ---------------------------------------------------------------------------
 # GGUF value type codes (from gguf.md spec)
@@ -190,8 +180,7 @@ BLOCK_QUANT_TYPES = frozenset(GGML_BLOCK_PARAMS.keys())
 
 # E2M1 codebook for Marlin FP4 quantization
 E2M1_VALUES: np.ndarray = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=np.float32,
 )
 
@@ -216,7 +205,7 @@ def dequant_q4_0(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_0]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # Extract FP16 scales -> FP32
     scales = np.frombuffer(raw[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
@@ -250,7 +239,7 @@ def dequant_q4_1(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_1]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # Extract FP16 scale and min
     scales = np.frombuffer(raw[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
@@ -286,7 +275,7 @@ def dequant_q5_0(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_0]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # FP16 scale
     scales = np.frombuffer(raw[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
@@ -326,7 +315,7 @@ def dequant_q5_1(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_1]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     scales = np.frombuffer(raw[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
     mins = np.frombuffer(raw[:, 2:4].tobytes(), dtype=np.float16).astype(np.float32)
@@ -364,7 +353,7 @@ def dequant_q8_0(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q8_0]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     scales = np.frombuffer(raw[:, :2].tobytes(), dtype=np.float16).astype(np.float32)
     scales = scales.reshape(n_blocks)
@@ -396,11 +385,19 @@ def dequant_q2_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q2_K]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # Extract fp16 d and dmin from end of block
-    d = np.frombuffer(raw[:, 80:82].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
-    dmin = np.frombuffer(raw[:, 82:84].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    d = (
+        np.frombuffer(raw[:, 80:82].tobytes(), dtype=np.float16)
+        .astype(np.float32)
+        .reshape(n_blocks)
+    )
+    dmin = (
+        np.frombuffer(raw[:, 82:84].tobytes(), dtype=np.float16)
+        .astype(np.float32)
+        .reshape(n_blocks)
+    )
 
     # Extract 4-bit scales (16 pairs of scale/min)
     scales_raw = raw[:, :16]  # (n_blocks, 16)
@@ -422,7 +419,9 @@ def dequant_q2_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         end = start + 16
         sb_scale = scales[:, sb] * d
         sb_min = mins[:, sb] * dmin
-        values[:, start:end] = quants[:, start:end] * sb_scale[:, np.newaxis] - sb_min[:, np.newaxis]
+        values[:, start:end] = (
+            quants[:, start:end] * sb_scale[:, np.newaxis] - sb_min[:, np.newaxis]
+        )
 
     return values.reshape(-1)[:n_elements]
 
@@ -442,10 +441,14 @@ def dequant_q3_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q3_K]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 d at end
-    d = np.frombuffer(raw[:, 108:110].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    d = (
+        np.frombuffer(raw[:, 108:110].tobytes(), dtype=np.float16)
+        .astype(np.float32)
+        .reshape(n_blocks)
+    )
 
     # High bits mask (32 bytes = 256 bits)
     hmask = raw[:, :32]  # (n_blocks, 32)
@@ -464,19 +467,32 @@ def dequant_q3_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         byte_idx = (i * 6) // 8
         bit_offset = (i * 6) % 8
         if bit_offset <= 2:
-            scales[:, i] = ((scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & 0x3F).astype(np.float32)
+            scales[:, i] = ((scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & 0x3F).astype(
+                np.float32
+            )
         else:
-            lo = (scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & ((1 << (8 - bit_offset)) - 1)
-            hi = (scales_raw[:, byte_idx + 1].astype(np.int32) & ((1 << (bit_offset - 2)) - 1)) << (8 - bit_offset)
+            lo = (scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & (
+                (1 << (8 - bit_offset)) - 1
+            )
+            hi = (scales_raw[:, byte_idx + 1].astype(np.int32) & ((1 << (bit_offset - 2)) - 1)) << (
+                8 - bit_offset
+            )
             scales[:, i] = (lo | hi).astype(np.float32)
     for i in range(8, 16):
         byte_idx = 6 + ((i - 8) * 6) // 8
         bit_offset = ((i - 8) * 6) % 8
         if bit_offset <= 2:
-            scales[:, i] = ((scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & 0x3F).astype(np.float32)
+            scales[:, i] = ((scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & 0x3F).astype(
+                np.float32
+            )
         else:
-            lo = (scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & ((1 << (8 - bit_offset)) - 1)
-            hi = (scales_raw[:, min(byte_idx + 1, 11)].astype(np.int32) & ((1 << (bit_offset - 2)) - 1)) << (8 - bit_offset)
+            lo = (scales_raw[:, byte_idx].astype(np.int32) >> bit_offset) & (
+                (1 << (8 - bit_offset)) - 1
+            )
+            hi = (
+                scales_raw[:, min(byte_idx + 1, 11)].astype(np.int32)
+                & ((1 << (bit_offset - 2)) - 1)
+            ) << (8 - bit_offset)
             scales[:, i] = (lo | hi).astype(np.float32)
 
     # Scales are stored as signed 6-bit, convert to signed
@@ -504,7 +520,9 @@ def dequant_q3_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         end = start + 16
         sb_scale = scales[:, sb] * d
         # Q3_K uses symmetric quantization centered at 4
-        values[:, start:end] = (quants[:, start:end].astype(np.float32) - 4.0) * sb_scale[:, np.newaxis]
+        values[:, start:end] = (quants[:, start:end].astype(np.float32) - 4.0) * sb_scale[
+            :, np.newaxis
+        ]
 
     return values.reshape(-1)[:n_elements]
 
@@ -523,11 +541,13 @@ def dequant_q4_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_K]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 d and dmin
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
-    dmin = np.frombuffer(raw[:, 2:4].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    dmin = (
+        np.frombuffer(raw[:, 2:4].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    )
 
     # 6-bit scales packed into 12 bytes
     # Layout: 8 scales (6 bits each) + 8 mins (6 bits each) = 96 bits = 12 bytes
@@ -574,7 +594,9 @@ def dequant_q4_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         end = start + 32
         sb_scale = scales[:, sb] * d
         sb_min = mins[:, sb] * dmin
-        values[:, start:end] = quants[:, start:end] * sb_scale[:, np.newaxis] - sb_min[:, np.newaxis]
+        values[:, start:end] = (
+            quants[:, start:end] * sb_scale[:, np.newaxis] - sb_min[:, np.newaxis]
+        )
 
     return values.reshape(-1)[:n_elements]
 
@@ -594,11 +616,13 @@ def dequant_q5_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_K]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 d and dmin
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
-    dmin = np.frombuffer(raw[:, 2:4].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    dmin = (
+        np.frombuffer(raw[:, 2:4].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    )
 
     # Unpack 6-bit scales and mins (same layout as Q4_K)
     scales_raw = raw[:, 4:16]
@@ -649,7 +673,10 @@ def dequant_q5_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         end = start + 32
         sb_scale = scales[:, sb] * d
         sb_min = mins[:, sb] * dmin
-        values[:, start:end] = quants[:, start:end].astype(np.float32) * sb_scale[:, np.newaxis] - sb_min[:, np.newaxis]
+        values[:, start:end] = (
+            quants[:, start:end].astype(np.float32) * sb_scale[:, np.newaxis]
+            - sb_min[:, np.newaxis]
+        )
 
     return values.reshape(-1)[:n_elements]
 
@@ -668,10 +695,14 @@ def dequant_q6_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q6_K]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 d at end
-    d = np.frombuffer(raw[:, 208:210].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
+    d = (
+        np.frombuffer(raw[:, 208:210].tobytes(), dtype=np.float16)
+        .astype(np.float32)
+        .reshape(n_blocks)
+    )
 
     # int8 scales (16 sub-blocks of 16 elements)
     scales = raw[:, 192:208].view(np.int8).astype(np.float32)  # (n_blocks, 16)
@@ -698,7 +729,9 @@ def dequant_q6_k(data: np.ndarray, n_elements: int) -> np.ndarray:
         end = start + 16
         sb_scale = scales[:, sb] * d
         # Q6_K uses symmetric quantization centered at 32
-        values[:, start:end] = (quants[:, start:end].astype(np.float32) - 32.0) * sb_scale[:, np.newaxis]
+        values[:, start:end] = (quants[:, start:end].astype(np.float32) - 32.0) * sb_scale[
+            :, np.newaxis
+        ]
 
     return values.reshape(-1)[:n_elements]
 
@@ -709,10 +742,30 @@ def dequant_q6_k(data: np.ndarray, n_elements: int) -> np.ndarray:
 
 # IQ4_NL non-linear codebook (16 values for 4-bit quantization)
 # These values are chosen to better represent the distribution of weights
-IQ4_NL_VALUES: np.ndarray = np.array([
-    -127, -104, -83, -65, -49, -35, -22, -10,
-    1, 13, 25, 38, 53, 69, 89, 113,
-], dtype=np.float32) / 127.0
+IQ4_NL_VALUES: np.ndarray = (
+    np.array(
+        [
+            -127,
+            -104,
+            -83,
+            -65,
+            -49,
+            -35,
+            -22,
+            -10,
+            1,
+            13,
+            25,
+            38,
+            53,
+            69,
+            89,
+            113,
+        ],
+        dtype=np.float32,
+    )
+    / 127.0
+)
 
 
 def dequant_iq4_nl(data: np.ndarray, n_elements: int) -> np.ndarray:
@@ -726,7 +779,7 @@ def dequant_iq4_nl(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ4_NL]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 scale
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
@@ -779,7 +832,7 @@ def dequant_iq2_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ2_XXS]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 super-block scale
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
@@ -789,7 +842,7 @@ def dequant_iq2_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
 
     for sb in range(8):
         sb_start = 2 + sb * 8
-        sb_data = raw[:, sb_start:sb_start + 8]
+        sb_data = raw[:, sb_start : sb_start + 8]
 
         # Grid indices (first 4 bytes = 4 x 9-bit indices, but stored as 16-bit pairs)
         qs = sb_data[:, :4]
@@ -830,7 +883,7 @@ def dequant_iq3_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ3_XXS]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 super-block scale
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
@@ -840,7 +893,7 @@ def dequant_iq3_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
     # Process 8 sub-blocks of 32 elements
     for sb in range(8):
         sb_start = 2 + sb * 12
-        sb_data = raw[:, sb_start:sb_start + 12]
+        sb_data = raw[:, sb_start : sb_start + 12]
 
         qs = sb_data[:, :6]  # 3-bit codes (6 bytes = 16 x 3 bits, for 32 elements in pairs)
         sb_data[:, 6:10]  # High bits
@@ -888,7 +941,7 @@ def dequant_iq4_xs(data: np.ndarray, n_elements: int) -> np.ndarray:
     """
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ4_XS]
     n_blocks = n_elements // block_size
-    raw = data[:n_blocks * block_bytes].reshape(n_blocks, block_bytes)
+    raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
 
     # fp16 super-block scale
     d = np.frombuffer(raw[:, 0:2].tobytes(), dtype=np.float16).astype(np.float32).reshape(n_blocks)
@@ -931,7 +984,9 @@ def dequant_iq4_xs(data: np.ndarray, n_elements: int) -> np.ndarray:
     for sb in range(8):
         start = sb * 32
         end = start + 32
-        values[:, start:end] = values_codebook[:, start:end] * scales[:, sb, np.newaxis] * d[:, np.newaxis]
+        values[:, start:end] = (
+            values_codebook[:, start:end] * scales[:, sb, np.newaxis] * d[:, np.newaxis]
+        )
 
     return values.reshape(-1)[:n_elements]
 
@@ -1031,9 +1086,7 @@ def _quantize_to_marlin_fp4(
     scales = (max_abs / 6.0).astype(np.float16)
 
     # Quantize: find nearest E2M1 codebook entry for each normalized weight
-    safe_scales = np.where(
-        scales == 0, np.float16(1.0), scales
-    ).astype(np.float32)
+    safe_scales = np.where(scales == 0, np.float16(1.0), scales).astype(np.float32)
     normalized = grouped / safe_scales[:, np.newaxis, :]  # (n_groups, group_size, N)
 
     flat = normalized.reshape(-1)
@@ -1123,16 +1176,12 @@ class GGUFReader:
             # Magic number
             magic = f.read(4)
             if magic != self.MAGIC:
-                raise ValueError(
-                    f"Not a GGUF file (magic={magic!r}, expected {self.MAGIC!r})"
-                )
+                raise ValueError(f"Not a GGUF file (magic={magic!r}, expected {self.MAGIC!r})")
 
             # Version (uint32)
             self._version = struct.unpack("<I", f.read(4))[0]
             if self._version not in (2, 3):
-                raise ValueError(
-                    f"Unsupported GGUF version {self._version} (expected 2 or 3)"
-                )
+                raise ValueError(f"Unsupported GGUF version {self._version} (expected 2 or 3)")
 
             # Tensor count and KV count
             # v2 uses uint32, v3 uses uint64 for these fields
@@ -1217,13 +1266,9 @@ class GGUFReader:
 
         # Shape: each dimension is uint64 in v3, uint32 in v2
         if self._version >= 3:
-            shape = tuple(
-                struct.unpack("<Q", f.read(8))[0] for _ in range(n_dims)
-            )
+            shape = tuple(struct.unpack("<Q", f.read(8))[0] for _ in range(n_dims))
         else:
-            shape = tuple(
-                struct.unpack("<I", f.read(4))[0] for _ in range(n_dims)
-            )
+            shape = tuple(struct.unpack("<I", f.read(4))[0] for _ in range(n_dims))
 
         qtype = struct.unpack("<I", f.read(4))[0]
         offset = struct.unpack("<Q", f.read(8))[0]
@@ -1256,7 +1301,9 @@ class GGUFReader:
             ValueError: If tensor type is unsupported.
         """
         if name not in self.tensor_infos:
-            raise KeyError(f"Tensor '{name}' not found. Available: {list(self.tensor_infos.keys())[:10]}...")
+            raise KeyError(
+                f"Tensor '{name}' not found. Available: {list(self.tensor_infos.keys())[:10]}..."
+            )
 
         info = self.tensor_infos[name]
         data = self._read_tensor_data(info)
@@ -1265,9 +1312,11 @@ class GGUFReader:
             return np.frombuffer(data.tobytes(), dtype=np.float32).reshape(info.shape)
 
         if info.qtype == GGML_TYPE_F16:
-            return np.frombuffer(
-                data.tobytes(), dtype=np.float16
-            ).astype(np.float32).reshape(info.shape)
+            return (
+                np.frombuffer(data.tobytes(), dtype=np.float16)
+                .astype(np.float32)
+                .reshape(info.shape)
+            )
 
         if info.qtype == GGML_TYPE_BF16:
             # BF16: reinterpret uint16 as bfloat16 -> FP32
@@ -1287,9 +1336,7 @@ class GGUFReader:
                 "is block-quantized but not supported by the dequantizer."
             )
 
-        raise ValueError(
-            f"Unsupported tensor type {info.qtype} for tensor '{name}'"
-        )
+        raise ValueError(f"Unsupported tensor type {info.qtype} for tensor '{name}'")
 
     def get_tensor_marlin_np(
         self,
@@ -1329,8 +1376,8 @@ class GGUFReader:
         self,
         name: str,
         group_size: int = DEFAULT_GROUP_SIZE,
-    ) -> tuple[mx.array, mx.array]:
-        """Get a tensor in Marlin FP4 packed format as MLX arrays.
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Get a tensor in Marlin FP4 packed format as PyTorch tensors.
 
         Dequantizes the tensor to FP32, then re-quantizes into the Marlin
         FP4 (E2M1) representation used by the Metal fused dequant-GEMM kernel.
@@ -1344,19 +1391,19 @@ class GGUFReader:
             group_size: Marlin quantization group size (default 128).
 
         Returns:
-            (packed_weights, scales) as MLX arrays.
+            (packed_weights, scales) as PyTorch tensors.
 
         Raises:
             ValueError: If tensor is not 2D (not a weight matrix).
-            ImportError: If MLX is not installed.
+            ImportError: If PyTorch is not installed.
         """
-        if not HAS_MLX:
+        if not HAS_TORCH or torch is None:
             raise ImportError(
-                "get_tensor_marlin() requires MLX. "
-                "Use get_tensor_marlin_np() for numpy arrays, or install MLX: pip install mlx"
+                "get_tensor_marlin() requires PyTorch. "
+                "Use get_tensor_marlin_np() for numpy arrays, or install PyTorch: pip install torch"
             )
         packed, scales = self.get_tensor_marlin_np(name, group_size)
-        return mx.array(packed), mx.array(scales)
+        return torch.from_numpy(packed.copy()), torch.from_numpy(scales.copy())
 
     def get_tensor_fp16(self, name: str) -> np.ndarray:
         """Get a tensor as a numpy FP16 array (no Marlin packing).
@@ -1372,8 +1419,8 @@ class GGUFReader:
         fp32 = self.get_tensor_fp32(name)
         return fp32.astype(np.float16)
 
-    def get_tensor_fp16_mx(self, name: str) -> mx.array:
-        """Get a tensor as an MLX FP16 array (no Marlin packing).
+    def get_tensor_fp16_torch(self, name: str) -> torch_typing.Tensor:
+        """Get a tensor as a PyTorch FP16 tensor (no Marlin packing).
 
         Useful for non-weight tensors like embeddings, norms, biases.
 
@@ -1381,18 +1428,18 @@ class GGUFReader:
             name: Tensor name from the GGUF file.
 
         Returns:
-            MLX float16 array.
+            PyTorch float16 tensor.
 
         Raises:
-            ImportError: If MLX is not installed.
+            ImportError: If PyTorch is not installed.
         """
-        if not HAS_MLX:
+        if not HAS_TORCH or torch is None:
             raise ImportError(
-                "get_tensor_fp16_mx() requires MLX. "
-                "Use get_tensor_fp16() for numpy arrays, or install MLX: pip install mlx"
+                "get_tensor_fp16_torch() requires PyTorch. "
+                "Use get_tensor_fp16() for numpy arrays, or install PyTorch: pip install torch"
             )
         fp32 = self.get_tensor_fp32(name)
-        return mx.array(fp32.astype(np.float16))
+        return torch.from_numpy(fp32.astype(np.float16).copy())
 
     def list_tensors(self) -> list[dict[str, Any]]:
         """List all tensors with their metadata.
@@ -1402,14 +1449,16 @@ class GGUFReader:
         """
         result = []
         for name, info in self.tensor_infos.items():
-            result.append({
-                "name": name,
-                "shape": info.shape,
-                "qtype": info.qtype,
-                "qtype_name": _qtype_name(info.qtype),
-                "n_elements": info.n_elements,
-                "data_size_bytes": info.data_size,
-            })
+            result.append(
+                {
+                    "name": name,
+                    "shape": info.shape,
+                    "qtype": info.qtype,
+                    "qtype_name": _qtype_name(info.qtype),
+                    "n_elements": info.n_elements,
+                    "data_size_bytes": info.data_size,
+                }
+            )
         return result
 
     def tensor_names(self) -> list[str]:
@@ -1482,7 +1531,7 @@ def load_gguf_model_np(
     Weight matrices (2D, quantized) are converted to Marlin FP4 packed format.
     Other tensors (embeddings, norms, biases) are returned as FP16 numpy arrays.
 
-    This function works without MLX installed.
+    This function works without PyTorch installed.
 
     Args:
         path: Path to the GGUF file.
@@ -1521,11 +1570,11 @@ def load_gguf_model(
     path: str | Path,
     group_size: int = DEFAULT_GROUP_SIZE,
     skip_patterns: list[str] | None = None,
-) -> dict[str, tuple[mx.array, mx.array] | mx.array]:
-    """Load all tensors from a GGUF file in Marlin-ready format as MLX arrays.
+) -> dict[str, tuple[torch_typing.Tensor, torch_typing.Tensor] | torch_typing.Tensor]:
+    """Load all tensors from a GGUF file in Marlin-ready format as PyTorch tensors.
 
     Weight matrices (2D, quantized) are converted to Marlin FP4 packed format.
-    Other tensors (embeddings, norms, biases) are returned as FP16 MLX arrays.
+    Other tensors (embeddings, norms, biases) are returned as FP16 PyTorch tensors.
 
     Args:
         path: Path to the GGUF file.
@@ -1535,22 +1584,22 @@ def load_gguf_model(
     Returns:
         Dict mapping tensor names to either:
           - (packed_weights, scales) tuple for 2D quantized weight matrices
-          - mx.array (FP16) for other tensors
+          - torch.Tensor (FP16) for other tensors
 
     Raises:
-        ImportError: If MLX is not installed.
+        ImportError: If PyTorch is not installed.
     """
-    if not HAS_MLX:
+    if not HAS_TORCH or torch is None:
         raise ImportError(
-            "load_gguf_model() requires MLX. "
-            "Use load_gguf_model_np() for numpy arrays, or install MLX: pip install mlx"
+            "load_gguf_model() requires PyTorch. "
+            "Use load_gguf_model_np() for numpy arrays, or install PyTorch: pip install torch"
         )
 
     if skip_patterns is None:
         skip_patterns = []
 
     reader = GGUFReader(path)
-    result: dict[str, tuple[mx.array, mx.array] | mx.array] = {}
+    result: dict[str, tuple[torch_typing.Tensor, torch_typing.Tensor] | torch_typing.Tensor] = {}
 
     for name in reader.tensor_names():
         if any(pat in name for pat in skip_patterns):
@@ -1564,6 +1613,6 @@ def load_gguf_model(
             result[name] = (packed, scales)
         else:
             # Everything else -> FP16
-            result[name] = reader.get_tensor_fp16_mx(name)
+            result[name] = reader.get_tensor_fp16_torch(name)
 
     return result

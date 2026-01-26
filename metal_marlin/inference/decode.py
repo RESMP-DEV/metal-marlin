@@ -20,19 +20,42 @@ Implementation notes:
 - Uses decode_gemv.metal kernels (TILE_M=1, TILE_N=256/512)
 - Fused attention avoids materialization of intermediate tensors
 - Quantized KV cache reduces memory bandwidth by 2-4x
+
+Backend: PyTorch MPS + Metal dispatch (no MLX dependency)
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from .._compat import mx, require_mlx
+import torch
+import torch.nn.functional as F
+
+from .._compat import HAS_TORCH
 
 if TYPE_CHECKING:
-    import mlx.core as mx
+    pass
+
+# ---------------------------------------------------------------------------
+# Backend availability
+# ---------------------------------------------------------------------------
+
+
+def _check_mps() -> bool:
+    """Check if MPS backend is available."""
+    return HAS_TORCH and torch.backends.mps.is_available()
+
+
+def require_mps(feature: str = "this operation") -> None:
+    """Raise RuntimeError if MPS is not available."""
+    if not _check_mps():
+        raise RuntimeError(
+            f"MPS backend is required for {feature}. "
+            "Ensure you're on Apple Silicon with PyTorch >= 2.0"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -106,26 +129,26 @@ class LayerWeights:
     """
 
     # Attention projections
-    q_proj_weight: Any  # mx.array
-    q_proj_scales: Any
-    k_proj_weight: Any
-    k_proj_scales: Any
-    v_proj_weight: Any
-    v_proj_scales: Any
-    o_proj_weight: Any
-    o_proj_scales: Any
+    q_proj_weight: torch.Tensor
+    q_proj_scales: torch.Tensor
+    k_proj_weight: torch.Tensor
+    k_proj_scales: torch.Tensor
+    v_proj_weight: torch.Tensor
+    v_proj_scales: torch.Tensor
+    o_proj_weight: torch.Tensor
+    o_proj_scales: torch.Tensor
 
     # MLP projections
-    gate_proj_weight: Any
-    gate_proj_scales: Any
-    up_proj_weight: Any
-    up_proj_scales: Any
-    down_proj_weight: Any
-    down_proj_scales: Any
+    gate_proj_weight: torch.Tensor
+    gate_proj_scales: torch.Tensor
+    up_proj_weight: torch.Tensor
+    up_proj_scales: torch.Tensor
+    down_proj_weight: torch.Tensor
+    down_proj_scales: torch.Tensor
 
     # Normalization
-    input_layernorm_weight: Any
-    post_attention_layernorm_weight: Any
+    input_layernorm_weight: torch.Tensor
+    post_attention_layernorm_weight: torch.Tensor
 
 
 @dataclass
@@ -174,11 +197,13 @@ class DecodeState:
         self,
         config: DecodeConfig,
         layer_weights: list[LayerWeights],
+        device: str = "mps",
     ) -> None:
-        require_mlx("DecodeState")
+        require_mps("DecodeState")
 
         self.config = config
         self.layer_weights = layer_weights
+        self.device = device
 
         # Pre-allocate persistent buffers if enabled
         if config.persistent_buffers:
@@ -189,7 +214,7 @@ class DecodeState:
             self._mlp_buffer = None
 
         # KV cache quantization state
-        self._kv_scales: list[tuple[Any, Any]] = []  # [(k_scale, v_scale), ...]
+        self._kv_scales: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def _init_persistent_buffers(self) -> None:
         """Initialize persistent buffers for decode."""
@@ -198,30 +223,30 @@ class DecodeState:
         assert cfg.num_kv_heads is not None
 
         # QKV output buffer: [1, num_heads * head_dim + 2 * num_kv_heads * head_dim]
-        qkv_dim = (
-            cfg.num_heads * cfg.head_dim + 2 * cfg.num_kv_heads * cfg.head_dim
-        )
-        self._qkv_buffer = mx.zeros((1, 1, qkv_dim), dtype=mx.bfloat16)
+        qkv_dim = cfg.num_heads * cfg.head_dim + 2 * cfg.num_kv_heads * cfg.head_dim
+        self._qkv_buffer = torch.zeros((1, 1, qkv_dim), dtype=torch.bfloat16, device=self.device)
 
         # Attention output buffer: [1, 1, hidden_size]
-        self._attn_out_buffer = mx.zeros((1, 1, cfg.hidden_size), dtype=mx.bfloat16)
+        self._attn_out_buffer = torch.zeros(
+            (1, 1, cfg.hidden_size), dtype=torch.bfloat16, device=self.device
+        )
 
         # MLP intermediate buffer: [1, 1, intermediate_size]
         assert cfg.intermediate_size is not None
-        self._mlp_buffer = mx.zeros(
-            (1, 1, cfg.intermediate_size), dtype=mx.bfloat16
+        self._mlp_buffer = torch.zeros(
+            (1, 1, cfg.intermediate_size), dtype=torch.bfloat16, device=self.device
         )
 
     @property
-    def qkv_buffer(self) -> Any:
+    def qkv_buffer(self) -> torch.Tensor | None:
         return self._qkv_buffer
 
     @property
-    def attn_out_buffer(self) -> Any:
+    def attn_out_buffer(self) -> torch.Tensor | None:
         return self._attn_out_buffer
 
     @property
-    def mlp_buffer(self) -> Any:
+    def mlp_buffer(self) -> torch.Tensor | None:
         return self._mlp_buffer
 
 
@@ -460,80 +485,10 @@ _QUANTIZED_KV_ATTENTION_SOURCE = """
 # Kernel dispatch functions
 # ---------------------------------------------------------------------------
 
-# Cached kernel objects
+# Cached kernel objects (for future Metal kernel dispatch)
 _decode_gemv_kernel: Any = None
 _fused_qkv_kernel: Any = None
 _quantized_kv_attention_kernel: Any = None
-
-
-def _get_decode_gemv_kernel() -> Any:
-    """Get or create the decode GEMV kernel."""
-    global _decode_gemv_kernel
-    require_mlx("decode_gemv kernel")
-
-    if _decode_gemv_kernel is None:
-        # Read from compiled Metal shader
-        shader_path = Path(__file__).parent.parent / "src" / "decode_gemv.metal"
-        if shader_path.exists():
-            with open(shader_path) as f:
-                source = f.read()
-        else:
-            # Fallback to inline source
-            source = """
-            uint col = threadgroup_position_in_grid.x * 256 + thread_position_in_threadgroup.x * 2;
-            if (col >= N) return;
-
-            float acc0 = 0.0f, acc1 = 0.0f;
-            for (uint k = 0; k < K; k += 8) {
-                uint pack_idx = k / 8;
-                uint group_idx = k / GROUP_SIZE;
-
-                half a0 = A[k], a1 = A[k+1], a2 = A[k+2], a3 = A[k+3];
-                half a4 = A[k+4], a5 = A[k+5], a6 = A[k+6], a7 = A[k+7];
-
-                uint packed0 = B[pack_idx * N + col];
-                half scale0 = scales[group_idx * N + col];
-                float fs0 = (float)scale0;
-
-                acc0 += (float)a0 * (float)dequant_fp4_scaled((packed0 >> 0) & 0xF, fs0);
-                acc0 += (float)a1 * (float)dequant_fp4_scaled((packed0 >> 4) & 0xF, fs0);
-                acc0 += (float)a2 * (float)dequant_fp4_scaled((packed0 >> 8) & 0xF, fs0);
-                acc0 += (float)a3 * (float)dequant_fp4_scaled((packed0 >> 12) & 0xF, fs0);
-                acc0 += (float)a4 * (float)dequant_fp4_scaled((packed0 >> 16) & 0xF, fs0);
-                acc0 += (float)a5 * (float)dequant_fp4_scaled((packed0 >> 20) & 0xF, fs0);
-                acc0 += (float)a6 * (float)dequant_fp4_scaled((packed0 >> 24) & 0xF, fs0);
-                acc0 += (float)a7 * (float)dequant_fp4_scaled((packed0 >> 28) & 0xF, fs0);
-
-                if (col + 1 < N) {
-                    uint packed1 = B[pack_idx * N + col + 1];
-                    half scale1 = scales[group_idx * N + col + 1];
-                    float fs1 = (float)scale1;
-
-                    acc1 += (float)a0 * (float)dequant_fp4_scaled((packed1 >> 0) & 0xF, fs1);
-                    acc1 += (float)a1 * (float)dequant_fp4_scaled((packed1 >> 4) & 0xF, fs1);
-                    acc1 += (float)a2 * (float)dequant_fp4_scaled((packed1 >> 8) & 0xF, fs1);
-                    acc1 += (float)a3 * (float)dequant_fp4_scaled((packed1 >> 12) & 0xF, fs1);
-                    acc1 += (float)a4 * (float)dequant_fp4_scaled((packed1 >> 16) & 0xF, fs1);
-                    acc1 += (float)a5 * (float)dequant_fp4_scaled((packed1 >> 20) & 0xF, fs1);
-                    acc1 += (float)a6 * (float)dequant_fp4_scaled((packed1 >> 24) & 0xF, fs1);
-                    acc1 += (float)a7 * (float)dequant_fp4_scaled((packed1 >> 28) & 0xF, fs1);
-                }
-            }
-
-            out[col] = half(acc0);
-            if (col + 1 < N) out[col + 1] = half(acc1);
-            """
-
-        _decode_gemv_kernel = mx.fast.metal_kernel(
-            name="decode_gemv_fp4",
-            input_names=["A", "B", "scales"],
-            output_names=["out"],
-            source=source,
-            header=_DECODE_GEMV_HEADER,
-            ensure_row_contiguous=True,
-        )
-
-    return _decode_gemv_kernel
 
 
 def select_decode_kernel(M: int, N: int, K: int) -> str:
@@ -569,15 +524,117 @@ def select_decode_kernel(M: int, N: int, K: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Quantized linear operation (PyTorch implementation)
+# ---------------------------------------------------------------------------
+
+
+def quantized_linear_torch(
+    x: torch.Tensor,
+    weight_packed: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    """FP4 quantized linear layer using PyTorch.
+
+    This is a reference implementation. For production, use Metal dispatch.
+
+    Args:
+        x: Input tensor [batch, in_features], fp16/bf16
+        weight_packed: Packed FP4 weights [in_features//8, out_features], uint32
+        scales: Per-group scales [in_features//group_size, out_features], fp16
+        group_size: Quantization group size
+
+    Returns:
+        Output tensor [batch, out_features]
+    """
+    # For now, use a simple dequantize-then-matmul approach
+    # A proper implementation would use Metal kernels
+    K_packed, N = weight_packed.shape
+    K = K_packed * 8
+
+    # Dequantize weights
+    weight_dequant = _dequantize_fp4_torch(weight_packed, scales, K, N, group_size)
+
+    # Matmul
+    return x @ weight_dequant
+
+
+def _dequantize_fp4_torch(
+    packed: torch.Tensor,
+    scales: torch.Tensor,
+    K: int,
+    N: int,
+    group_size: int,
+) -> torch.Tensor:
+    """Dequantize FP4 packed weights to fp16.
+
+    Args:
+        packed: [K//8, N] uint32, each holds 8 FP4 values
+        scales: [K//group_size, N] fp16
+        K: Original K dimension
+        N: Output dimension
+        group_size: Quantization group size
+
+    Returns:
+        [K, N] fp16 tensor
+    """
+    device = packed.device
+    dtype = scales.dtype
+
+    # FP4 E2M1 lookup table
+    # Values: 0, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, -0, -0.25, -0.5, -0.75, -1, -1.5, -2, -3
+    fp4_table = torch.tensor(
+        [
+            0.0,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            1.5,
+            2.0,
+            3.0,
+            -0.0,
+            -0.25,
+            -0.5,
+            -0.75,
+            -1.0,
+            -1.5,
+            -2.0,
+            -3.0,
+        ],
+        dtype=dtype,
+        device=device,
+    )
+
+    # Unpack: each uint32 -> 8 nibbles
+    K_packed = K // 8
+    output = torch.zeros((K, N), dtype=dtype, device=device)
+
+    for i in range(8):
+        nibbles = (packed >> (i * 4)) & 0xF  # [K//8, N]
+        values = fp4_table[nibbles.long()]  # [K//8, N]
+        output[i::8, :] = values
+
+    # Apply scales
+    num_groups = K // group_size
+    for g in range(num_groups):
+        k_start = g * group_size
+        k_end = k_start + group_size
+        output[k_start:k_end, :] *= scales[g : g + 1, :]
+
+    return output
+
+
+# ---------------------------------------------------------------------------
 # High-level decode functions
 # ---------------------------------------------------------------------------
 
 
 def fused_qkv_projection(
-    hidden_states: Any,  # mx.array [batch, 1, hidden_size]
+    hidden_states: torch.Tensor,
     layer: LayerWeights,
     config: DecodeConfig,
-) -> tuple[Any, Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Fused Q/K/V projection for decode phase.
 
     Computes all three projections in a single kernel launch to reduce
@@ -594,7 +651,7 @@ def fused_qkv_projection(
         - K: [batch, num_kv_heads, 1, head_dim]
         - V: [batch, num_kv_heads, 1, head_dim]
     """
-    require_mlx("fused_qkv_projection")
+    require_mps("fused_qkv_projection")
 
     batch_size = hidden_states.shape[0]
     hidden_size = config.hidden_size
@@ -605,51 +662,32 @@ def fused_qkv_projection(
     assert num_kv_heads is not None
     assert head_dim is not None
 
-    # For now, use separate projections (fused kernel to be implemented)
-    # Import kernels lazily to avoid circular imports
-    from ..metal_marlin import quantized_linear
-
     # Flatten to [batch, hidden_size]
     h = hidden_states.reshape(batch_size, hidden_size)
 
-    # Separate projections
-    q = quantized_linear(
-        h,
-        layer.q_proj_weight,
-        layer.q_proj_scales,
-        config.group_size,
-    )
-    k = quantized_linear(
-        h,
-        layer.k_proj_weight,
-        layer.k_proj_scales,
-        config.group_size,
-    )
-    v = quantized_linear(
-        h,
-        layer.v_proj_weight,
-        layer.v_proj_scales,
-        config.group_size,
-    )
+    # Separate projections using PyTorch
+    q = quantized_linear_torch(h, layer.q_proj_weight, layer.q_proj_scales, config.group_size)
+    k = quantized_linear_torch(h, layer.k_proj_weight, layer.k_proj_scales, config.group_size)
+    v = quantized_linear_torch(h, layer.v_proj_weight, layer.v_proj_scales, config.group_size)
 
     # Reshape to attention format
-    q = q.reshape(batch_size, 1, num_heads, head_dim).transpose(0, 2, 1, 3)
-    k = k.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
-    v = v.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+    q = q.reshape(batch_size, 1, num_heads, head_dim).transpose(1, 2)
+    k = k.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(1, 2)
+    v = v.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(1, 2)
 
     return q, k, v
 
 
 def quantized_kv_attention(
-    q: Any,  # [batch, num_heads, 1, head_dim]
-    k_cache: Any,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
-    v_cache: Any,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
-    k_scales: Any,  # [batch, num_kv_heads, seq_len, 1]
-    v_scales: Any,  # [batch, num_kv_heads, seq_len, 1]
+    q: torch.Tensor,  # [batch, num_heads, 1, head_dim]
+    k_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
+    v_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
+    k_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, 1]
+    v_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, 1]
     num_heads: int,
     num_kv_heads: int,
-    attention_mask: Any | None = None,
-) -> Any:
+    attention_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
     """Scaled dot-product attention with quantized KV cache.
 
     Performs fused attention computation directly on FP8/INT8 quantized
@@ -672,62 +710,62 @@ def quantized_kv_attention(
     Returns:
         Attention output [batch, num_heads, 1, head_dim].
     """
-    require_mlx("quantized_kv_attention")
+    require_mps("quantized_kv_attention")
 
-    q.shape[0]
     head_dim = q.shape[3]
-    k_cache.shape[2]
 
-    # Dequantize K and V (for now - fused kernel to be implemented)
+    # Dequantize K and V
     # FP8 E4M3 simulated: value = (quant - 128) / 127 * 448 * scale
-    k_dequant = (k_cache.astype(mx.float32) - 128.0) / 127.0 * 448.0 * k_scales
-    v_dequant = (v_cache.astype(mx.float32) - 128.0) / 127.0 * 448.0 * v_scales
+    k_dequant = (k_cache.float() - 128.0) / 127.0 * 448.0 * k_scales
+    v_dequant = (v_cache.float() - 128.0) / 127.0 * 448.0 * v_scales
 
-    k_dequant = k_dequant.astype(mx.bfloat16)
-    v_dequant = v_dequant.astype(mx.bfloat16)
+    k_dequant = k_dequant.to(torch.bfloat16)
+    v_dequant = v_dequant.to(torch.bfloat16)
 
     # Expand K/V for GQA if needed
     if num_kv_heads < num_heads:
         repeat_factor = num_heads // num_kv_heads
-        k_dequant = mx.repeat(k_dequant, repeat_factor, axis=1)
-        v_dequant = mx.repeat(v_dequant, repeat_factor, axis=1)
+        k_dequant = k_dequant.repeat_interleave(repeat_factor, dim=1)
+        v_dequant = v_dequant.repeat_interleave(repeat_factor, dim=1)
 
     # Scaled dot-product attention
     scale = 1.0 / math.sqrt(head_dim)
-    attn_weights = (q @ k_dequant.transpose(0, 1, 3, 2)) * scale
+    attn_weights = (q @ k_dequant.transpose(-2, -1)) * scale
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
-    attn_weights = mx.softmax(attn_weights, axis=-1)
+    attn_weights = F.softmax(attn_weights, dim=-1)
     attn_output = attn_weights @ v_dequant
 
     return attn_output
 
 
 def _apply_rope(
-    q: Any,  # [batch, num_heads, seq_len, head_dim]
-    k: Any,  # [batch, num_kv_heads, seq_len, head_dim]
+    q: torch.Tensor,  # [batch, num_heads, seq_len, head_dim]
+    k: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim]
     position: int,
     rope_theta: float = 10000.0,
-) -> tuple[Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply Rotary Position Embedding to Q and K."""
-    require_mlx("_apply_rope")
+    require_mps("_apply_rope")
 
     head_dim = q.shape[3]
     seq_len = q.shape[2]
+    device = q.device
+    dtype = q.dtype
 
     # Compute position indices
-    positions = mx.arange(position, position + seq_len, dtype=mx.float32)
+    positions = torch.arange(position, position + seq_len, dtype=torch.float32, device=device)
 
     # Compute inverse frequencies
-    dims = mx.arange(0, head_dim, 2, dtype=mx.float32)
+    dims = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
     inv_freq = 1.0 / (rope_theta ** (dims / head_dim))
 
     # Compute angles
-    freqs = mx.outer(positions, inv_freq)
-    cos = mx.cos(freqs)[None, None, :, :]
-    sin = mx.sin(freqs)[None, None, :, :]
+    freqs = torch.outer(positions, inv_freq)
+    cos = torch.cos(freqs)[None, None, :, :].to(dtype)
+    sin = torch.sin(freqs)[None, None, :, :].to(dtype)
 
     # Apply rotation
     q_even, q_odd = q[..., ::2], q[..., 1::2]
@@ -739,52 +777,49 @@ def _apply_rope(
     k_rotated_odd = k_odd * cos + k_even * sin
 
     # Interleave back
-    q_rotated = mx.stack([q_rotated_even, q_rotated_odd], axis=-1).reshape(q.shape)
-    k_rotated = mx.stack([k_rotated_even, k_rotated_odd], axis=-1).reshape(k.shape)
+    q_rotated = torch.stack([q_rotated_even, q_rotated_odd], dim=-1).reshape(q.shape)
+    k_rotated = torch.stack([k_rotated_even, k_rotated_odd], dim=-1).reshape(k.shape)
 
     return q_rotated, k_rotated
 
 
-def _rms_norm(x: Any, weight: Any, eps: float = 1e-6) -> Any:
+def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """RMS normalization."""
-    variance = mx.mean(x**2, axis=-1, keepdims=True)
-    x_normed = x * mx.rsqrt(variance + eps)
+    variance = torch.mean(x**2, dim=-1, keepdim=True)
+    x_normed = x * torch.rsqrt(variance + eps)
     return weight * x_normed
 
 
 def _mlp_forward(
-    hidden_states: Any,
-    gate_weight: Any,
-    gate_scales: Any,
-    up_weight: Any,
-    up_scales: Any,
-    down_weight: Any,
-    down_scales: Any,
+    hidden_states: torch.Tensor,
+    gate_weight: torch.Tensor,
+    gate_scales: torch.Tensor,
+    up_weight: torch.Tensor,
+    up_scales: torch.Tensor,
+    down_weight: torch.Tensor,
+    down_scales: torch.Tensor,
     group_size: int,
-) -> Any:
+) -> torch.Tensor:
     """SwiGLU MLP forward pass."""
-    require_mlx("_mlp_forward")
-    import mlx.nn as nn
+    require_mps("_mlp_forward")
 
-    from ..metal_marlin import quantized_linear
-
-    gate = quantized_linear(hidden_states, gate_weight, gate_scales, group_size)
-    up = quantized_linear(hidden_states, up_weight, up_scales, group_size)
-    hidden = nn.silu(gate) * up
-    return quantized_linear(hidden, down_weight, down_scales, group_size)
+    gate = quantized_linear_torch(hidden_states, gate_weight, gate_scales, group_size)
+    up = quantized_linear_torch(hidden_states, up_weight, up_scales, group_size)
+    hidden = F.silu(gate) * up
+    return quantized_linear_torch(hidden, down_weight, down_scales, group_size)
 
 
 def persistent_decode_step(
-    hidden_states: Any,  # [batch, 1, hidden_size]
+    hidden_states: torch.Tensor,  # [batch, 1, hidden_size]
     state: DecodeState,
     layer_idx: int,
-    k_cache: Any,  # [batch, num_kv_heads, seq_len, head_dim]
-    v_cache: Any,  # [batch, num_kv_heads, seq_len, head_dim]
+    k_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim]
+    v_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim]
     position: int,
-    attention_mask: Any | None = None,
+    attention_mask: torch.Tensor | None = None,
     rope_theta: float = 10000.0,
     rms_norm_eps: float = 1e-6,
-) -> tuple[Any, Any, Any]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single decode step for one transformer layer.
 
     Optimized for M=1 decode with:
@@ -810,9 +845,7 @@ def persistent_decode_step(
         - new_k: New key to append to cache [batch, num_kv_heads, 1, head_dim]
         - new_v: New value to append to cache [batch, num_kv_heads, 1, head_dim]
     """
-    require_mlx("persistent_decode_step")
-
-    from ..metal_marlin import quantized_linear
+    require_mps("persistent_decode_step")
 
     config = state.config
     layer = state.layer_weights[layer_idx]
@@ -829,9 +862,7 @@ def persistent_decode_step(
     residual = hidden_states
 
     # Input LayerNorm
-    hidden_states = _rms_norm(
-        hidden_states, layer.input_layernorm_weight, rms_norm_eps
-    )
+    hidden_states = _rms_norm(hidden_states, layer.input_layernorm_weight, rms_norm_eps)
 
     # QKV Projections (fused when enabled)
     if config.use_fused_attention:
@@ -839,19 +870,13 @@ def persistent_decode_step(
     else:
         h = hidden_states.reshape(batch_size, config.hidden_size)
 
-        q = quantized_linear(
-            h, layer.q_proj_weight, layer.q_proj_scales, config.group_size
-        )
-        k = quantized_linear(
-            h, layer.k_proj_weight, layer.k_proj_scales, config.group_size
-        )
-        v = quantized_linear(
-            h, layer.v_proj_weight, layer.v_proj_scales, config.group_size
-        )
+        q = quantized_linear_torch(h, layer.q_proj_weight, layer.q_proj_scales, config.group_size)
+        k = quantized_linear_torch(h, layer.k_proj_weight, layer.k_proj_scales, config.group_size)
+        v = quantized_linear_torch(h, layer.v_proj_weight, layer.v_proj_scales, config.group_size)
 
-        q = q.reshape(batch_size, 1, num_heads, head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
+        q = q.reshape(batch_size, 1, num_heads, head_dim).transpose(1, 2)
+        k = k.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(1, 2)
+        v = v.reshape(batch_size, 1, num_kv_heads, head_dim).transpose(1, 2)
 
     # Apply RoPE
     q, k = _apply_rope(q, k, position, rope_theta)
@@ -866,12 +891,12 @@ def persistent_decode_step(
         if config.kv_cache_dtype in ("fp8", "int8"):
             # Quantized attention path (to be implemented)
             # For now, fall back to dequantized attention
-            k_full = mx.concatenate([k_cache, k], axis=2)
-            v_full = mx.concatenate([v_cache, v], axis=2)
+            k_full = torch.cat([k_cache, k], dim=2)
+            v_full = torch.cat([v_cache, v], dim=2)
         else:
             # Standard attention
-            k_full = mx.concatenate([k_cache, k], axis=2)
-            v_full = mx.concatenate([v_cache, v], axis=2)
+            k_full = torch.cat([k_cache, k], dim=2)
+            v_full = torch.cat([v_cache, v], dim=2)
     else:
         k_full = k
         v_full = v
@@ -879,25 +904,23 @@ def persistent_decode_step(
     # Expand K/V for GQA
     if num_kv_heads < num_heads:
         repeat_factor = num_heads // num_kv_heads
-        k_full = mx.repeat(k_full, repeat_factor, axis=1)
-        v_full = mx.repeat(v_full, repeat_factor, axis=1)
+        k_full = k_full.repeat_interleave(repeat_factor, dim=1)
+        v_full = v_full.repeat_interleave(repeat_factor, dim=1)
 
     # Scaled dot-product attention
     scale = 1.0 / math.sqrt(head_dim)
-    attn_weights = (q @ k_full.transpose(0, 1, 3, 2)) * scale
+    attn_weights = (q @ k_full.transpose(-2, -1)) * scale
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
-    attn_weights = mx.softmax(attn_weights, axis=-1)
+    attn_weights = F.softmax(attn_weights, dim=-1)
     attn_output = attn_weights @ v_full
 
     # Reshape and project output
-    attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
-        batch_size, 1, num_heads * head_dim
-    )
+    attn_output = attn_output.transpose(1, 2).reshape(batch_size, 1, num_heads * head_dim)
 
-    hidden_states = quantized_linear(
+    hidden_states = quantized_linear_torch(
         attn_output.reshape(batch_size, num_heads * head_dim),
         layer.o_proj_weight,
         layer.o_proj_scales,
@@ -911,9 +934,7 @@ def persistent_decode_step(
     residual = hidden_states
 
     # Post-attention LayerNorm
-    hidden_states = _rms_norm(
-        hidden_states, layer.post_attention_layernorm_weight, rms_norm_eps
-    )
+    hidden_states = _rms_norm(hidden_states, layer.post_attention_layernorm_weight, rms_norm_eps)
 
     # MLP forward
     h = hidden_states.reshape(batch_size, config.hidden_size)

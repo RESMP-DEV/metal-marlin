@@ -48,8 +48,7 @@ class TestMemoryAuditor:
         assert auditor.shader_dir == SHADER_DIR
 
     @pytest.mark.skipif(
-        not (SHADER_DIR / "dequant.metal").exists(),
-        reason="Shader files not found"
+        not (SHADER_DIR / "dequant.metal").exists(), reason="Shader files not found"
     )
     def test_analyze_dequant_shader(self, auditor):
         """Test analysis of dequant.metal."""
@@ -64,8 +63,7 @@ class TestMemoryAuditor:
         assert any("dequant" in k for k in kernel_names_lower)
 
     @pytest.mark.skipif(
-        not (SHADER_DIR / "attention.metal").exists(),
-        reason="Shader files not found"
+        not (SHADER_DIR / "attention.metal").exists(), reason="Shader files not found"
     )
     def test_analyze_attention_shader(self, auditor):
         """Test analysis of attention.metal."""
@@ -78,8 +76,7 @@ class TestMemoryAuditor:
         assert any("attention" in k.lower() for k in analysis.kernel_names)
 
     @pytest.mark.skipif(
-        not (SHADER_DIR / "moe_router.metal").exists(),
-        reason="Shader files not found"
+        not (SHADER_DIR / "moe_router.metal").exists(), reason="Shader files not found"
     )
     def test_analyze_moe_router_shader(self, auditor):
         """Test analysis of moe_router.metal."""
@@ -98,10 +95,7 @@ class TestMemoryAuditor:
         assert len(analysis.warnings) > 0
         assert "not found" in analysis.warnings[0].lower()
 
-    @pytest.mark.skipif(
-        not SHADER_DIR.exists(),
-        reason="Shader directory not found"
-    )
+    @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_audit_priority_kernels(self, auditor):
         """Test auditing priority kernels."""
         report = auditor.audit_priority_kernels()
@@ -126,16 +120,31 @@ class TestShaderAnalysis:
         analysis = ShaderAnalysis(file_path=Path("test.metal"))
         analysis.accesses = [
             MemoryAccess(
-                line_number=1, code="", buffer_name="a", index_expr="",
-                pattern=AccessPattern.STRIDED, severity="critical", suggestion=""
+                line_number=1,
+                code="",
+                buffer_name="a",
+                index_expr="",
+                pattern=AccessPattern.STRIDED,
+                severity="critical",
+                suggestion="",
             ),
             MemoryAccess(
-                line_number=2, code="", buffer_name="b", index_expr="",
-                pattern=AccessPattern.STRIDED, severity="warning", suggestion=""
+                line_number=2,
+                code="",
+                buffer_name="b",
+                index_expr="",
+                pattern=AccessPattern.STRIDED,
+                severity="warning",
+                suggestion="",
             ),
             MemoryAccess(
-                line_number=3, code="", buffer_name="c", index_expr="",
-                pattern=AccessPattern.SEQUENTIAL, severity="critical", suggestion=""
+                line_number=3,
+                code="",
+                buffer_name="c",
+                index_expr="",
+                pattern=AccessPattern.SEQUENTIAL,
+                severity="critical",
+                suggestion="",
             ),
         ]
 
@@ -170,8 +179,10 @@ class TestPatternAnalysis:
         # Should mention K vector strided access
         issues = result["critical_issues"]
         assert len(issues) > 0
-        assert any("k" in issue["pattern"].lower() or "strided" in issue["pattern"].lower()
-                   for issue in issues)
+        assert any(
+            "k" in issue["pattern"].lower() or "strided" in issue["pattern"].lower()
+            for issue in issues
+        )
 
     def test_moe_analysis_structure(self):
         """Test MoE analysis returns expected structure."""
@@ -188,10 +199,7 @@ class TestPatternAnalysis:
 class TestReportGeneration:
     """Test report generation."""
 
-    @pytest.mark.skipif(
-        not SHADER_DIR.exists(),
-        reason="Shader directory not found"
-    )
+    @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_generate_report(self):
         """Test full report generation."""
         report = generate_full_report()
@@ -200,10 +208,7 @@ class TestReportGeneration:
         assert len(report) > 0
         assert "Memory Access Audit" in report
 
-    @pytest.mark.skipif(
-        not SHADER_DIR.exists(),
-        reason="Shader directory not found"
-    )
+    @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_generate_report_to_file(self, tmp_path):
         """Test report written to file."""
         output_path = tmp_path / "audit_report.txt"

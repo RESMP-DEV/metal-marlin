@@ -432,11 +432,24 @@ class AdaptivePrefetcher:
         return sum(t.size_bytes for t in self._all_tensors) / (1024**3)
 
     def _load_tensor(self, metadata: TensorMetadata) -> tuple[str, np.ndarray]:
-        """Load a single tensor from disk."""
+        """Load a single tensor from disk (with bfloat16 handling)."""
         from safetensors import safe_open
 
-        with safe_open(str(metadata.file_path), framework="numpy") as f:
-            tensor = f.get_tensor(metadata.name)
+        try:
+            with safe_open(str(metadata.file_path), framework="numpy") as f:
+                tensor = f.get_tensor(metadata.name)
+        except TypeError as e:
+            if "bfloat16" in str(e):
+                # bfloat16 not supported by numpy, load via PyTorch and convert
+                with safe_open(str(metadata.file_path), framework="pt") as f:
+                    tensor = f.get_tensor(metadata.name).float().numpy()
+            else:
+                raise
+
+        # Ensure float32 for any fp16/bf16
+        if tensor.dtype == np.float16:
+            tensor = tensor.astype(np.float32)
+
         return metadata.name, tensor
 
     def _compute_batch(self, start_idx: int) -> list[TensorMetadata]:
@@ -558,6 +571,7 @@ class AdaptivePrefetcher:
                     # Buffer empty - trigger prefetch and wait briefly
                     self._prefetch_event.set()
                     import time
+
                     time.sleep(0.1)
 
                     # Early exit check

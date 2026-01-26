@@ -458,7 +458,22 @@ def compute_model_sensitivity_profile(
                 if "weight" not in name.lower():
                     continue
 
-                tensor = f.get_tensor(name)
+                # Get tensor, handling bfloat16 conversion
+                try:
+                    tensor = f.get_tensor(name)
+                except TypeError as e:
+                    if "bfloat16" in str(e):
+                        # bfloat16 not supported by numpy, load as torch and convert
+                        from safetensors import safe_open as safe_open_torch
+
+                        with safe_open_torch(str(st_file), framework="pt") as f_pt:
+                            tensor = f_pt.get_tensor(name).float().numpy()
+                    else:
+                        raise
+
+                # Convert bfloat16 if loaded via workaround or other floats
+                if tensor.dtype == np.float16:
+                    tensor = tensor.astype(np.float32)
 
                 # Skip non-2D tensors
                 if tensor.ndim != 2:
@@ -561,7 +576,9 @@ def compute_model_sensitivity_profile(
 
         for sens in results.values():
             bit_counts[sens.recommended_bits] = bit_counts.get(sens.recommended_bits, 0) + 1
-            format_counts[sens.recommended_format] = format_counts.get(sens.recommended_format, 0) + 1
+            format_counts[sens.recommended_format] = (
+                format_counts.get(sens.recommended_format, 0) + 1
+            )
             if sens.metrics.get("needs_hadamard"):
                 hadamard_count += 1
 

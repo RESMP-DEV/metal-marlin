@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+import torch
 
-# Check if MLX is available
-try:
-    import mlx.core as mx
+# Check if MPS is available
+HAS_MPS = torch.backends.mps.is_available()
 
-    HAS_MLX = True
-except ImportError:
-    HAS_MLX = False
-
-pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
+pytestmark = pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 
 
 def hadamard_matrix_numpy(n: int) -> np.ndarray:
@@ -73,25 +69,21 @@ class TestHadamardTransformKernel:
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
-        x = mx.random.normal((batch, 32))
-        mx.eval(x)
+        x = torch.randn(batch, 32, device="mps")
 
         result = hadamard_transform(x, block_size=32, normalize=True)
-        mx.eval(result)
 
         assert result.shape == x.shape
-        assert result.dtype in (mx.bfloat16, mx.float16)
+        assert result.dtype == torch.float16
 
     def test_block_size_64(self):
         """Test Hadamard transform with block_size=64."""
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
-        x = mx.random.normal((batch, 64))
-        mx.eval(x)
+        x = torch.randn(batch, 64, device="mps")
 
         result = hadamard_transform(x, block_size=64, normalize=True)
-        mx.eval(result)
 
         assert result.shape == x.shape
 
@@ -100,11 +92,9 @@ class TestHadamardTransformKernel:
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
-        x = mx.random.normal((batch, 128))
-        mx.eval(x)
+        x = torch.randn(batch, 128, device="mps")
 
         result = hadamard_transform(x, block_size=128, normalize=True)
-        mx.eval(result)
 
         assert result.shape == x.shape
 
@@ -112,6 +102,7 @@ class TestHadamardTransformKernel:
         """Test accuracy of block_size=32 against numpy reference."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
         x_np = np.random.randn(batch, 32).astype(np.float32)
@@ -120,10 +111,9 @@ class TestHadamardTransformKernel:
         expected = hadamard_transform_numpy(x_np, normalize=True)
 
         # Metal kernel
-        x_mx = mx.array(x_np, dtype=mx.float16)
-        result = hadamard_transform(x_mx, block_size=32, normalize=True, dtype=mx.float16)
-        mx.eval(result)
-        result_np = np.array(result).astype(np.float32)
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform(x_torch, block_size=32, normalize=True)
+        result_np = result.cpu().float().numpy()
 
         # FP16 has limited precision
         np.testing.assert_allclose(result_np, expected, rtol=1e-2, atol=1e-2)
@@ -132,6 +122,7 @@ class TestHadamardTransformKernel:
         """Test accuracy of block_size=64 against numpy reference."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
         x_np = np.random.randn(batch, 64).astype(np.float32)
@@ -140,10 +131,9 @@ class TestHadamardTransformKernel:
         expected = hadamard_transform_numpy(x_np, normalize=True)
 
         # Metal kernel
-        x_mx = mx.array(x_np, dtype=mx.float16)
-        result = hadamard_transform(x_mx, block_size=64, normalize=True, dtype=mx.float16)
-        mx.eval(result)
-        result_np = np.array(result).astype(np.float32)
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform(x_torch, block_size=64, normalize=True)
+        result_np = result.cpu().float().numpy()
 
         np.testing.assert_allclose(result_np, expected, rtol=1e-2, atol=1e-2)
 
@@ -151,6 +141,7 @@ class TestHadamardTransformKernel:
         """Test accuracy of block_size=128 against numpy reference."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
         x_np = np.random.randn(batch, 128).astype(np.float32)
@@ -159,10 +150,9 @@ class TestHadamardTransformKernel:
         expected = hadamard_transform_numpy(x_np, normalize=True)
 
         # Metal kernel
-        x_mx = mx.array(x_np, dtype=mx.float16)
-        result = hadamard_transform(x_mx, block_size=128, normalize=True, dtype=mx.float16)
-        mx.eval(result)
-        result_np = np.array(result).astype(np.float32)
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform(x_torch, block_size=128, normalize=True)
+        result_np = result.cpu().float().numpy()
 
         np.testing.assert_allclose(result_np, expected, rtol=2e-2, atol=2e-2)
 
@@ -170,20 +160,17 @@ class TestHadamardTransformKernel:
         """Test that H @ H @ x = x (with normalized transforms)."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         batch = 8
-        x = mx.random.normal((batch, 64))
-        mx.eval(x)
+        x = torch.randn(batch, 64, device="mps")
 
         # Apply normalized Hadamard twice: H_norm @ H_norm @ x = x
         # because H_norm @ H_norm = (H/sqrt(n)) @ (H/sqrt(n)) = H@H / n = I
-        result1 = hadamard_transform(x, block_size=64, normalize=True, dtype=mx.float16)
-        mx.eval(result1)
+        result1 = hadamard_transform(x, block_size=64, normalize=True)
+        result2 = hadamard_transform(result1, block_size=64, normalize=True)
 
-        result2 = hadamard_transform(result1, block_size=64, normalize=True, dtype=mx.float16)
-        mx.eval(result2)
-
-        x_np = np.array(x.astype(mx.float32))
-        result_np = np.array(result2.astype(mx.float32))
+        x_np = x.cpu().float().numpy()
+        result_np = result2.cpu().float().numpy()
 
         np.testing.assert_allclose(result_np, x_np, rtol=5e-2, atol=5e-2)
 
@@ -191,22 +178,20 @@ class TestHadamardTransformKernel:
         """Test unnormalized Hadamard transform."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         batch = 4
-        x = mx.random.normal((batch, 64))
-        mx.eval(x)
+        x = torch.randn(batch, 64, device="mps")
 
         # Unnormalized
-        result_unnorm = hadamard_transform(x, block_size=64, normalize=False, dtype=mx.float16)
-        mx.eval(result_unnorm)
+        result_unnorm = hadamard_transform(x, block_size=64, normalize=False)
 
         # Normalized
-        result_norm = hadamard_transform(x, block_size=64, normalize=True, dtype=mx.float16)
-        mx.eval(result_norm)
+        result_norm = hadamard_transform(x, block_size=64, normalize=True)
 
         # Unnormalized = normalized * sqrt(block_size)
         scale = np.sqrt(64)
-        unnorm_np = np.array(result_unnorm.astype(mx.float32))
-        norm_np = np.array(result_norm.astype(mx.float32))
+        unnorm_np = result_unnorm.cpu().float().numpy()
+        norm_np = result_norm.cpu().float().numpy()
 
         np.testing.assert_allclose(unnorm_np, norm_np * scale, rtol=1e-2, atol=1e-2)
 
@@ -214,8 +199,7 @@ class TestHadamardTransformKernel:
         """Test that invalid block sizes raise errors."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((4, 64))
-        mx.eval(x)
+        x = torch.randn(4, 64, device="mps")
 
         with pytest.raises(ValueError, match="block_size must be"):
             hadamard_transform(x, block_size=48)
@@ -227,8 +211,7 @@ class TestHadamardTransformKernel:
         """Test that mismatched dimensions raise errors."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((4, 100))
-        mx.eval(x)
+        x = torch.randn(4, 100, device="mps")
 
         with pytest.raises(ValueError, match="must equal block_size"):
             hadamard_transform(x, block_size=64)
@@ -237,11 +220,9 @@ class TestHadamardTransformKernel:
         """Test with 3D input tensor."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((2, 8, 64))
-        mx.eval(x)
+        x = torch.randn(2, 8, 64, device="mps")
 
         result = hadamard_transform(x, block_size=64, normalize=True)
-        mx.eval(result)
 
         assert result.shape == x.shape
 
@@ -249,11 +230,9 @@ class TestHadamardTransformKernel:
         """Test with a single vector."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((1, 64))
-        mx.eval(x)
+        x = torch.randn(1, 64, device="mps")
 
         result = hadamard_transform(x, block_size=64, normalize=True)
-        mx.eval(result)
 
         assert result.shape == x.shape
 
@@ -262,55 +241,49 @@ class TestHadamardTransformKernel:
         from metal_marlin.kernels import hadamard_transform
 
         batch = 1024
-        x = mx.random.normal((batch, 64))
-        mx.eval(x)
+        x = torch.randn(batch, 64, device="mps")
 
         result = hadamard_transform(x, block_size=64, normalize=True)
-        mx.eval(result)
 
         assert result.shape == (batch, 64)
 
-    def test_dtype_float16(self):
-        """Test that float16 dtype is handled correctly."""
+    def test_dtype_float16_input(self):
+        """Test that float16 input is handled correctly."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((4, 64))
-        mx.eval(x)
+        x = torch.randn(4, 64, device="mps", dtype=torch.float16)
 
-        result = hadamard_transform(x, block_size=64, dtype=mx.float16)
-        mx.eval(result)
+        result = hadamard_transform(x, block_size=64)
 
-        assert result.dtype == mx.float16
+        assert result.dtype == torch.float16
 
-    def test_dtype_bfloat16(self):
-        """Test that bfloat16 dtype is handled correctly."""
+    def test_dtype_float32_input(self):
+        """Test that float32 input is converted to float16 for kernel."""
         from metal_marlin.kernels import hadamard_transform
 
-        x = mx.random.normal((4, 64))
-        mx.eval(x)
+        x = torch.randn(4, 64, device="mps", dtype=torch.float32)
 
-        result = hadamard_transform(x, block_size=64, dtype=mx.bfloat16)
-        mx.eval(result)
+        result = hadamard_transform(x, block_size=64)
 
-        assert result.dtype == mx.bfloat16
+        # Kernel internally converts to half
+        assert result.dtype == torch.float16
 
     def test_energy_preservation(self):
         """Test that total energy (Frobenius norm) is preserved."""
         from metal_marlin.kernels import hadamard_transform
 
+        torch.manual_seed(42)
         batch = 16
-        x = mx.random.normal((batch, 64))
-        mx.eval(x)
+        x = torch.randn(batch, 64, device="mps")
 
-        # Unnormalized transform preserves energy up to scaling
-        result = hadamard_transform(x, block_size=64, normalize=True, dtype=mx.float16)
-        mx.eval(result)
+        # Normalized transform preserves energy
+        result = hadamard_transform(x, block_size=64, normalize=True)
 
-        x_np = np.array(x.astype(mx.float32))
-        result_np = np.array(result.astype(mx.float32))
+        x_np = x.cpu().float().numpy()
+        result_np = result.cpu().float().numpy()
 
-        energy_before = np.sum(x_np ** 2)
-        energy_after = np.sum(result_np ** 2)
+        energy_before = np.sum(x_np**2)
+        energy_after = np.sum(result_np**2)
 
         # For normalized transform, energy is preserved
         np.testing.assert_allclose(energy_before, energy_after, rtol=5e-2)

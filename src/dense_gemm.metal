@@ -738,6 +738,103 @@ inline half gelu_half(half x) {
 }
 
 // ---------------------------------------------------------------------------
+// Tile loaders for fused gate*up kernel (64x64x32 tiling)
+// ---------------------------------------------------------------------------
+
+inline void load_A_tile_fused(
+    device const half* x,
+    threadgroup half (&A_tiles)[NUM_BUFFERS][DENSE_TILE_M][DENSE_TILE_K],
+    uint M, uint K,
+    uint tg_row, uint buf, uint k_block,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (DENSE_TILE_M * DENSE_TILE_K) / THREADS_PER_TG;
+    for (uint i = 0; i < elems_per_thread; ++i) {
+        uint flat_idx = thread_idx * elems_per_thread + i;
+        uint row = flat_idx / DENSE_TILE_K;
+        uint col = flat_idx % DENSE_TILE_K;
+        uint global_row = tg_row + row;
+        uint global_col = k_block + col;
+        half val = (global_row < M && global_col < K) ? x[global_row * K + global_col] : half(0.0h);
+        A_tiles[buf][row][col] = val;
+    }
+}
+
+inline void load_B_gate_tile_fused(
+    device const uint* W_gate,
+    device const half* scales_gate,
+    threadgroup half (&B_gate_tiles)[NUM_BUFFERS][DENSE_TILE_K][DENSE_TILE_N],
+    uint K, uint intermediate, uint group_size,
+    uint tg_col, uint buf, uint k_block,
+    uint k_packs, uint num_groups,
+    uint thread_idx
+) {
+    const uint packed_per_thread = (DENSE_TILE_K * DENSE_TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (DENSE_TILE_K / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (DENSE_TILE_K / FP4_PER_UINT);
+
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+
+        uint scale_k = global_k_base / group_size;
+        half s = (global_n < intermediate && global_k_base < K && scale_k < num_groups)
+                 ? scales_gate[scale_k * intermediate + global_n] : half(1.0h);
+
+        uint b_row = global_k_base / FP4_PER_UINT;
+        uint packed = (global_n < intermediate && b_row < k_packs && global_k_base < K)
+                      ? W_gate[b_row * intermediate + global_n] : 0u;
+
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        half vals[8];
+        unpack_fp4x8(packed, s, vals);
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < DENSE_TILE_K; ++v) {
+            if (n_idx < DENSE_TILE_N) {
+                B_gate_tiles[buf][tile_k_base + v][n_idx] = vals[v];
+            }
+        }
+    }
+}
+
+inline void load_B_up_tile_fused(
+    device const uint* W_up,
+    device const half* scales_up,
+    threadgroup half (&B_up_tiles)[NUM_BUFFERS][DENSE_TILE_K][DENSE_TILE_N],
+    uint K, uint intermediate, uint group_size,
+    uint tg_col, uint buf, uint k_block,
+    uint k_packs, uint num_groups,
+    uint thread_idx
+) {
+    const uint packed_per_thread = (DENSE_TILE_K * DENSE_TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (DENSE_TILE_K / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (DENSE_TILE_K / FP4_PER_UINT);
+
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+
+        uint scale_k = global_k_base / group_size;
+        half s = (global_n < intermediate && global_k_base < K && scale_k < num_groups)
+                 ? scales_up[scale_k * intermediate + global_n] : half(1.0h);
+
+        uint b_row = global_k_base / FP4_PER_UINT;
+        uint packed = (global_n < intermediate && b_row < k_packs && global_k_base < K)
+                      ? W_up[b_row * intermediate + global_n] : 0u;
+
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        half vals[8];
+        unpack_fp4x8(packed, s, vals);
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < DENSE_TILE_K; ++v) {
+            if (n_idx < DENSE_TILE_N) {
+                B_up_tiles[buf][tile_k_base + v][n_idx] = vals[v];
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // dense_fused_gate_up_fp4 - Fused gate*up with SiLU activation
 //
 // Computes: output = silu(x @ W_gate) * (x @ W_up)
@@ -794,82 +891,10 @@ kernel void dense_fused_gate_up_fp4(
     const uint num_groups = div_ceil(K, group_size);
     uint buf_compute = 0;
 
-    // Lambda-like inline functions for loading
-    auto load_A = [&](uint buf, uint k_block) {
-        const uint elems_per_thread = (DENSE_TILE_M * DENSE_TILE_K) / THREADS_PER_TG;
-        for (uint i = 0; i < elems_per_thread; ++i) {
-            uint flat_idx = thread_idx * elems_per_thread + i;
-            uint row = flat_idx / DENSE_TILE_K;
-            uint col = flat_idx % DENSE_TILE_K;
-            uint global_row = tg_row + row;
-            uint global_col = k_block + col;
-            half val = (global_row < M && global_col < K) ? x[global_row * K + global_col] : half(0.0h);
-            A_tiles[buf][row][col] = val;
-        }
-    };
-
-    auto load_B_gate = [&](uint buf, uint k_block) {
-        const uint packed_per_thread = (DENSE_TILE_K * DENSE_TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
-        for (uint i = 0; i < packed_per_thread; ++i) {
-            uint flat_packed_idx = thread_idx * packed_per_thread + i;
-            uint n_idx = flat_packed_idx / (DENSE_TILE_K / FP4_PER_UINT);
-            uint k_group_in_tile = flat_packed_idx % (DENSE_TILE_K / FP4_PER_UINT);
-
-            uint global_n = tg_col + n_idx;
-            uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
-
-            uint scale_k = global_k_base / group_size;
-            half s = (global_n < intermediate && global_k_base < K && scale_k < num_groups)
-                     ? scales_gate[scale_k * intermediate + global_n] : half(1.0h);
-
-            uint b_row = global_k_base / FP4_PER_UINT;
-            uint packed = (global_n < intermediate && b_row < k_packs && global_k_base < K)
-                          ? W_gate[b_row * intermediate + global_n] : 0u;
-
-            uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
-            half vals[8];
-            unpack_fp4x8(packed, s, vals);
-            for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < DENSE_TILE_K; ++v) {
-                if (n_idx < DENSE_TILE_N) {
-                    B_gate_tiles[buf][tile_k_base + v][n_idx] = vals[v];
-                }
-            }
-        }
-    };
-
-    auto load_B_up = [&](uint buf, uint k_block) {
-        const uint packed_per_thread = (DENSE_TILE_K * DENSE_TILE_N) / (THREADS_PER_TG * FP4_PER_UINT);
-        for (uint i = 0; i < packed_per_thread; ++i) {
-            uint flat_packed_idx = thread_idx * packed_per_thread + i;
-            uint n_idx = flat_packed_idx / (DENSE_TILE_K / FP4_PER_UINT);
-            uint k_group_in_tile = flat_packed_idx % (DENSE_TILE_K / FP4_PER_UINT);
-
-            uint global_n = tg_col + n_idx;
-            uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
-
-            uint scale_k = global_k_base / group_size;
-            half s = (global_n < intermediate && global_k_base < K && scale_k < num_groups)
-                     ? scales_up[scale_k * intermediate + global_n] : half(1.0h);
-
-            uint b_row = global_k_base / FP4_PER_UINT;
-            uint packed = (global_n < intermediate && b_row < k_packs && global_k_base < K)
-                          ? W_up[b_row * intermediate + global_n] : 0u;
-
-            uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
-            half vals[8];
-            unpack_fp4x8(packed, s, vals);
-            for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < DENSE_TILE_K; ++v) {
-                if (n_idx < DENSE_TILE_N) {
-                    B_up_tiles[buf][tile_k_base + v][n_idx] = vals[v];
-                }
-            }
-        }
-    };
-
     // Prologue
-    load_A(0, 0);
-    load_B_gate(0, 0);
-    load_B_up(0, 0);
+    load_A_tile_fused(x, A_tiles, M, K, tg_row, 0, 0, thread_idx);
+    load_B_gate_tile_fused(W_gate, scales_gate, B_gate_tiles, K, intermediate, group_size, tg_col, 0, 0, k_packs, num_groups, thread_idx);
+    load_B_up_tile_fused(W_up, scales_up, B_up_tiles, K, intermediate, group_size, tg_col, 0, 0, k_packs, num_groups, thread_idx);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Main loop
@@ -879,9 +904,9 @@ kernel void dense_fused_gate_up_fp4(
         uint buf_load = 1 - buf_compute;
 
         if (next_k < K) {
-            load_A(buf_load, next_k);
-            load_B_gate(buf_load, next_k);
-            load_B_up(buf_load, next_k);
+            load_A_tile_fused(x, A_tiles, M, K, tg_row, buf_load, next_k, thread_idx);
+            load_B_gate_tile_fused(W_gate, scales_gate, B_gate_tiles, K, intermediate, group_size, tg_col, buf_load, next_k, k_packs, num_groups, thread_idx);
+            load_B_up_tile_fused(W_up, scales_up, B_up_tiles, K, intermediate, group_size, tg_col, buf_load, next_k, k_packs, num_groups, thread_idx);
         }
 
         // Compute both gate and up projections

@@ -227,10 +227,13 @@ inline void moe_compute_from_tiles(
 }
 
 // Store results with expert probability weighting (fused multiply-add)
+// Note: staging must be passed from the kernel since threadgroup vars cannot be
+// declared in non-kernel functions.
 inline void moe_store_results_weighted(
     thread simdgroup_matrix<half, 8, 8> acc[MOE_SG_M_TILES][MOE_SG_N_TILES],
     device half* output,
     device const half* expert_probs,  // [batch, top_k]
+    threadgroup half (&staging)[MOE_SIMDGROUPS][MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8],
     uint batch_size, uint out_dim, uint top_k,
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
@@ -245,10 +248,7 @@ inline void moe_store_results_weighted(
     uint base_row = tg_row + sg_row_offset;
     uint base_col = tg_col + sg_col_offset;
 
-    // Use staging buffer for boundary handling and probability weighting
-    threadgroup half staging[MOE_SIMDGROUPS][sg_tile_rows][sg_tile_cols];
-
-    // Store all acc tiles to staging
+    // Store all acc tiles to staging (passed from kernel)
     for (uint mi = 0; mi < MOE_SG_M_TILES; ++mi) {
         for (uint ni = 0; ni < MOE_SG_N_TILES; ++ni) {
             simdgroup_store(acc[mi][ni],
@@ -319,6 +319,8 @@ kernel void moe_expert_gemm_fp4(
 ) {
     threadgroup half A_tiles[MOE_NUM_BUFFERS][MOE_TILE_M][MOE_TILE_K];
     threadgroup half B_tiles[MOE_NUM_BUFFERS][MOE_TILE_K][MOE_TILE_N];
+    // Staging buffer for store_results_weighted (must be in kernel, not helper)
+    threadgroup half result_staging[MOE_SIMDGROUPS][MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
 
     const uint tg_row = tgid.y * MOE_TILE_M;  // Token batch offset
     const uint tg_col = tgid.x * MOE_TILE_N;  // Output dimension offset
@@ -400,7 +402,7 @@ kernel void moe_expert_gemm_fp4(
         }
 
         // Store results with expert probability weighting
-        moe_store_results_weighted(acc, output, expert_probs,
+        moe_store_results_weighted(acc, output, expert_probs, result_staging,
                                    params.batch_size, params.out_dim, params.top_k,
                                    tg_row, tg_col,
                                    sg_row_offset, sg_col_offset,
@@ -448,8 +450,6 @@ kernel void moe_expert_gemm_fp4_grouped(
     // Threadgroup memory for tiles
     threadgroup half A_tiles[MOE_NUM_BUFFERS][MOE_TILE_M][MOE_TILE_K];
     threadgroup half B_tiles[MOE_NUM_BUFFERS][MOE_TILE_K][MOE_TILE_N];
-    // Per-token staging for output accumulation
-    threadgroup half output_staging[MOE_TILE_M][MOE_TILE_N];
     // Token IDs for this batch
     threadgroup uint token_batch[MOE_TILE_M];
     threadgroup half prob_batch[MOE_TILE_M];

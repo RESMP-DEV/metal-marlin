@@ -23,12 +23,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    import mlx.core as mx
 
 
 @dataclass
@@ -106,61 +103,6 @@ def compute_kl_divergence_np(
 
     # Filter out any NaN/Inf values
     kl_valid = kl_flat[np.isfinite(kl_flat)]
-
-    if len(kl_valid) == 0:
-        return 0.0, 0.0, 0.0, 0.0
-
-    return (
-        float(np.mean(kl_valid)),
-        float(np.max(kl_valid)),
-        float(np.std(kl_valid)),
-        float(np.percentile(kl_valid, 95)),
-    )
-
-
-def compute_kl_divergence_mx(
-    original_logits: mx.array,  # [batch, seq, vocab]
-    quantized_logits: mx.array,
-    temperature: float = 1.0,
-) -> tuple[float, float, float, float]:
-    """
-    Compute KL(P_original || P_quantized) using MLX.
-
-    This version runs on GPU for faster computation with large vocab sizes.
-
-    Args:
-        original_logits: Logits from the original model
-        quantized_logits: Logits from the quantized model
-        temperature: Temperature for softmax (default: 1.0)
-
-    Returns:
-        (kl_mean, kl_max, kl_std, kl_p95)
-    """
-    import mlx.core as mx
-
-    # Apply temperature scaling
-    if temperature != 1.0:
-        original_logits = original_logits / temperature
-        quantized_logits = quantized_logits / temperature
-
-    # Stable log-softmax
-    def log_softmax(x: mx.array, axis: int = -1) -> mx.array:
-        x_max = mx.max(x, axis=axis, keepdims=True)
-        return x - x_max - mx.log(mx.sum(mx.exp(x - x_max), axis=axis, keepdims=True))
-
-    log_p_orig = log_softmax(original_logits, axis=-1)
-    log_p_quant = log_softmax(quantized_logits, axis=-1)
-
-    # KL divergence
-    p_orig = mx.exp(log_p_orig)
-    kl_per_token = mx.sum(p_orig * (log_p_orig - log_p_quant), axis=-1)
-
-    # Flatten and filter
-    kl_flat = kl_per_token.reshape(-1)
-
-    # Move to numpy for statistics (MLX doesn't have percentile)
-    kl_np = np.array(kl_flat)
-    kl_valid = kl_np[np.isfinite(kl_np)]
 
     if len(kl_valid) == 0:
         return 0.0, 0.0, 0.0, 0.0
@@ -313,99 +255,6 @@ def evaluate_kl_from_paths(
         kl_p95=0.0,
         num_tokens=0,
         num_samples=0,
-        temperature=temperature,
-    )
-
-
-def evaluate_kl_streaming(
-    original_model,
-    quantized_model,
-    tokenizer: Any,
-    texts: list[str],
-    max_length: int = 256,
-    temperature: float = 1.0,
-    batch_size: int = 1,
-    verbose: bool = True,
-) -> KLResult:
-    """
-    Evaluate KL divergence with streaming to minimize memory usage.
-
-    Both models are run on the same batch, and KL is computed immediately
-    before moving to the next batch.
-
-    Args:
-        original_model: Model with __call__(input_ids) -> logits interface
-        quantized_model: Same interface as original_model
-        tokenizer: HuggingFace tokenizer
-        texts: List of text samples
-        max_length: Maximum sequence length
-        temperature: Softmax temperature
-        batch_size: Batch size for inference
-        verbose: Print progress
-
-    Returns:
-        KLResult with comprehensive statistics
-    """
-    import mlx.core as mx
-
-    all_kl_means: list[float] = []
-    all_kl_maxs: list[float] = []
-    total_tokens = 0
-
-    for i in range(0, len(texts), batch_size):
-        batch_texts = texts[i : i + batch_size]
-        batch_kl_per_sample = []
-
-        for text in batch_texts:
-            tokens = tokenizer.encode(text)
-            if len(tokens) < 10:
-                continue
-            tokens = tokens[:max_length]
-
-            input_ids = mx.array(tokens[:-1]).reshape(1, -1)
-
-            # Forward pass through both models
-            with mx.no_grad():
-                orig_logits = original_model(input_ids)
-                quant_logits = quantized_model(input_ids)
-
-            # Compute KL on GPU
-            kl_mean, kl_max, kl_std, kl_p95 = compute_kl_divergence_mx(
-                orig_logits, quant_logits, temperature
-            )
-
-            batch_kl_per_sample.append(kl_mean)
-            all_kl_maxs.append(kl_max)
-            total_tokens += input_ids.shape[1]
-
-        if batch_kl_per_sample:
-            all_kl_means.extend(batch_kl_per_sample)
-
-        if verbose and (i + batch_size) % (batch_size * 10) == 0:
-            print(f"  [{min(i + batch_size, len(texts))}/{len(texts)}] KL: {np.mean(all_kl_means):.4f}")
-
-        # Clear GPU cache periodically
-        if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
-            mx.metal.clear_cache()
-
-    if not all_kl_means:
-        return KLResult(
-            kl_mean=0.0,
-            kl_max=0.0,
-            kl_std=0.0,
-            kl_p95=0.0,
-            num_tokens=0,
-            num_samples=0,
-            temperature=temperature,
-        )
-
-    return KLResult(
-        kl_mean=float(np.mean(all_kl_means)),
-        kl_max=float(np.max(all_kl_maxs)),
-        kl_std=float(np.std(all_kl_means)),
-        kl_p95=float(np.percentile(all_kl_means, 95)),
-        num_tokens=total_tokens,
-        num_samples=len(texts),
         temperature=temperature,
     )
 

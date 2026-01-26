@@ -380,9 +380,7 @@ class AutotuneCache:
         filename = f"{self.gpu.to_key()}.json"
         return self.cache_dir / filename
 
-    def get(
-        self, M: int, N: int, K: int, group_size: int = 32
-    ) -> TileConfig | None:
+    def get(self, M: int, N: int, K: int, group_size: int = 32) -> TileConfig | None:
         """Look up cached config for a problem size.
 
         Args:
@@ -398,9 +396,7 @@ class AutotuneCache:
         entry = self.entries.get(key)
         return entry.config if entry else None
 
-    def get_entry(
-        self, M: int, N: int, K: int, group_size: int = 32
-    ) -> CacheEntry | None:
+    def get_entry(self, M: int, N: int, K: int, group_size: int = 32) -> CacheEntry | None:
         """Look up full cached entry including performance data."""
         key = self._problem_key(M, N, K, group_size)
         return self.entries.get(key)
@@ -530,6 +526,7 @@ class AutotuneCache:
         # Run autotuning
         if searcher is None:
             from .tile_search import TileSearcher
+
             searcher = TileSearcher(group_size=group_size)
 
         config, results = searcher.search_with_logging(M, N, K)
@@ -539,7 +536,10 @@ class AutotuneCache:
         if valid:
             best = valid[0]
             self.put(
-                M, N, K, config,
+                M,
+                N,
+                K,
+                config,
                 gflops=best.gflops,
                 bandwidth_gb_s=best.bandwidth_gb_s,
                 elapsed_ms=best.elapsed_ms,
@@ -573,9 +573,7 @@ def get_global_cache() -> AutotuneCache:
     return _global_cache
 
 
-def get_tuned_config(
-    M: int, N: int, K: int, group_size: int = 32
-) -> TileConfig:
+def get_tuned_config(M: int, N: int, K: int, group_size: int = 32) -> TileConfig:
     """Convenience function to get a tuned config using global cache.
 
     If not cached, runs autotuning and caches the result.

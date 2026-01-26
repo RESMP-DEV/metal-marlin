@@ -8,12 +8,11 @@ tensor parallelism and pipeline parallelism. This module provides:
 - Placement strategies for weight and activation sharding
 
 Currently supported device types:
-- GPU (Metal via MLX on Apple Silicon)
+- CUDA (NVIDIA GPUs via PyTorch)
+- MPS (Metal Performance Shaders via PyTorch on macOS)
 - CPU (numpy fallback for verification)
 
 Future support planned for:
-- Multi-die M-series configurations
-- External GPUs via Thunderbolt
 - Multi-node distributed inference
 """
 
@@ -24,7 +23,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
-from .._compat import HAS_MLX, HAS_TORCH, mx, torch
+from .._compat import HAS_TORCH, torch
 
 if TYPE_CHECKING:
     pass
@@ -34,7 +33,6 @@ class DeviceType(Enum):
     """Device type enumeration."""
 
     CPU = auto()
-    GPU = auto()  # Metal GPU (Apple Silicon)
     CUDA = auto()  # NVIDIA GPU (via PyTorch)
     MPS = auto()  # Metal Performance Shaders (PyTorch on macOS)
 
@@ -44,7 +42,7 @@ class Device:
     """A single compute device.
 
     Attributes:
-        device_type: Type of device (CPU, GPU, CUDA, MPS)
+        device_type: Type of device (CPU, CUDA, MPS)
         device_id: Device index (0 for first GPU, etc.)
         name: Human-readable device name
         memory_bytes: Total device memory in bytes (0 if unknown)
@@ -58,7 +56,7 @@ class Device:
     @property
     def is_gpu(self) -> bool:
         """True if this is any type of GPU device."""
-        return self.device_type in (DeviceType.GPU, DeviceType.CUDA, DeviceType.MPS)
+        return self.device_type in (DeviceType.CUDA, DeviceType.MPS)
 
     @property
     def is_cpu(self) -> bool:
@@ -78,35 +76,6 @@ class Device:
             device_type=DeviceType.CPU,
             device_id=device_id,
             name=platform.processor() or "cpu",
-        )
-
-    @classmethod
-    def gpu(cls, device_id: int = 0) -> Device:
-        """Create a Metal GPU device (Apple Silicon)."""
-        name = "Apple Silicon GPU"
-        memory = 0
-
-        if HAS_MLX and mx is not None:
-            # MLX doesn't expose device enumeration, but we can detect
-            # unified memory size via system calls
-            try:
-                import subprocess
-
-                result = subprocess.run(
-                    ["sysctl", "-n", "hw.memsize"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                )
-                memory = int(result.stdout.strip())
-            except (subprocess.CalledProcessError, ValueError, FileNotFoundError):
-                pass
-
-        return cls(
-            device_type=DeviceType.GPU,
-            device_id=device_id,
-            name=name,
-            memory_bytes=memory,
         )
 
     @classmethod
@@ -293,49 +262,43 @@ class DeviceMesh:
         return cls.from_devices(devices)
 
     @classmethod
-    def cpu_gpu_split(cls) -> DeviceMesh:
-        """Create a 2-device mesh with CPU and GPU for verification.
+    def cpu_mps_split(cls) -> DeviceMesh:
+        """Create a 2-device mesh with CPU and MPS for verification.
 
         This is useful for testing tensor parallel logic without
         requiring multiple physical GPUs. The CPU device handles
-        one shard and the GPU handles another.
+        one shard and the MPS device handles another.
 
         Returns:
-            DeviceMesh with [CPU, GPU] tensor parallel topology
+            DeviceMesh with [CPU, MPS] tensor parallel topology
         """
-        devices = [Device.cpu(0), Device.gpu(0)]
+        devices = [Device.cpu(0), Device.mps(0)]
         return cls.from_devices(devices, tensor_parallel_size=2)
 
     @classmethod
-    def single_gpu(cls) -> DeviceMesh:
-        """Create a mesh with a single GPU device.
+    def single_mps(cls) -> DeviceMesh:
+        """Create a mesh with a single MPS device.
 
-        This is the default for single-GPU inference.
+        This is the default for single-GPU inference on macOS.
 
         Returns:
-            DeviceMesh with one GPU device
+            DeviceMesh with one MPS device
         """
-        return cls.from_devices([Device.gpu(0)])
+        return cls.from_devices([Device.mps(0)])
 
     @classmethod
     def detect_available(cls) -> DeviceMesh:
         """Auto-detect available devices and create a mesh.
 
         Priority:
-        1. MLX Metal GPU (Apple Silicon)
-        2. CUDA GPUs (via PyTorch)
-        3. MPS (Metal via PyTorch)
-        4. CPU fallback
+        1. CUDA GPUs (via PyTorch)
+        2. MPS (Metal via PyTorch on macOS)
+        3. CPU fallback
 
         Returns:
             DeviceMesh with all available devices
         """
         devices: list[Device] = []
-
-        # Try MLX (Apple Silicon GPU)
-        if HAS_MLX:
-            devices.append(Device.gpu(0))
-            return cls.from_devices(devices)
 
         # Try CUDA
         if HAS_TORCH and torch is not None and torch.cuda.is_available():
@@ -354,7 +317,9 @@ class DeviceMesh:
         return cls.from_devices(devices)
 
     def __repr__(self) -> str:
-        lines = [f"DeviceMesh(tp_size={self.tensor_parallel_size}, pp_size={self.pipeline_parallel_size}):"]
+        lines = [
+            f"DeviceMesh(tp_size={self.tensor_parallel_size}, pp_size={self.pipeline_parallel_size}):"
+        ]
         for pp_rank, row in enumerate(self.devices):
             devices_str = ", ".join(str(d) for d in row)
             lines.append(f"  PP rank {pp_rank}: [{devices_str}]")
@@ -365,15 +330,11 @@ def get_device_for_array(arr: Any) -> Device:
     """Detect which device an array is on.
 
     Args:
-        arr: Array (numpy, MLX, or torch tensor)
+        arr: Array (numpy or torch tensor)
 
     Returns:
         Device where the array resides
     """
-    # MLX arrays
-    if HAS_MLX and type(arr).__module__.startswith("mlx"):
-        return Device.gpu(0)  # MLX uses unified memory on single GPU
-
     # PyTorch tensors
     if HAS_TORCH and torch is not None and isinstance(arr, torch.Tensor):
         device = arr.device
@@ -392,13 +353,13 @@ def move_to_device(arr: Any, device: Device) -> Any:
     """Move an array to the specified device.
 
     Args:
-        arr: Input array (numpy, MLX, or torch tensor)
+        arr: Input array (numpy or torch tensor)
         device: Target device
 
     Returns:
         Array on the target device
     """
-    from .._compat import from_numpy, to_numpy
+    from .._compat import to_numpy
 
     current_device = get_device_for_array(arr)
 
@@ -412,10 +373,6 @@ def move_to_device(arr: Any, device: Device) -> Any:
     # Target is CPU
     if device.device_type == DeviceType.CPU:
         return arr_np
-
-    # Target is MLX GPU
-    if device.device_type == DeviceType.GPU:
-        return from_numpy(arr_np, backend="mlx")
 
     # Target is CUDA or MPS (via PyTorch)
     if device.device_type in (DeviceType.CUDA, DeviceType.MPS):

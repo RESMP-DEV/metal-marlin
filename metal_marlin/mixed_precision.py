@@ -371,9 +371,7 @@ class MoEPrecisionConfig:
             attention_qkv=LayerQuantConfig(
                 self.attention_qkv_precision, self.attention_qkv_group_size
             ),
-            attention_out=LayerQuantConfig(
-                self.attention_o_precision, self.attention_o_group_size
-            ),
+            attention_out=LayerQuantConfig(self.attention_o_precision, self.attention_o_group_size),
             moe_router=LayerQuantConfig(self.router_precision, self.router_group_size),
             moe_shared_expert=LayerQuantConfig(
                 self.shared_expert_precision, self.shared_expert_group_size
@@ -472,7 +470,10 @@ class LayerPrecisionSelector:
                     self.moe_config.attention_qkv_group_size,
                 )
             if "o_proj" in name_lower or "out_proj" in name_lower:
-                return (self.moe_config.attention_o_precision, self.moe_config.attention_o_group_size)
+                return (
+                    self.moe_config.attention_o_precision,
+                    self.moe_config.attention_o_group_size,
+                )
             if "embed" in name_lower:
                 # Embeddings don't use group quantization
                 return (self.moe_config.embed_precision, 0)
@@ -689,14 +690,13 @@ def quantize_tensor(
     elif config.precision == Precision.BF16:
         # BF16 uses same memory as FP16 but with 8-bit exponent (same as FP32)
         # NumPy doesn't have native bf16, so we store as uint16 with bf16 flag
-        # The actual conversion happens in MLX/Metal at runtime
-        import mlx.core as mx
-
-        # Convert via MLX which has native bf16 support
-        mlx_tensor = mx.array(tensor.astype(np.float32))
-        bf16_tensor = mlx_tensor.astype(mx.bfloat16)
-        # Store raw bits as uint16 for numpy compatibility
-        return {"data": np.array(bf16_tensor).view(np.uint16), "dtype": "bfloat16"}
+        # The actual conversion happens in Metal at runtime
+        # Convert FP32 to BF16 by truncating lower 16 bits of mantissa
+        fp32_data = tensor.astype(np.float32)
+        # View as uint32 to manipulate bits, then shift right by 16
+        # This truncates the lower 16 mantissa bits, keeping sign(1)+exp(8)+mantissa(7)
+        bf16_bits = fp32_data.view(np.uint32) >> 16
+        return {"data": bf16_bits.astype(np.uint16), "dtype": "bfloat16"}
 
     elif config.precision == Precision.FP4_E2M1:
         packed, scales = quantize_fp4(tensor, group_size=config.group_size)
@@ -731,6 +731,7 @@ def quantize_tensor(
     # Sub-4-bit quantization formats
     elif config.precision == Precision.INT2:
         from .sub4bit import quantize_int2
+
         packed, scales = quantize_int2(tensor, group_size=config.group_size)
         return {
             "packed": packed,
@@ -742,6 +743,7 @@ def quantize_tensor(
 
     elif config.precision == Precision.INT3:
         from .sub4bit import quantize_int3
+
         packed, scales = quantize_int3(tensor, group_size=config.group_size)
         return {
             "packed": packed,
@@ -753,6 +755,7 @@ def quantize_tensor(
 
     elif config.precision == Precision.NF2:
         from .sub4bit import quantize_nf2
+
         packed, scales = quantize_nf2(tensor, group_size=config.group_size)
         return {
             "packed": packed,
@@ -764,6 +767,7 @@ def quantize_tensor(
 
     elif config.precision == Precision.NF3:
         from .sub4bit import quantize_nf3
+
         packed, scales = quantize_nf3(tensor, group_size=config.group_size)
         return {
             "packed": packed,

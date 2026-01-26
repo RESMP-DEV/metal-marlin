@@ -8,10 +8,10 @@
 
 **Solution**:
 1. Check macOS version (requires 14.0+)
-2. Verify Metal device supports simdgroup_matrix:
+2. Verify Metal device supports required features:
    ```python
-   import mlx.core as mx
-   print(mx.metal.device_info())
+   from metal_marlin import get_device_info
+   print(get_device_info())
    ```
 3. Look for shader compilation errors in console
 
@@ -43,11 +43,11 @@
    # Bad: sync after every op
    for layer in model.layers:
        x = layer(x)
-       mx.synchronize()  # Remove this!
+       device.commit()  # Remove this from inner loop!
 
    # Good: sync only at end
    output = model(input)
-   mx.synchronize()
+   device.commit()
    ```
 
 2. Kernel compilation cache cold?
@@ -66,6 +66,99 @@
 
 **Solution**: Metal Marlin requires Apple Silicon (M1/M2/M3/M4).
 
+## PyObjC Metal Issues
+
+### "No module named 'Metal'" or "No module named 'MetalPerformanceShaders'"
+
+**Cause**: PyObjC Metal bindings not installed.
+
+**Solution**:
+```bash
+uv pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders
+```
+
+### "MTLDevice not available" or device returns None
+
+**Cause**: PyObjC cannot find the Metal device.
+
+**Solution**:
+```python
+import Metal
+
+# Get the default device
+device = Metal.MTLCreateSystemDefaultDevice()
+if device is None:
+    raise RuntimeError("No Metal device available")
+
+print(f"Using device: {device.name()}")
+```
+
+### "Argument type mismatch" or "Invalid buffer binding"
+
+**Cause**: PyObjC bridge converts Python types incorrectly for Metal buffers.
+
+**Solution**:
+1. Ensure numpy arrays are contiguous:
+   ```python
+   import numpy as np
+   arr = np.ascontiguousarray(arr, dtype=np.float32)
+   ```
+
+2. Use explicit buffer creation:
+   ```python
+   buffer = device.newBufferWithBytes_length_options_(
+       arr.tobytes(),
+       arr.nbytes,
+       Metal.MTLResourceStorageModeShared
+   )
+   ```
+
+### "Command buffer execution failed" or GPU timeout
+
+**Cause**: Kernel took too long or hit an error during execution.
+
+**Solution**:
+1. Check for infinite loops in shader code
+2. Reduce workload size to isolate the issue
+3. Enable GPU error logging:
+   ```python
+   import os
+   os.environ["MTL_DEBUG_LAYER"] = "1"
+   os.environ["MTL_SHADER_VALIDATION"] = "1"
+   ```
+
+### Memory not released after computation
+
+**Cause**: PyObjC autorelease pool not draining properly.
+
+**Solution**:
+```python
+from Foundation import NSAutoreleasePool
+
+pool = NSAutoreleasePool.alloc().init()
+try:
+    # Your Metal computations here
+    result = run_metal_kernel(...)
+finally:
+    del pool  # Explicitly drain the pool
+```
+
+### "Selector not found" or attribute errors on Metal objects
+
+**Cause**: PyObjC version mismatch or incomplete bindings.
+
+**Solution**:
+1. Update PyObjC to latest version:
+   ```bash
+   uv pip install --upgrade pyobjc-framework-Metal
+   ```
+
+2. Verify macOS SDK compatibility:
+   ```python
+   import Metal
+   print(Metal.__file__)  # Check binding location
+   ```
+
 ## Debugging Tools
 
 ### Enable kernel profiling
@@ -78,12 +171,22 @@ os.environ["METAL_DEVICE_WRAPPER_TYPE"] = "1"
 # /tmp/metal_shader_compilation_log.txt
 ```
 
+### Enable Metal debug layer
+
+```python
+import os
+os.environ["MTL_DEBUG_LAYER"] = "1"
+os.environ["MTL_SHADER_VALIDATION"] = "1"
+os.environ["MTL_DEBUG_LAYER_WARNING_MODE"] = "nslog"
+```
+
 ### Validate quantization
 
 ```python
 from metal_marlin.debug import validate_quantization
+import torch
 
-original = mx.random.normal((4096, 4096))
+original = torch.randn(4096, 4096)
 packed, scales = pack_fp4_weights(original)
 
 report = validate_quantization(original, packed, scales)
@@ -101,4 +204,19 @@ ref = reference_gemm(A, dequant(B, scales))
 
 compare_with_reference(result, ref)
 # Output: All close: True, Max diff: 0.002
+```
+
+### Check Metal buffer contents
+
+```python
+import numpy as np
+
+def read_metal_buffer(buffer, dtype=np.float32):
+    """Read contents of a Metal buffer back to numpy."""
+    ptr = buffer.contents()
+    length = buffer.length()
+    return np.frombuffer(
+        (ctypes.c_char * length).from_address(ptr),
+        dtype=dtype
+    ).copy()
 ```

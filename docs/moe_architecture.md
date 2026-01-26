@@ -358,7 +358,7 @@ Cache benefit analysis:
 | Phase | Compute Pattern | Bottleneck | Recommended Kernel |
 |-------|-----------------|------------|-------------------|
 | Router | Small GEMM [B, H] × [H, E] | Memory bandwidth | `moe_router_topk_fused` |
-| Token grouping | Sort by expert | CPU | MLX `argsort` + `cumsum` |
+| Token grouping | Sort by expert | CPU | Python `argsort` + `cumsum` |
 | Expert GEMM | Variable per expert | Dequant + compute | `moe_expert_gemm_fp4` |
 | Shared expert | Full batch GEMM | Same as dense GEMM | `marlin_gemm_fused_fp4` |
 | Aggregation | Weighted sum | Memory bandwidth | Fused in expert kernel |
@@ -399,7 +399,7 @@ Key differences from Metal Marlin:
 | Memory model | PCIe + VRAM | Unified Memory |
 | Expert weights | May need offloading | Always resident |
 | Quantization | W8A8, W4A16 via Marlin | FP4, INT4, sub-4-bit |
-| Token grouping | Triton kernel | CPU (MLX) + GPU kernel |
+| Token grouping | Triton kernel | CPU + GPU kernel |
 | Expert parallelism | Across GPUs | Not needed |
 | Router fusion | Separate kernels | Fused (planned) |
 

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .._compat import HAS_MLX, HAS_PYOBJC_METAL, Metal, mx
+from .._compat import HAS_PYOBJC_METAL, Metal
 from .occupancy import detect_gpu
 from .trace import TraceEvent
 
@@ -342,9 +342,7 @@ class GPUProfiler:
     ):
         self._device = device
         self._enable_counters = enable_counters and HAS_METAL_COUNTERS
-        self._peak_bandwidth_gbs = (
-            peak_bandwidth_gbs or detect_gpu().peak_bw_gbs
-        )
+        self._peak_bandwidth_gbs = peak_bandwidth_gbs or detect_gpu().peak_bw_gbs
         self._counter_sets: list[Any] = []
         self._sample_buffer: Any = None
         self._capture_start_ns: int = 0
@@ -410,10 +408,6 @@ class GPUProfiler:
             # which may not be fully exposed via pyobjc
             pass
 
-        # Synchronize GPU to ensure clean timing
-        if HAS_MLX:
-            mx.synchronize()
-
     def stop_capture(
         self,
         flops: float = 0,
@@ -428,10 +422,6 @@ class GPUProfiler:
         Returns:
             GPUCounters snapshot.
         """
-        # Synchronize GPU
-        if HAS_MLX:
-            mx.synchronize()
-
         end_ns = time.time_ns()
         elapsed_ms = (end_ns - self._capture_start_ns) / 1e6
 

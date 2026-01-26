@@ -5,7 +5,7 @@ output during autoregressive decoding. The core pattern:
 
 1. LogitProcessor protocol: Any callable that transforms logits given context
 2. LogitProcessorList: Chains multiple processors for composed constraints
-3. apply_logit_mask: Efficient token masking (with optional Metal acceleration)
+3. apply_logit_mask: Efficient token masking using PyTorch
 
 The key insight from outlines/guidance: most structured generation can be
 expressed as "which tokens are valid next?" This yields a mask over the
@@ -24,14 +24,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-import numpy as np
+from .._compat import HAS_TORCH, require_torch
 
-from .._compat import HAS_MLX
-
-if HAS_MLX:
-    import mlx.core as mx
+if HAS_TORCH:
+    import torch
 elif TYPE_CHECKING:
-    import mlx.core as mx
+    import torch
 
 
 class MaskingMode(Enum):
@@ -56,9 +54,9 @@ class LogitProcessor(Protocol):
 
     def __call__(
         self,
-        logits: mx.array,
+        logits: torch.Tensor,
         generated_ids: list[int],
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Apply constraint to logits.
 
         Args:
@@ -104,6 +102,7 @@ class BaseLogitProcessor(ABC):
             vocab_size: Size of the model's vocabulary
             masking_mode: How to mask invalid tokens
         """
+        require_torch("guided generation")
         self.vocab_size = vocab_size
         self.masking_mode = masking_mode
 
@@ -122,9 +121,9 @@ class BaseLogitProcessor(ABC):
 
     def __call__(
         self,
-        logits: mx.array,
+        logits: torch.Tensor,
         generated_ids: list[int],
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Apply constraint by masking invalid tokens.
 
         Args:
@@ -175,9 +174,9 @@ class LogitProcessorList:
 
     def __call__(
         self,
-        logits: mx.array,
+        logits: torch.Tensor,
         generated_ids: list[int],
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Apply all processors in sequence.
 
         Args:
@@ -216,11 +215,11 @@ class LogitProcessorList:
 
 
 def apply_logit_mask(
-    logits: mx.array,
+    logits: torch.Tensor,
     valid_tokens: set[int],
     vocab_size: int,
     mode: MaskingMode = MaskingMode.NEGATIVE_INF,
-) -> mx.array:
+) -> torch.Tensor:
     """Apply a token validity mask to logits.
 
     Creates a mask where valid tokens have 0 and invalid tokens have a large
@@ -236,20 +235,20 @@ def apply_logit_mask(
     Returns:
         Masked logits tensor (same shape as input)
     """
+    require_torch("logit masking")
+
     if not valid_tokens:
         # No valid tokens - return logits unchanged (will likely cause issues)
         return logits
 
     # Build boolean mask: True = valid, False = invalid
-    mask_np = np.zeros(vocab_size, dtype=np.bool_)
-    valid_list = list(valid_tokens)
-    mask_np[valid_list] = True
+    mask = torch.zeros(vocab_size, dtype=torch.bool, device=logits.device)
+    valid_indices = torch.tensor(list(valid_tokens), dtype=torch.long, device=logits.device)
+    mask[valid_indices] = True
 
-    # Convert to MLX and expand to match logits shape
-    mask = mx.array(mask_np)
+    # Expand mask to match logits shape
     if logits.ndim > 1:
-        # Broadcast for batch dimension
-        mask = mx.broadcast_to(mask, logits.shape)
+        mask = mask.unsqueeze(0).expand(logits.shape[0], -1)
 
     # Determine mask value
     if mode == MaskingMode.NEGATIVE_INF:
@@ -260,47 +259,44 @@ def apply_logit_mask(
         mask_value = -1e9
 
     # Apply mask: where mask is True, keep logits; else apply mask_value
-    if HAS_MLX and mask.size == logits.size:
-        return apply_logit_mask_metal(logits, mask, mask_value=mask_value)
-
-    return mx.where(mask, logits, mx.array(mask_value))
+    return torch.where(
+        mask, logits, torch.tensor(mask_value, device=logits.device, dtype=logits.dtype)
+    )
 
 
 def apply_logit_mask_vectorized(
-    logits: mx.array,
-    valid_token_ids: mx.array,
+    logits: torch.Tensor,
+    valid_token_ids: torch.Tensor,
     vocab_size: int,
     mode: MaskingMode = MaskingMode.NEGATIVE_INF,
-) -> mx.array:
-    """Apply mask using vectorized MLX operations (no numpy).
+) -> torch.Tensor:
+    """Apply mask using vectorized PyTorch operations.
 
-    This variant takes token IDs as an MLX array, avoiding numpy conversion.
+    This variant takes token IDs as a tensor, avoiding list conversion.
     Useful when the valid token set is already computed on GPU.
 
     Args:
         logits: Logits tensor
-        valid_token_ids: 1D array of valid token IDs
+        valid_token_ids: 1D tensor of valid token IDs
         vocab_size: Total vocabulary size
         mode: How to apply the mask
 
     Returns:
         Masked logits tensor
     """
-    # Create mask via scatter: start with all False, set valid positions True
-    mask = mx.zeros(vocab_size, dtype=mx.bool_)
+    require_torch("vectorized logit masking")
 
-    # MLX doesn't have direct scatter, so we use index update
-    # This is a workaround - for efficiency, use the numpy path above
-    valid_np = np.zeros(vocab_size, dtype=np.bool_)
-    valid_ids = valid_token_ids.tolist() if hasattr(valid_token_ids, "tolist") else list(valid_token_ids)
-    valid_np[valid_ids] = True
-    mask = mx.array(valid_np)
+    # Create mask via scatter
+    mask = torch.zeros(vocab_size, dtype=torch.bool, device=logits.device)
+    mask.scatter_(0, valid_token_ids, True)
 
     if logits.ndim > 1:
-        mask = mx.broadcast_to(mask, logits.shape)
+        mask = mask.unsqueeze(0).expand(logits.shape[0], -1)
 
     mask_value = float("-inf") if mode == MaskingMode.NEGATIVE_INF else -1e9
-    return mx.where(mask, logits, mx.array(mask_value))
+    return torch.where(
+        mask, logits, torch.tensor(mask_value, device=logits.device, dtype=logits.dtype)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,22 +309,26 @@ class CachedMask:
     """Precomputed token mask for a constraint state.
 
     For DFA-based constraints, we can precompute which tokens are valid
-    from each state. This caches the mask array to avoid recomputation.
+    from each state. This caches the mask tensor to avoid recomputation.
     """
 
     state_id: int
     valid_token_ids: frozenset[int]
-    _mask_array: mx.array | None = None
+    _mask_tensor: torch.Tensor | None = None
 
-    def get_mask_array(self, vocab_size: int) -> mx.array:
-        """Get or create the boolean mask array."""
-        if self._mask_array is not None:
-            return self._mask_array
+    def get_mask_tensor(self, vocab_size: int, device: torch.device | str = "cpu") -> torch.Tensor:
+        """Get or create the boolean mask tensor."""
+        if self._mask_tensor is not None and self._mask_tensor.device == torch.device(device):
+            return self._mask_tensor
 
-        mask_np = np.zeros(vocab_size, dtype=np.bool_)
-        for tid in self.valid_token_ids:
-            mask_np[tid] = True
-        return mx.array(mask_np)
+        require_torch("mask tensor creation")
+        mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        if self.valid_token_ids:
+            valid_indices = torch.tensor(
+                list(self.valid_token_ids), dtype=torch.long, device=device
+            )
+            mask[valid_indices] = True
+        return mask
 
 
 class MaskCache:
@@ -338,19 +338,27 @@ class MaskCache:
     states. Caching masks avoids rebuilding them on repeated visits.
     """
 
-    def __init__(self, max_size: int = 1024, vocab_size: int = 32000) -> None:
+    def __init__(
+        self,
+        max_size: int = 1024,
+        vocab_size: int = 32000,
+        device: torch.device | str = "cpu",
+    ) -> None:
         """Initialize cache.
 
         Args:
             max_size: Maximum number of cached masks
-            vocab_size: Vocabulary size for mask arrays
+            vocab_size: Vocabulary size for mask tensors
+            device: Device for mask tensors
         """
+        require_torch("mask caching")
         self.max_size = max_size
         self.vocab_size = vocab_size
-        self._cache: dict[int, mx.array] = {}
+        self.device = torch.device(device)
+        self._cache: dict[int, torch.Tensor] = {}
         self._access_order: list[int] = []
 
-    def get(self, state_id: int) -> mx.array | None:
+    def get(self, state_id: int) -> torch.Tensor | None:
         """Get cached mask for state, or None if not cached."""
         if state_id in self._cache:
             # Move to end (most recently used)
@@ -359,7 +367,7 @@ class MaskCache:
             return self._cache[state_id]
         return None
 
-    def put(self, state_id: int, valid_tokens: set[int]) -> mx.array:
+    def put(self, state_id: int, valid_tokens: set[int]) -> torch.Tensor:
         """Cache mask for state and return it.
 
         Args:
@@ -367,13 +375,13 @@ class MaskCache:
             valid_tokens: Set of valid token IDs
 
         Returns:
-            The mask array (cached for future use)
+            The mask tensor (cached for future use)
         """
         # Build mask
-        mask_np = np.zeros(self.vocab_size, dtype=np.bool_)
-        for tid in valid_tokens:
-            mask_np[tid] = True
-        mask = mx.array(mask_np)
+        mask = torch.zeros(self.vocab_size, dtype=torch.bool, device=self.device)
+        if valid_tokens:
+            valid_indices = torch.tensor(list(valid_tokens), dtype=torch.long, device=self.device)
+            mask[valid_indices] = True
 
         # Evict if at capacity
         while len(self._cache) >= self.max_size:
@@ -388,7 +396,7 @@ class MaskCache:
         self,
         state_id: int,
         valid_tokens_fn: callable,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Get cached mask or compute and cache it.
 
         Args:
@@ -396,7 +404,7 @@ class MaskCache:
             valid_tokens_fn: Function that returns set[int] of valid tokens
 
         Returns:
-            Mask array
+            Mask tensor
         """
         mask = self.get(state_id)
         if mask is None:
@@ -409,99 +417,17 @@ class MaskCache:
         self._cache.clear()
         self._access_order.clear()
 
+    def to(self, device: torch.device | str) -> MaskCache:
+        """Move all cached masks to a new device.
 
-# ---------------------------------------------------------------------------
-# Metal-accelerated masking kernel (when vocabulary is large)
-# ---------------------------------------------------------------------------
+        Args:
+            device: Target device
 
-# The kernel source for parallel logit masking
-_LOGIT_MASK_KERNEL_SOURCE = """
-// Apply token validity mask to logits in parallel
-// Each thread handles one vocabulary position
-
-uint idx = tid;
-if (idx >= vocab_size) return;
-
-// Load mask value (1 = valid, 0 = invalid)
-bool is_valid = mask[idx] > 0;
-
-// Load logit and apply mask
-float logit = logits[idx];
-output[idx] = is_valid ? logit : mask_value;
-"""
-
-_LOGIT_MASK_KERNEL_HEADER = """
-#include <metal_stdlib>
-using namespace metal;
-"""
-
-
-def _build_mask_kernel():
-    """Build the Metal kernel for logit masking.
-
-    Returns None if MLX is unavailable.
-    """
-    if not HAS_MLX:
-        return None
-
-    try:
-        kernel = mx.fast.metal_kernel(
-            name="logit_mask",
-            input_names=["logits", "mask"],
-            output_names=["output"],
-            source=_LOGIT_MASK_KERNEL_SOURCE,
-            header=_LOGIT_MASK_KERNEL_HEADER,
-            ensure_row_contiguous=True,
-        )
-        return kernel
-    except Exception:
-        # Fall back to Python implementation if kernel compilation fails
-        return None
-
-
-# Lazily compiled kernel
-_mask_kernel = None
-
-
-def apply_logit_mask_metal(
-    logits: mx.array,
-    mask: mx.array,
-    mask_value: float = float("-inf"),
-) -> mx.array:
-    """Apply logit mask using Metal kernel.
-
-    This is faster than the numpy-based approach for large vocabularies
-    because it avoids CPU-GPU data transfer for the mask.
-
-    Args:
-        logits: Logits tensor [vocab_size] or [batch, vocab_size]
-        mask: Boolean mask [vocab_size] (True = valid)
-        mask_value: Value to assign to invalid positions
-
-    Returns:
-        Masked logits
-    """
-    global _mask_kernel
-
-    if _mask_kernel is None:
-        _mask_kernel = _build_mask_kernel()
-
-    if _mask_kernel is None:
-        # Fall back to mx.where
-        return mx.where(mask, logits, mx.array(mask_value))
-
-    # Flatten for kernel dispatch
-    flat_logits = logits.reshape(-1)
-    vocab_size = flat_logits.shape[0]
-
-    # Dispatch kernel
-    output = _mask_kernel(
-        inputs=[flat_logits, mask.astype(mx.float32)],
-        template=[("vocab_size", vocab_size), ("mask_value", mask_value)],
-        grid=(vocab_size, 1, 1),
-        threadgroup=(256, 1, 1),
-        output_shapes=[(vocab_size,)],
-        output_dtypes=[logits.dtype],
-    )[0]
-
-    return output.reshape(logits.shape)
+        Returns:
+            self (for method chaining)
+        """
+        new_device = torch.device(device)
+        if new_device != self.device:
+            self._cache = {k: v.to(new_device) for k, v in self._cache.items()}
+            self.device = new_device
+        return self

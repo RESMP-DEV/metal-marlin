@@ -183,6 +183,10 @@ inline void compute_from_tiles(
     }
 }
 
+// Staging buffer dimensions for store_results
+constant constexpr uint SG_TILE_ROWS = SG_M_TILES * 8;  // 16
+constant constexpr uint SG_TILE_COLS = SG_N_TILES * 8;  // 32
+
 inline void store_results(
     thread simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES],
     device half* C,
@@ -190,7 +194,9 @@ inline void store_results(
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
     uint simd_lane,
-    uint simd_id
+    uint simd_id,
+    threadgroup half (&sg_staging)[SIMDGROUPS_PER_TG][SG_TILE_ROWS][SG_TILE_COLS],
+    threadgroup half (&edge_staging)[8][8]
 ) {
     constexpr uint sg_tile_rows = SG_M_TILES * 8;
     constexpr uint sg_tile_cols = SG_N_TILES * 8;
@@ -201,8 +207,6 @@ inline void store_results(
     uint base_col = tg_col + sg_col_offset;
 
     if (base_row + sg_tile_rows <= M && base_col + sg_tile_cols <= N) {
-        threadgroup half sg_staging[SIMDGROUPS_PER_TG][sg_tile_rows][sg_tile_cols];
-
         for (uint mi = 0; mi < SG_M_TILES; ++mi) {
             for (uint ni = 0; ni < SG_N_TILES; ++ni) {
                 simdgroup_store(acc[mi][ni],
@@ -239,8 +243,7 @@ inline void store_results(
                                 C + out_row * N + out_col,
                                 N);
             } else {
-                threadgroup half staging[8][8];
-                simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+                simdgroup_store(acc[mi][ni], &edge_staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -249,7 +252,7 @@ inline void store_results(
                     uint gr = out_row + r;
                     uint gc = out_col + c;
                     if (gr < M && gc < N) {
-                        C[gr * N + gc] = staging[r][c];
+                        C[gr * N + gc] = edge_staging[r][c];
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -290,6 +293,8 @@ kernel void marlin_gemm_batched_fp4(
 
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+    threadgroup half sg_staging[SIMDGROUPS_PER_TG][SG_TILE_ROWS][SG_TILE_COLS];
+    threadgroup half edge_staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -330,7 +335,8 @@ kernel void marlin_gemm_batched_fp4(
     }
 
     store_results(acc, C_batch, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id,
+                  sg_staging, edge_staging);
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +375,8 @@ kernel void marlin_gemm_grouped_attention(
 
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+    threadgroup half sg_staging[SIMDGROUPS_PER_TG][SG_TILE_ROWS][SG_TILE_COLS];
+    threadgroup half edge_staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -409,5 +417,6 @@ kernel void marlin_gemm_grouped_attention(
     }
 
     store_results(acc, scores_head, seq_len, seq_len, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id,
+                  sg_staging, edge_staging);
 }

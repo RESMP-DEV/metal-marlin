@@ -333,9 +333,7 @@ def _has_encoder_decoder_pattern(ops: list[ONNXOp]) -> bool:
     return False
 
 
-def _has_bert_pattern(
-    ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]
-) -> bool:
+def _has_bert_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]) -> bool:
     """Detect BERT-like bidirectional encoder patterns.
 
     BERT models have:
@@ -372,9 +370,7 @@ def _has_bert_pattern(
     return False
 
 
-def _has_llama_pattern(
-    ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]
-) -> bool:
+def _has_llama_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]) -> bool:
     """Detect Llama-like decoder patterns.
 
     Llama models have:
@@ -444,9 +440,7 @@ def _has_sliding_window_pattern(ops: list[ONNXOp]) -> bool:
     return False
 
 
-def _has_gpt_pattern(
-    ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]
-) -> bool:
+def _has_gpt_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[str, int]) -> bool:
     """Detect GPT-like decoder patterns.
 
     GPT models have:
@@ -463,9 +457,7 @@ def _has_gpt_pattern(
         return False
 
     # Check for GPT-specific patterns
-    gpt_names = sum(
-        1 for op in ops if any(x in op.name.lower() for x in ("gpt", "wte", "wpe"))
-    )
+    gpt_names = sum(1 for op in ops if any(x in op.name.lower() for x in ("gpt", "wte", "wpe")))
 
     # GELU is characteristic of GPT family
     if has_gelu:
@@ -485,16 +477,12 @@ def _has_gpt_pattern(
     return False
 
 
-def _has_basic_transformer_pattern(
-    op_type_set: set[str], op_counts: dict[str, int]
-) -> bool:
+def _has_basic_transformer_pattern(op_type_set: set[str], op_counts: dict[str, int]) -> bool:
     """Detect basic transformer structure without specific architecture."""
     # Core transformer ops
     has_matmul = "MatMul" in op_type_set or "Gemm" in op_type_set
     has_softmax = "Softmax" in op_type_set
-    "LayerNormalization" in op_type_set or any(
-        "norm" in op.lower() for op in op_type_set
-    )
+    "LayerNormalization" in op_type_set or any("norm" in op.lower() for op in op_type_set)
 
     if not (has_matmul and has_softmax):
         return False

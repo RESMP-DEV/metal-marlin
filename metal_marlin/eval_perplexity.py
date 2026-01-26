@@ -40,13 +40,20 @@ from typing import Any
 import numpy as np
 
 
-def load_tokenizer(model_path: str | Path) -> Any:
+def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None) -> Any:
     """
     Load tokenizer from model directory.
 
     Supports:
     - tokenizer.json (fast tokenizer)
     - tokenizer.model (sentencepiece)
+
+    Args:
+        model_path: Path to model directory or HF model ID.
+        fallback_tokenizer: Fallback tokenizer to use if model has no tokenizer.
+
+    Returns:
+        Tokenizer instance.
     """
     from transformers import AutoTokenizer
 
@@ -54,6 +61,21 @@ def load_tokenizer(model_path: str | Path) -> Any:
 
     # Try to load from local path
     if model_path.exists():
+        # Check if tokenizer files exist
+        has_tokenizer = (
+            (model_path / "tokenizer.json").exists()
+            or (model_path / "tokenizer.model").exists()
+            or (model_path / "tokenizer_config.json").exists()
+        )
+        if has_tokenizer:
+            return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+
+        # Use fallback tokenizer if provided
+        if fallback_tokenizer:
+            print(f"No tokenizer in model, using fallback: {fallback_tokenizer}")
+            return AutoTokenizer.from_pretrained(fallback_tokenizer, trust_remote_code=True)
+
+        # Try loading anyway - might be an HF model ID style path
         return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
 
     # Otherwise treat as HF model ID
@@ -262,8 +284,14 @@ def compute_perplexity_sliding_window(
 
         n_windows += 1
         if verbose and n_windows % 10 == 0:
-            ppl_so_far = math.exp(total_nll / total_tokens_scored) if total_tokens_scored > 0 else float("inf")
-            print(f"  Window {n_windows}: pos {start}-{end}, scored {total_tokens_scored} tokens, PPL: {ppl_so_far:.4f}")
+            ppl_so_far = (
+                math.exp(total_nll / total_tokens_scored)
+                if total_tokens_scored > 0
+                else float("inf")
+            )
+            print(
+                f"  Window {n_windows}: pos {start}-{end}, scored {total_tokens_scored} tokens, PPL: {ppl_so_far:.4f}"
+            )
 
         # Move window by stride
         start += stride

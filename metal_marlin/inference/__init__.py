@@ -60,6 +60,20 @@ from .decode import (
     quantized_kv_attention,
     select_decode_kernel,
 )
+from .pipeline import (
+    GenerationConfig,
+    MarlinModel,
+    MarlinPipeline,
+    MetalGLM47Model,
+    MetalMarlinModel,
+    ModelConfig,
+    ModelInfo,
+    chat,
+    dequantize_fp4_torch,
+    get_device,
+    load_quantized_model,
+    load_safetensors_torch,
+)
 from .prefill import (
     BatchedKVResult,
     PrefillConfig,
@@ -83,6 +97,19 @@ __all__ = [
     "persistent_decode_step",
     "quantized_kv_attention",
     "select_decode_kernel",
+    # Pipeline exports (high-level API)
+    "GenerationConfig",
+    "MarlinModel",
+    "MarlinPipeline",
+    "MetalGLM47Model",
+    "MetalMarlinModel",
+    "ModelConfig",
+    "ModelInfo",
+    "chat",
+    "dequantize_fp4_torch",
+    "get_device",
+    "load_quantized_model",
+    "load_safetensors_torch",
     # Prefill exports
     "BatchedKVResult",
     "PrefillConfig",

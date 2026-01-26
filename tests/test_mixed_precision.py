@@ -22,8 +22,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 FP4_E2M1_TABLE: np.ndarray = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=np.float16,
 )
 
@@ -31,9 +30,7 @@ FP4_E2M1_TABLE: np.ndarray = np.array(
 FP4_MAX = 6.0
 
 
-def quantize_to_fp4(
-    weights: np.ndarray, group_size: int = 128
-) -> tuple[np.ndarray, np.ndarray]:
+def quantize_to_fp4(weights: np.ndarray, group_size: int = 128) -> tuple[np.ndarray, np.ndarray]:
     """Quantize FP16 weights to FP4 E2M1 format with per-group scales.
 
     Returns packed uint32 array [K/8, N] and scales [K/group_size, N].
@@ -169,9 +166,7 @@ def gemm_fp16_accumulation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     return C
 
 
-def gemm_fp32_accumulation(
-    A: np.ndarray, B: np.ndarray, *, output_fp16: bool = True
-) -> np.ndarray:
+def gemm_fp32_accumulation(A: np.ndarray, B: np.ndarray, *, output_fp16: bool = True) -> np.ndarray:
     """FP32 accumulation: inputs are FP16, accumulation in FP32.
 
     Args:
@@ -218,9 +213,7 @@ class TestFP16Overflow:
         )
 
         # FP32 accumulation must NOT overflow
-        assert not np.any(np.isinf(result_fp32)), (
-            "FP32 accumulator should not overflow, got inf"
-        )
+        assert not np.any(np.isinf(result_fp32)), "FP32 accumulator should not overflow, got inf"
 
         # FP32 result should be correct: 32768 * 6.0 = 196608.0
         expected_f32 = 32768.0 * 6.0
@@ -248,9 +241,7 @@ class TestFP16Overflow:
         result_fp16 = gemm_fp16_accumulation(A, B_dequant)
 
         # Should NOT overflow (32768 < 65504) but precision is severely degraded
-        assert not np.any(np.isinf(result_fp16)), (
-            "K=32768 with ones should not overflow FP16"
-        )
+        assert not np.any(np.isinf(result_fp16)), "K=32768 with ones should not overflow FP16"
 
         # FP32 accumulation gives the exact answer
         result_fp32 = gemm_fp32_accumulation(A, B_dequant)
@@ -265,21 +256,15 @@ class TestFP16Overflow:
         # The FP16-accumulated result will be much less than 32768 due to
         # precision starvation. The key test: FP32 acc is significantly more
         # accurate than FP16 acc for this scenario.
-        fp16_error = float(np.abs(
-            result_fp16.astype(np.float32) - 32768.0
-        ).max())
-        fp32_error = float(np.abs(
-            result_fp32.astype(np.float32) - 32768.0
-        ).max())
+        fp16_error = float(np.abs(result_fp16.astype(np.float32) - 32768.0).max())
+        fp32_error = float(np.abs(result_fp32.astype(np.float32) - 32768.0).max())
 
         # FP16 error should be large (precision loss from accumulating 32768 ones)
         assert fp16_error > 1000, (
             f"Expected significant FP16 precision loss, got error={fp16_error}"
         )
         # FP32 error should be negligible
-        assert fp32_error < 1.0, (
-            f"FP32 error too large: {fp32_error}"
-        )
+        assert fp32_error < 1.0, f"FP32 error too large: {fp32_error}"
 
     @pytest.mark.parametrize("K", [4096, 8192, 16384, 32768])
     def test_max_weights_overflow_threshold(self, K: int) -> None:
@@ -295,12 +280,10 @@ class TestFP16Overflow:
         expected_overflow = (K * 6.0) > 65504.0
 
         if expected_overflow:
-            assert np.any(np.isinf(result_fp16)), (
-                f"Expected overflow for K={K} (sum={K*6.0})"
-            )
+            assert np.any(np.isinf(result_fp16)), f"Expected overflow for K={K} (sum={K * 6.0})"
         else:
             assert not np.any(np.isinf(result_fp16)), (
-                f"Unexpected overflow for K={K} (sum={K*6.0} < 65504)"
+                f"Unexpected overflow for K={K} (sum={K * 6.0} < 65504)"
             )
 
 
@@ -317,9 +300,7 @@ class TestFP32Accumulation:
         return np.random.default_rng(seed=123)
 
     @pytest.mark.parametrize("K", [2048, 4096, 8192, 16384, 32768])
-    def test_fp32_acc_matches_reference(
-        self, rng: np.random.Generator, K: int
-    ) -> None:
+    def test_fp32_acc_matches_reference(self, rng: np.random.Generator, K: int) -> None:
         """FP32 accumulation should match FP64 reference within FP32 epsilon."""
         M, N = 4, 64
         A = rng.standard_normal((M, K)).astype(np.float16)
@@ -328,15 +309,13 @@ class TestFP32Accumulation:
         result_fp32 = gemm_fp32_accumulation(A, B)
 
         # FP64 reference (ground truth)
-        ref_fp64 = (A.astype(np.float64) @ B.astype(np.float64))
+        ref_fp64 = A.astype(np.float64) @ B.astype(np.float64)
 
         # FP32 accumulation error: bounded by K * eps_fp32 * max_product
         max_prod = float(np.abs(A.astype(np.float32)).max() * np.abs(B.astype(np.float32)).max())
         expected_error = K * 1.19e-7 * max_prod * np.sqrt(K)
 
-        abs_error = np.abs(
-            result_fp32.astype(np.float64) - ref_fp64
-        ).max()
+        abs_error = np.abs(result_fp32.astype(np.float64) - ref_fp64).max()
 
         # Error should be much smaller than FP16 range
         assert abs_error < max(expected_error, 1.0), (
@@ -345,9 +324,7 @@ class TestFP32Accumulation:
 
     @pytest.mark.slow
     @pytest.mark.parametrize("K", [32768, 65536])
-    def test_fp32_acc_large_k_no_overflow(
-        self, rng: np.random.Generator, K: int
-    ) -> None:
+    def test_fp32_acc_large_k_no_overflow(self, rng: np.random.Generator, K: int) -> None:
         """FP32 accumulation handles K=32768+ without overflow."""
         M, N = 1, 32
         # Use uniform [0,1] to ensure positive accumulation (worst case for overflow)
@@ -360,9 +337,7 @@ class TestFP32Accumulation:
         assert not np.any(np.isnan(result)), f"NaN at K={K}"
         # Output should be roughly K/4 (mean of uniform products)
         mean_output = float(result.astype(np.float32).mean())
-        assert mean_output > K * 0.1, (
-            f"Output too small for K={K}: mean={mean_output}"
-        )
+        assert mean_output > K * 0.1, f"Output too small for K={K}: mean={mean_output}"
 
 
 # ===========================================================================
@@ -398,35 +373,33 @@ class TestErrorScaling:
             ref_magnitude = np.abs(result_fp32.astype(np.float32))
             mask = ref_magnitude > 0.1
             if mask.any():
-                rel_error = np.abs(
-                    result_fp16[mask].astype(np.float32)
-                    - result_fp32[mask].astype(np.float32)
-                ) / ref_magnitude[mask]
+                rel_error = (
+                    np.abs(
+                        result_fp16[mask].astype(np.float32) - result_fp32[mask].astype(np.float32)
+                    )
+                    / ref_magnitude[mask]
+                )
                 errors.append(float(np.median(rel_error)))
             else:
                 errors.append(0.0)
 
         # Verify error increases with K
         # Allow some noise but the trend should be clear
-        assert errors[-1] > errors[0], (
-            f"Error should increase with K: errors={errors}"
-        )
+        assert errors[-1] > errors[0], f"Error should increase with K: errors={errors}"
 
         # Check rough sqrt(K) scaling: error at K=4096 should be ~sqrt(32) = 5.7x
         # larger than error at K=128. Allow 2x-20x range for robustness.
         if errors[0] > 1e-6:
             ratio = errors[-1] / errors[0]
-            assert ratio > 1.5, (
-                f"Error ratio K=4096/K=128 too small: {ratio:.2f} (expected >1.5)"
-            )
+            assert ratio > 1.5, f"Error ratio K=4096/K=128 too small: {ratio:.2f} (expected >1.5)"
 
     @pytest.mark.parametrize(
         "K,max_rel_error",
         [
-            (128, 0.01),    # <1% for small K
-            (512, 0.02),    # <2% for medium K
-            (2048, 0.05),   # <5% for large K
-            (4096, 0.10),   # <10% for very large K
+            (128, 0.01),  # <1% for small K
+            (512, 0.02),  # <2% for medium K
+            (2048, 0.05),  # <5% for large K
+            (4096, 0.10),  # <10% for very large K
         ],
     )
     def test_fp16_error_bounds(
@@ -444,15 +417,14 @@ class TestErrorScaling:
         mask = ref_magnitude > 1.0
         assert mask.any(), f"No outputs above threshold for K={K}"
 
-        rel_error = np.abs(
-            result_fp16[mask].astype(np.float32)
-            - result_fp32[mask].astype(np.float32)
-        ) / ref_magnitude[mask]
+        rel_error = (
+            np.abs(result_fp16[mask].astype(np.float32) - result_fp32[mask].astype(np.float32))
+            / ref_magnitude[mask]
+        )
 
         median_error = float(np.median(rel_error))
         assert median_error < max_rel_error, (
-            f"FP16 median relative error {median_error:.4f} exceeds bound "
-            f"{max_rel_error} for K={K}"
+            f"FP16 median relative error {median_error:.4f} exceeds bound {max_rel_error} for K={K}"
         )
 
 
@@ -469,9 +441,7 @@ class TestQuantizedPrecision:
         return np.random.default_rng(seed=789)
 
     @pytest.mark.parametrize("K", [128, 512, 2048, 4096])
-    def test_quantized_gemm_fp16_vs_fp32_acc(
-        self, rng: np.random.Generator, K: int
-    ) -> None:
+    def test_quantized_gemm_fp16_vs_fp32_acc(self, rng: np.random.Generator, K: int) -> None:
         """For quantized weights, FP32 acc should be closer to ground truth."""
         M, N = 4, 64
         group_size = 128
@@ -483,17 +453,13 @@ class TestQuantizedPrecision:
         B_dequant = dequant_fp4_array(packed, scales, K, N, group_size=group_size)
 
         # Ground truth: FP64
-        ref = (A.astype(np.float64) @ B_dequant.astype(np.float64))
+        ref = A.astype(np.float64) @ B_dequant.astype(np.float64)
 
         result_fp16 = gemm_fp16_accumulation(A, B_dequant)
         result_fp32 = gemm_fp32_accumulation(A, B_dequant)
 
-        error_fp16 = float(np.abs(
-            result_fp16.astype(np.float64) - ref
-        ).mean())
-        error_fp32 = float(np.abs(
-            result_fp32.astype(np.float64) - ref
-        ).mean())
+        error_fp16 = float(np.abs(result_fp16.astype(np.float64) - ref).mean())
+        error_fp32 = float(np.abs(result_fp32.astype(np.float64) - ref).mean())
 
         # FP32 accumulation should always be at least as good as FP16
         # (usually much better for K >= 512)
@@ -506,8 +472,7 @@ class TestQuantizedPrecision:
             # For large K, FP32 should be significantly better
             improvement = error_fp16 / max(error_fp32, 1e-10)
             assert improvement > 2.0, (
-                f"FP32 should be >2x better for K={K}: "
-                f"improvement={improvement:.2f}x"
+                f"FP32 should be >2x better for K={K}: improvement={improvement:.2f}x"
             )
 
     @pytest.mark.slow
@@ -537,17 +502,13 @@ class TestQuantizedPrecision:
 
         # FP16 result: 32768.0 is representable as half, but accumulated
         # via many additions it may have precision loss
-        float(np.abs(
-            result_fp16.astype(np.float32) - 32768.0
-        ).max())
+        float(np.abs(result_fp16.astype(np.float32) - 32768.0).max())
         # At magnitude 32768, FP16 ULP = 32, so precision is very coarse
         # but the result should still be finite
         assert not np.any(np.isinf(result_fp16)), "All-ones K=32768 should not overflow"
 
     @pytest.mark.slow
-    def test_k32768_max_weights_overflow_detection(
-        self, rng: np.random.Generator
-    ) -> None:
+    def test_k32768_max_weights_overflow_detection(self, rng: np.random.Generator) -> None:
         """K=32768 with max FP4 weights (6.0): confirm FP16 overflows.
 
         All FP4 codes set to 7 (value=6.0), scale=1.0.
@@ -591,9 +552,7 @@ class TestKParallelPrecision:
         return np.random.default_rng(seed=101)
 
     @pytest.mark.parametrize("parallel", [1, 2, 4, 8])
-    def test_k_parallel_reduces_fp16_error(
-        self, rng: np.random.Generator, parallel: int
-    ) -> None:
+    def test_k_parallel_reduces_fp16_error(self, rng: np.random.Generator, parallel: int) -> None:
         """K-parallel with FP16 acc should reduce error vs single-pass FP16.
 
         Splitting K into `parallel` slices means each slice accumulates K/parallel
@@ -613,9 +572,7 @@ class TestKParallelPrecision:
         for p in range(parallel):
             k_start = p * slice_size
             k_end = k_start + slice_size
-            partial_sums[p] = gemm_fp16_accumulation(
-                A[:, k_start:k_end], B[k_start:k_end, :]
-            )
+            partial_sums[p] = gemm_fp16_accumulation(A[:, k_start:k_end], B[k_start:k_end, :])
 
         # Final reduction in FP16 (matching the kernel's behavior)
         parallel_result = partial_sums.astype(np.float32).sum(axis=0).astype(np.float16)
@@ -623,12 +580,12 @@ class TestKParallelPrecision:
         # Reference (FP32 ground truth)
         ref = gemm_fp32_accumulation(A, B)
 
-        error_single = float(np.abs(
-            single_result.astype(np.float32) - ref.astype(np.float32)
-        ).mean())
-        error_parallel = float(np.abs(
-            parallel_result.astype(np.float32) - ref.astype(np.float32)
-        ).mean())
+        error_single = float(
+            np.abs(single_result.astype(np.float32) - ref.astype(np.float32)).mean()
+        )
+        error_parallel = float(
+            np.abs(parallel_result.astype(np.float32) - ref.astype(np.float32)).mean()
+        )
 
         if parallel > 1:
             # K-parallel should reduce error (or at least not increase it much)

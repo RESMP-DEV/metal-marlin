@@ -5,8 +5,8 @@ from forward-pass activations. These statistics inform quantization range
 selection, enabling outlier-aware schemes that clip extreme values rather
 than letting them inflate the quantization range.
 
-Since MLX nn.Module does not provide forward hooks, this module monkeypatches
-__call__ on target layers and restores originals on remove_hooks().
+Uses PyTorch forward hooks to capture activations from target layers.
+Hooks are automatically removed by remove_hooks().
 
 Usage:
     collector = CalibrationCollector(model)
@@ -43,8 +43,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
-import mlx.nn as nn
+import torch
+import torch.nn as nn
 
 # ---------------------------------------------------------------------------
 # CalibrationDataset: Pre-loaded calibration data for quantization
@@ -190,19 +190,18 @@ class CalibrationDataset:
         self,
         tokenizer,
         max_length: int = 2048,
-        return_tensors: str = "np",
+        return_tensors: str = "pt",
     ) -> list:
         """Tokenize samples using a HuggingFace-compatible tokenizer.
 
         Args:
             tokenizer: A tokenizer with __call__(text, ...) -> BatchEncoding.
             max_length: Maximum sequence length for each sample.
-            return_tensors: Return format ("np" for numpy, "mx" for MLX).
+            return_tensors: Return format ("pt" for PyTorch, "np" for numpy).
 
         Returns:
             List of tokenized samples (dict with input_ids, attention_mask).
         """
-
         results = []
         for text in self.samples:
             encoded = tokenizer(
@@ -210,10 +209,8 @@ class CalibrationDataset:
                 max_length=max_length,
                 truncation=True,
                 padding="max_length",
-                return_tensors="np",
+                return_tensors=return_tensors,
             )
-            if return_tensors == "mx":
-                encoded = {k: mx.array(v) for k, v in encoded.items()}
             results.append(encoded)
         return results
 
@@ -233,11 +230,11 @@ class CalibrationStats:
         num_batches: Number of forward passes accumulated.
     """
 
-    min_val: mx.array
-    max_val: mx.array
-    absmax: mx.array
-    percentile_low: mx.array | None = None
-    percentile_high: mx.array | None = None
+    min_val: torch.Tensor
+    max_val: torch.Tensor
+    absmax: torch.Tensor
+    percentile_low: torch.Tensor | None = None
+    percentile_high: torch.Tensor | None = None
     num_batches: int = 0
 
 
@@ -249,7 +246,7 @@ _DEFAULT_PERCENTILE_HIGH = 99.99
 class CalibrationCollector:
     """Collect activation statistics for quantization calibration.
 
-    Instruments target layers by wrapping their __call__ methods to
+    Instruments target layers by registering forward hooks to
     record input activation statistics.
 
     Supports two percentile estimation strategies:
@@ -262,7 +259,7 @@ class CalibrationCollector:
     Args:
         model: The nn.Module to instrument.
         layers_to_calibrate: Optional list of layer name prefixes to target.
-            If None, targets all nn.Linear and MarlinLinear layers.
+            If None, targets all nn.Linear layers.
         percentile_low: Low percentile for clipping (0-100). Default: 0.01.
         percentile_high: High percentile for clipping (0-100). Default: 99.99.
         method: Percentile estimation method. "histogram" or "exact".
@@ -287,95 +284,92 @@ class CalibrationCollector:
         self.num_bins = num_bins
 
         self.stats: dict[str, CalibrationStats] = {}
-        self._hooks: list[tuple[nn.Module, Any]] = []  # (module, original_call)
-        self._histograms: dict[str, tuple[mx.array, mx.array]] = {}  # counts, edges
-        self._exact_buffers: dict[str, list[mx.array]] = {}
+        self._hooks: list[torch.utils.hooks.RemovableHandle] = []
+        self._histograms: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}  # counts, edges
+        self._exact_buffers: dict[str, list[torch.Tensor]] = {}
 
         self._register_hooks(model, layers_to_calibrate)
 
     def _is_target_layer(self, module: nn.Module) -> bool:
         """Check if a module is a quantization target (linear layer)."""
-        try:
-            from ..metal_marlin.layers import MarlinLinear
-
-            target_types: tuple[type, ...] = (nn.Linear, MarlinLinear)
-        except (ImportError, AttributeError):
-            target_types = (nn.Linear,)
-
-        return isinstance(module, target_types)
+        return isinstance(module, nn.Linear)
 
     def _register_hooks(
         self, model: nn.Module, layers_to_calibrate: list[str] | None
     ) -> None:
-        """Walk the module tree and wrap target layers."""
-        for name, module in _named_modules(model):
+        """Walk the module tree and register forward hooks on target layers."""
+        for name, module in model.named_modules():
             if layers_to_calibrate is not None:
                 if not any(name.startswith(p) for p in layers_to_calibrate):
                     continue
             elif not self._is_target_layer(module):
                 continue
 
-            self._wrap_module(name, module)
+            self._register_hook(name, module)
 
-    def _wrap_module(self, name: str, module: nn.Module) -> None:
-        """Monkeypatch __call__ to intercept input activations."""
-        original_call = module.__call__
+    def _register_hook(self, name: str, module: nn.Module) -> None:
+        """Register a forward hook to capture input activations."""
 
-        def wrapped_call(x: mx.array, *args: Any, **kwargs: Any) -> mx.array:
-            self._update_stats(name, x)
-            return original_call(x, *args, **kwargs)
+        def hook_fn(
+            mod: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor
+        ) -> None:
+            if inputs and len(inputs) > 0:
+                x = inputs[0]
+                if isinstance(x, torch.Tensor):
+                    self._update_stats(name, x)
 
-        self._hooks.append((module, original_call))
-        module.__call__ = wrapped_call  # type: ignore[method-assign]
+        handle = module.register_forward_hook(hook_fn)
+        self._hooks.append(handle)
 
-    def _update_stats(self, name: str, x: mx.array) -> None:
+    def _update_stats(self, name: str, x: torch.Tensor) -> None:
         """Update running statistics for a layer given input activations."""
-        flat = x.reshape(-1)
+        with torch.no_grad():
+            flat = x.reshape(-1).float()  # Use float32 for accumulation
 
-        batch_min = mx.min(flat)
-        batch_max = mx.max(flat)
-        batch_absmax = mx.max(mx.abs(flat))
+            batch_min = flat.min()
+            batch_max = flat.max()
+            batch_absmax = flat.abs().max()
 
-        if name not in self.stats:
-            self.stats[name] = CalibrationStats(
-                min_val=batch_min,
-                max_val=batch_max,
-                absmax=batch_absmax,
-                num_batches=1,
-            )
-            if self.method == "histogram":
-                am = float(batch_absmax.item())
-                edge_max = am * 1.1 if am > 0 else 1.0
-                edges = mx.linspace(-edge_max, edge_max, self.num_bins + 1)
-                counts = _histogram(flat, edges)
-                self._histograms[name] = (counts, edges)
+            if name not in self.stats:
+                self.stats[name] = CalibrationStats(
+                    min_val=batch_min,
+                    max_val=batch_max,
+                    absmax=batch_absmax,
+                    num_batches=1,
+                )
+                if self.method == "histogram":
+                    am = float(batch_absmax.item())
+                    edge_max = am * 1.1 if am > 0 else 1.0
+                    edges = torch.linspace(-edge_max, edge_max, self.num_bins + 1, device=flat.device)
+                    counts = _histogram(flat, edges)
+                    self._histograms[name] = (counts, edges)
+                else:
+                    self._exact_buffers[name] = [flat.cpu()]  # Move to CPU to save GPU memory
             else:
-                self._exact_buffers[name] = [flat]
-        else:
-            s = self.stats[name]
-            s.min_val = mx.minimum(s.min_val, batch_min)
-            s.max_val = mx.maximum(s.max_val, batch_max)
-            s.absmax = mx.maximum(s.absmax, batch_absmax)
-            s.num_batches += 1
+                s = self.stats[name]
+                s.min_val = torch.minimum(s.min_val, batch_min)
+                s.max_val = torch.maximum(s.max_val, batch_max)
+                s.absmax = torch.maximum(s.absmax, batch_absmax)
+                s.num_batches += 1
 
-            if self.method == "histogram":
-                counts, edges = self._histograms[name]
-                current_edge_max = float(edges[-1].item())
-                new_absmax = float(batch_absmax.item())
+                if self.method == "histogram":
+                    counts, edges = self._histograms[name]
+                    current_edge_max = float(edges[-1].item())
+                    new_absmax = float(batch_absmax.item())
 
-                if new_absmax > current_edge_max:
-                    new_edge_max = new_absmax * 1.1
-                    new_edges = mx.linspace(
-                        -new_edge_max, new_edge_max, self.num_bins + 1
-                    )
-                    counts = _rebin_histogram(counts, edges, new_edges)
-                    edges = new_edges
+                    if new_absmax > current_edge_max:
+                        new_edge_max = new_absmax * 1.1
+                        new_edges = torch.linspace(
+                            -new_edge_max, new_edge_max, self.num_bins + 1, device=flat.device
+                        )
+                        counts = _rebin_histogram(counts, edges, new_edges)
+                        edges = new_edges
 
-                new_counts = _histogram(flat, edges)
-                counts = counts + new_counts
-                self._histograms[name] = (counts, edges)
-            else:
-                self._exact_buffers[name].append(flat)
+                    new_counts = _histogram(flat, edges)
+                    counts = counts + new_counts
+                    self._histograms[name] = (counts, edges)
+                else:
+                    self._exact_buffers[name].append(flat.cpu())
 
     def get_stats(self) -> dict[str, CalibrationStats]:
         """Compute final statistics including percentiles.
@@ -397,8 +391,8 @@ class CalibrationCollector:
                 s.percentile_low = _percentile_from_histogram(counts, edges, p_low)
                 s.percentile_high = _percentile_from_histogram(counts, edges, p_high)
             elif self.method == "exact" and name in self._exact_buffers:
-                all_vals = mx.concatenate(self._exact_buffers[name])
-                sorted_vals = mx.sort(all_vals)
+                all_vals = torch.cat(self._exact_buffers[name])
+                sorted_vals, _ = torch.sort(all_vals)
                 n = sorted_vals.shape[0]
                 idx_low = min(int(p_low * n), n - 1)
                 idx_high = min(int(p_high * n), n - 1)
@@ -408,9 +402,9 @@ class CalibrationCollector:
         return self.stats
 
     def remove_hooks(self) -> None:
-        """Restore original __call__ methods on all instrumented modules."""
-        for module, original_call in self._hooks:
-            module.__call__ = original_call  # type: ignore[method-assign]
+        """Remove all registered forward hooks."""
+        for handle in self._hooks:
+            handle.remove()
         self._hooks.clear()
 
     def reset(self) -> None:
@@ -429,7 +423,7 @@ def compute_scales(
     stats: dict[str, CalibrationStats],
     quant_type: str = "fp4",
     use_percentile: bool = True,
-) -> dict[str, tuple[mx.array, mx.array | None]]:
+) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
     """Compute per-layer quantization scales from calibration statistics.
 
     For outlier-aware quantization, uses percentile-based range instead
@@ -448,15 +442,15 @@ def compute_scales(
     Raises:
         ValueError: If quant_type is not recognized.
     """
-    result: dict[str, tuple[mx.array, mx.array | None]] = {}
+    result: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
     for name, s in stats.items():
         if quant_type == "fp4":
             # FP4 E2M1: representable magnitudes [0, 0.5, 1, 1.5, 2, 3, 4, 6]
             fp4_max = 6.0
             if use_percentile and s.percentile_high is not None:
-                ref = mx.maximum(
-                    mx.abs(s.percentile_low), mx.abs(s.percentile_high)
+                ref = torch.maximum(
+                    torch.abs(s.percentile_low), torch.abs(s.percentile_high)
                 )
             else:
                 ref = s.absmax
@@ -466,8 +460,8 @@ def compute_scales(
         elif quant_type == "int4_sym":
             # INT4 symmetric: [-8, 7], use 7 as positive max
             if use_percentile and s.percentile_high is not None:
-                ref = mx.maximum(
-                    mx.abs(s.percentile_low), mx.abs(s.percentile_high)
+                ref = torch.maximum(
+                    torch.abs(s.percentile_low), torch.abs(s.percentile_high)
                 )
             else:
                 ref = s.absmax
@@ -484,7 +478,7 @@ def compute_scales(
                 high = s.max_val
             range_val = high - low
             scale = range_val / 15.0
-            zeros = -low / mx.maximum(scale, mx.array(1e-10))
+            zeros = -low / torch.clamp(scale, min=1e-10)
 
         else:
             raise ValueError(
@@ -492,56 +486,8 @@ def compute_scales(
                 f"Expected one of: 'fp4', 'int4_sym', 'int4_asym'"
             )
 
-        scale = mx.maximum(scale, mx.array(1e-10, dtype=mx.float16))
-        result[name] = (scale.astype(mx.float16), zeros)
-
-    return result
-
-
-# --- Module tree walking ---
-
-
-def _named_modules(
-    module: nn.Module, prefix: str = ""
-) -> list[tuple[str, nn.Module]]:
-    """Recursively enumerate all submodules with dotted path names.
-
-    MLX nn.Module exposes children via the .children() method which
-    returns a dict of {attr_name: child_or_list}. We flatten lists
-    (e.g. model.layers = [layer0, layer1, ...]) with integer indices.
-    """
-    result: list[tuple[str, nn.Module]] = []
-    if not hasattr(module, "children"):
-        return result
-
-    children = module.children()
-    if not isinstance(children, dict):
-        return result
-
-    for attr_name, child in children.items():
-        if isinstance(child, nn.Module):
-            full_name = f"{prefix}.{attr_name}" if prefix else attr_name
-            result.append((full_name, child))
-            result.extend(_named_modules(child, full_name))
-        elif isinstance(child, list):
-            for i, item in enumerate(child):
-                if isinstance(item, nn.Module):
-                    full_name = (
-                        f"{prefix}.{attr_name}.{i}" if prefix else f"{attr_name}.{i}"
-                    )
-                    result.append((full_name, item))
-                    result.extend(_named_modules(item, full_name))
-        elif isinstance(child, dict):
-            # Some modules nest dicts of modules
-            for key, item in child.items():
-                if isinstance(item, nn.Module):
-                    full_name = (
-                        f"{prefix}.{attr_name}.{key}"
-                        if prefix
-                        else f"{attr_name}.{key}"
-                    )
-                    result.append((full_name, item))
-                    result.extend(_named_modules(item, full_name))
+        scale = torch.clamp(scale, min=1e-10).to(torch.float16)
+        result[name] = (scale, zeros)
 
     return result
 
@@ -549,42 +495,40 @@ def _named_modules(
 # --- Histogram utilities ---
 
 
-def _histogram(values: mx.array, bin_edges: mx.array) -> mx.array:
+def _histogram(values: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
     """Compute histogram counts for values given bin edges.
 
-    Uses searchsorted to assign bins, then one-hot accumulation.
-    Returns int32 counts array of shape [num_bins].
+    Uses searchsorted to assign bins, then scatter_add for counting.
+    Returns int64 counts array of shape [num_bins].
     """
     num_bins = bin_edges.shape[0] - 1
-    indices = mx.searchsorted(bin_edges[1:], values)
-    indices = mx.clip(indices, 0, num_bins - 1)
+    indices = torch.searchsorted(bin_edges[1:], values)
+    indices = torch.clamp(indices, 0, num_bins - 1)
 
-    # One-hot scatter to count per-bin occurrences
-    one_hot = mx.zeros((values.shape[0], num_bins), dtype=mx.float32)
-    rows = mx.arange(values.shape[0])
-    one_hot = one_hot.at[rows, indices].add(1.0)
-    counts = mx.sum(one_hot, axis=0).astype(mx.int32)
+    # Scatter add to count per-bin occurrences
+    counts = torch.zeros(num_bins, dtype=torch.int64, device=values.device)
+    ones = torch.ones_like(indices, dtype=torch.int64)
+    counts.scatter_add_(0, indices, ones)
     return counts
 
 
 def _rebin_histogram(
-    old_counts: mx.array, old_edges: mx.array, new_edges: mx.array
-) -> mx.array:
+    old_counts: torch.Tensor, old_edges: torch.Tensor, new_edges: torch.Tensor
+) -> torch.Tensor:
     """Redistribute histogram counts from old bins into new (wider) bins.
 
     Uses CDF interpolation: builds cumulative distribution from old counts,
     evaluates it at new bin edges, then differences to get new bin counts.
     """
-    num_old = old_counts.shape[0]
     num_new = new_edges.shape[0] - 1
 
-    old_cdf = mx.cumsum(old_counts.astype(mx.float32))
+    old_cdf = torch.cumsum(old_counts.float(), dim=0)
     total = old_cdf[-1]
     if float(total.item()) == 0:
-        return mx.zeros((num_new,), dtype=mx.int32)
+        return torch.zeros(num_new, dtype=torch.int64, device=old_counts.device)
 
     # Prepend 0 to old_cdf for full CDF: cdf[0]=0, cdf[i]=sum(counts[:i])
-    full_old_cdf = mx.concatenate([mx.array([0.0]), old_cdf])
+    full_old_cdf = torch.cat([torch.tensor([0.0], device=old_cdf.device), old_cdf])
     # full_old_cdf has shape [num_old + 1], aligned with old_edges
 
     # Evaluate old CDF at each new edge via linear interpolation
@@ -592,11 +536,11 @@ def _rebin_histogram(
 
     # Difference consecutive CDF values to get bin counts
     new_counts = new_cdf_vals[1:] - new_cdf_vals[:-1]
-    new_counts = mx.maximum(new_counts, mx.array(0.0))
-    return new_counts.astype(mx.int32)
+    new_counts = torch.clamp(new_counts, min=0.0)
+    return new_counts.long()
 
 
-def _interp(x: mx.array, xp: mx.array, fp: mx.array) -> mx.array:
+def _interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
     """1D linear interpolation (like numpy.interp).
 
     Args:
@@ -608,12 +552,12 @@ def _interp(x: mx.array, xp: mx.array, fp: mx.array) -> mx.array:
         Interpolated values at x.
     """
     # Clamp x to xp range
-    x_clamped = mx.clip(x, xp[0], xp[-1])
+    x_clamped = torch.clamp(x, xp[0], xp[-1])
 
     # Find insertion indices
-    indices = mx.searchsorted(xp, x_clamped)
+    indices = torch.searchsorted(xp, x_clamped)
     # Clamp to valid range for indexing
-    indices = mx.clip(indices, 1, xp.shape[0] - 1)
+    indices = torch.clamp(indices, 1, xp.shape[0] - 1)
 
     # Gather surrounding points
     x0 = xp[indices - 1]
@@ -623,13 +567,13 @@ def _interp(x: mx.array, xp: mx.array, fp: mx.array) -> mx.array:
 
     # Linear interpolation
     t = (x_clamped - x0) / (x1 - x0 + 1e-10)
-    t = mx.clip(t, 0.0, 1.0)
+    t = torch.clamp(t, 0.0, 1.0)
     return y0 + t * (y1 - y0)
 
 
 def _percentile_from_histogram(
-    counts: mx.array, bin_edges: mx.array, percentile: float
-) -> mx.array:
+    counts: torch.Tensor, bin_edges: torch.Tensor, percentile: float
+) -> torch.Tensor:
     """Interpolate a percentile value from histogram counts.
 
     Uses the cumulative distribution to find the bin containing the
@@ -643,19 +587,19 @@ def _percentile_from_histogram(
     Returns:
         Scalar float16 value at the given percentile.
     """
-    cdf = mx.cumsum(counts.astype(mx.float32))
+    cdf = torch.cumsum(counts.float(), dim=0)
     total = float(cdf[-1].item())
     if total == 0:
-        return mx.array(0.0, dtype=mx.float16)
+        return torch.tensor(0.0, dtype=torch.float16, device=counts.device)
 
     target = percentile * total
 
     # Find first bin where CDF >= target
     exceeded = cdf >= target
-    indices = mx.arange(cdf.shape[0])
+    indices = torch.arange(cdf.shape[0], device=cdf.device)
     # Set non-exceeded bins to a large index, then take min
-    masked = mx.where(exceeded, indices, mx.array(cdf.shape[0], dtype=mx.int32))
-    bin_idx = int(mx.min(masked).item())
+    masked = torch.where(exceeded, indices, torch.tensor(cdf.shape[0], device=cdf.device))
+    bin_idx = int(masked.min().item())
     bin_idx = min(bin_idx, counts.shape[0] - 1)
 
     # Linear interpolation within the bin
@@ -668,10 +612,10 @@ def _percentile_from_histogram(
         value = (bin_low + bin_high) / 2.0
     else:
         frac = (target - cdf_before) / bin_count
-        frac_arr = mx.clip(mx.array(frac), 0.0, 1.0)
-        value = bin_low + frac_arr * (bin_high - bin_low)
+        frac = max(0.0, min(1.0, frac))
+        value = bin_low + frac * (bin_high - bin_low)
 
-    return value.astype(mx.float16)
+    return value.to(torch.float16)
 
 
 # ---------------------------------------------------------------------------
@@ -694,7 +638,7 @@ class HessianStats:
         in_features: Dimension of the input features.
     """
 
-    hessian: mx.array
+    hessian: torch.Tensor
     num_samples: int
     in_features: int
 
@@ -715,7 +659,7 @@ class HessianCollector:
     Args:
         model: The nn.Module to instrument.
         layers_to_calibrate: Optional list of layer name prefixes to target.
-            If None, targets all nn.Linear and MarlinLinear layers.
+            If None, targets all nn.Linear layers.
         damping_factor: Factor for Hessian damping (default: 0.01).
             The damped Hessian is H + λI where λ = damping_factor * mean(diag(H)).
 
@@ -734,49 +678,45 @@ class HessianCollector:
         damping_factor: float = 0.01,
     ):
         self.damping_factor = damping_factor
-        self._hessians: dict[str, mx.array] = {}  # Running H = X^T @ X
+        self._hessians: dict[str, torch.Tensor] = {}  # Running H = X^T @ X
         self._sample_counts: dict[str, int] = {}
         self._in_features: dict[str, int] = {}
-        self._hooks: list[tuple[nn.Module, Any]] = []
+        self._hooks: list[torch.utils.hooks.RemovableHandle] = []
 
         self._register_hooks(model, layers_to_calibrate)
 
     def _is_target_layer(self, module: nn.Module) -> bool:
         """Check if a module is a quantization target (linear layer)."""
-        try:
-            from ..metal_marlin.layers import MarlinLinear
-
-            target_types: tuple[type, ...] = (nn.Linear, MarlinLinear)
-        except (ImportError, AttributeError):
-            target_types = (nn.Linear,)
-
-        return isinstance(module, target_types)
+        return isinstance(module, nn.Linear)
 
     def _register_hooks(
         self, model: nn.Module, layers_to_calibrate: list[str] | None
     ) -> None:
-        """Walk the module tree and wrap target layers."""
-        for name, module in _named_modules(model):
+        """Walk the module tree and register forward hooks on target layers."""
+        for name, module in model.named_modules():
             if layers_to_calibrate is not None:
                 if not any(name.startswith(p) for p in layers_to_calibrate):
                     continue
             elif not self._is_target_layer(module):
                 continue
 
-            self._wrap_module(name, module)
+            self._register_hook(name, module)
 
-    def _wrap_module(self, name: str, module: nn.Module) -> None:
-        """Monkeypatch __call__ to intercept input activations for Hessian."""
-        original_call = module.__call__
+    def _register_hook(self, name: str, module: nn.Module) -> None:
+        """Register a forward hook to capture input activations for Hessian."""
 
-        def wrapped_call(x: mx.array, *args: Any, **kwargs: Any) -> mx.array:
-            self._update_hessian(name, x)
-            return original_call(x, *args, **kwargs)
+        def hook_fn(
+            mod: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor
+        ) -> None:
+            if inputs and len(inputs) > 0:
+                x = inputs[0]
+                if isinstance(x, torch.Tensor):
+                    self._update_hessian(name, x)
 
-        self._hooks.append((module, original_call))
-        module.__call__ = wrapped_call  # type: ignore[method-assign]
+        handle = module.register_forward_hook(hook_fn)
+        self._hooks.append(handle)
 
-    def _update_hessian(self, name: str, x: mx.array) -> None:
+    def _update_hessian(self, name: str, x: torch.Tensor) -> None:
         """Update running Hessian H = X^T @ X for a layer.
 
         The input x has shape [..., in_features]. We flatten all leading
@@ -785,24 +725,25 @@ class HessianCollector:
 
         Uses float32 accumulation for numerical stability.
         """
-        # Flatten to 2D: [*, in_features] -> [num_samples, in_features]
-        in_features = x.shape[-1]
-        x_flat = x.reshape(-1, in_features).astype(mx.float32)
-        num_samples = x_flat.shape[0]
+        with torch.no_grad():
+            # Flatten to 2D: [*, in_features] -> [num_samples, in_features]
+            in_features = x.shape[-1]
+            x_flat = x.reshape(-1, in_features).float()
+            num_samples = x_flat.shape[0]
 
-        # Compute X^T @ X contribution: [in_features, num_samples] @ [num_samples, in_features]
-        # This is [in_features, in_features]
-        hessian_contrib = mx.matmul(x_flat.T, x_flat)
+            # Compute X^T @ X contribution: [in_features, num_samples] @ [num_samples, in_features]
+            # This is [in_features, in_features]
+            hessian_contrib = torch.matmul(x_flat.T, x_flat)
 
-        if name not in self._hessians:
-            self._hessians[name] = hessian_contrib
-            self._sample_counts[name] = num_samples
-            self._in_features[name] = in_features
-        else:
-            self._hessians[name] = self._hessians[name] + hessian_contrib
-            self._sample_counts[name] += num_samples
+            if name not in self._hessians:
+                self._hessians[name] = hessian_contrib
+                self._sample_counts[name] = num_samples
+                self._in_features[name] = in_features
+            else:
+                self._hessians[name] = self._hessians[name] + hessian_contrib
+                self._sample_counts[name] += num_samples
 
-    def collect_hessian(self, layer_name: str) -> mx.array:
+    def collect_hessian(self, layer_name: str) -> torch.Tensor:
         """Get the damped Hessian for a specific layer.
 
         Returns H_damped = H + λI where:
@@ -817,7 +758,7 @@ class HessianCollector:
             layer_name: Name of the layer to get Hessian for.
 
         Returns:
-            Damped Hessian as float32 array [in_features, in_features].
+            Damped Hessian as float32 tensor [in_features, in_features].
 
         Raises:
             KeyError: If layer_name was not instrumented or has no data.
@@ -832,12 +773,12 @@ class HessianCollector:
         in_features = self._in_features[layer_name]
 
         # Compute damping: λ = damping_factor * mean(diag(H))
-        diag_H = mx.diag(H)
-        mean_diag = mx.mean(diag_H)
+        diag_H = torch.diag(H)
+        mean_diag = torch.mean(diag_H)
         lambda_damp = self.damping_factor * mean_diag
 
         # Add damping: H_damped = H + λI
-        identity = mx.eye(in_features, dtype=mx.float32)
+        identity = torch.eye(in_features, dtype=torch.float32, device=H.device)
         H_damped = H + lambda_damp * identity
 
         return H_damped
@@ -868,9 +809,9 @@ class HessianCollector:
         return result
 
     def remove_hooks(self) -> None:
-        """Restore original __call__ methods on all instrumented modules."""
-        for module, original_call in self._hooks:
-            module.__call__ = original_call  # type: ignore[method-assign]
+        """Remove all registered forward hooks."""
+        for handle in self._hooks:
+            handle.remove()
         self._hooks.clear()
 
     def reset(self) -> None:
@@ -898,7 +839,8 @@ def compute_layer_hessians(
     chunk_size: int | None = None,
     cache_dir: str | Path | None = None,
     damping_factor: float = 0.01,
-) -> dict[str, mx.array]:
+    device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
     """Compute Hessians for specified layers using calibration data.
 
     This is a high-level function that handles the full calibration workflow:
@@ -928,9 +870,10 @@ def compute_layer_hessians(
         cache_dir: If specified, cache intermediate Hessians to this directory.
             Enables resumption and reduces memory pressure.
         damping_factor: Hessian damping factor (default: 0.01).
+        device: Device to run computations on.
 
     Returns:
-        Dictionary mapping layer names to damped Hessian arrays [in_features, in_features].
+        Dictionary mapping layer names to damped Hessian tensors [in_features, in_features].
 
     Example:
         >>> from metal_marlin.converters.calibration import compute_layer_hessians
@@ -950,9 +893,15 @@ def compute_layer_hessians(
 
     # Default forward function
     if forward_fn is None:
+
         def forward_fn(m: nn.Module, batch: Any) -> Any:
             if isinstance(batch, dict):
-                return m(batch["input_ids"])
+                input_ids = batch["input_ids"]
+                if isinstance(input_ids, torch.Tensor):
+                    input_ids = input_ids.to(device)
+                return m(input_ids)
+            if isinstance(batch, torch.Tensor):
+                return m(batch.to(device))
             return m(batch)
 
     # Process calibration data
@@ -960,7 +909,6 @@ def compute_layer_hessians(
         # Process all at once
         for batch in calibration_data:
             _ = forward_fn(model, batch)
-            mx.eval(list(collector._hessians.values()))  # Force evaluation
     else:
         # Process in chunks with optional caching
         total_samples = len(calibration_data)
@@ -970,7 +918,6 @@ def compute_layer_hessians(
 
             for batch in chunk:
                 _ = forward_fn(model, batch)
-                mx.eval(list(collector._hessians.values()))
 
             # Optional: cache intermediate results
             if cache_path:
@@ -984,45 +931,45 @@ def compute_layer_hessians(
     return {name: stats.hessian for name, stats in hessians_stats.items()}
 
 
-def _cache_hessians(hessians: dict[str, mx.array], path: Path) -> None:
+def _cache_hessians(hessians: dict[str, torch.Tensor], path: Path) -> None:
     """Cache Hessians to disk as numpy arrays."""
     import numpy as np
 
     np_hessians = {}
     for name, H in hessians.items():
-        # Convert to numpy, handling potential MLX-specific operations
-        if hasattr(H, "tolist"):
-            np_hessians[name.replace(".", "_")] = np.array(H.tolist(), dtype=np.float32)
-        else:
-            np_hessians[name.replace(".", "_")] = np.asarray(H)
+        np_hessians[name.replace(".", "_")] = H.detach().cpu().numpy()
 
     np.savez_compressed(path, **np_hessians)
 
 
-def load_cached_hessians(cache_dir: str | Path) -> dict[str, mx.array]:
+def load_cached_hessians(
+    cache_dir: str | Path, device: str | torch.device = "cpu"
+) -> dict[str, torch.Tensor]:
     """Load cached Hessians from disk.
 
     Args:
         cache_dir: Directory containing cached .npz files.
+        device: Device to load tensors to.
 
     Returns:
-        Dictionary mapping layer names to Hessian arrays.
+        Dictionary mapping layer names to Hessian tensors.
     """
     import numpy as np
 
     cache_path = Path(cache_dir)
-    hessians: dict[str, mx.array] = {}
+    hessians: dict[str, torch.Tensor] = {}
 
     for npz_file in sorted(cache_path.glob("hessian_chunk_*.npz")):
         data = np.load(npz_file)
         for key in data.files:
             layer_name = key.replace("_", ".")
             H_np = data[key]
+            H_tensor = torch.from_numpy(H_np).to(device)
             if layer_name in hessians:
                 # Accumulate if processing multiple chunks
-                hessians[layer_name] = hessians[layer_name] + mx.array(H_np)
+                hessians[layer_name] = hessians[layer_name] + H_tensor
             else:
-                hessians[layer_name] = mx.array(H_np)
+                hessians[layer_name] = H_tensor
 
     return hessians
 
@@ -1033,7 +980,8 @@ def compute_moe_hessians(
     expert_layers: dict[str, list[str]],
     router_fn: Any,
     damping_factor: float = 0.01,
-) -> dict[str, dict[int, mx.array]]:
+    device: str | torch.device = "cpu",
+) -> dict[str, dict[int, torch.Tensor]]:
     """Compute per-expert Hessians for MoE models.
 
     For Mixture-of-Experts models, each expert sees different subsets of
@@ -1046,15 +994,16 @@ def compute_moe_hessians(
         expert_layers: Dict mapping layer prefixes to expert sublayer names.
             Example: {"model.layers.0.moe": ["expert_0", "expert_1", ...]}
         router_fn: Function that returns router decisions for a batch.
-            Signature: router_fn(model, batch) -> dict[str, mx.array]
+            Signature: router_fn(model, batch) -> dict[str, torch.Tensor]
             Returns expert indices for each layer prefix.
         damping_factor: Hessian damping factor.
+        device: Device to run computations on.
 
     Returns:
         Nested dict: {layer_prefix: {expert_idx: Hessian}}.
     """
     # Track per-expert activations
-    expert_hessians: dict[str, dict[int, mx.array]] = {}
+    expert_hessians: dict[str, dict[int, torch.Tensor]] = {}
     expert_counts: dict[str, dict[int, int]] = {}
 
     for layer_prefix, expert_names in expert_layers.items():
@@ -1084,10 +1033,10 @@ def compute_moe_hessians(
             H = expert_hessians[layer_prefix][expert_idx]
             if H is not None:
                 in_features = H.shape[0]
-                diag_H = mx.diag(H)
-                mean_diag = mx.mean(diag_H)
+                diag_H = torch.diag(H)
+                mean_diag = torch.mean(diag_H)
                 lambda_damp = damping_factor * mean_diag
-                identity = mx.eye(in_features, dtype=mx.float32)
+                identity = torch.eye(in_features, dtype=torch.float32, device=H.device)
                 expert_hessians[layer_prefix][expert_idx] = H + lambda_damp * identity
 
     return expert_hessians

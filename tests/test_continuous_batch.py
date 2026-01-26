@@ -250,9 +250,7 @@ class TestIterationPlanner:
         state1 = RequestState(request=req1, priority=RequestPriority.NORMAL, enqueue_time=0.0)
         state2 = RequestState(request=req2, priority=RequestPriority.NORMAL, enqueue_time=1.0)
 
-        plan = planner.plan_iteration(
-            waiting=[state1, state2], running=[], kv_manager=kv_manager
-        )
+        plan = planner.plan_iteration(waiting=[state1, state2], running=[], kv_manager=kv_manager)
         # With chunked prefill: first request gets 3 tokens, second gets 2 (chunked)
         # Total: 5 tokens exactly matching budget
         assert len(plan.prefill_work) == 2
@@ -280,9 +278,7 @@ class TestIterationPlanner:
         state1 = RequestState(request=req1, priority=RequestPriority.NORMAL, enqueue_time=0.0)
         state2 = RequestState(request=req2, priority=RequestPriority.NORMAL, enqueue_time=1.0)
 
-        plan = planner.plan_iteration(
-            waiting=[state1, state2], running=[], kv_manager=kv_manager
-        )
+        plan = planner.plan_iteration(waiting=[state1, state2], running=[], kv_manager=kv_manager)
         # Without chunking: first request (3 tokens) fits, second (3 tokens) would exceed
         assert len(plan.prefill_work) == 1
         assert plan.prefill_tokens_used == 3
@@ -368,9 +364,7 @@ class TestBatchScheduler:
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
 
-        req = GenerationRequest(
-            request_id="req-1", prompt_tokens=[1, 2, 3, 4], max_tokens=2
-        )
+        req = GenerationRequest(request_id="req-1", prompt_tokens=[1, 2, 3, 4], max_tokens=2)
         scheduler.add_request(req)
         scheduler.schedule()
 
@@ -534,18 +528,14 @@ class TestIntegration:
         scheduler = BatchScheduler(config, kv_manager)
 
         # Add first request and start decoding
-        req1 = GenerationRequest(
-            request_id="req-1", prompt_tokens=[1, 2, 3, 4], max_tokens=10
-        )
+        req1 = GenerationRequest(request_id="req-1", prompt_tokens=[1, 2, 3, 4], max_tokens=10)
         scheduler.add_request(req1)
         scheduler.schedule()
         req1.append_token(5)
         scheduler.step()
 
         # Add second request mid-generation
-        req2 = GenerationRequest(
-            request_id="req-2", prompt_tokens=[10, 11, 12], max_tokens=10
-        )
+        req2 = GenerationRequest(request_id="req-2", prompt_tokens=[10, 11, 12], max_tokens=10)
         scheduler.add_request(req2)
 
         # Schedule should handle both

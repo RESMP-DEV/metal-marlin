@@ -29,8 +29,8 @@ Metal Marlin uses a format-agnostic, layered architecture. Instead of hardcoding
 │    │  12 vars  │  │  Flash + GQA  │  │  FP4/INT4/FP8 │  │  2:4 N:M    │  │
 │    └───────────┘  └───────────────┘  └───────────────┘  └──────────────┘  │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                       MLX Runtime                                           │
-│              metal_kernel() dispatch, lazy evaluation, unified memory       │
+│                       Metal Runtime                                          │
+│              Kernel dispatch, unified memory, Apple GPU execution            │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -93,7 +93,7 @@ Format loaders convert standard weight files into Marlin's packed FP4/INT4 repre
 
 ### ONNX (`converters/onnx_executor.py`)
 
-Parses the ONNX protobuf graph and loads initializers (weights) as MLX arrays. Weight tensors from MatMul/Gemm nodes are automatically quantized to FP4 during load.
+Parses the ONNX protobuf graph and loads initializers (weights). Weight tensors from MatMul/Gemm nodes are automatically quantized to FP4 during load.
 
 ```python
 executor = ONNXExecutor.from_file("model.onnx", quantize=True)
@@ -123,9 +123,9 @@ Topologically executes an ONNX graph. Each node dispatches to the appropriate ke
 
 ```
 MatMul / Gemm       → marlin_gemm_fp4 (if weight is quantized)
-                    → mx.matmul (fallback for non-quantized)
-LayerNormalization  → standard MLX implementation
-Softmax             → mx.softmax
+                    → dense_gemm (fallback for non-quantized)
+LayerNormalization  → standard implementation
+Softmax             → softmax kernel
 Add / Mul           → element-wise ops
 Reshape / Transpose → shape manipulation
 ```
@@ -139,7 +139,7 @@ For non-ONNX use, `MarlinPipeline` accepts any model implementing the `MarlinMod
 ```python
 @runtime_checkable
 class MarlinModel(Protocol):
-    def __call__(self, input_ids: mx.array, kv_cache=None) -> mx.array: ...
+    def __call__(self, input_ids: Tensor, kv_cache=None) -> Tensor: ...
     def create_kv_cache(self, batch_size: int = 1): ...
 ```
 
@@ -193,7 +193,7 @@ The old `llama.py` is preserved in `_archived/` for reference but is no longer p
                      ┌─────────▼──────────┐
                      │   Kernel Dispatch   │
                      │   kernels.py        │
-                     │   (MLX wrappers)    │
+                     │   (Metal wrappers)  │
                      └─────────┬──────────┘
                                │
                      ┌─────────▼──────────┐
@@ -254,11 +254,10 @@ src/
 ├── gemm_epilogue.metal        # Bias, activation fusion
 ├── sparse.metal               # General N:M sparsity
 ├── bf16_compat.metal          # BF16 layer
-├── kernels_autotune.metal     # Autotune templates
-└── debug.metal                # Profiling kernels
+└── kernels_autotune.metal     # Autotune templates
 
 metal_marlin/
-├── kernels.py                 # MLX metal_kernel() wrappers
+├── kernels.py                 # Metal kernel wrappers
 ├── layers.py                  # MarlinLinear (quantized nn.Linear)
 ├── mlp.py                     # MarlinMLP (SwiGLU / standard)
 ├── transformer.py             # MarlinTransformerBlock, RMSNorm

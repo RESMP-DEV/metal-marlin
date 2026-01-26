@@ -43,7 +43,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-
     from numpy.typing import NDArray
 
 
@@ -106,10 +105,7 @@ class HessianCollector:
 
         # Validate feature dimension
         if x.shape[-1] != self.in_features:
-            raise ValueError(
-                f"Expected last dimension {self.in_features}, "
-                f"got shape {x.shape}"
-            )
+            raise ValueError(f"Expected last dimension {self.in_features}, got shape {x.shape}")
 
         # Flatten to 2D: [n_samples, in_features]
         x_flat = x.reshape(-1, self.in_features).astype(self.dtype)
@@ -304,9 +300,7 @@ class HessianManager:
 
         self.collectors[name].accumulate(x)
 
-    def get_hessian(
-        self, name: str, damp: float | None = None
-    ) -> NDArray[np.float32]:
+    def get_hessian(self, name: str, damp: float | None = None) -> NDArray[np.float32]:
         """Get damped Hessian for a specific layer.
 
         Args:
@@ -325,9 +319,7 @@ class HessianManager:
         damp = damp if damp is not None else self.default_damp
         return self.collectors[name].get_hessian(damp=damp)
 
-    def get_all_hessians(
-        self, damp: float | None = None
-    ) -> dict[str, NDArray[np.float32]]:
+    def get_all_hessians(self, damp: float | None = None) -> dict[str, NDArray[np.float32]]:
         """Get damped Hessians for all registered layers.
 
         Args:
@@ -338,8 +330,7 @@ class HessianManager:
         """
         damp = damp if damp is not None else self.default_damp
         return {
-            name: collector.get_hessian(damp=damp)
-            for name, collector in self.collectors.items()
+            name: collector.get_hessian(damp=damp) for name, collector in self.collectors.items()
         }
 
     def get_sample_counts(self) -> dict[str, int]:
@@ -503,9 +494,7 @@ def validate_hessian(H: NDArray[np.floating], rtol: float = 1e-5) -> dict[str, A
 
     # Overall validation
     results["is_valid"] = (
-        results["is_symmetric"]
-        and results["is_finite"]
-        and results["is_positive_semidefinite"]
+        results["is_symmetric"] and results["is_finite"] and results["is_positive_semidefinite"]
     )
 
     return results

@@ -31,9 +31,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-import mlx.core as mx
 import numpy as np
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    ArrayLike = NDArray[np.integer] | NDArray[np.floating]
 
 
 @dataclass
@@ -125,9 +129,7 @@ class CapacityStats:
         Returns:
             List of (expert_id, overflow_count) tuples, sorted by count descending.
         """
-        sorted_experts = sorted(
-            self.expert_overflow_counts.items(), key=lambda x: -x[1]
-        )
+        sorted_experts = sorted(self.expert_overflow_counts.items(), key=lambda x: -x[1])
         return sorted_experts[:k]
 
 
@@ -161,9 +163,7 @@ class CapacityAnalyzer:
         self.num_experts = num_experts
         self.capacity_factor = capacity_factor
         self.top_k = top_k
-        self._stats = CapacityStats(
-            capacity_factor=capacity_factor, num_experts=num_experts
-        )
+        self._stats = CapacityStats(capacity_factor=capacity_factor, num_experts=num_experts)
         self._batch_history: list[OverflowInfo] = []
 
     def compute_capacity(self, batch_size: int) -> int:
@@ -179,7 +179,7 @@ class CapacityAnalyzer:
             batch_size, self.num_experts, self.capacity_factor, self.top_k
         )
 
-    def record_batch(self, expert_ids: mx.array) -> OverflowInfo:
+    def record_batch(self, expert_ids: NDArray[np.integer]) -> OverflowInfo:
         """Record routing decisions for a batch and compute overflow.
 
         Args:
@@ -194,11 +194,10 @@ class CapacityAnalyzer:
 
         # Count assignments per expert
         expert_counts = count_expert_assignments(expert_ids, self.num_experts)
-        expert_counts_np = np.array(expert_counts)
 
         # Find overflow
-        overflow_mask = expert_counts_np > capacity
-        overflow_amounts = np.maximum(0, expert_counts_np - capacity)
+        overflow_mask = expert_counts > capacity
+        overflow_amounts = np.maximum(0, expert_counts - capacity)
         dropped = int(np.sum(overflow_amounts))
         overflow_experts = list(np.where(overflow_mask)[0])
         max_overflow = int(np.max(overflow_amounts)) if dropped > 0 else 0
@@ -219,9 +218,7 @@ class CapacityAnalyzer:
         self._stats.total_dropped += dropped
         if dropped > 0:
             self._stats.batches_with_overflow += 1
-            self._stats.max_overflow_seen = max(
-                self._stats.max_overflow_seen, max_overflow
-            )
+            self._stats.max_overflow_seen = max(self._stats.max_overflow_seen, max_overflow)
             for eid in overflow_experts:
                 self._stats.expert_overflow_counts[eid] = (
                     self._stats.expert_overflow_counts.get(eid, 0) + 1
@@ -271,7 +268,9 @@ def compute_expert_capacity(
     return max(1, math.ceil(raw_capacity))
 
 
-def count_expert_assignments(expert_ids: mx.array, num_experts: int) -> mx.array:
+def count_expert_assignments(
+    expert_ids: NDArray[np.integer], num_experts: int
+) -> NDArray[np.int64]:
     """Count how many token-expert assignments go to each expert.
 
     Args:
@@ -281,20 +280,14 @@ def count_expert_assignments(expert_ids: mx.array, num_experts: int) -> mx.array
     Returns:
         [num_experts] array of assignment counts.
     """
-    expert_ids_flat = expert_ids.reshape(-1).astype(mx.int32)
-    expert_ids_flat.shape[0]
-
-    # One-hot encoding and sum
-    expert_range = mx.arange(num_experts, dtype=mx.int32)
-    matches = expert_ids_flat[:, None] == expert_range[None, :]
-    counts = mx.sum(matches.astype(mx.int32), axis=0)
-    mx.eval(counts)
-
-    return counts
+    expert_ids_flat = np.asarray(expert_ids).reshape(-1).astype(np.int32)
+    # Use bincount for efficient counting
+    counts = np.bincount(expert_ids_flat, minlength=num_experts)
+    return counts[:num_experts]
 
 
 def analyze_overflow_rate(
-    expert_load_history: list[mx.array] | mx.array,
+    expert_load_history: list[NDArray[np.integer]] | NDArray[np.integer],
     num_experts: int,
     capacity_factor: float = 1.0,
     top_k: int = 2,
@@ -318,7 +311,7 @@ def analyze_overflow_rate(
         num_experts=num_experts, capacity_factor=capacity_factor, top_k=top_k
     )
 
-    if isinstance(expert_load_history, mx.array):
+    if isinstance(expert_load_history, np.ndarray):
         # Single array - treat as one batch
         analyzer.record_batch(expert_load_history)
     else:
@@ -329,7 +322,7 @@ def analyze_overflow_rate(
 
 
 def auto_tune_capacity(
-    expert_load_history: list[mx.array],
+    expert_load_history: list[NDArray[np.integer]],
     num_experts: int,
     target_drop_rate: float = 0.01,
     min_factor: float = 1.0,
@@ -368,17 +361,13 @@ def auto_tune_capacity(
     top_k = expert_load_history[0].shape[1] if expert_load_history[0].ndim > 1 else 1
 
     # Check if max_factor achieves target
-    stats = analyze_overflow_rate(
-        expert_load_history, num_experts, max_factor, top_k
-    )
+    stats = analyze_overflow_rate(expert_load_history, num_experts, max_factor, top_k)
     if stats.overall_drop_rate > target_drop_rate:
         # Even max_factor doesn't achieve target, return max
         return max_factor
 
     # Check if min_factor already achieves target
-    stats = analyze_overflow_rate(
-        expert_load_history, num_experts, min_factor, top_k
-    )
+    stats = analyze_overflow_rate(expert_load_history, num_experts, min_factor, top_k)
     if stats.overall_drop_rate <= target_drop_rate:
         return min_factor
 
@@ -391,9 +380,7 @@ def auto_tune_capacity(
             break
 
         mid = (low + high) / 2
-        stats = analyze_overflow_rate(
-            expert_load_history, num_experts, mid, top_k
-        )
+        stats = analyze_overflow_rate(expert_load_history, num_experts, mid, top_k)
 
         if stats.overall_drop_rate <= target_drop_rate:
             best_factor = mid
@@ -487,7 +474,7 @@ class DynamicCapacity:
             batch_size, self.num_experts, self._current_factor, self.top_k
         )
 
-    def update(self, expert_ids: mx.array) -> float:
+    def update(self, expert_ids: NDArray[np.integer]) -> float:
         """Update capacity factor based on observed routing.
 
         Args:
@@ -501,8 +488,7 @@ class DynamicCapacity:
 
         # Count overflow
         expert_counts = count_expert_assignments(expert_ids, self.num_experts)
-        expert_counts_np = np.array(expert_counts)
-        overflow = np.sum(np.maximum(0, expert_counts_np - capacity))
+        overflow = np.sum(np.maximum(0, expert_counts - capacity))
         total_assignments = batch_size * self.top_k
         drop_rate = overflow / total_assignments if total_assignments > 0 else 0.0
 
@@ -559,9 +545,7 @@ class DynamicCapacity:
         return {
             "current_factor": self._current_factor,
             "recent_drop_rate": (
-                sum(self._drop_history) / len(self._drop_history)
-                if self._drop_history
-                else 0.0
+                sum(self._drop_history) / len(self._drop_history) if self._drop_history else 0.0
             ),
             "min_recent_drop": min(self._drop_history) if self._drop_history else 0.0,
             "max_recent_drop": max(self._drop_history) if self._drop_history else 0.0,
@@ -577,7 +561,7 @@ class DynamicCapacity:
 
 
 def dynamic_capacity(
-    expert_ids: mx.array,
+    expert_ids: NDArray[np.integer],
     num_experts: int,
     target_utilization: float = 0.9,
     min_factor: float = 1.0,
@@ -605,8 +589,7 @@ def dynamic_capacity(
 
     # Count actual expert assignments
     expert_counts = count_expert_assignments(expert_ids, num_experts)
-    expert_counts_np = np.array(expert_counts)
-    max_load = int(np.max(expert_counts_np))
+    max_load = int(np.max(expert_counts))
 
     # Compute capacity with headroom
     if target_utilization > 0:

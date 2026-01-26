@@ -1,46 +1,98 @@
-"""Model-level quantization API for Metal Marlin.
+"""Model-level quantization API for Metal Marlin (PyTorch backend).
 
-Provides a single-call interface to quantize all nn.Linear layers in an MLX
-model to Marlin FP4 (E2M1) format. Follows the same pattern as mlx.nn.quantize
-but replaces with MarlinLinear layers backed by the fused dequant-GEMM Metal
-kernel.
+Provides a single-call interface to quantize all nn.Linear layers in a
+PyTorch model to Marlin FP4 (E2M1) format. Replaces Linear layers
+with MarlinLinear layers backed by quantized weight storage.
+
+This module is the PyTorch-only implementation, independent of MLX.
 
 Usage:
-    import mlx.nn as nn
-    from metal_marlin.python.quantize_model import quantize_model
+    from metal_marlin.quantize_model import quantize_model
 
     model = load_my_model()
     quantize_model(model, group_size=128)
     # All nn.Linear layers (except lm_head, embed_tokens, etc.) are now
-    # MarlinLinear with FP4 weights and Metal kernel dispatch.
+    # MarlinLinear with FP4 weights.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
-import mlx.nn as nn
-from mlx.utils import tree_map_with_path
+import torch.nn as torch_nn
 
 from .layers import MarlinLinear
 
+# Constants
+FP4_PER_U32 = 8  # 8 FP4 values packed per uint32
+
+
+# ---------------------------------------------------------------------------
+# Model Quantization
+# ---------------------------------------------------------------------------
+
+
+def _quantize_torch(
+    model: Any,
+    quant_type: str,
+    group_size: int,
+    skip_layers: set[str],
+    layer_filter: Callable[[str, Any], bool] | None,
+) -> Any:
+    """Quantize PyTorch model in-place."""
+
+    def _should_quantize(name: str, module: Any) -> bool:
+        if not isinstance(module, torch_nn.Linear):
+            return False
+        if any(skip in name for skip in skip_layers):
+            return False
+        if layer_filter is not None and not layer_filter(name, module):
+            return False
+        in_features = module.in_features
+        out_features = module.out_features
+        # Check divisibility requirements
+        if in_features % group_size != 0:
+            return False
+        if out_features % FP4_PER_U32 != 0:
+            return False
+        return True
+
+    # Collect modules to replace (can't modify during iteration)
+    replacements: list[tuple[Any, str, torch_nn.Linear]] = []
+
+    for name, module in model.named_modules():
+        if _should_quantize(name, module):
+            if "." in name:
+                parent_name, child_name = name.rsplit(".", 1)
+                parent = dict(model.named_modules())[parent_name]
+            else:
+                parent = model
+                child_name = name
+            replacements.append((parent, child_name, module))
+
+    # Apply replacements
+    for parent, child_name, linear in replacements:
+        quantized = MarlinLinear.from_linear(linear, quant_type=quant_type, group_size=group_size)
+        setattr(parent, child_name, quantized)
+
+    return model
+
 
 def quantize_model(
-    model: nn.Module,
+    model: torch_nn.Module,
     quant_type: Literal["fp4"] = "fp4",
     group_size: int = 128,
     skip_layers: set[str] | None = None,
-    layer_filter: Callable[[str, nn.Module], bool] | None = None,
-) -> nn.Module:
-    """Quantize all nn.Linear layers in a model to Marlin FP4 format.
+    layer_filter: Callable[[str, Any], bool] | None = None,
+) -> torch_nn.Module:
+    """Quantize all nn.Linear layers in a PyTorch model to Marlin FP4 format.
 
-    Traverses the model's leaf modules and replaces qualifying nn.Linear
-    layers with MarlinLinear instances backed by the fused dequant-GEMM
-    Metal kernel. The model is modified in-place.
+    Traverses the model's modules and replaces qualifying nn.Linear
+    layers with MarlinLinear instances. The model is modified in-place.
 
     Args:
-        model: MLX model to quantize.
+        model: PyTorch model to quantize.
         quant_type: Quantization format. Currently only "fp4" (E2M1) is
             supported.
         group_size: Number of elements per quantization group along the
@@ -60,34 +112,14 @@ def quantize_model(
             f"Only quant_type='fp4' is currently supported, got {quant_type!r}"
         )
 
+    if not isinstance(model, torch_nn.Module):
+        raise TypeError(f"Model type {type(model)} not supported. Requires PyTorch nn.Module.")
+
     skip_layers = skip_layers or {"lm_head", "embed_tokens", "wte", "wpe"}
-
-    def _should_quantize(path: str, module: nn.Module) -> bool:
-        if not isinstance(module, nn.Linear):
-            return False
-        if any(skip in path for skip in skip_layers):
-            return False
-        if layer_filter is not None and not layer_filter(path, module):
-            return False
-        # Verify dimensions are compatible with packing
-        _, in_features = module.weight.shape
-        if in_features % 8 != 0:
-            return False
-        return True
-
-    def _maybe_quantize(path: str, module: nn.Module) -> nn.Module:
-        if _should_quantize(path, module):
-            quantized = MarlinLinear.from_linear(module, quant_type="fp4", group_size=group_size)
-            return quantized
-        return module
-
-    leaves = model.leaf_modules()
-    leaves = tree_map_with_path(_maybe_quantize, leaves, is_leaf=nn.Module.is_module)
-    model.update_modules(leaves)
-    return model
+    return _quantize_torch(model, quant_type, group_size, skip_layers, layer_filter)
 
 
-def estimate_model_size(model: nn.Module, group_size: int = 128) -> dict[str, float]:
+def estimate_model_size(model: torch_nn.Module, group_size: int = 128) -> dict[str, float]:
     """Estimate model memory footprint comparing FP16 vs FP4 quantization.
 
     Walks the model's parameters and estimates memory usage. For layers
@@ -95,7 +127,7 @@ def estimate_model_size(model: nn.Module, group_size: int = 128) -> dict[str, fl
     nn.Linear layers, estimates what quantized size would be.
 
     Args:
-        model: Model to analyze (quantized or unquantized).
+        model: PyTorch model to analyze (quantized or unquantized).
         group_size: Group size for estimation of unquantized layers.
 
     Returns:
@@ -107,34 +139,34 @@ def estimate_model_size(model: nn.Module, group_size: int = 128) -> dict[str, fl
             num_quantized_layers: Count of MarlinLinear layers.
             num_unquantized_layers: Count of remaining nn.Linear layers.
     """
+    if not isinstance(model, torch_nn.Module):
+        raise TypeError(f"Model type {type(model)} not supported. Requires PyTorch nn.Module.")
+
     fp16_bytes = 0
     quantized_bytes = 0
     num_quantized = 0
     num_unquantized = 0
 
-    def _visit(path: str, module: nn.Module) -> None:
-        nonlocal fp16_bytes, quantized_bytes, num_quantized, num_unquantized
-
+    for name, module in model.named_modules():
         if isinstance(module, MarlinLinear):
             num_quantized += 1
-            # Packed weights: [K, N//8] as uint32 (4 bytes each)
             K = module.in_features
             N = module.out_features
-            weight_bytes = (K * N) // 2  # 4 bits per weight = 0.5 bytes
-            # Scales: [K//group_size, N] as float16
+            # FP4: 4 bits per element = K * N / 2 bytes
+            weight_bytes = (K * N) // 2
             num_groups = K // module.group_size
+            # Scales: FP16 = 2 bytes each
             scale_bytes = num_groups * N * 2
-            # Bias if present
             bias_bytes = N * 2 if module.bias is not None else 0
             quantized_bytes += weight_bytes + scale_bytes + bias_bytes
-        elif isinstance(module, nn.Linear):
+        elif isinstance(module, torch_nn.Linear):
             num_unquantized += 1
-            out_features, in_features = module.weight.shape
+            in_features = module.in_features
+            out_features = module.out_features
+            # FP16: 2 bytes per element
             fp16_bytes += out_features * in_features * 2
-            if hasattr(module, "bias") and module.bias is not None:
+            if module.bias is not None:
                 fp16_bytes += out_features * 2
-
-    model.apply_to_modules(_visit)
 
     total = fp16_bytes + quantized_bytes
     return {

@@ -16,19 +16,30 @@ Usage:
         num_kv_heads=8,
     )
     output = block(hidden_states, kv_cache=cache, layer_idx=0)
+
+Requires PyTorch to be installed for actual execution.
 """
 
 from __future__ import annotations
 
-import mlx.core as mx
-import mlx.nn as nn
+from typing import TYPE_CHECKING, Any
 
-from .attention import MarlinAttention
-from .kv_cache import KVCache
-from .mlp import MarlinMLP
+from ._compat import HAS_TORCH, require_torch, torch
+
+if TYPE_CHECKING:
+    import torch  # noqa: F811
+
+    from .kv_cache import KVCache
 
 
-class RMSNorm(nn.Module):
+def _get_base_class() -> type:
+    """Return torch.nn.Module if PyTorch is available, else object."""
+    if HAS_TORCH and torch is not None:
+        return torch.nn.Module
+    return object
+
+
+class RMSNorm(_get_base_class()):
     """Root Mean Square Layer Normalization.
 
     Normalizes inputs by their RMS value and applies a learned scale.
@@ -36,18 +47,22 @@ class RMSNorm(nn.Module):
     bias, while achieving comparable training stability.
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = mx.ones((hidden_size,))
+    def __init__(self, hidden_size: int, eps: float = 1e-6, device: str = "mps"):
+        require_torch("RMSNorm")
+        if HAS_TORCH and torch is not None:
+            super().__init__()
+        assert torch is not None
+        self.weight = torch.nn.Parameter(torch.ones(hidden_size, device=device))
         self.eps = eps
 
-    def __call__(self, x: mx.array) -> mx.array:
-        variance = mx.mean(x ** 2, axis=-1, keepdims=True)
-        x = x * mx.rsqrt(variance + self.eps)
+    def forward(self, x: Any) -> Any:
+        assert torch is not None
+        variance = torch.mean(x**2, dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
 
 
-class MarlinTransformerBlock(nn.Module):
+class MarlinTransformerBlock(_get_base_class()):
     """
     Single transformer decoder block with pre-norm architecture.
 
@@ -68,6 +83,7 @@ class MarlinTransformerBlock(nn.Module):
         rms_norm_eps: Epsilon for RMSNorm stability.
         rope_theta: Base frequency for RoPE position embeddings.
         max_position_embeddings: Maximum sequence length for RoPE.
+        device: Device to place tensors on (default: "mps").
     """
 
     def __init__(
@@ -81,10 +97,16 @@ class MarlinTransformerBlock(nn.Module):
         rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000.0,
         max_position_embeddings: int = 4096,
+        device: str = "mps",
     ):
-        super().__init__()
+        require_torch("MarlinTransformerBlock")
+        if HAS_TORCH and torch is not None:
+            super().__init__()
 
-        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
+        from .attention import MarlinAttention
+        from .mlp import MarlinMLP
+
+        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps, device=device)
         self.self_attn = MarlinAttention(
             hidden_size=hidden_size,
             num_heads=num_heads,
@@ -95,7 +117,7 @@ class MarlinTransformerBlock(nn.Module):
             max_position_embeddings=max_position_embeddings,
         )
 
-        self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(hidden_size, rms_norm_eps, device=device)
         self.mlp = MarlinMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -103,14 +125,14 @@ class MarlinTransformerBlock(nn.Module):
             group_size=group_size,
         )
 
-    def __call__(
+    def forward(
         self,
-        hidden_states: mx.array,
-        attention_mask: mx.array | None = None,
-        position_ids: mx.array | None = None,
+        hidden_states: Any,
+        attention_mask: Any | None = None,
+        position_ids: Any | None = None,
         kv_cache: KVCache | None = None,
         layer_idx: int = 0,
-    ) -> mx.array:
+    ) -> Any:
         """Forward pass through the transformer block.
 
         Args:

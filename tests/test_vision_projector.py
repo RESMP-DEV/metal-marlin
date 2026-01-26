@@ -5,7 +5,7 @@ Tests cover:
 - Config parsing from HuggingFace configs
 - Auto-detection of projector types
 - Single image, multi-image, and video frame inputs
-- Numpy fallback when MLX unavailable
+- Numpy fallback when PyTorch unavailable
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from metal_marlin._compat import HAS_MLX, mx
+from metal_marlin._compat import HAS_TORCH, torch
 from metal_marlin.vision import (
     InternVLProjector,
     LLaVAProjector,
@@ -27,6 +27,18 @@ from metal_marlin.vision.projector import (
     LinearProjector,
     ProjectorType,
 )
+
+
+def _get_torch_device() -> str:
+    """Get the best available PyTorch device."""
+    if torch is None:
+        return "cpu"
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
 
 # =============================================================================
 # Config Tests
@@ -199,12 +211,14 @@ class TestLLaVAProjector:
 
         assert output.shape == (1, 576, 4096)
 
-    @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
-    def test_forward_mlx(self, config: VisionProjectorConfig) -> None:
-        """Test forward pass with MLX input."""
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_forward_torch(self, config: VisionProjectorConfig) -> None:
+        """Test forward pass with PyTorch input."""
+        assert torch is not None
         projector = LLaVAProjector(config)
 
-        x = mx.random.normal((1, 576, 1024))
+        device = _get_torch_device()
+        x = torch.randn(1, 576, 1024, device=device)
         output = projector(x)
 
         assert output.shape == (1, 576, 4096)
@@ -269,12 +283,14 @@ class TestQwen2VLProjector:
         # Output should be [batch, num_query_tokens, llm_hidden]
         assert output.shape == (1, 64, 3584)
 
-    @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
-    def test_forward_mlx(self, config: VisionProjectorConfig) -> None:
-        """Test forward pass with MLX (full cross-attention)."""
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_forward_torch(self, config: VisionProjectorConfig) -> None:
+        """Test forward pass with PyTorch (full cross-attention)."""
+        assert torch is not None
         projector = Qwen2VLProjector(config)
 
-        x = mx.random.normal((1, 576, 1280))
+        device = _get_torch_device()
+        x = torch.randn(1, 576, 1280, device=device)
         output = projector(x)
 
         assert output.shape == (1, 64, 3584)
@@ -329,12 +345,14 @@ class TestInternVLProjector:
 
         assert output.shape == (1, 256, 5120)
 
-    @pytest.mark.skipif(not HAS_MLX, reason="MLX not available")
-    def test_forward_mlx(self, config: VisionProjectorConfig) -> None:
-        """Test forward pass with MLX."""
+    @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
+    def test_forward_torch(self, config: VisionProjectorConfig) -> None:
+        """Test forward pass with PyTorch."""
+        assert torch is not None
         projector = InternVLProjector(config)
 
-        x = mx.random.normal((1, 576, 1408))
+        device = _get_torch_device()
+        x = torch.randn(1, 576, 1408, device=device)
         output = projector(x)
 
         assert output.shape == (1, 256, 5120)

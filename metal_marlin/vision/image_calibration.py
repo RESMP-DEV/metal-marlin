@@ -361,9 +361,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
 
         for img_path in image_paths:
             try:
-                img = cls._load_and_preprocess(
-                    img_path, image_size, mean, std, preprocess_fn
-                )
+                img = cls._load_and_preprocess(img_path, image_size, mean, std, preprocess_fn)
                 images.append(img)
                 image_infos.append(
                     ImageInfo(

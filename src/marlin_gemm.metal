@@ -485,6 +485,13 @@ inline void compute_from_tiles_divergent(
 
 // ---------------------------------------------------------------------------
 // Store accumulated results to global memory
+//
+// Uses simdgroup_store directly to global memory for full tiles, and
+// threadgroup staging for boundary tiles (handles partial writes).
+//
+// Parameters:
+//   staging: threadgroup buffer declared in the calling kernel, used for
+//            boundary handling when tiles partially exceed M or N bounds.
 // ---------------------------------------------------------------------------
 
 inline void store_results(
@@ -494,44 +501,11 @@ inline void store_results(
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
     uint simd_lane,
-    uint simd_id,
-    threadgroup half (&sg_staging)[SIMDGROUPS_PER_TG][SG_M_TILES * 8][SG_N_TILES * 8],
+    uint simd_id [[maybe_unused]],
     threadgroup half (&staging)[8][8]
 ) {
-    constexpr uint sg_tile_rows = SG_M_TILES * 8;
-    constexpr uint sg_tile_cols = SG_N_TILES * 8;
-    constexpr uint segments_per_row = sg_tile_cols / 8;
-    constexpr uint segments_per_simdgroup = sg_tile_rows * segments_per_row;
-
     uint base_row = tg_row + sg_row_offset;
     uint base_col = tg_col + sg_col_offset;
-
-    if (base_row + sg_tile_rows <= M && base_col + sg_tile_cols <= N) {
-        for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-            for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-                simdgroup_store(acc[mi][ni],
-                                &sg_staging[simd_id][mi * 8][ni * 8],
-                                sg_tile_cols);
-            }
-        }
-
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-
-        for (uint iter = 0; iter < segments_per_simdgroup / 32; ++iter) {
-            uint segment = simd_lane + iter * 32;
-            uint row = segment / segments_per_row;
-            uint col_segment = segment % segments_per_row;
-            uint col = col_segment * 8;
-
-            device half* dst = C + (base_row + row) * N + base_col + col;
-            threadgroup half* src = &sg_staging[simd_id][row][col];
-
-            for (uint i = 0; i < 8; ++i) {
-                dst[i] = src[i];
-            }
-        }
-        return;
-    }
 
     for (uint mi = 0; mi < SG_M_TILES; ++mi) {
         uint out_row = base_row + mi * 8;
@@ -540,12 +514,18 @@ inline void store_results(
         }
         for (uint ni = 0; ni < SG_N_TILES; ++ni) {
             uint out_col = base_col + ni * 8;
+            if (out_col >= N) {
+                continue;
+            }
 
             if (out_row + 8 <= M && out_col + 8 <= N) {
+                // Fast path: entire 8x8 tile fits in output bounds
+                // simdgroup_store writes directly to global memory
                 simdgroup_store(acc[mi][ni],
                                 C + out_row * N + out_col,
                                 N);
             } else {
+                // Boundary path: store to threadgroup staging, then scatter
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -571,44 +551,11 @@ inline void store_results_divergent(
     uint M, uint N,
     uint tg_row, uint tg_col,
     uint compute_id,
-    uint simd_lane
+    uint simd_lane,
+    threadgroup half (&staging)[8][8]
 ) {
-    constexpr uint sg_tile_rows = DIVERGENT_SG_M_TILES * 8;
-    constexpr uint sg_tile_cols = DIVERGENT_SG_N_TILES * 8;
-    constexpr uint segments_per_row = sg_tile_cols / 8;
-    constexpr uint segments_per_simdgroup = sg_tile_rows * segments_per_row;
-
     uint base_row = tg_row + compute_id * (TILE_M / DIVERGENT_COMPUTE_SG);
     uint base_col = tg_col;
-
-    if (base_row + sg_tile_rows <= M && base_col + sg_tile_cols <= N) {
-        threadgroup half sg_staging[DIVERGENT_COMPUTE_SG][sg_tile_rows][sg_tile_cols];
-
-        for (uint mi = 0; mi < DIVERGENT_SG_M_TILES; ++mi) {
-            for (uint ni = 0; ni < DIVERGENT_SG_N_TILES; ++ni) {
-                simdgroup_store(acc[mi][ni],
-                                &sg_staging[compute_id][mi * 8][ni * 8],
-                                sg_tile_cols);
-            }
-        }
-
-        simdgroup_barrier(mem_flags::mem_threadgroup);
-
-        for (uint iter = 0; iter < segments_per_simdgroup / 32; ++iter) {
-            uint segment = simd_lane + iter * 32;
-            uint row = segment / segments_per_row;
-            uint col_segment = segment % segments_per_row;
-            uint col = col_segment * 8;
-
-            device half* dst = C + (base_row + row) * N + base_col + col;
-            threadgroup half* src = &sg_staging[compute_id][row][col];
-
-            for (uint i = 0; i < 8; ++i) {
-                dst[i] = src[i];
-            }
-        }
-        return;
-    }
 
     for (uint mi = 0; mi < DIVERGENT_SG_M_TILES; ++mi) {
         uint out_row = base_row + mi * 8;
@@ -617,13 +564,17 @@ inline void store_results_divergent(
         }
         for (uint ni = 0; ni < DIVERGENT_SG_N_TILES; ++ni) {
             uint out_col = base_col + ni * 8;
+            if (out_col >= N) {
+                continue;
+            }
 
             if (out_row + 8 <= M && out_col + 8 <= N) {
+                // Fast path: entire 8x8 tile fits in output bounds
                 simdgroup_store(acc[mi][ni],
                                 C + out_row * N + out_col,
                                 N);
             } else {
-                threadgroup half staging[8][8];
+                // Boundary path: store to threadgroup staging, then scatter
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -685,7 +636,8 @@ inline void store_results_fp32(
     uint M, uint N,
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
-    uint simd_lane
+    uint simd_lane,
+    threadgroup float (&staging)[8][8]
 ) {
     for (uint mi = 0; mi < SG_M_TILES; ++mi) {
         uint out_row = tg_row + sg_row_offset + mi * 8;
@@ -694,29 +646,26 @@ inline void store_results_fp32(
         }
         for (uint ni = 0; ni < SG_N_TILES; ++ni) {
             uint out_col = tg_col + sg_col_offset + ni * 8;
+            if (out_col >= N) {
+                continue;
+            }
 
-            threadgroup float staging[8][8];
+            // FP32 accumulator -> FP16 output with bounds checking
+            // simdgroup_store writes to threadgroup staging, then we convert
+            // and scatter to global memory with bounds checking.
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            if (out_row + 8 <= M && out_col + 8 <= N) {
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    C[(out_row + r) * N + out_col + c] = half(staging[r][c]);
-                }
-            } else if (out_row < M && out_col < N) {
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    uint gr = out_row + r;
-                    uint gc = out_col + c;
-                    if (gr < M && gc < N) {
-                        C[gr * N + gc] = half(staging[r][c]);
-                    }
+            for (uint elem = simd_lane; elem < 64; elem += 32) {
+                uint r = elem / 8;
+                uint c = elem % 8;
+                uint gr = out_row + r;
+                uint gc = out_col + c;
+                if (gr < M && gc < N) {
+                    // Read FP32 from staging, convert to FP16
+                    C[gr * N + gc] = half(staging[r][c]);
                 }
             }
-
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
@@ -761,6 +710,7 @@ kernel void marlin_gemm_fp4(
     // Double-buffered threadgroup memory
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+    threadgroup half staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -810,7 +760,7 @@ kernel void marlin_gemm_fp4(
 
     // --- Epilogue: Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
 }
 
 // ===========================================================================
@@ -1038,6 +988,7 @@ kernel void marlin_gemm_divergent_fp4(
 ) {
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
+    threadgroup half staging[8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1060,7 +1011,7 @@ kernel void marlin_gemm_divergent_fp4(
     if (num_k_tiles == 0) {
         if (is_compute) {
             store_results_divergent(acc, C, M, N, tg_row, tg_col,
-                                    compute_id, simd_lane);
+                                    compute_id, simd_lane, staging);
         }
         return;
     }
@@ -1098,7 +1049,7 @@ kernel void marlin_gemm_divergent_fp4(
 
     if (is_compute) {
         store_results_divergent(acc, C, M, N, tg_row, tg_col,
-                                compute_id, simd_lane);
+                                compute_id, simd_lane, staging);
     }
 }
 
@@ -1532,9 +1483,13 @@ kernel void marlin_gemm_fp4_striped(
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (thread_idx == 0) {
+                // Note: Metal doesn't support memory_order_acq_rel.
+                // We use memory_order_relaxed here because the surrounding
+                // threadgroup_barrier(mem_flags::mem_device) calls provide
+                // the necessary ordering guarantees for device memory.
                 int prev = atomic_fetch_add_explicit(&locks[tile_linear],
                                                     1,
-                                                    memory_order_acq_rel);
+                                                    memory_order_relaxed);
                 is_last_slice = (prev == int(parallel) - 1);
             }
             // Broadcast is_last_slice to all threads via threadgroup memory.

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from metal_marlin._compat import HAS_TORCH, torch
 from metal_marlin.cache.prompt_cache import (
     CacheMetrics,
     PrefixCache,
@@ -197,8 +198,7 @@ class TestPrefixCache:
         # Store 2 blocks
         tokens_short = list(range(32))
         kv_blocks = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-            for _ in range(2)
+            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
         ]
         cache.store_prefix(tokens_short, kv_blocks)
 
@@ -213,9 +213,7 @@ class TestPrefixCache:
     def test_get_blocks(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Retrieved blocks match stored data."""
         tokens = list(range(16))  # 1 block
-        original_data = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-        ]
+        original_data = [[np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]]
         stored_hashes = cache.store_prefix(tokens, original_data)
 
         retrieved = cache.get_blocks(stored_hashes)
@@ -230,9 +228,7 @@ class TestPrefixCache:
     def test_release_blocks(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Releasing blocks decrements ref count."""
         tokens = list(range(16))
-        kv_blocks = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-        ]
+        kv_blocks = [[np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]]
         stored_hashes = cache.store_prefix(tokens, kv_blocks)
 
         # Initial ref count is 1
@@ -263,8 +259,7 @@ class TestPrefixCache:
         """Memory usage tracking works."""
         tokens = list(range(32))
         kv_blocks = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-            for _ in range(2)
+            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
         ]
         cache.store_prefix(tokens, kv_blocks)
 
@@ -383,8 +378,7 @@ class TestRadixPrefixCache:
         """Radix cache stores and matches prefixes."""
         tokens = list(range(32))
         kv_blocks = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-            for _ in range(2)
+            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
         ]
         radix_cache.store_prefix(tokens, kv_blocks)
 
@@ -396,8 +390,7 @@ class TestRadixPrefixCache:
         # Store system prompt
         system = list(range(32))
         kv_system = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-            for _ in range(2)
+            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
         ]
         radix_cache.store_prefix(system, kv_system)
 
@@ -412,8 +405,7 @@ class TestRadixPrefixCache:
         """Clear removes radix tree nodes."""
         tokens = list(range(32))
         kv_blocks = [
-            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]
-            for _ in range(2)
+            [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
         ]
         radix_cache.store_prefix(tokens, kv_blocks)
         radix_cache.clear()
@@ -493,24 +485,18 @@ class TestThreadSafety:
         assert len(errors) == 0, f"Errors occurred: {errors}"
 
 
-class TestMLXIntegration:
-    """Test MLX integration when available."""
+class TestTorchIntegration:
+    """Test PyTorch integration when available."""
 
     @pytest.fixture
-    def mlx_available(self):
-        """Check if MLX is available."""
-        try:
-            import mlx.core  # noqa: F401
-            return True
-        except ImportError:
-            return False
+    def torch_available(self):
+        """Check if PyTorch is available."""
+        return HAS_TORCH
 
-    def test_extend_from_cache_mlx(self, mlx_available):
-        """extend_from_cache works with MLX arrays."""
-        if not mlx_available:
-            pytest.skip("MLX not available")
-
-        import mlx.core as mx
+    def test_extend_from_cache_torch(self, torch_available):
+        """extend_from_cache works with PyTorch tensors."""
+        if not torch_available or torch is None:
+            pytest.skip("PyTorch not available")
 
         config = PrefixCacheConfig(
             num_layers=2,
@@ -520,16 +506,79 @@ class TestMLXIntegration:
         )
         cache = PrefixCache(config)
 
-        # MLX prefix KV
+        # PyTorch prefix KV
         prefix_kv = [
-            [mx.random.normal((2, 8, 4, 32)) for _ in range(2)],
+            [torch.randn(2, 8, 4, 32, dtype=torch.float16) for _ in range(2)],
         ]
 
-        # MLX new KV
-        new_kv = [mx.random.normal((2, 4, 4, 32)) for _ in range(2)]
+        # PyTorch new KV
+        new_kv = [torch.randn(2, 4, 4, 32, dtype=torch.float16) for _ in range(2)]
 
-        combined = cache.extend_from_cache(prefix_kv, new_kv)
+        # Custom concat function for PyTorch tensors
+        def torch_concat(a, b):
+            return torch.cat([a, b], dim=1)
+
+        combined = cache.extend_from_cache(prefix_kv, new_kv, concat_fn=torch_concat)
 
         assert len(combined) == 2
         assert combined[0].shape == (2, 12, 4, 32)
-        assert isinstance(combined[0], mx.array)
+        assert isinstance(combined[0], torch.Tensor)
+
+    def test_store_and_retrieve_torch_tensors(self, torch_available):
+        """Store PyTorch tensors (converted to numpy) and retrieve them."""
+        if not torch_available or torch is None:
+            pytest.skip("PyTorch not available")
+
+        config = PrefixCacheConfig(
+            num_layers=2,
+            num_heads=4,
+            head_dim=32,
+            block_size=8,
+            max_gpu_blocks=10,
+        )
+        cache = PrefixCache(config)
+
+        tokens = list(range(8))
+
+        # Create KV data as PyTorch tensors, then convert to numpy for storage
+        # (The cache internally stores numpy arrays)
+        original_tensors = [torch.randn(2, 8, 4, 32, dtype=torch.float16) for _ in range(2)]
+        kv_numpy = [[t.numpy() for t in original_tensors]]
+
+        stored_hashes = cache.store_prefix(tokens, kv_numpy)
+        retrieved = cache.get_blocks(stored_hashes)
+
+        assert len(retrieved) == 1
+        for layer_idx in range(2):
+            np.testing.assert_array_almost_equal(
+                retrieved[0][layer_idx], original_tensors[layer_idx].numpy()
+            )
+
+    def test_torch_mps_compatibility(self, torch_available):
+        """Test that tensors on MPS device can be converted for cache use."""
+        if not torch_available or torch is None:
+            pytest.skip("PyTorch not available")
+
+        if not torch.backends.mps.is_available():
+            pytest.skip("MPS not available")
+
+        config = PrefixCacheConfig(
+            num_layers=2,
+            num_heads=4,
+            head_dim=32,
+            block_size=8,
+        )
+        cache = PrefixCache(config)
+
+        # Create tensor on MPS
+        mps_tensor = torch.randn(2, 8, 4, 32, dtype=torch.float16, device="mps")
+
+        # Convert to CPU numpy for storage
+        cpu_numpy = mps_tensor.cpu().numpy()
+
+        tokens = list(range(8))
+        kv_blocks = [[[cpu_numpy] * 2]]
+
+        # Should store without error
+        stored_hashes = cache.store_prefix(tokens, kv_blocks)
+        assert len(stored_hashes) == 1

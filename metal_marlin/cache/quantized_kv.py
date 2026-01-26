@@ -34,8 +34,6 @@ from typing import Literal
 
 import numpy as np
 
-from .._compat import HAS_MLX, mx
-
 # FP8 E4M3 format constants
 # E4M3: 4 exponent bits, 3 mantissa bits
 # Max value: 448 (2^8 * 1.75)
@@ -399,18 +397,16 @@ class QuantizedKVCache:
         end_pos = self.seq_len + new_seq_len
 
         if end_pos > self.max_seq_len:
-            raise ValueError(
-                f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}"
-            )
+            raise ValueError(f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}")
 
         # Quantize
         (k_q, k_s), (v_q, v_s) = compress_kv(k_new, v_new, self.scaling)
 
         # Store in cache
-        self.k_cache[layer_idx][:, :, self.seq_len:end_pos, :] = k_q
-        self.v_cache[layer_idx][:, :, self.seq_len:end_pos, :] = v_q
-        self.k_scales[layer_idx][:, :, self.seq_len:end_pos, :] = k_s
-        self.v_scales[layer_idx][:, :, self.seq_len:end_pos, :] = v_s
+        self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_q
+        self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_q
+        self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_s
+        self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_s
 
     def get_kv_for_attention(
         self,
@@ -436,10 +432,10 @@ class QuantizedKVCache:
                 ),
             )
 
-        k_q = self.k_cache[layer_idx][:, :, :self.seq_len, :]
-        k_s = self.k_scales[layer_idx][:, :, :self.seq_len, :]
-        v_q = self.v_cache[layer_idx][:, :, :self.seq_len, :]
-        v_s = self.v_scales[layer_idx][:, :, :self.seq_len, :]
+        k_q = self.k_cache[layer_idx][:, :, : self.seq_len, :]
+        k_s = self.k_scales[layer_idx][:, :, : self.seq_len, :]
+        v_q = self.v_cache[layer_idx][:, :, : self.seq_len, :]
+        v_s = self.v_scales[layer_idx][:, :, : self.seq_len, :]
 
         output_dtype = np.float16  # numpy doesn't have bf16, use fp16
 
@@ -471,16 +467,14 @@ class QuantizedKVCache:
         end_pos = self.seq_len + new_seq_len
 
         if end_pos > self.max_seq_len:
-            raise ValueError(
-                f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}"
-            )
+            raise ValueError(f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}")
 
         # Quantize and store
         (k_q, k_s), (v_q, v_s) = compress_kv(k_new, v_new, self.scaling)
-        self.k_cache[layer_idx][:, :, self.seq_len:end_pos, :] = k_q
-        self.v_cache[layer_idx][:, :, self.seq_len:end_pos, :] = v_q
-        self.k_scales[layer_idx][:, :, self.seq_len:end_pos, :] = k_s
-        self.v_scales[layer_idx][:, :, self.seq_len:end_pos, :] = v_s
+        self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_q
+        self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_q
+        self.k_scales[layer_idx][:, :, self.seq_len : end_pos, :] = k_s
+        self.v_scales[layer_idx][:, :, self.seq_len : end_pos, :] = v_s
 
         # Return dequantized full cache (including new tokens)
         k_q_full = self.k_cache[layer_idx][:, :, :end_pos, :]
@@ -520,339 +514,3 @@ class QuantizedKVCache:
     def memory_saved_mb(self) -> float:
         """Return memory saved vs FP16 in MB."""
         return self.get_stats().memory_saved_mb
-
-
-# MLX-accelerated versions when available
-if HAS_MLX and mx is not None:
-
-    def compress_kv_mlx(
-        k: mx.array,
-        v: mx.array,
-        scaling: ScalingStrategy = ScalingStrategy.PER_HEAD,
-    ) -> tuple[tuple[mx.array, mx.array], tuple[mx.array, mx.array]]:
-        """MLX-accelerated KV compression.
-
-        Args:
-            k: Key tensor [batch, num_kv_heads, seq_len, head_dim]
-            v: Value tensor [batch, num_kv_heads, seq_len, head_dim]
-            scaling: Scaling strategy
-
-        Returns:
-            ((k_q, k_s), (v_q, v_s)): Quantized tensors and scales
-        """
-        per_head = scaling != ScalingStrategy.PER_TOKEN
-
-        if scaling == ScalingStrategy.ASYMMETRIC:
-            k_q, k_s = _quantize_fp8_e4m3_mlx(k, per_head=per_head)
-            v_q, v_s = _quantize_int8_symmetric_mlx(v, per_head=per_head)
-        else:
-            k_q, k_s = _quantize_fp8_e4m3_mlx(k, per_head=per_head)
-            v_q, v_s = _quantize_fp8_e4m3_mlx(v, per_head=per_head)
-
-        return (k_q, k_s), (v_q, v_s)
-
-    def decompress_kv_mlx(
-        k_q: mx.array,
-        k_scales: mx.array,
-        v_q: mx.array,
-        v_scales: mx.array,
-        scaling: ScalingStrategy = ScalingStrategy.PER_HEAD,
-        output_dtype: mx.Dtype = None,
-    ) -> tuple[mx.array, mx.array]:
-        """MLX-accelerated KV decompression.
-
-        Args:
-            k_q: Quantized keys
-            k_scales: Key scales
-            v_q: Quantized values
-            v_scales: Value scales
-            scaling: Scaling strategy
-            output_dtype: Output dtype (default mx.float16)
-
-        Returns:
-            (k, v): Dequantized tensors
-        """
-        if output_dtype is None:
-            output_dtype = mx.float16
-
-        if scaling == ScalingStrategy.ASYMMETRIC:
-            k = _dequantize_fp8_e4m3_mlx(k_q, k_scales, output_dtype)
-            v = _dequantize_int8_symmetric_mlx(v_q, v_scales, output_dtype)
-        else:
-            k = _dequantize_fp8_e4m3_mlx(k_q, k_scales, output_dtype)
-            v = _dequantize_fp8_e4m3_mlx(v_q, v_scales, output_dtype)
-
-        return k, v
-
-    def _quantize_fp8_e4m3_mlx(
-        tensor: mx.array,
-        per_head: bool = True,
-    ) -> tuple[mx.array, mx.array]:
-        """MLX FP8 E4M3 quantization."""
-        if per_head:
-            abs_max = mx.max(mx.abs(tensor), axis=-1, keepdims=True)
-        else:
-            abs_max = mx.max(mx.abs(tensor), axis=(1, 3), keepdims=True)
-
-        abs_max = mx.maximum(abs_max, 1e-12)
-        scale = abs_max / FP8_E4M3_MAX
-        scaled = tensor / scale
-        scaled = mx.clip(scaled, -FP8_E4M3_MAX, FP8_E4M3_MAX)
-
-        quantized = mx.round(scaled / FP8_E4M3_MAX * 127.0 + 128.0)
-        quantized = mx.clip(quantized, 0, 255).astype(mx.uint8)
-
-        return quantized, scale.astype(mx.float16)
-
-    def _dequantize_fp8_e4m3_mlx(
-        quantized: mx.array,
-        scale: mx.array,
-        output_dtype: mx.Dtype,
-    ) -> mx.array:
-        """MLX FP8 E4M3 dequantization."""
-        signed = (quantized.astype(mx.float32) - 128.0) / 127.0 * FP8_E4M3_MAX
-        dequantized = signed * scale.astype(mx.float32)
-        return dequantized.astype(output_dtype)
-
-    def _quantize_int8_symmetric_mlx(
-        tensor: mx.array,
-        per_head: bool = True,
-    ) -> tuple[mx.array, mx.array]:
-        """MLX INT8 symmetric quantization."""
-        if per_head:
-            abs_max = mx.max(mx.abs(tensor), axis=-1, keepdims=True)
-        else:
-            abs_max = mx.max(mx.abs(tensor), axis=(1, 3), keepdims=True)
-
-        abs_max = mx.maximum(abs_max, 1e-12)
-        scale = abs_max / INT8_MAX
-        scaled = tensor / scale
-        scaled = mx.clip(scaled, -INT8_MAX, INT8_MAX)
-
-        quantized = mx.round(scaled + 128.0)
-        quantized = mx.clip(quantized, 0, 255).astype(mx.uint8)
-
-        return quantized, scale.astype(mx.float16)
-
-    def _dequantize_int8_symmetric_mlx(
-        quantized: mx.array,
-        scale: mx.array,
-        output_dtype: mx.Dtype,
-    ) -> mx.array:
-        """MLX INT8 symmetric dequantization."""
-        signed = quantized.astype(mx.float32) - 128.0
-        dequantized = signed * scale.astype(mx.float32)
-        return dequantized.astype(output_dtype)
-
-    class QuantizedKVCacheMLX:
-        """MLX-accelerated quantized KV cache.
-
-        Uses Metal compute for quantization/dequantization operations,
-        significantly faster than numpy for large caches.
-        """
-
-        def __init__(
-            self,
-            num_layers: int,
-            num_kv_heads: int,
-            head_dim: int,
-            max_seq_len: int,
-            batch_size: int = 1,
-            scaling: ScalingStrategy = ScalingStrategy.PER_HEAD,
-            compute_dtype: mx.Dtype = None,
-        ):
-            """Initialize MLX quantized KV cache.
-
-            Args:
-                num_layers: Number of transformer layers
-                num_kv_heads: Number of KV heads
-                head_dim: Dimension per head
-                max_seq_len: Maximum sequence length
-                batch_size: Batch size
-                scaling: Quantization scaling strategy
-                compute_dtype: MLX dtype for attention (default mx.float16)
-            """
-            self.num_layers = num_layers
-            self.num_kv_heads = num_kv_heads
-            self.head_dim = head_dim
-            self.max_seq_len = max_seq_len
-            self.batch_size = batch_size
-            self.scaling = scaling
-            self.compute_dtype = compute_dtype if compute_dtype is not None else mx.float16
-            self.seq_len = 0
-
-            # Pre-allocate
-            cache_shape = (batch_size, num_kv_heads, max_seq_len, head_dim)
-            self.k_cache: list[mx.array] = [
-                mx.zeros(cache_shape, dtype=mx.uint8) for _ in range(num_layers)
-            ]
-            self.v_cache: list[mx.array] = [
-                mx.zeros(cache_shape, dtype=mx.uint8) for _ in range(num_layers)
-            ]
-
-            if scaling == ScalingStrategy.PER_TOKEN:
-                scale_shape = (batch_size, 1, max_seq_len, 1)
-            else:
-                scale_shape = (batch_size, num_kv_heads, max_seq_len, 1)
-
-            self.k_scales: list[mx.array] = [
-                mx.zeros(scale_shape, dtype=mx.float16) for _ in range(num_layers)
-            ]
-            self.v_scales: list[mx.array] = [
-                mx.zeros(scale_shape, dtype=mx.float16) for _ in range(num_layers)
-            ]
-
-        def compress_and_store(
-            self,
-            layer_idx: int,
-            k_new: mx.array,
-            v_new: mx.array,
-        ) -> None:
-            """Quantize and store new K, V tensors."""
-            new_seq_len = k_new.shape[2]
-            end_pos = self.seq_len + new_seq_len
-
-            if end_pos > self.max_seq_len:
-                raise ValueError(
-                    f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}"
-                )
-
-            (k_q, k_s), (v_q, v_s) = compress_kv_mlx(k_new, v_new, self.scaling)
-
-            # MLX is immutable, so we concatenate slices
-            self.k_cache[layer_idx] = mx.concatenate(
-                [
-                    self.k_cache[layer_idx][:, :, :self.seq_len, :],
-                    k_q,
-                    self.k_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_cache[layer_idx] = mx.concatenate(
-                [
-                    self.v_cache[layer_idx][:, :, :self.seq_len, :],
-                    v_q,
-                    self.v_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.k_scales[layer_idx] = mx.concatenate(
-                [
-                    self.k_scales[layer_idx][:, :, :self.seq_len, :],
-                    k_s,
-                    self.k_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_scales[layer_idx] = mx.concatenate(
-                [
-                    self.v_scales[layer_idx][:, :, :self.seq_len, :],
-                    v_s,
-                    self.v_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-
-        def get_kv_for_attention(
-            self,
-            layer_idx: int,
-        ) -> tuple[mx.array, mx.array]:
-            """Get dequantized K, V for attention."""
-            if self.seq_len == 0:
-                shape = (self.batch_size, self.num_kv_heads, 0, self.head_dim)
-                return mx.zeros(shape, dtype=self.compute_dtype), mx.zeros(
-                    shape, dtype=self.compute_dtype
-                )
-
-            k_q = self.k_cache[layer_idx][:, :, :self.seq_len, :]
-            k_s = self.k_scales[layer_idx][:, :, :self.seq_len, :]
-            v_q = self.v_cache[layer_idx][:, :, :self.seq_len, :]
-            v_s = self.v_scales[layer_idx][:, :, :self.seq_len, :]
-
-            return decompress_kv_mlx(k_q, k_s, v_q, v_s, self.scaling, self.compute_dtype)
-
-        def update(
-            self,
-            layer_idx: int,
-            k_new: mx.array,
-            v_new: mx.array,
-        ) -> tuple[mx.array, mx.array]:
-            """Update cache and return full dequantized cache including new tokens.
-
-            Note: Does NOT advance seq_len. Call advance() after updating all layers.
-            """
-            new_seq_len = k_new.shape[2]
-            end_pos = self.seq_len + new_seq_len
-
-            if end_pos > self.max_seq_len:
-                raise ValueError(
-                    f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}"
-                )
-
-            # Compress and store
-            (k_q, k_s), (v_q, v_s) = compress_kv_mlx(k_new, v_new, self.scaling)
-
-            # MLX concatenate for immutable arrays
-            self.k_cache[layer_idx] = mx.concatenate(
-                [
-                    self.k_cache[layer_idx][:, :, :self.seq_len, :],
-                    k_q,
-                    self.k_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_cache[layer_idx] = mx.concatenate(
-                [
-                    self.v_cache[layer_idx][:, :, :self.seq_len, :],
-                    v_q,
-                    self.v_cache[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.k_scales[layer_idx] = mx.concatenate(
-                [
-                    self.k_scales[layer_idx][:, :, :self.seq_len, :],
-                    k_s,
-                    self.k_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-            self.v_scales[layer_idx] = mx.concatenate(
-                [
-                    self.v_scales[layer_idx][:, :, :self.seq_len, :],
-                    v_s,
-                    self.v_scales[layer_idx][:, :, end_pos:, :],
-                ],
-                axis=2,
-            )
-
-            # Return dequantized full cache including new tokens
-            k_q_full = self.k_cache[layer_idx][:, :, :end_pos, :]
-            k_s_full = self.k_scales[layer_idx][:, :, :end_pos, :]
-            v_q_full = self.v_cache[layer_idx][:, :, :end_pos, :]
-            v_s_full = self.v_scales[layer_idx][:, :, :end_pos, :]
-
-            return decompress_kv_mlx(k_q_full, k_s_full, v_q_full, v_s_full, self.scaling, self.compute_dtype)
-
-        def advance(self, num_tokens: int = 1) -> None:
-            """Advance sequence position."""
-            self.seq_len += num_tokens
-
-        def reset(self) -> None:
-            """Clear cache."""
-            self.seq_len = 0
-
-        def get_stats(self) -> CacheStats:
-            """Get cache statistics."""
-            return CacheStats(
-                layers=self.num_layers,
-                kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                current_seq_len=self.seq_len,
-                max_seq_len=self.max_seq_len,
-                scaling=self.scaling,
-            )
-
-        def memory_usage_mb(self) -> float:
-            """Return current memory usage in MB."""
-            return self.get_stats().quantized_memory_bytes / (1024 * 1024)

@@ -49,6 +49,11 @@ constant constexpr uint BLOCKS_PER_U32_2_4 = 8;   // 32 / 4
 constant constexpr uint BLOCKS_PER_U32_2_8 = 5;   // floor(32 / 6)
 constant constexpr uint BLOCKS_PER_U32_4_8 = 4;   // floor(32 / 7)
 
+// Tile dimensions for dequant_sparse_fp4_tile
+constant constexpr uint TILE_K = 64;              // K dimension per tile
+constant constexpr uint TILE_N = 64;              // N dimension per tile
+constant constexpr uint THREADS_PER_TG = 256;     // Threads per threadgroup
+
 
 // ============================================================================
 // 1:4 Pattern (75% sparse) - 1 value per 4-element block
@@ -492,7 +497,7 @@ template <uint N_VALS, uint BPP>
 inline void decode_sparse_nm(uint32_t metadata,
                               uint base_bit,
                               thread uint positions[N_VALS]) {
-    constant uint mask = (1u << BPP) - 1u;
+    const uint mask = (1u << BPP) - 1u;
     uint shifted = metadata >> base_bit;
     for (uint i = 0; i < N_VALS; ++i) {
         positions[i] = shifted & mask;
@@ -512,7 +517,7 @@ inline void scatter_nm(thread half (&values)[N_VALS],
 /// Generic encode: pack N position indices into a single metadata field.
 template <uint N_VALS, uint BPP>
 inline uint encode_sparse_nm(thread uint positions[N_VALS]) {
-    constant uint mask = (1u << BPP) - 1u;
+    const uint mask = (1u << BPP) - 1u;
     uint encoded = 0;
     for (uint i = 0; i < N_VALS; ++i) {
         encoded |= (positions[i] & mask) << (i * BPP);
@@ -646,7 +651,7 @@ kernel void marlin_gemm_sparse_nm(
     uint K_sparse = K_dim * pat.n_vals / pat.m_block;
 
     // Tile assignment: each threadgroup handles a TILE_M x TILE_N output tile
-    constant uint TILE = 8;  // Sub-tile size matching simdgroup_matrix
+    const uint TILE = 8;  // Sub-tile size matching simdgroup_matrix
     uint row_base = tgid.y * TILE;
     uint col_base = tgid.x * TILE;
 

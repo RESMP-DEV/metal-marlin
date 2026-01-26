@@ -63,8 +63,7 @@ def ref_decode_metadata_x8(packed: int) -> list[tuple[int, int]]:
     return positions
 
 
-def ref_scatter_2in4(val0: float, val1: float,
-                     pos0: int, pos1: int) -> list[float]:
+def ref_scatter_2in4(val0: float, val1: float, pos0: int, pos1: int) -> list[float]:
     """Scatter two sparse values into a 4-element dense block."""
     block = [0.0, 0.0, 0.0, 0.0]
     block[pos0] = val0
@@ -111,12 +110,12 @@ class TestEncodeDecodeSingle:
     def test_expected_nibble_values(self) -> None:
         """Verify exact encoded values match Metal shader comments."""
         expected = {
-            (0, 1): 0b0100,   # 4
-            (0, 2): 0b1000,   # 8
-            (0, 3): 0b1100,   # 12
-            (1, 2): 0b1001,   # 9
-            (1, 3): 0b1101,   # 13
-            (2, 3): 0b1110,   # 14
+            (0, 1): 0b0100,  # 4
+            (0, 2): 0b1000,  # 8
+            (0, 3): 0b1100,  # 12
+            (1, 2): 0b1001,  # 9
+            (1, 3): 0b1101,  # 13
+            (2, 3): 0b1110,  # 14
         }
         for (pos0, pos1), expected_nibble in expected.items():
             assert ref_encode_sparse_2in4(pos0, pos1) == expected_nibble
@@ -153,7 +152,9 @@ class TestPackedX8:
         decoded = ref_decode_metadata_x8(packed)
 
         for i in range(8):
-            assert decoded[i] == patterns_used[i], f"block {i}: expected {patterns_used[i]}, got {decoded[i]}"
+            assert decoded[i] == patterns_used[i], (
+                f"block {i}: expected {patterns_used[i]}, got {decoded[i]}"
+            )
 
     def test_packed_fits_uint32(self) -> None:
         """Packed result fits in 32 bits."""
@@ -252,7 +253,7 @@ class TestEndToEnd:
         # Verify sparsity pattern
         for block_idx in range(8):
             dense_offset = block_idx * 4
-            block = dense_output[dense_offset:dense_offset + 4]
+            block = dense_output[dense_offset : dense_offset + 4]
             nonzero_count = np.count_nonzero(block)
             assert nonzero_count == 2, f"block {block_idx}: {nonzero_count} nonzero"
 
@@ -260,13 +261,9 @@ class TestEndToEnd:
         for block_idx in range(8):
             pos0, pos1 = patterns[block_idx]
             dense_offset = block_idx * 4
+            np.testing.assert_equal(dense_output[dense_offset + pos0], sparse_values[block_idx * 2])
             np.testing.assert_equal(
-                dense_output[dense_offset + pos0],
-                sparse_values[block_idx * 2]
-            )
-            np.testing.assert_equal(
-                dense_output[dense_offset + pos1],
-                sparse_values[block_idx * 2 + 1]
+                dense_output[dense_offset + pos1], sparse_values[block_idx * 2 + 1]
             )
 
     def test_random_patterns_stress(self) -> None:

@@ -96,9 +96,7 @@ def aggregate_results(results_dir: str | Path) -> pd.DataFrame:
         Returns empty DataFrame if pandas not available or no results found.
     """
     if not HAS_PANDAS:
-        raise ImportError(
-            "pandas required for aggregate_results. Install with: pip install pandas"
-        )
+        raise ImportError("pandas required for aggregate_results. Install with: pip install pandas")
 
     results_dir = Path(results_dir)
     if not results_dir.exists():
@@ -270,8 +268,17 @@ def _extract_model_name(label: str) -> str:
     """Extract model name from label string."""
     # Common patterns: "Llama-2-7B-FP4", "mistral-7b-fp4-g128"
     label = label.lower()
-    for model in ["llama-2-7b", "llama-2-13b", "llama-3-8b", "llama-3-70b",
-                  "mistral-7b", "mixtral-8x7b", "glm-4", "qwen", "phi-3"]:
+    for model in [
+        "llama-2-7b",
+        "llama-2-13b",
+        "llama-3-8b",
+        "llama-3-70b",
+        "mistral-7b",
+        "mixtral-8x7b",
+        "glm-4",
+        "qwen",
+        "phi-3",
+    ]:
         if model in label:
             return model.title()
     return label.split("-")[0].title() if "-" in label else label.title()
@@ -469,8 +476,12 @@ def _generate_model_breakdown(df: pd.DataFrame) -> list[str]:
 
         lines.append(f"### {model}")
         lines.append("")
-        lines.append("| Config | Quant | Group | PPL Base | PPL Quant | Delta % | Compression | TFLOPS |")
-        lines.append("|--------|-------|-------|----------|-----------|---------|-------------|--------|")
+        lines.append(
+            "| Config | Quant | Group | PPL Base | PPL Quant | Delta % | Compression | TFLOPS |"
+        )
+        lines.append(
+            "|--------|-------|-------|----------|-----------|---------|-------------|--------|"
+        )
 
         # Sort by PPL delta
         if "ppl_delta_pct" in model_df.columns:
@@ -500,7 +511,9 @@ def _generate_precision_comparison(df: pd.DataFrame) -> list[str]:
     if uniform.empty and mixed.empty:
         lines.append("No uniform/mixed-precision comparison data available.")
         lines.append("")
-        lines.append("This comparison requires benchmark results with configs labeled as 'uniform' or 'mixed'.")
+        lines.append(
+            "This comparison requires benchmark results with configs labeled as 'uniform' or 'mixed'."
+        )
         return lines
 
     lines.append("| Model | Uniform PPL Δ% | Mixed PPL Δ% | Improvement |")
@@ -508,8 +521,16 @@ def _generate_precision_comparison(df: pd.DataFrame) -> list[str]:
 
     models = set(uniform["model"].unique()) & set(mixed["model"].unique())
     for model in sorted(models):
-        u_row = uniform[uniform["model"] == model].iloc[0] if not uniform[uniform["model"] == model].empty else None
-        m_row = mixed[mixed["model"] == model].iloc[0] if not mixed[mixed["model"] == model].empty else None
+        u_row = (
+            uniform[uniform["model"] == model].iloc[0]
+            if not uniform[uniform["model"] == model].empty
+            else None
+        )
+        m_row = (
+            mixed[mixed["model"] == model].iloc[0]
+            if not mixed[mixed["model"] == model].empty
+            else None
+        )
 
         if u_row is not None and m_row is not None:
             improvement = u_row["ppl_delta_pct"] - m_row["ppl_delta_pct"]
@@ -534,7 +555,9 @@ def _generate_calibration_comparison(df: pd.DataFrame) -> list[str]:
     if wiki.empty and bart.empty:
         lines.append("No calibration comparison data available.")
         lines.append("")
-        lines.append("This comparison requires benchmark results with different calibration datasets.")
+        lines.append(
+            "This comparison requires benchmark results with different calibration datasets."
+        )
         return lines
 
     lines.append("| Model | Config | WikiText-2 PPL Δ% | Bartowski v3 PPL Δ% | Difference |")
@@ -761,7 +784,9 @@ def generate_results_file(results_dir: str | Path, output_dir: str | Path | None
         md_content += "   ```\n\n"
         md_content += "2. Regenerate this report:\n"
         md_content += "   ```bash\n"
-        md_content += "   uv run python -m metal_marlin.benchmark_report generate ./benchmarks/results/\n"
+        md_content += (
+            "   uv run python -m metal_marlin.benchmark_report generate ./benchmarks/results/\n"
+        )
         md_content += "   ```\n"
     else:
         # Generate markdown report
@@ -806,8 +831,12 @@ def main():
 
     # Generate command
     gen_p = subparsers.add_parser("generate", help="Generate RESULTS.md from benchmark JSONs")
-    gen_p.add_argument("results_dir", nargs="?", default=str(_RESULTS_DIR),
-                       help="Directory containing benchmark JSON files")
+    gen_p.add_argument(
+        "results_dir",
+        nargs="?",
+        default=str(_RESULTS_DIR),
+        help="Directory containing benchmark JSON files",
+    )
     gen_p.add_argument("-o", "--output", help="Output directory for RESULTS.md")
 
     # Plot PPL command

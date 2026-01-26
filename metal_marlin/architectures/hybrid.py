@@ -10,9 +10,12 @@ Provides:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .._compat import HAS_MLX, require_mlx
+import torch
+import torch.nn as nn
+
+from .._compat import require_torch
 from ..mixed_precision import LayerQuantConfig, Precision
 from .base import HybridLayerType, LayerState, StateType
 from .config import (
@@ -22,15 +25,11 @@ from .config import (
     MambaLayerConfig,
 )
 
-if HAS_MLX:
-    import mlx.core as mx
-    import mlx.nn as nn
-else:
-    mx = None
-    nn = None
+if TYPE_CHECKING:
+    pass
 
 
-class HybridBlock(nn.Module if HAS_MLX else object):
+class HybridBlock(nn.Module):
     """Unified block that dispatches to appropriate layer implementation.
 
     This is the core building block for hybrid models. Each block wraps
@@ -66,7 +65,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             intermediate_size: MLP intermediate size. Default 4 * hidden_size.
             shared_attention: Optional attention layer for SHARED_ATTENTION type.
         """
-        require_mlx("HybridBlock")
+        require_torch("HybridBlock")
         super().__init__()
 
         self.layer_type = layer_config.layer_type
@@ -95,7 +94,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
         self,
         config: HybridLayerConfig,
         shared_attention: Any | None = None,
-    ) -> Any:
+    ) -> nn.Module:
         """Build the layer implementation based on type."""
         if config.layer_type == HybridLayerType.ATTENTION:
             return self._build_attention(config)
@@ -117,6 +116,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
         elif config.layer_type == HybridLayerType.HYENA:
             # Hyena not implemented - fall back to attention with warning
             import warnings
+
             warnings.warn(
                 "Hyena layers not yet implemented, using attention fallback. "
                 "This will not have the same compute characteristics.",
@@ -130,7 +130,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
         else:
             raise ValueError(f"Unknown layer type: {config.layer_type}")
 
-    def _build_attention(self, config: HybridLayerConfig) -> Any:
+    def _build_attention(self, config: HybridLayerConfig) -> nn.Module:
         """Build attention-based transformer block."""
         from ..transformer import MarlinTransformerBlock
 
@@ -155,7 +155,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
         self,
         config: HybridLayerConfig,
         shared_layer: Any,
-    ) -> Any:
+    ) -> nn.Module:
         """Build shared attention block (Zamba-style).
 
         For shared attention, we wrap the shared layer to use its weights
@@ -169,7 +169,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             quant_config=config.quant_config,
         )
 
-    def _build_mamba(self, config: HybridLayerConfig) -> Any:
+    def _build_mamba(self, config: HybridLayerConfig) -> nn.Module:
         """Build Mamba block."""
         from .mamba import MarlinMambaBlock
 
@@ -188,7 +188,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             mlp_activation=config.mlp_activation,
         )
 
-    def _build_mlp_only(self, config: HybridLayerConfig) -> Any:
+    def _build_mlp_only(self, config: HybridLayerConfig) -> nn.Module:
         """Build MLP-only block (no attention/SSM)."""
 
         quant_cfg = config.quant_config or LayerQuantConfig(Precision.FP4_E2M1, 128)
@@ -204,7 +204,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             activation=config.mlp_activation,
         )
 
-    def _build_linear_attention(self, config: HybridLayerConfig) -> Any:
+    def _build_linear_attention(self, config: HybridLayerConfig) -> nn.Module:
         """Build RWKV block for linear attention."""
         from .rwkv import RWKVBlock
 
@@ -223,7 +223,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             layer_norm_eps=config.norm_eps,
         )
 
-    def _build_moe(self, config: HybridLayerConfig) -> Any:
+    def _build_moe(self, config: HybridLayerConfig) -> nn.Module:
         """Build MoE block.
 
         MoE is complex enough that it should use existing infrastructure.
@@ -234,14 +234,14 @@ class HybridBlock(nn.Module if HAS_MLX else object):
             "See moe_dispatch.py for token routing."
         )
 
-    def __call__(
+    def forward(
         self,
-        hidden_states: mx.array,
-        attention_mask: mx.array | None = None,
-        position_ids: mx.array | None = None,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
         state: LayerState | None = None,
         layer_idx: int = 0,
-    ) -> tuple[mx.array, LayerState | None]:
+    ) -> tuple[torch.Tensor, LayerState | None]:
         """Forward pass through the hybrid block.
 
         Args:
@@ -296,7 +296,7 @@ class HybridBlock(nn.Module if HAS_MLX else object):
         return None
 
 
-class SharedAttentionWrapper(nn.Module if HAS_MLX else object):
+class SharedAttentionWrapper(nn.Module):
     """Wrapper for shared attention weights (Zamba-style).
 
     In Zamba, one set of attention weights is shared across multiple layers.
@@ -312,7 +312,7 @@ class SharedAttentionWrapper(nn.Module if HAS_MLX else object):
         intermediate_size: int,
         quant_config: LayerQuantConfig | None = None,
     ):
-        require_mlx("SharedAttentionWrapper")
+        require_torch("SharedAttentionWrapper")
         super().__init__()
 
         self.shared_attention = shared_layer.self_attn  # Extract attention module
@@ -335,14 +335,14 @@ class SharedAttentionWrapper(nn.Module if HAS_MLX else object):
             group_size=quant_cfg.group_size,
         )
 
-    def __call__(
+    def forward(
         self,
-        hidden_states: mx.array,
-        attention_mask: mx.array | None = None,
-        position_ids: mx.array | None = None,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
         kv_cache: Any | None = None,
         layer_idx: int = 0,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Forward with shared attention weights."""
         # Attention with residual
         residual = hidden_states
@@ -365,7 +365,7 @@ class SharedAttentionWrapper(nn.Module if HAS_MLX else object):
         return hidden_states
 
 
-class MLPOnlyBlock(nn.Module if HAS_MLX else object):
+class MLPOnlyBlock(nn.Module):
     """Block with only MLP (no attention or SSM).
 
     Useful for some hybrid architectures that have dedicated MLP-only layers.
@@ -384,7 +384,7 @@ class MLPOnlyBlock(nn.Module if HAS_MLX else object):
         gated: bool = True,
         activation: str = "silu",
     ):
-        require_mlx("MLPOnlyBlock")
+        require_torch("MLPOnlyBlock")
         super().__init__()
 
         from ..mlp import MarlinMLP
@@ -400,30 +400,29 @@ class MLPOnlyBlock(nn.Module if HAS_MLX else object):
             gated=gated,
         )
 
-    def __call__(self, hidden_states: mx.array) -> mx.array:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         return residual + hidden_states
 
 
-class RMSNorm(nn.Module if HAS_MLX else object):
+class RMSNorm(nn.Module):
     """RMSNorm for hybrid blocks."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6):
-        if not HAS_MLX:
-            raise RuntimeError("MLX required for RMSNorm")
+        require_torch("RMSNorm")
         super().__init__()
-        self.weight = mx.ones((hidden_size,))
+        self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
 
-    def __call__(self, x: mx.array) -> mx.array:
-        variance = mx.mean(x ** 2, axis=-1, keepdims=True)
-        x = x * mx.rsqrt(variance + self.eps)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        variance = x.pow(2).mean(dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
 
 
-class HybridModel(nn.Module if HAS_MLX else object):
+class HybridModel(nn.Module):
     """Full hybrid model with heterogeneous layer stack.
 
     Combines embeddings, hybrid blocks, and output projection into
@@ -439,7 +438,7 @@ class HybridModel(nn.Module if HAS_MLX else object):
         Args:
             config: Full architecture configuration.
         """
-        require_mlx("HybridModel")
+        require_torch("HybridModel")
         super().__init__()
 
         self.config = config
@@ -451,7 +450,7 @@ class HybridModel(nn.Module if HAS_MLX else object):
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
 
         # Build layers
-        self.layers = self._build_layers(config)
+        self.layers = nn.ModuleList(self._build_layers(config))
 
         # Final norm
         self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -461,6 +460,7 @@ class HybridModel(nn.Module if HAS_MLX else object):
             self.lm_head = None
         else:
             from ..layers import MarlinLinear
+
             quant_type = _precision_to_str(config.embed_quant.precision)
             self.lm_head = MarlinLinear(
                 config.hidden_size,
@@ -470,17 +470,13 @@ class HybridModel(nn.Module if HAS_MLX else object):
                 group_size=config.embed_quant.group_size,
             )
 
-    def _build_layers(
-        self, config: HybridArchitectureConfig
-    ) -> list[HybridBlock]:
+    def _build_layers(self, config: HybridArchitectureConfig) -> list[HybridBlock]:
         """Build the layer stack respecting weight sharing."""
         layers: list[HybridBlock] = []
 
         for i, layer_config in enumerate(config.layer_configs or []):
             if layer_config.layer_type == HybridLayerType.SHARED_ATTENTION:
-                shared_attention = _resolve_shared_attention(
-                    layers, layer_config, i
-                )
+                shared_attention = _resolve_shared_attention(layers, layer_config, i)
                 block = HybridBlock(
                     layer_config,
                     config.hidden_size,
@@ -501,13 +497,13 @@ class HybridModel(nn.Module if HAS_MLX else object):
 
         return layers
 
-    def __call__(
+    def forward(
         self,
-        input_ids: mx.array,
-        attention_mask: mx.array | None = None,
-        position_ids: mx.array | None = None,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
         states: list[LayerState] | None = None,
-    ) -> tuple[mx.array, list[LayerState | None]]:
+    ) -> tuple[torch.Tensor, list[LayerState | None]]:
         """Forward pass through the model.
 
         Args:
@@ -549,10 +545,7 @@ class HybridModel(nn.Module if HAS_MLX else object):
 
     def init_states(self, batch_size: int) -> list[LayerState | None]:
         """Initialize states for all layers."""
-        return [
-            layer.init_state(batch_size, i)
-            for i, layer in enumerate(self.layers)
-        ]
+        return [layer.init_state(batch_size, i) for i, layer in enumerate(self.layers)]
 
     def get_layer_types(self) -> list[HybridLayerType]:
         """Get list of layer types in order."""
@@ -715,9 +708,7 @@ def build_hybrid_config(config_dict: dict[str, Any]) -> HybridArchitectureConfig
             f"num_layers ({num_layers}) must match len(layer_types) ({len(layer_types)})."
         )
 
-    attention_config = AttentionLayerConfig(
-        **config_dict.get("attention_config", {})
-    )
+    attention_config = AttentionLayerConfig(**config_dict.get("attention_config", {}))
     mamba_config = MambaLayerConfig(**config_dict.get("mamba_config", {}))
 
     defaults = HybridArchitectureConfig()
@@ -744,9 +735,9 @@ def build_hybrid_config(config_dict: dict[str, Any]) -> HybridArchitectureConfig
         defaults.norm_quant,
     )
 
-    architecture_name = config_dict.get("architecture_name") or _detect_architecture_from_layer_types(
-        layer_types
-    )
+    architecture_name = config_dict.get(
+        "architecture_name"
+    ) or _detect_architecture_from_layer_types(layer_types)
 
     return HybridArchitectureConfig(
         hidden_size=config_dict.get("hidden_size", defaults.hidden_size),
@@ -761,9 +752,7 @@ def build_hybrid_config(config_dict: dict[str, Any]) -> HybridArchitectureConfig
         embed_quant=embed_quant,
         norm_quant=norm_quant,
         rms_norm_eps=config_dict.get("rms_norm_eps", defaults.rms_norm_eps),
-        tie_word_embeddings=config_dict.get(
-            "tie_word_embeddings", defaults.tie_word_embeddings
-        ),
+        tie_word_embeddings=config_dict.get("tie_word_embeddings", defaults.tie_word_embeddings),
         use_cache=config_dict.get("use_cache", defaults.use_cache),
         architecture_name=architecture_name,
     )
@@ -809,17 +798,12 @@ def _detect_architecture_from_layer_types(
         else:
             normalized.append(str(lt).lower().strip())
 
-    if any(
-        lt == HybridLayerType.SHARED_ATTENTION or lt == "shared_attention"
-        for lt in normalized
-    ):
+    if any(lt == HybridLayerType.SHARED_ATTENTION or lt == "shared_attention" for lt in normalized):
         return "zamba"
     if any(lt == HybridLayerType.HYENA or lt == "hyena" for lt in normalized):
         return "stripedhyena"
 
-    has_attention = any(
-        lt == HybridLayerType.ATTENTION or lt == "attention" for lt in normalized
-    )
+    has_attention = any(lt == HybridLayerType.ATTENTION or lt == "attention" for lt in normalized)
     has_mamba = any(
         lt in (HybridLayerType.MAMBA, HybridLayerType.MAMBA2)
         or lt in ("mamba", "mamba2", "ssm", "ssd")
@@ -918,9 +902,9 @@ def _load_weights(model: HybridModel, model_path: Path) -> HybridModel:
     # and mapping to our hybrid model structure
 
     import warnings
+
     warnings.warn(
-        "Weight loading not fully implemented. "
-        "Model initialized with random weights.",
+        "Weight loading not fully implemented. Model initialized with random weights.",
         UserWarning,
     )
 

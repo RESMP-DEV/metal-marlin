@@ -13,8 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
 import numpy as np
+import torch
 
 from .calibration import CalibrationStats, compute_scales
 from .safetensors_loader import load_mapped_safetensors
@@ -78,7 +78,7 @@ _DEFAULT_SKIP = ["embed", "lm_head", "norm", "layernorm", "wte", "wpe"]
 def quantize_model(
     model_path: Path,
     output_path: Path,
-    calibration_data: list[mx.array] | None = None,
+    calibration_data: list[torch.Tensor] | None = None,
     quant_type: str = "fp4",
     group_size: int = 32,
     skip_layers: list[str] | None = None,
@@ -130,14 +130,14 @@ def quantize_model(
         skip_layers = list(_DEFAULT_SKIP)
 
     # Run calibration if data provided
-    calibrated_scales: dict[str, tuple[mx.array, mx.array | None]] | None = None
+    calibrated_scales: dict[str, tuple[torch.Tensor, torch.Tensor | None]] | None = None
     if calibration_data is not None:
         calibrated_scales = _run_calibration(
             state_dict, calibration_data, quant_type, group_size
         )
 
     # Quantize layers
-    quantized_state: dict[str, mx.array] = {}
+    quantized_state: dict[str, torch.Tensor] = {}
     report = QuantizationReport(total_tensors=len(state_dict))
     num_skipped = 0
 
@@ -157,9 +157,9 @@ def quantize_model(
         quantized_state[f"{name}.packed"] = packed
         quantized_state[f"{name}.scales"] = scales
         # Store metadata as a small array for safetensors compatibility
-        quantized_state[f"{name}.meta"] = mx.array(
+        quantized_state[f"{name}.meta"] = torch.tensor(
             [meta["orig_K"], meta["orig_N"], meta["padded_K"], meta["padded_N"]],
-            dtype=mx.int32,
+            dtype=torch.int32,
         )
 
         # Compute reconstruction error
@@ -181,10 +181,13 @@ def quantize_model(
             np.mean([lr.snr_db for lr in report.layers])
         )
 
-    # Serialize to safetensors (convert mx.array -> numpy)
+    # Serialize to safetensors (convert torch.Tensor -> numpy)
     np_state: dict[str, np.ndarray] = {}
     for name, tensor in quantized_state.items():
-        np_state[name] = np.array(tensor)
+        if isinstance(tensor, torch.Tensor):
+            np_state[name] = tensor.cpu().numpy()
+        else:
+            np_state[name] = np.array(tensor)
 
     out_file = output_path / "model.marlin.safetensors"
     save_file(np_state, str(out_file))
@@ -235,7 +238,7 @@ def quantize_model(
 
 def _should_skip(
     name: str,
-    weight: mx.array,
+    weight: torch.Tensor,
     skip_layers: list[str],
 ) -> bool:
     """Determine whether a layer should be skipped (kept in FP16)."""
@@ -248,11 +251,11 @@ def _should_skip(
 
 
 def _run_calibration(
-    state_dict: dict[str, mx.array],
-    calibration_data: list[mx.array],
+    state_dict: dict[str, torch.Tensor],
+    calibration_data: list[torch.Tensor],
     quant_type: str,
     group_size: int,
-) -> dict[str, tuple[mx.array, mx.array | None]]:
+) -> dict[str, tuple[torch.Tensor, torch.Tensor | None]]:
     """Run calibration passes and compute per-layer scales.
 
     For weight-only quantization without a model forward pass, we compute
@@ -266,27 +269,27 @@ def _run_calibration(
             continue
         flat = weight.reshape(-1)
         stats[name] = CalibrationStats(
-            min_val=mx.min(flat),
-            max_val=mx.max(flat),
-            absmax=mx.max(mx.abs(flat)),
-            percentile_99=_percentile(mx.abs(flat), 0.99),
+            min_val=torch.min(flat),
+            max_val=torch.max(flat),
+            absmax=torch.max(torch.abs(flat)),
+            percentile_99=_percentile(torch.abs(flat), 0.99),
         )
 
     return compute_scales(stats, quant_type=quant_type, group_size=group_size)
 
 
-def _percentile(x: mx.array, p: float) -> mx.array:
-    """Compute the p-th percentile of a 1D array."""
-    sorted_x = mx.sort(x)
+def _percentile(x: torch.Tensor, p: float) -> torch.Tensor:
+    """Compute the p-th percentile of a 1D tensor."""
+    sorted_x, _ = torch.sort(x)
     idx = min(int(len(sorted_x) * p), len(sorted_x) - 1)
     return sorted_x[idx]
 
 
 def _compute_layer_error(
     name: str,
-    original: mx.array,
-    packed: mx.array,
-    scales: mx.array,
+    original: torch.Tensor,
+    packed: torch.Tensor,
+    scales: torch.Tensor,
     meta: dict[str, int],
     group_size: int,
     quant_type: str,
@@ -300,14 +303,18 @@ def _compute_layer_error(
     orig_K, orig_N = original.shape
     reconstructed = reconstructed[:orig_K, :orig_N]
 
+    # Convert to same dtype for comparison
+    original_f32 = original.float()
+    reconstructed_f32 = torch.tensor(reconstructed, dtype=torch.float32) if not isinstance(reconstructed, torch.Tensor) else reconstructed.float()
+
     # Error metrics
-    diff = (original.astype(mx.float32) - reconstructed.astype(mx.float32))
-    rms_error = float(mx.sqrt(mx.mean(diff * diff)).item())
-    max_error = float(mx.max(mx.abs(diff)).item())
+    diff = original_f32 - reconstructed_f32
+    rms_error = float(torch.sqrt(torch.mean(diff * diff)).item())
+    max_error = float(torch.max(torch.abs(diff)).item())
 
     # Signal-to-noise ratio
-    signal_power = float(mx.mean(original.astype(mx.float32) ** 2).item())
-    noise_power = float(mx.mean(diff * diff).item())
+    signal_power = float(torch.mean(original_f32 ** 2).item())
+    noise_power = float(torch.mean(diff * diff).item())
     if noise_power > 0:
         snr_db = 10.0 * np.log10(signal_power / noise_power)
     else:

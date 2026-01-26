@@ -17,15 +17,30 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
-import mlx.core as mx
-import mlx.nn as nn
+import torch
+import torch.nn as nn
 
-from ..attention import RoPE
-from ..paged.allocator import BlockAllocator
-from ..paged.attention import paged_attention
-from ..transformer import MarlinTransformerBlock
 from .request import SchedulerOutput
+
+if TYPE_CHECKING:
+    from ..paged.allocator import BlockAllocator
+
+
+def _get_device() -> torch.device:
+    """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+class RoPEModule(Protocol):
+    """Protocol for RoPE modules."""
+
+    dims: int
+    traditional: bool
+    base: float
 
 
 @dataclass
@@ -50,15 +65,15 @@ class ModelConfig:
 class _BatchMetadata:
     """Internal metadata for a flattened batch."""
 
-    input_ids: mx.array       # [total_tokens]
-    positions: mx.array       # [total_tokens]
-    block_tables: mx.array    # [num_seqs, max_blocks_per_seq]
-    context_lens: mx.array    # [num_seqs]
-    slot_offsets: mx.array    # [num_seqs] - write offset for KV cache
-    seq_starts: list[int]     # Start index in flattened input per sequence
-    seq_lengths: list[int]    # Number of input tokens per sequence
-    num_prefill: int          # Number of prefill sequences
-    num_decode: int           # Number of decode sequences
+    input_ids: torch.Tensor  # [total_tokens]
+    positions: torch.Tensor  # [total_tokens]
+    block_tables: torch.Tensor  # [num_seqs, max_blocks_per_seq]
+    context_lens: torch.Tensor  # [num_seqs]
+    slot_offsets: torch.Tensor  # [num_seqs] - write offset for KV cache
+    seq_starts: list[int]  # Start index in flattened input per sequence
+    seq_lengths: list[int]  # Number of input tokens per sequence
+    num_prefill: int  # Number of prefill sequences
+    num_decode: int  # Number of decode sequences
 
 
 class BatchedModelRunner:
@@ -87,8 +102,10 @@ class BatchedModelRunner:
         self.model = model
         self.config = config
         self.allocator = allocator
+        self.device = _get_device()
+        self._layer_pools: list[torch.Tensor] | None = None
 
-    def execute(self, schedule: SchedulerOutput) -> mx.array:
+    def execute(self, schedule: SchedulerOutput) -> torch.Tensor:
         """Execute one iteration of batched generation.
 
         Processes all prefill and decode requests in a single forward pass.
@@ -103,7 +120,7 @@ class BatchedModelRunner:
             Returns empty array if schedule is empty.
         """
         if schedule.is_empty:
-            return mx.array([], dtype=mx.float16)
+            return torch.empty(0, dtype=torch.float16, device=self.device)
 
         batch = self._build_batch(schedule)
         logits = self._forward(batch)
@@ -140,11 +157,7 @@ class BatchedModelRunner:
             seq_starts.append(offset)
             seq_lengths.append(1)
 
-            last_token = (
-                req.output_tokens[-1]
-                if req.output_tokens
-                else req.prompt_tokens[-1]
-            )
+            last_token = req.output_tokens[-1] if req.output_tokens else req.prompt_tokens[-1]
             input_ids_list.append(last_token)
             positions_list.append(req.num_tokens - 1)
             block_tables_list.append(list(req.block_indices))
@@ -156,23 +169,21 @@ class BatchedModelRunner:
 
         # Pad block tables to uniform width
         max_blocks = max(len(bt) for bt in block_tables_list) if block_tables_list else 0
-        block_tables_padded = [
-            bt + [0] * (max_blocks - len(bt)) for bt in block_tables_list
-        ]
+        block_tables_padded = [bt + [0] * (max_blocks - len(bt)) for bt in block_tables_list]
 
         return _BatchMetadata(
-            input_ids=mx.array(input_ids_list, dtype=mx.int32),
-            positions=mx.array(positions_list, dtype=mx.int32),
-            block_tables=mx.array(block_tables_padded, dtype=mx.int32),
-            context_lens=mx.array(context_lens_list, dtype=mx.int32),
-            slot_offsets=mx.array(slot_offsets_list, dtype=mx.int32),
+            input_ids=torch.tensor(input_ids_list, dtype=torch.int32, device=self.device),
+            positions=torch.tensor(positions_list, dtype=torch.int32, device=self.device),
+            block_tables=torch.tensor(block_tables_padded, dtype=torch.int32, device=self.device),
+            context_lens=torch.tensor(context_lens_list, dtype=torch.int32, device=self.device),
+            slot_offsets=torch.tensor(slot_offsets_list, dtype=torch.int32, device=self.device),
             seq_starts=seq_starts,
             seq_lengths=seq_lengths,
             num_prefill=len(schedule.prefill_requests),
             num_decode=len(schedule.decode_requests),
         )
 
-    def _forward(self, batch: _BatchMetadata) -> mx.array:
+    def _forward(self, batch: _BatchMetadata) -> torch.Tensor:
         """Run the model forward pass with paged attention.
 
         For each transformer layer:
@@ -185,26 +196,24 @@ class BatchedModelRunner:
             Logits for the last token of each sequence [num_seqs, vocab_size].
         """
         num_seqs = len(batch.seq_starts)
-        int(batch.input_ids.shape[0])
 
         # Token embedding
         hidden = self.model.embed_tokens(batch.input_ids)  # [total_tokens, hidden_size]
 
         # Process each transformer layer
         for layer_idx, layer in enumerate(self.model.layers):
-            hidden = self._layer_forward(
-                layer, layer_idx, hidden, batch
-            )
+            hidden = self._layer_forward(layer, layer_idx, hidden, batch)
 
         # Final norm
         hidden = self.model.norm(hidden)
 
         # Extract the last token per sequence for logits
-        last_indices = [
-            batch.seq_starts[i] + batch.seq_lengths[i] - 1
-            for i in range(num_seqs)
-        ]
-        last_hidden = hidden[mx.array(last_indices)]  # [num_seqs, hidden_size]
+        last_indices = torch.tensor(
+            [batch.seq_starts[i] + batch.seq_lengths[i] - 1 for i in range(num_seqs)],
+            dtype=torch.long,
+            device=self.device,
+        )
+        last_hidden = hidden[last_indices]  # [num_seqs, hidden_size]
 
         # LM head projection
         logits = self.model.lm_head(last_hidden)  # [num_seqs, vocab_size]
@@ -213,11 +222,11 @@ class BatchedModelRunner:
 
     def _layer_forward(
         self,
-        layer: MarlinTransformerBlock,
+        layer: nn.Module,
         layer_idx: int,
-        hidden: mx.array,
+        hidden: torch.Tensor,
         batch: _BatchMetadata,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Forward one transformer layer with paged KV cache.
 
         Decomposes the block's pre-norm -> attention -> residual -> norm -> MLP
@@ -227,7 +236,7 @@ class BatchedModelRunner:
         head_dim = self.config.head_dim
         num_heads = self.config.num_heads
         num_kv_heads = self.config.num_kv_heads
-        block_size = self.allocator.block_size
+        block_size = self.block_size
 
         # === Attention sub-block ===
         residual = hidden
@@ -239,42 +248,33 @@ class BatchedModelRunner:
         v = layer.self_attn.v_proj(hidden)
 
         # Reshape to per-head: [total_tokens, num_heads, head_dim]
-        q = q.reshape(-1, num_heads, head_dim)
-        k = k.reshape(-1, num_kv_heads, head_dim)
-        v = v.reshape(-1, num_kv_heads, head_dim)
+        q = q.view(-1, num_heads, head_dim)
+        k = k.view(-1, num_kv_heads, head_dim)
+        v = v.view(-1, num_kv_heads, head_dim)
 
         # Apply RoPE using position IDs
-        # RoPE expects [batch, num_heads, seq_len, head_dim] but we have
-        # flattened tokens. Apply per-token using the positions array.
         q = self._apply_rope_flat(layer.self_attn.rope, q, batch.positions)
         k = self._apply_rope_flat(layer.self_attn.rope, k, batch.positions)
 
-        # Write K/V into block pool for this layer.
-        # We store per-layer KV in separate slices of the block pool.
-        # Block pool layout: [num_blocks, 2, block_size, num_kv_heads, head_dim]
-        # Each layer uses a different set of blocks (managed by the allocator).
-        # For simplicity here, we use a single pool and layer_idx offsets
-        # the block indices. In practice, each layer would have its own pool
-        # or the block table would encode layer information.
+        # Write K/V into block pool for this layer
         self._write_kv_to_cache(k, v, batch, layer_idx)
 
-        # Run paged attention per sequence.
-        # We must group tokens by sequence since each has different context.
-        attn_outputs = []
+        # Run paged attention per sequence
+        attn_outputs: list[torch.Tensor] = []
         for seq_idx in range(num_seqs):
             start = batch.seq_starts[seq_idx]
             length = batch.seq_lengths[seq_idx]
 
             # Query for this sequence: [1, num_heads, seq_len, head_dim]
-            q_seq = q[start:start + length]
-            q_seq = q_seq.reshape(1, length, num_heads, head_dim).transpose(0, 2, 1, 3)
+            q_seq = q[start : start + length]
+            q_seq = q_seq.view(1, length, num_heads, head_dim).transpose(1, 2)
 
             # Block table and context length for this sequence
-            seq_block_table = batch.block_tables[seq_idx:seq_idx + 1]
-            seq_context_len = batch.context_lens[seq_idx:seq_idx + 1]
+            seq_block_table = batch.block_tables[seq_idx : seq_idx + 1]
+            seq_context_len = batch.context_lens[seq_idx : seq_idx + 1]
 
             # Paged attention
-            attn_out = paged_attention(
+            attn_out = self._paged_attention(
                 query=q_seq,
                 block_pool=self._get_layer_pool(layer_idx),
                 block_tables=seq_block_table,
@@ -285,11 +285,11 @@ class BatchedModelRunner:
             )
             # attn_out: [1, num_heads, seq_len, head_dim]
             # Reshape to [seq_len, num_heads * head_dim]
-            attn_out = attn_out.transpose(0, 2, 1, 3).reshape(length, num_heads * head_dim)
+            attn_out = attn_out.transpose(1, 2).reshape(length, num_heads * head_dim)
             attn_outputs.append(attn_out)
 
         # Concatenate all sequences back to [total_tokens, hidden_size]
-        attn_hidden = mx.concatenate(attn_outputs, axis=0)
+        attn_hidden = torch.cat(attn_outputs, dim=0)
 
         # Output projection
         attn_hidden = layer.self_attn.o_proj(attn_hidden)
@@ -307,10 +307,10 @@ class BatchedModelRunner:
 
     def _apply_rope_flat(
         self,
-        rope: RoPE,
-        x: mx.array,
-        positions: mx.array,
-    ) -> mx.array:
+        rope: RoPEModule,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
         """Apply RoPE to flattened tokens using per-token position IDs.
 
         Args:
@@ -321,20 +321,21 @@ class BatchedModelRunner:
         Returns:
             Tensor with RoPE applied [total_tokens, num_heads, head_dim].
         """
-        x.shape[-1]
         dims = rope.dims
+        device = x.device
+        dtype = x.dtype
 
         # Compute inverse frequencies
         inv_freq = 1.0 / (
-            rope.base ** (mx.arange(0, dims, 2, dtype=mx.float32) / dims)
+            rope.base ** (torch.arange(0, dims, 2, dtype=torch.float32, device=device) / dims)
         )
 
         # Angles: [total_tokens, dims/2]
-        pos_float = positions.astype(mx.float32)
+        pos_float = positions.float()
         freqs = pos_float[:, None] * inv_freq[None, :]
 
-        cos = mx.cos(freqs)[:, None, :]  # [total_tokens, 1, dims/2]
-        sin = mx.sin(freqs)[:, None, :]
+        cos = torch.cos(freqs)[:, None, :]  # [total_tokens, 1, dims/2]
+        sin = torch.sin(freqs)[:, None, :]
 
         # Split even/odd
         x_even = x[..., ::2]  # [total_tokens, num_heads, head_dim/2]
@@ -349,16 +350,109 @@ class BatchedModelRunner:
             rot_odd = x_odd * cos + x_even * sin
 
         # Interleave back to [total_tokens, num_heads, head_dim]
-        result = mx.concatenate(
-            [rot_even[..., None], rot_odd[..., None]], axis=-1
-        ).reshape(x.shape)
+        result = torch.stack([rot_even, rot_odd], dim=-1).view(x.shape)
 
-        return result
+        return result.to(dtype)
+
+    def _paged_attention(
+        self,
+        query: torch.Tensor,
+        block_pool: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        scale: float,
+        num_kv_heads: int,
+        block_size: int = 16,
+    ) -> torch.Tensor:
+        """Compute scaled dot-product attention with paged KV cache.
+
+        Gathers K/V from the block pool using per-sequence block tables,
+        expands KV heads for GQA, and computes masked attention.
+
+        Args:
+            query: Query tensor [num_seqs, num_heads, seq_len, head_dim].
+            block_pool: Pre-allocated KV storage
+                [num_blocks, 2, block_size, num_kv_heads, head_dim].
+            block_tables: Block indices per sequence [num_seqs, max_blocks_per_seq].
+            context_lens: Number of valid KV tokens per sequence [num_seqs].
+            scale: Attention scale factor (typically head_dim ** -0.5).
+            num_kv_heads: Number of KV heads (for GQA expansion).
+            block_size: Tokens per block.
+
+        Returns:
+            Attention output [num_seqs, num_heads, seq_len, head_dim].
+        """
+        num_seqs = query.shape[0]
+        num_heads = query.shape[1]
+        seq_len = query.shape[2]
+        head_dim = query.shape[3]
+        max_blocks = block_tables.shape[1]
+        max_context = max_blocks * block_size
+        device = query.device
+
+        # Gather K and V from block pool for each sequence
+        flat_indices = block_tables.reshape(-1).long()  # [num_seqs * max_blocks]
+
+        # Gather: [num_seqs * max_blocks, 2, block_size, num_kv_heads, head_dim]
+        gathered = block_pool[flat_indices]
+
+        # Reshape to [num_seqs, max_blocks * block_size, num_kv_heads, head_dim]
+        gathered = gathered.view(num_seqs, max_blocks, 2, block_size, num_kv_heads, head_dim)
+        gathered = gathered.permute(0, 2, 1, 3, 4, 5)  # [num_seqs, 2, max_blocks, block_size, ...]
+        gathered = gathered.reshape(num_seqs, 2, max_context, num_kv_heads, head_dim)
+
+        # Split K and V: each [num_seqs, max_context, num_kv_heads, head_dim]
+        keys = gathered[:, 0]  # [num_seqs, max_context, num_kv_heads, head_dim]
+        values = gathered[:, 1]  # [num_seqs, max_context, num_kv_heads, head_dim]
+
+        # Transpose to [num_seqs, num_kv_heads, max_context, head_dim]
+        keys = keys.permute(0, 2, 1, 3)
+        values = values.permute(0, 2, 1, 3)
+
+        # GQA expansion: repeat KV heads to match query heads
+        if num_kv_heads < num_heads:
+            repeat_factor = num_heads // num_kv_heads
+            keys = keys.repeat_interleave(repeat_factor, dim=1)
+            values = values.repeat_interleave(repeat_factor, dim=1)
+
+        # Compute attention scores: [num_seqs, num_heads, seq_len, max_context]
+        attn_weights = (query @ keys.transpose(-2, -1)) * scale
+
+        # Build validity mask from context_lens
+        kv_positions = torch.arange(max_context, device=device)[None, :]  # [1, max_context]
+        context_lens_2d = context_lens[:, None].long()  # [num_seqs, 1]
+        valid_mask = kv_positions < context_lens_2d  # [num_seqs, max_context]
+
+        # Expand for broadcasting: [num_seqs, 1, 1, max_context]
+        valid_mask = valid_mask[:, None, None, :]
+        attn_weights = torch.where(
+            valid_mask, attn_weights, torch.tensor(float("-inf"), device=device)
+        )
+
+        # Causal mask for prefill (seq_len > 1)
+        if seq_len > 1:
+            q_positions = torch.arange(seq_len, device=device)[
+                None, None, :, None
+            ]  # [1, 1, seq_len, 1]
+            kv_pos_expanded = kv_positions[None, None, None, :]  # [1, 1, 1, max_context]
+
+            offsets = context_lens_2d[:, None, None, :] - seq_len + q_positions
+            causal_mask = kv_pos_expanded <= offsets
+            attn_weights = torch.where(
+                causal_mask, attn_weights, torch.tensor(float("-inf"), device=device)
+            )
+
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+
+        # Compute output: [num_seqs, num_heads, seq_len, head_dim]
+        output = attn_weights @ values
+
+        return output
 
     def _write_kv_to_cache(
         self,
-        keys: mx.array,
-        values: mx.array,
+        keys: torch.Tensor,
+        values: torch.Tensor,
         batch: _BatchMetadata,
         layer_idx: int,
     ) -> None:
@@ -368,7 +462,7 @@ class BatchedModelRunner:
         block table and slot offset, then writes K/V values.
         """
         num_seqs = len(batch.seq_starts)
-        block_size = self.allocator.block_size
+        block_size = self.block_size
         pool = self._get_layer_pool(layer_idx)
 
         for seq_idx in range(num_seqs):
@@ -377,8 +471,8 @@ class BatchedModelRunner:
             base_offset = int(batch.slot_offsets[seq_idx].item())
             seq_blocks = batch.block_tables[seq_idx]
 
-            k_seq = keys[start:start + length]   # [length, num_kv_heads, head_dim]
-            v_seq = values[start:start + length]
+            k_seq = keys[start : start + length]  # [length, num_kv_heads, head_dim]
+            v_seq = values[start : start + length]
 
             for tok_idx in range(length):
                 abs_pos = base_offset + tok_idx
@@ -386,51 +480,61 @@ class BatchedModelRunner:
                 slot_in_block = abs_pos % block_size
                 phys_block = int(seq_blocks[block_in_seq].item())
 
-                pool = pool.at[phys_block, 0, slot_in_block].add(
-                    k_seq[tok_idx] - pool[phys_block, 0, slot_in_block]
-                )
-                pool = pool.at[phys_block, 1, slot_in_block].add(
-                    v_seq[tok_idx] - pool[phys_block, 1, slot_in_block]
-                )
+                pool[phys_block, 0, slot_in_block] = k_seq[tok_idx]
+                pool[phys_block, 1, slot_in_block] = v_seq[tok_idx]
 
-        self._set_layer_pool(layer_idx, pool)
-
-    def _get_layer_pool(self, layer_idx: int) -> mx.array:
+    def _get_layer_pool(self, layer_idx: int) -> torch.Tensor:
         """Get the KV block pool for a specific layer.
 
         If the model uses per-layer pools (stored as a list on the runner),
         returns the appropriate one. Otherwise returns the allocator's
         shared storage.
         """
-        if hasattr(self, "_layer_pools"):
+        if self._layer_pools is not None:
             return self._layer_pools[layer_idx]
         return self.allocator._storage
 
-    def _set_layer_pool(self, layer_idx: int, pool: mx.array) -> None:
+    def _set_layer_pool(self, layer_idx: int, pool: torch.Tensor) -> None:
         """Update the KV block pool for a specific layer."""
-        if hasattr(self, "_layer_pools"):
+        if self._layer_pools is not None:
             self._layer_pools[layer_idx] = pool
         else:
             self.allocator._storage = pool
 
-    def init_layer_pools(self) -> None:
+    def init_layer_pools(
+        self,
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> None:
         """Initialize per-layer KV cache pools.
 
         Allocates separate block pools for each transformer layer.
         This avoids block-table aliasing across layers and is the
         recommended setup for multi-layer models.
+
+        Args:
+            num_blocks: Total number of blocks in the pool.
+            block_size: Number of tokens per block.
+            num_kv_heads: Number of KV heads.
+            head_dim: Dimension per attention head.
         """
-        self._layer_pools: list[mx.array] = [
-            mx.zeros_like(self.allocator._storage)
+        self._layer_pools = [
+            torch.zeros(
+                (num_blocks, 2, block_size, num_kv_heads, head_dim),
+                dtype=torch.float16,
+                device=self.device,
+            )
             for _ in range(self.config.num_layers)
         ]
 
     @property
     def block_size(self) -> int:
         """Block size from the allocator."""
-        return self.allocator.block_size
+        return getattr(self.allocator, "block_size", 16)
 
     @property
     def num_free_blocks(self) -> int:
         """Number of free blocks in the allocator."""
-        return self.allocator.num_free_blocks
+        return getattr(self.allocator, "num_free", 0)

@@ -21,9 +21,9 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from metal_marlin._compat import HAS_MLX, mx
+from metal_marlin._compat import HAS_TORCH, torch
 
-if HAS_MLX:
+if HAS_TORCH and torch is not None:
     from metal_marlin.architectures import (
         DifferentialAttention,
         DifferentialAttentionConfig,
@@ -32,7 +32,7 @@ if HAS_MLX:
         parse_diff_transformer_config,
     )
 else:
-    pytest.skip("MLX required for differential attention tests", allow_module_level=True)
+    pytest.skip("PyTorch required for differential attention tests", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +156,8 @@ class TestDifferentialAttentionCore:
     ) -> np.ndarray:
         """Reference NumPy implementation of differential attention."""
         batch, num_heads, seq_q, head_dim = q1.shape
-        seq_k = k1.shape[2]
-        scale = head_dim ** -0.5
+        _seq_k = k1.shape[2]  # Unused but documents expected shape
+        scale = head_dim**-0.5
 
         # Compute attention scores for both paths
         scores1 = (q1 @ k1.transpose(0, 1, 3, 2)) * scale
@@ -202,23 +202,27 @@ class TestDifferentialAttentionCore:
         # Reference computation
         ref_output = self.reference_diff_attention(q1, k1, v, q2, k2, lambda_val)
 
-        # Metal Marlin computation
+        # Metal Marlin computation (disable fused kernel for testing without Metal shader)
         attn = DifferentialAttention(
             num_heads=heads,
             head_dim=dim,
             lambda_init=lambda_val,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1),
-            mx.array(k1),
-            mx.array(v),
-            mx.array(q2),
-            mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
-        output_np = np.array(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
         # Verify shape
         assert output_np.shape == (batch, heads, seq, dim)
@@ -241,7 +245,7 @@ class TestDifferentialAttentionCore:
         k2 = np.random.randn(batch, heads, seq, dim).astype(np.float32)
 
         # Reference: standard attention (lambda=0 means path 2 is ignored)
-        scale = dim ** -0.5
+        scale = dim**-0.5
         scores = (q1 @ k1.transpose(0, 1, 3, 2)) * scale
 
         def softmax(x, axis=-1):
@@ -252,21 +256,29 @@ class TestDifferentialAttentionCore:
         weights = softmax(scores)
         ref_output = weights @ v
 
-        # Differential attention with lambda=0
+        # Differential attention with lambda=0 (disable fused kernel for testing)
         attn = DifferentialAttention(
             num_heads=heads,
             head_dim=dim,
             lambda_init=0.0,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1), mx.array(k1), mx.array(v),
-            mx.array(q2), mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        np.testing.assert_allclose(np.array(output), ref_output, rtol=1e-3, atol=1e-4)
+        np.testing.assert_allclose(output_np, ref_output, rtol=1e-3, atol=1e-4)
 
     def test_lambda_one_identical_paths(self, basic_config):
         """Lambda=1 with identical Q1/K1 and Q2/K2 should give near-zero output."""
@@ -287,16 +299,24 @@ class TestDifferentialAttentionCore:
             head_dim=dim,
             lambda_init=1.0,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q), mx.array(k), mx.array(v),
-            mx.array(q), mx.array(k),  # Same Q and K
+            torch.tensor(q),
+            torch.tensor(k),
+            torch.tensor(v),
+            torch.tensor(q),
+            torch.tensor(k),  # Same Q and K
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
         # Output should be near zero
-        assert np.abs(np.array(output)).max() < 1e-5
+        assert np.abs(output_np).max() < 1e-5
 
     def test_per_head_lambda(self, basic_config):
         """Test per-head lambda values."""
@@ -319,16 +339,24 @@ class TestDifferentialAttentionCore:
             lambda_init=0.5,
             lambda_learnable=False,
             lambda_per_head=True,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1), mx.array(k1), mx.array(v),
-            mx.array(q2), mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
         # Just verify it runs without error
-        assert output.shape == (batch, heads, seq, dim)
+        assert output_np.shape == (batch, heads, seq, dim)
 
     def test_gqa_differential_attention(self):
         """Test differential attention with GQA (fewer KV heads)."""
@@ -361,15 +389,23 @@ class TestDifferentialAttentionCore:
             head_dim=dim,
             lambda_init=0.8,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1), mx.array(k1), mx.array(v),
-            mx.array(q2), mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        np.testing.assert_allclose(np.array(output), ref_output, rtol=1e-3, atol=1e-4)
+        np.testing.assert_allclose(output_np, ref_output, rtol=1e-3, atol=1e-4)
 
 
 # ---------------------------------------------------------------------------
@@ -410,13 +446,18 @@ class TestDifferentialMarlinAttention:
             num_kv_heads=num_heads,
             quant_type="fp4",
             group_size=32,
+            use_fused_kernel=False,
         )
 
-        x = mx.random.normal((batch, seq_len, hidden_size))
+        x = torch.randn(batch, seq_len, hidden_size)
         output = attn(x)
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        assert output.shape == (batch, seq_len, hidden_size)
+        assert output_np.shape == (batch, seq_len, hidden_size)
 
     def test_with_causal_mask(self):
         """Test with causal attention mask."""
@@ -431,15 +472,20 @@ class TestDifferentialMarlinAttention:
             lambda_init=0.8,
             quant_type="fp4",
             group_size=32,
+            use_fused_kernel=False,
         )
 
-        x = mx.random.normal((batch, seq_len, hidden_size))
-        mask = create_causal_mask(seq_len)
+        x = torch.randn(batch, seq_len, hidden_size)
+        mask = create_causal_mask(seq_len, device=x.device)
 
         output = attn(x, attention_mask=mask)
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        assert output.shape == (batch, seq_len, hidden_size)
+        assert output_np.shape == (batch, seq_len, hidden_size)
 
     def test_gqa_layer(self):
         """Test full layer with GQA."""
@@ -455,13 +501,18 @@ class TestDifferentialMarlinAttention:
             num_kv_heads=num_kv_heads,
             quant_type="fp4",
             group_size=32,
+            use_fused_kernel=False,
         )
 
-        x = mx.random.normal((batch, seq_len, hidden_size))
+        x = torch.randn(batch, seq_len, hidden_size)
         output = attn(x)
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        assert output.shape == (batch, seq_len, hidden_size)
+        assert output_np.shape == (batch, seq_len, hidden_size)
 
 
 # ---------------------------------------------------------------------------
@@ -475,17 +526,24 @@ class TestCausalMask:
     def test_causal_mask_shape(self):
         """Test causal mask has correct shape."""
         seq_len = 8
-        mask = create_causal_mask(seq_len)
-        mx.eval(mask)
+        mask = create_causal_mask(seq_len, device=torch.device("cpu"))
 
-        assert mask.shape == (1, 1, seq_len, seq_len)
+        if isinstance(mask, torch.Tensor):
+            mask_np = mask.cpu().numpy()
+        else:
+            mask_np = np.asarray(mask)
+
+        assert mask_np.shape == (1, 1, seq_len, seq_len)
 
     def test_causal_mask_values(self):
         """Test causal mask has correct values (upper triangle is -inf)."""
         seq_len = 4
-        mask = create_causal_mask(seq_len)
-        mx.eval(mask)
-        mask_np = np.array(mask).squeeze()
+        mask = create_causal_mask(seq_len, device=torch.device("cpu"))
+
+        if isinstance(mask, torch.Tensor):
+            mask_np = mask.cpu().numpy().squeeze()
+        else:
+            mask_np = np.asarray(mask).squeeze()
 
         # Lower triangle and diagonal should be 0
         for i in range(seq_len):
@@ -518,13 +576,17 @@ class TestLambdaParameter:
             head_dim=64,
             lambda_init=0.8,
             lambda_learnable=True,
+            use_fused_kernel=False,
         )
 
         lambda_val = attn.get_lambda()
-        mx.eval(lambda_val)
+        if isinstance(lambda_val, torch.Tensor):
+            lambda_np = lambda_val.detach().cpu().numpy()
+        else:
+            lambda_np = np.asarray(lambda_val)
 
         # Should be close to 0.8
-        np.testing.assert_allclose(np.array(lambda_val), 0.8, rtol=1e-5)
+        np.testing.assert_allclose(lambda_np, 0.8, rtol=1e-5)
 
     def test_fixed_lambda(self):
         """Test fixed lambda is stored directly."""
@@ -533,12 +595,16 @@ class TestLambdaParameter:
             head_dim=64,
             lambda_init=0.5,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         lambda_val = attn.get_lambda()
-        mx.eval(lambda_val)
+        if isinstance(lambda_val, torch.Tensor):
+            lambda_np = lambda_val.detach().cpu().numpy()
+        else:
+            lambda_np = np.asarray(lambda_val)
 
-        np.testing.assert_allclose(np.array(lambda_val), 0.5, rtol=1e-5)
+        np.testing.assert_allclose(lambda_np, 0.5, rtol=1e-5)
 
     def test_per_head_lambda_shape(self):
         """Test per-head lambda has correct shape."""
@@ -549,12 +615,16 @@ class TestLambdaParameter:
             lambda_init=0.8,
             lambda_learnable=True,
             lambda_per_head=True,
+            use_fused_kernel=False,
         )
 
         lambda_val = attn.get_lambda()
-        mx.eval(lambda_val)
+        if isinstance(lambda_val, torch.Tensor):
+            shape = tuple(lambda_val.shape)
+        else:
+            shape = np.asarray(lambda_val).shape
 
-        assert lambda_val.shape == (num_heads,)
+        assert shape == (num_heads,)
 
     def test_shared_lambda_shape(self):
         """Test shared lambda has correct shape."""
@@ -564,12 +634,16 @@ class TestLambdaParameter:
             lambda_init=0.8,
             lambda_learnable=True,
             lambda_per_head=False,
+            use_fused_kernel=False,
         )
 
         lambda_val = attn.get_lambda()
-        mx.eval(lambda_val)
+        if isinstance(lambda_val, torch.Tensor):
+            shape = tuple(lambda_val.shape)
+        else:
+            shape = np.asarray(lambda_val).shape
 
-        assert lambda_val.shape == (1,)
+        assert shape == (1,)
 
 
 # ---------------------------------------------------------------------------
@@ -600,16 +674,23 @@ class TestNumericalStability:
             head_dim=dim,
             lambda_init=0.8,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1), mx.array(k1), mx.array(v),
-            mx.array(q2), mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
         # Output should not contain NaN or Inf
-        output_np = np.array(output)
         assert not np.any(np.isnan(output_np))
         assert not np.any(np.isinf(output_np))
 
@@ -632,15 +713,22 @@ class TestNumericalStability:
             head_dim=dim,
             lambda_init=0.8,
             lambda_learnable=False,
+            use_fused_kernel=False,
         )
 
         output = attn(
-            mx.array(q1), mx.array(k1), mx.array(v),
-            mx.array(q2), mx.array(k2),
+            torch.tensor(q1),
+            torch.tensor(k1),
+            torch.tensor(v),
+            torch.tensor(q2),
+            torch.tensor(k2),
         )
-        mx.eval(output)
+        output_np = (
+            output.detach().cpu().numpy()
+            if isinstance(output, torch.Tensor)
+            else np.asarray(output)
+        )
 
-        output_np = np.array(output)
         assert not np.any(np.isnan(output_np))
         assert not np.any(np.isinf(output_np))
 

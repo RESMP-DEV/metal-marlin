@@ -13,11 +13,6 @@ Quantized KV Cache:
 - ScalingStrategy: Per-head, per-token, or asymmetric scaling
 - CacheStats: Statistics about cache memory usage
 
-When MLX is available:
-- QuantizedKVCacheMLX: MLX-accelerated quantized KV cache
-- compress_kv_mlx: MLX KV compression
-- decompress_kv_mlx: MLX KV decompression
-
 Prefix Caching:
 - PrefixCache: Hierarchical prefix cache with GPU/RAM/disk tiers
 - RadixPrefixCache: O(log n) prefix matching with radix tree
@@ -85,22 +80,3 @@ __all__ = [
     "hash_prefix",
     "hash_tokens",
 ]
-
-# MLX exports when available
-try:
-    from .quantized_kv import (  # noqa: F401 (re-exported to __all__)
-        QuantizedKVCacheMLX,
-        compress_kv_mlx,
-        decompress_kv_mlx,
-    )
-
-    __all__.extend(
-        [
-            "QuantizedKVCacheMLX",
-            "compress_kv_mlx",
-            "decompress_kv_mlx",
-        ]
-    )
-except ImportError:
-    # MLX not available
-    pass

@@ -1,6 +1,6 @@
-# Why Metal Marlin Instead of MLX?
+# Why Not MLX?
 
-MLX is Apple's official ML framework for Apple Silicon. So why build something else?
+MLX is Apple's official ML framework for Apple Silicon. Metal Marlin uses PyTorch MPS for tensor operations and native Metal shaders (via PyObjC) for quantized kernels. This document explains why we don't use MLX.
 
 ## The Case for 4-bit
 
@@ -15,7 +15,7 @@ Running BF16 when 4-bit is available means using 4× the memory for <4% quality 
 
 ## Direct Metal Control
 
-Metal Marlin is a production inference engine that writes Metal shaders directly rather than going through a framework abstraction. This provides:
+Metal Marlin writes Metal shaders directly rather than relying on framework-provided quantization. This provides:
 
 **Model-specific optimization:** Kernels tuned for specific architectures (MoE expert dispatch, MLA attention, grouped-query attention) ship when the model ships, not when a framework adds support. New model architectures get optimized kernels within days.
 
@@ -23,9 +23,9 @@ Metal Marlin is a production inference engine that writes Metal shaders directly
 
 **Format flexibility:** Supporting a new quantization format requires only shader changes. No framework approval process, no API design committee, no backwards compatibility constraints.
 
-MLX necessarily serves a broad audience and must maintain API stability. Metal Marlin serves one purpose: fastest possible inference on Apple Silicon with the best available quantization methods.
+MLX necessarily serves a broad audience and must maintain API stability. Metal Marlin's quantization pipeline serves one purpose: highest quality 4-bit weights using state-of-the-art methods.
 
-## Features MLX Doesn't Have
+## Features Beyond MLX's Quantization
 
 **Quantized KV Cache:** For long-context inference (4K+ tokens), the KV cache dominates memory. Metal Marlin supports FP4 and INT4 KV cache with per-row scales, reducing cache memory by 3.8× (4GB → 1GB at 4K context, 32 layers). Dequantization is fused into flash attention kernels with no intermediate materialization.
 
@@ -33,9 +33,9 @@ MLX necessarily serves a broad audience and must maintain API stability. Metal M
 
 **Architecture-Specific Attention:** Separate implementations for standard multi-head attention, grouped-query attention (GQA), multi-latent attention (MLA), and differential attention. Each kernel is tuned for the specific access pattern, not a generic fallback.
 
-## The Measured Quality Gap
+## The Measured Quantization Quality Gap
 
-We benchmarked MLX's native quantization against GGUF methods on Qwen3-30B-A3B (a 30B-parameter MoE model):
+We benchmarked MLX's built-in quantization against GGUF methods on Qwen3-30B-A3B (a 30B-parameter MoE model):
 
 | Method | Bits | File Size | Perplexity | vs Baseline |
 |--------|------|-----------|------------|-------------|
@@ -47,9 +47,9 @@ We benchmarked MLX's native quantization against GGUF methods on Qwen3-30B-A3B (
 
 The 0.09 bpw difference (3.51 vs 3.60) cannot explain a 38% quality gap. The difference is in the quantization algorithm.
 
-## Technical Differences in Quantization Methods
+## Technical Differences in Quantization Algorithms
 
-MLX uses **round-to-nearest (RTN) with uniform affine levels**:
+MLX's built-in quantization uses **round-to-nearest (RTN) with uniform affine levels**:
 - Every weight matrix gets the same bit allocation
 - Quantization levels are uniformly spaced
 - No calibration data informs the quantization
@@ -68,7 +68,7 @@ The difference is especially pronounced at low bit-widths (2-4 bit) where naive 
 
 ## NVFP4 Format Specification Difference
 
-MLX labels its 4-bit format as "nvfp4" (NVIDIA FP4). The implementation differs from NVIDIA's specification, documented in [ml-explore/mlx#2962](https://github.com/ml-explore/mlx/issues/2962):
+MLX's built-in quantization labels its 4-bit format as "nvfp4" (NVIDIA FP4). The implementation differs from NVIDIA's specification, documented in [ml-explore/mlx#2962](https://github.com/ml-explore/mlx/issues/2962):
 
 **NVIDIA's NVFP4 specification:**
 - Two-level scaling: per-block E4M3 scale + per-tensor FP32 scale

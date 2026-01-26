@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import mlx.core as mx
+import torch
+from torch import Tensor
 
 
 @dataclass
@@ -36,15 +37,15 @@ class VerifyResult:
             if all accepted).
     """
 
-    accepted_tokens: mx.array
-    num_accepted: mx.array
-    next_token: mx.array
+    accepted_tokens: Tensor
+    num_accepted: Tensor
+    next_token: Tensor
 
 
 def verify_speculative(
-    draft_tokens: mx.array,
-    draft_probs: mx.array,
-    target_logits: mx.array,
+    draft_tokens: Tensor,
+    draft_probs: Tensor,
+    target_logits: Tensor,
     temperature: float = 1.0,
     top_p: float = 1.0,
 ) -> VerifyResult:
@@ -66,53 +67,61 @@ def verify_speculative(
         VerifyResult with accepted tokens, acceptance counts, and next token.
     """
     batch_size, num_spec = draft_tokens.shape
+    device = draft_tokens.device
 
     # Convert target logits to probabilities
     if temperature <= 0:
         # Greedy: one-hot on argmax
         target_probs = _greedy_probs(target_logits)
     else:
-        target_probs = mx.softmax(target_logits / temperature, axis=-1)
+        target_probs = torch.softmax(target_logits / temperature, dim=-1)
 
     # Per-position acceptance loop (K is small, typically 4-8)
-    accepted_list: list[mx.array] = []
-    num_accepted = mx.zeros(batch_size, dtype=mx.int32)
-    still_accepting = mx.ones(batch_size, dtype=mx.bool_)
-    rejection_pos = mx.full((batch_size,), num_spec, dtype=mx.int32)
+    accepted_list: list[Tensor] = []
+    num_accepted = torch.zeros(batch_size, dtype=torch.int32, device=device)
+    still_accepting = torch.ones(batch_size, dtype=torch.bool, device=device)
+    rejection_pos = torch.full((batch_size,), num_spec, dtype=torch.int32, device=device)
 
     for i in range(num_spec):
         draft_token = draft_tokens[:, i]  # [batch]
         token_idx = draft_token.reshape(-1, 1)  # [batch, 1]
 
         # Gather q(x_i) and p(x_i)
-        p_draft = mx.take_along_axis(
-            draft_probs[:, i, :], token_idx, axis=1
-        ).squeeze(-1)
-        p_target = mx.take_along_axis(
-            target_probs[:, i, :], token_idx, axis=1
-        ).squeeze(-1)
+        p_draft = torch.gather(draft_probs[:, i, :], dim=1, index=token_idx).squeeze(-1)
+        p_target = torch.gather(target_probs[:, i, :], dim=1, index=token_idx).squeeze(-1)
 
         # Accept if r < min(1, p/q)
-        r = mx.random.uniform(shape=(batch_size,))
-        ratio = p_target / mx.maximum(p_draft, mx.array(1e-10))
+        r = torch.rand(batch_size, device=device)
+        ratio = p_target / torch.clamp(p_draft, min=1e-10)
         accept = (r < ratio) & still_accepting
 
         # Record this position's accepted token (0 for rejected)
-        accepted_list.append(mx.where(accept, draft_token, mx.zeros_like(draft_token)))
-        num_accepted = mx.where(accept, num_accepted + 1, num_accepted)
+        accepted_list.append(torch.where(accept, draft_token, torch.zeros_like(draft_token)))
+        num_accepted = torch.where(accept, num_accepted + 1, num_accepted)
 
         # Track first rejection position
         newly_rejected = still_accepting & ~accept
-        rejection_pos = mx.where(newly_rejected, mx.array(i, dtype=mx.int32), rejection_pos)
+        rejection_pos = torch.where(
+            newly_rejected,
+            torch.tensor(i, dtype=torch.int32, device=device),
+            rejection_pos,
+        )
         still_accepting = still_accepting & accept
 
-    accepted_tokens = mx.stack(accepted_list, axis=1)  # [batch, num_spec]
+    accepted_tokens = torch.stack(accepted_list, dim=1)  # [batch, num_spec]
 
     # Sample next token based on whether all were accepted or not
     next_token = _sample_next_token(
-        still_accepting, rejection_pos, num_spec,
-        target_logits, target_probs, draft_probs,
-        temperature, top_p, batch_size,
+        still_accepting,
+        rejection_pos,
+        num_spec,
+        target_logits,
+        target_probs,
+        draft_probs,
+        temperature,
+        top_p,
+        batch_size,
+        device,
     )
 
     return VerifyResult(
@@ -122,7 +131,7 @@ def verify_speculative(
     )
 
 
-def _greedy_probs(logits: mx.array) -> mx.array:
+def _greedy_probs(logits: Tensor) -> Tensor:
     """Convert logits to one-hot probability distributions (greedy).
 
     Args:
@@ -132,65 +141,71 @@ def _greedy_probs(logits: mx.array) -> mx.array:
         [batch, seq, vocab] with 1.0 at argmax positions, 0 elsewhere.
     """
     batch, seq, vocab = logits.shape
-    argmax_ids = mx.argmax(logits, axis=-1)  # [batch, seq]
+    argmax_ids = logits.argmax(dim=-1)  # [batch, seq]
 
-    # Build one-hot via comparison with vocab range
-    vocab_range = mx.arange(vocab).reshape(1, 1, vocab)  # [1, 1, vocab]
-    one_hot = (argmax_ids.reshape(batch, seq, 1) == vocab_range).astype(mx.float32)
+    # Build one-hot via scatter
+    one_hot = torch.zeros_like(logits)
+    one_hot.scatter_(2, argmax_ids.unsqueeze(-1), 1.0)
     return one_hot
 
 
 def _sample_next_token(
-    all_accepted: mx.array,
-    rejection_pos: mx.array,
+    all_accepted: Tensor,
+    rejection_pos: Tensor,
     num_spec: int,
-    target_logits: mx.array,
-    target_probs: mx.array,
-    draft_probs: mx.array,
+    target_logits: Tensor,
+    target_probs: Tensor,
+    draft_probs: Tensor,
     temperature: float,
     top_p: float,
     batch_size: int,
-) -> mx.array:
+    device: torch.device,
+) -> Tensor:
     """Sample the next token after verification.
 
     For fully-accepted sequences: sample from target at the bonus position.
     For rejected sequences: sample from the residual distribution
     norm(max(0, p_target - p_draft)) at the rejection position.
     """
-    next_token = mx.zeros(batch_size, dtype=mx.int32)
+    next_token = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     # Bonus token for fully-accepted sequences
-    any_all_accepted = mx.any(all_accepted)
-    mx.eval(any_all_accepted)
-    if any_all_accepted.item():
+    if all_accepted.any():
         bonus_logits = target_logits[:, num_spec, :]
-        bonus_token = _sample(bonus_logits, temperature, top_p)
-        next_token = mx.where(all_accepted, bonus_token, next_token)
+        bonus_token = _sample(bonus_logits, temperature, top_p, device)
+        next_token = torch.where(all_accepted, bonus_token, next_token)
 
     # Residual sampling for rejected sequences
     rejected_mask = ~all_accepted
-    any_rejected = mx.any(rejected_mask)
-    mx.eval(any_rejected)
-    if any_rejected.item():
+    if rejected_mask.any():
         next_token = _sample_residual_batched(
-            rejected_mask, rejection_pos, target_probs, draft_probs,
-            target_logits, temperature, top_p, batch_size, next_token,
+            rejected_mask,
+            rejection_pos,
+            target_probs,
+            draft_probs,
+            target_logits,
+            temperature,
+            top_p,
+            batch_size,
+            next_token,
+            device,
         )
 
     return next_token
 
 
 def _sample_residual_batched(
-    rejected_mask: mx.array,
-    rejection_pos: mx.array,
-    target_probs: mx.array,
-    draft_probs: mx.array,
-    target_logits: mx.array,
+    rejected_mask: Tensor,
+    rejection_pos: Tensor,
+    target_probs: Tensor,
+    draft_probs: Tensor,
+    target_logits: Tensor,
     temperature: float,
     top_p: float,
     batch_size: int,
-    next_token: mx.array,
-) -> mx.array:
+    next_token: Tensor,
+    device: torch.device,
+) -> Tensor:
     """Sample from residual distribution for rejected batch elements.
 
     The residual distribution is norm(max(0, p_target - p_draft)), which
@@ -205,62 +220,57 @@ def _sample_residual_batched(
             continue
         pos = int(rejection_pos[b].item())
         p_t = target_probs[b, pos, :]  # [vocab]
-        p_d = draft_probs[b, pos, :]   # [vocab]
+        p_d = draft_probs[b, pos, :]  # [vocab]
 
         # Residual distribution: max(0, p_target - p_draft)
-        residual = mx.maximum(p_t - p_d, mx.array(0.0))
-        residual_sum = mx.sum(residual)
-        mx.eval(residual_sum)
+        residual = torch.clamp(p_t - p_d, min=0.0)
+        residual_sum = residual.sum()
 
         if residual_sum.item() < 1e-10:
             # Degenerate case: target and draft agree perfectly.
             # Fall back to sampling from target directly.
-            token = _sample(target_logits[b:b+1, pos, :], temperature, top_p)
+            token = _sample(target_logits[b : b + 1, pos, :], temperature, top_p, device)
         else:
             # Sample from normalized residual
-            log_residual = mx.log(residual / residual_sum + 1e-10)
-            token = mx.random.categorical(log_residual[None, :])
+            log_residual = torch.log(residual / residual_sum + 1e-10)
+            token = torch.multinomial(
+                torch.softmax(log_residual, dim=-1).unsqueeze(0), num_samples=1
+            )
 
-        mx.eval(token)
         token_val = int(token.reshape(()).item())
-        # Update this batch element
-        batch_mask = mx.arange(batch_size) == b
-        next_token = mx.where(
-            batch_mask,
-            mx.full((batch_size,), token_val, dtype=next_token.dtype),
-            next_token,
-        )
+        next_token[b] = token_val
 
     return next_token
 
 
-def _sample(logits: mx.array, temperature: float, top_p: float) -> mx.array:
+def _sample(logits: Tensor, temperature: float, top_p: float, device: torch.device) -> Tensor:
     """Sample from logits with temperature and nucleus (top-p) sampling.
 
     Args:
         logits: [batch, vocab] or [vocab] raw logits.
         temperature: Temperature for softmax. <= 0 means greedy.
         top_p: Nucleus sampling threshold. 1.0 means no filtering.
+        device: Device for output tensor.
 
     Returns:
         [batch] sampled token indices.
     """
     if logits.ndim == 1:
-        logits = logits[None, :]
+        logits = logits.unsqueeze(0)
 
     if temperature <= 0:
-        return mx.argmax(logits, axis=-1)
+        return logits.argmax(dim=-1)
 
     scaled_logits = logits / temperature
-    probs = mx.softmax(scaled_logits, axis=-1)
+    probs = torch.softmax(scaled_logits, dim=-1)
 
     if top_p < 1.0:
         probs = _apply_top_p(probs, top_p)
 
-    return mx.random.categorical(mx.log(probs + 1e-10))
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
 
-def _apply_top_p(probs: mx.array, p: float) -> mx.array:
+def _apply_top_p(probs: Tensor, p: float) -> Tensor:
     """Apply nucleus (top-p) filtering to a probability distribution.
 
     Zeros out tokens outside the smallest set whose cumulative probability
@@ -274,27 +284,28 @@ def _apply_top_p(probs: mx.array, p: float) -> mx.array:
         [batch, vocab] filtered and renormalized probabilities.
     """
     # Sort descending by probability
-    sorted_indices = mx.argsort(-probs, axis=-1)
-    sorted_probs = mx.take_along_axis(probs, sorted_indices, axis=-1)
+    sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
 
     # Cumulative sum in sorted order
-    cumsum = mx.cumsum(sorted_probs, axis=-1)
+    cumsum = sorted_probs.cumsum(dim=-1)
 
     # Keep tokens where cumulative probability hasn't exceeded p yet.
     # Always keep at least the top-1 token.
-    mask = mx.concatenate(
-        [mx.ones((*probs.shape[:-1], 1), dtype=mx.bool_),
-         cumsum[..., :-1] < p],
-        axis=-1,
+    mask = torch.cat(
+        [
+            torch.ones(*probs.shape[:-1], 1, dtype=torch.bool, device=probs.device),
+            cumsum[..., :-1] < p,
+        ],
+        dim=-1,
     )
 
     # Zero out tokens outside nucleus in sorted space
-    filtered_sorted = mx.where(mask, sorted_probs, mx.zeros_like(sorted_probs))
+    filtered_sorted = torch.where(mask, sorted_probs, torch.zeros_like(sorted_probs))
 
-    # Unsort: argsort of the sort indices gives the inverse permutation
-    inv_indices = mx.argsort(sorted_indices, axis=-1)
-    filtered = mx.take_along_axis(filtered_sorted, inv_indices, axis=-1)
+    # Unsort: scatter back to original positions
+    filtered = torch.zeros_like(probs)
+    filtered.scatter_(dim=-1, index=sorted_indices, src=filtered_sorted)
 
     # Renormalize
-    total = mx.sum(filtered, axis=-1, keepdims=True)
-    return filtered / mx.maximum(total, mx.array(1e-10))
+    total = filtered.sum(dim=-1, keepdim=True)
+    return filtered / torch.clamp(total, min=1e-10)

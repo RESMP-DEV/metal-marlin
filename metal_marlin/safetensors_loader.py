@@ -5,13 +5,13 @@ Streams weights from .safetensors files, quantizes 2D weight matrices on-the-fly
 to FP4 (E2M1) or INT4 format with per-group scales, and can serialize the result
 as a .marlin.safetensors file ready for inference.
 
-This module uses numpy by default for weight loading and processing, with optional
-conversion to MLX arrays when MLX is available and requested.
+This module uses numpy by default for weight loading and processing. Optional
+conversion to PyTorch tensors is available via the output_backend parameter.
 
 Usage:
     from safetensors_loader import convert_model_to_marlin
 
-    # Numpy output (default, no MLX required)
+    # Numpy output (default)
     convert_model_to_marlin(
         "model.safetensors",
         "model.marlin.safetensors",
@@ -19,75 +19,42 @@ Usage:
         group_size=128,
     )
 
-    # MLX output (requires MLX)
+    # PyTorch output (requires torch)
     for name, packed, scales in load_and_quantize_safetensors(
         "model.safetensors",
-        output_backend="mlx",
+        output_backend="torch",
     ):
-        ...  # packed and scales are mx.array
+        ...  # packed and scales are torch.Tensor
 """
 
 from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
+from ._compat import HAS_TORCH, from_numpy, to_numpy
+
 if TYPE_CHECKING:
-    import mlx.core as mx
-
-# Lazy MLX import for optional conversion
-_mlx_core: mx | None = None
-
-
-def _get_mlx() -> mx:
-    """Lazily import and cache MLX core module."""
-    global _mlx_core
-    if _mlx_core is None:
-        try:
-            import mlx.core as mx
-
-            _mlx_core = mx
-        except ImportError as e:
-            raise ImportError(
-                "MLX is required for output_backend='mlx'. "
-                "Install with: pip install mlx"
-            ) from e
-    return _mlx_core
-
-
-def _has_mlx() -> bool:
-    """Check if MLX is available without importing it."""
-    try:
-        import mlx.core  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
+    pass
 
 # Type alias for output backend selection
-OutputBackend = Literal["numpy", "mlx"]
+OutputBackend = Literal["numpy", "torch"]
 
 
-def _to_output_backend(
-    arr: np.ndarray, backend: OutputBackend
-) -> np.ndarray | mx.array:
+def _to_output_backend(arr: np.ndarray, backend: OutputBackend) -> Any:
     """Convert numpy array to requested backend format.
 
     Args:
         arr: Numpy array to convert
-        backend: Target backend ("numpy" or "mlx")
+        backend: Target backend ("numpy" or "torch")
 
     Returns:
         Array in requested format
     """
-    if backend == "numpy":
-        return arr
-    mx = _get_mlx()
-    return mx.array(arr)
+    return from_numpy(arr, backend=backend)
 
 
 def _quantize_tensor_fp4_numpy(
@@ -96,8 +63,7 @@ def _quantize_tensor_fp4_numpy(
     """
     Quantize a 2D weight tensor to FP4 (E2M1) with per-group scales.
 
-    Uses the same algorithm as metal_marlin.pack_fp4_weights but operates
-    on numpy arrays directly.
+    Uses pure numpy operations via the quantize module.
 
     Args:
         weight: float16/float32 tensor [K, N]
@@ -106,20 +72,12 @@ def _quantize_tensor_fp4_numpy(
     Returns:
         (packed_weights [K, N//8] as uint32, scales [K//group_size, N] as float16)
     """
-    # Import pack_fp4_weights lazily - it may use MLX internally
-    # but we convert back to numpy at the end
-    from metal_marlin import pack_fp4_weights
+    from .quantize import pack_fp4_weights
 
-    # Convert to MLX for the packing operation (pack_fp4_weights requires it)
-    mx = _get_mlx()
-    weight_mx = mx.array(weight)
+    # pack_fp4_weights handles numpy input directly
+    packed, scales, _meta = pack_fp4_weights(weight, group_size=group_size, output_backend="numpy")
 
-    # pack_fp4_weights expects [out_features, in_features] (row-major, PyTorch convention)
-    # and transposes internally. Since we already have [K, N], pass transposed.
-    packed, scales = pack_fp4_weights(weight_mx.T, group_size=group_size)
-
-    # Convert back to numpy
-    return np.array(packed), np.array(scales)
+    return packed, scales
 
 
 def _quantize_tensor_int4_numpy(
@@ -131,7 +89,7 @@ def _quantize_tensor_int4_numpy(
     Each group of `group_size` elements along K shares one scale and zero_point.
     Values are quantized to [0, 15] and packed 8 per uint32.
 
-    This implementation is pure numpy - no MLX dependency.
+    This implementation is pure numpy.
 
     Args:
         weight: float16/float32 tensor [K, N]
@@ -166,9 +124,7 @@ def _quantize_tensor_int4_numpy(
     scales_expanded = np.repeat(scales_np, group_size, axis=0)  # [K, N]
     zeros_expanded = np.repeat(zeros_np, group_size, axis=0)  # [K, N]
 
-    w_quant = np.clip(
-        np.round((w - zeros_expanded) / scales_expanded), 0, 15
-    ).astype(np.uint8)
+    w_quant = np.clip(np.round((w - zeros_expanded) / scales_expanded), 0, 15).astype(np.uint8)
 
     # Pack 8 values along N into uint32
     packed_np = np.zeros((K, N // 8), dtype=np.uint32)
@@ -183,7 +139,7 @@ def load_and_quantize_safetensors(
     quant_type: str = "fp4",
     group_size: int = 128,
     output_backend: OutputBackend = "numpy",
-) -> Generator[tuple[str, np.ndarray | mx.array, np.ndarray | mx.array | None], None, None]:
+) -> Generator[tuple[str, Any, Any | None], None, None]:
     """
     Stream weights from a safetensors file, quantizing 2D weight matrices on-the-fly.
 
@@ -193,8 +149,8 @@ def load_and_quantize_safetensors(
         path: Path to .safetensors file.
         quant_type: "fp4" for E2M1 FP4 or "int4" for asymmetric unsigned INT4.
         group_size: Number of elements per quantization group.
-        output_backend: "numpy" (default) or "mlx" for output array type.
-            MLX backend requires MLX to be installed.
+        output_backend: "numpy" (default) or "torch" for output array type.
+            PyTorch backend requires torch to be installed.
 
     Yields:
         (name, packed_weights_or_tensor, scales_or_None) tuples.
@@ -238,7 +194,7 @@ def convert_model_to_marlin(
     the result as a new safetensors file with `.packed` and `.scales` suffixes
     for quantized layers.
 
-    This function uses numpy throughout - no MLX dependency required.
+    This function uses numpy throughout.
 
     Args:
         input_path: Source .safetensors file.
@@ -264,51 +220,53 @@ def convert_model_to_marlin(
     print(f"Saved Marlin model to {output_path}")
 
 
-# Convenience function to check MLX availability
-def has_mlx_backend() -> bool:
-    """Check if MLX backend is available for loading.
+# Convenience function to check PyTorch availability
+def has_torch_backend() -> bool:
+    """Check if PyTorch backend is available for loading.
 
     Returns:
-        True if MLX can be imported, False otherwise
+        True if torch can be imported, False otherwise
     """
-    return _has_mlx()
+    return HAS_TORCH
 
 
-# Backward compatibility aliases for MLX-based quantization (used by converters/)
-def _quantize_tensor_fp4(
-    weight: mx.array, group_size: int = 128
-) -> tuple[mx.array, mx.array]:
+# Backward compatibility aliases for quantization (used by converters/)
+def _quantize_tensor_fp4(weight: Any, group_size: int = 128) -> tuple[Any, Any]:
     """
-    Quantize a 2D MLX weight tensor to FP4 (E2M1) with per-group scales.
+    Quantize a 2D weight tensor to FP4 (E2M1) with per-group scales.
 
-    This is a backward-compatible wrapper that accepts and returns MLX arrays.
+    This is a backward-compatible wrapper that accepts and returns arrays
+    in the same backend as the input.
     For new code, prefer using numpy-based functions with output_backend parameter.
 
     Args:
-        weight: MLX float16 tensor [K, N]
+        weight: float16 tensor [K, N] (numpy or torch)
         group_size: elements per quantization group
 
     Returns:
         (packed_weights [K, N//8] as uint32, scales [K//group_size, N] as float16)
     """
-    mx = _get_mlx()
-    # Convert MLX to numpy, quantize, convert back
-    weight_np = np.array(weight)
+    from ._compat import get_array_backend
+
+    # Detect input backend and convert to numpy
+    backend = get_array_backend(weight)
+    weight_np = to_numpy(weight)
     packed_np, scales_np = _quantize_tensor_fp4_numpy(weight_np, group_size)
-    return mx.array(packed_np), mx.array(scales_np)
+
+    # Convert back to original backend
+    return from_numpy(packed_np, backend=backend), from_numpy(scales_np, backend=backend)
 
 
-def _quantize_tensor_int4(
-    weight: mx.array, group_size: int = 128
-) -> tuple[mx.array, mx.array, mx.array]:
+def _quantize_tensor_int4(weight: Any, group_size: int = 128) -> tuple[Any, Any, Any]:
     """
-    Quantize a 2D MLX weight tensor to asymmetric INT4 with per-group scales and zeros.
+    Quantize a 2D weight tensor to asymmetric INT4 with per-group scales and zeros.
 
-    This is a backward-compatible wrapper that accepts and returns MLX arrays.
+    This is a backward-compatible wrapper that accepts and returns arrays
+    in the same backend as the input.
     For new code, prefer using numpy-based functions with output_backend parameter.
 
     Args:
-        weight: MLX float16 tensor [K, N]
+        weight: float16 tensor [K, N] (numpy or torch)
         group_size: elements per quantization group
 
     Returns:
@@ -316,8 +274,16 @@ def _quantize_tensor_int4(
          scales [K//group_size, N] as float16,
          zeros [K//group_size, N] as float16)
     """
-    mx = _get_mlx()
-    # Convert MLX to numpy, quantize, convert back
-    weight_np = np.array(weight)
+    from ._compat import get_array_backend
+
+    # Detect input backend and convert to numpy
+    backend = get_array_backend(weight)
+    weight_np = to_numpy(weight)
     packed_np, scales_np, zeros_np = _quantize_tensor_int4_numpy(weight_np, group_size)
-    return mx.array(packed_np), mx.array(scales_np), mx.array(zeros_np)
+
+    # Convert back to original backend
+    return (
+        from_numpy(packed_np, backend=backend),
+        from_numpy(scales_np, backend=backend),
+        from_numpy(zeros_np, backend=backend),
+    )

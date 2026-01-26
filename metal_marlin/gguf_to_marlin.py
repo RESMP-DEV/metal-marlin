@@ -46,8 +46,7 @@ from .gguf_loader import DEQUANT_SUPPORTED_TYPES, dequantize_tensor
 # Bits: [sign(1), exponent(2), mantissa(1)]
 # From ggml-common.h kvalues_mxfp4 (as floats, not doubled int8)
 KVALUES_MXFP4: np.ndarray = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=np.float32,
 )
 
@@ -74,7 +73,7 @@ def e8m0_to_fp32(e: np.ndarray) -> np.ndarray:
     """
     result = np.where(
         e == 0,
-        np.float32(2.0 ** -126),
+        np.float32(2.0**-126),
         np.power(np.float32(2.0), e.astype(np.float32) - 127.0),
     )
     return result.astype(np.float32)
@@ -298,7 +297,7 @@ def reorder_for_simdgroup(packed: np.ndarray, N: int) -> np.ndarray:
 
     # Handle remainder columns (no permutation needed)
     if remainder > 0:
-        result[:, n_tiles * MARLIN_TILE_N:] = packed[:, n_tiles * MARLIN_TILE_N:]
+        result[:, n_tiles * MARLIN_TILE_N :] = packed[:, n_tiles * MARLIN_TILE_N :]
 
     return result
 
@@ -327,9 +326,7 @@ def pack_weights_marlin(
     weights = weights_fp16.astype(np.float32)
     K, N = weights.shape
 
-    assert K % group_size == 0, (
-        f"K={K} must be divisible by group_size={group_size}"
-    )
+    assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
     assert K % 8 == 0, f"K={K} must be divisible by 8 for uint32 packing"
 
     # Step 1: Compute scales
@@ -401,7 +398,7 @@ def dequant_marlin(
         col_end = col_start + MARLIN_TILE_N
         unpermuted[:, col_start:col_end] = packed_bytes[:, col_start:col_end][:, inv_perm]
     if remainder > 0:
-        unpermuted[:, n_tiles * MARLIN_TILE_N:] = packed_bytes[:, n_tiles * MARLIN_TILE_N:]
+        unpermuted[:, n_tiles * MARLIN_TILE_N :] = packed_bytes[:, n_tiles * MARLIN_TILE_N :]
 
     # Unpack nibbles
     lo_indices = unpermuted & 0x0F
@@ -506,11 +503,11 @@ def extract_model_config(reader: Any) -> dict[str, Any]:
         "vocab_size",
     ]
 
-    for field in reader.fields.values() if hasattr(reader, 'fields') else []:
-        name = field.name if hasattr(field, 'name') else str(field)
+    for field in reader.fields.values() if hasattr(reader, "fields") else []:
+        name = field.name if hasattr(field, "name") else str(field)
         if name in key_map:
             # Extract scalar value
-            if hasattr(field, 'parts') and len(field.parts) > 0:
+            if hasattr(field, "parts") and len(field.parts) > 0:
                 val = field.parts[-1].tolist()
                 if isinstance(val, list) and len(val) == 1:
                     val = val[0]
@@ -523,7 +520,7 @@ def extract_model_config(reader: Any) -> dict[str, Any]:
             full_key = f"{arch}.{key}"
             try:
                 field = reader.get_field(full_key)
-                if field is not None and hasattr(field, 'parts') and len(field.parts) > 0:
+                if field is not None and hasattr(field, "parts") and len(field.parts) > 0:
                     val = field.parts[-1].tolist()
                     if isinstance(val, list) and len(val) == 1:
                         val = val[0]
@@ -562,16 +559,12 @@ def convert_gguf_to_marlin(
     try:
         from gguf import GGUFReader
     except ImportError as e:
-        raise ImportError(
-            "gguf package required. Install with: uv add gguf"
-        ) from e
+        raise ImportError("gguf package required. Install with: uv add gguf") from e
 
     try:
         from safetensors.numpy import save_file
     except ImportError as e:
-        raise ImportError(
-            "safetensors package required. Install with: uv add safetensors"
-        ) from e
+        raise ImportError("safetensors package required. Install with: uv add safetensors") from e
 
     reader = GGUFReader(gguf_path)
 
@@ -603,31 +596,23 @@ def convert_gguf_to_marlin(
         stats["total_params"] += n_elements
 
         # tensor_type is an enum or int; compare against the known value
-        type_val = tensor_type.value if hasattr(tensor_type, 'value') else int(tensor_type)
+        type_val = tensor_type.value if hasattr(tensor_type, "value") else int(tensor_type)
 
         # Preserve importance matrices as-is (if present)
         if is_importance_matrix_tensor(name):
             stats["preserved_tensors"] += 1
             type_to_dtype = {
-                0: np.float32,   # F32
-                1: np.float16,   # F16
+                0: np.float32,  # F32
+                1: np.float16,  # F16
                 30: np.float16,  # BF16 -> store as FP16
             }
             dtype = type_to_dtype.get(type_val, None)
             if dtype is not None:
-                marlin_weights[name] = np.frombuffer(
-                    tensor.data, dtype=dtype
-                ).reshape(shape).copy()
+                marlin_weights[name] = np.frombuffer(tensor.data, dtype=dtype).reshape(shape).copy()
             else:
-                marlin_weights[name] = np.frombuffer(
-                    tensor.data, dtype=np.uint8
-                ).copy()
-                marlin_weights[name + ".ggml_type"] = np.array(
-                    [type_val], dtype=np.int32
-                )
-                marlin_weights[name + ".shape"] = np.array(
-                    list(shape), dtype=np.int32
-                )
+                marlin_weights[name] = np.frombuffer(tensor.data, dtype=np.uint8).copy()
+                marlin_weights[name + ".ggml_type"] = np.array([type_val], dtype=np.int32)
+                marlin_weights[name + ".shape"] = np.array(list(shape), dtype=np.int32)
             print(f"  Preserved importance tensor {name}: {shape} (type={type_val})")
             continue
 
@@ -666,7 +651,7 @@ def convert_gguf_to_marlin(
                 fp16_weights = np.pad(
                     fp16_weights,
                     ((0, pad_rows), (0, 0)),
-                    mode='constant',
+                    mode="constant",
                     constant_values=0,
                 )
                 padded_rows = rows + pad_rows
@@ -680,7 +665,7 @@ def convert_gguf_to_marlin(
                 fp16_weights = np.pad(
                     fp16_weights,
                     ((0, 0), (0, pad_cols)),
-                    mode='constant',
+                    mode="constant",
                     constant_values=0,
                 )
                 padded_cols = cols + pad_cols
@@ -701,34 +686,30 @@ def convert_gguf_to_marlin(
 
             # Validate round-trip accuracy
             if validate:
-                recovered = dequant_marlin(
-                    packed, scales, padded_rows, padded_cols, group_size
-                )
+                recovered = dequant_marlin(packed, scales, padded_rows, padded_cols, group_size)
                 # Compare only the unpadded region
                 recovered_unpadded = recovered[:rows, :cols]
                 original_unpadded = dequant_mxfp4(tensor.data, (rows, cols))
 
                 # Compute relative error (avoid div by zero)
                 abs_diff = np.abs(
-                    recovered_unpadded.astype(np.float32)
-                    - original_unpadded.astype(np.float32)
+                    recovered_unpadded.astype(np.float32) - original_unpadded.astype(np.float32)
                 )
                 max_err = float(abs_diff.max())
                 mean_err = float(abs_diff.mean())
                 roundtrip_errors.append(max_err)
 
                 if max_err > 1e-2:
-                    stats["errors"].append({
-                        "tensor": name,
-                        "max_error": max_err,
-                        "mean_error": mean_err,
-                        "shape": list(shape),
-                    })
+                    stats["errors"].append(
+                        {
+                            "tensor": name,
+                            "max_error": max_err,
+                            "mean_error": mean_err,
+                            "shape": list(shape),
+                        }
+                    )
 
-            print(
-                f"  Packed {name}: {shape} -> "
-                f"weights[{packed.shape}] + scales[{scales.shape}]"
-            )
+            print(f"  Packed {name}: {shape} -> weights[{packed.shape}] + scales[{scales.shape}]")
 
         elif type_val in DEQUANT_SUPPORTED_TYPES and is_quantizable_tensor(name):
             # GGML block-quantized tensor -> dequant then repack as Marlin
@@ -771,7 +752,7 @@ def convert_gguf_to_marlin(
                 fp16_weights = np.pad(
                     fp16_weights,
                     ((0, pad_rows), (0, 0)),
-                    mode='constant',
+                    mode="constant",
                     constant_values=0,
                 )
                 padded_rows = rows + pad_rows
@@ -785,7 +766,7 @@ def convert_gguf_to_marlin(
                 fp16_weights = np.pad(
                     fp16_weights,
                     ((0, 0), (0, pad_cols)),
-                    mode='constant',
+                    mode="constant",
                     constant_values=0,
                 )
                 padded_cols = cols + pad_cols
@@ -801,10 +782,7 @@ def convert_gguf_to_marlin(
                 [rows, cols, padded_rows, padded_cols], dtype=np.int32
             )
 
-            print(
-                f"  Packed {name}: {shape} -> "
-                f"weights[{packed.shape}] + scales[{scales.shape}]"
-            )
+            print(f"  Packed {name}: {shape} -> weights[{packed.shape}] + scales[{scales.shape}]")
 
         else:
             # Non-MXFP4 or non-quantizable: preserve in original precision
@@ -827,27 +805,19 @@ def convert_gguf_to_marlin(
                 # Already in a standard format, copy raw data
                 # Determine numpy dtype from GGML type
                 type_to_dtype = {
-                    0: np.float32,   # F32
-                    1: np.float16,   # F16
+                    0: np.float32,  # F32
+                    1: np.float16,  # F16
                     30: np.float16,  # BF16 -> store as FP16
                 }
                 dtype = type_to_dtype.get(type_val, None)
                 if dtype is not None:
-                    data_array = np.frombuffer(
-                        tensor.data, dtype=dtype
-                    ).reshape(shape).copy()
+                    data_array = np.frombuffer(tensor.data, dtype=dtype).reshape(shape).copy()
                     marlin_weights[name] = data_array
                 else:
                     # For other quantized types, store raw bytes with metadata
-                    marlin_weights[name] = np.frombuffer(
-                        tensor.data, dtype=np.uint8
-                    ).copy()
-                    marlin_weights[name + ".ggml_type"] = np.array(
-                        [type_val], dtype=np.int32
-                    )
-                    marlin_weights[name + ".shape"] = np.array(
-                        list(shape), dtype=np.int32
-                    )
+                    marlin_weights[name] = np.frombuffer(tensor.data, dtype=np.uint8).copy()
+                    marlin_weights[name + ".ggml_type"] = np.array([type_val], dtype=np.int32)
+                    marlin_weights[name + ".shape"] = np.array(list(shape), dtype=np.int32)
                 print(f"  Preserved {name}: {shape} (type={type_val})")
 
     # Compute aggregate stats
@@ -866,9 +836,7 @@ def convert_gguf_to_marlin(
             config["source_quantization"] = stats["source_quant_types"][0]
         else:
             config["source_quantization"] = "mixed"
-    config["conversion_stats"] = {
-        k: v for k, v in stats.items() if k != "errors"
-    }
+    config["conversion_stats"] = {k: v for k, v in stats.items() if k != "errors"}
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 

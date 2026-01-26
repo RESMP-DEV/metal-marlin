@@ -31,13 +31,16 @@ enum class ReduceOp : uint8_t {
 };
 
 /**
- * All-reduce kernel for bf16/fp16 tensors.
+ * All-reduce kernel for fp16/fp32 tensors.
  *
  * Reduces num_shards tensors into a single output tensor using the
  * specified reduction operation.
  *
+ * Note: Metal does not have native bfloat16 support. Use half (fp16)
+ * or float (fp32) instead.
+ *
  * Template parameters:
- *   T - element type (half or bfloat)
+ *   T - element type (half or float)
  *
  * Arguments:
  *   input: Input tensors stacked along first dimension [num_shards, numel]
@@ -105,16 +108,6 @@ template [[host_name("all_reduce_half")]]
 [[kernel]] void all_reduce_kernel<half>(
     device const half*,
     device half*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint
-);
-
-template [[host_name("all_reduce_bfloat")]]
-[[kernel]] void all_reduce_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
     constant uint32_t&,
     constant uint32_t&,
     constant uint8_t&,
@@ -208,10 +201,10 @@ template [[host_name("all_reduce_simd_half")]]
     uint
 );
 
-template [[host_name("all_reduce_simd_bfloat")]]
-[[kernel]] void all_reduce_simd_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
+template [[host_name("all_reduce_simd_float")]]
+[[kernel]] void all_reduce_simd_kernel<float>(
+    device const float*,
+    device float*,
     constant uint32_t&,
     constant uint32_t&,
     constant uint8_t&,
@@ -258,10 +251,10 @@ template [[host_name("scatter_half")]]
     uint2
 );
 
-template [[host_name("scatter_bfloat")]]
-[[kernel]] void scatter_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
+template [[host_name("scatter_float")]]
+[[kernel]] void scatter_kernel<float>(
+    device const float*,
+    device float*,
     constant uint32_t&,
     constant uint32_t&,
     constant uint32_t&,
@@ -307,10 +300,10 @@ template [[host_name("all_gather_half")]]
     uint2
 );
 
-template [[host_name("all_gather_bfloat")]]
-[[kernel]] void all_gather_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
+template [[host_name("all_gather_float")]]
+[[kernel]] void all_gather_kernel<float>(
+    device const float*,
+    device float*,
     constant uint32_t&,
     constant uint32_t&,
     constant uint32_t&,
@@ -398,10 +391,10 @@ template [[host_name("reduce_scatter_half")]]
     uint2
 );
 
-template [[host_name("reduce_scatter_bfloat")]]
-[[kernel]] void reduce_scatter_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
+template [[host_name("reduce_scatter_float")]]
+[[kernel]] void reduce_scatter_kernel<float>(
+    device const float*,
+    device float*,
     constant uint32_t&,
     constant uint32_t&,
     constant uint8_t&,

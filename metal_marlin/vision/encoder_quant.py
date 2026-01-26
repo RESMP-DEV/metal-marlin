@@ -55,7 +55,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .._compat import HAS_MLX, HAS_TORCH, mx, to_numpy, torch
+from .._compat import HAS_TORCH, to_numpy, torch
 from ..calibration.hooks import CalibrationHooks
 from ..mixed_precision import Precision
 from ..packing.mixed_format import pack_mixed_format_model
@@ -147,9 +147,7 @@ class _ActivationCollector:
 
     def get(self) -> dict[str, np.ndarray]:
         return {
-            name: np.concatenate(chunks, axis=0)
-            for name, chunks in self._buffers.items()
-            if chunks
+            name: np.concatenate(chunks, axis=0) for name, chunks in self._buffers.items() if chunks
         }
 
 
@@ -179,8 +177,8 @@ def collect_vision_calibration_stats(
     Returns:
         (activations, hessians) dicts keyed by weight names.
     """
-    if not (HAS_TORCH or HAS_MLX):
-        raise RuntimeError("PyTorch or MLX required for calibration.")
+    if not HAS_TORCH:
+        raise RuntimeError("PyTorch required for calibration.")
 
     layer_filter = _make_vision_layer_filter(config)
     hooks = CalibrationHooks(damping=damping) if collect_hessians else None
@@ -191,24 +189,18 @@ def collect_vision_calibration_stats(
 
     activation_handles: list[Any] = []
     if collect_activations and activation_collector is not None:
-        activation_handles = _register_activation_hooks(
-            model, activation_collector, layer_filter
-        )
+        activation_handles = _register_activation_hooks(model, activation_collector, layer_filter)
 
     if forward_fn is None:
         forward_fn = _default_forward_fn
 
     batch_iter = calibration_data.get_batches(batch_size=batch_size)
 
-    if HAS_TORCH and torch is not None:
-        model.eval()
-        with torch.no_grad():
-            for idx, batch in enumerate(batch_iter):
-                if max_batches is not None and idx >= max_batches:
-                    break
-                batch_input = _convert_batch_for_model(model, batch)
-                _ = forward_fn(model, batch_input)
-    else:
+    if torch is None:
+        raise RuntimeError("PyTorch required for calibration.")
+
+    model.eval()
+    with torch.no_grad():
         for idx, batch in enumerate(batch_iter):
             if max_batches is not None and idx >= max_batches:
                 break
@@ -399,18 +391,14 @@ def _default_forward_fn(model: Any, batch: Any) -> Any:
         except Exception:
             continue
 
-    raise ValueError(
-        "Unable to infer vision forward method. Provide forward_fn explicitly."
-    )
+    raise ValueError("Unable to infer vision forward method. Provide forward_fn explicitly.")
 
 
 def _convert_batch_for_model(model: Any, batch: np.ndarray) -> Any:
-    if HAS_TORCH and torch is not None:
-        device = _get_torch_device(model)
-        return torch.from_numpy(batch).to(device)
-    if HAS_MLX and mx is not None:
-        return mx.array(batch)
-    return batch
+    if torch is None:
+        raise RuntimeError("PyTorch required for calibration.")
+    device = _get_torch_device(model)
+    return torch.from_numpy(batch).to(device)
 
 
 def _get_torch_device(model: Any) -> Any:

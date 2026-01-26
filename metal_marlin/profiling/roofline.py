@@ -394,8 +394,7 @@ class RooflineAnalyzer:
         print("=" * 80)
 
         header = (
-            f"{'Kernel':<30} {'TFLOPS':>8} {'AI':>10} {'Bound':>8} "
-            f"{'Attain%':>8} {'Max TF':>8}"
+            f"{'Kernel':<30} {'TFLOPS':>8} {'AI':>10} {'Bound':>8} {'Attain%':>8} {'Max TF':>8}"
         )
         print(header)
         print("-" * len(header))

@@ -23,9 +23,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .._compat import HAS_MLX, mx
+from .._compat import HAS_TORCH, torch
 from .occupancy import AppleSiliconGPU, detect_gpu
 from .trace import TraceEvent
+
+
+def _gpu_sync() -> None:
+    """Synchronize GPU if torch MPS is available."""
+    if HAS_TORCH and torch is not None and torch.backends.mps.is_available():
+        torch.mps.synchronize()
 
 
 @dataclass
@@ -168,20 +174,17 @@ class MemoryBandwidthProfiler:
         # Warmup
         for _ in range(warmup):
             fn()
-            if HAS_MLX:
-                mx.synchronize()
+            _gpu_sync()
 
         # Timed iterations
         times: list[float] = []
         for _ in range(iterations):
-            if HAS_MLX:
-                mx.synchronize()
+            _gpu_sync()
 
             start = time.perf_counter()
             fn()
 
-            if HAS_MLX:
-                mx.synchronize()
+            _gpu_sync()
 
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             times.append(elapsed_ms)
@@ -211,7 +214,7 @@ class MemoryBandwidthProfiler:
         """Measure raw memory transfer bandwidth.
 
         Creates a dedicated bandwidth probe to measure actual
-        memory transfer rates.
+        memory transfer rates using PyTorch MPS.
 
         Args:
             size_bytes: Size of data to transfer.
@@ -221,7 +224,7 @@ class MemoryBandwidthProfiler:
         Returns:
             BandwidthMeasurement.
         """
-        if not HAS_MLX:
+        if not HAS_TORCH or torch is None or not torch.backends.mps.is_available():
             return BandwidthMeasurement(
                 name=f"transfer_{direction}_{size_bytes}",
                 bytes_read=size_bytes if direction in ("read", "both") else 0,
@@ -232,14 +235,14 @@ class MemoryBandwidthProfiler:
 
         # Create test data
         elements = size_bytes // 4  # float32
-        data = mx.random.normal((elements,), dtype=mx.float32)
-        mx.eval(data)
+        data = torch.randn(elements, device="mps", dtype=torch.float32)
+        torch.mps.synchronize()
 
         def read_kernel() -> Any:
-            return mx.sum(data)
+            return data.sum()
 
         def write_kernel() -> Any:
-            return mx.zeros_like(data)
+            return torch.zeros_like(data)
 
         def both_kernel() -> Any:
             return data + 1.0
@@ -273,8 +276,7 @@ class MemoryBandwidthProfiler:
             return
 
         header = (
-            f"{'Name':<35} {'Read GB/s':>10} {'Write GB/s':>11} "
-            f"{'Total GB/s':>11} {'Eff %':>7}"
+            f"{'Name':<35} {'Read GB/s':>10} {'Write GB/s':>11} {'Total GB/s':>11} {'Eff %':>7}"
         )
         print(header)
         print("-" * len(header))

@@ -41,9 +41,11 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
-from .._compat import mx, require_mlx
+import numpy as np
+from numpy.typing import NDArray
+from scipy.special import softmax
 
 
 @dataclass(frozen=True)
@@ -78,15 +80,13 @@ class MLACacheConfig:
     rope_head_dim: int = 0  # 0 means no RoPE in latent space
     quantize_mode: Literal["none", "fp8", "fp4"] = "none"
     # Use field with factory to avoid mutable default
-    # dtype will be resolved at runtime when MLX is available
     _dtype_str: str = field(default="bf16", repr=False)
 
     @property
-    def dtype(self):
-        """Get MLX dtype for storage. Raises if MLX unavailable."""
-        require_mlx("MLA cache dtype access")
-        dtype_map = {"fp16": mx.float16, "bf16": mx.bfloat16, "fp32": mx.float32}
-        return dtype_map.get(self._dtype_str, mx.bfloat16)
+    def dtype(self) -> np.dtype:
+        """Get numpy dtype for storage."""
+        dtype_map = {"fp16": np.float16, "bf16": np.float16, "fp32": np.float32}
+        return np.dtype(dtype_map.get(self._dtype_str, np.float16))
 
     @property
     def latent_bytes_per_token(self) -> int:
@@ -151,41 +151,29 @@ class MLABlock:
 
     def __init__(self, config: MLACacheConfig | None = None) -> None:
         self.config = config or MLACacheConfig()
-        self._latents = None
-        self._scales = None
+        self._latents: NDArray[Any] | None = None
+        self._scales: NDArray[Any] | None = None
         self._token_count: int = 0
         self._ref_count: int = 0
         self._prefix_hash: int | None = None
 
     def allocate(self) -> None:
         """Allocate block memory for latent storage."""
-        require_mlx("MLA block allocation")
-
         if self.config.quantize_mode == "fp4":
             # Pack 8 FP4 values per uint32
             packed_dim = self.config.kv_lora_rank // 8
-            self._latents = mx.zeros(
-                (self.config.block_size, packed_dim), dtype=mx.uint32
-            )
+            self._latents = np.zeros((self.config.block_size, packed_dim), dtype=np.uint32)
             # Per-token scales
-            self._scales = mx.zeros(
-                (self.config.block_size, 1), dtype=mx.float16
-            )
+            self._scales = np.zeros((self.config.block_size, 1), dtype=np.float16)
         elif self.config.quantize_mode == "fp8":
-            self._latents = mx.zeros(
-                self.config.latent_shape, dtype=mx.uint8
-            )
-            self._scales = mx.zeros(
-                (self.config.block_size, 1), dtype=mx.float16
-            )
+            self._latents = np.zeros(self.config.latent_shape, dtype=np.uint8)
+            self._scales = np.zeros((self.config.block_size, 1), dtype=np.float16)
         else:
-            self._latents = mx.zeros(
-                self.config.latent_shape, dtype=self.config.dtype
-            )
+            self._latents = np.zeros(self.config.latent_shape, dtype=self.config.dtype)
         self._token_count = 0
 
     @property
-    def latents(self):
+    def latents(self) -> NDArray[Any] | None:
         """The underlying latent storage array."""
         return self._latents
 
@@ -217,7 +205,7 @@ class MLABlock:
         self._ref_count = max(0, self._ref_count - 1)
         return self._ref_count
 
-    def append_latent(self, latent) -> int:
+    def append_latent(self, latent: NDArray[Any]) -> int:
         """Append compressed latent for a single token.
 
         Args:
@@ -239,40 +227,20 @@ class MLABlock:
 
         if self.config.quantize_mode == "fp4":
             packed, scale = self._quantize_fp4(latent)
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                mx.expand_dims(packed, axis=0),
-                self._latents[idx + 1:],
-            ], axis=0)
-            self._scales = mx.concatenate([
-                self._scales[:idx],
-                mx.expand_dims(scale, axis=0),
-                self._scales[idx + 1:],
-            ], axis=0)
+            self._latents[idx] = packed
+            self._scales[idx] = scale
         elif self.config.quantize_mode == "fp8":
             quant, scale = self._quantize_fp8(latent)
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                mx.expand_dims(quant, axis=0),
-                self._latents[idx + 1:],
-            ], axis=0)
-            self._scales = mx.concatenate([
-                self._scales[:idx],
-                mx.expand_dims(scale, axis=0),
-                self._scales[idx + 1:],
-            ], axis=0)
+            self._latents[idx] = quant
+            self._scales[idx] = scale
         else:
             # Full precision: direct storage
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                mx.expand_dims(latent.astype(self.config.dtype), axis=0),
-                self._latents[idx + 1:],
-            ], axis=0)
+            self._latents[idx] = latent.astype(self.config.dtype)
 
         self._token_count += 1
         return self.config.block_size - self._token_count
 
-    def append_latent_batch(self, latents) -> int:
+    def append_latent_batch(self, latents: NDArray[Any]) -> int:
         """Append multiple token latents at once.
 
         More efficient than repeated single appends.
@@ -301,39 +269,19 @@ class MLABlock:
 
         if self.config.quantize_mode == "fp4":
             packed, scales = self._quantize_fp4_batch(latents)
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                packed,
-                self._latents[end:],
-            ], axis=0)
-            self._scales = mx.concatenate([
-                self._scales[:idx],
-                scales,
-                self._scales[end:],
-            ], axis=0)
+            self._latents[idx:end] = packed
+            self._scales[idx:end] = scales
         elif self.config.quantize_mode == "fp8":
             quant, scales = self._quantize_fp8_batch(latents)
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                quant,
-                self._latents[end:],
-            ], axis=0)
-            self._scales = mx.concatenate([
-                self._scales[:idx],
-                scales,
-                self._scales[end:],
-            ], axis=0)
+            self._latents[idx:end] = quant
+            self._scales[idx:end] = scales
         else:
-            self._latents = mx.concatenate([
-                self._latents[:idx],
-                latents.astype(self.config.dtype),
-                self._latents[end:],
-            ], axis=0)
+            self._latents[idx:end] = latents.astype(self.config.dtype)
 
         self._token_count += num_tokens
         return self.config.block_size - self._token_count
 
-    def get_latents(self):
+    def get_latents(self) -> NDArray[Any]:
         """Get the filled portion of latents (dequantized if needed).
 
         Returns:
@@ -345,16 +293,16 @@ class MLABlock:
         if self._latents is None:
             raise RuntimeError("Block not allocated")
 
-        raw = self._latents[:self._token_count]
+        raw = self._latents[: self._token_count]
 
         if self.config.quantize_mode == "fp4":
-            return self._dequant_fp4(raw, self._scales[:self._token_count])
+            return self._dequant_fp4(raw, self._scales[: self._token_count])
         elif self.config.quantize_mode == "fp8":
-            return self._dequant_fp8(raw, self._scales[:self._token_count])
+            return self._dequant_fp8(raw, self._scales[: self._token_count])
         else:
             return raw
 
-    def decompress(self, kv_b_proj) -> tuple:
+    def decompress(self, kv_b_proj: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Decompress latents to full K, V using the decompression projection.
 
         This is the key MLA operation: latents @ kv_b_proj.T -> [K, V]
@@ -416,25 +364,9 @@ class MLABlock:
     def reset(self) -> None:
         """Clear block contents without deallocating."""
         if self._latents is not None:
-            if self.config.quantize_mode == "fp4":
-                packed_dim = self.config.kv_lora_rank // 8
-                self._latents = mx.zeros(
-                    (self.config.block_size, packed_dim), dtype=mx.uint32
-                )
-                self._scales = mx.zeros(
-                    (self.config.block_size, 1), dtype=mx.float16
-                )
-            elif self.config.quantize_mode == "fp8":
-                self._latents = mx.zeros(
-                    self.config.latent_shape, dtype=mx.uint8
-                )
-                self._scales = mx.zeros(
-                    (self.config.block_size, 1), dtype=mx.float16
-                )
-            else:
-                self._latents = mx.zeros(
-                    self.config.latent_shape, dtype=self.config.dtype
-                )
+            self._latents.fill(0)
+            if self._scales is not None:
+                self._scales.fill(0)
         self._token_count = 0
         self._ref_count = 0
         self._prefix_hash = None
@@ -443,8 +375,9 @@ class MLABlock:
         """Create an independent copy of this block (for CoW)."""
         new_block = MLABlock(config=self.config)
         if self._latents is not None:
-            new_block._latents = self._latents
-            new_block._scales = self._scales
+            new_block._latents = self._latents.copy()
+            if self._scales is not None:
+                new_block._scales = self._scales.copy()
             new_block._token_count = self._token_count
             new_block._prefix_hash = self._prefix_hash
         return new_block
@@ -453,48 +386,48 @@ class MLABlock:
     # Quantization helpers
     # --------------------------------------------------------------------------
 
-    def _quantize_fp4(self, latent):
+    def _quantize_fp4(self, latent: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize single latent vector to FP4."""
-        abs_max = mx.max(mx.abs(latent))
-        abs_max = mx.maximum(abs_max, 1e-8)
+        abs_max = np.max(np.abs(latent))
+        abs_max = max(abs_max, 1e-8)
         scale = abs_max / 6.0  # FP4 E2M1 max is 6.0
 
         scaled = latent / scale
-        scaled = mx.clip(scaled, -6.0, 6.0)
-        quantized = mx.round(scaled * 2.0).astype(mx.int8)
-        quantized = mx.clip(quantized + 8, 0, 15).astype(mx.uint8)
+        scaled = np.clip(scaled, -6.0, 6.0)
+        quantized = np.round(scaled * 2.0).astype(np.int8)
+        quantized = np.clip(quantized + 8, 0, 15).astype(np.uint8)
 
         # Pack 8 values per uint32
         packed_dim = self.config.kv_lora_rank // 8
         reshaped = quantized.reshape(packed_dim, 8)
-        packed = mx.zeros((packed_dim,), dtype=mx.uint32)
+        packed = np.zeros((packed_dim,), dtype=np.uint32)
         for i in range(8):
-            packed = packed | (reshaped[:, i].astype(mx.uint32) << (i * 4))
+            packed = packed | (reshaped[:, i].astype(np.uint32) << (i * 4))
 
-        return packed, mx.array([scale], dtype=mx.float16)
+        return packed, np.array([scale], dtype=np.float16)
 
-    def _quantize_fp4_batch(self, latents):
+    def _quantize_fp4_batch(self, latents: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize batch of latents to FP4."""
         num_tokens = latents.shape[0]
-        abs_max = mx.max(mx.abs(latents), axis=-1, keepdims=True)
-        abs_max = mx.maximum(abs_max, 1e-8)
+        abs_max = np.max(np.abs(latents), axis=-1, keepdims=True)
+        abs_max = np.maximum(abs_max, 1e-8)
         scales = abs_max / 6.0
 
         scaled = latents / scales
-        scaled = mx.clip(scaled, -6.0, 6.0)
-        quantized = mx.round(scaled * 2.0).astype(mx.int8)
-        quantized = mx.clip(quantized + 8, 0, 15).astype(mx.uint8)
+        scaled = np.clip(scaled, -6.0, 6.0)
+        quantized = np.round(scaled * 2.0).astype(np.int8)
+        quantized = np.clip(quantized + 8, 0, 15).astype(np.uint8)
 
         # Pack 8 values per uint32
         packed_dim = self.config.kv_lora_rank // 8
         reshaped = quantized.reshape(num_tokens, packed_dim, 8)
-        packed = mx.zeros((num_tokens, packed_dim), dtype=mx.uint32)
+        packed = np.zeros((num_tokens, packed_dim), dtype=np.uint32)
         for i in range(8):
-            packed = packed | (reshaped[:, :, i].astype(mx.uint32) << (i * 4))
+            packed = packed | (reshaped[:, :, i].astype(np.uint32) << (i * 4))
 
-        return packed, scales.astype(mx.float16)
+        return packed, scales.astype(np.float16)
 
-    def _dequant_fp4(self, packed, scales):
+    def _dequant_fp4(self, packed: NDArray[Any], scales: NDArray[Any]) -> NDArray[Any]:
         """Dequantize FP4 packed latents."""
         batch_size = packed.shape[0]
         packed_dim = packed.shape[1]
@@ -504,42 +437,42 @@ class MLABlock:
         unpacked = []
         for i in range(8):
             nibble = (packed >> (i * 4)) & 0xF
-            signed = nibble.astype(mx.float16) - 8.0
+            signed = nibble.astype(np.float16) - 8.0
             unpacked.append(signed)
 
         # Interleave properly
-        result = mx.stack(unpacked, axis=-1).reshape(batch_size, full_dim)
+        result = np.stack(unpacked, axis=-1).reshape(batch_size, full_dim)
         return result * scales / 2.0
 
-    def _quantize_fp8(self, latent):
+    def _quantize_fp8(self, latent: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize single latent vector to FP8 (simulated)."""
-        abs_max = mx.max(mx.abs(latent))
-        abs_max = mx.maximum(abs_max, 1e-8)
+        abs_max = np.max(np.abs(latent))
+        abs_max = max(abs_max, 1e-8)
         scale = abs_max / 448.0  # E4M3 max
 
         scaled = latent / scale
-        scaled = mx.clip(scaled, -448.0, 448.0)
-        quantized = mx.round(scaled / 448.0 * 127.0) + 128.0
-        quantized = mx.clip(quantized, 0, 255).astype(mx.uint8)
+        scaled = np.clip(scaled, -448.0, 448.0)
+        quantized = np.round(scaled / 448.0 * 127.0) + 128.0
+        quantized = np.clip(quantized, 0, 255).astype(np.uint8)
 
-        return quantized, mx.array([scale], dtype=mx.float16)
+        return quantized, np.array([scale], dtype=np.float16)
 
-    def _quantize_fp8_batch(self, latents):
+    def _quantize_fp8_batch(self, latents: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize batch of latents to FP8."""
-        abs_max = mx.max(mx.abs(latents), axis=-1, keepdims=True)
-        abs_max = mx.maximum(abs_max, 1e-8)
+        abs_max = np.max(np.abs(latents), axis=-1, keepdims=True)
+        abs_max = np.maximum(abs_max, 1e-8)
         scales = abs_max / 448.0
 
         scaled = latents / scales
-        scaled = mx.clip(scaled, -448.0, 448.0)
-        quantized = mx.round(scaled / 448.0 * 127.0) + 128.0
-        quantized = mx.clip(quantized, 0, 255).astype(mx.uint8)
+        scaled = np.clip(scaled, -448.0, 448.0)
+        quantized = np.round(scaled / 448.0 * 127.0) + 128.0
+        quantized = np.clip(quantized, 0, 255).astype(np.uint8)
 
-        return quantized, scales.astype(mx.float16)
+        return quantized, scales.astype(np.float16)
 
-    def _dequant_fp8(self, quantized, scales):
+    def _dequant_fp8(self, quantized: NDArray[Any], scales: NDArray[Any]) -> NDArray[Any]:
         """Dequantize FP8 latents."""
-        signed = quantized.astype(mx.float16) - 128.0
+        signed = quantized.astype(np.float16) - 128.0
         return signed / 127.0 * 448.0 * scales
 
     def __repr__(self) -> str:
@@ -578,9 +511,7 @@ class MLABlockAllocator:
         self.num_blocks = num_blocks
         self.config = config or MLACacheConfig()
 
-        self.blocks: list[MLABlockState] = [
-            MLABlockState(block_idx=i) for i in range(num_blocks)
-        ]
+        self.blocks: list[MLABlockState] = [MLABlockState(block_idx=i) for i in range(num_blocks)]
         self._free_list: list[int] = list(range(num_blocks - 1, -1, -1))
 
         # Prefix cache: hash -> block_idx
@@ -660,8 +591,11 @@ class MLABlockAllocator:
         old_block = self._storage[block_idx]
         new_block = self._storage[new_idx]
         if old_block is not None and new_block is not None:
-            new_block._latents = old_block._latents
-            new_block._scales = old_block._scales
+            new_block._latents = (
+                old_block._latents.copy() if old_block._latents is not None else None
+            )
+            if old_block._scales is not None:
+                new_block._scales = old_block._scales.copy()
             new_block._token_count = old_block._token_count
 
         # Decrement old block's ref count
@@ -709,22 +643,16 @@ class MLABlockAllocator:
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
-        allocated = sum(
-            1 for block in self._storage if block is not None
-        )
+        allocated = sum(1 for block in self._storage if block is not None)
         return allocated * self.config.memory_bytes / 1024 / 1024
 
-    def memory_usage_stats(self) -> dict:
+    def memory_usage_stats(self) -> dict[str, Any]:
         """Return detailed memory usage statistics."""
         standard_cache_bytes = (
-            self.num_allocated
-            * self.config.block_size
-            * self.config.standard_bytes_per_token
+            self.num_allocated * self.config.block_size * self.config.standard_bytes_per_token
         )
         mla_cache_bytes = (
-            self.num_allocated
-            * self.config.block_size
-            * self.config.latent_bytes_per_token
+            self.num_allocated * self.config.block_size * self.config.latent_bytes_per_token
         )
 
         return {
@@ -739,16 +667,16 @@ class MLABlockAllocator:
 
 
 def mla_attention(
-    query,
-    latent_pool,
-    block_tables,
-    context_lens,
-    kv_b_proj,
+    query: NDArray[Any],
+    latent_pool: NDArray[Any],
+    block_tables: NDArray[Any],
+    context_lens: NDArray[Any],
+    kv_b_proj: NDArray[Any],
     scale: float | None = None,
     num_kv_heads: int | None = None,
     head_dim: int | None = None,
     block_size: int = 16,
-):
+) -> NDArray[Any]:
     """Compute scaled dot-product attention with MLA paged latent cache.
 
     This performs on-demand decompression: latents are decompressed to K, V
@@ -769,8 +697,6 @@ def mla_attention(
     Returns:
         Attention output [num_seqs, num_heads, seq_len, head_dim].
     """
-    require_mlx("MLA attention")
-
     num_seqs = query.shape[0]
     num_heads = query.shape[1]
     seq_len = query.shape[2]
@@ -786,7 +712,7 @@ def mla_attention(
     max_context = max_blocks * block_size
 
     if scale is None:
-        scale = 1.0 / (head_dim ** 0.5)
+        scale = 1.0 / (head_dim**0.5)
 
     # Gather latents from pool for each sequence
     # latent_pool: [num_blocks, block_size, kv_lora_rank]
@@ -809,36 +735,36 @@ def mla_attention(
     values = v_flat.reshape(num_seqs, max_context, num_kv_heads, head_dim)
 
     # Transpose to [num_seqs, num_kv_heads, max_context, head_dim]
-    keys = keys.transpose(0, 2, 1, 3)
-    values = values.transpose(0, 2, 1, 3)
+    keys = np.transpose(keys, (0, 2, 1, 3))
+    values = np.transpose(values, (0, 2, 1, 3))
 
     # GQA expansion: repeat KV heads to match query heads
     if num_kv_heads < num_heads:
         repeat_factor = num_heads // num_kv_heads
-        keys = mx.repeat(keys, repeat_factor, axis=1)
-        values = mx.repeat(values, repeat_factor, axis=1)
+        keys = np.repeat(keys, repeat_factor, axis=1)
+        values = np.repeat(values, repeat_factor, axis=1)
 
     # Compute attention scores: [num_seqs, num_heads, seq_len, max_context]
-    attn_weights = (query @ keys.transpose(0, 1, 3, 2)) * scale
+    attn_weights = (query @ np.transpose(keys, (0, 1, 3, 2))) * scale
 
     # Build validity mask from context_lens
-    kv_positions = mx.arange(max_context)[None, :]  # [1, max_context]
+    kv_positions = np.arange(max_context)[None, :]  # [1, max_context]
     context_lens_2d = context_lens[:, None]  # [num_seqs, 1]
     valid_mask = kv_positions < context_lens_2d
 
     # Expand for broadcasting: [num_seqs, 1, 1, max_context]
     valid_mask = valid_mask[:, None, None, :]
-    attn_weights = mx.where(valid_mask, attn_weights, mx.array(float("-inf")))
+    attn_weights = np.where(valid_mask, attn_weights, float("-inf"))
 
     # Causal mask for prefill
     if seq_len > 1:
-        q_positions = mx.arange(seq_len)[None, None, :, None]
+        q_positions = np.arange(seq_len)[None, None, :, None]
         kv_pos_expanded = kv_positions[None, None, None, :]
-        offsets = (context_lens[:, None, None, None] - seq_len + q_positions)
+        offsets = context_lens[:, None, None, None] - seq_len + q_positions
         causal_mask = kv_pos_expanded <= offsets
-        attn_weights = mx.where(causal_mask, attn_weights, mx.array(float("-inf")))
+        attn_weights = np.where(causal_mask, attn_weights, float("-inf"))
 
-    attn_weights = mx.softmax(attn_weights, axis=-1)
+    attn_weights = softmax(attn_weights, axis=-1)
 
     # Compute output: [num_seqs, num_heads, seq_len, head_dim]
     output = attn_weights @ values
@@ -854,7 +780,7 @@ def compare_memory_usage(
     head_dim: int,
     kv_lora_rank: int,
     dtype_bytes: int = 2,
-) -> dict:
+) -> dict[str, float]:
     """Compare memory usage between standard and MLA KV cache.
 
     Args:
@@ -882,6 +808,8 @@ def compare_memory_usage(
         "standard_total_mb": standard_total_bytes / 1024 / 1024,
         "mla_per_layer_mb": mla_bytes_per_layer / 1024 / 1024,
         "mla_total_mb": mla_total_bytes / 1024 / 1024,
-        "savings_ratio": standard_total_bytes / mla_total_bytes if mla_total_bytes > 0 else float("inf"),
+        "savings_ratio": standard_total_bytes / mla_total_bytes
+        if mla_total_bytes > 0
+        else float("inf"),
         "bytes_saved_total_mb": (standard_total_bytes - mla_total_bytes) / 1024 / 1024,
     }

@@ -152,9 +152,9 @@ inline void epilogue_bias(
     thread simdgroup_matrix<half, 8, 8>& acc,
     device const half* bias,
     uint col_offset,
-    uint simd_lane
+    uint simd_lane,
+    threadgroup half (&staging)[8][8]
 ) {
-    threadgroup half staging[8][8];
     simdgroup_store(acc, &staging[0][0], 8);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -168,9 +168,9 @@ inline void epilogue_bias_gelu(
     thread simdgroup_matrix<half, 8, 8>& acc,
     device const half* bias,
     uint col_offset,
-    uint simd_lane
+    uint simd_lane,
+    threadgroup half (&staging)[8][8]
 ) {
-    threadgroup half staging[8][8];
     simdgroup_store(acc, &staging[0][0], 8);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -197,7 +197,8 @@ inline void store_results_epilogue(
     uint tg_row, uint tg_col,
     uint sg_row_offset, uint sg_col_offset,
     uint simd_lane,
-    uint mode
+    uint mode,
+    threadgroup half (&staging)[8][8]
 ) {
     // Fast path: no epilogue, use direct simdgroup_store for interior tiles
     if (mode == EPILOGUE_NONE) {
@@ -209,7 +210,6 @@ inline void store_results_epilogue(
                 if (out_row + 8 <= M && out_col + 8 <= N) {
                     simdgroup_store(acc[mi][ni], C + out_row * N + out_col, N);
                 } else {
-                    threadgroup half staging[8][8];
                     simdgroup_store(acc[mi][ni], &staging[0][0], 8);
                     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -235,7 +235,6 @@ inline void store_results_epilogue(
             uint out_row = tg_row + sg_row_offset + mi * 8;
             uint out_col = tg_col + sg_col_offset + ni * 8;
 
-            threadgroup half staging[8][8];
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -335,9 +334,50 @@ inline void epilogue_apply_vec2(
 // kernel launch, eliminating one global memory round-trip of the full output.
 // ===========================================================================
 
-// Forward-declare fused dequant primitives (defined in marlin_gemm.metal)
-inline void fused_dequant_fp4x8(uint32_t packed, half scale, thread half *out);
-inline half fused_dequant_fp4_scalar(uint nibble);
+// ---------------------------------------------------------------------------
+// FP4 E2M1 dequantization (duplicated from marlin_gemm.metal for standalone compilation)
+// ---------------------------------------------------------------------------
+
+/// Guard a dequantized half value: replace NaN/Inf with 0.
+inline half guard_finite(half val) {
+    return select(val, half(0.0h), !isfinite(val));
+}
+
+/// Safe dequant with float intermediates to work around Metal compiler bug.
+inline half safe_dequant(half raw, half scale) {
+    float result = (float)raw * (float)scale;
+    if (!isfinite(result)) {
+        result = 0.0f;
+    }
+    return (half)result;
+}
+
+/// FP4 (E2M1) dequant: branchless scalar, select() for subnormal handling.
+inline half fused_dequant_fp4_scalar(uint nibble) {
+    uint sign_bit = (nibble >> 3) & 1;
+    uint exp_bits = (nibble >> 1) & 0x3;
+    uint man_bit  = nibble & 1;
+
+    // Subnormal (exp=0): 0.0 or 0.25
+    half sub_mag = half(man_bit) * half(0.25h);
+    // Normal (exp>0): 2^(exp-1) * (1 + mantissa*0.5)
+    half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
+
+    half magnitude = select(norm_mag, sub_mag, exp_bits == 0);
+    return select(magnitude, -magnitude, bool(sign_bit));
+}
+
+/// FP4 dequant: 8 values from packed uint32, scale applied.
+inline void fused_dequant_fp4x8(uint32_t packed, half scale, thread half *out) {
+    out[0] = safe_dequant(fused_dequant_fp4_scalar((packed >>  0) & 0xF), scale);
+    out[1] = safe_dequant(fused_dequant_fp4_scalar((packed >>  4) & 0xF), scale);
+    out[2] = safe_dequant(fused_dequant_fp4_scalar((packed >>  8) & 0xF), scale);
+    out[3] = safe_dequant(fused_dequant_fp4_scalar((packed >> 12) & 0xF), scale);
+    out[4] = safe_dequant(fused_dequant_fp4_scalar((packed >> 16) & 0xF), scale);
+    out[5] = safe_dequant(fused_dequant_fp4_scalar((packed >> 20) & 0xF), scale);
+    out[6] = safe_dequant(fused_dequant_fp4_scalar((packed >> 24) & 0xF), scale);
+    out[7] = safe_dequant(fused_dequant_fp4_scalar((packed >> 28) & 0xF), scale);
+}
 
 // Tile constants for the kernel (same as marlin_gemm.metal)
 constant constexpr uint EP_TILE_M = 64;
@@ -358,7 +398,10 @@ inline void marlin_gemm_fused_fp4_epilogue_impl(
     uint epilogue_mode,
     uint2 tg_pos,
     uint simd_id,
-    uint simd_lane
+    uint simd_lane,
+    threadgroup half (&A_tile)[EP_TILE_M][EP_TILE_K],
+    threadgroup half (&B_staging)[EP_SIMDGROUPS_PER_TG][8][8],
+    threadgroup half (&epilogue_staging)[8][8]
 ) {
     const uint M = dims.x;
     const uint N = dims.y;
@@ -381,12 +424,7 @@ inline void marlin_gemm_fused_fp4_epilogue_impl(
 
     const uint thread_idx = simd_id * 32 + simd_lane;
     const uint k_packs = K / EP_FP4_PER_UINT;
-
-    // A_tile: cooperative load of activation tile into threadgroup memory
-    threadgroup half A_tile[EP_TILE_M][EP_TILE_K];
-
-    // B_staging: per-simdgroup 8x8 dequantized B sub-tile
-    threadgroup half B_staging[EP_SIMDGROUPS_PER_TG][8][8];
+    (void)k_packs;  // Suppress unused variable warning
 
     // --- Main loop over K dimension ---
     for (uint k_block = 0; k_block < K; k_block += EP_TILE_K) {
@@ -456,7 +494,7 @@ inline void marlin_gemm_fused_fp4_epilogue_impl(
     // --- Epilogue: Apply bias + activation, then store ---
     store_results_epilogue(acc, C, bias, M, N, tg_row, tg_col,
                            sg_row_offset, sg_col_offset, simd_lane,
-                           epilogue_mode);
+                           epilogue_mode, epilogue_staging);
 }
 
 kernel void marlin_gemm_fused_fp4_epilogue(
@@ -471,9 +509,15 @@ kernel void marlin_gemm_fused_fp4_epilogue(
     uint simd_id                      [[simdgroup_index_in_threadgroup]],
     uint simd_lane                    [[thread_index_in_simdgroup]]
 ) {
+    // Threadgroup memory must be declared in kernel, passed to helpers
+    threadgroup half A_tile[EP_TILE_M][EP_TILE_K];
+    threadgroup half B_staging[EP_SIMDGROUPS_PER_TG][8][8];
+    threadgroup half epilogue_staging[8][8];
+
     marlin_gemm_fused_fp4_epilogue_impl(A, B_packed, scales, C, dims, bias,
                                         epilogue_mode, tg_pos, simd_id,
-                                        simd_lane);
+                                        simd_lane, A_tile, B_staging,
+                                        epilogue_staging);
 }
 
 constant uint k_epilogue_mode_fc [[function_constant(0)]];
@@ -489,9 +533,15 @@ kernel void marlin_gemm_fused_fp4_epilogue_fc(
     uint simd_id                      [[simdgroup_index_in_threadgroup]],
     uint simd_lane                    [[thread_index_in_simdgroup]]
 ) {
+    // Threadgroup memory must be declared in kernel, passed to helpers
+    threadgroup half A_tile[EP_TILE_M][EP_TILE_K];
+    threadgroup half B_staging[EP_SIMDGROUPS_PER_TG][8][8];
+    threadgroup half epilogue_staging[8][8];
+
     marlin_gemm_fused_fp4_epilogue_impl(A, B_packed, scales, C, dims, bias,
                                         k_epilogue_mode_fc, tg_pos, simd_id,
-                                        simd_lane);
+                                        simd_lane, A_tile, B_staging,
+                                        epilogue_staging);
 }
 
 // ===========================================================================

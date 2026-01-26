@@ -39,86 +39,21 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
-
-from .._compat import HAS_MLX, from_numpy, mx, nn, require_mlx, to_numpy
-from ..layers import MarlinLinear
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 if TYPE_CHECKING:
-    import mlx.core as mx
-    import mlx.nn as nn
+    from ..kv_cache import KVCache
 
 
-if HAS_MLX and mx is not None:
-    _DIFF_ATTN_SOURCE: str | None = None
-    _diff_attn_kernel: object | None = None
-    _diff_attn_causal_kernel: object | None = None
-
-    _DIFF_ATTN_ROWS_PER_TG = 4
-    _DIFF_ATTN_THREADS_PER_TG = 32 * _DIFF_ATTN_ROWS_PER_TG
-
-    def _get_diff_attn_source() -> str:
-        global _DIFF_ATTN_SOURCE
-        if _DIFF_ATTN_SOURCE is None:
-            shader_path = Path(__file__).parent.parent / "src" / "diff_attention.metal"
-            _DIFF_ATTN_SOURCE = shader_path.read_text()
-        return _DIFF_ATTN_SOURCE
-
-    def _get_diff_attn_kernel(causal: bool) -> object:
-        global _diff_attn_kernel, _diff_attn_causal_kernel
-        if causal:
-            if _diff_attn_causal_kernel is None:
-                _diff_attn_causal_kernel = mx.fast.metal_kernel(
-                    name="diff_attention_causal",
-                    input_names=[
-                        "Q1",
-                        "Q2",
-                        "K1",
-                        "K2",
-                        "V",
-                        "lambda_vals",
-                        "batch",
-                        "num_heads_q",
-                        "num_heads_k",
-                        "seq_q",
-                        "seq_k",
-                        "head_dim",
-                        "scale",
-                        "lambda_per_head",
-                    ],
-                    output_names=["O"],
-                    source=_get_diff_attn_source(),
-                    ensure_row_contiguous=True,
-                )
-            return _diff_attn_causal_kernel
-
-        if _diff_attn_kernel is None:
-            _diff_attn_kernel = mx.fast.metal_kernel(
-                name="diff_attention",
-                input_names=[
-                    "Q1",
-                    "Q2",
-                    "K1",
-                    "K2",
-                    "V",
-                    "lambda_vals",
-                    "batch",
-                    "num_heads_q",
-                    "num_heads_k",
-                    "seq_q",
-                    "seq_k",
-                    "head_dim",
-                    "scale",
-                    "lambda_per_head",
-                ],
-                output_names=["O"],
-                source=_get_diff_attn_source(),
-                ensure_row_contiguous=True,
-            )
-        return _diff_attn_kernel
+def _get_device() -> torch.device:
+    """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 @dataclass
@@ -146,7 +81,7 @@ class DifferentialAttentionConfig:
             When set, enables separate Q1/K1 projections for mixed precision.
         q2k2_quant_type: Optional quantization type for Q2/K2 projections.
             When set, enables separate Q2/K2 projections for mixed precision.
-        use_fused_kernel: Enable fused differential attention kernel (MLX only).
+        use_fused_kernel: Enable fused differential attention kernel (when available).
     """
 
     hidden_size: int
@@ -164,7 +99,7 @@ class DifferentialAttentionConfig:
     q2k2_quant_type: Literal["fp4", "fp16"] | None = None
     use_fused_kernel: bool = True
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
         if self.head_dim is None:
@@ -207,13 +142,9 @@ def parse_diff_transformer_config(config_dict: dict[str, Any]) -> DifferentialAt
     hidden_size = config_dict.get("hidden_size", config_dict.get("d_model", 4096))
     num_heads = config_dict.get("num_attention_heads", config_dict.get("n_head", 32))
     num_kv_heads = config_dict.get(
-        "num_key_value_heads",
-        config_dict.get("num_kv_heads", num_heads)
+        "num_key_value_heads", config_dict.get("num_kv_heads", num_heads)
     )
-    head_dim = config_dict.get(
-        "head_dim",
-        config_dict.get("kv_channels", hidden_size // num_heads)
-    )
+    head_dim = config_dict.get("head_dim", config_dict.get("kv_channels", hidden_size // num_heads))
 
     # Differential attention specific fields
     lambda_init = config_dict.get("diff_attn_lambda_init", 0.8)
@@ -249,7 +180,7 @@ def parse_diff_transformer_config(config_dict: dict[str, Any]) -> DifferentialAt
     )
 
 
-class RoPE:
+class RoPE(nn.Module):
     """Rotary Position Embedding for differential attention.
 
     Identical to standard RoPE but handles the split head dimensions
@@ -257,11 +188,16 @@ class RoPE:
     """
 
     def __init__(self, dims: int, traditional: bool = False, base: float = 10000.0):
+        super().__init__()
         self.dims = dims
         self.traditional = traditional
         self.base = base
 
-    def __call__(self, x: Any, offset: int = 0) -> Any:
+    def forward(
+        self,
+        x: torch.Tensor,
+        offset: int = 0,
+    ) -> torch.Tensor:
         """Apply RoPE to input tensor.
 
         Args:
@@ -271,145 +207,52 @@ class RoPE:
         Returns:
             Tensor with RoPE applied
         """
-        if not HAS_MLX:
-            return self._apply_numpy(to_numpy(x), offset)
-
         shape = x.shape
         seq_len = shape[2]
-        shape[3]
+        head_dim = shape[3]
+        device = x.device
+        dtype = x.dtype
 
         # Compute position indices
-        positions = mx.arange(offset, offset + seq_len, dtype=mx.float32)
+        positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=device)
 
         # Compute inverse frequencies
-        inv_freq = 1.0 / (self.base ** (mx.arange(0, self.dims, 2, dtype=mx.float32) / self.dims))
+        inv_freq = 1.0 / (
+            self.base
+            ** (torch.arange(0, self.dims, 2, dtype=torch.float32, device=device) / self.dims)
+        )
 
         # Compute angles: [seq_len, dims/2]
-        freqs = mx.outer(positions, inv_freq)
+        freqs = torch.outer(positions, inv_freq)
 
         # Compute cos and sin
-        cos = mx.cos(freqs)
-        sin = mx.sin(freqs)
+        cos = torch.cos(freqs)
+        sin = torch.sin(freqs)
 
         # Expand dims for broadcasting: [1, 1, seq_len, dims/2]
-        cos = cos[None, None, :, :]
-        sin = sin[None, None, :, :]
+        cos = cos.unsqueeze(0).unsqueeze(0)
+        sin = sin.unsqueeze(0).unsqueeze(0)
 
         # Split into even and odd indices
         x_even = x[..., ::2]
         x_odd = x[..., 1::2]
 
         # Apply rotation (Llama-style)
-        x_rotated_even = x_even * cos - x_odd * sin
-        x_rotated_odd = x_odd * cos + x_even * sin
+        if self.traditional:
+            x_rotated_even = x_even * cos - x_odd * sin
+            x_rotated_odd = x_even * sin + x_odd * cos
+        else:
+            x_rotated_even = x_even * cos - x_odd * sin
+            x_rotated_odd = x_odd * cos + x_even * sin
 
         # Interleave back
-        x_rotated = mx.concatenate(
-            [x_rotated_even[..., None], x_rotated_odd[..., None]], axis=-1
-        ).reshape(shape)
+        x_rotated = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
+        x_rotated = x_rotated.view(*shape[:-1], head_dim)
 
-        return x_rotated
-
-    def _apply_numpy(self, x: np.ndarray, offset: int = 0) -> np.ndarray:
-        """NumPy fallback for RoPE."""
-        shape = x.shape
-        seq_len = shape[2]
-
-        positions = np.arange(offset, offset + seq_len, dtype=np.float32)
-        inv_freq = 1.0 / (self.base ** (np.arange(0, self.dims, 2, dtype=np.float32) / self.dims))
-        freqs = np.outer(positions, inv_freq)
-
-        cos = np.cos(freqs)[None, None, :, :]
-        sin = np.sin(freqs)[None, None, :, :]
-
-        x_even = x[..., ::2]
-        x_odd = x[..., 1::2]
-
-        x_rotated_even = x_even * cos - x_odd * sin
-        x_rotated_odd = x_odd * cos + x_even * sin
-
-        x_rotated = np.zeros_like(x)
-        x_rotated[..., ::2] = x_rotated_even
-        x_rotated[..., 1::2] = x_rotated_odd
-
-        return x_rotated
+        return x_rotated.to(dtype)
 
 
-def _fused_diff_attention_mlx(
-    q1: Any,
-    q2: Any,
-    k1: Any,
-    k2: Any,
-    v: Any,
-    lambda_vals: Any,
-    scale: float,
-    lambda_per_head: bool,
-    use_causal: bool,
-) -> Any:
-    if not HAS_MLX or mx is None:
-        raise RuntimeError("Fused differential attention requires MLX.")
-
-    batch, num_heads_q, seq_q, head_dim = q1.shape
-    num_heads_k = k1.shape[1]
-    seq_k = k1.shape[2]
-
-    if head_dim > 128 or head_dim % 32 != 0:
-        raise ValueError(
-            "Fused differential attention requires head_dim <= 128 and "
-            "head_dim divisible by 32."
-        )
-
-    kernel = _get_diff_attn_kernel(causal=use_causal)
-
-    q1 = q1.astype(mx.float16)
-    q2 = q2.astype(mx.float16)
-    k1 = k1.astype(mx.float16)
-    k2 = k2.astype(mx.float16)
-    v = v.astype(mx.float16)
-    lambda_vals = lambda_vals.astype(mx.float16)
-
-    batch_const = mx.array([batch], dtype=mx.uint32)
-    num_heads_q_const = mx.array([num_heads_q], dtype=mx.uint32)
-    num_heads_k_const = mx.array([num_heads_k], dtype=mx.uint32)
-    seq_q_const = mx.array([seq_q], dtype=mx.uint32)
-    seq_k_const = mx.array([seq_k], dtype=mx.uint32)
-    head_dim_const = mx.array([head_dim], dtype=mx.uint32)
-    scale_const = mx.array([scale], dtype=mx.float32)
-    lambda_per_head_const = mx.array([lambda_per_head], dtype=mx.bool_)
-
-    grid_x = num_heads_q
-    grid_y = (seq_q + _DIFF_ATTN_ROWS_PER_TG - 1) // _DIFF_ATTN_ROWS_PER_TG
-    grid_z = batch
-
-    output_size = batch * num_heads_q * seq_q * head_dim
-
-    outputs = kernel(
-        inputs=[
-            q1.reshape(-1),
-            q2.reshape(-1),
-            k1.reshape(-1),
-            k2.reshape(-1),
-            v.reshape(-1),
-            lambda_vals.reshape(-1),
-            batch_const,
-            num_heads_q_const,
-            num_heads_k_const,
-            seq_q_const,
-            seq_k_const,
-            head_dim_const,
-            scale_const,
-            lambda_per_head_const,
-        ],
-        grid=(grid_x, grid_y, grid_z),
-        threadgroup=(_DIFF_ATTN_THREADS_PER_TG, 1, 1),
-        output_shapes=[(output_size,)],
-        output_dtypes=[mx.float16],
-    )
-
-    return outputs[0].reshape(batch, num_heads_q, seq_q, head_dim)
-
-
-class DifferentialAttention:
+class DifferentialAttention(nn.Module):
     """Pure differential attention computation (no projections).
 
     This class implements the core differential attention mechanism:
@@ -425,6 +268,7 @@ class DifferentialAttention:
         lambda_learnable: Whether lambda is trainable. Default: True.
         lambda_per_head: Use separate lambda per head. Default: False.
         sublayer_norm: Apply LayerNorm after attention. Default: False.
+        use_fused_kernel: Enable fused attention (uses PyTorch SDPA). Default: True.
     """
 
     def __init__(
@@ -437,66 +281,54 @@ class DifferentialAttention:
         sublayer_norm: bool = False,
         use_fused_kernel: bool = True,
     ):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
+        super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
         self.sublayer_norm = sublayer_norm
         self.lambda_per_head = lambda_per_head
         self.use_fused_kernel = use_fused_kernel
+        self.lambda_learnable = lambda_learnable
 
         # Lambda parameter
         # Shape: [num_heads] if per_head, else [1]
         lambda_shape = (num_heads,) if lambda_per_head else (1,)
 
-        if HAS_MLX and mx is not None:
-            if lambda_learnable:
-                # Learnable parameter stored as log to ensure positivity
-                # lambda = exp(lambda_log) where lambda_log is initialized to log(lambda_init)
-                init_val = math.log(lambda_init) if lambda_init > 0 else -2.0
-                self.lambda_log = mx.full(lambda_shape, init_val, dtype=mx.float16)
-            else:
-                # Fixed lambda
-                self.lambda_log = None
-                self.lambda_fixed = mx.full(lambda_shape, lambda_init, dtype=mx.float16)
-
-            if sublayer_norm:
-                # LayerNorm after differential attention
-                self.sublayer_ln = nn.LayerNorm(head_dim)
+        if lambda_learnable:
+            # Learnable parameter stored as log to ensure positivity
+            # lambda = exp(lambda_log) where lambda_log is initialized to log(lambda_init)
+            init_val = math.log(lambda_init) if lambda_init > 0 else -2.0
+            self.lambda_log = nn.Parameter(torch.full(lambda_shape, init_val, dtype=torch.float32))
         else:
-            # NumPy fallback
-            if lambda_learnable:
-                init_val = math.log(lambda_init) if lambda_init > 0 else -2.0
-                self.lambda_log = np.full(lambda_shape, init_val, dtype=np.float16)
-            else:
-                self.lambda_log = None
-                self.lambda_fixed = np.full(lambda_shape, lambda_init, dtype=np.float16)
+            # Fixed lambda (register as buffer, not parameter)
+            self.register_buffer(
+                "lambda_fixed", torch.full(lambda_shape, lambda_init, dtype=torch.float32)
+            )
+            self.lambda_log = None
+
+        if sublayer_norm:
+            # LayerNorm after differential attention
+            self.sublayer_ln = nn.LayerNorm(head_dim)
+        else:
             self.sublayer_ln = None
 
-        self.lambda_learnable = lambda_learnable
-
-    def get_lambda(self) -> Any:
+    def get_lambda(self) -> torch.Tensor:
         """Get current lambda value(s)."""
-        if self.lambda_learnable:
-            if HAS_MLX and mx is not None:
-                return mx.exp(self.lambda_log).astype(mx.float16)
-            else:
-                return np.exp(self.lambda_log).astype(np.float16)
+        if self.lambda_learnable and self.lambda_log is not None:
+            return torch.exp(self.lambda_log)
         else:
             return self.lambda_fixed
 
-    def __call__(
+    def forward(
         self,
-        q1: Any,  # [batch, num_heads, seq_q, head_dim]
-        k1: Any,  # [batch, num_kv_heads, seq_k, head_dim]
-        v: Any,   # [batch, num_kv_heads, seq_k, head_dim]
-        q2: Any,  # [batch, num_heads, seq_q, head_dim]
-        k2: Any,  # [batch, num_kv_heads, seq_k, head_dim]
-        attention_mask: Any | None = None,
-        attention_mask_is_causal: bool = False,
-    ) -> Any:
+        q1: torch.Tensor,  # [batch, num_heads, seq_q, head_dim]
+        k1: torch.Tensor,  # [batch, num_kv_heads, seq_k, head_dim]
+        v: torch.Tensor,  # [batch, num_kv_heads, seq_k, head_dim]
+        q2: torch.Tensor,  # [batch, num_heads, seq_q, head_dim]
+        k2: torch.Tensor,  # [batch, num_kv_heads, seq_k, head_dim]
+        attention_mask: torch.Tensor | None = None,
+        is_causal: bool = False,
+    ) -> torch.Tensor:
         """Compute differential attention.
 
         Args:
@@ -504,96 +336,67 @@ class DifferentialAttention:
             v: Value tensor (shared between both attention computations)
             q2, k2: Second attention sub-head Q/K (negative/baseline component)
             attention_mask: Optional causal mask with -inf for masked positions
-            attention_mask_is_causal: True if the mask is causal (allows fused kernel)
+            is_causal: If True, uses causal masking (more efficient than explicit mask)
 
         Returns:
             Differential attention output [batch, num_heads, seq_q, head_dim]
         """
-        if HAS_MLX:
-            return self._forward_mlx(
+        batch_size, num_heads, seq_q, head_dim = q1.shape
+        num_kv_heads = k1.shape[1]
+        device = q1.device
+        dtype = q1.dtype
+
+        # Handle GQA: repeat K/V heads if needed
+        if num_kv_heads < num_heads:
+            repeat_factor = num_heads // num_kv_heads
+            k1 = k1.repeat_interleave(repeat_factor, dim=1)
+            k2 = k2.repeat_interleave(repeat_factor, dim=1)
+            v = v.repeat_interleave(repeat_factor, dim=1)
+
+        if self.use_fused_kernel and (attention_mask is None or is_causal):
+            # Use PyTorch's optimized SDPA for both attention computations
+            attn1 = F.scaled_dot_product_attention(
                 q1,
                 k1,
                 v,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=is_causal,
+                scale=self.scale,
+            )
+            attn2 = F.scaled_dot_product_attention(
                 q2,
                 k2,
-                attention_mask,
-                attention_mask_is_causal,
+                v,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=is_causal,
+                scale=self.scale,
             )
         else:
-            return self._forward_numpy(
-                to_numpy(q1), to_numpy(k1), to_numpy(v),
-                to_numpy(q2), to_numpy(k2),
-                to_numpy(attention_mask) if attention_mask is not None else None
-            )
+            # Manual attention computation with explicit mask
+            # Compute attention scores for both sub-heads
+            scores1 = (q1 @ k1.transpose(-2, -1)) * self.scale
+            scores2 = (q2 @ k2.transpose(-2, -1)) * self.scale
 
-    def _forward_mlx(
-        self,
-        q1: Any, k1: Any, v: Any,
-        q2: Any, k2: Any,
-        attention_mask: Any | None,
-        attention_mask_is_causal: bool,
-    ) -> Any:
-        """MLX implementation of differential attention."""
-        batch_size, num_heads, seq_q, head_dim = q1.shape
-        num_kv_heads = k1.shape[1]
+            # Apply attention mask (causal mask with -inf)
+            if attention_mask is not None:
+                scores1 = scores1 + attention_mask
+                scores2 = scores2 + attention_mask
 
-        use_fused = self.use_fused_kernel and (
-            attention_mask is None or attention_mask_is_causal
-        )
+            # Softmax
+            weights1 = F.softmax(scores1, dim=-1)
+            weights2 = F.softmax(scores2, dim=-1)
 
-        if use_fused:
-            try:
-                return _fused_diff_attention_mlx(
-                    q1=q1,
-                    q2=q2,
-                    k1=k1,
-                    k2=k2,
-                    v=v,
-                    lambda_vals=self.get_lambda(),
-                    scale=self.scale,
-                    lambda_per_head=self.lambda_per_head,
-                    use_causal=attention_mask_is_causal,
-                )
-            except (ValueError, RuntimeError):
-                # Fall back to reference path when kernel constraints are not met.
-                use_fused = False
-
-        if attention_mask is None and attention_mask_is_causal:
-            attention_mask = create_causal_mask(seq_q, k1.shape[2])
-
-        if num_kv_heads < num_heads:
-            repeat_factor = num_heads // num_kv_heads
-            k1 = mx.repeat(k1, repeat_factor, axis=1)
-            k2 = mx.repeat(k2, repeat_factor, axis=1)
-            v = mx.repeat(v, repeat_factor, axis=1)
-
-        # Compute attention scores for both sub-heads
-        # attn1 = softmax(Q1 @ K1^T / sqrt(d)) @ V
-        # attn2 = softmax(Q2 @ K2^T / sqrt(d)) @ V
-        scores1 = (q1 @ k1.transpose(0, 1, 3, 2)) * self.scale
-        scores2 = (q2 @ k2.transpose(0, 1, 3, 2)) * self.scale
-
-        # Apply attention mask (causal mask with -inf)
-        if attention_mask is not None:
-            scores1 = scores1 + attention_mask
-            scores2 = scores2 + attention_mask
-
-        # Softmax
-        weights1 = mx.softmax(scores1, axis=-1)
-        weights2 = mx.softmax(scores2, axis=-1)
-
-        # Compute weighted values
-        attn1 = weights1 @ v
-        attn2 = weights2 @ v
+            # Compute weighted values
+            attn1 = weights1 @ v
+            attn2 = weights2 @ v
 
         # Differential attention: output = attn1 - lambda * attn2
-        lambda_val = self.get_lambda()
+        lambda_val = self.get_lambda().to(dtype=dtype, device=device)
         if self.lambda_per_head:
             # lambda_val: [num_heads] -> [1, num_heads, 1, 1]
-            lambda_val = lambda_val[None, :, None, None]
-        else:
-            # lambda_val: [1] -> scalar broadcast
-            pass
+            lambda_val = lambda_val.view(1, -1, 1, 1)
 
         output = attn1 - lambda_val * attn2
 
@@ -607,53 +410,8 @@ class DifferentialAttention:
 
         return output
 
-    def _forward_numpy(
-        self,
-        q1: np.ndarray, k1: np.ndarray, v: np.ndarray,
-        q2: np.ndarray, k2: np.ndarray,
-        attention_mask: np.ndarray | None,
-    ) -> np.ndarray:
-        """NumPy fallback implementation."""
-        batch_size, num_heads, seq_q, head_dim = q1.shape
-        num_kv_heads = k1.shape[1]
 
-        # Handle GQA
-        if num_kv_heads < num_heads:
-            repeat_factor = num_heads // num_kv_heads
-            k1 = np.repeat(k1, repeat_factor, axis=1)
-            k2 = np.repeat(k2, repeat_factor, axis=1)
-            v = np.repeat(v, repeat_factor, axis=1)
-
-        # Compute attention scores
-        scores1 = (q1 @ k1.transpose(0, 1, 3, 2)) * self.scale
-        scores2 = (q2 @ k2.transpose(0, 1, 3, 2)) * self.scale
-
-        if attention_mask is not None:
-            scores1 = scores1 + attention_mask
-            scores2 = scores2 + attention_mask
-
-        # Stable softmax
-        def softmax(x, axis=-1):
-            x_max = np.max(x, axis=axis, keepdims=True)
-            exp_x = np.exp(x - x_max)
-            return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
-
-        weights1 = softmax(scores1)
-        weights2 = softmax(scores2)
-
-        attn1 = weights1 @ v
-        attn2 = weights2 @ v
-
-        lambda_val = self.get_lambda()
-        if self.lambda_per_head:
-            lambda_val = lambda_val[None, :, None, None]
-
-        output = attn1 - lambda_val * attn2
-
-        return output
-
-
-class DifferentialMarlinAttention:
+class DifferentialMarlinAttention(nn.Module):
     """Full Differential Transformer attention layer with Marlin-quantized projections.
 
     This is a drop-in replacement for standard attention layers in transformer models.
@@ -682,7 +440,7 @@ class DifferentialMarlinAttention:
         rope_theta: RoPE base frequency. Default: 10000.0.
         max_position_embeddings: Maximum position for RoPE. Default: 4096.
         bias: Whether projections have bias. Default: False.
-        use_fused_kernel: Enable fused differential attention kernel (MLX only).
+        use_fused_kernel: Enable fused differential attention kernel. Default: True.
     """
 
     def __init__(
@@ -704,9 +462,7 @@ class DifferentialMarlinAttention:
         bias: bool = False,
         use_fused_kernel: bool = True,
     ):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads or num_heads
@@ -714,21 +470,19 @@ class DifferentialMarlinAttention:
         self.quant_type = quant_type
         self.q1k1_quant_type = q1k1_quant_type
         self.q2k2_quant_type = q2k2_quant_type
-        self.split_qk_projections = (
-            q1k1_quant_type is not None or q2k2_quant_type is not None
-        )
+        self.split_qk_projections = q1k1_quant_type is not None or q2k2_quant_type is not None
 
-        def _build_proj(out_features: int, proj_quant_type: Literal["fp4", "fp16"]) -> Any:
-            if proj_quant_type == "fp4":
-                return MarlinLinear(
-                    hidden_size,
-                    out_features,
-                    bias=bias,
-                    quant_type="fp4",
-                    group_size=group_size,
-                )
-            require_mlx("FP16 differential attention projections")
-            return nn.Linear(hidden_size, out_features, bias=bias)
+        def _build_proj(
+            in_features: int,
+            out_features: int,
+            proj_quant_type: Literal["fp4", "fp16"],
+        ) -> nn.Module:
+            # Always use nn.Linear for initialization.
+            # For quantized inference, use MarlinLinear.from_linear() to convert
+            # the layers after loading weights, or load pre-quantized checkpoints.
+            # This matches the pattern where models are trained in FP16 and
+            # quantized post-training.
+            return nn.Linear(in_features, out_features, bias=bias)
 
         v_size = self.num_kv_heads * self.head_dim
         o_size = num_heads * self.head_dim
@@ -741,46 +495,24 @@ class DifferentialMarlinAttention:
 
             self.q_proj = None
             self.k_proj = None
-            self.q1_proj = _build_proj(num_heads * self.head_dim, q1_type)
-            self.q2_proj = _build_proj(num_heads * self.head_dim, q2_type)
-            self.k1_proj = _build_proj(self.num_kv_heads * self.head_dim, k1_type)
-            self.k2_proj = _build_proj(self.num_kv_heads * self.head_dim, k2_type)
+            self.q1_proj = _build_proj(hidden_size, num_heads * self.head_dim, q1_type)
+            self.q2_proj = _build_proj(hidden_size, num_heads * self.head_dim, q2_type)
+            self.k1_proj = _build_proj(hidden_size, self.num_kv_heads * self.head_dim, k1_type)
+            self.k2_proj = _build_proj(hidden_size, self.num_kv_heads * self.head_dim, k2_type)
         else:
             q_size = num_heads * self.head_dim * 2
             k_size = self.num_kv_heads * self.head_dim * 2
 
-            if quant_type == "fp4":
-                self.q_proj = MarlinLinear(
-                    hidden_size, q_size, bias=bias,
-                    quant_type="fp4", group_size=group_size,
-                )
-                self.k_proj = MarlinLinear(
-                    hidden_size, k_size, bias=bias,
-                    quant_type="fp4", group_size=group_size,
-                )
-            else:
-                require_mlx("FP16 differential attention projections")
-                self.q_proj = nn.Linear(hidden_size, q_size, bias=bias)
-                self.k_proj = nn.Linear(hidden_size, k_size, bias=bias)
+            self.q_proj = _build_proj(hidden_size, q_size, quant_type)
+            self.k_proj = _build_proj(hidden_size, k_size, quant_type)
 
             self.q1_proj = None
             self.q2_proj = None
             self.k1_proj = None
             self.k2_proj = None
 
-        if quant_type == "fp4":
-            self.v_proj = MarlinLinear(
-                hidden_size, v_size, bias=bias,
-                quant_type="fp4", group_size=group_size,
-            )
-            self.o_proj = MarlinLinear(
-                o_size, hidden_size, bias=bias,
-                quant_type="fp4", group_size=group_size,
-            )
-        else:
-            require_mlx("FP16 differential attention projections")
-            self.v_proj = nn.Linear(hidden_size, v_size, bias=bias)
-            self.o_proj = nn.Linear(o_size, hidden_size, bias=bias)
+        self.v_proj = _build_proj(hidden_size, v_size, quant_type)
+        self.o_proj = _build_proj(o_size, hidden_size, quant_type)
 
         # Differential attention core
         self.diff_attn = DifferentialAttention(
@@ -796,15 +528,15 @@ class DifferentialMarlinAttention:
         # RoPE embeddings
         self.rope = RoPE(self.head_dim, base=rope_theta)
 
-    def __call__(
+    def forward(
         self,
-        hidden_states: Any,  # [batch, seq_len, hidden_size]
-        attention_mask: Any | None = None,
-        position_ids: Any | None = None,
-        kv_cache: Any | None = None,
+        hidden_states: torch.Tensor,  # [batch, seq_len, hidden_size]
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        kv_cache: KVCache | None = None,
         layer_idx: int = 0,
-        attention_mask_is_causal: bool = False,
-    ) -> Any:
+        is_causal: bool = False,
+    ) -> torch.Tensor:
         """Forward pass.
 
         Args:
@@ -813,77 +545,40 @@ class DifferentialMarlinAttention:
             position_ids: Optional position IDs for RoPE
             kv_cache: Optional KV cache for autoregressive generation
             layer_idx: Layer index for KV cache
+            is_causal: If True, uses causal masking
 
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
-        if HAS_MLX:
-            return self._forward_mlx(
-                hidden_states,
-                attention_mask,
-                position_ids,
-                kv_cache,
-                layer_idx,
-                attention_mask_is_causal,
-            )
-        else:
-            if attention_mask is None and attention_mask_is_causal:
-                seq_len = hidden_states.shape[1]
-                attention_mask = create_causal_mask(seq_len, seq_len)
-            return self._forward_numpy(
-                hidden_states,
-                attention_mask,
-                position_ids,
-                kv_cache,
-                layer_idx,
-            )
-
-    def _forward_mlx(
-        self,
-        hidden_states: Any,
-        attention_mask: Any | None,
-        position_ids: Any | None,
-        kv_cache: Any,
-        layer_idx: int,
-        attention_mask_is_causal: bool,
-    ) -> Any:
-        """MLX forward pass."""
         batch_size, seq_len, _ = hidden_states.shape
 
+        # V projection (shared between both attention paths)
         v = self.v_proj(hidden_states)  # [batch, seq, num_kv_heads * head_dim]
-        v = v.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.transpose(0, 2, 1, 3)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
         if self.split_qk_projections:
+            # Separate projections for Q1/K1 and Q2/K2
             q1 = self.q1_proj(hidden_states)
             q2 = self.q2_proj(hidden_states)
             k1 = self.k1_proj(hidden_states)
             k2 = self.k2_proj(hidden_states)
 
-            q1 = q1.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-            q2 = q2.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-            q1 = q1.transpose(0, 2, 1, 3)
-            q2 = q2.transpose(0, 2, 1, 3)
-
-            k1 = k1.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            k2 = k2.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            k1 = k1.transpose(0, 2, 1, 3)
-            k2 = k2.transpose(0, 2, 1, 3)
+            q1 = q1.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            q2 = q2.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+            k1 = k1.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+            k2 = k2.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         else:
+            # Combined projections, split after
             q = self.q_proj(hidden_states)
             k = self.k_proj(hidden_states)
 
-            q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim * 2)
-            q1 = q[..., :self.head_dim]
-            q2 = q[..., self.head_dim:]
-            q1 = q1.transpose(0, 2, 1, 3)
-            q2 = q2.transpose(0, 2, 1, 3)
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim * 2)
+            q1 = q[..., : self.head_dim].transpose(1, 2)
+            q2 = q[..., self.head_dim :].transpose(1, 2)
 
-            k = k.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim * 2)
-            k1 = k[..., :self.head_dim]
-            k2 = k[..., self.head_dim:]
-            k1 = k1.transpose(0, 2, 1, 3)
-            k2 = k2.transpose(0, 2, 1, 3)
+            k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim * 2)
+            k1 = k[..., : self.head_dim].transpose(1, 2)
+            k2 = k[..., self.head_dim :].transpose(1, 2)
 
         # Apply RoPE to Q1, Q2, K1, K2
         position_offset = kv_cache.seq_len if kv_cache else 0
@@ -895,11 +590,11 @@ class DifferentialMarlinAttention:
         # Update KV cache if provided
         if kv_cache is not None:
             # Cache stores [k1, k2] concatenated and v
-            k_combined = mx.concatenate([k1, k2], axis=-1)  # [batch, kv_heads, seq, head_dim*2]
+            k_combined = torch.cat([k1, k2], dim=-1)  # [batch, kv_heads, seq, head_dim*2]
             k_combined, v = kv_cache.update(layer_idx, k_combined, v)
             # Split back
-            k1 = k_combined[..., :self.head_dim]
-            k2 = k_combined[..., self.head_dim:]
+            k1 = k_combined[..., : self.head_dim]
+            k2 = k_combined[..., self.head_dim :]
 
         # Compute differential attention
         attn_output = self.diff_attn(
@@ -908,88 +603,16 @@ class DifferentialMarlinAttention:
             v,
             q2,
             k2,
-            attention_mask,
-            attention_mask_is_causal,
+            attention_mask=attention_mask,
+            is_causal=is_causal,
         )
 
         # Reshape and project output
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
-            batch_size, seq_len, self.num_heads * self.head_dim
+        attn_output = (
+            attn_output.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_len, self.num_heads * self.head_dim)
         )
-        output = self.o_proj(attn_output)
-
-        return output
-
-    def _forward_numpy(
-        self,
-        hidden_states: Any,
-        attention_mask: Any | None,
-        position_ids: Any | None,
-        kv_cache: Any,
-        layer_idx: int,
-    ) -> Any:
-        """NumPy fallback forward pass."""
-        hidden_np = to_numpy(hidden_states)
-        batch_size, seq_len, _ = hidden_np.shape
-
-        v = self.v_proj(hidden_states)
-
-        if self.split_qk_projections:
-            q1 = to_numpy(self.q1_proj(hidden_states))
-            q2 = to_numpy(self.q2_proj(hidden_states))
-            k1 = to_numpy(self.k1_proj(hidden_states))
-            k2 = to_numpy(self.k2_proj(hidden_states))
-
-            q1 = q1.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-            q2 = q2.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
-            q1 = q1.transpose(0, 2, 1, 3)
-            q2 = q2.transpose(0, 2, 1, 3)
-
-            k1 = k1.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            k2 = k2.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-            k1 = k1.transpose(0, 2, 1, 3)
-            k2 = k2.transpose(0, 2, 1, 3)
-        else:
-            q = to_numpy(self.q_proj(hidden_states))
-            k = to_numpy(self.k_proj(hidden_states))
-
-            q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim * 2)
-            q1 = q[..., :self.head_dim]
-            q2 = q[..., self.head_dim:]
-            q1 = q1.transpose(0, 2, 1, 3)
-            q2 = q2.transpose(0, 2, 1, 3)
-
-            k = k.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim * 2)
-            k1 = k[..., :self.head_dim]
-            k2 = k[..., self.head_dim:]
-            k1 = k1.transpose(0, 2, 1, 3)
-            k2 = k2.transpose(0, 2, 1, 3)
-
-        v = to_numpy(v)
-
-        # V is not split
-        v = v.reshape(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.transpose(0, 2, 1, 3)
-
-        # Apply RoPE
-        position_offset = 0  # KV cache not supported in numpy fallback
-        q1 = self.rope._apply_numpy(q1, offset=position_offset)
-        q2 = self.rope._apply_numpy(q2, offset=position_offset)
-        k1 = self.rope._apply_numpy(k1, offset=position_offset)
-        k2 = self.rope._apply_numpy(k2, offset=position_offset)
-
-        # Compute differential attention
-        mask_np = to_numpy(attention_mask) if attention_mask is not None else None
-        attn_output = self.diff_attn._forward_numpy(q1, k1, v, q2, k2, mask_np)
-
-        # Reshape and project output
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
-            batch_size, seq_len, self.num_heads * self.head_dim
-        )
-
-        if HAS_MLX:
-            attn_output = from_numpy(attn_output, backend="mlx")
-
         output = self.o_proj(attn_output)
 
         return output
@@ -1031,15 +654,20 @@ class DifferentialMarlinAttention:
         )
 
 
-def create_causal_mask(seq_len: int, kv_seq_len: int | None = None) -> Any:
+def create_causal_mask(
+    seq_len: int,
+    kv_seq_len: int | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor | None:
     """Create causal attention mask.
 
     Args:
         seq_len: Query sequence length
         kv_seq_len: Key/value sequence length (defaults to seq_len)
+        device: Device to create the mask on
 
     Returns:
-        Causal mask with -inf for masked positions
+        Causal mask with -inf for masked positions, or None for single-token decode
     """
     kv_seq_len = kv_seq_len or seq_len
 
@@ -1047,43 +675,11 @@ def create_causal_mask(seq_len: int, kv_seq_len: int | None = None) -> Any:
         # Single token decode - no masking needed
         return None
 
-    if HAS_MLX and mx is not None:
-        mask = mx.triu(mx.full((seq_len, kv_seq_len), float("-inf")), k=1)
-        return mask[None, None, :, :]
-    else:
-        mask = np.triu(np.full((seq_len, kv_seq_len), float("-inf")), k=1)
-        return mask[None, None, :, :]
+    if device is None:
+        device = _get_device()
 
-
-# Make classes inherit from nn.Module when MLX is available
-if HAS_MLX and nn is not None:
-    _OriginalDiffAttn = DifferentialAttention
-    _OriginalDiffMarlinAttn = DifferentialMarlinAttention
-
-    class DifferentialAttention(nn.Module):  # type: ignore[no-redef]
-        """Differential attention computation with learnable lambda."""
-
-        __doc__ = _OriginalDiffAttn.__doc__
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__()
-            _OriginalDiffAttn.__init__(self, *args, **kwargs)
-
-        __call__ = _OriginalDiffAttn.__call__
-        _forward_mlx = _OriginalDiffAttn._forward_mlx
-        _forward_numpy = _OriginalDiffAttn._forward_numpy
-        get_lambda = _OriginalDiffAttn.get_lambda
-
-    class DifferentialMarlinAttention(nn.Module):  # type: ignore[no-redef]
-        """Full differential attention layer with Marlin-quantized projections."""
-
-        __doc__ = _OriginalDiffMarlinAttn.__doc__
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__()
-            _OriginalDiffMarlinAttn.__init__(self, *args, **kwargs)
-
-        __call__ = _OriginalDiffMarlinAttn.__call__
-        _forward_mlx = _OriginalDiffMarlinAttn._forward_mlx
-        _forward_numpy = _OriginalDiffMarlinAttn._forward_numpy
-        from_config = _OriginalDiffMarlinAttn.from_config
+    mask = torch.triu(
+        torch.full((seq_len, kv_seq_len), float("-inf"), device=device),
+        diagonal=1,
+    )
+    return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]

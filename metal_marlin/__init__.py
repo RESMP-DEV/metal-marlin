@@ -1,19 +1,21 @@
-"""Metal Marlin: FP4-quantized GEMM for Apple Silicon via MLX custom kernels.
+"""Metal Marlin: FP4-quantized GEMM for Apple Silicon via Metal and PyTorch MPS.
 
 This package provides quantized GEMM operations optimized for Apple Silicon.
-When MLX is available, it uses Metal compute kernels for acceleration.
-When MLX is not available, core functionality falls back to numpy.
+Uses PyTorch MPS for tensor operations and direct Metal kernels for compute.
 
 Key exports:
-- MarlinLinear: Quantized linear layer (works with or without MLX)
+- MarlinLinear: Quantized linear layer
 - MRGPTQQuantizer: Hessian-aware GPTQ quantization with Hadamard rotation
-- pack_fp4_weights, quantized_linear: Low-level quantization (requires MLX)
-- HAS_MLX, HAS_TORCH: Feature flags for runtime detection
+- MoE dispatch: Token-to-expert grouping with PyTorch MPS routing
+- HAS_TORCH: Feature flag for runtime detection
 """
 
-from ._compat import HAS_MLX, HAS_TORCH
+from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 
-# Always-available imports (work without MLX)
+# HAS_MLX is deprecated - kept for backwards compatibility
+HAS_MLX = False
+
+# Always-available imports
 from .calibration import (
     AdaptiveQuantizer,
     AdaptiveQuantResult,
@@ -23,6 +25,9 @@ from .calibration import (
     ModelBudgetAllocation,
     compute_moe_expert_sensitivity,
 )
+
+# Metal-accelerated generation (requires PyTorch MPS + PyObjC Metal)
+from .generate import GenerationConfig, generate, generate_batch, generate_stream
 from .gptq import GPTQQuantizer
 from .gptq_fp4 import FP4GPTQQuantizer
 from .hadamard import (
@@ -31,6 +36,7 @@ from .hadamard import (
     hadamard_matrix,
     inverse_hadamard_rotation,
 )
+from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
 from .layers import MarlinLinear
 from .mixed_precision import (
     LayerPrecisionSelector,
@@ -39,6 +45,17 @@ from .mixed_precision import (
     MixedPrecisionConfig,
     MoEPrecisionConfig,
     Precision,
+)
+
+# MoE dispatch now uses PyTorch MPS (no MLX dependency)
+from .moe_dispatch import (
+    MoEDispatchInfo,
+    compute_expert_load,
+    compute_load_balancing_loss,
+    gather_for_experts,
+    group_tokens_by_expert,
+    group_tokens_by_expert_full,
+    scatter_expert_outputs,
 )
 from .mr_gptq import MRGPTQQuantizer, QuantizationFormat, QuantizationReport
 from .onnx_graph import (
@@ -55,7 +72,7 @@ from .onnx_loader import (
     list_onnx_tensors,
     normalize_onnx_name,
 )
-from .quantize import (  # FP8 quantization  # FP8 quantization
+from .quantize import (  # FP8 quantization
     FP8_E4M3_MAX,
     FP8_E4M3_VALUES,
     FP8_E5M2_MAX,
@@ -73,6 +90,7 @@ from .quantize import (  # FP8 quantization  # FP8 quantization
     unpack_fp4_weights,
 )
 from .quantize import pack_fp4_weights as pack_fp4_weights_cpu  # FP4/INT4/NF4 quantization
+from .sampler import MetalSampler, SamplingConfig, sample_next_token
 from .vision import (
     InternVLProjector,
     LLaVAProjector,
@@ -82,81 +100,12 @@ from .vision import (
     detect_projector_type,
 )
 
-# MLX-dependent imports - only available when MLX is installed
-# MLA attention requires MLX for Metal kernels
-if HAS_MLX:
-    from .autotune import (
-        autotune_gemm,
-        autotuned_linear,
-        load_autotune_cache,
-        save_autotune_cache,
-        sweep_problem_sizes,
-    )
-    from .capacity import (
-        CapacityAnalyzer,
-        CapacityStats,
-        DynamicCapacity,
-        DynamicCapacityConfig,
-        OverflowInfo,
-        analyze_overflow_rate,
-        auto_tune_capacity,
-        compute_expert_capacity,
-        dynamic_capacity,
-    )
-    from .checkpoint import (
-        CheckpointConfig,
-        CheckpointedModule,
-        CheckpointStats,
-        MemoryBudget,
-        SequentialCheckpoint,
-        checkpoint_activations,
-        chunked_apply,
-    )
-    from .expert_cache import (
-        ExpertCache,
-        ExpertStats,
-        LayerStats,
-        TileCoordinator,
-        TileKey,
-        create_moe_cache,
-    )
-    from .kernels import moe_expert_gemm_fp4, moe_router_topk
-    from .metal_marlin import MarlinLinear as MarlinLinearLegacy
-    from .metal_marlin import pack_fp4_weights, quantized_linear
-    from .mla_attention import (
-        MLAAttention,
-        MLAConfig,
-        MLAKVCache,
-        MLARoPE,
-        create_mla_from_hf_config,
-    )
-    from .mlp import MarlinMLP
-    from .moe_dispatch import (
-        MoEDispatchInfo,
-        compute_expert_load,
-        compute_load_balancing_loss,
-        gather_for_experts,
-        group_tokens_by_expert,
-        group_tokens_by_expert_full,
-        scatter_expert_outputs,
-    )
-    from .quantize_model import estimate_model_size, quantize_model
-    from .speculative import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
-
 __all__ = [
     # Feature flags
-    "HAS_MLX",
+    "HAS_MLX",  # Deprecated, always False
+    "HAS_MPS",
+    "HAS_PYOBJC_METAL",
     "HAS_TORCH",
-    # Capacity management
-    "CapacityAnalyzer",
-    "CapacityStats",
-    "DynamicCapacity",
-    "DynamicCapacityConfig",
-    "OverflowInfo",
-    "analyze_overflow_rate",
-    "auto_tune_capacity",
-    "compute_expert_capacity",
-    "dynamic_capacity",
     # FP8 quantization
     "FP8_E4M3_MAX",
     "FP8_E4M3_VALUES",
@@ -201,59 +150,24 @@ __all__ = [
     "MoEPrecisionConfig",
     "Precision",
     # Core modules
-    "CheckpointConfig",
-    "CheckpointStats",
-    "CheckpointedModule",
-    "DraftModel",
-    "DraftOutput",
-    "ExpertCache",
-    "ExpertStats",
-    "LayerStats",
     "MarlinLinear",
-    "MarlinLinearLegacy",
-    "MarlinMLP",
-    "MLAAttention",
-    "MLAConfig",
-    "MLAKVCache",
-    "MLARoPE",
-    "MemoryBudget",
     "MoEDispatchInfo",
-    "NGramDraft",
     "ONNXGraphInfo",
     "ONNXOp",
-    "SequentialCheckpoint",
-    "SmallModelDraft",
-    "TileCoordinator",
-    "TileKey",
-    "create_mla_from_hf_config",
-    "autotune_gemm",
-    "autotuned_linear",
-    "checkpoint_activations",
-    "chunked_apply",
     "compute_expert_load",
     "compute_load_balancing_loss",
-    "create_moe_cache",
     "detect_architecture",
-    "estimate_model_size",
     "extract_onnx_weights",
     "gather_for_experts",
     "get_onnx_config",
     "group_tokens_by_expert",
     "group_tokens_by_expert_full",
     "list_onnx_tensors",
-    "load_autotune_cache",
-    "moe_expert_gemm_fp4",
-    "moe_router_topk",
     "normalize_onnx_name",
-    "pack_fp4_weights",
     "parse_onnx_graph",
     "parse_onnx_graph_full",
-    "quantize_model",
-    "quantized_linear",
-    "save_autotune_cache",
     "scatter_expert_outputs",
     "summarize_graph",
-    "sweep_problem_sizes",
     # Vision projectors
     "VisionProjector",
     "VisionProjectorConfig",
@@ -261,4 +175,14 @@ __all__ = [
     "Qwen2VLProjector",
     "InternVLProjector",
     "detect_projector_type",
+    # Metal-accelerated generation
+    "GenerationConfig",
+    "generate",
+    "generate_batch",
+    "generate_stream",
+    "CacheConfigTorch",
+    "KVCacheTorch",
+    "MetalSampler",
+    "SamplingConfig",
+    "sample_next_token",
 ]

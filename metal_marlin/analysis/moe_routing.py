@@ -124,24 +124,15 @@ class LayerRoutingProfile:
 
     def get_hot_experts(self, threshold: float = 1.5) -> list[int]:
         """Get experts with activation rate > threshold * average."""
-        return [
-            eid for eid, stats in self.expert_stats.items()
-            if stats.is_hot
-        ]
+        return [eid for eid, stats in self.expert_stats.items() if stats.is_hot]
 
     def get_cold_experts(self, threshold: float = 0.5) -> list[int]:
         """Get experts with activation rate < threshold * average."""
-        return [
-            eid for eid, stats in self.expert_stats.items()
-            if stats.is_cold
-        ]
+        return [eid for eid, stats in self.expert_stats.items() if stats.is_cold]
 
     def get_dead_experts(self) -> list[int]:
         """Get experts that were never selected."""
-        return [
-            eid for eid, stats in self.expert_stats.items()
-            if stats.is_dead
-        ]
+        return [eid for eid, stats in self.expert_stats.items() if stats.is_dead]
 
 
 @dataclass
@@ -168,9 +159,7 @@ class RoutingPredictability:
 
     def __post_init__(self) -> None:
         if self.layer_correlations is None:
-            self.layer_correlations = np.zeros(
-                (self.num_layers, self.num_layers), dtype=np.float32
-            )
+            self.layer_correlations = np.zeros((self.num_layers, self.num_layers), dtype=np.float32)
 
 
 class MoERoutingProfiler:
@@ -232,9 +221,7 @@ class MoERoutingProfiler:
                 If not provided, uniform weights are assumed.
         """
         if layer_idx < 0 or layer_idx >= self.num_layers:
-            raise ValueError(
-                f"layer_idx {layer_idx} out of range [0, {self.num_layers})"
-            )
+            raise ValueError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")
 
         # Convert to numpy if needed
         if hasattr(expert_ids, "numpy"):
@@ -282,8 +269,7 @@ class MoERoutingProfiler:
             # Count activations per expert
             expert_counts = np.zeros(self.num_experts, dtype=np.int64)
             rank_counts: dict[int, dict[int, int]] = {
-                e: {k: 0 for k in range(self.top_k)}
-                for e in range(self.num_experts)
+                e: {k: 0 for k in range(self.top_k)} for e in range(self.num_experts)
             }
 
             # Sum probabilities per expert for averaging
@@ -314,10 +300,7 @@ class MoERoutingProfiler:
                 rate = count / total_assignments if total_assignments > 0 else 0.0
 
                 avg_prob = prob_sums[expert_id] / count if count > 0 else 0.0
-                var_prob = (
-                    (prob_sq_sums[expert_id] / count - avg_prob ** 2)
-                    if count > 0 else 0.0
-                )
+                var_prob = (prob_sq_sums[expert_id] / count - avg_prob**2) if count > 0 else 0.0
                 std_prob = np.sqrt(max(0, var_prob))
 
                 is_hot = count > self.hot_threshold * avg_activations
@@ -350,7 +333,11 @@ class MoERoutingProfiler:
             )
 
             # Routing entropy (using softmax of counts as distribution)
-            probs_norm = expert_counts / expert_counts.sum() if expert_counts.sum() > 0 else np.zeros_like(expert_counts)
+            probs_norm = (
+                expert_counts / expert_counts.sum()
+                if expert_counts.sum() > 0
+                else np.zeros_like(expert_counts)
+            )
             probs_norm = probs_norm[probs_norm > 0]  # Remove zeros for log
             entropy = -np.sum(probs_norm * np.log(probs_norm + 1e-10))
             max_entropy = np.log(self.num_experts)  # Uniform distribution
@@ -361,8 +348,7 @@ class MoERoutingProfiler:
             n = len(sorted_counts)
             cumsum = np.cumsum(sorted_counts)
             gini = (
-                (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n
-                if n > 0 and cumsum[-1] > 0 else 0.0
+                (n + 1 - 2 * np.sum(cumsum) / cumsum[-1]) / n if n > 0 and cumsum[-1] > 0 else 0.0
             )
 
             profiles[layer_idx] = LayerRoutingProfile(
@@ -507,9 +493,7 @@ class MoERoutingProfiler:
 
         # Per-layer prediction accuracy (from layer 0)
         for j in range(self.num_layers):
-            predictability.per_layer_accuracy[j] = float(
-                predictability.layer_correlations[0, j]
-            )
+            predictability.per_layer_accuracy[j] = float(predictability.layer_correlations[0, j])
 
         return predictability
 
@@ -623,9 +607,15 @@ class MoERoutingProfiler:
 
         # Aggregate statistics
         total_tokens = sum(p.total_tokens for p in self.layer_profiles.values())
-        avg_cv = np.mean([p.load_balance_cv for p in self.layer_profiles.values() if p.total_tokens > 0])
-        avg_entropy = np.mean([p.entropy for p in self.layer_profiles.values() if p.total_tokens > 0])
-        avg_gini = np.mean([p.gini_coefficient for p in self.layer_profiles.values() if p.total_tokens > 0])
+        avg_cv = np.mean(
+            [p.load_balance_cv for p in self.layer_profiles.values() if p.total_tokens > 0]
+        )
+        avg_entropy = np.mean(
+            [p.entropy for p in self.layer_profiles.values() if p.total_tokens > 0]
+        )
+        avg_gini = np.mean(
+            [p.gini_coefficient for p in self.layer_profiles.values() if p.total_tokens > 0]
+        )
 
         # Per-layer summary
         layer_summaries = []
@@ -633,17 +623,19 @@ class MoERoutingProfiler:
             if profile.total_tokens == 0:
                 continue
 
-            layer_summaries.append({
-                "layer": layer_idx,
-                "tokens": profile.total_tokens,
-                "active_experts": profile.active_experts,
-                "dead_experts": profile.dead_experts,
-                "load_balance_cv": round(profile.load_balance_cv, 4),
-                "entropy": round(profile.entropy, 4),
-                "gini": round(profile.gini_coefficient, 4),
-                "hot_experts": profile.get_hot_experts(),
-                "cold_experts": profile.get_cold_experts(),
-            })
+            layer_summaries.append(
+                {
+                    "layer": layer_idx,
+                    "tokens": profile.total_tokens,
+                    "active_experts": profile.active_experts,
+                    "dead_experts": profile.dead_experts,
+                    "load_balance_cv": round(profile.load_balance_cv, 4),
+                    "entropy": round(profile.entropy, 4),
+                    "gini": round(profile.gini_coefficient, 4),
+                    "hot_experts": profile.get_hot_experts(),
+                    "cold_experts": profile.get_cold_experts(),
+                }
+            )
 
         # Global hot/cold/dead experts
         global_hot = self.get_hot_experts()
@@ -680,12 +672,9 @@ class MoERoutingProfiler:
             },
             "predictability": {
                 "predictable_from_layer": self.predictability.predictable_from_layer,
-                "avg_prediction_accuracy": round(
-                    self.predictability.avg_prediction_accuracy, 4
-                ),
+                "avg_prediction_accuracy": round(self.predictability.avg_prediction_accuracy, 4),
                 "per_layer_from_layer0": {
-                    k: round(v, 4)
-                    for k, v in self.predictability.per_layer_accuracy.items()
+                    k: round(v, 4) for k, v in self.predictability.per_layer_accuracy.items()
                 },
             },
             "per_layer": layer_summaries,
@@ -721,15 +710,21 @@ class MoERoutingProfiler:
         print(f"  Gini coefficient: {summary['avg_gini']:.4f}")
 
         print("\nExpert Utilization:")
-        print(f"  Hot experts (>1.5x avg): {balance['num_hot']} - {balance['hot_experts'][:10]}{'...' if len(balance['hot_experts']) > 10 else ''}")
-        print(f"  Cold experts (<0.5x avg): {balance['num_cold']} - {balance['cold_experts'][:10]}{'...' if len(balance['cold_experts']) > 10 else ''}")
-        print(f"  Dead experts (never used): {balance['num_dead']} - {balance['dead_experts'][:10]}{'...' if len(balance['dead_experts']) > 10 else ''}")
+        print(
+            f"  Hot experts (>1.5x avg): {balance['num_hot']} - {balance['hot_experts'][:10]}{'...' if len(balance['hot_experts']) > 10 else ''}"
+        )
+        print(
+            f"  Cold experts (<0.5x avg): {balance['num_cold']} - {balance['cold_experts'][:10]}{'...' if len(balance['cold_experts']) > 10 else ''}"
+        )
+        print(
+            f"  Dead experts (never used): {balance['num_dead']} - {balance['dead_experts'][:10]}{'...' if len(balance['dead_experts']) > 10 else ''}"
+        )
 
-        if balance['num_dead'] > 0:
+        if balance["num_dead"] > 0:
             print(f"\n  OPTIMIZATION: {balance['num_dead']} experts can be pruned (never selected)")
 
         print("\nRouting Predictability:")
-        if pred['predictable_from_layer'] >= 0:
+        if pred["predictable_from_layer"] >= 0:
             print(f"  Routing predictable from layer: {pred['predictable_from_layer']}")
             print(f"  Average prediction accuracy: {pred['avg_prediction_accuracy']:.2%}")
             print("  OPTIMIZATION: Pre-load experts based on early layer routing")
@@ -829,8 +824,10 @@ class MoERoutingProfiler:
             ax4.set_ylabel("Metric Value")
             ax4.set_title("Load Balance Metrics per Layer")
             ax4.legend()
-            ax4.set_xticks(x[::max(1, len(x) // 10)])  # Show every 10th label
-            ax4.set_xticklabels([str(layers[i]) for i in range(0, len(layers), max(1, len(layers) // 10))])
+            ax4.set_xticks(x[:: max(1, len(x) // 10)])  # Show every 10th label
+            ax4.set_xticklabels(
+                [str(layers[i]) for i in range(0, len(layers), max(1, len(layers) // 10))]
+            )
 
         plt.tight_layout()
 
@@ -933,11 +930,15 @@ def simulate_routing_for_model(
         # Create layer-specific expert popularity (Dirichlet gives natural skew)
         alpha = np.ones(config["num_experts"]) * 0.5
         # Make some experts more popular
-        popular_experts = rng.choice(config["num_experts"], size=config["num_experts"] // 4, replace=False)
+        popular_experts = rng.choice(
+            config["num_experts"], size=config["num_experts"] // 4, replace=False
+        )
         alpha[popular_experts] *= 3.0
         # Make some experts very unpopular (candidates for pruning)
         if layer_idx % 5 == 0:  # Every 5th layer has some dead experts
-            dead_experts = rng.choice(config["num_experts"], size=config["num_experts"] // 20, replace=False)
+            dead_experts = rng.choice(
+                config["num_experts"], size=config["num_experts"] // 20, replace=False
+            )
             alpha[dead_experts] = 0.01
 
         expert_probs_base = rng.dirichlet(alpha)

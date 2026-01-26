@@ -16,6 +16,10 @@ Quantization API:
     from converters.safetensors_loader import load_and_quantize
 
     state_dict, config = load_and_quantize(Path("model/"), quant_type="fp4", group_size=32)
+
+Note:
+    This module uses PyTorch tensors. All tensor operations are performed on CPU
+    for maximum compatibility. Arrays are converted to torch.Tensor on load.
 """
 
 from __future__ import annotations
@@ -26,9 +30,10 @@ import warnings
 from pathlib import Path
 from typing import Any
 
-import mlx.core as mx
+import numpy as np
+import torch
 
-from ..metal_marlin.inference import ModelConfig
+from metal_marlin.inference import ModelConfig
 
 # Activation function aliases found across different model configs.
 _ACT_ALIASES: dict[str, str] = {
@@ -47,7 +52,7 @@ def _resolve_act(raw: str) -> str:
     return _ACT_ALIASES.get(raw.lower(), raw.lower())
 
 
-def _resolve_intermediate_size(cfg: dict) -> int:
+def _resolve_intermediate_size(cfg: dict[str, Any]) -> int:
     """Determine intermediate (FFN) size from various config keys."""
     if "intermediate_size" in cfg:
         return cfg["intermediate_size"]
@@ -66,7 +71,7 @@ def _resolve_intermediate_size(cfg: dict) -> int:
     return hidden * 4
 
 
-def _resolve_num_kv_heads(cfg: dict) -> int:
+def _resolve_num_kv_heads(cfg: dict[str, Any]) -> int:
     """Extract num_key_value_heads, handling GQA and MQA configs."""
     if "num_key_value_heads" in cfg:
         return cfg["num_key_value_heads"]
@@ -80,7 +85,7 @@ def _resolve_num_kv_heads(cfg: dict) -> int:
     return cfg.get("num_attention_heads", 32)
 
 
-def _resolve_head_dim(cfg: dict) -> int | None:
+def _resolve_head_dim(cfg: dict[str, Any]) -> int | None:
     """Extract explicit head_dim if specified (e.g., Phi-3)."""
     if "head_dim" in cfg:
         return cfg["head_dim"]
@@ -90,7 +95,7 @@ def _resolve_head_dim(cfg: dict) -> int | None:
     return None
 
 
-def _resolve_rope_theta(cfg: dict) -> float:
+def _resolve_rope_theta(cfg: dict[str, Any]) -> float:
     """Extract RoPE base frequency from config."""
     if "rope_theta" in cfg:
         return float(cfg["rope_theta"])
@@ -101,7 +106,7 @@ def _resolve_rope_theta(cfg: dict) -> float:
     return 10000.0
 
 
-def _resolve_norm_eps(cfg: dict) -> float:
+def _resolve_norm_eps(cfg: dict[str, Any]) -> float:
     """Extract layer norm epsilon from various config keys."""
     if "rms_norm_eps" in cfg:
         return float(cfg["rms_norm_eps"])
@@ -224,7 +229,7 @@ def load_and_quantize(
     model_path: Path,
     quant_type: str = "fp4",
     group_size: int = 32,
-) -> tuple[dict[str, mx.array], ModelConfig]:
+) -> tuple[dict[str, torch.Tensor], ModelConfig]:
     """Load safetensors weights and quantize Linear layers on-the-fly.
 
     Streams tensors from disk, quantizes 2D weight matrices to FP4 or INT4
@@ -249,11 +254,10 @@ def load_and_quantize(
         (state_dict, config) where state_dict has "{name}.packed" and
         "{name}.scales" for quantized layers, original names for passthrough.
     """
-    import mlx.core as mx
     from safetensors import safe_open
     from tqdm import tqdm
 
-    from ..metal_marlin.safetensors_loader import (
+    from metal_marlin.safetensors_loader import (
         _quantize_tensor_fp4,
         _quantize_tensor_int4,
     )
@@ -287,7 +291,7 @@ def load_and_quantize(
         with safe_open(str(shard), framework="numpy") as f:
             total_tensors += len(list(f.keys()))
 
-    state_dict: dict[str, mx.array] = {}
+    state_dict: dict[str, torch.Tensor] = {}
     n_quantized = 0
 
     with tqdm(total=total_tensors, desc="Quantizing weights", unit="tensor") as pbar:
@@ -295,14 +299,14 @@ def load_and_quantize(
             with safe_open(str(shard), framework="numpy") as f:
                 for name in f.keys():
                     tensor_np = f.get_tensor(name)
-                    tensor = mx.array(tensor_np)
+                    tensor = torch.from_numpy(tensor_np.copy())
 
                     if "weight" in name and tensor.ndim == 2:
                         K, N = tensor.shape
 
                         # Skip incompatible dimensions
                         if N % 8 != 0 or K % group_size != 0:
-                            state_dict[name] = tensor.astype(mx.float16)
+                            state_dict[name] = tensor.to(torch.float16)
                             pbar.update(1)
                             continue
 
@@ -310,15 +314,15 @@ def load_and_quantize(
                             packed, scales = _quantize_tensor_fp4(
                                 tensor, group_size
                             )
-                            state_dict[f"{name}.packed"] = packed
-                            state_dict[f"{name}.scales"] = scales
+                            state_dict[f"{name}.packed"] = _to_torch(packed)
+                            state_dict[f"{name}.scales"] = _to_torch(scales)
                         elif quant_type == "int4":
                             packed, scales, zeros = _quantize_tensor_int4(
                                 tensor, group_size
                             )
-                            state_dict[f"{name}.packed"] = packed
-                            state_dict[f"{name}.scales"] = scales
-                            state_dict[f"{name}.zeros"] = zeros
+                            state_dict[f"{name}.packed"] = _to_torch(packed)
+                            state_dict[f"{name}.scales"] = _to_torch(scales)
+                            state_dict[f"{name}.zeros"] = _to_torch(zeros)
                         else:
                             raise ValueError(
                                 f"Unknown quant_type: {quant_type!r}. "
@@ -328,12 +332,19 @@ def load_and_quantize(
                         n_quantized += 1
                         pbar.set_postfix_str(f"{name} [{K}x{N}]")
                     else:
-                        state_dict[name] = tensor.astype(mx.float16)
+                        state_dict[name] = tensor.to(torch.float16)
 
                     pbar.update(1)
 
     print(f"Done: {n_quantized} layers quantized, {len(state_dict)} total entries")
     return state_dict, config
+
+
+def _to_torch(arr: Any) -> torch.Tensor:
+    """Convert array to torch.Tensor."""
+    if isinstance(arr, torch.Tensor):
+        return arr
+    return torch.from_numpy(np.asarray(arr).copy())
 
 
 # ---------------------------------------------------------------------------
@@ -356,11 +367,11 @@ def load_and_quantize(
 
 
 def _split_fused_qkv(
-    fused: mx.array,
+    fused: torch.Tensor,
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
-) -> tuple[mx.array, mx.array, mx.array]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Split a fused QKV weight matrix into separate Q, K, V tensors.
 
     Handles the concatenated layout:
@@ -393,9 +404,9 @@ def _split_fused_qkv(
 
 
 def _split_fused_gate_up(
-    fused: mx.array,
+    fused: torch.Tensor,
     intermediate_size: int,
-) -> tuple[mx.array, mx.array]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Split a fused gate_up_proj weight into separate gate and up tensors.
 
     Layout: [gate: intermediate_size, up: intermediate_size] along output dim.
@@ -601,7 +612,7 @@ def detect_model_type(state_dict_keys: set[str]) -> str:
 
 
 def map_weight_names(
-    hf_state_dict: dict[str, mx.array],
+    hf_state_dict: dict[str, torch.Tensor],
     model_type: str = "auto",
     *,
     num_heads: int | None = None,
@@ -609,7 +620,7 @@ def map_weight_names(
     head_dim: int | None = None,
     intermediate_size: int | None = None,
     config: ModelConfig | dict[str, Any] | None = None,
-) -> dict[str, mx.array]:
+) -> dict[str, torch.Tensor]:
     """Map HuggingFace weight names to generic internal layer names.
 
     Handles renaming, fused QKV splitting, and fused gate_up splitting.
@@ -661,7 +672,7 @@ def map_weight_names(
 
     rules = _ARCHITECTURE_RULES[model_type]
     compiled = _build_mapper(rules)
-    mapped: dict[str, mx.array] = {}
+    mapped: dict[str, torch.Tensor] = {}
     unmapped: list[str] = []
 
     for hf_name, tensor in hf_state_dict.items():
@@ -739,7 +750,7 @@ def load_mapped_safetensors(
     *,
     config: ModelConfig | dict[str, Any] | None = None,
     config_path: str | Path | None = None,
-) -> tuple[dict[str, mx.array], ModelConfig]:
+) -> tuple[dict[str, torch.Tensor], ModelConfig]:
     """Load safetensors file(s) and map weight names to generic convention.
 
     Combines safetensors loading with weight name mapping. Reads config.json
@@ -770,7 +781,7 @@ def load_mapped_safetensors(
             config = load_config(cfg_path)
 
     # Load safetensors
-    state_dict: dict[str, mx.array] = {}
+    state_dict: dict[str, torch.Tensor] = {}
     if path.is_dir():
         shard_files = sorted(path.glob("*.safetensors"))
         if not shard_files:
@@ -778,11 +789,11 @@ def load_mapped_safetensors(
         for shard in shard_files:
             with safe_open(str(shard), framework="numpy") as f:
                 for name in f.keys():
-                    state_dict[name] = mx.array(f.get_tensor(name))
+                    state_dict[name] = torch.from_numpy(f.get_tensor(name).copy())
     else:
         with safe_open(str(path), framework="numpy") as f:
             for name in f.keys():
-                state_dict[name] = mx.array(f.get_tensor(name))
+                state_dict[name] = torch.from_numpy(f.get_tensor(name).copy())
 
     mapped = map_weight_names(state_dict, model_type=model_type, config=config)
 

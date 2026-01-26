@@ -17,19 +17,15 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .._compat import HAS_MLX
+from .._compat import HAS_TORCH, require_torch, torch
 from ..layers import MarlinLinear
 from ..mixed_precision import LayerQuantConfig, Precision
 from .base import HybridLayerType, LayerState, StateType
 
-if HAS_MLX:
-    import mlx.core as mx
-    import mlx.nn as nn
-else:
-    mx = None
-    nn = None
+if TYPE_CHECKING:
+    import torch as torch_typing
 
 
 @dataclass
@@ -41,8 +37,8 @@ class MambaState:
         conv_state: [batch, d_conv - 1, d_inner] - Convolutional state buffer.
     """
 
-    ssm_state: Any  # mx.array when MLX available
-    conv_state: Any  # mx.array when MLX available
+    ssm_state: Any  # torch.Tensor when PyTorch available
+    conv_state: Any  # torch.Tensor when PyTorch available
 
     @classmethod
     def zeros(
@@ -51,14 +47,19 @@ class MambaState:
         d_state: int,
         d_inner: int,
         d_conv: int,
+        device: str = "mps",
+        dtype: Any = None,
     ) -> MambaState:
         """Create zero-initialized state."""
-        if mx is None:
-            raise RuntimeError("MLX required for Mamba state initialization")
+        require_torch("Mamba state initialization")
+        assert torch is not None
+
+        if dtype is None:
+            dtype = torch.float32
 
         return cls(
-            ssm_state=mx.zeros((batch_size, d_state, d_inner)),
-            conv_state=mx.zeros((batch_size, d_conv - 1, d_inner)),
+            ssm_state=torch.zeros((batch_size, d_state, d_inner), device=device, dtype=dtype),
+            conv_state=torch.zeros((batch_size, d_conv - 1, d_inner), device=device, dtype=dtype),
         )
 
 
@@ -83,8 +84,15 @@ class SelectiveScanConfig:
     dt_floor: float = 1e-4
 
 
-class MambaBlock(nn.Module if HAS_MLX else object):
-    """Mamba block with selective state space mechanism.
+def _get_base_class() -> type:
+    """Return torch.nn.Module if PyTorch is available, else object."""
+    if HAS_TORCH and torch is not None:
+        return torch.nn.Module
+    return object
+
+
+class _MambaBlockBase:
+    """Base implementation of Mamba block without nn.Module inheritance.
 
     Architecture:
         x -> Linear(in_proj) -> split -> [xz, x_proj]
@@ -98,7 +106,29 @@ class MambaBlock(nn.Module if HAS_MLX else object):
     layer_type = HybridLayerType.MAMBA
     state_type = StateType.HYBRID  # Both SSM and conv state
 
-    def __init__(
+    hidden_size: int
+    d_state: int
+    d_conv: int
+    expand: int
+    d_inner: int
+    dt_rank: int
+    conv_bias: bool
+    bias: bool
+    quant_config: LayerQuantConfig
+    device: str
+
+    # Layers
+    in_proj: MarlinLinear
+    conv1d: Any  # torch.nn.Conv1d
+    x_proj: MarlinLinear
+    dt_proj: Any  # torch.nn.Linear
+    out_proj: MarlinLinear
+
+    # Parameters
+    A_log: Any  # torch.nn.Parameter
+    D: Any  # torch.nn.Parameter
+
+    def _init_mamba(
         self,
         hidden_size: int,
         d_state: int = 16,
@@ -108,7 +138,8 @@ class MambaBlock(nn.Module if HAS_MLX else object):
         conv_bias: bool = True,
         bias: bool = False,
         quant_config: LayerQuantConfig | None = None,
-    ):
+        device: str = "mps",
+    ) -> None:
         """Initialize Mamba block.
 
         Args:
@@ -120,17 +151,17 @@ class MambaBlock(nn.Module if HAS_MLX else object):
             conv_bias: Use bias in convolution.
             bias: Use bias in linear projections.
             quant_config: Quantization settings for linear layers.
+            device: Device for tensor allocation.
         """
-        if not HAS_MLX:
-            raise RuntimeError("MLX required for MambaBlock")
-
-        super().__init__()
+        require_torch("MambaBlock")
+        assert torch is not None
 
         self.hidden_size = hidden_size
         self.d_state = d_state
         self.d_conv = d_conv
         self.expand = expand
         self.d_inner = hidden_size * expand
+        self.device = device
 
         # Compute dt_rank
         if dt_rank == "auto":
@@ -154,13 +185,14 @@ class MambaBlock(nn.Module if HAS_MLX else object):
 
         # 1D convolution for local context
         # Note: For quantized inference, we keep conv in FP16 (small parameter count)
-        self.conv1d = nn.Conv1d(
+        self.conv1d = torch.nn.Conv1d(
             in_channels=self.d_inner,
             out_channels=self.d_inner,
             kernel_size=d_conv,
             groups=self.d_inner,  # Depthwise
             bias=conv_bias,
             padding=d_conv - 1,
+            device=device,
         )
 
         # x_proj: maps d_inner -> dt_rank + 2*d_state (for B and C)
@@ -174,12 +206,12 @@ class MambaBlock(nn.Module if HAS_MLX else object):
         )
 
         # dt_proj: maps dt_rank -> d_inner
-        self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True)
+        self.dt_proj = torch.nn.Linear(self.dt_rank, self.d_inner, bias=True, device=device)
 
         # A and D parameters (not quantized - small)
         # A is the state transition matrix (initialized for stability)
-        self.A_log = mx.zeros((d_state, self.d_inner))
-        self.D = mx.ones((self.d_inner,))
+        self.A_log = torch.nn.Parameter(torch.zeros((d_state, self.d_inner), device=device))
+        self.D = torch.nn.Parameter(torch.ones((self.d_inner,), device=device))
 
         # Output projection: maps d_inner -> hidden_size
         self.out_proj = MarlinLinear(
@@ -207,36 +239,38 @@ class MambaBlock(nn.Module if HAS_MLX else object):
 
     def _init_parameters(self) -> None:
         """Initialize SSM parameters for stability."""
+        assert torch is not None
+
         # A initialization: use S4D-Real scheme for stability
         # A = -exp(uniform(log(dt_min), log(dt_max)))
         # This gives a distribution of timescales
-        A = mx.repeat(mx.arange(1, self.d_state + 1, dtype=mx.float32)[:, None], self.d_inner, axis=1)
-        self.A_log = mx.log(A)
+        A = torch.arange(1, self.d_state + 1, dtype=torch.float32, device=self.device)
+        A = A.unsqueeze(1).expand(self.d_state, self.d_inner)
+        self.A_log.data = torch.log(A)
 
         # D is a skip connection (residual)
-        self.D = mx.ones((self.d_inner,))
+        self.D.data = torch.ones((self.d_inner,), device=self.device)
 
         # Initialize dt_proj bias to encourage small initial dt
-        if hasattr(self.dt_proj, "bias"):
+        if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
             # Initialize to values that give dt in [dt_min, dt_max]
-            dt_init = mx.exp(
-                mx.random.uniform(
-                    shape=(self.d_inner,),
-                    low=math.log(0.001),
-                    high=math.log(0.1),
+            dt_init = torch.exp(
+                torch.empty(self.d_inner, device=self.device).uniform_(
+                    math.log(0.001), math.log(0.1)
                 )
             )
             # Inverse of softplus to get bias
-            inv_dt = dt_init + mx.log(-mx.expm1(-dt_init))
-            self.dt_proj.bias = inv_dt
+            inv_dt = dt_init + torch.log(-torch.expm1(-dt_init))
+            with torch.no_grad():
+                self.dt_proj.bias.copy_(inv_dt)
 
-    def __call__(
+    def _forward(
         self,
-        hidden_states: mx.array,
-        position_ids: mx.array | None = None,
+        hidden_states: torch_typing.Tensor,
+        position_ids: torch_typing.Tensor | None = None,
         state: LayerState | None = None,
-        attention_mask: mx.array | None = None,
-    ) -> tuple[mx.array, LayerState | None]:
+        attention_mask: torch_typing.Tensor | None = None,
+    ) -> tuple[torch_typing.Tensor, LayerState | None]:
         """Forward pass through Mamba block.
 
         Args:
@@ -248,61 +282,67 @@ class MambaBlock(nn.Module if HAS_MLX else object):
         Returns:
             (output, new_state) where output is [batch, seq_len, hidden_size]
         """
+        assert torch is not None
         batch_size, seq_len, _ = hidden_states.shape
 
         # Project input to (x, z) pair
         xz = self.in_proj(hidden_states)  # [B, L, 2*d_inner]
-        x, z = mx.split(xz, 2, axis=-1)  # Each [B, L, d_inner]
+        x, z = torch.chunk(xz, 2, dim=-1)  # Each [B, L, d_inner]
 
         # Convolutional branch with state handling
         if state is not None and state.conv_state is not None:
             # Prepend conv state for causal convolution
             conv_state = state.conv_state  # [B, d_conv-1, d_inner]
-            x_with_state = mx.concatenate([conv_state, x.transpose(0, 2, 1)], axis=1)
+            x_with_state = torch.cat([conv_state, x.transpose(1, 2)], dim=2)
             # [B, d_inner, L+d_conv-1]
-            conv_out = self.conv1d(x_with_state.transpose(0, 2, 1))[:, :seq_len, :]
+            x_transposed = x_with_state.transpose(1, 2)  # [B, L+d_conv-1, d_inner]
+            conv_out = self.conv1d(x_transposed.transpose(1, 2))[:, :, :seq_len]
+            conv_out = conv_out.transpose(1, 2)  # [B, L, d_inner]
             # Update conv state (last d_conv-1 positions)
-            new_conv_state = x.transpose(0, 2, 1)[:, -(self.d_conv - 1):, :]
+            new_conv_state = x.transpose(1, 2)[:, :, -(self.d_conv - 1) :]
         else:
             # Transpose for conv1d: [B, d_inner, L]
-            x_transposed = x.transpose(0, 2, 1)
-            conv_out = self.conv1d(x_transposed)[:, :seq_len, :]
-            conv_out = conv_out.transpose(0, 2, 1)  # Back to [B, L, d_inner]
-            new_conv_state = x.transpose(0, 2, 1)[:, -(self.d_conv - 1):, :] if seq_len >= self.d_conv - 1 else None
+            x_transposed = x.transpose(1, 2)
+            conv_out = self.conv1d(x_transposed)[:, :, :seq_len]
+            conv_out = conv_out.transpose(1, 2)  # Back to [B, L, d_inner]
+            new_conv_state = (
+                x.transpose(1, 2)[:, :, -(self.d_conv - 1) :]
+                if seq_len >= self.d_conv - 1
+                else None
+            )
 
-        # Apply activation
-        x = mx.sigmoid(conv_out) * conv_out  # SiLU/Swish
+        # Apply activation (SiLU/Swish)
+        x = torch.nn.functional.silu(conv_out)
 
         # Compute SSM parameters from input (selective!)
         x_dbl = self.x_proj(x)  # [B, L, dt_rank + 2*d_state]
 
         # Split into dt, B, C
-        dt, B, C = mx.split(
-            x_dbl,
-            [self.dt_rank, self.dt_rank + self.d_state],
-            axis=-1,
-        )
-        # dt: [B, L, dt_rank]
-        # B: [B, L, d_state]
-        # C: [B, L, d_state]
+        dt = x_dbl[:, :, : self.dt_rank]  # [B, L, dt_rank]
+        B = x_dbl[:, :, self.dt_rank : self.dt_rank + self.d_state]  # [B, L, d_state]
+        C = x_dbl[:, :, self.dt_rank + self.d_state :]  # [B, L, d_state]
 
         # Project dt to d_inner and apply softplus
         dt = self.dt_proj(dt)  # [B, L, d_inner]
-        dt = mx.softplus(dt)  # Ensure positive
+        dt = torch.nn.functional.softplus(dt)  # Ensure positive
 
         # Get A from log
-        A = -mx.exp(self.A_log)  # [d_state, d_inner]
+        A = -torch.exp(self.A_log)  # [d_state, d_inner]
 
         # Run selective scan
         if state is not None and state.ssm_state is not None:
             ssm_state = state.ssm_state
         else:
-            ssm_state = mx.zeros((batch_size, self.d_state, self.d_inner))
+            ssm_state = torch.zeros(
+                (batch_size, self.d_state, self.d_inner),
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
+            )
 
         y, new_ssm_state = self._selective_scan(x, dt, A, B, C, ssm_state)
 
         # Gate with z
-        y = y * mx.sigmoid(z)
+        y = y * torch.sigmoid(z)
 
         # Skip connection with D
         y = y + self.D * x
@@ -321,13 +361,13 @@ class MambaBlock(nn.Module if HAS_MLX else object):
 
     def _selective_scan(
         self,
-        x: mx.array,  # [B, L, d_inner]
-        dt: mx.array,  # [B, L, d_inner]
-        A: mx.array,  # [d_state, d_inner]
-        B: mx.array,  # [B, L, d_state]
-        C: mx.array,  # [B, L, d_state]
-        ssm_state: mx.array,  # [B, d_state, d_inner]
-    ) -> tuple[mx.array, mx.array]:
+        x: torch_typing.Tensor,  # [B, L, d_inner]
+        dt: torch_typing.Tensor,  # [B, L, d_inner]
+        A: torch_typing.Tensor,  # [d_state, d_inner]
+        B: torch_typing.Tensor,  # [B, L, d_state]
+        C: torch_typing.Tensor,  # [B, L, d_state]
+        ssm_state: torch_typing.Tensor,  # [B, d_state, d_inner]
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
         """Selective scan operation (sequential version).
 
         This is the key innovation of Mamba: the SSM parameters (A, B, C)
@@ -347,19 +387,20 @@ class MambaBlock(nn.Module if HAS_MLX else object):
         Returns:
             (output_sequence, final_ssm_state)
         """
+        assert torch is not None
         batch_size, seq_len, d_inner = x.shape
 
         # Discretize A with zero-order hold: A_bar = exp(dt * A)
         # Note: A is [d_state, d_inner], dt is [B, L, d_inner]
         # We need A_bar as [B, L, d_state, d_inner]
-        dt_A = dt[:, :, None, :] * A[None, None, :, :]  # [B, L, d_state, d_inner]
-        A_bar = mx.exp(dt_A)
+        dt_A = dt.unsqueeze(2) * A.unsqueeze(0).unsqueeze(0)  # [B, L, d_state, d_inner]
+        A_bar = torch.exp(dt_A)
 
         # Discretize B with zero-order hold: B_bar = (A^-1 * (A_bar - I)) * B
         # Simplified: B_bar ≈ dt * B (when dt is small)
         # B is [B, L, d_state], dt is [B, L, d_inner]
         # Need B_bar as [B, L, d_state, d_inner]
-        B_bar = dt[:, :, None, :] * B[:, :, :, None]  # [B, L, d_state, d_inner]
+        B_bar = dt.unsqueeze(2) * B.unsqueeze(-1)  # [B, L, d_state, d_inner]
 
         # Sequential scan
         outputs = []
@@ -371,24 +412,25 @@ class MambaBlock(nn.Module if HAS_MLX else object):
             B_bar_t = B_bar[:, t, :, :]  # [B, d_state, d_inner]
             x_t = x[:, t, :]  # [B, d_inner]
 
-            h = A_bar_t * h + B_bar_t * x_t[:, None, :]  # [B, d_state, d_inner]
+            h = A_bar_t * h + B_bar_t * x_t.unsqueeze(1)  # [B, d_state, d_inner]
 
             # Output: y = C * h
             C_t = C[:, t, :]  # [B, d_state]
-            y_t = mx.sum(C_t[:, :, None] * h, axis=1)  # [B, d_inner]
+            y_t = torch.sum(C_t.unsqueeze(-1) * h, dim=1)  # [B, d_inner]
 
             outputs.append(y_t)
 
-        y = mx.stack(outputs, axis=1)  # [B, L, d_inner]
+        y = torch.stack(outputs, dim=1)  # [B, L, d_inner]
         return y, h
 
-    def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+    def _init_state(self, batch_size: int, layer_idx: int) -> LayerState:
         """Initialize state for autoregressive generation."""
         mamba_state = MambaState.zeros(
             batch_size=batch_size,
             d_state=self.d_state,
             d_inner=self.d_inner,
             d_conv=self.d_conv,
+            device=self.device,
         )
         return LayerState(
             state_type=StateType.HYBRID,
@@ -398,8 +440,8 @@ class MambaBlock(nn.Module if HAS_MLX else object):
         )
 
 
-class MarlinMambaBlock(nn.Module if HAS_MLX else object):
-    """Full Mamba block with input/output norms and MLP.
+class _MarlinMambaBlockBase:
+    """Base implementation of full Mamba block with input/output norms and MLP.
 
     Matches the structure expected by hybrid models:
         x -> Norm -> Mamba -> residual -> Norm -> MLP -> residual
@@ -410,7 +452,14 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
     layer_type = HybridLayerType.MAMBA
     state_type = StateType.HYBRID
 
-    def __init__(
+    hidden_size: int
+    intermediate_size: int
+    mamba: Any  # MambaBlock
+    input_layernorm: Any  # RMSNorm
+    post_mamba_layernorm: Any  # RMSNorm
+    mlp: Any  # MarlinMLP
+
+    def _init_marlin_mamba(
         self,
         hidden_size: int,
         intermediate_size: int | None = None,
@@ -422,7 +471,8 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
         rms_norm_eps: float = 1e-6,
         use_gated_mlp: bool = True,
         mlp_activation: str = "silu",
-    ):
+        device: str = "mps",
+    ) -> None:
         """Initialize full Mamba block.
 
         Args:
@@ -436,11 +486,9 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
             rms_norm_eps: Epsilon for RMSNorm.
             use_gated_mlp: Use gated MLP (SwiGLU).
             mlp_activation: Activation for MLP.
+            device: Device for tensor allocation.
         """
-        if not HAS_MLX:
-            raise RuntimeError("MLX required for MarlinMambaBlock")
-
-        super().__init__()
+        require_torch("MarlinMambaBlock")
 
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size or hidden_size * 4
@@ -452,17 +500,18 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
             d_conv=d_conv,
             expand=expand,
             quant_config=quant_config,
+            device=device,
         )
 
         # Layer norms
-        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps)
-        self.post_mamba_layernorm = RMSNorm(hidden_size, rms_norm_eps)
+        self.input_layernorm = RMSNorm(hidden_size, rms_norm_eps, device=device)
+        self.post_mamba_layernorm = RMSNorm(hidden_size, rms_norm_eps, device=device)
 
         # MLP (import here to avoid circular)
         from ..mlp import MarlinMLP
 
         mlp_quant = mlp_quant_config or quant_config
-        quant_type = "fp4" if mlp_quant is None else self._get_quant_type(mlp_quant)
+        quant_type = "fp4" if mlp_quant is None else self._get_quant_type_mlp(mlp_quant)
         group_size = 128 if mlp_quant is None else mlp_quant.group_size
 
         self.mlp = MarlinMLP(
@@ -474,7 +523,7 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
             gated=use_gated_mlp,
         )
 
-    def _get_quant_type(self, config: LayerQuantConfig) -> str:
+    def _get_quant_type_mlp(self, config: LayerQuantConfig) -> str:
         """Convert precision enum to string."""
         precision_map = {
             Precision.FP4_E2M1: "fp4",
@@ -486,13 +535,13 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
         }
         return precision_map.get(config.precision, "fp4")
 
-    def __call__(
+    def _forward_block(
         self,
-        hidden_states: mx.array,
-        position_ids: mx.array | None = None,
+        hidden_states: torch_typing.Tensor,
+        position_ids: torch_typing.Tensor | None = None,
         state: LayerState | None = None,
-        attention_mask: mx.array | None = None,
-    ) -> tuple[mx.array, LayerState | None]:
+        attention_mask: torch_typing.Tensor | None = None,
+    ) -> tuple[torch_typing.Tensor, LayerState | None]:
         """Forward pass.
 
         Args:
@@ -523,25 +572,215 @@ class MarlinMambaBlock(nn.Module if HAS_MLX else object):
 
         return hidden_states, new_state
 
-    def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+    def _init_state_block(self, batch_size: int, layer_idx: int) -> LayerState:
         """Initialize state for autoregressive generation."""
         return self.mamba.init_state(batch_size, layer_idx)
 
 
-class RMSNorm(nn.Module if HAS_MLX else object):
-    """RMSNorm for Mamba blocks.
+class _RMSNormBase:
+    """Base RMSNorm implementation for Mamba blocks."""
 
-    Duplicated here to avoid import issues when MLX not available.
-    """
+    weight: Any  # torch.nn.Parameter
+    eps: float
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        if not HAS_MLX:
-            raise RuntimeError("MLX required for RMSNorm")
-        super().__init__()
-        self.weight = mx.ones((hidden_size,))
+    def _init_rmsnorm(self, hidden_size: int, eps: float = 1e-6, device: str = "mps") -> None:
+        require_torch("RMSNorm")
+        assert torch is not None
+        self.weight = torch.nn.Parameter(torch.ones((hidden_size,), device=device))
         self.eps = eps
 
-    def __call__(self, x: mx.array) -> mx.array:
-        variance = mx.mean(x ** 2, axis=-1, keepdims=True)
-        x = x * mx.rsqrt(variance + self.eps)
+    def _forward_rmsnorm(self, x: torch_typing.Tensor) -> torch_typing.Tensor:
+        assert torch is not None
+        variance = torch.mean(x**2, dim=-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
+
+
+# Conditionally define classes based on PyTorch availability
+if HAS_TORCH and torch is not None:
+
+    class MambaBlock(torch.nn.Module, _MambaBlockBase):
+        """Mamba block with selective state space mechanism.
+
+        Architecture:
+            x -> Linear(in_proj) -> split -> [xz, x_proj]
+                                                |
+            x_proj -> Conv1D -> SiLU -> SSM(A, B, C, dt) -> * z -> Linear(out_proj) -> out
+
+        The selective scan allows the model to selectively remember or forget
+        information based on the input, unlike traditional RNNs with fixed dynamics.
+        """
+
+        def __init__(
+            self,
+            hidden_size: int,
+            d_state: int = 16,
+            d_conv: int = 4,
+            expand: int = 2,
+            dt_rank: int | str = "auto",
+            conv_bias: bool = True,
+            bias: bool = False,
+            quant_config: LayerQuantConfig | None = None,
+            device: str = "mps",
+        ):
+            """Initialize Mamba block.
+
+            Args:
+                hidden_size: Input/output dimension.
+                d_state: State dimension for SSM (N in paper).
+                d_conv: Convolutional kernel width.
+                expand: Expansion factor for inner dimension.
+                dt_rank: Rank for delta projection. "auto" = ceil(hidden_size / 16).
+                conv_bias: Use bias in convolution.
+                bias: Use bias in linear projections.
+                quant_config: Quantization settings for linear layers.
+                device: Device for tensor allocation.
+            """
+            torch.nn.Module.__init__(self)
+            self._init_mamba(
+                hidden_size,
+                d_state,
+                d_conv,
+                expand,
+                dt_rank,
+                conv_bias,
+                bias,
+                quant_config,
+                device,
+            )
+
+        def forward(
+            self,
+            hidden_states: torch_typing.Tensor,
+            position_ids: torch_typing.Tensor | None = None,
+            state: LayerState | None = None,
+            attention_mask: torch_typing.Tensor | None = None,
+        ) -> tuple[torch_typing.Tensor, LayerState | None]:
+            return self._forward(hidden_states, position_ids, state, attention_mask)
+
+        def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            return self._init_state(batch_size, layer_idx)
+
+    class MarlinMambaBlock(torch.nn.Module, _MarlinMambaBlockBase):
+        """Full Mamba block with input/output norms and MLP.
+
+        Matches the structure expected by hybrid models:
+            x -> Norm -> Mamba -> residual -> Norm -> MLP -> residual
+
+        This mirrors MarlinTransformerBlock but uses Mamba instead of attention.
+        """
+
+        def __init__(
+            self,
+            hidden_size: int,
+            intermediate_size: int | None = None,
+            d_state: int = 16,
+            d_conv: int = 4,
+            expand: int = 2,
+            quant_config: LayerQuantConfig | None = None,
+            mlp_quant_config: LayerQuantConfig | None = None,
+            rms_norm_eps: float = 1e-6,
+            use_gated_mlp: bool = True,
+            mlp_activation: str = "silu",
+            device: str = "mps",
+        ):
+            """Initialize full Mamba block.
+
+            Args:
+                hidden_size: Model hidden dimension.
+                intermediate_size: MLP intermediate size. Default 4 * hidden_size.
+                d_state: SSM state dimension.
+                d_conv: Convolution width.
+                expand: Expansion factor for Mamba inner dimension.
+                quant_config: Quantization for Mamba projections.
+                mlp_quant_config: Quantization for MLP. Default same as quant_config.
+                rms_norm_eps: Epsilon for RMSNorm.
+                use_gated_mlp: Use gated MLP (SwiGLU).
+                mlp_activation: Activation for MLP.
+                device: Device for tensor allocation.
+            """
+            torch.nn.Module.__init__(self)
+            self._init_marlin_mamba(
+                hidden_size,
+                intermediate_size,
+                d_state,
+                d_conv,
+                expand,
+                quant_config,
+                mlp_quant_config,
+                rms_norm_eps,
+                use_gated_mlp,
+                mlp_activation,
+                device,
+            )
+
+        def forward(
+            self,
+            hidden_states: torch_typing.Tensor,
+            position_ids: torch_typing.Tensor | None = None,
+            state: LayerState | None = None,
+            attention_mask: torch_typing.Tensor | None = None,
+        ) -> tuple[torch_typing.Tensor, LayerState | None]:
+            return self._forward_block(hidden_states, position_ids, state, attention_mask)
+
+        def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            return self._init_state_block(batch_size, layer_idx)
+
+    class RMSNorm(torch.nn.Module, _RMSNormBase):
+        """RMSNorm for Mamba blocks."""
+
+        def __init__(self, hidden_size: int, eps: float = 1e-6, device: str = "mps"):
+            torch.nn.Module.__init__(self)
+            self._init_rmsnorm(hidden_size, eps, device)
+
+        def forward(self, x: torch_typing.Tensor) -> torch_typing.Tensor:
+            return self._forward_rmsnorm(x)
+
+else:
+
+    class MambaBlock(_MambaBlockBase):  # type: ignore[no-redef]
+        """Mamba block stub when PyTorch is not available."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "MambaBlock requires PyTorch for inference. Install PyTorch with: pip install torch"
+            )
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("MambaBlock requires PyTorch")
+
+        def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            raise RuntimeError("MambaBlock requires PyTorch")
+
+    class MarlinMambaBlock(_MarlinMambaBlockBase):  # type: ignore[no-redef]
+        """MarlinMambaBlock stub when PyTorch is not available."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "MarlinMambaBlock requires PyTorch for inference. "
+                "Install PyTorch with: pip install torch"
+            )
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("MarlinMambaBlock requires PyTorch")
+
+        def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            raise RuntimeError("MarlinMambaBlock requires PyTorch")
+
+    class RMSNorm(_RMSNormBase):  # type: ignore[no-redef]
+        """RMSNorm stub when PyTorch is not available."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("RMSNorm requires PyTorch. Install PyTorch with: pip install torch")
+
+        def __call__(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("RMSNorm requires PyTorch")
+
+
+__all__ = [
+    "MambaBlock",
+    "MambaState",
+    "MarlinMambaBlock",
+    "RMSNorm",
+    "SelectiveScanConfig",
+]

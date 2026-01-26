@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .._compat import HAS_MLX, HAS_TORCH, mx, to_numpy, torch
+from .._compat import HAS_TORCH, to_numpy, torch
 from ..dtypes import DTypeConfig, get_default_config
 from .device_mesh import Device, DeviceMesh, DeviceType
 
@@ -114,8 +114,7 @@ def shard_tensor(
 
     if size % num_shards != 0:
         raise ValueError(
-            f"Cannot evenly shard dimension {dim} of size {size} "
-            f"into {num_shards} shards"
+            f"Cannot evenly shard dimension {dim} of size {size} into {num_shards} shards"
         )
 
     shard_size = size // num_shards
@@ -321,8 +320,7 @@ class TensorParallelLinear:
 
         if len(shards) != self.tp_size:
             raise ValueError(
-                f"Number of shards ({len(shards)}) must match "
-                f"tensor parallel size ({self.tp_size})"
+                f"Number of shards ({len(shards)}) must match tensor parallel size ({self.tp_size})"
             )
 
     @classmethod
@@ -391,7 +389,9 @@ class TensorParallelLinear:
                 # Move to appropriate device
                 device = mesh.get_device(tp_rank=i)
                 weight_shard = _to_device_array(weight_shard, device)
-                scales_shard = _to_device_array(scales_shard, device, dtype=linear.dtype_config.numpy_scales)
+                scales_shard = _to_device_array(
+                    scales_shard, device, dtype=linear.dtype_config.numpy_scales
+                )
                 if bias_shard is not None:
                     bias_shard = _to_device_array(bias_shard, device)
 
@@ -418,8 +418,7 @@ class TensorParallelLinear:
 
             if in_features % tp_size != 0:
                 raise ValueError(
-                    f"Cannot split {in_features} input features "
-                    f"across {tp_size} devices"
+                    f"Cannot split {in_features} input features across {tp_size} devices"
                 )
 
             shard_k = in_features // tp_size
@@ -440,7 +439,9 @@ class TensorParallelLinear:
 
                 device = mesh.get_device(tp_rank=i)
                 weight_shard = _to_device_array(weight_shard, device)
-                scales_shard = _to_device_array(scales_shard, device, dtype=linear.dtype_config.numpy_scales)
+                scales_shard = _to_device_array(
+                    scales_shard, device, dtype=linear.dtype_config.numpy_scales
+                )
                 bias_shard = None
                 if has_bias:
                     bias_shard = _to_device_array(bias_np, device)
@@ -581,11 +582,6 @@ def _to_device_array(arr: np.ndarray, device: Device, dtype: Any = None) -> Any:
 
     if device.device_type == DeviceType.CPU:
         return arr
-    elif device.device_type == DeviceType.GPU:
-        # MLX Metal GPU
-        if HAS_MLX and mx is not None:
-            return mx.array(arr)
-        return arr
     elif device.device_type == DeviceType.CUDA:
         if HAS_TORCH and torch is not None:
             return torch.from_numpy(arr.copy()).to(f"cuda:{device.device_id}")
@@ -651,15 +647,13 @@ class TensorParallelAttention:
         # Heads per device
         if num_heads % self.tp_size != 0:
             raise ValueError(
-                f"num_heads ({num_heads}) must be divisible by "
-                f"tp_size ({self.tp_size})"
+                f"num_heads ({num_heads}) must be divisible by tp_size ({self.tp_size})"
             )
         self.local_num_heads = num_heads // self.tp_size
 
         if num_kv_heads % self.tp_size != 0:
             raise ValueError(
-                f"num_kv_heads ({num_kv_heads}) must be divisible by "
-                f"tp_size ({self.tp_size})"
+                f"num_kv_heads ({num_kv_heads}) must be divisible by tp_size ({self.tp_size})"
             )
         self.local_num_kv_heads = num_kv_heads // self.tp_size
 

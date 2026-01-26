@@ -13,8 +13,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from .._compat import HAS_MLX, mx
+from .._compat import HAS_TORCH, torch
 from .trace import ChromeTrace, TraceEvent
+
+
+def _gpu_sync() -> None:
+    """Synchronize GPU if torch MPS is available."""
+    if HAS_TORCH and torch is not None and torch.backends.mps.is_available():
+        torch.mps.synchronize()
 
 
 @dataclass
@@ -144,8 +150,8 @@ class Profiler:
             with profiler.profile("gemm_fp4", {"M": 4096, "N": 4096}):
                 result = kernel(...)
         """
-        if self.sync_before and HAS_MLX:
-            mx.synchronize()
+        if self.sync_before:
+            _gpu_sync()
 
         start_time = time.perf_counter()
 
@@ -158,8 +164,8 @@ class Profiler:
         try:
             yield profile
         finally:
-            if self.sync_after and HAS_MLX:
-                mx.synchronize()
+            if self.sync_after:
+                _gpu_sync()
 
             elapsed = time.perf_counter() - start_time
             profile.wall_time_ms = elapsed * 1000.0
@@ -354,9 +360,7 @@ class MetalProfileSession:
                 analyzer = OccupancyAnalyzer()
                 capture.occupancy = analyzer.analyze(threadgroup_config)
                 if capture.counters is not None:
-                    capture.counters.threadgroup_occupancy = (
-                        capture.occupancy.achieved_occupancy
-                    )
+                    capture.counters.threadgroup_occupancy = capture.occupancy.achieved_occupancy
 
             if bytes_read is not None or bytes_written is not None:
                 profiler = MemoryBandwidthProfiler()
@@ -465,8 +469,7 @@ def bench(
     # Warmup (still uses GPU sync, but results discarded)
     for _ in range(warmup):
         fn()
-        if HAS_MLX:
-            mx.synchronize()
+        _gpu_sync()
 
     # Timed iterations
     for _ in range(iterations):

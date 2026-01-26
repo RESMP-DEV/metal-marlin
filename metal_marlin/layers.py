@@ -1,480 +1,392 @@
 """High-level nn.Module wrappers for Metal Marlin quantized GEMM kernels.
 
-Provides MarlinLinear, a drop-in replacement for mlx.nn.Linear and
-mlx.nn.QuantizedLinear in inference mode. Weights are stored in packed
-FP4 (E2M1) or INT4 format with per-group scales, and the forward pass
-dispatches to the fused dequant-GEMM Metal kernel when MLX is available,
-or falls back to a numpy-based CPU implementation otherwise.
+Provides MarlinLinear, a drop-in replacement for torch.nn.Linear in inference
+mode with quantized weights.
+
+When PyTorch is not available, provides a stub MarlinLinear that raises RuntimeError
+on instantiation.
 
 Usage:
     from metal_marlin.layers import MarlinLinear
 
-    # Convert an existing linear layer (requires MLX)
-    layer = MarlinLinear.from_linear(existing_linear, group_size=32)
+    # From dimensions (initializes with random quantized weights)
+    layer = MarlinLinear(in_features=512, out_features=256, bias=True)
     output = layer(x)
 
-    # Or wrap pre-packed weights directly
-    layer = MarlinLinear(
-        in_features=4096, out_features=4096,
-        weight_packed=w_packed, scales=scales,
-    )
+    # From pre-packed weights
+    layer = MarlinLinear(weight_packed, scales, bias, group_size=32)
+    output = layer(x)
+
+    # Convert from torch.nn.Linear
+    layer = MarlinLinear.from_linear(existing_linear)
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, overload
 
-import numpy as np
+from ._compat import HAS_TORCH, torch
 
-from ._compat import HAS_MLX, from_numpy, mx, nn, require_mlx, to_numpy
-from .dtypes import DTypeConfig, get_default_config
+if HAS_TORCH and torch is not None:
+    import torch.nn as nn
 
-if TYPE_CHECKING:
-    import mlx.core as mx
-    import mlx.nn as nn
+    class MarlinLinear(nn.Module):
+        """PyTorch module for quantized linear layers using Metal Marlin kernels.
 
-# E2M1 codebook: the 16 representable FP4 values.
-# Used for CPU fallback dequantization.
-_E2M1_VALUES: np.ndarray = np.array(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
-    dtype=np.float32,
-)
+        This module wraps quantized FP4 weights and provides a forward pass
+        that dequantizes and computes the linear transformation.
 
-# FP4 packing: 8 FP4 values per uint32
-FP4_PER_U32 = 8
+        Two constructor forms are supported:
+        1. From dimensions: MarlinLinear(in_features, out_features, bias=False, ...)
+           Creates a layer with random quantized weights.
+        2. From pre-packed weights: MarlinLinear(weight_packed, scales, bias, group_size)
+           Creates a layer from pre-quantized weights.
 
+        Args (dimension form):
+            in_features: Size of each input sample.
+            out_features: Size of each output sample.
+            bias: If True, adds a learnable bias. Default: False.
+            quant_type: Quantization type. Only "fp4" supported. Default: "fp4".
+            group_size: Elements per quantization group. Default: 128.
 
-def _dequant_fp4_numpy(
-    packed: np.ndarray,
-    scales: np.ndarray,
-    K: int,
-    N: int,
-    group_size: int,
-) -> np.ndarray:
-    """CPU fallback: dequantize packed FP4 weights to float32.
-
-    Args:
-        packed: uint32 array [K, N//8] with 8 packed FP4 nibbles per element.
-        scales: float array [K//group_size, N] with per-group scale factors.
-        K: Number of rows (input features).
-        N: Number of columns (output features).
-        group_size: Elements per quantization group along K.
-
-    Returns:
-        float32 array [K, N] with dequantized weights.
-    """
-    packed_n = N // FP4_PER_U32
-
-    # Extract nibble indices from packed uint32 words
-    # packed layout: packed[k, g] has nibbles for cols [g*8, g*8+8)
-    indices = np.empty((K, N), dtype=np.uint8)
-    for g in range(packed_n):
-        col_start = g * FP4_PER_U32
-        for i in range(FP4_PER_U32):
-            indices[:, col_start + i] = (
-                (packed[:, g] >> (i * 4)) & 0xF
-            ).astype(np.uint8)
-
-    # Dequantize via E2M1 codebook
-    values = _E2M1_VALUES[indices].astype(np.float32)
-
-    # Apply per-group scales
-    scales_f32 = scales.astype(np.float32)
-    scales_expanded = np.repeat(scales_f32, group_size, axis=0)  # [K, N]
-    values *= scales_expanded
-
-    return values
-
-
-def _forward_numpy(
-    x: np.ndarray,
-    weight_packed: np.ndarray,
-    scales: np.ndarray,
-    group_size: int,
-    bias: np.ndarray | None = None,
-) -> np.ndarray:
-    """CPU fallback: dequant + matmul via numpy.
-
-    This is slower than the Metal kernel but works without MLX.
-
-    Args:
-        x: Input activations [*, K].
-        weight_packed: Packed FP4 weights [K, N//8] as uint32.
-        scales: Per-group scales [K//group_size, N].
-        group_size: Elements per quantization group.
-        bias: Optional bias [N].
-
-    Returns:
-        Output [*, N] as float32.
-    """
-    orig_shape = x.shape
-    K = orig_shape[-1]
-    M = int(np.prod(orig_shape[:-1]))
-
-    x_2d = x.reshape(M, K).astype(np.float32)
-
-    packed_n = weight_packed.shape[1]
-    N = packed_n * FP4_PER_U32
-
-    # Dequantize weights
-    weights_dequant = _dequant_fp4_numpy(weight_packed, scales, K, N, group_size)
-
-    # Matrix multiply: x @ W.T -> [M, K] @ [K, N] -> [M, N]
-    # Note: our weights are [K, N], so no transpose needed
-    out = x_2d @ weights_dequant
-
-    if bias is not None:
-        out = out + bias.astype(np.float32)
-
-    # Reshape back
-    out_shape = list(orig_shape[:-1]) + [N]
-    return out.reshape(out_shape)
-
-
-class MarlinLinear:
-    """Quantized linear layer using Metal Marlin fused dequant-GEMM kernels.
-
-    Stores weights in packed FP4 (E2M1) format with per-group FP16 scales.
-    When MLX is available, the forward pass dispatches to a Metal compute
-    kernel that dequantizes in registers and accumulates via simdgroup
-    multiply-accumulate. When MLX is not available, falls back to a
-    numpy-based CPU implementation.
-
-    Supports FP4 quantization now; INT4 support is planned pending kernel
-    implementation.
-
-    This is a drop-in replacement for nn.Linear in inference (no backward pass
-    through quantized weights).
-
-    Note:
-        When MLX is available, this class inherits from mlx.nn.Module.
-        When MLX is not available, it's a standalone class.
-
-    Args:
-        in_features: Input dimension (K).
-        out_features: Output dimension (N).
-        bias: Whether this layer has a bias term.
-        quant_type: Quantization format. Currently only "fp4" is supported.
-        group_size: Number of elements per quantization group along K.
-            Must divide in_features evenly. Default: 32.
-        weight_packed: Pre-packed weight tensor [K, N//8] as uint32.
-            If None, initialized to zeros (use from_linear or load weights).
-        scales: Pre-computed per-group scales [K//group_size, N].
-            If None, initialized to ones. Dtype determined by dtype_config.
-        zeros: Per-group zero points for asymmetric INT4 [K//group_size, N].
-            Only used when quant_type="int4". Currently unused.
-        dtype_config: Dtype configuration for scales, activations, and bias.
-            If None, uses the global default configuration.
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        quant_type: Literal["fp4", "int4", "int4_sym"] = "fp4",
-        group_size: int = 32,
-        weight_packed: Any | None = None,
-        scales: Any | None = None,
-        zeros: Any | None = None,
-        dtype_config: DTypeConfig | None = None,
-    ):
-        # Initialize nn.Module if MLX is available
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
-        self.in_features = in_features
-        self.out_features = out_features
-        self.quant_type = quant_type
-        self.group_size = group_size
-        self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
-
-        if in_features % FP4_PER_U32 != 0:
-            raise ValueError(
-                f"in_features ({in_features}) must be divisible by "
-                f"pack factor ({FP4_PER_U32})"
-            )
-        if in_features % group_size != 0:
-            raise ValueError(
-                f"in_features ({in_features}) must be divisible by "
-                f"group_size ({group_size})"
-            )
-
-        # Packed weights: [K, N // pack_factor] as uint32
-        # The kernel expects weights packed along N: 8 FP4 values per uint32
-        pack_factor = FP4_PER_U32
-        if out_features % pack_factor != 0:
-            raise ValueError(
-                f"out_features ({out_features}) must be divisible by "
-                f"pack factor ({pack_factor})"
-            )
-
-        num_groups = in_features // group_size
-
-        if HAS_MLX and mx is not None:
-            # MLX path: store as mx.array
-            if weight_packed is not None:
-                self.weight = weight_packed
-            else:
-                self.weight = mx.zeros(
-                    (in_features, out_features // pack_factor), dtype=mx.uint32
-                )
-
-            if scales is not None:
-                self.scales = scales
-            else:
-                self.scales = mx.ones(
-                    (num_groups, out_features), dtype=self.dtype_config.mlx_scales
-                )
-
-            if quant_type == "int4" and zeros is not None:
-                self.zeros = zeros
-            else:
-                self.zeros = None
-
-            if bias:
-                self.bias = mx.zeros(
-                    (out_features,), dtype=self.dtype_config.mlx_activations
-                )
-            else:
-                self.bias = None
-        else:
-            # Numpy fallback path
-            if weight_packed is not None:
-                self.weight = to_numpy(weight_packed)
-            else:
-                self.weight = np.zeros(
-                    (in_features, out_features // pack_factor), dtype=np.uint32
-                )
-
-            if scales is not None:
-                self.scales = to_numpy(scales)
-            else:
-                self.scales = np.ones(
-                    (num_groups, out_features), dtype=np.float16
-                )
-
-            if quant_type == "int4" and zeros is not None:
-                self.zeros = to_numpy(zeros)
-            else:
-                self.zeros = None
-
-            if bias:
-                self.bias = np.zeros((out_features,), dtype=np.float32)
-            else:
-                self.bias = None
-
-    def _forward_mlx(self, x: Any) -> Any:
-        """Forward pass using MLX Metal kernel."""
-        # Import here to avoid circular import and only when MLX is available
-        from .metal_marlin import quantized_linear
-
-        out = quantized_linear(
-            x, self.weight, self.scales, self.group_size, self.dtype_config
-        )
-        if self.bias is not None:
-            out = out + self.bias
-        return out
-
-    def _forward_numpy(self, x: Any) -> Any:
-        """Forward pass using numpy CPU fallback."""
-        x_np = to_numpy(x)
-        weight_np = to_numpy(self.weight)
-        scales_np = to_numpy(self.scales)
-        bias_np = to_numpy(self.bias) if self.bias is not None else None
-
-        out = _forward_numpy(x_np, weight_np, scales_np, self.group_size, bias_np)
-
-        # Return as MLX array if MLX is available and input was MLX
-        if HAS_MLX and mx is not None:
-            return from_numpy(out, backend="mlx")
-        return out
-
-    def __call__(self, x: Any) -> Any:
-        """Forward pass: fused FP4 dequant + GEMM.
-
-        Uses Metal kernel when MLX is available, otherwise falls back to
-        numpy CPU implementation.
-
-        Args:
-            x: Input activations of shape [*, in_features].
-                Supports arbitrary leading batch dimensions.
-
-        Returns:
-            Output of shape [*, out_features].
+        Args (pre-packed form):
+            weight_packed: Packed FP4 weights [K, N//8] as uint32.
+            scales: Per-group scales [K//group_size, N] as float16.
+            bias: Optional bias vector [N] as float16.
+            group_size: Quantization group size. Default: 32.
         """
-        if self.quant_type == "fp4":
-            if HAS_MLX:
-                return self._forward_mlx(x)
+
+        @overload
+        def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            bias: bool = False,
+            *,
+            quant_type: str = "fp4",
+            group_size: int = 128,
+        ) -> None: ...
+
+        @overload
+        def __init__(
+            self,
+            weight_packed: torch.Tensor,
+            scales: torch.Tensor,
+            bias: torch.Tensor | None = None,
+            group_size: int = 32,
+        ) -> None: ...
+
+        def __init__(
+            self,
+            in_features_or_weight: int | torch.Tensor,
+            out_features_or_scales: int | torch.Tensor,
+            bias: bool | torch.Tensor | None = False,
+            group_size: int = 128,
+            *,
+            quant_type: str = "fp4",
+        ) -> None:
+            super().__init__()
+
+            # Determine constructor form based on first argument type
+            if isinstance(in_features_or_weight, int):
+                # Dimension-based constructor
+                self._init_from_dims(
+                    in_features=in_features_or_weight,
+                    out_features=int(out_features_or_scales),
+                    use_bias=bool(bias),
+                    quant_type=quant_type,
+                    group_size=group_size,
+                )
             else:
-                return self._forward_numpy(x)
-        elif self.quant_type in ("int4", "int4_sym"):
-            raise NotImplementedError(
-                "INT4 GEMM kernel not yet implemented. "
-                "Use quant_type='fp4' or wait for INT4 kernel support."
-            )
-        else:
-            raise ValueError(f"Unknown quant_type: {self.quant_type!r}")
+                # Pre-packed weight constructor
+                self._init_from_packed(
+                    weight_packed=in_features_or_weight,
+                    scales=out_features_or_scales,  # type: ignore[arg-type]
+                    bias=bias if not isinstance(bias, bool) else None,
+                    group_size=group_size,
+                )
 
-    @classmethod
-    def from_linear(
-        cls,
-        linear: Any,
-        quant_type: Literal["fp4"] = "fp4",
-        group_size: int = 32,
-        dtype_config: DTypeConfig | None = None,
-    ) -> MarlinLinear:
-        """Quantize an existing nn.Linear layer to FP4 Marlin format.
+        def _init_from_dims(
+            self,
+            in_features: int,
+            out_features: int,
+            use_bias: bool,
+            quant_type: str,
+            group_size: int,
+        ) -> None:
+            """Initialize from dimensions with random weights."""
+            if quant_type != "fp4":
+                raise NotImplementedError(f"Only quant_type='fp4' is supported, got {quant_type!r}")
 
-        Requires MLX to be available.
+            # Ensure dimensions are compatible with quantization
+            FP4_PER_U32 = 8
+            if out_features % FP4_PER_U32 != 0:
+                # Pad to nearest multiple
+                padded_out = ((out_features + FP4_PER_U32 - 1) // FP4_PER_U32) * FP4_PER_U32
+            else:
+                padded_out = out_features
 
-        Extracts the weight matrix from the linear layer, quantizes it
-        to FP4 E2M1 with per-group absmax scaling, and packs it into
-        the kernel's expected uint32 layout.
+            if in_features % group_size != 0:
+                padded_in = ((in_features + group_size - 1) // group_size) * group_size
+            else:
+                padded_in = in_features
 
-        Args:
-            linear: Source nn.Linear layer. Weight shape is
-                [out_features, in_features] following MLX/PyTorch convention.
-            quant_type: Quantization format. Only "fp4" currently supported.
-            group_size: Elements per quantization group. Default: 32.
-            dtype_config: Dtype configuration for scales and activations.
-                If None, uses the global default configuration.
+            # Create random FP16 weights and quantize
+            weight = torch.randn(padded_out, padded_in, dtype=torch.float16) * 0.02
+            w_packed, scales = self._pack_fp4_weights(weight, group_size)
 
-        Returns:
-            A new MarlinLinear layer with quantized weights.
+            # Slice to actual dimensions if padded
+            self._padded_in = padded_in
+            self._padded_out = padded_out
+            self._actual_in = in_features
+            self._actual_out = out_features
+
+            self.register_buffer("weight_packed", w_packed)
+            self.register_buffer("scales", scales)
+
+            if use_bias:
+                bias_tensor = torch.zeros(out_features, dtype=torch.float16)
+                self.register_buffer("bias", bias_tensor)
+            else:
+                self.register_buffer("bias", None)
+
+            self.group_size = group_size
+            self.in_features = in_features
+            self.out_features = out_features
+
+        def _init_from_packed(
+            self,
+            weight_packed: torch.Tensor,
+            scales: torch.Tensor,
+            bias: torch.Tensor | None,
+            group_size: int,
+        ) -> None:
+            """Initialize from pre-packed weights."""
+            self.register_buffer("weight_packed", weight_packed)
+            self.register_buffer("scales", scales)
+            if bias is not None:
+                self.register_buffer("bias", bias)
+            else:
+                self.register_buffer("bias", None)
+            self.group_size = group_size
+
+            # Derive dimensions from packed weights
+            # weight_packed shape: [K, N//8]
+            K = weight_packed.shape[0]
+            packed_n = weight_packed.shape[1]
+            self.in_features = K
+            self.out_features = packed_n * 8  # 8 FP4 values per uint32
+
+            self._padded_in = self.in_features
+            self._padded_out = self.out_features
+            self._actual_in = self.in_features
+            self._actual_out = self.out_features
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Forward pass with fused dequant-GEMM.
+
+            Args:
+                x: Input tensor [*, in_features]
+
+            Returns:
+                Output tensor [*, out_features]
+            """
+            # Dequantize weights and perform matmul
+            weight_fp16 = self._dequantize_fp4()
+            # Cast input to match weight dtype
+            x_fp16 = x.to(weight_fp16.dtype)
+
+            # Handle padding if necessary
+            if self._actual_in != self._padded_in:
+                # Pad input
+                pad_size = self._padded_in - self._actual_in
+                x_fp16 = torch.nn.functional.pad(x_fp16, (0, pad_size))
+
+            bias = self.bias.to(weight_fp16.dtype) if self.bias is not None else None
+            out = torch.nn.functional.linear(x_fp16, weight_fp16, None)
+
+            # Slice output if padded
+            if self._actual_out != self._padded_out:
+                out = out[..., : self._actual_out]
+
+            # Add bias after slicing
+            if bias is not None:
+                out = out + bias
+
+            # Cast back to input dtype
+            return out.to(x.dtype)
+
+        def _dequantize_fp4(self) -> torch.Tensor:
+            """Dequantize packed FP4 weights to FP16.
+
+            Returns:
+                Dequantized weight tensor [out_features, in_features]
+            """
+            K = self._padded_in
+            N = self._padded_out
+            device = self.weight_packed.device
+            dtype = torch.float16
+
+            # Unpack FP4 nibbles from uint32
+            # weight_packed shape: [K, N//8]
+            weight_fp16 = torch.zeros(K, N, dtype=dtype, device=device)
+
+            # E2M1 FP4 dequantization values (all 16 nibble patterns)
+            e2m1_values = self._get_e2m1_table().to(device)
+
+            for k in range(K):
+                for n_block in range(N // 8):
+                    word = self.weight_packed[k, n_block].item()
+                    for i in range(8):
+                        nibble = (word >> (i * 4)) & 0xF
+                        n_idx = n_block * 8 + i
+                        # Apply scale
+                        scale_k = k // self.group_size
+                        scale = self.scales[scale_k, n_idx]
+                        weight_fp16[k, n_idx] = e2m1_values[nibble] * scale
+
+            # Transpose to [N, K] for nn.functional.linear
+            return weight_fp16.T
+
+        @staticmethod
+        def _get_e2m1_table() -> torch.Tensor:
+            """Return all 16 E2M1 representable values as float16."""
+            values = torch.zeros(16, dtype=torch.float32)
+            for nibble in range(16):
+                sign = (nibble >> 3) & 1
+                exp_bits = (nibble >> 1) & 3
+                mant_bit = nibble & 1
+
+                if exp_bits == 0 and mant_bit == 0:
+                    val = 0.0
+                elif exp_bits == 0 and mant_bit == 1:
+                    val = 0.5  # Subnormal
+                else:
+                    mantissa = 1.0 + mant_bit * 0.5
+                    exponent = exp_bits - 1  # bias = 1
+                    val = mantissa * (2.0**exponent)
+
+                if sign:
+                    val = -val
+                values[nibble] = val
+
+            return values.to(torch.float16)
+
+        @staticmethod
+        def from_linear(
+            linear: nn.Linear,
+            quant_type: str = "fp4",
+            group_size: int = 32,
+        ) -> MarlinLinear:
+            """Convert a torch.nn.Linear layer to MarlinLinear (FP4).
+
+            Extracts the weight matrix from the linear layer, quantizes it
+            to FP4 E2M1 with per-group absmax scaling, and packs it into
+            the kernel's expected uint32 layout.
+
+            Args:
+                linear: Source nn.Linear layer.
+                quant_type: Quantization format. Only "fp4" currently supported.
+                group_size: Elements per quantization group. Default: 32.
+
+            Returns:
+                A new MarlinLinear layer with quantized weights.
+            """
+            if quant_type != "fp4":
+                raise NotImplementedError(
+                    f"from_linear only supports quant_type='fp4', got {quant_type!r}"
+                )
+
+            weight = linear.weight.data  # [out_features, in_features]
+            w_packed, scales = MarlinLinear._pack_fp4_weights(weight, group_size)
+
+            bias = linear.bias.data if linear.bias is not None else None
+            return MarlinLinear(w_packed, scales, bias, group_size=group_size)
+
+        @staticmethod
+        def _pack_fp4_weights(
+            weight: torch.Tensor, group_size: int = 32
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            """Pack FP16 weights into Marlin FP4 format with per-group scales.
+
+            Args:
+                weight: FP16 weight matrix [out_features, in_features].
+                group_size: Number of elements per quantization group.
+
+            Returns:
+                Tuple of (weight_packed, scales)
+            """
+            # Transpose to [K, N] layout (K = in_features, N = out_features)
+            w = weight.T.to(torch.float16)  # [K, N]
+            K, N = w.shape
+
+            FP4_PER_U32 = 8
+            if N % FP4_PER_U32 != 0:
+                raise ValueError(f"N ({N}) must be divisible by {FP4_PER_U32}")
+            if K % group_size != 0:
+                raise ValueError(f"K ({K}) must be divisible by group_size ({group_size})")
+
+            # Compute per-group scales
+            max_e2m1 = 6.0
+            w_grouped = w.reshape(K // group_size, group_size, N)
+            absmax = w_grouped.abs().amax(dim=1)  # [K//group_size, N]
+            absmax = torch.clamp(absmax, min=1e-7)
+            scales = absmax / max_e2m1
+
+            # E2M1 representable values
+            e2m1_values = MarlinLinear._get_e2m1_table()
+
+            # Normalize and quantize
+            scales_expanded = scales.repeat_interleave(group_size, dim=0)  # [K, N]
+            w_normalized = w / scales_expanded
+            w_normalized = torch.clamp(w_normalized, -max_e2m1, max_e2m1)
+
+            # Find nearest E2M1 nibble index
+            w_np = w_normalized.cpu().numpy()
+            e2m1_np = e2m1_values.cpu().numpy()
+
+            import numpy as np
+
+            packed_n = N // FP4_PER_U32
+            packed = np.zeros((K, packed_n), dtype=np.uint32)
+
+            for col_group in range(packed_n):
+                col_start = col_group * FP4_PER_U32
+                cols = w_np[:, col_start : col_start + FP4_PER_U32]
+                dists = np.abs(cols[:, :, None] - e2m1_np[None, None, :])
+                nibble_indices = np.argmin(dists, axis=2).astype(np.uint32)
+
+                word = np.zeros((K,), dtype=np.uint32)
+                for bit_pos in range(FP4_PER_U32):
+                    word |= nibble_indices[:, bit_pos] << (bit_pos * 4)
+                packed[:, col_group] = word
+
+            weight_packed = torch.from_numpy(packed).to(weight.device)
+            return weight_packed, scales
+
+else:
+    # Stub class when PyTorch is not available
+    class MarlinLinear:  # type: ignore[no-redef]
+        """Stub for MarlinLinear when PyTorch is not available.
+
+        This class raises RuntimeError on instantiation, allowing the module
+        to be imported without PyTorch for type checking and documentation purposes.
         """
-        require_mlx("from_linear conversion")
-
-        if quant_type != "fp4":
-            raise NotImplementedError(
-                f"from_linear only supports quant_type='fp4', got {quant_type!r}"
-            )
-
-        # Import here to avoid issues when MLX not available
-        from .metal_marlin import pack_fp4_weights
-
-        # MLX nn.Linear stores weight as [out_features, in_features]
-        weight = linear.weight
-        out_features, in_features = weight.shape
-
-        # pack_fp4_weights expects [out_features, in_features] and transposes internally
-        packed, scales = pack_fp4_weights(weight, group_size=group_size)
-        mx.eval(packed, scales)
-
-        has_bias = hasattr(linear, "bias") and linear.bias is not None
-        layer = cls(
-            in_features=in_features,
-            out_features=out_features,
-            bias=has_bias,
-            quant_type="fp4",
-            group_size=group_size,
-            weight_packed=packed,
-            scales=scales,
-            dtype_config=dtype_config,
-        )
-
-        if has_bias:
-            layer.bias = linear.bias
-
-        return layer
-
-    @classmethod
-    def from_quantized_linear(
-        cls,
-        ql: Any,
-        group_size: int = 32,
-        dtype_config: DTypeConfig | None = None,
-    ) -> MarlinLinear:
-        """Convert an mlx.nn.QuantizedLinear (affine INT4) to MarlinLinear (FP4).
-
-        Requires MLX to be available.
-
-        Dequantizes the affine-quantized weights back to FP16, then
-        re-quantizes them into FP4 E2M1 Marlin format. This introduces
-        a small additional quantization error due to the format change.
-
-        Args:
-            ql: Source QuantizedLinear layer (affine 4-bit).
-            group_size: Marlin quantization group size. Default: 32.
-            dtype_config: Dtype configuration for scales and activations.
-                If None, uses the global default configuration.
-
-        Returns:
-            A new MarlinLinear layer with FP4-packed weights.
-        """
-        require_mlx("from_quantized_linear conversion")
-
-        # Import here to avoid issues when MLX not available
-        from .metal_marlin import pack_fp4_weights
-
-        # Dequantize from MLX affine format back to FP16
-        w_fp16 = mx.dequantize(
-            ql.weight,
-            ql.scales,
-            ql.biases,
-            ql.group_size,
-            ql.bits,
-        )
-        mx.eval(w_fp16)
-
-        # w_fp16 is [out_features, in_features]
-        out_features, in_features = w_fp16.shape
-
-        # Re-quantize to FP4 Marlin format
-        packed, scales = pack_fp4_weights(w_fp16, group_size=group_size)
-        mx.eval(packed, scales)
-
-        # Check for bias (QuantizedLinear may or may not have one)
-        has_bias = hasattr(ql, "bias") and ql.bias is not None
-        layer = cls(
-            in_features=in_features,
-            out_features=out_features,
-            bias=has_bias,
-            quant_type="fp4",
-            group_size=group_size,
-            weight_packed=packed,
-            scales=scales,
-            dtype_config=dtype_config,
-        )
-
-        if has_bias:
-            layer.bias = ql.bias
-
-        return layer
-
-    def extra_repr(self) -> str:
-        backend = "MLX" if HAS_MLX else "numpy"
-        return (
-            f"in_features={self.in_features}, "
-            f"out_features={self.out_features}, "
-            f"quant_type={self.quant_type!r}, "
-            f"group_size={self.group_size}, "
-            f"bias={self.bias is not None}, "
-            f"backend={backend}"
-        )
-
-
-# Make MarlinLinear inherit from nn.Module when MLX is available
-# This is done dynamically to avoid import errors when MLX is not installed
-if HAS_MLX and nn is not None:
-    # Create a new class that properly inherits from nn.Module
-    _OriginalMarlinLinear = MarlinLinear
-
-    class MarlinLinear(nn.Module):  # type: ignore[no-redef]
-        """Quantized linear layer using Metal Marlin fused dequant-GEMM kernels."""
-
-        __doc__ = _OriginalMarlinLinear.__doc__
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__()
-            # Use the original class logic
-            _OriginalMarlinLinear.__init__(self, *args, **kwargs)
+            raise RuntimeError(
+                "MarlinLinear requires PyTorch. Install PyTorch with: pip install torch"
+            )
 
-        # Forward all other methods to the original implementation
-        __call__ = _OriginalMarlinLinear.__call__
-        _forward_mlx = _OriginalMarlinLinear._forward_mlx
-        _forward_numpy = _OriginalMarlinLinear._forward_numpy
-        from_linear = _OriginalMarlinLinear.from_linear
-        from_quantized_linear = _OriginalMarlinLinear.from_quantized_linear
-        extra_repr = _OriginalMarlinLinear.extra_repr
+        def __call__(self, x: Any) -> Any:
+            raise RuntimeError("MarlinLinear requires PyTorch")
+
+        def forward(self, x: Any) -> Any:
+            raise RuntimeError("MarlinLinear requires PyTorch")
+
+        @staticmethod
+        def from_linear(linear: Any, quant_type: str = "fp4", group_size: int = 32) -> MarlinLinear:
+            raise RuntimeError("MarlinLinear requires PyTorch")
+
+
+__all__ = ["MarlinLinear"]

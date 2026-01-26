@@ -25,16 +25,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import numpy as np
 
-from .._compat import HAS_MLX, from_numpy, mx, nn, to_numpy
+from .._compat import to_numpy
 from ..dtypes import DTypeConfig, get_default_config
-
-if TYPE_CHECKING:
-    import mlx.core as mx
-    import mlx.nn as nn
 
 
 class ProjectorType(Enum):
@@ -118,7 +114,9 @@ class VisionProjectorConfig:
         )
 
         # LLM hidden size
-        llm_hidden = config.get("hidden_size", config.get("text_config", {}).get("hidden_size", 4096))
+        llm_hidden = config.get(
+            "hidden_size", config.get("text_config", {}).get("hidden_size", 4096)
+        )
 
         # Intermediate size for MLP projectors
         intermediate = config.get(
@@ -149,7 +147,9 @@ class VisionProjectorConfig:
             activation = "gelu"
 
         # Video support
-        supports_video = config.get("supports_video", False) or "video" in config.get("model_type", "").lower()
+        supports_video = (
+            config.get("supports_video", False) or "video" in config.get("model_type", "").lower()
+        )
 
         return cls(
             projector_type=projector_type,
@@ -211,19 +211,39 @@ def detect_projector_type(config: dict[str, Any]) -> ProjectorType:
     return ProjectorType.LLAVA_MLP
 
 
-def _get_activation(name: str) -> Any:
-    """Get activation function by name."""
-    if not HAS_MLX or nn is None:
-        raise RuntimeError("MLX required for activation functions")
-
-    if name == "gelu":
-        return nn.gelu
-    elif name == "silu":
-        return nn.silu
-    elif name == "relu":
-        return nn.relu
+def _apply_activation(x: np.ndarray, activation: str) -> np.ndarray:
+    """Apply activation function to numpy array."""
+    if activation == "gelu":
+        # GELU approximation
+        return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x**3)))
+    elif activation == "silu":
+        return x * (1 / (1 + np.exp(-x)))
+    elif activation == "relu":
+        return np.maximum(x, 0)
     else:
-        raise ValueError(f"Unknown activation: {name}")
+        raise ValueError(f"Unknown activation: {activation}")
+
+
+def _create_sinusoidal_positions(max_len: int, dim: int) -> np.ndarray:
+    """Create sinusoidal position encodings."""
+    positions = np.arange(max_len, dtype=np.float32)
+    inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
+    sincos = np.outer(positions, inv_freq)
+    return np.concatenate([np.sin(sincos), np.cos(sincos)], axis=-1)[None, :, :]
+
+
+def _layer_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+    """Apply layer normalization."""
+    mean = x.mean(axis=-1, keepdims=True)
+    var = x.var(axis=-1, keepdims=True)
+    return (x - mean) / np.sqrt(var + eps)
+
+
+def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """Apply softmax."""
+    x_max = x.max(axis=axis, keepdims=True)
+    exp_x = np.exp(x - x_max)
+    return exp_x / exp_x.sum(axis=axis, keepdims=True)
 
 
 class LLaVAProjector:
@@ -240,43 +260,22 @@ class LLaVAProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
         self.intermediate_size = config.intermediate_size or (4 * config.vision_hidden_size)
 
-        if HAS_MLX and mx is not None:
-            # MLX path: use standard nn.Linear (kept at higher precision)
-            self.linear1 = nn.Linear(
-                self.vision_hidden_size,
-                self.intermediate_size,
-                bias=config.use_bias,
-            )
-            self.linear2 = nn.Linear(
-                self.intermediate_size,
-                self.llm_hidden_size,
-                bias=config.use_bias,
-            )
-            self._activation = _get_activation(config.activation)
+        # NumPy weights
+        self.weight1 = np.zeros((self.intermediate_size, self.vision_hidden_size), dtype=np.float16)
+        self.weight2 = np.zeros((self.llm_hidden_size, self.intermediate_size), dtype=np.float16)
+        if config.use_bias:
+            self.bias1 = np.zeros((self.intermediate_size,), dtype=np.float16)
+            self.bias2 = np.zeros((self.llm_hidden_size,), dtype=np.float16)
         else:
-            # Numpy fallback: store weights
-            self.weight1 = np.zeros(
-                (self.intermediate_size, self.vision_hidden_size), dtype=np.float16
-            )
-            self.weight2 = np.zeros(
-                (self.llm_hidden_size, self.intermediate_size), dtype=np.float16
-            )
-            if config.use_bias:
-                self.bias1 = np.zeros((self.intermediate_size,), dtype=np.float16)
-                self.bias2 = np.zeros((self.llm_hidden_size,), dtype=np.float16)
-            else:
-                self.bias1 = None
-                self.bias2 = None
+            self.bias1 = None
+            self.bias2 = None
 
-    def __call__(self, x: Any) -> Any:
+    def __call__(self, x: Any) -> np.ndarray:
         """Forward pass through the projector.
 
         Args:
@@ -286,21 +285,6 @@ class LLaVAProjector:
         Returns:
             LLM embeddings [batch, num_patches, llm_hidden_size]
         """
-        if HAS_MLX and mx is not None:
-            return self._forward_mlx(x)
-        return self._forward_numpy(x)
-
-    def _forward_mlx(self, x: Any) -> Any:
-        """MLX forward pass."""
-        # Convert numpy to MLX if needed
-        if isinstance(x, np.ndarray):
-            x = mx.array(x)
-        h = self.linear1(x)
-        h = self._activation(h)
-        return self.linear2(h)
-
-    def _forward_numpy(self, x: Any) -> Any:
-        """Numpy fallback forward pass."""
         x_np = to_numpy(x).astype(np.float32)
         orig_shape = x_np.shape
 
@@ -313,13 +297,8 @@ class LLaVAProjector:
         if self.bias1 is not None:
             h = h + self.bias1
 
-        # Activation (GELU approximation)
-        if self.config.activation == "gelu":
-            h = 0.5 * h * (1 + np.tanh(np.sqrt(2 / np.pi) * (h + 0.044715 * h**3)))
-        elif self.config.activation == "silu":
-            h = h * (1 / (1 + np.exp(-h)))
-        elif self.config.activation == "relu":
-            h = np.maximum(h, 0)
+        # Activation
+        h = _apply_activation(h, self.config.activation)
 
         # Linear 2
         out = h @ self.weight2.T
@@ -328,11 +307,7 @@ class LLaVAProjector:
 
         # Restore shape
         out_shape = list(orig_shape[:-1]) + [self.llm_hidden_size]
-        out = out.reshape(out_shape)
-
-        if HAS_MLX and mx is not None:
-            return from_numpy(out, backend="mlx")
-        return out
+        return out.reshape(out_shape)
 
     def extra_repr(self) -> str:
         return (
@@ -341,6 +316,138 @@ class LLaVAProjector:
             f"intermediate={self.intermediate_size}, "
             f"activation={self.config.activation}"
         )
+
+
+class _PerceiverResamplerLayer:
+    """Single layer of Perceiver resampler with cross-attention and FFN."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_dim: int,
+        use_bias: bool = True,
+        activation: str = "gelu",
+    ):
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scale = head_dim**-0.5
+        self.activation = activation
+
+        # Cross-attention weights
+        proj_dim = num_heads * head_dim
+        self.q_weight = np.zeros((proj_dim, hidden_size), dtype=np.float16)
+        self.k_weight = np.zeros((proj_dim, hidden_size), dtype=np.float16)
+        self.v_weight = np.zeros((proj_dim, hidden_size), dtype=np.float16)
+        self.o_weight = np.zeros((hidden_size, proj_dim), dtype=np.float16)
+
+        if use_bias:
+            self.q_bias = np.zeros((proj_dim,), dtype=np.float16)
+            self.k_bias = np.zeros((proj_dim,), dtype=np.float16)
+            self.v_bias = np.zeros((proj_dim,), dtype=np.float16)
+            self.o_bias = np.zeros((hidden_size,), dtype=np.float16)
+        else:
+            self.q_bias = None
+            self.k_bias = None
+            self.v_bias = None
+            self.o_bias = None
+
+        # FFN weights
+        ffn_dim = hidden_size * 4
+        self.ffn_up_weight = np.zeros((ffn_dim, hidden_size), dtype=np.float16)
+        self.ffn_down_weight = np.zeros((hidden_size, ffn_dim), dtype=np.float16)
+        if use_bias:
+            self.ffn_up_bias = np.zeros((ffn_dim,), dtype=np.float16)
+            self.ffn_down_bias = np.zeros((hidden_size,), dtype=np.float16)
+        else:
+            self.ffn_up_bias = None
+            self.ffn_down_bias = None
+
+    def __call__(
+        self,
+        hidden_states: np.ndarray,
+        encoder_hidden_states: np.ndarray,
+        attention_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Forward pass with cross-attention and FFN.
+
+        Args:
+            hidden_states: Query tokens [batch, num_queries, hidden_size]
+            encoder_hidden_states: Vision features [batch, num_patches, hidden_size]
+            attention_mask: Optional attention mask
+
+        Returns:
+            Updated hidden states [batch, num_queries, hidden_size]
+        """
+        # Pre-norm for attention
+        residual = hidden_states
+        hidden_states = _layer_norm(hidden_states)
+
+        batch_size, num_queries, _ = hidden_states.shape
+        _, num_patches, _ = encoder_hidden_states.shape
+
+        # Q from queries, K/V from vision features
+        q = hidden_states.reshape(-1, self.hidden_size) @ self.q_weight.T
+        if self.q_bias is not None:
+            q = q + self.q_bias
+        q = q.reshape(batch_size, num_queries, self.num_heads, self.head_dim)
+
+        k = encoder_hidden_states.reshape(-1, self.hidden_size) @ self.k_weight.T
+        if self.k_bias is not None:
+            k = k + self.k_bias
+        k = k.reshape(batch_size, num_patches, self.num_heads, self.head_dim)
+
+        v = encoder_hidden_states.reshape(-1, self.hidden_size) @ self.v_weight.T
+        if self.v_bias is not None:
+            v = v + self.v_bias
+        v = v.reshape(batch_size, num_patches, self.num_heads, self.head_dim)
+
+        # Transpose for attention: [batch, heads, seq, head_dim]
+        q = q.transpose(0, 2, 1, 3)
+        k = k.transpose(0, 2, 1, 3)
+        v = v.transpose(0, 2, 1, 3)
+
+        # Attention scores
+        scores = (q @ k.transpose(0, 1, 3, 2)) * self.scale
+
+        if attention_mask is not None:
+            scores = scores + attention_mask
+
+        attn_weights = _softmax(scores, axis=-1)
+        attn_output = attn_weights @ v
+
+        # Reshape back: [batch, seq, heads * head_dim]
+        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
+            batch_size, num_queries, self.num_heads * self.head_dim
+        )
+
+        # Output projection
+        attn_output = attn_output.reshape(-1, self.num_heads * self.head_dim) @ self.o_weight.T
+        if self.o_bias is not None:
+            attn_output = attn_output + self.o_bias
+        attn_output = attn_output.reshape(batch_size, num_queries, self.hidden_size)
+
+        # Residual
+        hidden_states = residual + attn_output
+
+        # FFN with pre-norm
+        residual = hidden_states
+        hidden_states = _layer_norm(hidden_states)
+
+        # FFN up
+        h = hidden_states.reshape(-1, self.hidden_size) @ self.ffn_up_weight.T
+        if self.ffn_up_bias is not None:
+            h = h + self.ffn_up_bias
+        h = _apply_activation(h.reshape(batch_size, num_queries, -1), self.activation)
+
+        # FFN down
+        h = h.reshape(-1, h.shape[-1]) @ self.ffn_down_weight.T
+        if self.ffn_down_bias is not None:
+            h = h + self.ffn_down_bias
+        h = h.reshape(batch_size, num_queries, self.hidden_size)
+
+        return residual + h
 
 
 class Qwen2VLProjector:
@@ -360,9 +467,6 @@ class Qwen2VLProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -371,52 +475,40 @@ class Qwen2VLProjector:
         self.num_layers = config.num_resampler_layers
         self.head_dim = config.llm_hidden_size // config.num_attention_heads
 
-        if HAS_MLX and mx is not None:
-            # Learned query tokens
-            self.query_tokens = mx.zeros((1, self.num_query_tokens, self.llm_hidden_size))
+        # Learned query tokens
+        self.query_tokens = np.zeros(
+            (1, self.num_query_tokens, self.llm_hidden_size), dtype=np.float16
+        )
 
-            # Project vision features to match query dimension
-            self.vision_projection = nn.Linear(
-                self.vision_hidden_size,
-                self.llm_hidden_size,
-                bias=config.use_bias,
-            )
+        # Vision projection
+        self.vision_proj_weight = np.zeros(
+            (self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16
+        )
+        self.vision_proj_bias = np.zeros((self.llm_hidden_size,), dtype=np.float16)
 
-            # Cross-attention layers
-            self.layers = []
-            for _ in range(self.num_layers):
-                layer = _PerceiverResamplerLayer(
-                    hidden_size=self.llm_hidden_size,
-                    num_heads=self.num_heads,
-                    head_dim=self.head_dim,
-                    use_bias=config.use_bias,
-                    activation=config.activation,
-                )
-                self.layers.append(layer)
+        # Output projection
+        self.output_proj_weight = np.zeros(
+            (self.llm_hidden_size, self.llm_hidden_size), dtype=np.float16
+        )
+        self.output_proj_bias = np.zeros((self.llm_hidden_size,), dtype=np.float16)
 
-            # Output projection (optional, for dimension alignment)
-            self.output_projection = nn.Linear(
-                self.llm_hidden_size,
-                self.llm_hidden_size,
-                bias=config.use_bias,
+        # Cross-attention layers
+        self.layers = [
+            _PerceiverResamplerLayer(
+                hidden_size=self.llm_hidden_size,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                use_bias=config.use_bias,
+                activation=config.activation,
             )
-        else:
-            # Numpy fallback - simplified
-            self.query_tokens = np.zeros(
-                (1, self.num_query_tokens, self.llm_hidden_size), dtype=np.float16
-            )
-            self.vision_proj_weight = np.zeros(
-                (self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16
-            )
-            self.output_proj_weight = np.zeros(
-                (self.llm_hidden_size, self.llm_hidden_size), dtype=np.float16
-            )
+            for _ in range(self.num_layers)
+        ]
 
     def __call__(
         self,
         vision_features: Any,
         attention_mask: Any | None = None,
-    ) -> Any:
+    ) -> np.ndarray:
         """Forward pass through Perceiver resampler.
 
         Args:
@@ -426,73 +518,30 @@ class Qwen2VLProjector:
         Returns:
             Resampled features [batch, num_query_tokens, llm_hidden]
         """
-        if HAS_MLX and mx is not None:
-            return self._forward_mlx(vision_features, attention_mask)
-        return self._forward_numpy(vision_features)
-
-    def _forward_mlx(self, vision_features: Any, attention_mask: Any | None) -> Any:
-        """MLX forward pass with cross-attention."""
-        # Convert numpy to MLX if needed
-        if isinstance(vision_features, np.ndarray):
-            vision_features = mx.array(vision_features)
-        batch_size = vision_features.shape[0]
-
-        # Project vision features
-        vision_embeds = self.vision_projection(vision_features)
-
-        # Expand query tokens for batch
-        queries = mx.broadcast_to(
-            self.query_tokens,
-            (batch_size, self.num_query_tokens, self.llm_hidden_size),
-        )
-
-        # Apply cross-attention layers
-        hidden_states = queries
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                encoder_hidden_states=vision_embeds,
-                attention_mask=attention_mask,
-            )
-
-        # Final projection
-        output = self.output_projection(hidden_states)
-        return output
-
-    def _forward_numpy(self, vision_features: Any) -> Any:
-        """Simplified numpy fallback (no cross-attention, just projection)."""
         x_np = to_numpy(vision_features).astype(np.float32)
         batch_size = x_np.shape[0]
 
         # Project vision features
         x_flat = x_np.reshape(-1, x_np.shape[-1])
-        projected = x_flat @ self.vision_proj_weight.T
-        projected = projected.reshape(batch_size, -1, self.llm_hidden_size)
+        vision_embeds = x_flat @ self.vision_proj_weight.T + self.vision_proj_bias
+        vision_embeds = vision_embeds.reshape(batch_size, -1, self.llm_hidden_size)
 
-        # Simple average pooling to num_query_tokens (simplified fallback)
-        num_patches = projected.shape[1]
-        if num_patches > self.num_query_tokens:
-            # Chunk and average
-            chunk_size = num_patches // self.num_query_tokens
-            output = np.zeros(
-                (batch_size, self.num_query_tokens, self.llm_hidden_size),
-                dtype=np.float32,
-            )
-            for i in range(self.num_query_tokens):
-                start = i * chunk_size
-                end = min((i + 1) * chunk_size, num_patches)
-                output[:, i, :] = projected[:, start:end, :].mean(axis=1)
-        else:
-            # Pad with zeros
-            output = np.zeros(
-                (batch_size, self.num_query_tokens, self.llm_hidden_size),
-                dtype=np.float32,
-            )
-            output[:, :num_patches, :] = projected
+        # Expand query tokens for batch
+        queries = np.broadcast_to(
+            self.query_tokens.astype(np.float32),
+            (batch_size, self.num_query_tokens, self.llm_hidden_size),
+        ).copy()
 
-        if HAS_MLX and mx is not None:
-            return from_numpy(output, backend="mlx")
-        return output
+        # Apply cross-attention layers
+        hidden_states = queries
+        mask = to_numpy(attention_mask).astype(np.float32) if attention_mask is not None else None
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, vision_embeds, mask)
+
+        # Final projection
+        out_flat = hidden_states.reshape(-1, self.llm_hidden_size)
+        output = out_flat @ self.output_proj_weight.T + self.output_proj_bias
+        return output.reshape(batch_size, self.num_query_tokens, self.llm_hidden_size)
 
     def extra_repr(self) -> str:
         return (
@@ -502,108 +551,6 @@ class Qwen2VLProjector:
             f"num_heads={self.num_heads}, "
             f"num_layers={self.num_layers}"
         )
-
-
-class _PerceiverResamplerLayer:
-    """Single layer of Perceiver resampler with cross-attention and FFN."""
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        head_dim: int,
-        use_bias: bool = True,
-        activation: str = "gelu",
-    ):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.scale = head_dim**-0.5
-
-        if HAS_MLX and nn is not None:
-            # Cross-attention components
-            self.q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=use_bias)
-            self.k_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=use_bias)
-            self.v_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=use_bias)
-            self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=use_bias)
-
-            # Layer norms
-            self.attn_ln = nn.LayerNorm(hidden_size)
-            self.ffn_ln = nn.LayerNorm(hidden_size)
-
-            # FFN
-            self.ffn_up = nn.Linear(hidden_size, hidden_size * 4, bias=use_bias)
-            self.ffn_down = nn.Linear(hidden_size * 4, hidden_size, bias=use_bias)
-            self._activation = _get_activation(activation)
-
-    def __call__(
-        self,
-        hidden_states: Any,
-        encoder_hidden_states: Any,
-        attention_mask: Any | None = None,
-    ) -> Any:
-        """Forward pass with cross-attention and FFN.
-
-        Args:
-            hidden_states: Query tokens [batch, num_queries, hidden_size]
-            encoder_hidden_states: Vision features [batch, num_patches, hidden_size]
-            attention_mask: Optional attention mask
-
-        Returns:
-            Updated hidden states [batch, num_queries, hidden_size]
-        """
-        if not HAS_MLX or mx is None:
-            # Simplified fallback: just return hidden states
-            return hidden_states
-
-        # Pre-norm for attention
-        residual = hidden_states
-        hidden_states = self.attn_ln(hidden_states)
-
-        # Cross-attention
-        batch_size, num_queries, _ = hidden_states.shape
-        _, num_patches, _ = encoder_hidden_states.shape
-
-        # Q from queries, K/V from vision features
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(encoder_hidden_states)
-        v = self.v_proj(encoder_hidden_states)
-
-        # Reshape for multi-head attention
-        q = q.reshape(batch_size, num_queries, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        k = k.reshape(batch_size, num_patches, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-        v = v.reshape(batch_size, num_patches, self.num_heads, self.head_dim).transpose(0, 2, 1, 3)
-
-        # Attention scores
-        scores = (q @ k.transpose(0, 1, 3, 2)) * self.scale
-
-        if attention_mask is not None:
-            scores = scores + attention_mask
-
-        attn_weights = mx.softmax(scores, axis=-1)
-        attn_output = attn_weights @ v
-
-        # Reshape back
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
-            batch_size, num_queries, self.num_heads * self.head_dim
-        )
-        attn_output = self.o_proj(attn_output)
-
-        # Residual
-        hidden_states = residual + attn_output
-
-        # FFN with pre-norm
-        residual = hidden_states
-        hidden_states = self.ffn_ln(hidden_states)
-        hidden_states = self.ffn_up(hidden_states)
-        hidden_states = self._activation(hidden_states)
-        hidden_states = self.ffn_down(hidden_states)
-        hidden_states = residual + hidden_states
-
-        return hidden_states
 
 
 class InternVLProjector:
@@ -619,9 +566,6 @@ class InternVLProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -629,75 +573,41 @@ class InternVLProjector:
         self.num_heads = config.num_attention_heads
         self.num_layers = config.num_resampler_layers
         self.head_dim = config.llm_hidden_size // config.num_attention_heads
+        self.max_patches = config.max_image_tokens
 
-        if HAS_MLX and mx is not None:
-            # Learned query tokens
-            self.query_tokens = mx.zeros((1, self.num_query_tokens, self.llm_hidden_size))
+        # Learned query tokens
+        self.query_tokens = np.zeros(
+            (1, self.num_query_tokens, self.llm_hidden_size), dtype=np.float16
+        )
 
-            # Vision input projection
-            self.vision_projection = nn.Linear(
-                self.vision_hidden_size,
-                self.llm_hidden_size,
-                bias=config.use_bias,
+        # Vision projection
+        self.vision_proj_weight = np.zeros(
+            (self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16
+        )
+        self.vision_proj_bias = np.zeros((self.llm_hidden_size,), dtype=np.float16)
+
+        # Position encoding
+        self.position_encoding = _create_sinusoidal_positions(
+            config.max_image_tokens, self.llm_hidden_size
+        )
+
+        # Cross-attention layers
+        self.layers = [
+            _PerceiverResamplerLayer(
+                hidden_size=self.llm_hidden_size,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                use_bias=config.use_bias,
+                activation=config.activation,
             )
-
-            # Position encoding for vision features
-            self.max_patches = config.max_image_tokens
-            self._init_position_encoding()
-
-            # Cross-attention layers
-            self.layers = []
-            for _ in range(self.num_layers):
-                layer = _PerceiverResamplerLayer(
-                    hidden_size=self.llm_hidden_size,
-                    num_heads=self.num_heads,
-                    head_dim=self.head_dim,
-                    use_bias=config.use_bias,
-                    activation=config.activation,
-                )
-                self.layers.append(layer)
-
-            # Output layer norm
-            self.output_ln = nn.LayerNorm(self.llm_hidden_size)
-        else:
-            # Numpy fallback
-            self.query_tokens = np.zeros(
-                (1, self.num_query_tokens, self.llm_hidden_size), dtype=np.float16
-            )
-            self.vision_proj_weight = np.zeros(
-                (self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16
-            )
-            self.position_encoding = self._create_sinusoidal_positions_np(
-                config.max_image_tokens, self.llm_hidden_size
-            )
-
-    def _init_position_encoding(self) -> None:
-        """Initialize sinusoidal position encodings."""
-        if not HAS_MLX or mx is None:
-            return
-
-        positions = mx.arange(self.max_patches, dtype=mx.float32)
-        dim = self.llm_hidden_size
-        inv_freq = 1.0 / (10000 ** (mx.arange(0, dim, 2, dtype=mx.float32) / dim))
-
-        # [max_patches, dim/2]
-        sincos = mx.outer(positions, inv_freq)
-        # [max_patches, dim]
-        pos_enc = mx.concatenate([mx.sin(sincos), mx.cos(sincos)], axis=-1)
-        self.position_encoding = pos_enc[None, :, :]  # [1, max_patches, dim]
-
-    def _create_sinusoidal_positions_np(self, max_len: int, dim: int) -> np.ndarray:
-        """Create sinusoidal position encodings (numpy)."""
-        positions = np.arange(max_len, dtype=np.float32)
-        inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
-        sincos = np.outer(positions, inv_freq)
-        return np.concatenate([np.sin(sincos), np.cos(sincos)], axis=-1)[None, :, :]
+            for _ in range(self.num_layers)
+        ]
 
     def __call__(
         self,
         vision_features: Any,
         attention_mask: Any | None = None,
-    ) -> Any:
+    ) -> np.ndarray:
         """Forward pass through QLLaMA projector.
 
         Args:
@@ -707,78 +617,32 @@ class InternVLProjector:
         Returns:
             Projected features [batch, num_query_tokens, llm_hidden]
         """
-        if HAS_MLX and mx is not None:
-            return self._forward_mlx(vision_features, attention_mask)
-        return self._forward_numpy(vision_features)
-
-    def _forward_mlx(self, vision_features: Any, attention_mask: Any | None) -> Any:
-        """MLX forward pass."""
-        # Convert numpy to MLX if needed
-        if isinstance(vision_features, np.ndarray):
-            vision_features = mx.array(vision_features)
-        batch_size, num_patches, _ = vision_features.shape
-
-        # Project vision features
-        vision_embeds = self.vision_projection(vision_features)
-
-        # Add position encoding
-        if num_patches <= self.max_patches:
-            pos_enc = self.position_encoding[:, :num_patches, :]
-            vision_embeds = vision_embeds + pos_enc
-
-        # Expand query tokens for batch
-        queries = mx.broadcast_to(
-            self.query_tokens,
-            (batch_size, self.num_query_tokens, self.llm_hidden_size),
-        )
-
-        # Apply cross-attention layers
-        hidden_states = queries
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states,
-                encoder_hidden_states=vision_embeds,
-                attention_mask=attention_mask,
-            )
-
-        # Final layer norm
-        output = self.output_ln(hidden_states)
-        return output
-
-    def _forward_numpy(self, vision_features: Any) -> Any:
-        """Numpy fallback."""
         x_np = to_numpy(vision_features).astype(np.float32)
         batch_size, num_patches, _ = x_np.shape
 
-        # Project and add position encoding
+        # Project vision features
         x_flat = x_np.reshape(-1, x_np.shape[-1])
-        projected = x_flat @ self.vision_proj_weight.T
-        projected = projected.reshape(batch_size, num_patches, self.llm_hidden_size)
+        vision_embeds = x_flat @ self.vision_proj_weight.T + self.vision_proj_bias
+        vision_embeds = vision_embeds.reshape(batch_size, num_patches, self.llm_hidden_size)
 
+        # Add position encoding
         if num_patches <= self.max_patches:
-            projected = projected + self.position_encoding[:, :num_patches, :]
+            vision_embeds = vision_embeds + self.position_encoding[:, :num_patches, :]
 
-        # Simple pooling fallback
-        if num_patches > self.num_query_tokens:
-            chunk_size = num_patches // self.num_query_tokens
-            output = np.zeros(
-                (batch_size, self.num_query_tokens, self.llm_hidden_size),
-                dtype=np.float32,
-            )
-            for i in range(self.num_query_tokens):
-                start = i * chunk_size
-                end = min((i + 1) * chunk_size, num_patches)
-                output[:, i, :] = projected[:, start:end, :].mean(axis=1)
-        else:
-            output = np.zeros(
-                (batch_size, self.num_query_tokens, self.llm_hidden_size),
-                dtype=np.float32,
-            )
-            output[:, :num_patches, :] = projected
+        # Expand query tokens for batch
+        queries = np.broadcast_to(
+            self.query_tokens.astype(np.float32),
+            (batch_size, self.num_query_tokens, self.llm_hidden_size),
+        ).copy()
 
-        if HAS_MLX and mx is not None:
-            return from_numpy(output, backend="mlx")
-        return output
+        # Apply cross-attention layers
+        hidden_states = queries
+        mask = to_numpy(attention_mask).astype(np.float32) if attention_mask is not None else None
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, vision_embeds, mask)
+
+        # Final layer norm
+        return _layer_norm(hidden_states)
 
     def extra_repr(self) -> str:
         return (
@@ -802,29 +666,14 @@ class LinearProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
-        if HAS_MLX and nn is not None:
-            nn.Module.__init__(self)
-
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
 
-        if HAS_MLX and nn is not None:
-            self.projection = nn.Linear(
-                self.vision_hidden_size,
-                self.llm_hidden_size,
-                bias=config.use_bias,
-            )
-        else:
-            self.weight = np.zeros(
-                (self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16
-            )
-            self.bias = np.zeros((self.llm_hidden_size,), dtype=np.float16) if config.use_bias else None
+        self.weight = np.zeros((self.llm_hidden_size, self.vision_hidden_size), dtype=np.float16)
+        self.bias = np.zeros((self.llm_hidden_size,), dtype=np.float16) if config.use_bias else None
 
-    def __call__(self, x: Any) -> Any:
-        if HAS_MLX and mx is not None:
-            return self.projection(x)
-
+    def __call__(self, x: Any) -> np.ndarray:
         x_np = to_numpy(x).astype(np.float32)
         orig_shape = x_np.shape
         x_flat = x_np.reshape(-1, x_np.shape[-1])
@@ -834,11 +683,7 @@ class LinearProjector:
             out = out + self.bias
 
         out_shape = list(orig_shape[:-1]) + [self.llm_hidden_size]
-        out = out.reshape(out_shape)
-
-        if HAS_MLX and mx is not None:
-            return from_numpy(out, backend="mlx")
-        return out
+        return out.reshape(out_shape)
 
 
 class IdentityProjector:
@@ -903,76 +748,3 @@ class VisionProjector:
         """
         config = VisionProjectorConfig.from_hf_config(hf_config)
         return VisionProjector.from_config(config)
-
-
-# Make classes inherit from nn.Module when MLX is available
-if HAS_MLX and nn is not None:
-    _OrigLLaVA = LLaVAProjector
-    _OrigQwen2VL = Qwen2VLProjector
-    _OrigInternVL = InternVLProjector
-    _OrigLinear = LinearProjector
-    _OrigLayer = _PerceiverResamplerLayer
-
-    class LLaVAProjector(nn.Module):  # type: ignore[no-redef]
-        """LLaVA-style 2-layer MLP projector."""
-
-        __doc__ = _OrigLLaVA.__doc__
-
-        def __init__(self, config: VisionProjectorConfig):
-            super().__init__()
-            _OrigLLaVA.__init__(self, config)
-
-        __call__ = _OrigLLaVA.__call__
-        _forward_mlx = _OrigLLaVA._forward_mlx
-        _forward_numpy = _OrigLLaVA._forward_numpy
-        extra_repr = _OrigLLaVA.extra_repr
-
-    class Qwen2VLProjector(nn.Module):  # type: ignore[no-redef]
-        """Qwen2-VL Perceiver resampler projector."""
-
-        __doc__ = _OrigQwen2VL.__doc__
-
-        def __init__(self, config: VisionProjectorConfig):
-            super().__init__()
-            _OrigQwen2VL.__init__(self, config)
-
-        __call__ = _OrigQwen2VL.__call__
-        _forward_mlx = _OrigQwen2VL._forward_mlx
-        _forward_numpy = _OrigQwen2VL._forward_numpy
-        extra_repr = _OrigQwen2VL.extra_repr
-
-    class InternVLProjector(nn.Module):  # type: ignore[no-redef]
-        """InternVL QLLaMA-style projector."""
-
-        __doc__ = _OrigInternVL.__doc__
-
-        def __init__(self, config: VisionProjectorConfig):
-            super().__init__()
-            _OrigInternVL.__init__(self, config)
-
-        __call__ = _OrigInternVL.__call__
-        _forward_mlx = _OrigInternVL._forward_mlx
-        _forward_numpy = _OrigInternVL._forward_numpy
-        _init_position_encoding = _OrigInternVL._init_position_encoding
-        _create_sinusoidal_positions_np = _OrigInternVL._create_sinusoidal_positions_np
-        extra_repr = _OrigInternVL.extra_repr
-
-    class LinearProjector(nn.Module):  # type: ignore[no-redef]
-        """Simple linear projection."""
-
-        __doc__ = _OrigLinear.__doc__
-
-        def __init__(self, config: VisionProjectorConfig):
-            super().__init__()
-            _OrigLinear.__init__(self, config)
-
-        __call__ = _OrigLinear.__call__
-
-    class _PerceiverResamplerLayer(nn.Module):  # type: ignore[no-redef]
-        """Perceiver resampler layer with cross-attention."""
-
-        def __init__(self, *args: Any, **kwargs: Any):
-            super().__init__()
-            _OrigLayer.__init__(self, *args, **kwargs)
-
-        __call__ = _OrigLayer.__call__

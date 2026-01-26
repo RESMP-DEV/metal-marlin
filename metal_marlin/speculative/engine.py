@@ -21,7 +21,8 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
-import mlx.core as mx
+import torch
+from torch import Tensor
 
 from ..kv_cache import KVCache
 from .draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
@@ -36,9 +37,7 @@ class TargetModel:
     typing.Protocol to avoid runtime overhead.
     """
 
-    def __call__(
-        self, input_ids: mx.array, kv_cache: KVCache | None = None
-    ) -> mx.array:
+    def __call__(self, input_ids: Tensor, kv_cache: KVCache | None = None) -> Tensor:
         """Forward pass returning logits [batch, seq_len, vocab]."""
         raise NotImplementedError
 
@@ -88,11 +87,11 @@ class StepResult:
         acceptance_rate: Average acceptance fraction across batch.
     """
 
-    new_tokens: mx.array        # [batch, max_new]
-    num_new_tokens: mx.array    # [batch]
+    new_tokens: Tensor  # [batch, max_new]
+    num_new_tokens: Tensor  # [batch]
     num_target_calls: int
     num_draft_tokens: int
-    num_accepted: mx.array      # [batch]
+    num_accepted: Tensor  # [batch]
     acceptance_rate: float
 
 
@@ -148,10 +147,12 @@ class SpeculativeEngine:
         target_model,
         draft_model: DraftModel,
         config: SpeculativeConfig | None = None,
+        device: torch.device | None = None,
     ):
         self.target = target_model
         self.draft = draft_model
         self.config = config or SpeculativeConfig()
+        self.device = device or torch.device("cpu")
 
         # Adaptive state
         self._acceptance_history: list[float] = []
@@ -177,7 +178,7 @@ class SpeculativeEngine:
 
     def generate_step(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         target_cache: KVCache | None = None,
     ) -> StepResult:
         """Execute one step of speculative generation.
@@ -208,7 +209,7 @@ class SpeculativeEngine:
         self._stats.total_draft_steps += 1
 
         # 2. Target evaluates: original context + draft tokens in one pass
-        spec_input = mx.concatenate([input_ids, draft_out.tokens], axis=1)
+        spec_input = torch.cat([input_ids, draft_out.tokens], dim=1)
         target_logits = self.target(spec_input, kv_cache=target_cache)
         self._stats.total_target_calls += 1
         # target_logits: [batch, input_len + num_spec, vocab]
@@ -232,29 +233,28 @@ class SpeculativeEngine:
 
         # 4. Assemble output: accepted_tokens + next_token per batch element
         max_new = num_spec + 1
-        new_tokens = mx.zeros((batch_size, max_new), dtype=draft_out.tokens.dtype)
+        new_tokens = torch.zeros(
+            batch_size, max_new, dtype=draft_out.tokens.dtype, device=self.device
+        )
         num_new_tokens = result.num_accepted + 1  # Each gets at least next_token
 
         for b in range(batch_size):
             n_acc = int(result.num_accepted[b].item())
             # Copy accepted tokens
             if n_acc > 0:
-                for j in range(n_acc):
-                    new_tokens = _set_element(
-                        new_tokens, b, j, result.accepted_tokens[b, j]
-                    )
+                new_tokens[b, :n_acc] = result.accepted_tokens[b, :n_acc]
             # Append next token (correction or bonus)
-            new_tokens = _set_element(new_tokens, b, n_acc, result.next_token[b])
+            new_tokens[b, n_acc] = result.next_token[b]
 
         # 5. Update cumulative stats
-        total_acc = int(mx.sum(result.num_accepted).item())
-        total_new = int(mx.sum(num_new_tokens).item())
+        total_acc = int(result.num_accepted.sum().item())
+        total_new = int(num_new_tokens.sum().item())
         self._stats.total_accepted += total_acc
         self._stats.total_proposed += batch_size * num_spec
         self._stats.total_tokens += total_new
 
         # 6. Update adaptive speculation
-        avg_accepted = float(mx.mean(result.num_accepted.astype(mx.float32)).item())
+        avg_accepted = float(result.num_accepted.float().mean().item())
         acceptance_rate = avg_accepted / num_spec if num_spec > 0 else 0.0
         self._update_num_spec(acceptance_rate)
 
@@ -269,7 +269,7 @@ class SpeculativeEngine:
 
     def generate(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         max_tokens: int = 256,
         target_cache: KVCache | None = None,
     ) -> Iterator[StepResult]:
@@ -298,16 +298,16 @@ class SpeculativeEngine:
 
         # Sample first token from prefill
         first_logits = prefill_logits[:, -1, :]  # [batch, vocab]
-        first_token = _sample_token(first_logits, self.config.temperature)
+        first_token = _sample_token(first_logits, self.config.temperature, self.device)
         # [batch]
 
         # Yield first token as a degenerate StepResult
         first_step = StepResult(
             new_tokens=first_token.reshape(batch_size, 1),
-            num_new_tokens=mx.ones((batch_size,), dtype=mx.int32),
+            num_new_tokens=torch.ones(batch_size, dtype=torch.int32, device=self.device),
             num_target_calls=1,
             num_draft_tokens=0,
-            num_accepted=mx.zeros((batch_size,), dtype=mx.int32),
+            num_accepted=torch.zeros(batch_size, dtype=torch.int32, device=self.device),
             acceptance_rate=0.0,
         )
         self._stats.total_target_calls += 1
@@ -333,9 +333,9 @@ class SpeculativeEngine:
                 # Adjust num_new_tokens to stop at EOS (exclusive)
                 step = StepResult(
                     new_tokens=step.new_tokens,
-                    num_new_tokens=mx.minimum(
+                    num_new_tokens=torch.minimum(
                         step.num_new_tokens,
-                        mx.full((batch_size,), pos, dtype=mx.int32),
+                        torch.full((batch_size,), pos, dtype=torch.int32, device=self.device),
                     ),
                     num_target_calls=step.num_target_calls,
                     num_draft_tokens=step.num_draft_tokens,
@@ -348,32 +348,27 @@ class SpeculativeEngine:
             yield step
 
             # Advance cache and prepare next input
-            max_new = int(mx.max(step.num_new_tokens).item())
+            max_new = int(step.num_new_tokens.max().item())
             total_generated += max_new
             target_cache.advance(max_new)
 
             # Next input: last produced token per batch element
-            last_tokens = mx.zeros((batch_size, 1), dtype=current_input.dtype)
+            last_tokens = torch.zeros(batch_size, 1, dtype=current_input.dtype, device=self.device)
             for b in range(batch_size):
                 n_new = int(step.num_new_tokens[b].item())
-                last_tokens = _set_element(
-                    last_tokens, b, 0, step.new_tokens[b, n_new - 1]
-                )
+                last_tokens[b, 0] = step.new_tokens[b, n_new - 1]
             current_input = last_tokens
 
             # Synchronize draft model with accepted tokens
             self._sync_draft(step)
 
-            # Prevent MLX graph accumulation
-            mx.eval(mx.array(0))
-
     def generate_all(
         self,
-        input_ids: mx.array,
+        input_ids: Tensor,
         max_tokens: int = 256,
         target_cache: KVCache | None = None,
         streamer: Callable[[int], None] | None = None,
-    ) -> mx.array:
+    ) -> Tensor:
         """Generate a complete sequence, returning prompt + generated tokens.
 
         Convenience wrapper around generate() that collects all tokens into
@@ -391,18 +386,17 @@ class SpeculativeEngine:
         all_tokens: list[int] = input_ids[0].tolist()
 
         for step in self.generate(input_ids, max_tokens=max_tokens, target_cache=target_cache):
-            step.new_tokens.shape[0]
             # Extract valid tokens from first batch element
             n_new = int(step.num_new_tokens[0].item())
             for j in range(n_new):
                 tok = int(step.new_tokens[0, j].item())
                 if tok == self.config.eos_token_id:
-                    return mx.array([all_tokens])
+                    return torch.tensor([all_tokens], dtype=torch.long, device=self.device)
                 all_tokens.append(tok)
                 if streamer:
                     streamer(tok)
 
-        return mx.array([all_tokens])
+        return torch.tensor([all_tokens], dtype=torch.long, device=self.device)
 
     def _sync_draft(self, step: StepResult) -> None:
         """Synchronize draft model state after a verification step.
@@ -416,7 +410,7 @@ class SpeculativeEngine:
             for b in range(batch_size):
                 n_acc = int(step.num_accepted[b].item())
                 if n_acc > 0:
-                    accepted = step.new_tokens[b:b + 1, :n_acc]
+                    accepted = step.new_tokens[b : b + 1, :n_acc]
                     self.draft.sync_after_accept(accepted)
 
         elif isinstance(self.draft, NGramDraft):
@@ -425,9 +419,7 @@ class SpeculativeEngine:
             for b in range(batch_size):
                 n_new = int(step.num_new_tokens[b].item())
                 if n_new > 0:
-                    token_list = [
-                        int(step.new_tokens[b, j].item()) for j in range(n_new)
-                    ]
+                    token_list = [int(step.new_tokens[b, j].item()) for j in range(n_new)]
                     self.draft.update_ngrams(token_list)
 
     def _update_num_spec(self, acceptance_rate: float) -> None:
@@ -438,7 +430,7 @@ class SpeculativeEngine:
         """
         self._acceptance_history.append(acceptance_rate)
 
-        window = self._acceptance_history[-self.config.history_window:]
+        window = self._acceptance_history[-self.config.history_window :]
         avg_rate = sum(window) / len(window)
 
         if avg_rate < self.config.acceptance_threshold:
@@ -453,47 +445,32 @@ class SpeculativeEngine:
             )
 
 
-def _set_element(
-    arr: mx.array, batch_idx: int, seq_idx: int, value: mx.array
-) -> mx.array:
-    """Set a single element in a 2D array via masking.
-
-    MLX doesn't support in-place arr[b, s] = val, so we use a boolean mask
-    and mx.where to achieve the same effect functionally.
-    """
-    batch_size, seq_len = arr.shape
-    mask = (mx.arange(batch_size).reshape(-1, 1) == batch_idx) & (
-        mx.arange(seq_len).reshape(1, -1) == seq_idx
-    )
-    val_scalar = value.reshape(()).astype(arr.dtype)
-    val_broadcast = mx.broadcast_to(val_scalar.reshape(1, 1), (batch_size, seq_len))
-    return mx.where(mask, val_broadcast, arr)
-
-
-def _sample_token(logits: mx.array, temperature: float) -> mx.array:
+def _sample_token(logits: Tensor, temperature: float, device: torch.device) -> Tensor:
     """Sample a token from logits with temperature.
 
     Args:
         logits: [batch, vocab] raw logits.
         temperature: Sampling temperature. <= 0 means greedy.
+        device: Device for output tensor.
 
     Returns:
         [batch] sampled token IDs.
     """
     if temperature <= 0:
-        return mx.argmax(logits, axis=-1).astype(mx.uint32)
+        return logits.argmax(dim=-1).long()
     scaled = logits / max(temperature, 1e-8)
-    return mx.random.categorical(scaled).astype(mx.uint32)
+    probs = torch.softmax(scaled, dim=-1)
+    return torch.multinomial(probs, num_samples=1).squeeze(-1).long()
 
 
-def _contains_eos(tokens: mx.array, eos_id: int) -> bool:
+def _contains_eos(tokens: Tensor, eos_id: int) -> bool:
     """Check if any element in a 1D token array equals eos_id."""
-    return bool(mx.any(tokens == eos_id).item())
+    return bool((tokens == eos_id).any().item())
 
 
 def _find_eos(
-    new_tokens: mx.array,
-    num_new_tokens: mx.array,
+    new_tokens: Tensor,
+    num_new_tokens: Tensor,
     eos_id: int,
 ) -> tuple[int, int] | None:
     """Find first EOS position in a step's output tokens.

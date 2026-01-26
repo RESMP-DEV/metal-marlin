@@ -81,9 +81,7 @@ class ThreadgroupConfig:
     def __post_init__(self) -> None:
         # Auto-compute simdgroups if not specified
         if self.simdgroups_per_tg == 0:
-            object.__setattr__(
-                self, "simdgroups_per_tg", (self.threads_per_tg + 31) // 32
-            )
+            object.__setattr__(self, "simdgroups_per_tg", (self.threads_per_tg + 31) // 32)
 
 
 @dataclass
@@ -328,18 +326,14 @@ class OccupancyAnalyzer:
             recommendations.append(
                 f"Reduce threadgroup memory from {config.threadgroup_memory_bytes} bytes"
             )
-            recommendations.append(
-                "Consider using device memory instead of threadgroup memory"
-            )
+            recommendations.append("Consider using device memory instead of threadgroup memory")
 
         if limiting_factor == "registers":
             recommendations.append("Reduce register usage by simplifying kernel logic")
             recommendations.append("Consider using function constants instead of locals")
 
         if config.threads_per_tg < 128:
-            recommendations.append(
-                "Increase threads_per_tg to at least 128 for better utilization"
-            )
+            recommendations.append("Increase threads_per_tg to at least 128 for better utilization")
 
         if config.threads_per_tg % self.SIMD_WIDTH != 0:
             recommendations.append(
@@ -349,9 +343,7 @@ class OccupancyAnalyzer:
 
         # Check for power-of-2 sizing
         if config.threads_per_tg & (config.threads_per_tg - 1) != 0:
-            recommendations.append(
-                "Consider power-of-2 threadgroup size for better coalescing"
-            )
+            recommendations.append("Consider power-of-2 threadgroup size for better coalescing")
 
         return OccupancyMetrics(
             theoretical_occupancy=theoretical_occupancy,

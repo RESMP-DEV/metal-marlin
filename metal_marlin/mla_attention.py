@@ -37,6 +37,8 @@ Supported MLA variants:
     - DeepSeek-V2: KV compression only (no query compression in base version)
     - DeepSeek-V2.5/V3: Full MLA similar to GLM
 
+This implementation uses PyTorch with MPS backend for Apple Silicon acceleration.
+
 Usage:
     from metal_marlin.mla_attention import MLAAttention
 
@@ -54,12 +56,24 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import mlx.core as mx
-import mlx.nn as nn
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from .kv_cache import KVCache
 from .layers import MarlinLinear
+
+if TYPE_CHECKING:
+    pass
+
+
+def _get_device() -> torch.device:
+    """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 @dataclass
@@ -122,45 +136,70 @@ class MLARoPE(nn.Module):
 
         # Precompute inverse frequencies with rope_ratio scaling
         half_dim = dim // 2
-        inv_freq = rope_ratio / (base ** (mx.arange(0, half_dim, dtype=mx.float32) * 2 / dim))
-        self.inv_freq = inv_freq
+        inv_freq = rope_ratio / (base ** (torch.arange(0, half_dim, dtype=torch.float32) * 2 / dim))
+        self.register_buffer("inv_freq", inv_freq)
 
         # Precompute cos/sin cache for max sequence length
-        positions = mx.arange(max_seq_len, dtype=mx.float32)
-        freqs = mx.outer(positions, inv_freq)  # [max_seq, dim/2]
-        self.cos_cache = mx.cos(freqs).astype(mx.float16)
-        self.sin_cache = mx.sin(freqs).astype(mx.float16)
+        self._build_cache(max_seq_len)
 
-    def __call__(
+    def _build_cache(self, max_seq_len: int) -> None:
+        """Build cos/sin cache for the given sequence length."""
+        # Ensure positions are created on the same device as inv_freq
+        device = self.inv_freq.device
+        positions = torch.arange(max_seq_len, dtype=torch.float32, device=device)
+        freqs = torch.outer(positions, self.inv_freq)  # [max_seq, dim/2]
+        cos_cache = torch.cos(freqs).to(torch.float16)
+        sin_cache = torch.sin(freqs).to(torch.float16)
+        self.register_buffer("cos_cache", cos_cache)
+        self.register_buffer("sin_cache", sin_cache)
+
+    def forward(
         self,
-        x: mx.array,
+        x: torch.Tensor,
         position_offset: int = 0,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Apply RoPE to input tensor.
 
         Args:
-            x: Input tensor [..., seq_len, dim]
+            x: Input tensor of shape:
+               - [batch, seq_len, dim] for k_pe
+               - [batch, seq_len, num_heads, head_dim] for Q
+               In both cases, seq_len is at index 1.
             position_offset: Position offset for KV cache continuation
 
         Returns:
             Tensor with RoPE applied, same shape as input
         """
-        seq_len = x.shape[-2]
+        # seq_len is always at index 1 for MLA inputs
+        seq_len = x.shape[1]
+        device = x.device
+        dtype = x.dtype
 
-        # Get cos/sin for current positions
-        positions = mx.arange(position_offset, position_offset + seq_len)
-        cos = self.cos_cache[positions]  # [seq_len, dim/2]
-        sin = self.sin_cache[positions]
+        # Get cos/sin for positions
+        end_pos = position_offset + seq_len
+        if end_pos > self.max_seq_len:
+            self._build_cache(end_pos)
+            self.max_seq_len = end_pos
 
-        # Expand dimensions for broadcasting
-        # x: [..., seq_len, dim]
-        # cos, sin: [seq_len, dim/2] -> [1, ..., seq_len, dim/2]
-        while cos.ndim < x.ndim:
-            cos = cos[None]
-            sin = sin[None]
+        cos = self.cos_cache[position_offset:end_pos].to(device)  # [seq_len, dim/2]
+        sin = self.sin_cache[position_offset:end_pos].to(device)
 
-        # Split into pairs
-        x_even = x[..., ::2]  # [..., seq_len, dim/2]
+        # Handle different input formats:
+        # - 3D: [batch, seq, dim] for k_pe -> need [1, seq, dim/2]
+        # - 4D: [batch, seq, heads, head_dim] for Q -> need [1, seq, 1, dim/2]
+        if x.ndim == 3:
+            # [batch, seq, dim] format
+            cos = cos.unsqueeze(0)  # [1, seq, dim/2]
+            sin = sin.unsqueeze(0)
+        elif x.ndim == 4:
+            # [batch, seq, heads, head_dim] format
+            cos = cos.unsqueeze(0).unsqueeze(2)  # [1, seq, 1, dim/2]
+            sin = sin.unsqueeze(0).unsqueeze(2)
+        else:
+            raise ValueError(f"Unsupported input dimensions: {x.ndim}. Expected 3 or 4.")
+
+        # Split into even/odd indices along last dimension
+        x_even = x[..., ::2]
         x_odd = x[..., 1::2]
 
         # Apply rotation (Llama-style)
@@ -168,12 +207,10 @@ class MLARoPE(nn.Module):
         x_rotated_odd = x_odd * cos + x_even * sin
 
         # Interleave back
-        shape = x.shape
-        x_rotated = mx.concatenate(
-            [x_rotated_even[..., None], x_rotated_odd[..., None]], axis=-1
-        ).reshape(shape)
+        x_rotated = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
+        x_rotated = x_rotated.flatten(-2)  # Flatten last 2 dims to restore original dim
 
-        return x_rotated
+        return x_rotated.to(dtype)
 
 
 class MLAKVCache:
@@ -193,7 +230,8 @@ class MLAKVCache:
         max_seq_len: int,
         kv_lora_rank: int,
         qk_rope_head_dim: int,
-        dtype: mx.Dtype = mx.float16,
+        dtype: torch.dtype = torch.float16,
+        device: str = "mps",
     ):
         self.num_layers = num_layers
         self.batch_size = batch_size
@@ -201,28 +239,31 @@ class MLAKVCache:
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.dtype = dtype
-
-        # Allocate cache buffers
-        # c_kv: [num_layers, batch, max_seq, kv_lora_rank]
-        self.c_kv = mx.zeros(
-            (num_layers, batch_size, max_seq_len, kv_lora_rank),
-            dtype=dtype,
-        )
-        # k_pe: [num_layers, batch, max_seq, qk_rope_head_dim]
-        self.k_pe = mx.zeros(
-            (num_layers, batch_size, max_seq_len, qk_rope_head_dim),
-            dtype=dtype,
-        )
+        self.device = device
 
         # Current sequence lengths per layer (all start at 0)
         self.seq_lens = [0] * num_layers
 
+        # Allocate cache buffers
+        # c_kv: [num_layers, batch, max_seq, kv_lora_rank]
+        self.c_kv = torch.zeros(
+            (num_layers, batch_size, max_seq_len, kv_lora_rank),
+            dtype=dtype,
+            device=device,
+        )
+        # k_pe: [num_layers, batch, max_seq, qk_rope_head_dim]
+        self.k_pe = torch.zeros(
+            (num_layers, batch_size, max_seq_len, qk_rope_head_dim),
+            dtype=dtype,
+            device=device,
+        )
+
     def update(
         self,
         layer_idx: int,
-        c_kv_new: mx.array,
-        k_pe_new: mx.array,
-    ) -> tuple[mx.array, mx.array]:
+        c_kv_new: torch.Tensor,
+        k_pe_new: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Update cache with new c_kv and k_pe, return full sequence.
 
         Args:
@@ -237,27 +278,40 @@ class MLAKVCache:
         start_pos = self.seq_lens[layer_idx]
         end_pos = start_pos + new_seq_len
 
-        # Update cache
-        # Note: mx.array doesn't support slice assignment directly, so we reconstruct
-        c_kv_updated = mx.concatenate([
-            self.c_kv[layer_idx, :, :start_pos, :],
-            c_kv_new,
-        ], axis=1) if start_pos > 0 else c_kv_new
+        if end_pos > self.max_seq_len:
+            raise ValueError(f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}")
 
-        k_pe_updated = mx.concatenate([
-            self.k_pe[layer_idx, :, :start_pos, :],
-            k_pe_new,
-        ], axis=1) if start_pos > 0 else k_pe_new
+        # Update cache in-place
+        self.c_kv[layer_idx, :, start_pos:end_pos, :] = c_kv_new.to(self.dtype)
+        self.k_pe[layer_idx, :, start_pos:end_pos, :] = k_pe_new.to(self.dtype)
 
-        # Store back (padded to max_seq_len)
         self.seq_lens[layer_idx] = end_pos
 
-        return c_kv_updated, k_pe_updated
+        # Return full sequence up to current position
+        c_kv_full = self.c_kv[layer_idx, :, :end_pos, :]
+        k_pe_full = self.k_pe[layer_idx, :, :end_pos, :]
+
+        return c_kv_full, k_pe_full
 
     @property
     def seq_len(self) -> int:
         """Current sequence length (assumes all layers are in sync)."""
         return self.seq_lens[0] if self.seq_lens else 0
+
+    def reset(self) -> None:
+        """Clear cache for new sequence."""
+        self.seq_lens = [0] * self.num_layers
+
+    def memory_usage_mb(self) -> float:
+        """Return current memory usage in MB."""
+        bytes_per_element = 2  # float16
+        current_elements = (
+            self.batch_size
+            * max(self.seq_lens)
+            * (self.kv_lora_rank + self.qk_rope_head_dim)
+            * self.num_layers
+        )
+        return current_elements * bytes_per_element / 1024 / 1024
 
 
 class MLAAttention(nn.Module):
@@ -293,7 +347,6 @@ class MLAAttention(nn.Module):
         bias: bool = False,
     ):
         super().__init__()
-
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim or (hidden_size // num_heads)
@@ -301,43 +354,56 @@ class MLAAttention(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.rope_ratio = rope_ratio
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
         # Query projections
         if q_lora_rank is not None:
             # Compressed query path: hidden -> q_latent -> Q
             self.q_a_proj = MarlinLinear(
-                hidden_size, q_lora_rank,
-                bias=bias, quant_type=quant_type, group_size=group_size
+                hidden_size, q_lora_rank, bias=bias, quant_type=quant_type, group_size=group_size
             )
             self.q_b_proj = MarlinLinear(
-                q_lora_rank, num_heads * self.head_dim,
-                bias=bias, quant_type=quant_type, group_size=group_size
+                q_lora_rank,
+                num_heads * self.head_dim,
+                bias=bias,
+                quant_type=quant_type,
+                group_size=group_size,
             )
+            self.q_proj = None
         else:
             # Standard query projection
             self.q_proj = MarlinLinear(
-                hidden_size, num_heads * self.head_dim,
-                bias=bias, quant_type=quant_type, group_size=group_size
+                hidden_size,
+                num_heads * self.head_dim,
+                bias=bias,
+                quant_type=quant_type,
+                group_size=group_size,
             )
+            self.q_a_proj = None
+            self.q_b_proj = None
 
         # KV projections (always compressed in MLA)
         # kv_a_proj output: [kv_lora_rank + qk_rope_head_dim]
         kv_a_out_dim = kv_lora_rank + qk_rope_head_dim
         self.kv_a_proj = MarlinLinear(
-            hidden_size, kv_a_out_dim,
-            bias=bias, quant_type=quant_type, group_size=group_size
+            hidden_size, kv_a_out_dim, bias=bias, quant_type=quant_type, group_size=group_size
         )
         # kv_b_proj: decompress latent to full K and V
         self.kv_b_proj = MarlinLinear(
-            kv_lora_rank, num_heads * self.head_dim * 2,
-            bias=bias, quant_type=quant_type, group_size=group_size
+            kv_lora_rank,
+            num_heads * self.head_dim * 2,
+            bias=bias,
+            quant_type=quant_type,
+            group_size=group_size,
         )
 
         # Output projection
         self.o_proj = MarlinLinear(
-            num_heads * self.head_dim, hidden_size,
-            bias=bias, quant_type=quant_type, group_size=group_size
+            num_heads * self.head_dim,
+            hidden_size,
+            bias=bias,
+            quant_type=quant_type,
+            group_size=group_size,
         )
 
         # RoPE for Q (full head_dim) and k_pe (qk_rope_head_dim)
@@ -372,13 +438,13 @@ class MLAAttention(nn.Module):
             bias=config.bias,
         )
 
-    def __call__(
+    def forward(
         self,
-        hidden_states: mx.array,
-        attention_mask: mx.array | None = None,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
         kv_cache: MLAKVCache | KVCache | None = None,
         layer_idx: int = 0,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Forward pass.
 
         Args:
@@ -400,12 +466,12 @@ class MLAAttention(nn.Module):
             q = self.q_proj(hidden_states)
 
         # Reshape Q: [batch, seq, num_heads, head_dim]
-        q = q.reshape(batch_size, seq_len, self.num_heads, self.head_dim)
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # KV path: compress then split
         kv_compressed = self.kv_a_proj(hidden_states)  # [B, S, kv_lora_rank + rope_dim]
-        c_kv = kv_compressed[..., :self.kv_lora_rank]  # Latent (no RoPE)
-        k_pe = kv_compressed[..., self.kv_lora_rank:]  # Position encoding
+        c_kv = kv_compressed[..., : self.kv_lora_rank]  # Latent (no RoPE)
+        k_pe = kv_compressed[..., self.kv_lora_rank :]  # Position encoding
 
         # Determine position offset from cache
         if isinstance(kv_cache, MLAKVCache):
@@ -425,59 +491,61 @@ class MLAAttention(nn.Module):
         if isinstance(kv_cache, MLAKVCache):
             c_kv, k_pe = kv_cache.update(layer_idx, c_kv, k_pe)
 
+        # Get current cache/sequence length after potential cache update
+        cache_len = c_kv.shape[1]
+
         # Decompress KV: c_kv -> full K, V
         kv_full = self.kv_b_proj(c_kv)  # [B, cache_len, num_heads * head_dim * 2]
-        kv_full = kv_full.reshape(batch_size, -1, self.num_heads, self.head_dim * 2)
-        k_content, v = mx.split(kv_full, 2, axis=-1)  # [B, cache_len, num_heads, head_dim]
+        kv_full = kv_full.view(batch_size, cache_len, self.num_heads, self.head_dim * 2)
+        k_content, v = kv_full.split(self.head_dim, dim=-1)  # [B, cache_len, num_heads, head_dim]
 
-        # Note: In full MLA, k_pe is concatenated with K to add positional info.
-        # The exact combination depends on the model variant.
-        # GLM-4.7 uses decoupled RoPE where k_pe forms part of the attention key.
-        # For simplicity, we broadcast k_pe to all heads and concat.
+        # Note: k_pe is available for future RoPE concatenation if needed
+        # Currently, the decompressed K from c_kv already contains positional information
+        # implicitly through the learned projection
 
-        # Expand k_pe for multi-head: [B, cache_len, 1, rope_dim] -> [B, cache_len, num_heads, rope_dim]
-        k_pe[..., None, :].repeat(1, 1, self.num_heads, 1)
-
-        # Concatenate k_content with k_pe (if dimensions allow) or use separate attention
-        # Standard approach: concat [k_content, k_pe] along head_dim
-        # This increases effective head_dim by rope_dim
-        # Alternative: use k_pe as additive position bias
-
-        # For compatibility with standard attention, we keep k = k_content
-        # and apply position encoding separately in attention scores
         k = k_content
 
         # Transpose for attention: [batch, heads, seq, head_dim]
-        q = q.transpose(0, 2, 1, 3)
-        k = k.transpose(0, 2, 1, 3)
-        v = v.transpose(0, 2, 1, 3)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        # Scaled dot-product attention
-        attn_weights = (q @ k.transpose(0, 1, 3, 2)) * self.scale
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        attn_weights = mx.softmax(attn_weights, axis=-1)
-
-        attn_output = attn_weights @ v  # [batch, heads, seq, head_dim]
+        # Use PyTorch's scaled_dot_product_attention (MPS-optimized)
+        attn_output = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=attention_mask is None and seq_len > 1,
+            scale=self.scale,
+        )
 
         # Reshape and project output
-        attn_output = attn_output.transpose(0, 2, 1, 3).reshape(
-            batch_size, seq_len, self.num_heads * self.head_dim
+        attn_output = (
+            attn_output.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_len, self.num_heads * self.head_dim)
         )
+
         output = self.o_proj(attn_output)
 
         return output
 
 
-def create_mla_from_hf_config(config: dict) -> MLAAttention:
+def create_mla_from_hf_config(
+    config: dict,
+    quant_type: str = "fp4",
+    group_size: int | None = None,
+) -> MLAAttention:
     """Create MLAAttention from HuggingFace config dict.
 
     Extracts MLA-specific parameters from model config and creates attention layer.
 
     Args:
         config: HuggingFace model config dict
+        quant_type: Quantization type for projections
+        group_size: Quantization group size. If None, auto-calculates from dimensions.
 
     Returns:
         Configured MLAAttention instance
@@ -497,6 +565,20 @@ def create_mla_from_hf_config(config: dict) -> MLAAttention:
     rope_ratio = config.get("rope_ratio", 1.0)
     max_position_embeddings = config.get("max_position_embeddings", 4096)
 
+    # Auto-calculate group_size if not provided
+    if group_size is None:
+        # Find a group_size that divides all projection dimensions
+        dims = [hidden_size, kv_lora_rank, num_heads * head_dim * 2]
+        if q_lora_rank is not None:
+            dims.append(q_lora_rank)
+        # Start from 128 and find largest power of 2 that works
+        for gs in [128, 64, 32, 16, 8]:
+            if all(d % gs == 0 for d in dims):
+                group_size = gs
+                break
+        else:
+            group_size = 1  # Fallback
+
     return MLAAttention(
         hidden_size=hidden_size,
         num_heads=num_heads,
@@ -507,4 +589,6 @@ def create_mla_from_hf_config(config: dict) -> MLAAttention:
         rope_theta=rope_theta,
         rope_ratio=rope_ratio,
         max_position_embeddings=max_position_embeddings,
+        quant_type=quant_type,
+        group_size=group_size,
     )

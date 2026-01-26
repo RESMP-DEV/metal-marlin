@@ -55,8 +55,8 @@ The cache allocates tensors for `max_seq_len` at initialization. This avoids per
 
 ```python
 cache_shape = (batch_size, num_kv_heads, max_seq_len, head_dim)
-k_cache = mx.zeros(cache_shape, dtype=mx.float16)  # Per layer
-v_cache = mx.zeros(cache_shape, dtype=mx.float16)
+k_cache = torch.zeros(cache_shape, dtype=torch.float16, device="mps")  # Per layer
+v_cache = torch.zeros(cache_shape, dtype=torch.float16, device="mps")
 ```
 
 A position counter (`seq_len`) tracks how much of the buffer is valid. Reads slice `[:, :, :seq_len, :]`; writes target `[:, :, seq_len:seq_len+new, :]`.
@@ -170,7 +170,7 @@ config = CacheConfig(
     num_kv_heads=8,      # KV heads (GQA with 4:1 ratio)
     head_dim=128,
     max_seq_len=4096,
-    dtype=mx.float16,
+    dtype=torch.float16,
     quantize=False,      # Set True for FP4 KV cache
 )
 

@@ -151,16 +151,13 @@ class GPTQQuantizer:
         out_features, in_features = W.shape
 
         if H.shape != (in_features, in_features):
-            raise ValueError(
-                f"H shape {H.shape} doesn't match W in_features {in_features}"
-            )
+            raise ValueError(f"H shape {H.shape} doesn't match W in_features {in_features}")
 
         # Determine group size (per-channel if -1)
         group_size = in_features if self.group_size == -1 else self.group_size
         if in_features % group_size != 0:
             raise ValueError(
-                f"in_features ({in_features}) must be divisible by "
-                f"group_size ({group_size})"
+                f"in_features ({in_features}) must be divisible by group_size ({group_size})"
             )
 
         num_groups = in_features // group_size

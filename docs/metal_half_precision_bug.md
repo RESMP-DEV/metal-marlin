@@ -201,8 +201,6 @@ The following files have been updated with the float intermediate workaround:
   - `safe_dequant_u4_value()` - INT4 value with zero point
 - `batched_gemm.metal`:
   - `dequant_fp4()` - FP4 scalar dequantization
-- `debug.metal`:
-  - `dequant_fp4()` - Debug FP4 dequantization
 - `dequant_fp8.metal`:
   - `dequant_fp8_e4m3_x4_scaled()` - FP8 E4M3 × scale
   - `dequant_fp8_e4m3_x8_fused()` - FP8 E4M3 8-value fused

@@ -176,9 +176,7 @@ class AdaptiveQuantizer:
         if max_bits > 8:
             raise ValueError(f"max_bits must be <= 8, got {max_bits}")
         if min_bits > max_bits:
-            raise ValueError(
-                f"min_bits ({min_bits}) must be <= max_bits ({max_bits})"
-            )
+            raise ValueError(f"min_bits ({min_bits}) must be <= max_bits ({max_bits})")
         if error_budget <= 0:
             raise ValueError(f"error_budget must be positive, got {error_budget}")
         if group_size <= 0:
@@ -352,8 +350,24 @@ class AdaptiveQuantizer:
         """Get the quantization grid for a format."""
         if fmt == QuantizationFormat.FP4:
             return np.array(
-                [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-                 -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+                [
+                    0.0,
+                    0.5,
+                    1.0,
+                    1.5,
+                    2.0,
+                    3.0,
+                    4.0,
+                    6.0,
+                    -0.0,
+                    -0.5,
+                    -1.0,
+                    -1.5,
+                    -2.0,
+                    -3.0,
+                    -4.0,
+                    -6.0,
+                ],
                 dtype=np.float32,
             )
         elif fmt == QuantizationFormat.INT4:
@@ -381,7 +395,7 @@ class AdaptiveQuantizer:
         """Compute NormalFloat grid from Gaussian quantiles."""
         from scipy import stats
 
-        n_levels = 2 ** bits
+        n_levels = 2**bits
         quantiles = np.linspace(0.5 / n_levels, 1 - 0.5 / n_levels, n_levels)
         levels = stats.norm.ppf(quantiles)
         # Normalize so max magnitude is 1
@@ -684,9 +698,7 @@ class AdaptiveQuantizer:
             sensitivities[name] = self.compute_sensitivity(H)
 
         # Compute total parameters and sensitivity-weighted average
-        total_params = sum(
-            shape[0] * shape[1] for shape in layer_shapes.values()
-        )
+        total_params = sum(shape[0] * shape[1] for shape in layer_shapes.values())
         sens_values = list(sensitivities.values())
         mean_sens = np.mean(sens_values)
         std_sens = np.std(sens_values) + 1e-10
@@ -721,9 +733,7 @@ class AdaptiveQuantizer:
             )
 
         # Compute actual average bits
-        actual_bits = sum(
-            lb.allocated_bits * lb.weight for lb in layer_budgets
-        )
+        actual_bits = sum(lb.allocated_bits * lb.weight for lb in layer_budgets)
 
         return ModelBudgetAllocation(
             layers=layer_budgets,

@@ -36,9 +36,9 @@ from .request import GenerationRequest, RequestStatus, SchedulerOutput
 class SchedulerConfig:
     """Configuration for the FCFS batch scheduler."""
 
-    max_num_seqs: int = 64              # Max concurrent sequences
+    max_num_seqs: int = 64  # Max concurrent sequences
     max_num_batched_tokens: int = 2048  # Max tokens per iteration
-    max_prefill_tokens: int = 1024      # Limit prefill to control latency
+    max_prefill_tokens: int = 1024  # Limit prefill to control latency
     block_size: int = 16
 
 

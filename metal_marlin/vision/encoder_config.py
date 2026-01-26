@@ -502,7 +502,9 @@ class VisionEncoderConfig:
             return "bf16", 0
 
         # Attention Q/K/V projections
-        if any(p in name_lower for p in ["q_proj", "k_proj", "v_proj", "qkv", "query", "key", "value"]):
+        if any(
+            p in name_lower for p in ["q_proj", "k_proj", "v_proj", "qkv", "query", "key", "value"]
+        ):
             return self.attention_precision, self.attention_group_size
 
         # Attention output projection
@@ -586,12 +588,20 @@ def detect_vision_architecture(model_path: str | Path) -> VisionArchitecture:
         return VisionArchitecture.QWEN2_VL_VIT
     elif "internvl" in model_type or "intern_vit" in vision_type:
         hidden = vision_config.get("hidden_size", 1024)
-        return VisionArchitecture.INTERN_VIT_6B if hidden >= 3000 else VisionArchitecture.INTERN_VIT_300M
+        return (
+            VisionArchitecture.INTERN_VIT_6B
+            if hidden >= 3000
+            else VisionArchitecture.INTERN_VIT_300M
+        )
     elif "siglip" in vision_type:
         return VisionArchitecture.SIGLIP_SO400M
     elif "clip" in vision_type:
         image_size = vision_config.get("image_size", 224)
-        return VisionArchitecture.CLIP_VIT_L_14_336 if image_size >= 336 else VisionArchitecture.CLIP_VIT_L_14
+        return (
+            VisionArchitecture.CLIP_VIT_L_14_336
+            if image_size >= 336
+            else VisionArchitecture.CLIP_VIT_L_14
+        )
     elif "pixtral" in model_type:
         return VisionArchitecture.PIXTRAL_VIT
 

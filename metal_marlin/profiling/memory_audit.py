@@ -31,13 +31,6 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-try:
-    import mlx.core as mx  # noqa: F401
-
-    HAS_MLX = True
-except ImportError:
-    HAS_MLX = False
-
 
 class AccessPattern(Enum):
     """Classification of memory access patterns."""

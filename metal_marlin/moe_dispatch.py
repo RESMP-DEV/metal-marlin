@@ -15,20 +15,31 @@ Workflow:
     4. scatter_expert_outputs() restores original token order
 
 Example:
-    >>> expert_ids = mx.array([[2, 0], [1, 2], [0, 1]])  # [3 tokens, top_k=2]
+    >>> expert_ids = torch.tensor([[2, 0], [1, 2], [0, 1]], device="mps")  # [3 tokens, top_k=2]
     >>> sorted_idx, offsets, inverse = group_tokens_by_expert(expert_ids, num_experts=3)
     >>> # sorted_idx groups token-expert pairs by expert:
     >>> # expert 0: token 0 (2nd choice), token 2 (1st choice)
     >>> # expert 1: token 1 (1st choice), token 2 (2nd choice)
     >>> # expert 2: token 0 (1st choice), token 1 (2nd choice)
     >>> # offsets = [0, 2, 4, 6] (2 assignments each for 3 experts)
+
+Note:
+    This module uses PyTorch MPS for routing logic. For expert compute
+    (GEMM), use metal_dispatch.py which provides direct Metal kernel dispatch.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-import mlx.core as mx
+import torch
+
+if TYPE_CHECKING:
+    pass
+
+# Default device for MoE dispatch operations
+_DEFAULT_DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 
 
 @dataclass
@@ -57,10 +68,10 @@ class MoEDispatchInfo:
         num_experts: Total number of experts.
     """
 
-    sorted_token_indices: mx.array  # [total_assignments] int32
-    sorted_expert_indices: mx.array  # [total_assignments] int32
-    expert_offsets: mx.array  # [num_experts + 1] int32
-    inverse_indices: mx.array  # [total_assignments] int32
+    sorted_token_indices: torch.Tensor  # [total_assignments] int64
+    sorted_expert_indices: torch.Tensor  # [total_assignments] int64
+    expert_offsets: torch.Tensor  # [num_experts + 1] int64
+    inverse_indices: torch.Tensor  # [total_assignments] int64
     num_tokens: int
     top_k: int
     num_experts: int
@@ -72,9 +83,9 @@ class MoEDispatchInfo:
 
 
 def group_tokens_by_expert(
-    expert_ids: mx.array,
+    expert_ids: torch.Tensor,
     num_experts: int,
-) -> tuple[mx.array, mx.array, mx.array]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Group tokens by their assigned expert for batched GEMM execution.
 
     Given expert assignments for each token, produces indexing tensors that
@@ -83,25 +94,25 @@ def group_tokens_by_expert(
     per-token execution.
 
     Args:
-        expert_ids: [batch, top_k] int32 array where expert_ids[i, j] is the
+        expert_ids: [batch, top_k] int tensor where expert_ids[i, j] is the
             j-th expert assigned to token i. Values must be in [0, num_experts).
         num_experts: Total number of experts in the MoE layer.
 
     Returns:
-        Tuple of three arrays:
-        - sorted_indices: [batch * top_k] int32 indices to reorder flattened
+        Tuple of three tensors:
+        - sorted_indices: [batch * top_k] int64 indices to reorder flattened
             token-expert pairs by expert. sorted_indices[i] gives the index
             into the flattened expert_ids for the i-th assignment in
             expert-sorted order.
-        - expert_offsets: [num_experts + 1] int32 cumulative counts. Expert e's
+        - expert_offsets: [num_experts + 1] int64 cumulative counts. Expert e's
             assignments are at sorted_indices[expert_offsets[e]:expert_offsets[e+1]].
-        - inverse_indices: [batch * top_k] int32 indices to restore original
+        - inverse_indices: [batch * top_k] int64 indices to restore original
             order. For each position i in sorted order, inverse_indices[i]
             gives its original position before sorting.
 
     Example:
         >>> # 4 tokens, top_k=2, 3 experts
-        >>> expert_ids = mx.array([[0, 2], [1, 0], [2, 1], [0, 1]])
+        >>> expert_ids = torch.tensor([[0, 2], [1, 0], [2, 1], [0, 1]], device="mps")
         >>> sorted_idx, offsets, inverse = group_tokens_by_expert(expert_ids, 3)
         >>>
         >>> # Token-expert assignments flattened: [(0,0), (0,2), (1,1), (1,0), (2,2), (2,1), (3,0), (3,1)]
@@ -111,66 +122,41 @@ def group_tokens_by_expert(
         >>> #   Expert 2: positions 1, 4    (tokens 0, 2)
         >>> # offsets = [0, 3, 6, 8]
     """
+    device = expert_ids.device
     batch_size, top_k = expert_ids.shape
     total_assignments = batch_size * top_k
 
     # Flatten expert_ids to [batch * top_k]
-    expert_ids_flat = expert_ids.reshape(-1).astype(mx.int32)
+    expert_ids_flat = expert_ids.reshape(-1).to(torch.int64)
 
-    # Create stable sort key: expert_id * batch_size + original_position
+    # Create stable sort key: expert_id * total_assignments + original_position
     # This ensures tokens for the same expert are grouped, with original
     # order preserved within each expert group
-    original_positions = mx.arange(total_assignments, dtype=mx.int32)
+    original_positions = torch.arange(total_assignments, dtype=torch.int64, device=device)
 
     # Compute sort keys - stable sort by expert, preserving token order within expert
-    # Using expert_id * total_assignments + position ensures stability
     sort_keys = expert_ids_flat * total_assignments + original_positions
 
     # Argsort to get indices that would sort by expert
-    sorted_indices = mx.argsort(sort_keys)
+    sorted_indices = torch.argsort(sort_keys)
 
-    # Compute expert_offsets using cumsum on one-hot counts
-    # Count how many assignments go to each expert
-    expert_counts = mx.zeros((num_experts,), dtype=mx.int32)
-
-    # Use scatter_add pattern: for each expert e, count occurrences
-    # Since mx doesn't have scatter_add, we use a different approach:
-    # Sort the expert_ids and count changes
-    expert_ids_flat[sorted_indices]
-
-    # expert_offsets[e] = number of assignments with expert_id < e
-    # We can compute this by finding where each expert starts in sorted order
-    #
-    # Method: for each expert e, find first position where sorted_experts >= e
-    # This is equivalent to cumsum of counts
-
-    # Count occurrences of each expert
-    # Use one-hot encoding and sum
-    mx.zeros((total_assignments, num_experts), dtype=mx.int32)
-
-    # Scatter 1s at expert positions
-    # Since MLX doesn't have scatter, use alternative:
-    # Create range [0, num_experts) and compare with each expert_id
-    expert_range = mx.arange(num_experts, dtype=mx.int32)
-    # [total_assignments, num_experts] comparison matrix
-    matches = expert_ids_flat[:, None] == expert_range[None, :]
-    expert_counts = mx.sum(matches.astype(mx.int32), axis=0)
+    # Count occurrences of each expert using bincount
+    expert_counts = torch.bincount(expert_ids_flat, minlength=num_experts)
 
     # Cumsum to get offsets (prepend 0)
-    expert_offsets = mx.concatenate(
-        [mx.array([0], dtype=mx.int32), mx.cumsum(expert_counts)]
-    )
+    expert_offsets = torch.zeros(num_experts + 1, dtype=torch.int64, device=device)
+    expert_offsets[1:] = torch.cumsum(expert_counts, dim=0)
 
     # Compute inverse indices: for each sorted position, where did it come from?
     # inverse_indices[sorted_indices[i]] = i, or equivalently:
     # inverse_indices = argsort(sorted_indices)
-    inverse_indices = mx.argsort(sorted_indices)
+    inverse_indices = torch.argsort(sorted_indices)
 
     return sorted_indices, expert_offsets, inverse_indices
 
 
 def group_tokens_by_expert_full(
-    expert_ids: mx.array,
+    expert_ids: torch.Tensor,
     num_experts: int,
 ) -> MoEDispatchInfo:
     """Group tokens by expert with full dispatch information.
@@ -179,14 +165,13 @@ def group_tokens_by_expert_full(
     dataclass with additional information needed for the full MoE forward pass.
 
     Args:
-        expert_ids: [batch, top_k] int32 array of expert assignments.
+        expert_ids: [batch, top_k] int tensor of expert assignments.
         num_experts: Total number of experts.
 
     Returns:
         MoEDispatchInfo with all indexing tensors for dispatch and scatter.
     """
     batch_size, top_k = expert_ids.shape
-    batch_size * top_k
 
     sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert(
         expert_ids, num_experts
@@ -212,9 +197,9 @@ def group_tokens_by_expert_full(
 
 
 def gather_for_experts(
-    activations: mx.array,
+    activations: torch.Tensor,
     dispatch_info: MoEDispatchInfo,
-) -> mx.array:
+) -> torch.Tensor:
     """Gather activations in expert-sorted order for batched GEMM.
 
     Reorders activations so that all tokens going to the same expert are
@@ -234,10 +219,10 @@ def gather_for_experts(
 
 
 def scatter_expert_outputs(
-    expert_outputs: mx.array,
-    expert_probs: mx.array,
+    expert_outputs: torch.Tensor,
+    expert_probs: torch.Tensor,
     dispatch_info: MoEDispatchInfo,
-) -> mx.array:
+) -> torch.Tensor:
     """Scatter and combine expert outputs back to original token order.
 
     After running batched expert GEMM, this function:
@@ -266,7 +251,7 @@ def scatter_expert_outputs(
     ]
 
     # Weight outputs by their routing probabilities
-    weighted_outputs = expert_outputs * probs_for_sorted[:, None]
+    weighted_outputs = expert_outputs * probs_for_sorted.unsqueeze(1)
 
     # Reorder from sorted order to original flat order [batch * top_k]
     # inverse_indices[i] = position in sorted array that maps to original position i
@@ -277,15 +262,15 @@ def scatter_expert_outputs(
     # Now reshape to [batch, top_k, out_dim] and sum over top_k dimension
     # The original flat order is [token0_expert0, token0_expert1, token1_expert0, ...]
     weighted_reshaped = weighted_original.reshape(batch_size, top_k, out_dim)
-    output = mx.sum(weighted_reshaped, axis=1)
+    output = weighted_reshaped.sum(dim=1)
 
     return output
 
 
 def compute_expert_load(
-    expert_ids: mx.array,
+    expert_ids: torch.Tensor,
     num_experts: int,
-) -> mx.array:
+) -> torch.Tensor:
     """Compute load (number of assigned tokens) per expert.
 
     Useful for load balancing analysis and auxiliary losses.
@@ -295,23 +280,21 @@ def compute_expert_load(
         num_experts: Total number of experts.
 
     Returns:
-        [num_experts] int32 array of token counts per expert.
+        [num_experts] int64 tensor of token counts per expert.
     """
-    expert_ids_flat = expert_ids.reshape(-1).astype(mx.int32)
+    expert_ids_flat = expert_ids.reshape(-1).to(torch.int64)
 
-    # Count occurrences using one-hot sum
-    expert_range = mx.arange(num_experts, dtype=mx.int32)
-    matches = expert_ids_flat[:, None] == expert_range[None, :]
-    expert_counts = mx.sum(matches.astype(mx.int32), axis=0)
+    # Count occurrences using bincount
+    expert_counts = torch.bincount(expert_ids_flat, minlength=num_experts)
 
     return expert_counts
 
 
 def compute_load_balancing_loss(
-    expert_probs_pre_topk: mx.array,
-    expert_ids: mx.array,
+    expert_probs_pre_topk: torch.Tensor,
+    expert_ids: torch.Tensor,
     num_experts: int,
-) -> mx.array:
+) -> torch.Tensor:
     """Compute auxiliary load balancing loss for MoE training.
 
     Uses the formulation from Switch Transformer:
@@ -330,18 +313,41 @@ def compute_load_balancing_loss(
     Returns:
         Scalar load balancing loss.
     """
-    expert_ids.shape[0]
-
     # f_e: fraction of tokens routed to each expert
-    expert_counts = compute_expert_load(expert_ids, num_experts).astype(mx.float32)
+    expert_counts = compute_expert_load(expert_ids, num_experts).to(torch.float32)
     # Normalize by total assignments
-    total_assignments = expert_ids.size
+    total_assignments = expert_ids.numel()
     f = expert_counts / total_assignments
 
     # P_e: average probability assigned to each expert across all tokens
-    P = mx.mean(expert_probs_pre_topk, axis=0)  # [num_experts]
+    P = expert_probs_pre_topk.mean(dim=0)  # [num_experts]
 
     # Loss = num_experts * dot(f, P)
-    loss = num_experts * mx.sum(f * P)
+    loss = num_experts * (f * P).sum()
 
     return loss
+
+
+# Utility function for compatibility with MLX-based callers
+def ensure_torch_tensor(
+    arr: torch.Tensor,
+    device: str | torch.device | None = None,
+) -> torch.Tensor:
+    """Ensure input is a PyTorch tensor on the specified device.
+
+    Args:
+        arr: Input tensor (must be PyTorch tensor)
+        device: Target device. If None, uses MPS if available, else CPU.
+
+    Returns:
+        PyTorch tensor on the target device.
+    """
+    if device is None:
+        device = _DEFAULT_DEVICE
+
+    if not isinstance(arr, torch.Tensor):
+        raise TypeError(f"Expected torch.Tensor, got {type(arr).__name__}")
+
+    if arr.device != torch.device(device):
+        return arr.to(device)
+    return arr

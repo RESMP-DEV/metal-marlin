@@ -27,15 +27,15 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from .._compat import HAS_MLX, require_mlx
-
-if HAS_MLX:
-    import mlx.core as mx
+from .._compat import HAS_MPS, require_torch, torch
 
 if TYPE_CHECKING:
     from ..dtypes import DTypeConfig
+
+# Type alias for tensors
+Tensor = Any
 
 
 @dataclass(frozen=True)
@@ -281,29 +281,29 @@ class TileSearcher:
         Returns:
             Best TileConfig for this problem size.
         """
-        require_mlx("tile search autotuning")
+        require_torch("tile search autotuning")
+        if not HAS_MPS:
+            raise RuntimeError(
+                "MPS (Metal Performance Shaders) is required for tile search autotuning. "
+                "This feature requires an Apple Silicon Mac with PyTorch MPS support."
+            )
 
         from ..dtypes import get_default_config
         from ..kernels import pack_fp4_weights
 
         cfg = dtype_config if dtype_config is not None else get_default_config()
-        act_dtype = cfg.mlx_activations
+        act_dtype = cfg.torch_activations
 
-        # Generate test data
-        A = mx.random.normal((M, K), dtype=act_dtype)
-        weight = mx.random.normal((N, K), dtype=act_dtype)
-        packed = pack_fp4_weights(weight, group_size=self.group_size)
-        if len(packed) == 3:
-            B_packed, scales, _meta = packed
-        else:
-            B_packed, scales = packed
-        mx.eval(A, B_packed, scales)
+        # Generate test data on MPS
+        A = torch.randn((M, K), dtype=act_dtype, device="mps")
+        weight = torch.randn((N, K), dtype=act_dtype, device="mps")
+        B_packed, scales = pack_fp4_weights(weight, group_size=self.group_size)
+        # Synchronize to ensure data is ready
+        torch.mps.synchronize()
 
         results = []
         for config in self.configs:
-            result = self._benchmark_config(
-                config, A, B_packed, scales, M, N, K, cfg
-            )
+            result = self._benchmark_config(config, A, B_packed, scales, M, N, K, cfg)
             results.append(result)
 
             if self.verbose and result.valid:
@@ -324,9 +324,9 @@ class TileSearcher:
     def _benchmark_config(
         self,
         config: TileConfig,
-        A: mx.array,
-        B_packed: mx.array,
-        scales: mx.array,
+        A: Tensor,
+        B_packed: Tensor,
+        scales: Tensor,
         M: int,
         N: int,
         K: int,
@@ -350,16 +350,14 @@ class TileSearcher:
 
             # Warmup
             for _ in range(self.warmup_iters):
-                out = kernel_fn(A, B_packed, scales, M, N, K)
-                mx.eval(out)
-                mx.synchronize()
+                _ = kernel_fn(A, B_packed, scales, M, N, K)
+                torch.mps.synchronize()
 
             # Benchmark
             start = time.perf_counter()
             for _ in range(self.bench_iters):
-                out = kernel_fn(A, B_packed, scales, M, N, K)
-                mx.eval(out)
-                mx.synchronize()
+                _ = kernel_fn(A, B_packed, scales, M, N, K)
+                torch.mps.synchronize()
             elapsed = (time.perf_counter() - start) / self.bench_iters
 
             elapsed_ms = elapsed * 1000
@@ -415,52 +413,32 @@ class TileSearcher:
 
     def _get_dispatch_fn(
         self, config: TileConfig, dtype_config: DTypeConfig
-    ) -> Callable[[mx.array, mx.array, mx.array, int, int, int], mx.array]:
+    ) -> Callable[[Tensor, Tensor, Tensor, int, int, int], Tensor]:
         """Get a dispatch function for the given config.
 
         Returns a callable that runs the GEMM with the specified tile config.
+        Uses PyTorch MPS backend with direct Metal kernel dispatch via PyObjC.
         """
-        # Build kernel with this config's template parameters
-        from ..kernels import _FP4_GEMM_SOURCE, _GEMM_HEADER
+        from ..kernels import marlin_gemm_fp4
 
-        kernel = mx.fast.metal_kernel(
-            name=f"marlin_gemm_fp4_{config.name}",
-            input_names=["A", "B", "scales"],
-            output_names=["C"],
-            header=_GEMM_HEADER,
-            source=_FP4_GEMM_SOURCE,
-            ensure_row_contiguous=True,
-        )
-
-        output_dtype = dtype_config.mlx_activations
+        # For PyTorch/MPS, we use the unified marlin_gemm_fp4 function
+        # which handles Metal kernel dispatch internally.
+        # The tile config doesn't affect the kernel dispatch in the PyTorch path
+        # since kernels.py uses fixed tile sizes. For true tile-config-based
+        # autotuning, we would need to extend the Metal dispatch layer.
 
         def dispatch(
-            A: mx.array,
-            B_packed: mx.array,
-            scales: mx.array,
+            A: Tensor,
+            B_packed: Tensor,
+            scales: Tensor,
             M: int,
             N: int,
             K: int,
-        ) -> mx.array:
-            grid_x = (N + config.tile_n - 1) // config.tile_n
-            grid_y = (M + config.tile_m - 1) // config.tile_m
-
-            template = [
-                ("M", M),
-                ("N", N),
-                ("K", K),
-                ("GROUP_SIZE", self.group_size),
-            ] + config.to_template_params()
-
-            outputs = kernel(
-                inputs=[A, B_packed, scales],
-                template=template,
-                grid=(grid_x, grid_y, 1),
-                threadgroup=(config.threads_per_tg, 1, 1),
-                output_shapes=[(M, N)],
-                output_dtypes=[output_dtype],
-            )
-            return outputs[0]
+        ) -> Tensor:
+            # Use the standard GEMM function from kernels module
+            # The tile config is recorded for analysis but the kernel
+            # uses its built-in configuration
+            return marlin_gemm_fp4(A, B_packed, scales, self.group_size)
 
         return dispatch
 
@@ -475,28 +453,29 @@ class TileSearcher:
 
         Same as search() but also returns all benchmark results for analysis.
         """
-        require_mlx("tile search autotuning")
+        require_torch("tile search autotuning")
+        if not HAS_MPS:
+            raise RuntimeError(
+                "MPS (Metal Performance Shaders) is required for tile search autotuning. "
+                "This feature requires an Apple Silicon Mac with PyTorch MPS support."
+            )
 
         from ..dtypes import get_default_config
         from ..kernels import pack_fp4_weights
 
         cfg = dtype_config if dtype_config is not None else get_default_config()
-        act_dtype = cfg.mlx_activations
+        act_dtype = cfg.torch_activations
 
-        A = mx.random.normal((M, K), dtype=act_dtype)
-        weight = mx.random.normal((N, K), dtype=act_dtype)
-        packed = pack_fp4_weights(weight, group_size=self.group_size)
-        if len(packed) == 3:
-            B_packed, scales, _meta = packed
-        else:
-            B_packed, scales = packed
-        mx.eval(A, B_packed, scales)
+        # Generate test data on MPS
+        A = torch.randn((M, K), dtype=act_dtype, device="mps")
+        weight = torch.randn((N, K), dtype=act_dtype, device="mps")
+        B_packed, scales = pack_fp4_weights(weight, group_size=self.group_size)
+        # Synchronize to ensure data is ready
+        torch.mps.synchronize()
 
         results = []
         for config in self.configs:
-            result = self._benchmark_config(
-                config, A, B_packed, scales, M, N, K, cfg
-            )
+            result = self._benchmark_config(config, A, B_packed, scales, M, N, K, cfg)
             results.append(result)
 
         valid_results = [r for r in results if r.valid]
@@ -562,10 +541,10 @@ def common_transformer_sizes(
     if hidden_sizes is None:
         # Common LLM hidden sizes
         hidden_sizes = [
-            2048,   # Llama 2 7B
-            4096,   # Llama 2 7B, Llama 3 8B
-            5120,   # Llama 2 13B
-            8192,   # Llama 2 70B, Llama 3 70B
+            2048,  # Llama 2 7B
+            4096,  # Llama 2 7B, Llama 3 8B
+            5120,  # Llama 2 13B
+            8192,  # Llama 2 70B, Llama 3 70B
         ]
 
     if batch_sizes is None:

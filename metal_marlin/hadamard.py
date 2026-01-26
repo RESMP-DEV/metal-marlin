@@ -42,6 +42,7 @@ class HadamardMetadata:
         padded_k: K dimension after padding to block_size multiple.
         axis: Axis along which rotation was applied (0 for K, 1 for N).
     """
+
     block_size: int
     orig_k: int
     padded_k: int
@@ -84,7 +85,9 @@ def hadamard_matrix(n: int) -> NDArray[np.floating[Any]]:
     return H / np.sqrt(n)
 
 
-def _pad_to_multiple(arr: NDArray[np.floating[Any]], axis: int, multiple: int) -> NDArray[np.floating[Any]]:
+def _pad_to_multiple(
+    arr: NDArray[np.floating[Any]], axis: int, multiple: int
+) -> NDArray[np.floating[Any]]:
     """Pad array along given axis to the next multiple of `multiple`."""
     current = arr.shape[axis]
     if current % multiple == 0:
@@ -92,7 +95,7 @@ def _pad_to_multiple(arr: NDArray[np.floating[Any]], axis: int, multiple: int) -
     pad_amount = multiple - (current % multiple)
     pad_widths = [(0, 0)] * arr.ndim
     pad_widths[axis] = (0, pad_amount)
-    return np.pad(arr, pad_widths, mode='constant', constant_values=0.0)
+    return np.pad(arr, pad_widths, mode="constant", constant_values=0.0)
 
 
 def apply_hadamard_rotation(
@@ -160,7 +163,7 @@ def apply_hadamard_rotation(
         K, N = w.shape
         w_blocks = w.reshape(num_blocks, block_size, N)
         # H @ each block: [block_size, block_size] @ [block_size, N] -> [block_size, N]
-        rotated_blocks = np.einsum('ij,bjk->bik', H, w_blocks)
+        rotated_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
         rotated = rotated_blocks.reshape(K, N)
     else:
         # Rotate along N: W_rotated[:, block_i] = W[:, block_i] @ H.T
@@ -168,7 +171,7 @@ def apply_hadamard_rotation(
         K, N = w.shape
         w_blocks = w.reshape(K, num_blocks, block_size)
         # Each block @ H.T: [K, block_size] @ [block_size, block_size] -> [K, block_size]
-        rotated_blocks = np.einsum('bij,jk->bik', w_blocks, H.T)
+        rotated_blocks = np.einsum("bij,jk->bik", w_blocks, H.T)
         rotated = rotated_blocks.reshape(K, N)
 
     metadata = HadamardMetadata(
@@ -219,14 +222,14 @@ def inverse_hadamard_rotation(
         K, N = w.shape
         w_blocks = w.reshape(num_blocks, block_size, N)
         # Inverse: H.T @ each block, but H.T = H for Hadamard
-        recovered_blocks = np.einsum('ij,bjk->bik', H, w_blocks)
+        recovered_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
         recovered = recovered_blocks.reshape(K, N)
         # Trim padding
         recovered = recovered[:orig_dim, :]
     else:
         K, N = w.shape
         w_blocks = w.reshape(K, num_blocks, block_size)
-        recovered_blocks = np.einsum('bij,jk->bik', w_blocks, H)
+        recovered_blocks = np.einsum("bij,jk->bik", w_blocks, H)
         recovered = recovered_blocks.reshape(K, N)
         recovered = recovered[:, :orig_dim]
 
@@ -255,7 +258,7 @@ def compute_outlier_stats(weights: NDArray[np.floating[Any]]) -> dict[str, float
     # Excess kurtosis (normal = 0)
     centered = weights.ravel() - weights.mean()
     if std > 0:
-        kurtosis = float(np.mean(centered ** 4) / (std ** 4) - 3.0)
+        kurtosis = float(np.mean(centered**4) / (std**4) - 3.0)
     else:
         kurtosis = 0.0
 

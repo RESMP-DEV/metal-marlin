@@ -1,13 +1,12 @@
 """Forward hooks for Hessian collection during calibration passes.
 
-This module provides a unified interface for registering forward hooks on
-PyTorch and MLX models to collect Hessian matrices (X^T @ X) for GPTQ
-quantization. The hooks capture input activations to linear layers and
-accumulate the Hessian incrementally for memory efficiency.
+This module provides an interface for registering forward hooks on PyTorch
+models to collect Hessian matrices (X^T @ X) for GPTQ quantization. The hooks
+capture input activations to linear layers and accumulate the Hessian
+incrementally for memory efficiency.
 
 Supports:
 - PyTorch models via register_forward_hook
-- MLX models via __call__ wrapper (MLX lacks native hook support)
 - GQA/MQA attention patterns (different Q/K/V dimensions)
 
 Usage:
@@ -34,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
-from .._compat import HAS_MLX, HAS_TORCH, mx, torch
+from .._compat import HAS_TORCH, torch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,9 +67,7 @@ class HessianCollector:
     damping: float = 0.01
 
     def __post_init__(self) -> None:
-        self.hessian = np.zeros(
-            (self.in_features, self.in_features), dtype=np.float64
-        )
+        self.hessian = np.zeros((self.in_features, self.in_features), dtype=np.float64)
 
     def update(self, activations: NDArray[np.floating]) -> None:
         """Update Hessian with a batch of activations.
@@ -78,10 +75,10 @@ class HessianCollector:
         Args:
             activations: Input activations [batch, seq_len, in_features] or
                         [n_samples, in_features] if already flattened.
-                        Accepts numpy arrays, torch tensors, or MLX arrays.
+                        Accepts numpy arrays or torch tensors.
         """
         # Convert to numpy float64 for accumulation stability
-        x = _to_numpy_f64(activations)
+        x = _torch_to_numpy_f64(activations)
 
         # Flatten to 2D: [*, in_features] -> [n_samples, in_features]
         if x.ndim > 2:
@@ -91,9 +88,7 @@ class HessianCollector:
 
         n_samples, in_feat = x.shape
         if in_feat != self.in_features:
-            raise ValueError(
-                f"Expected in_features={self.in_features}, got {in_feat}"
-            )
+            raise ValueError(f"Expected in_features={self.in_features}, got {in_feat}")
 
         # Accumulate H = X^T @ X
         self.hessian += x.T @ x
@@ -126,12 +121,9 @@ class HessianCollector:
 class CalibrationHooks:
     """Manage forward hooks for Hessian collection across model layers.
 
-    This class provides a unified interface for instrumenting both PyTorch
-    and MLX models with hooks that capture input activations to linear
-    layers for Hessian computation.
-
-    PyTorch models use the native register_forward_hook API.
-    MLX models use __call__ wrapping since MLX lacks native hooks.
+    This class provides an interface for instrumenting PyTorch models with
+    hooks that capture input activations to linear layers for Hessian
+    computation using the native register_forward_hook API.
 
     Supports GQA/MQA attention patterns where Q has different dimensions
     than K/V by maintaining per-layer HessianCollectors with appropriate
@@ -154,8 +146,7 @@ class CalibrationHooks:
                     Higher values improve stability but may affect accuracy.
         """
         self.collectors: dict[str, HessianCollector] = {}
-        self.handles: list[Any] = []  # torch RemovableHandle or (module, original_call)
-        self._mlx_hooks: list[tuple[Any, Any]] = []  # (module, original_call)
+        self.handles: list[Any] = []  # torch RemovableHandle
         self.damping = damping
 
     def register_linear_hooks(
@@ -165,12 +156,11 @@ class CalibrationHooks:
     ) -> int:
         """Register hooks on all Linear layers in the model.
 
-        Detects the model framework (PyTorch or MLX) and registers appropriate
-        hooks. For GQA/MQA attention, each projection (Q/K/V) gets its own
+        For GQA/MQA attention, each projection (Q/K/V) gets its own
         collector with the correct in_features dimension.
 
         Args:
-            model: PyTorch nn.Module or MLX nn.Module to instrument.
+            model: PyTorch nn.Module to instrument.
             layer_filter: Optional filter function (name, module) -> bool.
                          If provided, only layers where filter returns True
                          will be instrumented. Default: all Linear layers.
@@ -179,16 +169,12 @@ class CalibrationHooks:
             Number of layers instrumented.
 
         Raises:
-            RuntimeError: If neither PyTorch nor MLX is available.
+            RuntimeError: If PyTorch is not available or model is not a PyTorch module.
         """
         if HAS_TORCH and _is_torch_module(model):
             return self._register_torch_hooks(model, layer_filter)
-        elif HAS_MLX and _is_mlx_module(model):
-            return self._register_mlx_hooks(model, layer_filter)
         else:
-            raise RuntimeError(
-                "Model framework not detected. Install PyTorch or MLX."
-            )
+            raise RuntimeError("Model must be a PyTorch nn.Module. Install PyTorch if needed.")
 
     def _register_torch_hooks(
         self,
@@ -206,13 +192,9 @@ class CalibrationHooks:
                 continue
 
             in_features = module.in_features
-            self.collectors[name] = HessianCollector(
-                in_features=in_features, damping=self.damping
-            )
+            self.collectors[name] = HessianCollector(in_features=in_features, damping=self.damping)
 
-            hook = module.register_forward_hook(
-                self._make_torch_hook(name)
-            )
+            hook = module.register_forward_hook(self._make_torch_hook(name))
             self.handles.append(hook)
             count += 1
 
@@ -230,54 +212,10 @@ class CalibrationHooks:
 
             collector = self.collectors.get(name)
             if collector is not None:
-                x_np = _to_numpy_f64(x)
+                x_np = _torch_to_numpy_f64(x)
                 collector.update(x_np)
 
         return hook
-
-    def _register_mlx_hooks(
-        self,
-        model: Any,
-        layer_filter: Callable[[str, Any], bool] | None,
-    ) -> int:
-        """Register hooks on MLX model via __call__ wrapping."""
-        if mx is None:
-            raise RuntimeError("MLX not available")
-
-        import mlx.nn as mnn
-
-        count = 0
-        for name, module in _named_modules_mlx(model):
-            if not isinstance(module, mnn.Linear):
-                continue
-            if layer_filter is not None and not layer_filter(name, module):
-                continue
-
-            # Get in_features from weight shape: [out_features, in_features]
-            in_features = module.weight.shape[1]
-            self.collectors[name] = HessianCollector(
-                in_features=in_features, damping=self.damping
-            )
-
-            # Wrap __call__ to intercept input
-            self._wrap_mlx_module(name, module)
-            count += 1
-
-        return count
-
-    def _wrap_mlx_module(self, name: str, module: Any) -> None:
-        """Wrap MLX module __call__ to collect activations."""
-        original_call = module.__call__
-
-        def wrapped_call(x: Any, *args: Any, **kwargs: Any) -> Any:
-            collector = self.collectors.get(name)
-            if collector is not None:
-                x_np = _to_numpy_f64(x)
-                collector.update(x_np)
-            return original_call(x, *args, **kwargs)
-
-        module.__call__ = wrapped_call  # type: ignore[method-assign]
-        self._mlx_hooks.append((module, original_call))
 
     def collect_from_module(
         self,
@@ -292,13 +230,13 @@ class CalibrationHooks:
 
         Args:
             module_name: Name for this collector (used as key in results).
-            module: The module to instrument. Must be a Linear layer.
+            module: The PyTorch module to instrument. Must be a Linear layer.
 
         Returns:
             The HessianCollector for this module.
 
         Raises:
-            ValueError: If module is not a supported Linear layer type.
+            ValueError: If module is not a PyTorch Linear layer.
         """
         if HAS_TORCH and _is_torch_linear(module):
             in_features = module.in_features
@@ -309,35 +247,15 @@ class CalibrationHooks:
             self.handles.append(hook)
             return collector
 
-        elif HAS_MLX and _is_mlx_linear(module):
-            in_features = module.weight.shape[1]
-            collector = HessianCollector(in_features=in_features, damping=self.damping)
-            self.collectors[module_name] = collector
-
-            self._wrap_mlx_module(module_name, module)
-            return collector
-
         else:
-            raise ValueError(
-                f"Module {module_name} is not a supported Linear layer type"
-            )
+            raise ValueError(f"Module {module_name} is not a PyTorch Linear layer")
 
     def remove_hooks(self) -> None:
-        """Clean up all registered hooks.
-
-        For PyTorch: removes hooks via RemovableHandle.remove()
-        For MLX: restores original __call__ methods
-        """
-        # Remove PyTorch hooks
+        """Clean up all registered hooks via RemovableHandle.remove()."""
         for handle in self.handles:
             if hasattr(handle, "remove"):
                 handle.remove()
         self.handles.clear()
-
-        # Restore MLX __call__ methods
-        for module, original_call in self._mlx_hooks:
-            module.__call__ = original_call  # type: ignore[method-assign]
-        self._mlx_hooks.clear()
 
     def get_hessians(self, apply_damping: bool = True) -> dict[str, NDArray[np.float64]]:
         """Return all collected Hessians.
@@ -475,21 +393,11 @@ class GQACalibrationHooks(CalibrationHooks):
 # ---------------------------------------------------------------------------
 
 
-def _to_numpy_f64(arr: Any) -> NDArray[np.float64]:
-    """Convert any array type to numpy float64.
-
-    Handles PyTorch tensors, MLX arrays, and numpy arrays.
-    """
-    # PyTorch tensor
+def _torch_to_numpy_f64(arr: Any) -> NDArray[np.float64]:
+    """Convert PyTorch tensor or numpy array to numpy float64."""
     if HAS_TORCH and torch is not None:
         if isinstance(arr, torch.Tensor):
             return arr.detach().cpu().numpy().astype(np.float64)
-
-    # MLX array
-    if HAS_MLX and mx is not None:
-        if hasattr(arr, "__module__") and "mlx" in str(type(arr).__module__):
-            mx.eval(arr)
-            return np.array(arr).astype(np.float64)
 
     # Already numpy or array-like
     return np.asarray(arr, dtype=np.float64)
@@ -500,15 +408,8 @@ def _is_torch_module(obj: Any) -> bool:
     if not HAS_TORCH or torch is None:
         return False
     import torch.nn as tnn
+
     return isinstance(obj, tnn.Module)
-
-
-def _is_mlx_module(obj: Any) -> bool:
-    """Check if object is an MLX nn.Module."""
-    if not HAS_MLX or mx is None:
-        return False
-    import mlx.nn as mnn
-    return isinstance(obj, mnn.Module)
 
 
 def _is_torch_linear(obj: Any) -> bool:
@@ -516,53 +417,5 @@ def _is_torch_linear(obj: Any) -> bool:
     if not HAS_TORCH or torch is None:
         return False
     import torch.nn as tnn
+
     return isinstance(obj, tnn.Linear)
-
-
-def _is_mlx_linear(obj: Any) -> bool:
-    """Check if object is an MLX Linear layer."""
-    if not HAS_MLX or mx is None:
-        return False
-    import mlx.nn as mnn
-    return isinstance(obj, mnn.Linear)
-
-
-def _named_modules_mlx(
-    module: Any, prefix: str = ""
-) -> list[tuple[str, Any]]:
-    """Recursively enumerate all submodules of an MLX module.
-
-    MLX nn.Module exposes children via .children() which returns a dict.
-    We handle nested dicts and lists for model.layers patterns.
-    """
-    result: list[tuple[str, Any]] = []
-
-    if not hasattr(module, "children"):
-        return result
-
-    children = module.children()
-    if not isinstance(children, dict):
-        return result
-
-    for attr_name, child in children.items():
-        full_name = f"{prefix}.{attr_name}" if prefix else attr_name
-
-        if HAS_MLX and mx is not None:
-            import mlx.nn as mnn
-            if isinstance(child, mnn.Module):
-                result.append((full_name, child))
-                result.extend(_named_modules_mlx(child, full_name))
-            elif isinstance(child, list):
-                for i, item in enumerate(child):
-                    if isinstance(item, mnn.Module):
-                        item_name = f"{full_name}.{i}"
-                        result.append((item_name, item))
-                        result.extend(_named_modules_mlx(item, item_name))
-            elif isinstance(child, dict):
-                for key, item in child.items():
-                    if isinstance(item, mnn.Module):
-                        item_name = f"{full_name}.{key}"
-                        result.append((item_name, item))
-                        result.extend(_named_modules_mlx(item, item_name))
-
-    return result

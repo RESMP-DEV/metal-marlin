@@ -7,18 +7,23 @@ and related prefill utilities.
 from __future__ import annotations
 
 import pytest
+import torch
+import torch.nn as nn
 
-try:
-    import mlx.core as mx
-    import mlx.nn as nn
+# Check if MPS is available for full tests
+HAS_MPS = torch.backends.mps.is_available()
 
-    HAS_MLX = True
-except ImportError:
-    HAS_MLX = False
-    mx = None
-    nn = None
+pytestmark = pytest.mark.skipif(not HAS_MPS, reason="MPS required for prefill tests")
 
-pytestmark = pytest.mark.skipif(not HAS_MLX, reason="MLX required for prefill tests")
+
+# ---------------------------------------------------------------------------
+# Device helpers
+# ---------------------------------------------------------------------------
+
+
+def get_device() -> torch.device:
+    """Get the appropriate device for testing."""
+    return torch.device("mps" if HAS_MPS else "cpu")
 
 
 # ---------------------------------------------------------------------------
@@ -62,17 +67,20 @@ class MockModel:
     def __init__(self, config: dict):
         self.config = config
         self._call_count = 0
+        self._device = get_device()
 
     def __call__(
         self,
-        input_ids: mx.array,
+        input_ids: torch.Tensor,
         kv_cache=None,
         attention_mask=None,
-    ) -> mx.array:
+    ) -> torch.Tensor:
         """Mock forward pass - returns random logits."""
         self._call_count += 1
         batch_size, seq_len = input_ids.shape
-        return mx.random.normal((batch_size, seq_len, self.config["vocab_size"]))
+        return torch.randn(
+            batch_size, seq_len, self.config["vocab_size"], device=self._device, dtype=torch.float32
+        )
 
     def create_kv_cache(self, batch_size: int = 1):
         from metal_marlin.kv_cache import CacheConfig, KVCache
@@ -137,7 +145,8 @@ class TestChunkedPrefill:
         """Test that short prompts use single chunk."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
-        input_ids = mx.zeros((1, 100), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 100), dtype=torch.int32, device=device)
         config = PrefillConfig(chunk_size=512)
 
         logits, stats = chunked_prefill(mock_model, input_ids, config=config)
@@ -151,7 +160,8 @@ class TestChunkedPrefill:
         """Test that long prompts are chunked correctly."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
-        input_ids = mx.zeros((1, 800), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 800), dtype=torch.int32, device=device)
         config = PrefillConfig(chunk_size=256)
 
         logits, stats = chunked_prefill(mock_model, input_ids, config=config)
@@ -165,7 +175,8 @@ class TestChunkedPrefill:
         """Test that stats are populated correctly."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
-        input_ids = mx.zeros((1, 512), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 512), dtype=torch.int32, device=device)
         config = PrefillConfig(chunk_size=256)
 
         _, stats = chunked_prefill(mock_model, input_ids, config=config)
@@ -180,7 +191,8 @@ class TestChunkedPrefill:
         """Test progress callback invocation."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
-        input_ids = mx.zeros((1, 600), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 600), dtype=torch.int32, device=device)
         config = PrefillConfig(chunk_size=256)
 
         progress_calls = []
@@ -197,7 +209,8 @@ class TestChunkedPrefill:
         """Test that batch_size > 1 raises error."""
         from metal_marlin.inference.prefill import chunked_prefill
 
-        input_ids = mx.zeros((2, 100), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((2, 100), dtype=torch.int32, device=device)
 
         with pytest.raises(ValueError, match="batch_size=1"):
             chunked_prefill(mock_model, input_ids)
@@ -206,8 +219,9 @@ class TestChunkedPrefill:
         """Test that exceeding cache capacity raises error."""
         from metal_marlin.inference.prefill import chunked_prefill
 
+        device = get_device()
         # kv_cache has max_seq_len=1024
-        input_ids = mx.zeros((1, 2000), dtype=mx.int32)
+        input_ids = torch.zeros((1, 2000), dtype=torch.int32, device=device)
 
         with pytest.raises(ValueError, match="exceeds"):
             chunked_prefill(mock_model, input_ids, kv_cache=kv_cache)
@@ -225,6 +239,7 @@ class TestParallelKVWrite:
         """Test basic parallel KV write."""
         from metal_marlin.inference.prefill import parallel_kv_write
 
+        device = get_device()
         num_layers = model_config["num_layers"]
         num_kv_heads = model_config["num_kv_heads"]
         head_dim = model_config["head_dim"]
@@ -232,11 +247,11 @@ class TestParallelKVWrite:
 
         # Create dummy K/V tensors
         keys = [
-            mx.random.normal((1, num_kv_heads, seq_len, head_dim))
+            torch.randn(1, num_kv_heads, seq_len, head_dim, device=device)
             for _ in range(num_layers)
         ]
         values = [
-            mx.random.normal((1, num_kv_heads, seq_len, head_dim))
+            torch.randn(1, num_kv_heads, seq_len, head_dim, device=device)
             for _ in range(num_layers)
         ]
 
@@ -251,11 +266,12 @@ class TestParallelKVWrite:
         """Test that mismatched key/value counts raise error."""
         from metal_marlin.inference.prefill import parallel_kv_write
 
+        device = get_device()
         num_kv_heads = model_config["num_kv_heads"]
         head_dim = model_config["head_dim"]
 
-        keys = [mx.random.normal((1, num_kv_heads, 32, head_dim)) for _ in range(2)]
-        values = [mx.random.normal((1, num_kv_heads, 32, head_dim)) for _ in range(3)]
+        keys = [torch.randn(1, num_kv_heads, 32, head_dim, device=device) for _ in range(2)]
+        values = [torch.randn(1, num_kv_heads, 32, head_dim, device=device) for _ in range(3)]
 
         with pytest.raises(ValueError, match="mismatch"):
             parallel_kv_write(keys, values, kv_cache)
@@ -273,12 +289,13 @@ class TestFlashPrefillAttention:
         """Test basic flash attention computation."""
         from metal_marlin.inference.prefill import flash_prefill_attention
 
+        device = get_device()
         batch, num_heads, seq_len, head_dim = 1, 4, 64, 64
         num_kv_heads = 4
 
-        q = mx.random.normal((batch, num_heads, seq_len, head_dim))
-        k = mx.random.normal((batch, num_kv_heads, seq_len, head_dim))
-        v = mx.random.normal((batch, num_kv_heads, seq_len, head_dim))
+        q = torch.randn(batch, num_heads, seq_len, head_dim, device=device)
+        k = torch.randn(batch, num_kv_heads, seq_len, head_dim, device=device)
+        v = torch.randn(batch, num_kv_heads, seq_len, head_dim, device=device)
 
         output = flash_prefill_attention(q, k, v, causal=True)
 
@@ -288,12 +305,13 @@ class TestFlashPrefillAttention:
         """Test GQA (num_kv_heads < num_heads)."""
         from metal_marlin.inference.prefill import flash_prefill_attention
 
+        device = get_device()
         batch, num_heads, seq_len, head_dim = 1, 8, 32, 64
         num_kv_heads = 2
 
-        q = mx.random.normal((batch, num_heads, seq_len, head_dim))
-        k = mx.random.normal((batch, num_kv_heads, seq_len, head_dim))
-        v = mx.random.normal((batch, num_kv_heads, seq_len, head_dim))
+        q = torch.randn(batch, num_heads, seq_len, head_dim, device=device)
+        k = torch.randn(batch, num_kv_heads, seq_len, head_dim, device=device)
+        v = torch.randn(batch, num_kv_heads, seq_len, head_dim, device=device)
 
         output = flash_prefill_attention(q, k, v, causal=True)
 
@@ -303,23 +321,23 @@ class TestFlashPrefillAttention:
         """Test that causal masking prevents attending to future."""
         from metal_marlin.inference.prefill import flash_prefill_attention
 
+        device = get_device()
         batch, num_heads, seq_len, head_dim = 1, 2, 4, 16
 
         # Create Q and K where future tokens have large values
-        q = mx.ones((batch, num_heads, seq_len, head_dim))
-        k = mx.ones((batch, num_heads, seq_len, head_dim))
-        v = mx.zeros((batch, num_heads, seq_len, head_dim))
+        q = torch.ones(batch, num_heads, seq_len, head_dim, device=device)
+        k = torch.ones(batch, num_heads, seq_len, head_dim, device=device)
+        v = torch.zeros(batch, num_heads, seq_len, head_dim, device=device)
 
         # Put distinctive values in V at each position
         for i in range(seq_len):
-            v = v.at[:, :, i, :].add(mx.full((batch, num_heads, head_dim), float(i)))
+            v[:, :, i, :] = float(i)
 
         output_causal = flash_prefill_attention(q, k, v, causal=True)
         output_noncausal = flash_prefill_attention(q, k, v, causal=False)
 
-        # With causal masking, position 0 should only see V[0]
-        # Without causal masking, all positions see all V
-        mx.eval([output_causal, output_noncausal])
+        # Synchronize for accurate comparison
+        torch.mps.synchronize()
 
         # Causal: first position only attends to first position
         # Noncausal: first position attends to all positions
@@ -329,11 +347,12 @@ class TestFlashPrefillAttention:
         """Test custom attention scale."""
         from metal_marlin.inference.prefill import flash_prefill_attention
 
+        device = get_device()
         batch, num_heads, seq_len, head_dim = 1, 2, 16, 32
 
-        q = mx.random.normal((batch, num_heads, seq_len, head_dim))
-        k = mx.random.normal((batch, num_heads, seq_len, head_dim))
-        v = mx.random.normal((batch, num_heads, seq_len, head_dim))
+        q = torch.randn(batch, num_heads, seq_len, head_dim, device=device)
+        k = torch.randn(batch, num_heads, seq_len, head_dim, device=device)
+        v = torch.randn(batch, num_heads, seq_len, head_dim, device=device)
 
         # Custom scale
         output = flash_prefill_attention(q, k, v, scale=0.1, causal=True)
@@ -353,34 +372,35 @@ class TestBatchedKVProjection:
         """Test basic batched KV projection."""
         from metal_marlin.inference.prefill import batched_kv_projection
 
+        device = get_device()
+
         # Create minimal layer structure
         hidden_size = model_config["hidden_size"]
         num_kv_heads = model_config["num_kv_heads"]
         head_dim = model_config["head_dim"]
         num_layers = model_config["num_layers"]
 
-        class MockAttention:
+        class MockAttention(nn.Module):
             def __init__(self):
+                super().__init__()
                 self.num_kv_heads = num_kv_heads
                 self.head_dim = head_dim
                 self.k_proj = nn.Linear(hidden_size, num_kv_heads * head_dim)
                 self.v_proj = nn.Linear(hidden_size, num_kv_heads * head_dim)
                 self.rope = MockRoPE()
 
-            def _init_weights(self):
-                pass
-
         class MockRoPE:
             def __call__(self, x, offset=0):
                 return x  # Identity for testing
 
-        class MockLayer:
+        class MockLayer(nn.Module):
             def __init__(self):
+                super().__init__()
                 self.self_attn = MockAttention()
 
-        layers = [MockLayer() for _ in range(num_layers)]
+        layers = [MockLayer().to(device) for _ in range(num_layers)]
 
-        hidden_states = mx.random.normal((1, 32, hidden_size))
+        hidden_states = torch.randn(1, 32, hidden_size, device=device)
 
         result = batched_kv_projection(hidden_states, layers, rope_offset=0)
 
@@ -409,14 +429,13 @@ class TestSpeculativePrefill:
             speculative_prefill,
         )
 
-        input_ids = mx.zeros((1, 100), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 100), dtype=torch.int32, device=device)
         kv_cache = mock_model.create_kv_cache()
 
         config = SpeculativePrefillConfig(enabled=False)
 
-        logits, spec_tokens = speculative_prefill(
-            mock_model, input_ids, kv_cache, config
-        )
+        logits, spec_tokens = speculative_prefill(mock_model, input_ids, kv_cache, config)
 
         assert logits.shape[0] == 1
         assert logits.shape[1] == 100
@@ -429,7 +448,8 @@ class TestSpeculativePrefill:
             speculative_prefill,
         )
 
-        input_ids = mx.zeros((1, 50), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 50), dtype=torch.int32, device=device)
         kv_cache = mock_model.create_kv_cache()
 
         config = SpeculativePrefillConfig(
@@ -438,9 +458,7 @@ class TestSpeculativePrefill:
             confidence_threshold=0.0,  # Accept any prediction
         )
 
-        logits, spec_tokens = speculative_prefill(
-            mock_model, input_ids, kv_cache, config
-        )
+        logits, spec_tokens = speculative_prefill(mock_model, input_ids, kv_cache, config)
 
         # With threshold=0.0, we should get some speculative tokens
         assert logits.shape[0] == 1
@@ -459,14 +477,14 @@ class TestPrefillIntegration:
         """Test prefill followed by decode simulation."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
+        device = get_device()
+
         # Prefill phase
-        input_ids = mx.zeros((1, 256), dtype=mx.int32)
+        input_ids = torch.zeros((1, 256), dtype=torch.int32, device=device)
         kv_cache = mock_model.create_kv_cache()
         config = PrefillConfig(chunk_size=128)
 
-        logits, stats = chunked_prefill(
-            mock_model, input_ids, kv_cache=kv_cache, config=config
-        )
+        logits, stats = chunked_prefill(mock_model, input_ids, kv_cache=kv_cache, config=config)
 
         assert stats.num_chunks == 2
         assert logits.shape == (1, 256, model_config["vocab_size"])
@@ -478,7 +496,8 @@ class TestPrefillIntegration:
         """Test that memory estimation is reasonable."""
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
-        input_ids = mx.zeros((1, 512), dtype=mx.int32)
+        device = get_device()
+        input_ids = torch.zeros((1, 512), dtype=torch.int32, device=device)
         config = PrefillConfig(chunk_size=256)
 
         _, stats = chunked_prefill(mock_model, input_ids, config=config)

@@ -288,8 +288,7 @@ def pack_mixed_format_model(
         from safetensors.numpy import save_file
     except ImportError as e:
         raise ImportError(
-            "safetensors is required for mixed format models. "
-            "Install with: pip install safetensors"
+            "safetensors is required for mixed format models. Install with: pip install safetensors"
         ) from e
 
     if not weights:
@@ -382,8 +381,7 @@ def load_mixed_format_model(
         from safetensors import safe_open
     except ImportError as e:
         raise ImportError(
-            "safetensors is required for mixed format models. "
-            "Install with: pip install safetensors"
+            "safetensors is required for mixed format models. Install with: pip install safetensors"
         ) from e
 
     model_path = Path(model_path)
@@ -410,9 +408,7 @@ def load_mixed_format_model(
                     header.layer_formats[base_name] = "fp4"
                     header.quantized_params += tensor.size * 8  # 8 values per uint32
                 elif ".scales" not in name and ".zeros" not in name:
-                    header.layer_formats[name] = (
-                        "fp16" if tensor.dtype == np.float16 else "fp32"
-                    )
+                    header.layer_formats[name] = "fp16" if tensor.dtype == np.float16 else "fp32"
         else:
             header = MixedFormatHeader.from_json(metadata[_HEADER_KEY])
 
@@ -467,9 +463,7 @@ def merge_mixed_format_models(
     try:
         from safetensors.numpy import save_file
     except ImportError as e:
-        raise ImportError(
-            "safetensors is required. Install with: pip install safetensors"
-        ) from e
+        raise ImportError("safetensors is required. Install with: pip install safetensors") from e
 
     combined_weights: dict[str, NDArray[Any]] = {}
     combined_header = MixedFormatHeader()
@@ -487,9 +481,7 @@ def merge_mixed_format_models(
     # Recompute average bits
     if combined_header.total_params > 0:
         total_bits = sum(
-            combined_header.total_params * _bits_for_precision(
-                _format_str_to_precision(fmt)
-            )
+            combined_header.total_params * _bits_for_precision(_format_str_to_precision(fmt))
             for fmt in combined_header.layer_formats.values()
         )
         # This is an approximation; precise calculation would need param counts
