@@ -86,7 +86,9 @@ class MLAConfig:
         head_dim: Dimension per head (default: hidden_size // num_heads)
         kv_lora_rank: KV compression latent dimension (e.g., 512)
         q_lora_rank: Query compression dimension (e.g., 1536), None for no compression
+        qk_nope_head_dim: Query/key content dimension without RoPE
         qk_rope_head_dim: Dimension for position encoding (e.g., 64)
+        v_head_dim: Value head dimension (may differ from q/k in GLM)
         rope_theta: RoPE base frequency (default: 10000)
         rope_ratio: GLM-style frequency scaling (default: 1.0)
         max_position_embeddings: Maximum sequence length for RoPE cache
@@ -100,7 +102,9 @@ class MLAConfig:
     head_dim: int | None = None
     kv_lora_rank: int = 512
     q_lora_rank: int | None = 1536  # None = no query compression
+    qk_nope_head_dim: int | None = None
     qk_rope_head_dim: int = 64
+    v_head_dim: int | None = None
     rope_theta: float = 10000.0
     rope_ratio: float = 1.0
     max_position_embeddings: int = 4096
@@ -152,6 +156,7 @@ class MLARoPE(nn.Module):
         sin_cache = torch.sin(freqs).to(torch.float16)
         self.register_buffer("cos_cache", cos_cache)
         self.register_buffer("sin_cache", sin_cache)
+        self.max_seq_len = max_seq_len
 
     def forward(
         self,
@@ -163,15 +168,15 @@ class MLARoPE(nn.Module):
         Args:
             x: Input tensor of shape:
                - [batch, seq_len, dim] for k_pe
-               - [batch, seq_len, num_heads, head_dim] for Q
-               In both cases, seq_len is at index 1.
+               - [batch, heads, seq_len, head_dim] for Q
+               For all inputs, seq_len is the second-to-last dimension.
             position_offset: Position offset for KV cache continuation
 
         Returns:
             Tensor with RoPE applied, same shape as input
         """
-        # seq_len is always at index 1 for MLA inputs
-        seq_len = x.shape[1]
+        # seq_len is always the second-to-last dimension
+        seq_len = x.shape[-2]
         device = x.device
         dtype = x.dtype
 
@@ -184,19 +189,16 @@ class MLARoPE(nn.Module):
         cos = self.cos_cache[position_offset:end_pos].to(device)  # [seq_len, dim/2]
         sin = self.sin_cache[position_offset:end_pos].to(device)
 
-        # Handle different input formats:
-        # - 3D: [batch, seq, dim] for k_pe -> need [1, seq, dim/2]
-        # - 4D: [batch, seq, heads, head_dim] for Q -> need [1, seq, 1, dim/2]
-        if x.ndim == 3:
-            # [batch, seq, dim] format
-            cos = cos.unsqueeze(0)  # [1, seq, dim/2]
-            sin = sin.unsqueeze(0)
-        elif x.ndim == 4:
-            # [batch, seq, heads, head_dim] format
-            cos = cos.unsqueeze(0).unsqueeze(2)  # [1, seq, 1, dim/2]
-            sin = sin.unsqueeze(0).unsqueeze(2)
-        else:
-            raise ValueError(f"Unsupported input dimensions: {x.ndim}. Expected 3 or 4.")
+        if x.ndim < 3:
+            raise ValueError(f"Unsupported input dimensions: {x.ndim}. Expected >= 3.")
+
+        # Broadcast cos/sin across leading dims, keeping seq at -2 and dim at -1.
+        # Example shapes:
+        # - 3D: [batch, seq, dim] -> [1, seq, dim/2]
+        # - 4D: [batch, heads, seq, dim] -> [1, 1, seq, dim/2]
+        expand_shape = [1] * (x.ndim - 2) + [seq_len, cos.shape[1]]
+        cos = cos.view(*expand_shape)
+        sin = sin.view(*expand_shape)
 
         # Split into even/odd indices along last dimension
         x_even = x[..., ::2]
@@ -337,8 +339,10 @@ class MLAAttention(nn.Module):
         num_heads: int,
         kv_lora_rank: int = 512,
         q_lora_rank: int | None = 1536,
+        qk_nope_head_dim: int | None = None,
         qk_rope_head_dim: int = 64,
         head_dim: int | None = None,
+        v_head_dim: int | None = None,
         rope_theta: float = 10000.0,
         rope_ratio: float = 1.0,
         max_position_embeddings: int = 4096,
@@ -349,12 +353,22 @@ class MLAAttention(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
-        self.head_dim = head_dim or (hidden_size // num_heads)
+        base_head_dim = head_dim or (hidden_size // num_heads)
+        self.head_dim = base_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_nope_head_dim = (
+            qk_nope_head_dim if qk_nope_head_dim is not None else base_head_dim - qk_rope_head_dim
+        )
+        if self.qk_nope_head_dim < 0:
+            raise ValueError(
+                "qk_nope_head_dim must be >= 0 and qk_rope_head_dim must be <= head_dim"
+            )
+        self.q_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        self.v_head_dim = v_head_dim if v_head_dim is not None else base_head_dim
         self.kv_lora_rank = kv_lora_rank
         self.q_lora_rank = q_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
         self.rope_ratio = rope_ratio
-        self.scale = self.head_dim**-0.5
+        self.scale = self.q_head_dim**-0.5
 
         # Query projections
         if q_lora_rank is not None:
@@ -364,7 +378,7 @@ class MLAAttention(nn.Module):
             )
             self.q_b_proj = MarlinLinear(
                 q_lora_rank,
-                num_heads * self.head_dim,
+                num_heads * self.q_head_dim,
                 bias=bias,
                 quant_type=quant_type,
                 group_size=group_size,
@@ -374,7 +388,7 @@ class MLAAttention(nn.Module):
             # Standard query projection
             self.q_proj = MarlinLinear(
                 hidden_size,
-                num_heads * self.head_dim,
+                num_heads * self.q_head_dim,
                 bias=bias,
                 quant_type=quant_type,
                 group_size=group_size,
@@ -391,7 +405,7 @@ class MLAAttention(nn.Module):
         # kv_b_proj: decompress latent to full K and V
         self.kv_b_proj = MarlinLinear(
             kv_lora_rank,
-            num_heads * self.head_dim * 2,
+            num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=bias,
             quant_type=quant_type,
             group_size=group_size,
@@ -399,16 +413,16 @@ class MLAAttention(nn.Module):
 
         # Output projection
         self.o_proj = MarlinLinear(
-            num_heads * self.head_dim,
+            num_heads * self.v_head_dim,
             hidden_size,
             bias=bias,
             quant_type=quant_type,
             group_size=group_size,
         )
 
-        # RoPE for Q (full head_dim) and k_pe (qk_rope_head_dim)
+        # RoPE for q_pe and k_pe (qk_rope_head_dim)
         self.rope_q = MLARoPE(
-            dim=self.head_dim,
+            dim=self.qk_rope_head_dim,
             base=rope_theta,
             rope_ratio=rope_ratio,
             max_seq_len=max_position_embeddings,
@@ -420,6 +434,35 @@ class MLAAttention(nn.Module):
             max_seq_len=max_position_embeddings,
         )
 
+    def _load_from_state_dict(  # noqa: D401
+        self,
+        state_dict: dict[str, torch.Tensor],
+        prefix: str,
+        local_metadata: dict[str, object],
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        """Support GLM kv_a_proj_with_mqa weight alias."""
+        alias_prefix = f"{prefix}kv_a_proj_with_mqa."
+        target_prefix = f"{prefix}kv_a_proj."
+        for key in list(state_dict.keys()):
+            if key.startswith(alias_prefix):
+                mapped_key = f"{target_prefix}{key[len(alias_prefix):]}"
+                if mapped_key not in state_dict:
+                    state_dict[mapped_key] = state_dict[key]
+                state_dict.pop(key, None)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
+
     @classmethod
     def from_config(cls, config: MLAConfig) -> MLAAttention:
         """Create MLAAttention from configuration."""
@@ -429,7 +472,9 @@ class MLAAttention(nn.Module):
             head_dim=config.head_dim,
             kv_lora_rank=config.kv_lora_rank,
             q_lora_rank=config.q_lora_rank,
+            qk_nope_head_dim=config.qk_nope_head_dim,
             qk_rope_head_dim=config.qk_rope_head_dim,
+            v_head_dim=config.v_head_dim,
             rope_theta=config.rope_theta,
             rope_ratio=config.rope_ratio,
             max_position_embeddings=config.max_position_embeddings,
@@ -461,12 +506,12 @@ class MLAAttention(nn.Module):
         # Query path
         if self.q_lora_rank is not None:
             q_latent = self.q_a_proj(hidden_states)  # [B, S, q_lora_rank]
-            q = self.q_b_proj(q_latent)  # [B, S, num_heads * head_dim]
+            q = self.q_b_proj(q_latent)  # [B, S, num_heads * q_head_dim]
         else:
             q = self.q_proj(hidden_states)
 
-        # Reshape Q: [batch, seq, num_heads, head_dim]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # Reshape Q: [batch, seq, num_heads, q_head_dim]
+        q = q.view(batch_size, seq_len, self.num_heads, self.q_head_dim)
 
         # KV path: compress then split
         kv_compressed = self.kv_a_proj(hidden_states)  # [B, S, kv_lora_rank + rope_dim]
@@ -481,11 +526,12 @@ class MLAAttention(nn.Module):
         else:
             position_offset = 0
 
-        # Apply RoPE to Q
-        q = self.rope_q(q, position_offset)
-
-        # Apply RoPE to k_pe
-        k_pe = self.rope_k(k_pe, position_offset)
+        # Apply RoPE to q_pe and k_pe
+        if self.qk_rope_head_dim > 0:
+            q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            q_pe = self.rope_q(q_pe, position_offset)
+            q = torch.cat([q_nope, q_pe], dim=-1)
+            k_pe = self.rope_k(k_pe, position_offset)
 
         # Update MLA cache if provided
         if isinstance(kv_cache, MLAKVCache):
@@ -495,15 +541,17 @@ class MLAAttention(nn.Module):
         cache_len = c_kv.shape[1]
 
         # Decompress KV: c_kv -> full K, V
-        kv_full = self.kv_b_proj(c_kv)  # [B, cache_len, num_heads * head_dim * 2]
-        kv_full = kv_full.view(batch_size, cache_len, self.num_heads, self.head_dim * 2)
-        k_content, v = kv_full.split(self.head_dim, dim=-1)  # [B, cache_len, num_heads, head_dim]
+        kv_full = self.kv_b_proj(c_kv)  # [B, cache_len, num_heads * (qk_nope_head_dim + v_head_dim)]
+        kv_full = kv_full.view(
+            batch_size, cache_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = kv_full.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # Note: k_pe is available for future RoPE concatenation if needed
-        # Currently, the decompressed K from c_kv already contains positional information
-        # implicitly through the learned projection
-
-        k = k_content
+        if self.qk_rope_head_dim > 0:
+            k_pe_expanded = k_pe.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
+            k = torch.cat([k_nope, k_pe_expanded], dim=-1)
+        else:
+            k = k_nope
 
         # Transpose for attention: [batch, heads, seq, head_dim]
         q = q.transpose(1, 2)
@@ -525,7 +573,7 @@ class MLAAttention(nn.Module):
         attn_output = (
             attn_output.transpose(1, 2)
             .contiguous()
-            .view(batch_size, seq_len, self.num_heads * self.head_dim)
+            .view(batch_size, seq_len, self.num_heads * self.v_head_dim)
         )
 
         output = self.o_proj(attn_output)
@@ -553,12 +601,21 @@ def create_mla_from_hf_config(
     # Extract dimensions
     hidden_size = config.get("hidden_size", 4096)
     num_heads = config.get("num_attention_heads", 32)
-    head_dim = config.get("head_dim", hidden_size // num_heads)
+    qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
+    qk_nope_head_dim = config.get("qk_nope_head_dim")
+    head_dim = config.get("head_dim")
+    if head_dim is None:
+        if qk_nope_head_dim is not None:
+            head_dim = qk_nope_head_dim + qk_rope_head_dim
+        else:
+            head_dim = hidden_size // num_heads
+    if qk_nope_head_dim is None:
+        qk_nope_head_dim = head_dim - qk_rope_head_dim
 
     # MLA-specific parameters
     kv_lora_rank = config.get("kv_lora_rank", 512)
     q_lora_rank = config.get("q_lora_rank", 1536)  # May be None
-    qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
+    v_head_dim = config.get("v_head_dim", head_dim)
 
     # RoPE parameters
     rope_theta = config.get("rope_theta", 10000.0)
@@ -568,9 +625,10 @@ def create_mla_from_hf_config(
     # Auto-calculate group_size if not provided
     if group_size is None:
         # Find a group_size that divides all projection dimensions
-        dims = [hidden_size, kv_lora_rank, num_heads * head_dim * 2]
+        dims = [hidden_size, kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim)]
         if q_lora_rank is not None:
             dims.append(q_lora_rank)
+            dims.append(num_heads * (qk_nope_head_dim + qk_rope_head_dim))
         # Start from 128 and find largest power of 2 that works
         for gs in [128, 64, 32, 16, 8]:
             if all(d % gs == 0 for d in dims):
@@ -585,7 +643,9 @@ def create_mla_from_hf_config(
         head_dim=head_dim,
         kv_lora_rank=kv_lora_rank,
         q_lora_rank=q_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
         qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
         rope_theta=rope_theta,
         rope_ratio=rope_ratio,
         max_position_embeddings=max_position_embeddings,

@@ -46,6 +46,65 @@ output = engine.generate("The capital of France is", max_tokens=50)
 
 See [CLI Reference](docs/cli.md) for full options.
 
+## OpenAI-Compatible Server
+
+Metal Marlin includes a vLLM-style server for hosting quantized models:
+
+### Quick Start
+
+```bash
+# Quantize a model (if not already done)
+metal-marlin quantize Qwen/Qwen3-4B --format fp4 -o qwen3_4b_fp4
+
+# Start the server
+metal-marlin serve qwen3_4b_fp4 --port 8000
+```
+
+### API Endpoints
+
+- `GET /v1/models` - List available models
+- `POST /v1/chat/completions` - Chat completions (OpenAI-compatible)
+- `POST /v1/completions` - Text completions (legacy)
+- `GET /health` - Health check
+
+### Usage with OpenAI SDK
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="unused",  # No auth required
+)
+
+response = client.chat.completions.create(
+    model="qwen3_4b_fp4",
+    messages=[{"role": "user", "content": "Hello!"}],
+    temperature=0.7,
+)
+print(response.choices[0].message.content)
+```
+
+### Streaming
+
+```python
+stream = client.chat.completions.create(
+    model="qwen3_4b_fp4",
+    messages=[{"role": "user", "content": "Write a poem"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+### Performance
+
+On Apple Silicon M4 Max (PyTorch MPS backend):
+- Qwen3-4B FP4: ~27 tok/s decode
+- GLM-4.7-Flash MLA: In development
+
+**Note:** Currently using PyTorch MPS fallback. Fused Metal kernels are in development for higher throughput.
+
 ## Apple Silicon Performance
 
 On M3/M4, BF16 and FP16 have nearly identical throughput (~14.8 TFLOPS on M4 Max), with FP32 only ~10% slower. **Prefer BF16** — same speed as FP16 but 8× larger dynamic range.

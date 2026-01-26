@@ -157,6 +157,16 @@ def load_safetensors_torch(
     return weights
 
 
+def load_config(model_path: str | Path) -> dict[str, Any]:
+    """Load config.json from a model directory."""
+    model_path = Path(model_path)
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"config.json not found in {model_path}")
+    with open(config_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
 def dequantize_fp4_torch(
     packed: torch_typing.Tensor,
     scales: torch_typing.Tensor,
@@ -199,24 +209,34 @@ def dequantize_fp4_torch(
         device=packed.device,
     )
 
-    out_feat = packed.shape[0]
-    in_feat = packed.shape[1] * 8
+    # Storage format from hf_loader.convert_model_to_fp4 is TRANSPOSED:
+    # packed: [in_feat // 8, out_feat], scales: [n_groups, out_feat]
+    # We need to transpose and unpack to get [out_feat, in_feat]
+
+    packed_in = packed.shape[0]  # in_feat // 8
+    out_feat = packed.shape[1]
+    in_feat = packed_in * 8
 
     # Unpack 8 FP4 values from each uint32
-    # packed is uint32, need to extract nibbles
-    indices = torch.zeros((out_feat, in_feat), dtype=torch.long, device=packed.device)
+    # packed is [in_feat // 8, out_feat], indices will be [in_feat, out_feat]
+    indices = torch.zeros((in_feat, out_feat), dtype=torch.long, device=packed.device)
+    # Convert to int64 for bitshift (uint32 rshift not implemented on CPU)
+    packed_i64 = packed.to(torch.int64)
     for i in range(8):
-        indices[:, i::8] = ((packed >> (i * 4)) & 0xF).long()
+        indices[i::8, :] = ((packed_i64 >> (i * 4)) & 0xF).long()
 
     # Dequantize using lookup table
-    values = E2M1_VALUES[indices]
+    values = E2M1_VALUES[indices]  # [in_feat, out_feat]
 
-    # Apply scales
+    # Apply scales - scales is [n_groups, out_feat]
     n_groups = in_feat // group_size
-    values = values.reshape(out_feat, n_groups, group_size)
-    scales_expanded = scales[:, :, None].float()
+    values = values.reshape(n_groups, group_size, out_feat)
+    scales_expanded = scales[:, None, :].float()  # [n_groups, 1, out_feat]
     values = values * scales_expanded
-    values = values.reshape(out_feat, in_feat)
+    values = values.reshape(in_feat, out_feat)
+
+    # Transpose to standard [out_feat, in_feat] layout
+    values = values.T
 
     return values.half()
 
@@ -255,11 +275,27 @@ class MetalMarlinModel:
         self.num_heads = config.get("num_attention_heads", 32)
         self.num_kv_heads = config.get("num_key_value_heads", self.num_heads)
         self.vocab_size = config.get("vocab_size", 32000)
-        self.head_dim = self.hidden_size // self.num_heads
+        # Use explicit head_dim from config if available (e.g., Qwen3 has head_dim=128)
+        self.head_dim = config.get("head_dim", self.hidden_size // self.num_heads)
         self.rms_norm_eps = config.get("rms_norm_eps", 1e-6)
+
+        # RoPE (Rotary Position Embeddings) config
+        self.rope_theta = config.get("rope_theta", 10000.0)
+        self.max_position_embeddings = config.get("max_position_embeddings", 4096)
+
+        # Precompute RoPE frequencies
+        self._rope_cache: dict[int, tuple[torch_typing.Tensor, torch_typing.Tensor]] = {}
 
         # Build dequantized weight cache (lazy)
         self._dequant_cache: dict[str, torch_typing.Tensor] = {}
+
+        # Check if fused kernels are available and working
+        try:
+            from ..kernels import HAS_METAL, HAS_MPS, marlin_gemm_fp4
+
+            self._use_fused_kernels = HAS_METAL and HAS_MPS
+        except ImportError:
+            self._use_fused_kernels = False
 
     @classmethod
     def from_quantized(
@@ -338,6 +374,33 @@ class MetalMarlinModel:
 
         raise KeyError(f"Weight {name} not found")
 
+    def _quantized_linear(
+        self,
+        x: torch_typing.Tensor,
+        weight_name: str,
+    ) -> torch_typing.Tensor:
+        """Linear with quantized weights - uses fused kernel if available."""
+        assert torch is not None
+
+        if self._use_fused_kernels and self.config.get("quant_type", "fp4") == "fp4":
+            packed_name = f"{weight_name}.packed"
+            scales_name = f"{weight_name}.scales"
+            gs_name = f"{weight_name}.group_size"
+
+            if packed_name in self.weights and scales_name in self.weights:
+                from ..kernels import marlin_gemm_fp4
+
+                group_size = 128
+                if gs_name in self.weights:
+                    group_size = int(self.weights[gs_name].item())
+
+                packed = self.weights[packed_name]
+                scales = self.weights[scales_name]
+                return marlin_gemm_fp4(x, packed, scales, group_size)
+
+        weight = self._get_weight(weight_name)
+        return torch.nn.functional.linear(x, weight)
+
     def __call__(
         self,
         input_ids: torch_typing.Tensor,
@@ -362,6 +425,8 @@ class MetalMarlinModel:
         # Get embeddings
         embed_weight = self._get_weight("model.embed_tokens.weight")
         hidden = torch.nn.functional.embedding(input_ids, embed_weight)
+        # Convert to half precision for efficient computation with quantized weights
+        hidden = hidden.half()
 
         # Process through transformer layers
         for layer_idx in range(self.num_layers):
@@ -370,8 +435,12 @@ class MetalMarlinModel:
         # Final RMSNorm
         hidden = self._rms_norm(hidden, "model.norm.weight")
 
-        # LM head projection
-        lm_head_weight = self._get_weight("lm_head.weight")
+        # LM head projection (handle weight tying)
+        if "lm_head.weight" in self.weights:
+            lm_head_weight = self._get_weight("lm_head.weight")
+        else:
+            # Weight tying: use embed_tokens as lm_head
+            lm_head_weight = self._get_weight("model.embed_tokens.weight")
         logits = torch.nn.functional.linear(hidden, lm_head_weight)
 
         return logits
@@ -420,56 +489,153 @@ class MetalMarlinModel:
         x = x * torch.rsqrt(variance + self.rms_norm_eps)
         return x * weight
 
+    def _per_head_rms_norm(
+        self,
+        x: torch_typing.Tensor,
+        weight: torch_typing.Tensor,
+    ) -> torch_typing.Tensor:
+        """Apply RMSNorm per attention head.
+
+        Args:
+            x: Input tensor [batch, heads, seq_len, head_dim]
+            weight: Norm weight [head_dim]
+        """
+        assert torch is not None
+
+        variance = x.pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.rms_norm_eps)
+        return x * weight
+
     def _attention(
         self,
         hidden: torch_typing.Tensor,
         layer_idx: int,
         kv_cache: Any = None,
     ) -> torch_typing.Tensor:
-        """Compute self-attention."""
+        """Compute self-attention with RoPE."""
         assert torch is not None
 
         batch_size, seq_len, _ = hidden.shape
         prefix = f"model.layers.{layer_idx}.self_attn"
 
         # Q, K, V projections
-        q_weight = self._get_weight(f"{prefix}.q_proj.weight")
-        k_weight = self._get_weight(f"{prefix}.k_proj.weight")
-        v_weight = self._get_weight(f"{prefix}.v_proj.weight")
-        o_weight = self._get_weight(f"{prefix}.o_proj.weight")
-
-        q = torch.nn.functional.linear(hidden, q_weight)
-        k = torch.nn.functional.linear(hidden, k_weight)
-        v = torch.nn.functional.linear(hidden, v_weight)
+        q = self._quantized_linear(hidden, f"{prefix}.q_proj.weight")
+        k = self._quantized_linear(hidden, f"{prefix}.k_proj.weight")
+        v = self._quantized_linear(hidden, f"{prefix}.v_proj.weight")
 
         # Reshape for multi-head attention
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        # Handle GQA: repeat K, V if num_kv_heads < num_heads
-        if self.num_kv_heads < self.num_heads:
-            repeats = self.num_heads // self.num_kv_heads
-            k = k.repeat_interleave(repeats, dim=1)
-            v = v.repeat_interleave(repeats, dim=1)
+        # QK Normalization (Qwen3 and similar models)
+        if f"{prefix}.q_norm.weight" in self.weights:
+            q_norm_weight = self._get_weight(f"{prefix}.q_norm.weight")
+            k_norm_weight = self._get_weight(f"{prefix}.k_norm.weight")
+            # Apply RMS norm per-head (weight is [head_dim])
+            q = self._per_head_rms_norm(q, q_norm_weight)
+            k = self._per_head_rms_norm(k, k_norm_weight)
 
-        # KV cache update
+        # Apply RoPE (Rotary Position Embeddings)
+        # Get position offset from KV cache
+        position_offset = kv_cache.seq_len if kv_cache is not None else 0
+        cos, sin = self._get_rope_embeddings(seq_len, position_offset)
+        q = self._apply_rotary_emb(q, cos, sin)
+        k = self._apply_rotary_emb(k, cos, sin)
+
+        # KV cache update (BEFORE GQA repeat - cache stores original num_kv_heads)
         if kv_cache is not None:
             k_full, v_full = kv_cache.update(layer_idx, k, v)
         else:
             k_full, v_full = k, v
 
+        # Handle GQA: repeat K, V if num_kv_heads < num_heads (AFTER cache)
+        if self.num_kv_heads < self.num_heads:
+            repeats = self.num_heads // self.num_kv_heads
+            k_full = k_full.repeat_interleave(repeats, dim=1)
+            v_full = v_full.repeat_interleave(repeats, dim=1)
+
+        # Ensure consistent dtype for attention (fix potential float32/float16 mix)
+        q = q.half()
+        k_full = k_full.half()
+        v_full = v_full.half()
+
         # Scaled dot-product attention
+        # is_causal=True only works correctly when Q and K have the same seq_len.
+        # During decode (single token query attending to cached K), we must use
+        # is_causal=False because the single query should attend to ALL keys.
+        is_decode = seq_len == 1 and kv_cache is not None
         attn_out = torch.nn.functional.scaled_dot_product_attention(
             q,
             k_full,
             v_full,
-            is_causal=True,
+            is_causal=not is_decode,
         )
 
         # Reshape back and project output
         attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        return torch.nn.functional.linear(attn_out, o_weight)
+        return self._quantized_linear(attn_out, f"{prefix}.o_proj.weight")
+
+    def _get_rope_embeddings(
+        self, seq_len: int, position_offset: int = 0
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Get RoPE sin/cos embeddings for given sequence length and offset."""
+        assert torch is not None
+
+        total_len = seq_len + position_offset
+        cache_key = total_len
+
+        if cache_key not in self._rope_cache:
+            # Compute inverse frequencies
+            half_dim = self.head_dim // 2
+            inv_freq = 1.0 / (
+                self.rope_theta ** (torch.arange(0, half_dim, dtype=torch.float32) / half_dim)
+            )
+            inv_freq = inv_freq.to(self.device)
+
+            # Compute position embeddings
+            positions = torch.arange(total_len, dtype=torch.float32, device=self.device)
+            freqs = torch.outer(positions, inv_freq)  # [seq_len, half_dim]
+
+            # Compute sin/cos
+            cos = torch.cos(freqs).half()
+            sin = torch.sin(freqs).half()
+
+            self._rope_cache[cache_key] = (cos, sin)
+
+        cos, sin = self._rope_cache[cache_key]
+        return cos[position_offset:total_len], sin[position_offset:total_len]
+
+    def _apply_rotary_emb(
+        self, x: torch_typing.Tensor, cos: torch_typing.Tensor, sin: torch_typing.Tensor
+    ) -> torch_typing.Tensor:
+        """Apply rotary position embeddings to tensor x.
+
+        Args:
+            x: Input tensor [batch, heads, seq_len, head_dim]
+            cos: Cosine frequencies [seq_len, half_dim]
+            sin: Sine frequencies [seq_len, half_dim]
+        """
+        assert torch is not None
+
+        # Split x into first and second halves
+        x1 = x[..., : self.head_dim // 2]
+        x2 = x[..., self.head_dim // 2 :]
+
+        # Broadcast cos/sin to match x shape
+        cos = cos.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, half_dim]
+        sin = sin.unsqueeze(0).unsqueeze(0)
+
+        # Apply rotation
+        rotated = torch.cat(
+            [
+                x1 * cos - x2 * sin,
+                x1 * sin + x2 * cos,
+            ],
+            dim=-1,
+        )
+
+        return rotated
 
     def _mlp(
         self,
@@ -481,17 +647,13 @@ class MetalMarlinModel:
 
         prefix = f"model.layers.{layer_idx}.mlp"
 
-        gate_weight = self._get_weight(f"{prefix}.gate_proj.weight")
-        up_weight = self._get_weight(f"{prefix}.up_proj.weight")
-        down_weight = self._get_weight(f"{prefix}.down_proj.weight")
-
-        gate = torch.nn.functional.linear(hidden, gate_weight)
-        up = torch.nn.functional.linear(hidden, up_weight)
+        gate = self._quantized_linear(hidden, f"{prefix}.gate_proj.weight")
+        up = self._quantized_linear(hidden, f"{prefix}.up_proj.weight")
 
         # SwiGLU activation
         hidden = torch.nn.functional.silu(gate) * up
 
-        return torch.nn.functional.linear(hidden, down_weight)
+        return self._quantized_linear(hidden, f"{prefix}.down_proj.weight")
 
     def create_kv_cache(self, batch_size: int = 1) -> KVCache:
         """Create empty KV cache structure."""
@@ -587,9 +749,19 @@ class MarlinPipeline:
         require_torch()
 
         model_path = Path(model_path)
+        config = load_config(model_path)
 
-        # Load model
-        model = MetalMarlinModel.from_quantized(model_path, device=device)
+        # Detect model architecture
+        arch = config.get("architectures", [""])[0]
+
+        if "GLM" in arch or config.get("model_type") == "glm4_moe_lite":
+            from ..models.glm4_model import GLM4MoEModel
+
+            model = GLM4MoEModel.from_quantized(model_path, device=device)
+        elif "Qwen" in arch:
+            model = MetalMarlinModel.from_quantized(model_path, device=device)
+        else:
+            model = MetalMarlinModel.from_quantized(model_path, device=device)
 
         # Load tokenizer
         from transformers import AutoTokenizer
@@ -643,6 +815,44 @@ class MarlinPipeline:
         else:
             return self._generate(input_ids, gen_config)
 
+    def stream_generate(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+    ) -> Iterator[str]:
+        """Yield tokens as they are generated for streaming responses."""
+        require_torch()
+        assert torch is not None
+
+        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self._device)
+        kv_cache = self.model.create_kv_cache(batch_size=1)
+
+        # Prefill
+        logits = self.model(input_ids, kv_cache=kv_cache)
+        kv_cache.advance(input_ids.shape[1])
+
+        eos_token_id = self.tokenizer.eos_token_id or 2
+
+        for _ in range(max_tokens):
+            next_token_id = self._sample(
+                logits[0, -1],
+                temperature=temperature,
+                top_p=top_p,
+                do_sample=True,
+            )
+            token_str = self.tokenizer.decode([next_token_id])
+            yield token_str
+
+            if next_token_id == eos_token_id:
+                break
+
+            # Decode step
+            next_input = torch.tensor([[next_token_id]], device=self._device, dtype=torch.long)
+            logits = self.model(next_input, kv_cache=kv_cache)
+            kv_cache.advance(1)
+
     def _generate(
         self,
         input_ids: torch_typing.Tensor,
@@ -662,30 +872,12 @@ class MarlinPipeline:
         generated_ids = input_ids.tolist()[0]
 
         for _ in range(config.max_new_tokens):
-            next_logits = logits[:, -1, :]  # [batch, vocab]
-
-            # Apply temperature
-            if config.temperature > 0:
-                next_logits = next_logits / config.temperature
-
-            # Sample or greedy
-            if config.do_sample and config.temperature > 0:
-                probs = torch.nn.functional.softmax(next_logits, dim=-1)
-
-                # Top-p sampling
-                if config.top_p < 1.0:
-                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-                    cumsum = torch.cumsum(sorted_probs, dim=-1)
-                    mask = cumsum - sorted_probs > config.top_p
-                    sorted_probs[mask] = 0.0
-                    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-                    next_token = sorted_indices[0, torch.multinomial(sorted_probs[0], 1)]
-                else:
-                    next_token = torch.multinomial(probs[0], 1)
-            else:
-                next_token = torch.argmax(next_logits, dim=-1)
-
-            next_token_id = int(next_token.item())
+            next_token_id = self._sample(
+                logits[:, -1, :][0],
+                temperature=config.temperature,
+                top_p=config.top_p,
+                do_sample=config.do_sample,
+            )
             generated_ids.append(next_token_id)
 
             # Check for EOS
@@ -718,27 +910,12 @@ class MarlinPipeline:
         prev_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
         for _ in range(config.max_new_tokens):
-            next_logits = logits[:, -1, :]
-
-            if config.temperature > 0:
-                next_logits = next_logits / config.temperature
-
-            if config.do_sample and config.temperature > 0:
-                probs = torch.nn.functional.softmax(next_logits, dim=-1)
-
-                if config.top_p < 1.0:
-                    sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-                    cumsum = torch.cumsum(sorted_probs, dim=-1)
-                    mask = cumsum - sorted_probs > config.top_p
-                    sorted_probs[mask] = 0.0
-                    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-                    next_token = sorted_indices[0, torch.multinomial(sorted_probs[0], 1)]
-                else:
-                    next_token = torch.multinomial(probs[0], 1)
-            else:
-                next_token = torch.argmax(next_logits, dim=-1)
-
-            next_token_id = int(next_token.item())
+            next_token_id = self._sample(
+                logits[:, -1, :][0],
+                temperature=config.temperature,
+                top_p=config.top_p,
+                do_sample=config.do_sample,
+            )
 
             if next_token_id == config.eos_token_id:
                 break
@@ -754,6 +931,36 @@ class MarlinPipeline:
             next_input = torch.tensor([[next_token_id]], device=self._device, dtype=torch.long)
             logits = self.model(next_input, kv_cache=kv_cache)
             kv_cache.advance(1)
+
+    def _sample(
+        self,
+        logits: torch_typing.Tensor,
+        temperature: float,
+        top_p: float,
+        do_sample: bool,
+    ) -> int:
+        """Sample a token id from logits with temperature and top-p."""
+        assert torch is not None
+
+        if temperature > 0:
+            logits = logits / temperature
+
+        if do_sample and temperature > 0:
+            probs = torch.nn.functional.softmax(logits, dim=-1)
+
+            if top_p < 1.0:
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True)
+                cumsum = torch.cumsum(sorted_probs, dim=-1)
+                mask = cumsum - sorted_probs > top_p
+                sorted_probs[mask] = 0.0
+                sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+                next_token = sorted_indices[torch.multinomial(sorted_probs, 1)]
+            else:
+                next_token = torch.multinomial(probs, 1)
+        else:
+            next_token = torch.argmax(logits, dim=-1)
+
+        return int(next_token.item())
 
     def info(self) -> ModelInfo:
         """Get model information."""

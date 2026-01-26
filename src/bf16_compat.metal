@@ -202,14 +202,8 @@ inline bf16_t bf16_from_half(half h) {
 /// @param packed  4 BF16 values in uint16 storage
 /// @return        4 FP32 values
 inline float4 bf16x4_to_float4_direct(ushort4 packed) {
-    ushort lane = ushort(simd_lane_id);
-    ushort4 lane_vals = ushort4(
-        simd_shuffle(packed.x, lane),
-        simd_shuffle(packed.y, lane),
-        simd_shuffle(packed.z, lane),
-        simd_shuffle(packed.w, lane)
-    );
-    uint4 widened = uint4(lane_vals) << 16;
+    // BF16 -> FP32: just shift left by 16 bits (BF16 is upper 16 bits of FP32)
+    uint4 widened = uint4(packed) << 16;
     return as_type<float4>(widened);
 }
 
@@ -336,19 +330,6 @@ inline void bf16_load_as_half8(device const ushort *src,
 /// @param offset    Element offset into the buffer
 /// @param out_lo    Output: first 4 values as float4
 /// @param out_hi    Output: last 4 values as float4
-inline void bf16_load_as_float8(device const ushort *src,
-                                uint offset,
-                                thread float4 &out_lo,
-                                thread float4 &out_hi) {
-    ushort4 lo_packed = ushort4(src[offset],     src[offset + 1],
-                                src[offset + 2], src[offset + 3]);
-    ushort4 hi_packed = ushort4(src[offset + 4], src[offset + 5],
-                                src[offset + 6], src[offset + 7]);
-
-    out_lo = bf16x4_to_float4(lo_packed);
-    out_hi = bf16x4_to_float4(hi_packed);
-}
-
 /// Store 8 half values as BF16 to a device buffer (with RNE rounding).
 /// Intended for writing GEMM outputs back to BF16 activation memory.
 ///
@@ -381,23 +362,6 @@ inline void bf16_store_from_half8(device ushort *dst,
 /// @param offset    Element offset into the buffer
 /// @param lo        First 4 values (float4)
 /// @param hi        Last 4 values (float4)
-inline void bf16_store_from_float8(device ushort *dst,
-                                   uint offset,
-                                   float4 lo,
-                                   float4 hi) {
-    ushort4 lo_packed = float4_to_bf16x4_rne(lo);
-    ushort4 hi_packed = float4_to_bf16x4_rne(hi);
-
-    dst[offset]     = lo_packed.x;
-    dst[offset + 1] = lo_packed.y;
-    dst[offset + 2] = lo_packed.z;
-    dst[offset + 3] = lo_packed.w;
-    dst[offset + 4] = hi_packed.x;
-    dst[offset + 5] = hi_packed.y;
-    dst[offset + 6] = hi_packed.z;
-    dst[offset + 7] = hi_packed.w;
-}
-
 /// Store 8 float values as BF16 to a device buffer (with RNE rounding).
 /// Intended for writing FP32 outputs back to BF16 activation memory.
 ///

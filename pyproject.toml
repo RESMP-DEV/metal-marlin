@@ -27,9 +27,15 @@ metal = [
     "pyobjc-framework-Metal>=10.0",
     "pyobjc-framework-MetalPerformanceShaders>=10.0",
 ]
+serve = [
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "pydantic>=2.0.0",
+    "sse-starlette>=1.6.0",
+]
 torch = ["torch>=2.0.0"]
 dev = ["pytest>=7.0", "ruff>=0.4.0"]
-all = ["metal-marlin[metal,torch,dev]"]
+all = ["metal-marlin[metal,serve,torch,dev]"]
 
 [build-system]
 requires = ["hatchling"]

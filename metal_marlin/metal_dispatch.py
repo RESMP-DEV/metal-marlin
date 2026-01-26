@@ -63,9 +63,7 @@ if HAS_METAL:
     from ._buffer_pool import MetalBufferPool
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
-    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[Any, Any] = (
-        weakref.WeakKeyDictionary()
-    )
+    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
         pool = _STAGING_POOLS.get(id(device))
@@ -74,9 +72,7 @@ if HAS_METAL:
             _STAGING_POOLS[id(device)] = pool
         return pool
 
-    def _blit_copy(
-        lib: MetalKernelLibrary, source: Any, destination: Any, size: int
-    ) -> None:
+    def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
         command_buffer = lib.command_queue.commandBuffer()
         blit = command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
@@ -86,9 +82,7 @@ if HAS_METAL:
         command_buffer.commit()
         command_buffer.waitUntilCompleted()
 
-    def _private_buffer_from_bytes(
-        lib: MetalKernelLibrary, device: Any, data: bytes
-    ) -> Any:
+    def _private_buffer_from_bytes(lib: MetalKernelLibrary, device: Any, data: bytes) -> Any:
         size = len(data)
         staging = _get_staging_pool(device).get(size)
         contents = staging.contents()
@@ -96,9 +90,7 @@ if HAS_METAL:
         view[:size] = data
         staging.didModifyRange_(Foundation.NSMakeRange(0, size))
 
-        private_buf = device.newBufferWithLength_options_(
-            size, Metal.MTLResourceStorageModePrivate
-        )
+        private_buf = device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModePrivate)
         _blit_copy(lib, staging, private_buf, size)
         _get_staging_pool(device).release(staging)
         return private_buf
@@ -264,6 +256,9 @@ class MetalKernelLibrary:
         Returns:
             MTLLibrary instance.
         """
+        # Preprocess includes before compilation (PyObjC Metal doesn't resolve #include).
+        source = self._preprocess_includes(source)
+
         options = Metal.MTLCompileOptions.new()
         # Enable fast math for performance
         options.setFastMathEnabled_(True)
@@ -279,6 +274,41 @@ class MetalKernelLibrary:
 
         self._libraries[name] = library
         return library
+
+    def _preprocess_includes(self, source: str) -> str:
+        """Resolve #include directives by inlining referenced files.
+
+        System includes (<metal_stdlib>, <simd/simd.h>, etc.) are preserved.
+        Local includes ("file.metal") are inlined.
+        """
+        import re
+
+        # Only match local includes with double quotes, not system includes with angle brackets
+        local_include_pattern = re.compile(r'#include\s*"([^"]+)"')
+        processed: set[str] = set()
+
+        def resolve(src: str, depth: int = 0) -> str:
+            if depth > 10:
+                raise RuntimeError("Include depth exceeded")
+
+            def replacer(match: re.Match[str]) -> str:
+                filename = match.group(1)
+                if filename in processed:
+                    return ""
+                processed.add(filename)
+
+                include_path = _SRC_DIR / filename
+                if not include_path.exists():
+                    include_path = _SRC_DIR / "fusion" / filename
+                if not include_path.exists():
+                    raise FileNotFoundError(f"Include not found: {filename}")
+
+                content = include_path.read_text()
+                return resolve(content, depth + 1)
+
+            return local_include_pattern.sub(replacer, src)
+
+        return resolve(source)
 
     def get_pipeline(
         self,

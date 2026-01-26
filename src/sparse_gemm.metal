@@ -68,6 +68,10 @@ inline uint sp_div_ceil(uint a, uint b) {
     return (a + b - 1) / b;
 }
 
+inline uint div_ceil(uint a, uint b) {
+    return (a + b - 1) / b;
+}
+
 // ---------------------------------------------------------------------------
 // FP4 E2M1 dequantization (same as dense kernel)
 // ---------------------------------------------------------------------------

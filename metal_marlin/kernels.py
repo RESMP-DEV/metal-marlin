@@ -27,6 +27,7 @@ Note:
 
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -41,6 +42,7 @@ from .metal_dispatch import (
     mps_tensor_to_metal_buffer,
     require_mps,
 )
+from .utils.padding import pad_torch_2d, round_up
 
 if HAS_TORCH:
     import torch
@@ -917,9 +919,7 @@ if HAS_METAL and HAS_MPS:
     from ._buffer_pool import MetalBufferPool
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
-    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[torch.Tensor, Any] = (
-        weakref.WeakKeyDictionary()
-    )
+    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[torch.Tensor, Any] = weakref.WeakKeyDictionary()
 
     class MarlinGemmDispatcher:
         """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
@@ -965,7 +965,9 @@ if HAS_METAL and HAS_MPS:
                 if compile_options:
                     source = get_shader_source(source_name)
                     source = self._apply_compile_options(source, compile_options)
-                    tag = "_".join(opt.replace("-", "").replace("=", "_") for opt in compile_options)
+                    tag = "_".join(
+                        opt.replace("-", "").replace("=", "_") for opt in compile_options
+                    )
                     library_name = f"{source_name}:{function_name}:{tag}"
                     self._lib.compile_source(library_name, source)
                     pipeline = self._lib.get_pipeline(function_name, library_name)
@@ -1056,15 +1058,11 @@ if HAS_METAL and HAS_MPS:
     def _get_staging_pool(device: Any) -> MetalBufferPool:
         pool = _STAGING_POOLS.get(id(device))
         if pool is None:
-            pool = MetalBufferPool(
-                device, storage_mode=Metal.MTLResourceStorageModeManaged
-            )
+            pool = MetalBufferPool(device, storage_mode=Metal.MTLResourceStorageModeManaged)
             _STAGING_POOLS[id(device)] = pool
         return pool
 
-    def _blit_copy(
-        lib: MetalKernelLibrary, source: Any, destination: Any, size: int
-    ) -> None:
+    def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
         command_buffer = lib.command_queue.commandBuffer()
         blit = command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
@@ -1074,9 +1072,7 @@ if HAS_METAL and HAS_MPS:
         command_buffer.commit()
         command_buffer.waitUntilCompleted()
 
-    def _private_buffer_from_bytes(
-        lib: MetalKernelLibrary, device: Any, data: bytes
-    ) -> Any:
+    def _private_buffer_from_bytes(lib: MetalKernelLibrary, device: Any, data: bytes) -> Any:
         size = len(data)
         staging = _get_staging_pool(device).get(size)
         contents = staging.contents()
@@ -1084,9 +1080,7 @@ if HAS_METAL and HAS_MPS:
         view[:size] = data
         staging.didModifyRange_(Foundation.NSMakeRange(0, size))
 
-        private_buf = device.newBufferWithLength_options_(
-            size, Metal.MTLResourceStorageModePrivate
-        )
+        private_buf = device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModePrivate)
         _blit_copy(lib, staging, private_buf, size)
         _get_staging_pool(device).release(staging)
         return private_buf
@@ -1303,6 +1297,72 @@ if HAS_METAL and HAS_MPS:
         scales_out = scales.to("mps")
         return weight_packed, scales_out
 
+    def dispatch_gemm_fp4(
+        lib: MetalKernelLibrary,
+        A: torch.Tensor,
+        B_packed: torch.Tensor,
+        scales: torch.Tensor,
+        M: int,
+        N: int,
+        K: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        """Dispatch the FP4 fused dequant-GEMM Metal kernel.
+
+        Args:
+            lib: Metal kernel library with compiled marlin_gemm_fp4.
+            A: Input activations [M, K] float16.
+            B_packed: Packed FP4 weights [K/8, N] uint32.
+            scales: Per-group scales [K/group_size, N] float16.
+            M: Batch dimension (rows of A).
+            N: Output features (cols of B).
+            K: Reduction dimension.
+            group_size: Quantization group size.
+
+        Returns:
+            Output tensor [M, N] float16.
+        """
+        device = lib.device
+
+        # Ensure contiguous and correct dtype
+        A_contig = A.contiguous()
+        B_packed_contig = B_packed.contiguous()
+        scales_half = (
+            scales.half().contiguous() if scales.dtype != torch.float16 else scales.contiguous()
+        )
+
+        # Create output tensor
+        C = torch.empty((M, N), dtype=torch.float16, device="mps")
+
+        # Get Metal buffers
+        A_buf = _private_buffer_from_tensor(A_contig, lib, device, cache=True)
+        B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+        S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
+        C_buf = mps_tensor_to_metal_buffer(C, device)
+
+        # Params: M, N, K, group_size
+        params = np.array([M, N, K, group_size], dtype=np.uint32)
+        params_buf = _params_buffer(lib, device, params)
+
+        # Tile sizes matching marlin_gemm.metal
+        TILE_M = 64
+        TILE_N = 64
+        THREADS_PER_TG = 256
+
+        grid_m = (M + TILE_M - 1) // TILE_M
+        grid_n = (N + TILE_N - 1) // TILE_N
+
+        dispatch_kernel(
+            lib,
+            function_name="marlin_gemm_fp4",
+            grid=(grid_n, grid_m, 1),
+            threadgroup=(THREADS_PER_TG, 1, 1),
+            buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
+            wait=True,
+        )
+
+        return C
+
     def marlin_gemm_fp4(
         A: torch.Tensor,
         B_packed: torch.Tensor,
@@ -1342,9 +1402,7 @@ if HAS_METAL and HAS_MPS:
         if M_dispatch != M:
             A_2d, _ = pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
 
-        C = dispatch_gemm_fp4(
-            lib, A_2d, B_packed, scales, M_dispatch, N, K, group_size
-        )
+        C = dispatch_gemm_fp4(lib, A_2d, B_packed, scales, M_dispatch, N, K, group_size)
         if M_dispatch != M:
             C = C[:M, :]
         out_shape = list(orig_shape[:-1]) + [N]

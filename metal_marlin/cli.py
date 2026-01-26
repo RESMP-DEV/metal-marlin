@@ -64,6 +64,31 @@ def chat(model, system, quant):
     run_chat(model, system_prompt=system)
 
 
+@click.command()
+@click.argument("model_path", type=click.Path(exists=True))
+@click.option("--host", default="0.0.0.0", help="Bind address")
+@click.option("--port", default=8000, type=int, help="Port number")
+@click.option("--device", default="mps", help="Device (mps/cuda/cpu)")
+def serve(model_path: str, host: str, port: int, device: str):
+    """Start OpenAI-compatible API server.
+
+    Example:
+        metal-marlin serve benchmarks/results/qwen3_4b_fp4 --port 8000
+
+    Then use with:
+        curl http://localhost:8000/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -d '{"model": "qwen3_4b_fp4", "messages": [{"role": "user", "content": "Hello"}]}'
+    """
+    from .serving.server import run_server
+
+    run_server(model_path, host=host, port=port, device=device)
+
+
+if "serve" not in cli.commands:
+    cli.add_command(serve)
+
+
 @cli.command()
 @click.option("--input", "-i", "input_path", required=True, help="Input model path")
 @click.option("--output", "-o", "output_path", required=True, help="Output path")

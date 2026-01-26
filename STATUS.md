@@ -1,60 +1,112 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-26T02:15
+**Last Updated:** 2026-01-26T19:30
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Metal Shaders | **34/34** ✅ |
+| Qwen3-4B FP4 Inference | **Working** ✅ ~27 tok/s |
+| OpenAI Server | **Scaffolded** 🔄 |
+| Metal Shaders | **30/35** compiling |
 | MLX Removal | **Complete** ✅ |
-| Weight Quantization | Tested (GLM-4.7-Flash) |
-| Quantized Inference | **Not implemented** |
+| GLM-4.7-Flash MLA | **In Progress** 🔄 |
 
 ---
 
-## Recent: GLM-4.7-Flash Weight Quantization
+## Working: Qwen3-4B FP4 Inference
 
-Quantized `zai-org/GLM-4.7-Flash` weights (not end-to-end inference):
+End-to-end inference working via PyTorch MPS fallback:
+
+```bash
+cd contrib/metal_marlin
+python3 -c "
+from metal_marlin.inference.pipeline import MarlinPipeline
+pipe = MarlinPipeline.from_pretrained('benchmarks/results/qwen3_4b_fp4', device='mps')
+print(pipe('The capital of France is', max_tokens=20))
+"
+```
 
 | Metric | Value |
 |--------|-------|
-| Compression | 9.38x |
-| Weight RMSE | 0.003 |
-| Format | 99.5% FP4, 0.5% BF16 (gates) |
+| Model | Qwen3-4B FP4 |
+| Throughput | ~27 tok/s decode |
+| Compression | 7.76x |
+| Backend | PyTorch MPS (fallback) |
 
-**Note:** These are weight-level metrics only. End-to-end inference not yet implemented.
+**Note:** Using PyTorch dequant+matmul, not fused Metal kernels yet.
+
+---
+
+## OpenAI-Compatible Server
+
+vLLM-style server scaffolded in `metal_marlin/serving/`:
+
+```bash
+# Start server
+metal-marlin serve benchmarks/results/qwen3_4b_fp4 --port 8000
+
+# Or with Python
+python -m metal_marlin serve benchmarks/results/qwen3_4b_fp4
+```
+
+**Endpoints:**
+- `GET /v1/models` - List models
+- `POST /v1/chat/completions` - Chat completions (streaming supported)
+- `POST /v1/completions` - Text completions
+- `GET /health` - Health check
+
+**Files:**
+- `serving/server.py` - FastAPI routes
+- `serving/engine.py` - Inference engine wrapper  
+- `serving/openai_schemas.py` - Pydantic models
+- `serving/continuous_batch.py` - Batch scheduler (WIP)
+
+---
+
+## Metal Shader Status
+
+### ✅ Compiling (30/35)
+
+| Category | Shaders |
+|----------|---------|
+| **GEMM** | marlin_gemm ✅, gemm_fp4_optimized, sparse_gemm, batched_gemm |
+| **Attention** | attention, flash_attention, simdgroup_attention, paged_attention, diff_attention |
+| **Dequant** | dequant, dequant_fp8, dequant_int8, dequant_sub4bit |
+| **MoE** | moe_dispatch, moe_router, moe_expert_gemm, moe_shared_expert |
+| **Other** | rope, sampling, hadamard, bf16_compat, decode_gemv, mla_proj |
+
+### ❌ Issues (5/35)
+
+| Shader | Issue |
+|--------|-------|
+| dense_gemm | Missing `SMALL_SG_M_TILES` defines |
+| flash_attention_v2 | Compile warning only |
+| moe_dispatch_optimized | Function not found |
+| simdgroup_attention | Function not found |
+| test_async_copy | Removed (unsupported AIR intrinsics) |
 
 ---
 
 ## Blockers
 
-### 1. ~~Failing Shader: marlin_gemm.metal~~ FIXED ✅
+### 1. Fused Kernel Integration (P0)
 
-All 34 Metal shaders now compile successfully.
+`marlin_gemm_fp4` shader compiles ✅ but runtime buffer conversion fails:
+```
+TypeError: converting to a C array (PyObjC Metal buffer issue)
+```
 
----
+Current workaround: PyTorch MPS fallback (~27 tok/s vs target ~100 tok/s).
 
-### 2. Quantized Inference Not Implemented
+### 2. GLM-4.7-Flash MLA (P1)
 
-Current limitation: Benchmark computes quality metrics at **weight level** (RMSE 0.003 = excellent), but cannot run end-to-end inference with FP4 weights because:
+Multi-Latent Attention requires:
+- Latent projection (down_proj, up_proj)
+- Rotary position embedding on latents
+- Quantized KV cache support
 
-1. PyTorch cannot natively load our FP4 tensors
-2. Dequantization + GEMM must be fused in Metal kernels
-3. Model forward pass needs integration with quantized weight loader
-
-**Next steps:** See `quantized_inference_tasks.yaml` for implementation plan.
-
----
-
-## Working Shaders (31/32)
-
-All compiling:
-- **Attention:** attention, flash_attention, flash_attention_v2, simdgroup_attention, diff_attention, paged_attention
-- **GEMM:** dense_gemm, batched_gemm, gemm_fp4_optimized, sparse_gemm, moe_expert_gemm
-- **Dequant:** dequant (FP4/INT4), dequant_fp8, dequant_int8, dequant_sub4bit
-- **MoE:** moe_dispatch, moe_dispatch_optimized, moe_router, moe_shared_expert
-- **Other:** rope, sampling, hadamard, all_reduce, sparse, rwkv_wkv, mla_proj, bf16_compat, decode_gemv, vision_preprocess, gemm_epilogue, kernels_autotune
+MLA implementation started in `mla_attention.py` and `mla_kv_cache.py`.
 
 ---
 
@@ -62,40 +114,28 @@ All compiling:
 
 | Format | Bits | Status | Use Case |
 |--------|------|--------|----------|
-| FP4 E2M1 | 4.0 | ✅ Primary | Default weight format |
-| INT4 U4/S4 | 4.0 | ✅ Working | GPTQ compatibility |
-| INT3/INT2 | 3.0/2.0 | ✅ Working | Cold MoE experts |
-| NF3/NF2 | 3.0/2.0 | ✅ Working | QLoRA formats |
-| FP8 E4M3/E5M2 | 8.0 | ✅ Working | Higher precision |
-| 2:4 Sparse | variable | ✅ Working | Structured sparsity |
-
----
-
-## Tasks
-
-See `tasks/quantized_inference.yaml` for implementation plan (24 tasks).
-
----
-
-## Codebase Metrics
-
-| Metric | Count |
-|--------|-------|
-| Python files (metal_marlin/) | ~125 |
-| Metal shaders | 35 |
+| FP4 E2M1 | 4.0 | ✅ Working | Default weights |
+| INT4 U4/S4 | 4.0 | ✅ Working | GPTQ compat |
+| FP8 E4M3 | 8.0 | ✅ Working | Higher precision |
+| INT3/INT2 | 3/2 | ✅ Working | Cold experts |
+| 2:4 Sparse | var | ✅ Working | Sparsity |
 
 ---
 
 ## Commands
 
 ```bash
-# Test shader compilation
-uv run python -c "
-from metal_marlin.metal_dispatch import MetalKernelLibrary
-lib = MetalKernelLibrary.from_source_dir()
-print(f'Compiled: {len(lib._libraries)} libraries')
+# Test inference
+cd contrib/metal_marlin
+python3 -c "
+from metal_marlin.inference.pipeline import MarlinPipeline
+pipe = MarlinPipeline.from_pretrained('benchmarks/results/qwen3_4b_fp4', device='mps')
+print(pipe('Hello world', max_tokens=20))
 "
 
-# Run tests
-uv run pytest tests/ -v
+# Verify kernel compilation
+python3 scripts/verify_kernels.py
+
+# Quantize a new model
+python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./output --bits 4
 ```
