@@ -1,0 +1,36 @@
+# Model downloads (large files - do not commit)
+models/
+*.gguf
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+_archived/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Benchmark outputs (optional - may want to track some results)
+# benchmarks/results/*.json
+
+# Temporary files
+*.tmp
+*.log
+*.aria2

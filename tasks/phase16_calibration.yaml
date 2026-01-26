@@ -1,0 +1,125 @@
+# yaml-language-server: $schema=
+# Phase 16: Bartowski Calibration v3 Integration
+# Better calibration data than WikiText-2 for quantization ranges
+
+tasks:
+  - name: calibration-loader
+    prompt: |
+      Create `metal_marlin/calibration.py` - Bartowski calibration dataset loader.
+
+      Bartowski calibration v3 is a multi-domain dataset (code, chat, reasoning, math)
+      that provides better activation ranges than WikiText-2 for LLM quantization.
+
+      Implement:
+      ```python
+      @dataclass
+      class CalibrationDataset:
+          samples: list[str]
+          name: str
+          version: str
+
+      class BartowskiCalibration:
+          @classmethod
+          def v3(cls, max_samples: int = 512) -> CalibrationDataset:
+              """Load Bartowski calibration v3 from HuggingFace."""
+              # Download from bartowski/calibration-data or equivalent
+              # Contains: code snippets, chat conversations, reasoning chains
+
+          @classmethod
+          def from_local(cls, path: str) -> CalibrationDataset:
+              """Load from local JSON/JSONL file."""
+
+      def compute_activation_ranges(
+          model_path: str,
+          calibration: CalibrationDataset,
+          layers: list[str] | None = None,
+      ) -> dict[str, tuple[float, float]]:
+          """
+          Run calibration samples through model, track activation min/max.
+
+          Returns dict mapping layer names to (min, max) activation ranges.
+          Used for setting optimal quantization scales.
+          """
+      ```
+
+      Primary calibration data source (use this):
+      https://gist.githubusercontent.com/bartowski1182/eb213dccb3571f863da82e99418f81e8/raw/2c64bb691316d32915b188e495754ef34931ae71/calibration_datav3.txt
+
+      The v3 dataset is a text file with diverse samples (code, chat, reasoning).
+      Cache locally after first download.
+
+      No MLX dependency - use numpy + transformers tokenizer only.
+    priority: P0
+    dependencies: []
+
+  - name: calibration-aware-quantization
+    prompt: |
+      Update `metal_marlin/quantize_fp4.py` to support calibration-aware quantization.
+
+      Add optional `activation_ranges` parameter to `quantize_fp4()`:
+      ```python
+      def quantize_fp4(
+          tensor: np.ndarray,
+          group_size: int = 128,
+          activation_ranges: dict[str, tuple[float, float]] | None = None,
+      ) -> tuple[np.ndarray, np.ndarray]:
+          """
+          If activation_ranges provided, use them to set optimal scale
+          instead of just min/max of static weights.
+
+          Calibration-aware scaling:
+          1. If we know input activations range [a_min, a_max]
+          2. And weight values range [w_min, w_max]
+          3. Output range is roughly [a_min*w_min, a_max*w_max]
+          4. Use this to set scales that minimize quantization error
+             for the actual runtime value distribution
+          """
+      ```
+
+      Also update `convert_model_to_fp4()` in `hf_loader.py` to accept
+      optional `calibration` parameter.
+    priority: P1
+    dependencies:
+      - calibration-loader
+
+  - name: calibration-cli
+    prompt: |
+      Add calibration commands to CLI in `metal_marlin/hf_loader.py`:
+
+      ```bash
+      # Run calibration
+      python -m metal_marlin.hf_loader calibrate \
+          zai-org/GLM-4.7-Flash \
+          --calibration bartowski-v3 \
+          --output activation_ranges.json
+
+      # Convert with calibration
+      python -m metal_marlin.hf_loader convert \
+          zai-org/GLM-4.7-Flash ./glm4-fp4/ \
+          --calibration bartowski-v3 \
+          --mixed-precision moe-mtp
+      ```
+
+      Integrate with existing argparse structure.
+    priority: P2
+    dependencies:
+      - calibration-aware-quantization
+
+  - name: calibration-validation
+    prompt: |
+      Create `tests/test_calibration.py` - validate Bartowski calibration integration.
+
+      Tests:
+      1. `test_download_bartowski_v3()`: Download from gist, verify format
+      2. `test_calibration_caching()`: Verify local cache works
+      3. `test_activation_range_computation()`: Mock model, verify ranges computed
+      4. `test_calibration_aware_scale()`: Compare scales with/without calibration
+      5. `test_calibration_cli()`: Smoke test CLI commands
+
+      Verify the gist URL works:
+      https://gist.githubusercontent.com/bartowski1182/eb213dccb3571f863da82e99418f81e8/raw/2c64bb691316d32915b188e495754ef34931ae71/calibration_datav3.txt
+
+      Run: `uv run pytest tests/test_calibration.py -v`
+    priority: P1
+    dependencies:
+      - calibration-cli

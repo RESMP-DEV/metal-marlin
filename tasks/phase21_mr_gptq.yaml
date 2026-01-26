@@ -1,0 +1,463 @@
+# yaml-language-server: $schema=
+# Phase 21: MR-GPTQ Implementation
+#
+# Goal: Implement proper Marlin-Replica GPTQ quantization with Hadamard rotations
+# Reference: https://github.com/vllm-project/vllm/tree/main/csrc/quantization/marlin
+#            https://github.com/AutoGPTQ/AutoGPTQ
+#
+# Current state: RTN (Round-to-Nearest) - same as MLX, ~38% perplexity gap vs GGUF Q4_K_M
+# Target state:  MR-GPTQ with Hessian-aware optimization, matching GGUF quality
+
+tasks:
+  # ============================================================================
+  # PHASE 21.1: HADAMARD ROTATION (Outlier Dispersal)
+  # ============================================================================
+
+  - name: hadamard-transform-impl
+    prompt: |
+      Implement Hadamard transform for weight quantization outlier dispersal.
+
+      Create `metal_marlin/hadamard.py` with:
+
+      1. `hadamard_matrix(n: int) -> np.ndarray`:
+         - Generate normalized Hadamard matrix H_n where H_n * H_n^T = I
+         - Use Sylvester construction: H_2n = [[H_n, H_n], [H_n, -H_n]]
+         - Normalize by 1/sqrt(n)
+         - n must be power of 2 (pad weights if needed)
+
+      2. `apply_hadamard_rotation(weights: np.ndarray, block_size: int = 64) -> tuple[np.ndarray, np.ndarray]`:
+         - Apply block-diagonal Hadamard rotation to disperse outliers
+         - Block size typically 64 or 128 (matches quantization group size)
+         - Return (rotated_weights, rotation_metadata) for later inverse
+         
+      3. `inverse_hadamard_rotation(weights: np.ndarray, metadata: np.ndarray) -> np.ndarray`:
+         - Reverse the rotation (Hadamard is self-inverse: H^-1 = H^T = H)
+
+      Key insight: Hadamard rotation redistributes outlier magnitudes across channels,
+      making per-channel quantization scales more uniform. This is critical for 4-bit
+      quantization where large outliers cause catastrophic errors.
+
+      Reference: QuaRot paper (arxiv:2404.00456) - uses Hadamard to eliminate outliers
+
+      Add tests in `tests/test_hadamard.py`:
+      - Test orthonormality: H @ H.T ≈ I
+      - Test self-inverse: H @ H ≈ I
+      - Test that rotated weights have lower max/mean ratio (outlier reduction)
+    priority: P0
+    dependencies: []
+
+  - name: hadamard-metal-kernel
+    prompt: |
+      Implement Metal kernel for online Hadamard rotation during inference.
+
+      Create `metal_marlin/kernels/hadamard.metal`:
+
+      For Hadamard-rotated weights, we need complementary rotation on activations:
+      - y = (HW) @ (H^T x) = W @ x (mathematically equivalent)
+      - But we can fuse H^T @ x into the GEMM prologue
+
+      Kernel signature:
+      ```metal
+      kernel void hadamard_transform(
+          device const half* input,           // [N, block_size]
+          device half* output,                // [N, block_size]  
+          constant uint& n,                   // number of vectors
+          constant uint& block_size,          // 64 or 128
+          uint2 tid [[thread_position_in_grid]]
+      );
+      ```
+
+      Optimization notes:
+      - Use Walsh-Hadamard transform (butterfly pattern) - O(n log n) vs O(n²)
+      - Process block_size elements per thread via simdgroup operations
+      - Fuse with scale application if possible
+
+      Add Python binding in `metal_marlin/kernels.py`:
+      ```python
+      def hadamard_transform(x: mlx.array, block_size: int = 64) -> mlx.array:
+          ...
+      ```
+    priority: P1
+    dependencies:
+      - hadamard-transform-impl
+
+  # ============================================================================
+  # PHASE 21.2: HESSIAN APPROXIMATION FROM CALIBRATION
+  # ============================================================================
+
+  - name: hessian-approximation
+    prompt: |
+      Implement Hessian approximation for GPTQ quantization.
+
+      Extend `metal_marlin/converters/calibration.py`:
+
+      The GPTQ algorithm needs the Hessian H = X^T @ X where X is calibration activations.
+      This captures input statistics for optimal quantization decisions.
+
+      1. `CalibrationCollector.collect_hessian(layer_name: str) -> np.ndarray`:
+         - Accumulate X^T @ X during forward passes
+         - Use running sum for memory efficiency (don't store all X)
+         - Return [in_features, in_features] Hessian
+         - Add damping: H_damped = H + λI where λ = 0.01 * mean(diag(H))
+
+      2. `compute_layer_hessians(model, calibration_data, layers: list[str]) -> dict[str, np.ndarray]`:
+         - Run calibration forward pass
+         - Collect Hessians for specified layers
+         - Handle both dense and MoE models (per-expert Hessians)
+
+      Memory optimization:
+      - Use float32 accumulation, cast back to float16
+      - Chunk processing for large calibration sets
+      - Cache intermediate results to disk if needed
+
+      Reference: Original GPTQ paper (arxiv:2210.17323) Section 3.2
+    priority: P0
+    dependencies: []
+
+  # ============================================================================
+  # PHASE 21.3: GPTQ CORE ALGORITHM
+  # ============================================================================
+
+  - name: gptq-quantizer-impl
+    prompt: |
+      Implement the core GPTQ quantization algorithm.
+
+      Create `metal_marlin/gptq.py`:
+
+      GPTQ quantizes one column at a time, compensating errors in remaining columns.
+      This is the key algorithm that makes GPTQ superior to RTN.
+
+      ```python
+      class GPTQQuantizer:
+          def __init__(
+              self,
+              bits: int = 4,
+              group_size: int = 128,
+              sym: bool = True,
+              actorder: bool = True,  # activation-order quantization
+              damp: float = 0.01,
+          ):
+              ...
+          
+          def quantize_weight(
+              self,
+              W: np.ndarray,           # [out_features, in_features]
+              H: np.ndarray,           # [in_features, in_features] Hessian
+          ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+              """
+              Returns (quantized_W, scales, zeros).
+              
+              Algorithm:
+              1. Compute Cholesky decomposition: H = L @ L^T
+              2. For each column i (in activation order if actorder=True):
+                 a. Quantize W[:, i] using current scale
+                 b. Compute quantization error
+                 c. Distribute error to remaining columns using H^-1
+              3. Return quantized weights and computed scales
+              """
+              ...
+      ```
+
+      Key implementation details:
+      - `actorder`: Quantize columns in order of Hessian diagonal (importance)
+      - Error compensation: W[:, j] -= error[:, i] * H_inv[i, j] / H_inv[i, i]
+      - Group-wise scales: One scale per `group_size` consecutive elements
+
+      Reference: GPTQ paper Algorithm 1 and AutoGPTQ implementation
+    priority: P0
+    dependencies:
+      - hessian-approximation
+
+  - name: gptq-fp4-adapter
+    prompt: |
+      Adapt GPTQ for FP4 E2M1 quantization grid.
+
+      Create `metal_marlin/gptq_fp4.py`:
+
+      The core GPTQ algorithm assumes uniform quantization levels (INT4).
+      FP4 E2M1 has non-uniform levels: {0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6}
+
+      This requires a modified quantization function:
+
+      ```python
+      FP4_GRID = np.array([0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                          -0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0])
+
+      def quantize_to_fp4_grid(x: float, scale: float) -> int:
+          """Map scaled value to nearest FP4 E2M1 level."""
+          x_scaled = x / scale
+          # Find closest FP4 grid point
+          idx = np.argmin(np.abs(FP4_GRID - x_scaled))
+          return idx
+
+      def fp4_gptq_quantize_weight(
+          W: np.ndarray,
+          H: np.ndarray,
+          group_size: int = 128,
+      ) -> tuple[np.ndarray, np.ndarray]:
+          """
+          GPTQ quantization to FP4 E2M1 grid.
+          
+          Key difference from INT4 GPTQ:
+          - Quantization uses non-uniform FP4 grid
+          - Scale optimization accounts for FP4 spacing
+          - Error compensation uses FP4-aware rounding
+          """
+          ...
+      ```
+
+      Scale optimization:
+      - For FP4, optimal scale minimizes: sum((W - scale * FP4_GRID[idx])²)
+      - This is a weighted least-squares problem
+      - Can use grid search or Newton optimization
+
+      Reference: MR-GPTQ approach from vLLM Marlin
+    priority: P0
+    dependencies:
+      - gptq-quantizer-impl
+
+  # ============================================================================
+  # PHASE 21.4: MR-GPTQ INTEGRATION
+  # ============================================================================
+
+  - name: mr-gptq-pipeline
+    prompt: |
+      Implement the full MR-GPTQ pipeline combining Hadamard + GPTQ.
+
+      Create `metal_marlin/mr_gptq.py`:
+
+      MR-GPTQ = Marlin-Replica GPTQ = Hadamard rotation + GPTQ core
+
+      ```python
+      class MRGPTQQuantizer:
+          def __init__(
+              self,
+              bits: int = 4,
+              format: str = "fp4",  # "fp4", "int4", "nf4"
+              group_size: int = 128,
+              use_hadamard: bool = True,
+              hadamard_block_size: int = 64,
+              actorder: bool = True,
+          ):
+              ...
+          
+          def quantize_model(
+              self,
+              model_path: str,
+              calibration_data: CalibrationDataset,
+              output_path: str,
+              layers_to_quantize: list[str] = None,  # None = all linear layers
+          ) -> QuantizationReport:
+              """
+              Full MR-GPTQ quantization pipeline:
+              
+              1. Load model weights
+              2. Collect Hessians from calibration data
+              3. For each layer:
+                 a. Apply Hadamard rotation to weights
+                 b. Run GPTQ with format-specific grid
+                 c. Pack quantized weights in Marlin format
+                 d. Save rotation metadata for inference
+              4. Save quantized model
+              5. Return quality metrics
+              """
+              ...
+      ```
+
+      MoE handling:
+      - Each expert gets its own Hessian (experts may see different inputs)
+      - Router weights stay in higher precision (BF16)
+      - Shared expert uses full batch Hessian
+
+      Output format:
+      - Weights: Marlin FP4 packing (N-dimension, matches existing kernels)
+      - Scales: FP16 per-group
+      - Hadamard metadata: Block size and any permutation indices
+    priority: P0
+    dependencies:
+      - hadamard-transform-impl
+      - gptq-fp4-adapter
+
+  - name: mr-gptq-cli
+    prompt: |
+      Add CLI command for MR-GPTQ quantization.
+
+      Extend `metal_marlin/cli.py`:
+
+      ```bash
+      # Quantize with MR-GPTQ (recommended)
+      python -m metal_marlin quantize \
+          --input models/Qwen3-32B \
+          --output models/Qwen3-32B-MR-GPTQ-FP4 \
+          --method mr-gptq \
+          --bits 4 \
+          --format fp4 \
+          --group-size 128 \
+          --calibration bartowski-v3 \
+          --samples 512
+
+      # Quick RTN quantization (existing, for comparison)
+      python -m metal_marlin quantize \
+          --input models/Qwen3-32B \
+          --output models/Qwen3-32B-RTN-FP4 \
+          --method rtn \
+          --bits 4
+
+      # Compare quality
+      python -m metal_marlin eval \
+          --model models/Qwen3-32B-MR-GPTQ-FP4 \
+          --reference models/Qwen3-32B \
+          --metric perplexity
+      ```
+
+      CLI arguments:
+      - `--method`: rtn | gptq | mr-gptq
+      - `--bits`: 2 | 3 | 4 | 8
+      - `--format`: fp4 | int4 | nf4 | int3 | int2
+      - `--group-size`: 32 | 64 | 128 | 256
+      - `--calibration`: bartowski-v3 | wikitext2 | custom.txt
+      - `--samples`: Number of calibration samples
+      - `--no-hadamard`: Disable Hadamard rotation
+    priority: P1
+    dependencies:
+      - mr-gptq-pipeline
+
+  # ============================================================================
+  # PHASE 21.5: VALIDATION & BENCHMARKS
+  # ============================================================================
+
+  - name: mr-gptq-tests
+    prompt: |
+      Create comprehensive test suite for MR-GPTQ.
+
+      Create `tests/test_mr_gptq.py`:
+
+      1. Unit tests:
+         - test_gptq_basic: Small weight matrix, verify algorithm correctness
+         - test_gptq_error_compensation: Verify error is propagated to remaining columns
+         - test_gptq_actorder: Verify columns quantized in Hessian-diagonal order
+         - test_fp4_grid_quantization: Verify non-uniform grid mapping
+
+      2. Integration tests:
+         - test_mr_gptq_single_layer: Quantize one Linear layer, check reconstruction MSE
+         - test_mr_gptq_vs_rtn: MR-GPTQ should have lower MSE than RTN
+         - test_hadamard_reduces_outliers: Max/mean ratio should decrease after rotation
+
+      3. Quality benchmarks:
+         - test_perplexity_qwen3_4b: Full model perplexity on WikiText-2
+         - test_perplexity_improvement: MR-GPTQ vs RTN perplexity gap
+
+      Test targets:
+      - MSE improvement: MR-GPTQ should be 20-40% lower MSE than RTN
+      - Perplexity: Should match or beat GGUF Q4_K_M quality
+    priority: P1
+    dependencies:
+      - mr-gptq-pipeline
+
+  - name: quality-benchmark-suite
+    prompt: |
+      Create perplexity benchmark comparing quantization methods.
+
+      Create `benchmarks/bench_quantization_quality.py`:
+
+      ```python
+      METHODS = ["rtn", "gptq", "mr-gptq"]
+      FORMATS = ["fp4", "int4", "nf4"]
+      MODELS = ["Qwen3-4B", "Qwen3-32B", "GLM-4.7-Flash"]
+
+      def benchmark_method(model_name, method, format):
+          # 1. Quantize model
+          # 2. Measure perplexity on WikiText-2 test set
+          # 3. Return (bpw, perplexity, time)
+          ...
+
+      def run_benchmark():
+          results = []
+          for model in MODELS:
+              for method in METHODS:
+                  for format in FORMATS:
+                      result = benchmark_method(model, method, format)
+                      results.append(result)
+          
+          # Generate comparison table
+          print_table(results)
+      ```
+
+      Expected output:
+      ```
+      Model         Method    Format  BPW   PPL    vs BF16  vs GGUF Q4_K
+      ─────────────────────────────────────────────────────────────────
+      Qwen3-4B      RTN       FP4     4.0   7.82   +0.52    +0.35
+      Qwen3-4B      GPTQ      FP4     4.0   7.51   +0.21    +0.04
+      Qwen3-4B      MR-GPTQ   FP4     4.0   7.48   +0.18    +0.01  ← Target
+      ```
+    priority: P2
+    dependencies:
+      - mr-gptq-tests
+
+  # ============================================================================
+  # PHASE 21.6: DOCUMENTATION
+  # ============================================================================
+
+  - name: mr-gptq-docs
+    prompt: |
+      Document MR-GPTQ implementation and usage.
+
+      Create `metal_marlin/docs/mr_gptq.md`:
+
+      1. Algorithm Overview:
+         - Why RTN is insufficient (38% perplexity gap)
+         - How GPTQ uses Hessian for importance-aware quantization
+         - How Hadamard rotation disperses outliers
+
+      2. Implementation Details:
+         - Hessian collection during calibration
+         - Column-wise quantization with error compensation
+         - FP4 grid adaptation
+         - MoE expert handling
+
+      3. Usage Guide:
+         - Quick start with CLI
+         - Python API examples
+         - Calibration dataset selection
+
+      4. Quality Benchmarks:
+         - Perplexity comparison table (RTN vs GPTQ vs MR-GPTQ)
+         - Memory usage comparison
+         - Quantization time comparison
+
+      5. References:
+         - GPTQ paper (arxiv:2210.17323)
+         - QuaRot paper (arxiv:2404.00456)
+         - vLLM Marlin implementation
+         - AutoGPTQ implementation
+    priority: P2
+    dependencies:
+      - quality-benchmark-suite
+
+  - name: update-readme
+    prompt: |
+      Update README to reflect MR-GPTQ capability.
+
+      Edit `metal_marlin/README.md`:
+
+      1. Add to features list:
+         - MR-GPTQ: Hessian-aware quantization with 96% FP16 quality recovery
+
+      2. Add quick start example:
+         ```bash
+         # Quantize with MR-GPTQ (best quality)
+         python -m metal_marlin quantize \
+             --input Qwen/Qwen3-32B \
+             --output Qwen3-32B-MR-GPTQ-FP4 \
+             --method mr-gptq
+         ```
+
+      3. Add quality comparison table showing RTN vs MR-GPTQ improvement
+
+      4. Update honest naming:
+         - Our format is `fp4_e2m1_fp16_scales`, not "NVFP4" or "MXFP4"
+         - Explain the difference from NVFP4 (two-level scaling)
+    priority: P3
+    dependencies:
+      - mr-gptq-docs

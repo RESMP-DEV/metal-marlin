@@ -1,0 +1,466 @@
+# yaml-language-server: $schema=
+# Phase 20: MoE Kernels + BF16 Migration + Performance Features
+#
+# Key findings from codebase audit:
+# - 75 numpy float16 hardcodings, 52 mx.float16 vs 3 mx.bfloat16
+# - No MoE-specific Metal kernels (batched expert GEMM, fused router)
+# - sub4bit module exists but has no tests
+# - batched_gemm.metal is generic, not expert-optimized
+#
+# Unified Memory is the key advantage for MoE on Apple Silicon.
+# These tasks optimize for that architecture.
+
+tasks:
+  # ============================================================================
+  # MoE-Specific Kernels (P0 - Core for Unified Memory advantage)
+  # ============================================================================
+
+  - name: moe-batched-expert-gemm
+    prompt: |
+      Create a Metal kernel optimized for MoE expert execution.
+
+      File: src/moe_expert_gemm.metal
+
+      Key insight: On Unified Memory, all experts are always resident.
+      Don't copy - just index. The kernel should:
+
+      1. Accept expert weights as a single contiguous buffer [num_experts, out, in]
+      2. Accept per-token expert assignments [batch, top_k]
+      3. Accept per-token expert weights [batch, top_k]
+      4. Execute only the assigned experts per token (variable work)
+
+      Kernel signature:
+      ```metal
+      kernel void moe_expert_gemm_fp4(
+          device const half* activations,     // [batch, hidden]
+          device const uint* expert_weights,  // [num_experts, out/8, in] packed FP4
+          device const half* scales,          // [num_experts, out/group, in]
+          device const uint* expert_ids,      // [batch, top_k]
+          device const half* expert_probs,    // [batch, top_k]
+          device half* output,                // [batch, out]
+          constant MoEParams& params,
+          ...
+      )
+      ```
+
+      Optimization notes:
+      - Group tokens by expert to maximize cache reuse
+      - Use simdgroup_matrix_multiply for the actual GEMM
+      - Weight by expert_probs in the kernel (fused)
+      - Consider shared expert path (always executed)
+
+      Reference: vLLM's fused_moe kernel for the strategy, but adapt for Metal.
+    priority: P0
+    dependencies: []
+
+  - name: moe-router-topk-fused
+    prompt: |
+      Create a fused router + top-k selection kernel.
+
+      File: src/moe_router.metal
+
+      The router computes: expert_probs = softmax(hidden @ router_weights)
+      Then selects top-k experts per token.
+
+      Fused operations:
+      1. GEMM: [batch, hidden] @ [hidden, num_experts] -> [batch, num_experts]
+      2. Softmax along expert dimension
+      3. Top-k selection (k typically 2-8)
+      4. Renormalize selected probabilities
+
+      Output:
+      - expert_ids: [batch, top_k] uint32
+      - expert_probs: [batch, top_k] half (renormalized)
+
+      Key optimization: The router is tiny (e.g., 4096 x 64 for GLM-4).
+      Fusing avoids 3 separate kernel launches and intermediate buffers.
+
+      Consider BF16 accumulation for the router softmax (more dynamic range).
+    priority: P0
+    dependencies: []
+
+  - name: moe-shared-expert-fusion
+    prompt: |
+      Implement shared expert fusion for MoE models like GLM-4 and Qwen3-MoE.
+
+      File: src/moe_shared_expert.metal
+
+      Architecture pattern:
+      ```
+      output = shared_expert(x) + sum(prob_i * routed_expert_i(x))
+      ```
+
+      The shared expert always runs on every token. Fuse it with the
+      routed expert aggregation:
+
+      1. Compute shared_expert output (always)
+      2. Compute routed expert outputs (variable per token)
+      3. Weighted sum with shared expert in a single pass
+
+      This avoids a separate kernel launch for the shared expert addition.
+
+      Metal-specific: Use simdgroup reductions for the weighted sum.
+    priority: P1
+    dependencies:
+      - moe-batched-expert-gemm
+
+  - name: moe-python-bindings
+    prompt: |
+      Add Python bindings for MoE kernels in kernels.py.
+
+      Functions to add:
+      ```python
+      def moe_expert_gemm_fp4(
+          activations: mx.array,      # [batch, hidden]
+          expert_weights: mx.array,   # [num_experts, out, in/8] packed
+          scales: mx.array,           # [num_experts, num_groups, in]
+          expert_ids: mx.array,       # [batch, top_k]
+          expert_probs: mx.array,     # [batch, top_k]
+          group_size: int = 128,
+      ) -> mx.array:
+          ...
+
+      def moe_router_topk(
+          hidden: mx.array,           # [batch, hidden]
+          router_weights: mx.array,   # [hidden, num_experts]
+          top_k: int = 2,
+      ) -> tuple[mx.array, mx.array]:  # (expert_ids, expert_probs)
+          ...
+      ```
+
+      Use mx.metal.custom_kernel for dispatch.
+      Add to __init__.py exports.
+    priority: P1
+    dependencies:
+      - moe-batched-expert-gemm
+      - moe-router-topk-fused
+
+  # ============================================================================
+  # BF16 Migration (P1 - Better accuracy, native Apple Silicon)
+  # ============================================================================
+
+  - name: bf16-autotune-migration
+    prompt: |
+      Migrate auto_tune.py and autotune.py from hardcoded FP16 to DTypeConfig.
+
+      Current issues (found via grep):
+      - auto_tune.py: 6 instances of mx.float16
+      - autotune.py: 3 instances of mx.float16
+
+      Changes:
+      1. Import DTypeConfig from dtypes.py
+      2. Replace mx.float16 with config.mlx_activations
+      3. Add dtype parameter to tuning functions
+      4. Default to BF16 (Apple Silicon native)
+
+      Before:
+      ```python
+      x = mx.random.normal((M, K)).astype(mx.float16)
+      ```
+
+      After:
+      ```python
+      from .dtypes import get_default_config
+      config = get_default_config()
+      x = mx.random.normal((M, K)).astype(config.mlx_activations)
+      ```
+    priority: P1
+    dependencies: []
+
+  - name: bf16-kernels-migration
+    prompt: |
+      Migrate kernels.py from hardcoded FP16 to configurable dtype.
+
+      Current issues: 15 instances of mx.float16 in kernels.py
+
+      Changes:
+      1. Add dtype parameter to all GEMM functions
+      2. Use DTypeConfig for default
+      3. Update Metal dispatch to pass dtype info
+      4. Ensure output_dtypes matches input dtype
+
+      Key functions to update:
+      - marlin_gemm_fp4()
+      - marlin_gemm_fused_fp4()
+      - marlin_gemm_fused_u4()
+      - flash_attention_kv_fp4()
+
+      Test: Verify both FP16 and BF16 paths produce correct results.
+    priority: P1
+    dependencies:
+      - bf16-autotune-migration
+
+  - name: bf16-layers-kvcache-migration
+    prompt: |
+      Migrate layers.py and kv_cache.py to use DTypeConfig.
+
+      Current issues:
+      - layers.py: 2 instances of mx.float16
+      - kv_cache.py: 6 instances of mx.float16
+
+      For KV cache specifically:
+      - Add support for FP8 KV cache (already in DTypeConfig)
+      - Default to BF16 for better dynamic range
+      - Allow mixed: BF16 activations with FP8 KV cache
+
+      Update MarlinLinear and KVCache classes to accept dtype config.
+    priority: P1
+    dependencies:
+      - bf16-kernels-migration
+
+  - name: bf16-numpy-migration
+    prompt: |
+      Audit and fix numpy float16 hardcodings across the codebase.
+
+      Found 75 instances of np.float16 or .astype(...float16).
+
+      Strategy:
+      1. For weight packing (quantize.py, sub4bit.py): Keep FP16 for storage
+      2. For activations/intermediates: Use configurable dtype
+      3. For scale computation: Consider FP32 for precision
+
+      Priority files:
+      - quantize.py: Check if BF16 input is handled correctly
+      - mixed_precision.py: Ensure dtype consistency
+      - calibration.py: Use FP32 for calibration statistics
+
+      Add helper: numpy_dtype_for_mlx(mx_dtype) in dtypes.py
+    priority: P2
+    dependencies:
+      - bf16-layers-kvcache-migration
+
+  # ============================================================================
+  # Sub-4-bit Tests (P1 - Claimed but untested)
+  # ============================================================================
+
+  - name: sub4bit-test-suite
+    prompt: |
+      Create comprehensive test suite for sub4bit.py module.
+
+      File: tests/test_sub4bit.py
+
+      The module implements INT2, INT3, NF2, NF3 but has NO tests.
+
+      Test cases:
+      1. Quantization roundtrip accuracy (quantize -> dequantize)
+      2. Packing correctness (16 INT2 per uint32, 10 INT3 per uint32)
+      3. Scale computation
+      4. Edge cases: zeros, max values, negative values
+      5. Different tensor shapes
+      6. Group size variations
+
+      Reference test structure:
+      ```python
+      class TestINT2:
+          def test_quantize_roundtrip_accuracy(self):
+              ...
+          def test_packing_correctness(self):
+              ...
+          def test_scale_computation(self):
+              ...
+
+      class TestINT3:
+          ...
+
+      class TestNF3:
+          ...
+      ```
+
+      Use pytest parametrize for shape/group_size variations.
+    priority: P1
+    dependencies: []
+
+  - name: sub4bit-metal-kernels
+    prompt: |
+      Add Metal dequantization kernels for INT2/INT3/NF3.
+
+      File: src/dequant_sub4bit.metal
+
+      Currently only in Python. Need Metal for GEMM integration.
+
+      Kernels needed:
+      1. dequant_int2_x16() - Unpack 16 INT2 from uint32
+      2. dequant_int3_x10() - Unpack 10 INT3 from uint32 (with padding)
+      3. dequant_nf3_x10() - NormalFloat3 variant
+
+      INT2 levels: [-1.5, -0.5, 0.5, 1.5] * scale
+      INT3 levels: [-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5] * scale
+
+      Use the same bitwise dequant pattern as FP4/INT4.
+      Add to dequant.metal or create separate file.
+    priority: P2
+    dependencies:
+      - sub4bit-test-suite
+
+  # ============================================================================
+  # Performance Optimizations (P2)
+  # ============================================================================
+
+  - name: activation-checkpointing
+    prompt: |
+      Implement activation checkpointing for memory-efficient inference.
+
+      File: metal_marlin/checkpoint.py
+
+      For very long sequences, recompute activations instead of storing.
+      Trades compute for memory - valuable on Unified Memory.
+
+      API:
+      ```python
+      @checkpoint_activations(chunk_size=1024)
+      def forward(self, x):
+          ...
+      ```
+
+      Integrates with MLX's lazy evaluation - only materialize when needed.
+    priority: P2
+    dependencies: []
+
+  - name: expert-caching-strategy
+    prompt: |
+      Implement intelligent expert caching for MoE models.
+
+      File: metal_marlin/expert_cache.py
+
+      On Unified Memory, all experts are resident. But we can still optimize:
+      1. Track expert activation frequency per layer
+      2. Prefetch likely-needed experts based on history
+      3. For quantized experts, cache dequantized tiles
+
+      The key insight: Dequantization is the bottleneck, not memory.
+      Cache recently-dequantized expert tiles in a LRU buffer.
+
+      ```python
+      class ExpertCache:
+          def __init__(self, cache_size_mb: int = 512):
+              ...
+          
+          def get_expert_tile(self, expert_id: int, tile_idx: int):
+              # Returns cached dequantized tile or triggers dequant
+              ...
+      ```
+    priority: P2
+    dependencies:
+      - moe-batched-expert-gemm
+
+  - name: dynamic-batch-expert-grouping
+    prompt: |
+      Implement dynamic token-to-expert grouping for batched MoE.
+
+      File: metal_marlin/moe_dispatch.py
+
+      Problem: Naive MoE executes each token independently.
+      Solution: Group tokens by assigned expert, batch the GEMM.
+
+      ```python
+      def group_tokens_by_expert(
+          expert_ids: mx.array,  # [batch, top_k]
+          num_experts: int,
+      ) -> tuple[mx.array, mx.array, mx.array]:
+          # Returns:
+          # - sorted_indices: reorder tokens by expert
+          # - expert_offsets: [num_experts+1] start indices
+          # - inverse_indices: to restore original order
+      ```
+
+      This is the CPU-side preparation for moe_expert_gemm.
+      Use mx.argsort and cumsum for efficient implementation.
+    priority: P2
+    dependencies:
+      - moe-python-bindings
+
+  # ============================================================================
+  # Validation & Benchmarks (P2)
+  # ============================================================================
+
+  - name: moe-benchmark-suite
+    prompt: |
+      Create benchmark suite for MoE kernels.
+
+      File: benchmarks/benchmark_moe.py
+
+      Compare:
+      1. Naive per-token expert execution
+      2. Batched expert GEMM (new kernel)
+      3. MLX native (for baseline)
+      4. llama.cpp MoE (if available)
+
+      Metrics:
+      - Tokens/second for different batch sizes
+      - Memory bandwidth utilization
+      - Expert cache hit rates
+
+      Test models:
+      - GLM-4.7-Flash (64 experts, top-2)
+      - Qwen3-30B-A3B (128 experts, top-8)
+      - Mixtral-8x7B (8 experts, top-2)
+    priority: P2
+    dependencies:
+      - moe-python-bindings
+
+  - name: bf16-accuracy-validation
+    prompt: |
+      Validate BF16 vs FP16 accuracy across the test suite.
+
+      File: tests/test_bf16_accuracy.py
+
+      Tests:
+      1. GEMM numerical accuracy (BF16 vs FP16 vs FP32 reference)
+      2. Attention accuracy (BF16 accumulation)
+      3. Quantization error (FP16 scales vs FP32 scales)
+      4. End-to-end perplexity (should be equal or better)
+
+      Key insight: BF16 has more dynamic range, should help with:
+      - Large activations (no overflow)
+      - Attention softmax stability
+      - MoE router precision
+
+      Log any cases where BF16 is worse than FP16.
+    priority: P2
+    dependencies:
+      - bf16-kernels-migration
+
+  # ============================================================================
+  # Documentation (P3)
+  # ============================================================================
+
+  - name: moe-architecture-doc
+    prompt: |
+      Document MoE kernel architecture and design decisions.
+
+      File: docs/moe_architecture.md
+
+      Contents:
+      1. Why Unified Memory changes MoE strategy
+      2. Kernel design: batched vs per-token
+      3. Router fusion rationale
+      4. Expert caching strategy
+      5. Performance characteristics
+      6. Comparison with vLLM/TensorRT-LLM approaches
+
+      Include diagrams (ASCII or Mermaid) for:
+      - Token-to-expert dispatch flow
+      - Memory layout for expert weights
+      - Kernel launch strategy
+    priority: P3
+    dependencies:
+      - moe-benchmark-suite
+
+  - name: dtype-configuration-doc
+    prompt: |
+      Document dtype configuration system.
+
+      File: docs/dtype_configuration.md
+
+      Contents:
+      1. DTypeConfig class and presets
+      2. When to use FP16 vs BF16
+      3. FP8 KV cache tradeoffs
+      4. Accumulation precision
+      5. Scale storage precision
+      6. Migration guide from hardcoded FP16
+
+      Add code examples for common configurations.
+    priority: P3
+    dependencies:
+      - bf16-accuracy-validation

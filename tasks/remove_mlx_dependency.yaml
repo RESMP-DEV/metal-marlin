@@ -1,0 +1,355 @@
+# yaml-language-server: $schema=
+# AlphaHENG swarm tasks: Remove MLX dependency from metal_marlin
+#
+# Goal: Make MLX optional by:
+# 1. Creating _compat.py for conditional imports
+# 2. Using numpy for CPU operations (quantization, packing)
+# 3. Making MLX-dependent code conditional
+# 4. Keeping Metal kernel dispatch behind HAS_MLX flag
+
+tasks:
+  # Phase 1: Create compatibility layer
+  - name: create-compat-module
+    priority: P0
+    dependencies: []
+    prompt: |
+      Create `metal_marlin/_compat.py` for centralized optional imports.
+
+      This module should:
+      1. Try to import mlx.core as mx, set HAS_MLX=True if successful, False otherwise
+      2. Try to import torch, set HAS_TORCH=True if successful
+      3. Export placeholder types when libraries unavailable
+      4. Provide array conversion utilities that work with numpy/torch/mlx
+
+      Pattern to follow:
+      ```python
+      from types import ModuleType
+      from typing import TYPE_CHECKING
+      import numpy as np
+
+      HAS_MLX = False
+      HAS_TORCH = False
+      mx: ModuleType | None = None
+      torch: ModuleType | None = None
+
+      try:
+          import mlx.core as _mx
+          mx = _mx
+          HAS_MLX = True
+      except ImportError:
+          pass
+
+      try:
+          import torch as _torch
+          torch = _torch
+          HAS_TORCH = True
+      except ImportError:
+          pass
+
+      def to_numpy(arr):
+          """Convert any array type to numpy."""
+          if HAS_MLX and hasattr(arr, '__mlx_array__'):
+              import mlx.core as mx
+              mx.eval(arr)
+              return np.array(arr)
+          if HAS_TORCH and hasattr(arr, 'cpu'):
+              return arr.cpu().numpy()
+          return np.asarray(arr)
+
+      def from_numpy(arr, backend='numpy'):
+          """Convert numpy to specified backend."""
+          if backend == 'mlx' and HAS_MLX:
+              import mlx.core as mx
+              return mx.array(arr)
+          if backend == 'torch' and HAS_TORCH:
+              import torch
+              return torch.from_numpy(arr)
+          return arr
+      ```
+
+      Create file at: `metal_marlin/_compat.py`
+
+      After creating, verify with:
+      ```bash
+      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      python3 -c "from metal_marlin._compat import HAS_MLX, HAS_TORCH; print(f'MLX: {HAS_MLX}, Torch: {HAS_TORCH}')"
+      ```
+
+  # Phase 2: Core quantization module (CPU-only, numpy)
+  - name: refactor-quantize-numpy
+    priority: P0
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/quantize.py` to use pure numpy, making MLX optional.
+
+      Current state: Uses `import mlx.core as mx` at top, returns mx.array
+      Target state: Use numpy internally, optionally wrap output in mx.array
+
+      Changes needed:
+      1. Replace `import mlx.core as mx` with:
+         ```python
+         from ._compat import HAS_MLX, to_numpy, from_numpy
+         if HAS_MLX:
+             import mlx.core as mx
+         ```
+
+      2. In `pack_fp4_weights()`:
+         - Already uses numpy internally for quantization
+         - Change return to return numpy arrays by default
+         - Add optional `output_backend='numpy'` parameter
+         - If output_backend='mlx' and HAS_MLX, wrap in mx.array
+
+      3. In `unpack_fp4_weights()`:
+         - Accept numpy arrays as input (use to_numpy for conversion)
+         - Return numpy by default, optionally wrap
+
+      4. Remove all `mx.eval()` calls - use to_numpy() instead which handles this
+
+      File: `metal_marlin/quantize.py`
+
+      After refactoring, test with:
+      ```bash
+      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      python3 -c "
+      import numpy as np
+      from metal_marlin.quantize import pack_fp4_weights, unpack_fp4_weights
+      w = np.random.randn(128, 64).astype(np.float32)
+      packed, scales, meta = pack_fp4_weights(w, group_size=32)
+      print(f'Packed shape: {packed.shape}, dtype: {packed.dtype}')
+      print(f'Scales shape: {scales.shape}, dtype: {scales.dtype}')
+      "
+      ```
+
+  - name: refactor-quantize-fp4-numpy
+    priority: P0
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/quantize_fp4.py` to use pure numpy, making MLX optional.
+
+      This file likely has similar patterns to quantize.py. Apply same changes:
+      1. Conditional MLX import from _compat
+      2. Use numpy internally
+      3. Optional output backend parameter
+      4. Replace mx.eval with to_numpy
+
+      File: `metal_marlin/quantize_fp4.py`
+
+  - name: refactor-dtypes-numpy
+    priority: P0
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/dtypes.py` to make MLX dtypes optional.
+
+      Current state: Uses `import mlx.core as mx` for dtype definitions
+      Target state: Define dtypes that work without MLX
+
+      Changes:
+      1. Conditional MLX import from _compat
+      2. DTypeConfig should work with numpy dtypes as primary
+      3. Add mlx_dtype property that's None when HAS_MLX=False
+      4. Ensure numpy_weights, numpy_scales work without MLX
+
+      File: `metal_marlin/dtypes.py`
+
+  # Phase 3: Core layers (keep MLX for Metal dispatch, but make optional)
+  - name: refactor-layers-optional-mlx
+    priority: P1
+    dependencies: [create-compat-module, refactor-dtypes-numpy]
+    prompt: |
+      Refactor `metal_marlin/layers.py` to make MLX optional.
+
+      This file defines MarlinLinear which uses MLX for Metal kernel dispatch.
+      Keep the MLX code but make it conditional:
+
+      1. Add guard at module level:
+         ```python
+         from ._compat import HAS_MLX
+         if not HAS_MLX:
+             raise ImportError(
+                 "metal_marlin.layers requires MLX for Metal kernel dispatch. "
+                 "Install with: pip install mlx"
+             )
+         ```
+
+      2. Or better: provide a numpy-only fallback that does CPU dequant-matmul:
+         ```python
+         class MarlinLinear:
+             def __call__(self, x):
+                 if HAS_MLX:
+                     return self._forward_mlx(x)
+                 else:
+                     return self._forward_numpy(x)
+         ```
+
+      File: `metal_marlin/layers.py`
+
+  - name: refactor-kernels-optional-mlx
+    priority: P1
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/kernels.py` to make MLX optional.
+
+      This file uses `mx.fast.metal_kernel` for Metal dispatch.
+      This REQUIRES MLX - there's no numpy alternative for Metal dispatch.
+
+      Add clear error message when MLX unavailable:
+      ```python
+      from ._compat import HAS_MLX
+
+      if not HAS_MLX:
+          def _mlx_required(*args, **kwargs):
+              raise ImportError(
+                  "Metal kernel dispatch requires MLX. "
+                  "Install with: pip install mlx"
+              )
+          marlin_gemm_fp4 = _mlx_required
+          marlin_gemm_int4 = _mlx_required
+          # ... etc
+      else:
+          import mlx.core as mx
+          # ... existing kernel definitions
+      ```
+
+      File: `metal_marlin/kernels.py`
+
+  # Phase 4: Inference and model loading
+  - name: refactor-inference-optional-mlx
+    priority: P1
+    dependencies: [refactor-layers-optional-mlx]
+    prompt: |
+      Refactor `metal_marlin/inference.py` to make MLX optional.
+
+      Inference requires either MLX (for Metal) or can fall back to numpy (CPU-only).
+
+      Add backend selection:
+      ```python
+      from ._compat import HAS_MLX, HAS_TORCH
+
+      def get_default_backend():
+          if HAS_MLX:
+              return 'mlx'
+          if HAS_TORCH:
+              return 'torch'
+          return 'numpy'
+      ```
+
+      File: `metal_marlin/inference.py`
+
+  - name: refactor-safetensors-loader-numpy
+    priority: P1
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/safetensors_loader.py` to use numpy by default.
+
+      Safetensors loading should work without MLX since safetensors
+      natively supports numpy.
+
+      Changes:
+      1. Load as numpy arrays by default
+      2. Optionally convert to MLX arrays if requested and HAS_MLX
+      3. Add `output_backend` parameter to load functions
+
+      File: `metal_marlin/safetensors_loader.py`
+
+  - name: refactor-gguf-loader-numpy
+    priority: P1
+    dependencies: [create-compat-module]
+    prompt: |
+      Refactor `metal_marlin/gguf_loader.py` to use numpy by default.
+
+      GGUF loading should work without MLX.
+
+      File: `metal_marlin/gguf_loader.py`
+
+  # Phase 5: Tests - make them work without MLX
+  - name: refactor-tests-optional-mlx
+    priority: P2
+    dependencies: [refactor-quantize-numpy, refactor-dtypes-numpy]
+    prompt: |
+      Refactor tests to work without MLX where possible.
+
+      For each test file in `tests/`:
+      1. Add `pytest.importorskip('mlx')` for tests that require MLX
+      2. Tests for pure numpy functionality should work without MLX
+      3. Use `from metal_marlin._compat import HAS_MLX` for conditional tests
+
+      Pattern:
+      ```python
+      import pytest
+      from metal_marlin._compat import HAS_MLX
+
+      @pytest.mark.skipif(not HAS_MLX, reason="Requires MLX")
+      def test_metal_kernel():
+          ...
+
+      def test_numpy_quantize():
+          # This should work without MLX
+          ...
+      ```
+
+      Files to update:
+      - tests/test_gemm_accuracy.py
+      - tests/test_layers.py
+      - tests/test_inference.py
+      - tests/test_edge_cases.py
+      - tests/test_gemm_boundaries.py
+
+      Run tests after to verify:
+      ```bash
+      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      python3 -m pytest tests/test_gemm_accuracy.py -v --collect-only
+      ```
+
+  # Phase 6: Benchmarks - document MLX requirement
+  - name: update-benchmarks-mlx-check
+    priority: P2
+    dependencies: [create-compat-module]
+    prompt: |
+      Update benchmark scripts to check for MLX availability.
+
+      Benchmarks need MLX for Metal performance testing. Add check at start:
+      ```python
+      from metal_marlin._compat import HAS_MLX
+      if not HAS_MLX:
+          print("ERROR: Benchmarks require MLX for Metal GPU access.")
+          print("Install with: pip install mlx")
+          sys.exit(1)
+      ```
+
+      Files:
+      - benchmarks/bench_gemm.py
+      - benchmarks/bench_glm47_flash.py
+      - benchmarks/bench_qwen3_3b.py
+      - benchmarks/bench_inference.py
+
+      This is NOT about removing MLX from benchmarks (they need it),
+      just about providing clear error messages.
+
+  # Phase 7: Update package init and documentation
+  - name: update-init-exports
+    priority: P2
+    dependencies: [create-compat-module, refactor-quantize-numpy]
+    prompt: |
+      Update `metal_marlin/__init__.py` to export _compat flags.
+
+      Add:
+      ```python
+      from ._compat import HAS_MLX, HAS_TORCH
+      ```
+
+      Also ensure quantize functions are exported and work without MLX.
+
+      File: `metal_marlin/__init__.py`
+
+  - name: update-status-mlx-optional
+    priority: P3
+    dependencies: [update-init-exports]
+    prompt: |
+      Update STATUS.md to document MLX as optional dependency.
+
+      Add section explaining:
+      - Quantization/packing works with numpy only (no GPU needed)
+      - Metal kernel inference requires MLX
+      - PyTorch can be used for some operations as alternative
+
+      File: `STATUS.md`
