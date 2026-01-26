@@ -278,6 +278,7 @@ class MetalMarlinModel:
         # Use explicit head_dim from config if available (e.g., Qwen3 has head_dim=128)
         self.head_dim = config.get("head_dim", self.hidden_size // self.num_heads)
         self.rms_norm_eps = config.get("rms_norm_eps", 1e-6)
+        self.group_size = int(config.get("group_size", 128))
 
         # RoPE (Rotary Position Embeddings) config
         self.rope_theta = config.get("rope_theta", 10000.0)
@@ -294,8 +295,10 @@ class MetalMarlinModel:
             from ..kernels import HAS_METAL, HAS_MPS, marlin_gemm_fp4
 
             self._use_fused_kernels = HAS_METAL and HAS_MPS
-        except ImportError:
+            self._marlin_gemm_fp4 = marlin_gemm_fp4
+        except Exception:
             self._use_fused_kernels = False
+            self._marlin_gemm_fp4 = None
 
     @classmethod
     def from_quantized(
@@ -354,14 +357,18 @@ class MetalMarlinModel:
         gs_name = f"{name}.group_size"
 
         if scales_name in self.weights:
-            packed = self.weights[name]
+            packed_name = name
+            packed_suffix = f"{name}.packed"
+            if packed_name not in self.weights and packed_suffix in self.weights:
+                packed_name = packed_suffix
+            packed = self.weights[packed_name]
             scales = self.weights[scales_name]
 
             # Get group size
             if gs_name in self.weights:
                 group_size = int(self.weights[gs_name].item())
             else:
-                group_size = 128
+                group_size = self.group_size
 
             # Dequantize
             weight = dequantize_fp4_torch(packed, scales, group_size)
@@ -374,32 +381,42 @@ class MetalMarlinModel:
 
         raise KeyError(f"Weight {name} not found")
 
-    def _quantized_linear(
+    def _forward_linear(
         self,
         x: torch_typing.Tensor,
-        weight_name: str,
+        layer_name: str,
     ) -> torch_typing.Tensor:
-        """Linear with quantized weights - uses fused kernel if available."""
+        """Linear layer with optional fused kernel."""
         assert torch is not None
 
         if self._use_fused_kernels and self.config.get("quant_type", "fp4") == "fp4":
-            packed_name = f"{weight_name}.packed"
-            scales_name = f"{weight_name}.scales"
-            gs_name = f"{weight_name}.group_size"
+            packed_name = f"{layer_name}.packed"
+            scales_name = f"{layer_name}.scales"
+            gs_name = f"{layer_name}.group_size"
 
-            if packed_name in self.weights and scales_name in self.weights:
-                from ..kernels import marlin_gemm_fp4
-
-                group_size = 128
+            if (
+                self._marlin_gemm_fp4 is not None
+                and packed_name in self.weights
+                and scales_name in self.weights
+            ):
+                group_size = self.group_size
                 if gs_name in self.weights:
                     group_size = int(self.weights[gs_name].item())
 
                 packed = self.weights[packed_name]
                 scales = self.weights[scales_name]
-                return marlin_gemm_fp4(x, packed, scales, group_size)
+                return self._marlin_gemm_fp4(x, packed, scales, group_size)
 
-        weight = self._get_weight(weight_name)
+        weight = self._get_weight(layer_name)
         return torch.nn.functional.linear(x, weight)
+
+    def _quantized_linear(
+        self,
+        x: torch_typing.Tensor,
+        weight_name: str,
+    ) -> torch_typing.Tensor:
+        """Backward-compatible alias for _forward_linear."""
+        return self._forward_linear(x, weight_name)
 
     def __call__(
         self,

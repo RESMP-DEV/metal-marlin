@@ -46,6 +46,7 @@ from .hadamard import (
     hadamard_matrix,
     inverse_hadamard_rotation,
 )
+from .kernels import marlin_gemm_fp4
 from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
 from .layers import MarlinLinear
 from .mixed_precision import (
@@ -82,7 +83,7 @@ from .onnx_loader import (
     list_onnx_tensors,
     normalize_onnx_name,
 )
-from .quantize import (  # FP8 quantization
+from .quantize import (  # FP8 quantization  # FP8 quantization
     FP8_E4M3_MAX,
     FP8_E4M3_VALUES,
     FP8_E5M2_MAX,
@@ -136,6 +137,7 @@ __all__ = [
     "pack_fp8_weights",
     "quantize_to_fp8",
     # FP4/INT4/NF4 quantization (CPU)
+    "marlin_gemm_fp4",
     "pack_fp4_weights_cpu",
     "pack_int4_weights",
     "pack_nf4_weights",

@@ -1338,26 +1338,28 @@ if HAS_METAL and HAS_MPS:
         A_buf = _private_buffer_from_tensor(A_contig, lib, device, cache=True)
         B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
         S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-        C_buf = mps_tensor_to_metal_buffer(C, device)
+        C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
-        # Params: M, N, K, group_size
-        params = np.array([M, N, K, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        # Create separate param buffers (kernel expects buffers at indices 4, 5, 6, 7)
+        M_buf = _params_buffer(lib, device, np.array([M], dtype=np.uint32))
+        N_buf = _params_buffer(lib, device, np.array([N], dtype=np.uint32))
+        K_buf = _params_buffer(lib, device, np.array([K], dtype=np.uint32))
+        gs_buf = _params_buffer(lib, device, np.array([group_size], dtype=np.uint32))
 
         # Tile sizes matching marlin_gemm.metal
         TILE_M = 64
         TILE_N = 64
-        THREADS_PER_TG = 256
+        THREADS_PER_TG = 128
 
         grid_m = (M + TILE_M - 1) // TILE_M
         grid_n = (N + TILE_N - 1) // TILE_N
 
         dispatch_kernel(
             lib,
-            function_name="marlin_gemm_fp4",
+            function_name="marlin_gemm_fused_fp4",
             grid=(grid_n, grid_m, 1),
             threadgroup=(THREADS_PER_TG, 1, 1),
-            buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
+            buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
             wait=True,
         )
 

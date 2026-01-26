@@ -2,32 +2,29 @@ import time
 
 from metal_marlin.inference.pipeline import MarlinPipeline
 
-models = [
-    ("benchmarks/results/qwen3_4b_fp4", "Qwen3-4B FP4"),
-]
+model_path = "benchmarks/results/qwen3_4b_fp4"
 
-for path, name in models:
-    try:
-        pipe = MarlinPipeline.from_pretrained(path, device="mps")
+try:
+    # Test with fused kernels
+    pipe_fused = MarlinPipeline.from_pretrained(model_path, device="mps")
+    pipe_fused.model._use_fused_kernels = True
 
-        # Check if using fused kernels
-        uses_fused = getattr(pipe.model, "_use_fused_kernels", False)
+    # Test with fallback
+    pipe_fallback = MarlinPipeline.from_pretrained(model_path, device="mps")
+    pipe_fallback.model._use_fused_kernels = False
 
-        # Warmup
-        pipe("Hello", max_tokens=5)
+    prompt = "The capital of France is"
 
-        # Benchmark decode
-        prompt = "Write a detailed essay:"
+    for name, pipe in [("Fused", pipe_fused), ("Fallback", pipe_fallback)]:
+        pipe(prompt, max_tokens=5)  # Warmup
+
         start = time.perf_counter()
-        result = pipe(prompt, max_tokens=100, temperature=0.0)
+        result = pipe(prompt, max_tokens=50, temperature=0.0)
         elapsed = time.perf_counter() - start
 
-        tokens = len(pipe.tokenizer.encode(result)) - len(pipe.tokenizer.encode(prompt))
-        tps = tokens / elapsed
-
-        print(f"{name}:")
-        print(f"  Fused kernels: {uses_fused}")
-        print(f"  Throughput: {tps:.1f} tok/s")
-        print()
-    except Exception as e:
-        print(f"{name}: FAILED - {e}")
+        tokens = len(pipe.tokenizer.encode(result)) - len(
+            pipe.tokenizer.encode(prompt)
+        )
+        print(f"{name}: {tokens/elapsed:.1f} tok/s")
+except Exception as e:
+    print(f"Benchmark failed: {e}")

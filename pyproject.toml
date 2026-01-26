@@ -19,7 +19,12 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-dependencies = ["numpy>=1.24.0", "safetensors>=0.4.0", "scipy>=1.10.0"]
+dependencies = [
+    "numpy>=1.24.0",
+    "requests>=2.32.5",
+    "safetensors>=0.4.0",
+    "scipy>=1.10.0",
+]
 
 [project.optional-dependencies]
 metal = [

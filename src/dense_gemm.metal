@@ -24,6 +24,14 @@
 #include <metal_simdgroup_matrix>
 #include "bf16_compat.metal"
 
+// Tile sizes for small batch GEMM
+#ifndef SMALL_SG_M_TILES
+#define SMALL_SG_M_TILES 1
+#endif
+#ifndef SMALL_SG_N_TILES
+#define SMALL_SG_N_TILES 8
+#endif
+
 using namespace metal;
 
 // ---------------------------------------------------------------------------
@@ -457,7 +465,7 @@ inline void load_B_tile_dequant_small_fp32(
 }
 
 inline void store_small_batch_fp32_bf16(
-    thread simdgroup_matrix<float, 8, 8> acc[SMALL_SG_M_TILES][SMALL_SG_N_TILES],
+    thread simdgroup_matrix<float, 8, 8> (&acc)[SMALL_SG_M_TILES][SMALL_SG_N_TILES],
     device ushort* C,
     uint M, uint N,
     uint tg_row, uint tg_col,
@@ -514,8 +522,6 @@ inline void store_small_batch_fp32_bf16(
 // Dispatch: Grid [ceil(N/128), ceil(M/16), 1], Threadgroup [128, 1, 1]
 // ---------------------------------------------------------------------------
 
-constant constexpr uint SMALL_SG_M_TILES = 1;  // 1 row of 8x8 = 8 rows per SG
-constant constexpr uint SMALL_SG_N_TILES = 8;  // 8 cols of 8x8 = 64 cols per SG
 constant constexpr uint SMALL_K_TILES = SMALL_TILE_K / 8;  // 4
 
 kernel void dense_gemm_small_batch_fp4(

@@ -640,17 +640,56 @@ class MetalKernelLibrary:
 # ---------------------------------------------------------------------------
 
 
-def mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
+class _CopyBackBuffer:
+    """Wrapper for buffers that need to be copied back into a tensor."""
+
+    __slots__ = ("buffer", "tensor")
+
+    def __init__(self, buffer: Any, tensor: torch.Tensor) -> None:
+        self.buffer = buffer
+        self.tensor = tensor
+
+
+def _torch_dtype_to_numpy(dtype: torch.dtype) -> np.dtype:
+    mapping = {
+        torch.float16: np.float16,
+        torch.float32: np.float32,
+        torch.float64: np.float64,
+        torch.int8: np.int8,
+        torch.int16: np.int16,
+        torch.int32: np.int32,
+        torch.int64: np.int64,
+        torch.uint8: np.uint8,
+        torch.bool: np.bool_,
+    }
+    np_dtype = mapping.get(dtype)
+    if np_dtype is None:
+        # Fallback for less common dtypes (e.g., bfloat16) via CPU tensor.
+        np_dtype = torch.empty((), dtype=dtype, device="cpu").numpy().dtype
+    return np_dtype
+
+
+def _copy_buffer_to_tensor(buffer: Any, tensor: torch.Tensor) -> None:
+    contents = buffer.contents()
+    length = buffer.length()
+    np_dtype = _torch_dtype_to_numpy(tensor.dtype)
+    arr = np.frombuffer(contents.as_buffer(length), dtype=np_dtype)
+    arr = arr.reshape(tuple(tensor.shape)).copy()
+    tensor.copy_(torch.from_numpy(arr).to(device=tensor.device))
+
+
+def mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any, *, copy_back: bool = False) -> Any:
     """Get Metal buffer from PyTorch MPS tensor.
 
-    This creates a shared buffer - no copy is made.
+    Prefers zero-copy interop; falls back to a shared buffer copy when PyObjC
+    cannot wrap the MPS device pointer. Set copy_back=True for output tensors.
 
     Args:
         tensor: PyTorch tensor on MPS device
         device: MTLDevice (must match MPS device)
 
     Returns:
-        MTLBuffer sharing the tensor's memory.
+        MTLBuffer or a copy-back wrapper for output tensors.
     """
     require_mps()
 
@@ -660,22 +699,34 @@ def mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
 
-    # Get the raw data pointer via storage
-    # PyTorch MPS tensors use Metal buffers internally
-    storage = tensor.untyped_storage()
+    size = tensor.numel() * tensor.element_size()
 
-    # Create a Metal buffer from the same memory
-    # This uses Metal's buffer creation from existing memory
-    ptr = storage.data_ptr()
-    size = storage.nbytes()
+    # Ensure pending MPS ops are done before we access tensor data.
+    torch.mps.synchronize()
 
-    buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
-        ptr, size, Metal.MTLResourceStorageModeShared, None
+    try:
+        ptr = tensor.data_ptr()
+        buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
+            ptr, size, Metal.MTLResourceStorageModeShared, None
+        )
+        if buffer is not None:
+            return buffer
+    except Exception:
+        buffer = None
+
+    # PyObjC cannot reliably wrap the MPS device pointer. Fall back to a shared buffer.
+    if copy_back:
+        buffer = device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModeShared)
+        if buffer is None:
+            raise RuntimeError("Failed to create Metal buffer for output tensor")
+        return _CopyBackBuffer(buffer, tensor)
+
+    arr = tensor.detach().cpu().numpy()
+    buffer = device.newBufferWithBytes_length_options_(
+        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
     )
-
     if buffer is None:
-        raise RuntimeError("Failed to create Metal buffer from tensor")
-
+        raise RuntimeError("Failed to create Metal buffer from tensor data")
     return buffer
 
 
@@ -732,8 +783,13 @@ def dispatch_kernel(
     encoder.setComputePipelineState_(pipeline)
 
     # Bind buffers
+    copy_back: list[_CopyBackBuffer] = []
     for i, buf in enumerate(buffers):
-        encoder.setBuffer_offset_atIndex_(buf, 0, i)
+        if isinstance(buf, _CopyBackBuffer):
+            encoder.setBuffer_offset_atIndex_(buf.buffer, 0, i)
+            copy_back.append(buf)
+        else:
+            encoder.setBuffer_offset_atIndex_(buf, 0, i)
 
     # Dispatch
     grid_size = Metal.MTLSizeMake(*grid)
@@ -745,6 +801,8 @@ def dispatch_kernel(
 
     if wait:
         command_buffer.waitUntilCompleted()
+        for item in copy_back:
+            _copy_buffer_to_tensor(item.buffer, item.tensor)
 
 
 # ---------------------------------------------------------------------------
@@ -929,12 +987,13 @@ def dispatch_gemm_fp4(
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-    C_buf = mps_tensor_to_metal_buffer(C, device)
+    C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
-    # Create params buffer (struct matching kernel expectations)
-    # struct GemmParams { uint M, N, K, group_size; }
-    params = np.array([M, N, K, group_size], dtype=np.uint32)
-    params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
+    # Create separate param buffers (kernel expects bufffers at indices 4, 5, 6, 7)
+    M_buf = _private_buffer_from_bytes(lib, device, np.array([M], dtype=np.uint32).tobytes())
+    N_buf = _private_buffer_from_bytes(lib, device, np.array([N], dtype=np.uint32).tobytes())
+    K_buf = _private_buffer_from_bytes(lib, device, np.array([K], dtype=np.uint32).tobytes())
+    gs_buf = _private_buffer_from_bytes(lib, device, np.array([group_size], dtype=np.uint32).tobytes())
 
     # Compute grid
     grid_m = (M + TILE_M - 1) // TILE_M
@@ -946,7 +1005,7 @@ def dispatch_gemm_fp4(
         function_name=kernel_name,
         grid=(grid_n, grid_m, 1),
         threadgroup=(THREADS_PER_TG, 1, 1),
-        buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
+        buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
         wait=True,
     )
 
@@ -1007,7 +1066,7 @@ def dispatch_gemm_fp8(
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-    C_buf = mps_tensor_to_metal_buffer(C, device)
+    C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
     params = np.array([M, N, K, group_size], dtype=np.uint32)
     params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
@@ -1081,7 +1140,7 @@ def dispatch_gemm_int2(
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-    C_buf = mps_tensor_to_metal_buffer(C, device)
+    C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
     params = np.array([M, N, K, group_size], dtype=np.uint32)
     params_buf = _private_buffer_from_bytes(lib, device, params.tobytes())
@@ -1149,7 +1208,7 @@ def dispatch_dequant_fp4(
     # Convert tensors to Metal buffers
     packed_buf = mps_tensor_to_metal_buffer(packed.contiguous(), device)
     scales_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
-    output_buf = mps_tensor_to_metal_buffer(output, device)
+    output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create constant buffers
     K_buf = device.newBufferWithBytes_length_options_(
@@ -1212,7 +1271,7 @@ def dispatch_dequant_fp4_linear(
     # Convert tensors to Metal buffers
     packed_buf = mps_tensor_to_metal_buffer(packed.contiguous(), device)
     scales_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
-    output_buf = mps_tensor_to_metal_buffer(output, device)
+    output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create constant buffers
     np_buf = device.newBufferWithBytes_length_options_(
@@ -1274,7 +1333,7 @@ def dispatch_dequant_fp4_bandwidth_max(
     # Convert tensors to Metal buffers
     packed_buf = mps_tensor_to_metal_buffer(packed.contiguous(), device)
     scales_buf = mps_tensor_to_metal_buffer(scales.half().contiguous(), device)
-    output_buf = mps_tensor_to_metal_buffer(output, device)
+    output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Kernel expects num_packed / 4
     num_packed_div4 = num_packed // 4
@@ -1445,7 +1504,7 @@ def dispatch_moe_optimized(
         shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
         shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
 
-    out_buf = mps_tensor_to_metal_buffer(output, device)
+    out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create params buffer
     # struct MoEOptParams { batch_size, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared }
@@ -1542,7 +1601,7 @@ def dispatch_moe_prerouted(
         shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
         shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
 
-    out_buf = mps_tensor_to_metal_buffer(output, device)
+    out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     params = np.array(
         [batch_size, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared],
@@ -1631,7 +1690,7 @@ def dispatch_moe_decode(
         shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
         shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
 
-    out_buf = mps_tensor_to_metal_buffer(output, device)
+    out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     params = np.array(
         [1, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared], dtype=np.uint32
