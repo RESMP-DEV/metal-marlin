@@ -68,10 +68,7 @@ from metal_marlin.mixed_precision import (  # noqa: E402
     classify_layer,
     should_quantize,
 )
-from metal_marlin.quantize_fp4 import (  # noqa: E402
-    compute_quantization_error,
-    quantize_fp4,
-)
+from metal_marlin.quantize_fp4 import compute_quantization_error, quantize_fp4  # noqa: E402
 from metal_marlin.utils.prefetch import get_system_memory  # noqa: E402
 
 # Check PyTorch/MPS availability
@@ -234,10 +231,27 @@ def balanced_fp4_config() -> tuple[MixedPrecisionConfig, str]:
     return MixedPrecisionConfig.default_moe_mtp(), "balanced_fp4"
 
 
+def mixtral_fp4_moe_config() -> tuple[MixedPrecisionConfig, str]:
+    """Mixtral 8x7B config: FP4 experts/attention, BF16 router."""
+    return MixedPrecisionConfig(
+        embeddings=LayerQuantConfig(Precision.BF16),
+        lm_head=LayerQuantConfig(Precision.BF16),
+        norms=LayerQuantConfig(Precision.BF16),
+        moe_router=LayerQuantConfig(Precision.BF16),
+        attention_qkv=LayerQuantConfig(Precision.FP4_E2M1, 64),
+        attention_out=LayerQuantConfig(Precision.FP4_E2M1, 64),
+        moe_shared_expert=LayerQuantConfig(Precision.FP4_E2M1, 64),
+        moe_experts=LayerQuantConfig(Precision.FP4_E2M1, 128),
+        mtp_heads=LayerQuantConfig(Precision.FP4_E2M1, 256),
+        default=LayerQuantConfig(Precision.FP4_E2M1, 128),
+    ), "mixtral_fp4_moe"
+
+
 QUANT_CONFIGS = {
     "sensitivity_fp8_int2": sensitivity_fp8_int2_config,
     "aggressive_int2": aggressive_int2_config,
     "balanced_fp4": balanced_fp4_config,
+    "mixtral_fp4_moe": mixtral_fp4_moe_config,
 }
 
 
@@ -1007,9 +1021,7 @@ def compute_quality_metrics(
             print("Loading BF16 reference model via PyTorch...")
         model_fp16 = load_pytorch_model(model_path, dtype="bfloat16", verbose=verbose)
 
-        def fp16_logits(
-            input_ids: np.ndarray, model: Any = model_fp16
-        ) -> np.ndarray:
+        def fp16_logits(input_ids: np.ndarray, model: Any = model_fp16) -> np.ndarray:
             ids = torch.tensor(input_ids, dtype=torch.long, device=device)
             with torch.no_grad():
                 outputs = model(ids)
@@ -1018,7 +1030,7 @@ def compute_quality_metrics(
                 torch.mps.synchronize()
             elif HAS_CUDA:
                 torch.cuda.synchronize()
-            return logits.cpu().numpy()
+            return logits.float().cpu().numpy()
 
         # Compute BF16 perplexity
         if verbose:

@@ -20,13 +20,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import Tensor
 
 from ..kv_cache import KVCache
-from .draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
+from .draft import DraftModel, DraftOutput, EagleHead, NGramDraft, SmallModelDraft
 from .verify import VerifyResult, verify_speculative
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 class TargetModel:
@@ -51,6 +55,10 @@ class SpeculativeConfig:
     """Configuration for the speculative decoding engine.
 
     Attributes:
+        draft_type: Type of draft model to use:
+            - "small_model": Use a separate smaller LM for drafting.
+            - "ngram": Use online n-gram statistics (zero extra params).
+            - "eagle": Use EAGLE v3 tree attention for high-acceptance drafting.
         num_speculative_tokens: Initial (and target) number of tokens to speculate.
         min_speculative_tokens: Adaptive floor.
         max_speculative_tokens: Adaptive ceiling (can exceed initial if acceptance is high).
@@ -60,8 +68,14 @@ class SpeculativeConfig:
         increase_threshold: Increase K when windowed rate exceeds this.
         history_window: Number of recent steps for adaptive averaging.
         eos_token_id: End-of-sequence token ID.
+        eagle_tree_width: Number of candidates to explore per tree node (Eagle only).
+        eagle_max_depth: Maximum depth of EAGLE speculation tree.
+        eagle_adaptive: Enable adaptive tree width based on acceptance (Eagle only).
+        adaptive_depth: Enable adaptive speculation depth based on running acceptance.
+        adaptive_depth_alpha: EMA smoothing factor for adaptive depth (0-1).
     """
 
+    draft_type: Literal["small_model", "ngram", "eagle"] = "eagle"
     num_speculative_tokens: int = 4
     min_speculative_tokens: int = 1
     max_speculative_tokens: int = 8
@@ -71,6 +85,13 @@ class SpeculativeConfig:
     increase_threshold: float = 0.8
     history_window: int = 10
     eos_token_id: int = 2
+    # Eagle-specific settings
+    eagle_tree_width: int = 3
+    eagle_max_depth: int = 5
+    eagle_adaptive: bool = True
+    # Adaptive depth settings
+    adaptive_depth: bool = True
+    adaptive_depth_alpha: float = 0.2
 
 
 @dataclass
@@ -131,7 +152,17 @@ class SpeculativeEngine:
     The output distribution is mathematically identical to sampling from
     the target model alone; the draft model only affects throughput.
 
+    Supports three draft model types:
+    - small_model: A separate smaller LM for drafting
+    - ngram: Online n-gram statistics (zero additional parameters)
+    - eagle: EAGLE v3 tree attention for high-acceptance rates
+
     Usage:
+        # Using Eagle (default)
+        config = SpeculativeConfig(draft_type="eagle", eagle_tree_width=3)
+        engine = SpeculativeEngine.from_config(target_model, config)
+
+        # Or with explicit draft model
         engine = SpeculativeEngine(target_model, draft_model, config)
 
         # Iterator interface (recommended for streaming)
@@ -144,20 +175,74 @@ class SpeculativeEngine:
 
     def __init__(
         self,
-        target_model,
-        draft_model: DraftModel,
+        target_model: Any,
+        draft_model: DraftModel | None = None,
         config: SpeculativeConfig | None = None,
         device: torch.device | None = None,
     ):
         self.target = target_model
-        self.draft = draft_model
         self.config = config or SpeculativeConfig()
         self.device = device or torch.device("cpu")
+
+        # Create draft model if not provided
+        if draft_model is None:
+            draft_model = self._create_draft_model()
+        self.draft = draft_model
 
         # Adaptive state
         self._acceptance_history: list[float] = []
         self._current_num_spec = self.config.num_speculative_tokens
         self._stats = GenerationStats()
+
+        # Exponential moving average for adaptive depth
+        self._ema_acceptance: float = 0.5  # Start at 50% estimate
+
+    def _create_draft_model(self) -> DraftModel:
+        """Create draft model based on config.draft_type."""
+        if self.config.draft_type == "eagle":
+            return EagleHead.from_target_model(
+                self.target,
+                tree_width=self.config.eagle_tree_width,
+                max_depth=self.config.eagle_max_depth,
+                adaptive_width=self.config.eagle_adaptive,
+                device=self.device,
+            )
+        elif self.config.draft_type == "ngram":
+            # Get vocab size from target model if available
+            vocab_size = 32000
+            config = getattr(self.target, "config", None)
+            if config is not None:
+                vocab_size = getattr(config, "vocab_size", 32000)
+            return NGramDraft(ngram_size=3, vocab_size=vocab_size, device=self.device)
+        elif self.config.draft_type == "small_model":
+            raise ValueError(
+                "small_model draft_type requires passing a draft model to __init__(). "
+                "Use SpeculativeEngine(target, SmallModelDraft(small_model), config)."
+            )
+        else:
+            raise ValueError(f"Unknown draft_type: {self.config.draft_type}")
+
+    @classmethod
+    def from_config(
+        cls,
+        target_model: Any,
+        config: SpeculativeConfig,
+        device: torch.device | None = None,
+    ) -> SpeculativeEngine:
+        """Create engine with draft model auto-created from config.
+
+        This is the recommended way to create an engine when using Eagle
+        or n-gram drafting, as it handles draft model creation automatically.
+
+        Args:
+            target_model: The target language model.
+            config: Speculative decoding configuration.
+            device: Device for tensors.
+
+        Returns:
+            Configured SpeculativeEngine instance.
+        """
+        return cls(target_model=target_model, config=config, device=device)
 
     @property
     def current_num_spec(self) -> int:
@@ -403,6 +488,7 @@ class SpeculativeEngine:
 
         For SmallModelDraft: feed accepted tokens into the draft cache.
         For NGramDraft: update n-gram statistics with produced tokens.
+        For EagleHead: update adaptive width based on acceptance rate.
         """
         if isinstance(self.draft, SmallModelDraft):
             # Feed accepted tokens to keep draft cache in sync
@@ -422,27 +508,66 @@ class SpeculativeEngine:
                     token_list = [int(step.new_tokens[b, j].item()) for j in range(n_new)]
                     self.draft.update_ngrams(token_list)
 
-    def _update_num_spec(self, acceptance_rate: float) -> None:
-        """Adapt speculation length based on windowed acceptance average.
+        elif isinstance(self.draft, EagleHead):
+            # Update Eagle's adaptive tree width
+            self.draft.update_acceptance(step.acceptance_rate)
 
-        Conservative: decrease by 1 on sustained low acceptance,
-        increase by 1 on sustained high acceptance.
+    def _update_num_spec(self, acceptance_rate: float) -> None:
+        """Adapt speculation length based on acceptance rate.
+
+        Two modes:
+        1. Windowed average (default): Conservative step changes based on
+           sustained low/high acceptance.
+        2. Adaptive depth (enabled via config.adaptive_depth): Uses EMA
+           to smoothly track optimal speculation depth based on acceptance.
         """
         self._acceptance_history.append(acceptance_rate)
 
-        window = self._acceptance_history[-self.config.history_window :]
-        avg_rate = sum(window) / len(window)
+        if self.config.adaptive_depth:
+            # Exponential moving average for smooth adaptation
+            alpha = self.config.adaptive_depth_alpha
+            self._ema_acceptance = alpha * acceptance_rate + (1 - alpha) * self._ema_acceptance
 
-        if avg_rate < self.config.acceptance_threshold:
-            self._current_num_spec = max(
-                self.config.min_speculative_tokens,
-                self._current_num_spec - 1,
-            )
-        elif avg_rate > self.config.increase_threshold:
-            self._current_num_spec = min(
-                self.config.num_speculative_tokens,
-                self._current_num_spec + 1,
-            )
+            # Compute optimal depth from EMA acceptance rate
+            # Higher acceptance -> more speculation is beneficial
+            # Formula: optimal_k ≈ 1 / (1 - acceptance) for geometric distribution
+            # We clamp this to reasonable bounds
+            if self._ema_acceptance < 0.1:
+                optimal_depth = self.config.min_speculative_tokens
+            elif self._ema_acceptance > 0.95:
+                optimal_depth = self.config.max_speculative_tokens
+            else:
+                # Geometric series expected length: 1/(1-p) - 1 accepted before rejection
+                # We use a slightly conservative estimate
+                raw_optimal = min(1.0 / (1.0 - self._ema_acceptance), 10.0)
+                optimal_depth = int(raw_optimal * 0.8)  # 80% of theoretical optimum
+
+            # Gradually move toward optimal (1 step at a time for stability)
+            if optimal_depth > self._current_num_spec:
+                self._current_num_spec = min(
+                    self._current_num_spec + 1,
+                    self.config.max_speculative_tokens,
+                )
+            elif optimal_depth < self._current_num_spec:
+                self._current_num_spec = max(
+                    self._current_num_spec - 1,
+                    self.config.min_speculative_tokens,
+                )
+        else:
+            # Original windowed average approach
+            window = self._acceptance_history[-self.config.history_window :]
+            avg_rate = sum(window) / len(window)
+
+            if avg_rate < self.config.acceptance_threshold:
+                self._current_num_spec = max(
+                    self.config.min_speculative_tokens,
+                    self._current_num_spec - 1,
+                )
+            elif avg_rate > self.config.increase_threshold:
+                self._current_num_spec = min(
+                    self.config.max_speculative_tokens,
+                    self._current_num_spec + 1,
+                )
 
 
 def _sample_token(logits: Tensor, temperature: float, device: torch.device) -> Tensor:

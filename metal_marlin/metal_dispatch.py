@@ -247,6 +247,156 @@ class MetalKernelLibrary:
             return []
         return list(lib.functionNames())
 
+    def get_kernel(self, library_name: str, function_name: str) -> Any:
+        """Get a compute pipeline from a specific library."""
+        return self.get_pipeline(function_name, library_name)
+
+    def _get_metal_buffer(self, tensor: torch.Tensor) -> Any:
+        """Get MTLBuffer from MPS tensor (zero-copy)."""
+        require_mps()
+
+        if not tensor.is_mps:
+            raise ValueError("Tensor must be on MPS device")
+
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        # Use tensor.data_ptr() to get buffer address for zero-copy interop.
+        ptr = tensor.data_ptr()
+        size = tensor.numel() * tensor.element_size()
+
+        buffer = self._device.newBufferWithBytesNoCopy_length_options_deallocator_(
+            ptr, size, Metal.MTLResourceStorageModeShared, None
+        )
+
+        if buffer is None:
+            raise RuntimeError("Failed to create Metal buffer from tensor")
+
+        return buffer
+
+    def _dispatch(
+        self,
+        kernel: Any,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        *args: Any,
+    ) -> None:
+        """Dispatch a Metal kernel with buffer/constant arguments."""
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(kernel)
+
+        buffers: list[Any] = []
+        for arg in args:
+            if isinstance(arg, (int, np.integer)):
+                const = np.array([int(arg)], dtype=np.uint32)
+                buf = self._device.newBufferWithBytes_length_options_(
+                    const.tobytes(), const.nbytes, Metal.MTLResourceStorageModeShared
+                )
+                buffers.append(buf)
+            else:
+                buffers.append(arg)
+
+        for i, buf in enumerate(buffers):
+            encoder.setBuffer_offset_atIndex_(buf, 0, i)
+
+        grid_size = Metal.MTLSizeMake(*grid)
+        tg_size = Metal.MTLSizeMake(*threadgroup)
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+    def fp4_gemm(
+        self,
+        input: torch.Tensor,  # [M, K] input activations
+        weight: torch.Tensor,  # Packed FP4 weights
+        scales: torch.Tensor,  # Per-group scales
+        N: int,  # Output features
+        K: int,  # Input features
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Fused FP4 dequantize + GEMM using marlin_gemm kernel."""
+        M = input.shape[0]
+
+        # Allocate output
+        output = torch.empty((M, N), dtype=input.dtype, device=input.device)
+
+        # Get kernel
+        kernel = self.get_kernel("marlin_gemm", "marlin_gemm_fp4")
+
+        # Get Metal buffers from MPS tensors
+        input_buf = self._get_metal_buffer(input)
+        weight_buf = self._get_metal_buffer(weight)
+        scales_buf = self._get_metal_buffer(scales)
+        output_buf = self._get_metal_buffer(output)
+
+        # Compute grid dimensions (match marlin_gemm.metal)
+        grid_m = (M + TILE_M - 1) // TILE_M
+        grid_n = (N + TILE_N - 1) // TILE_N
+
+        # Dispatch
+        self._dispatch(
+            kernel,
+            (grid_m, grid_n, 1),
+            (THREADS_PER_TG, 1, 1),
+            input_buf,
+            weight_buf,
+            scales_buf,
+            output_buf,
+            M,
+            N,
+            K,
+            group_size,
+        )
+
+        return output
+
+    def int4_gemm(
+        self,
+        input: torch.Tensor,  # [M, K] input activations
+        weight: torch.Tensor,  # Packed INT4 weights
+        scales: torch.Tensor,  # Per-group scales
+        zeros: torch.Tensor,  # Per-group zero points
+        N: int,  # Output features
+        K: int,  # Input features
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Fused INT4 dequantize + GEMM using marlin_gemm kernel."""
+        M = input.shape[0]
+
+        output = torch.empty((M, N), dtype=input.dtype, device=input.device)
+
+        kernel = self.get_kernel("marlin_gemm", "marlin_gemm_fused_u4")
+
+        input_buf = self._get_metal_buffer(input)
+        weight_buf = self._get_metal_buffer(weight)
+        scales_buf = self._get_metal_buffer(scales)
+        zeros_buf = self._get_metal_buffer(zeros)
+        output_buf = self._get_metal_buffer(output)
+
+        grid_m = (M + TILE_M - 1) // TILE_M
+        grid_n = (N + TILE_N - 1) // TILE_N
+
+        self._dispatch(
+            kernel,
+            (grid_m, grid_n, 1),
+            (THREADS_PER_TG, 1, 1),
+            input_buf,
+            weight_buf,
+            scales_buf,
+            zeros_buf,
+            output_buf,
+            M,
+            N,
+            K,
+            group_size,
+        )
+
+        return output
+
 
 # ---------------------------------------------------------------------------
 # PyTorch MPS <-> Metal buffer interop

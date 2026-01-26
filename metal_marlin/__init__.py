@@ -16,6 +16,16 @@ from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 HAS_MLX = False
 
 # Always-available imports
+# Attention kernels
+from .attention import (
+    MarlinAttention,
+    RoPE,
+    create_causal_mask,
+    create_sliding_window_mask,
+    flash_attention_metal,
+    scaled_dot_product_attention_metal,
+    sliding_window_attention_metal,
+)
 from .calibration import (
     AdaptiveQuantizer,
     AdaptiveQuantResult,
@@ -90,6 +100,14 @@ from .quantize import (  # FP8 quantization
     unpack_fp4_weights,
 )
 from .quantize import pack_fp4_weights as pack_fp4_weights_cpu  # FP4/INT4/NF4 quantization
+from .rope import (
+    YaRNConfig,
+    YaRNRoPE,
+    compute_yarn_cos_sin_cache,
+    compute_yarn_inv_freq,
+    create_rope_from_config,
+    get_yarn_mscale,
+)
 from .sampler import MetalSampler, SamplingConfig, sample_next_token
 from .vision import (
     InternVLProjector,
@@ -185,4 +203,19 @@ __all__ = [
     "MetalSampler",
     "SamplingConfig",
     "sample_next_token",
+    # YaRN RoPE
+    "YaRNConfig",
+    "YaRNRoPE",
+    "compute_yarn_cos_sin_cache",
+    "compute_yarn_inv_freq",
+    "create_rope_from_config",
+    "get_yarn_mscale",
+    # Attention
+    "MarlinAttention",
+    "RoPE",
+    "create_causal_mask",
+    "create_sliding_window_mask",
+    "flash_attention_metal",
+    "scaled_dot_product_attention_metal",
+    "sliding_window_attention_metal",
 ]

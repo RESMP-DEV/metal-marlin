@@ -529,6 +529,7 @@ class QuantizationReport:
     group_size: int
     use_hadamard: bool
     hadamard_block_size: int
+    hadamard_kurtosis_threshold: float | None
     actorder: bool
     quantized_layers: int
     skipped_layers: int
@@ -547,6 +548,7 @@ class QuantizationReport:
             "group_size": self.group_size,
             "use_hadamard": self.use_hadamard,
             "hadamard_block_size": self.hadamard_block_size,
+            "hadamard_kurtosis_threshold": self.hadamard_kurtosis_threshold,
             "actorder": self.actorder,
             "quantized_layers": self.quantized_layers,
             "skipped_layers": self.skipped_layers,
@@ -631,6 +633,19 @@ def _compute_layer_error(
     }
 
 
+def _compute_excess_kurtosis(weights: NDArray[np.floating[Any]]) -> float:
+    """Compute excess kurtosis (normal distribution = 0)."""
+    w = np.asarray(weights, dtype=np.float64).ravel()
+    if w.size == 0:
+        return 0.0
+    mean = float(np.mean(w))
+    std = float(np.std(w))
+    if std < 1e-12:
+        return 0.0
+    centered = w - mean
+    return float(np.mean(centered**4) / (std**4) - 3.0)
+
+
 class MRGPTQQuantizer:
     """
     MR-GPTQ Quantizer: Hadamard Rotation + GPTQ for high-quality low-bit quantization.
@@ -646,6 +661,8 @@ class MRGPTQQuantizer:
         group_size: Elements per quantization group
         use_hadamard: Apply Hadamard rotation before quantization
         hadamard_block_size: Block size for Hadamard transform (power of 2)
+        hadamard_kurtosis_threshold: Only apply Hadamard when excess kurtosis
+            meets or exceeds this threshold (None = apply to all layers).
         actorder: Process columns in activation importance order
         percdamp: Damping ratio for Hessian inversion
     """
@@ -657,6 +674,7 @@ class MRGPTQQuantizer:
         group_size: int = 128,
         use_hadamard: bool = True,
         hadamard_block_size: int = 64,
+        hadamard_kurtosis_threshold: float | None = None,
         actorder: bool = True,
         percdamp: float = 0.01,
     ):
@@ -671,6 +689,7 @@ class MRGPTQQuantizer:
         self.group_size = group_size
         self.use_hadamard = use_hadamard
         self.hadamard_block_size = hadamard_block_size
+        self.hadamard_kurtosis_threshold = hadamard_kurtosis_threshold
         self.actorder = actorder
         self.percdamp = percdamp
 
@@ -682,6 +701,7 @@ class MRGPTQQuantizer:
         weights: NDArray[np.float32],
         hessian: NDArray[np.float32] | None = None,
         layer_name: str = "",
+        use_hadamard: bool | None = None,
     ) -> tuple[NDArray[np.uint32], NDArray[np.float16], dict[str, Any]]:
         """
         Quantize a single layer using MR-GPTQ.
@@ -700,12 +720,15 @@ class MRGPTQQuantizer:
         W = weights.astype(np.float32)
         out_feat, in_feat = W.shape
 
+        if use_hadamard is None:
+            use_hadamard = self.use_hadamard
+
         metadata: dict[str, Any] = {
             "layer_name": layer_name,
             "original_shape": (out_feat, in_feat),
             "format": self.format.value,
             "group_size": self.group_size,
-            "use_hadamard": self.use_hadamard,
+            "use_hadamard": use_hadamard,
         }
 
         # Ensure dimensions are compatible
@@ -718,7 +741,7 @@ class MRGPTQQuantizer:
 
         # Step 1: Apply Hadamard rotation (optional)
         hadamard_meta = None
-        if self.use_hadamard:
+        if use_hadamard:
             W, hadamard_meta = apply_hadamard_rotation(
                 W, block_size=self.hadamard_block_size, axis=1
             )
@@ -850,6 +873,8 @@ class MRGPTQQuantizer:
             print(f"  Format: {self.format.value}")
             print(f"  Group size: {self.group_size}")
             print(f"  Hadamard: {self.use_hadamard} (block_size={self.hadamard_block_size})")
+            if self.hadamard_kurtosis_threshold is not None:
+                print(f"  Hadamard kurtosis threshold: {self.hadamard_kurtosis_threshold}")
             print(f"  Actorder: {self.actorder}")
             print()
 
@@ -891,8 +916,23 @@ class MRGPTQQuantizer:
                         # Get Hessian if available
                         hessian = hessians.get(name)
 
+                        apply_hadamard = self.use_hadamard
+                        layer_kurtosis = None
+                        if self.use_hadamard and self.hadamard_kurtosis_threshold is not None:
+                            layer_kurtosis = _compute_excess_kurtosis(tensor)
+                            apply_hadamard = (
+                                layer_kurtosis >= self.hadamard_kurtosis_threshold
+                            )
+
                         # Quantize layer
-                        packed, scales, meta = self.quantize_layer(tensor, hessian, layer_name=name)
+                        packed, scales, meta = self.quantize_layer(
+                            tensor,
+                            hessian,
+                            layer_name=name,
+                            use_hadamard=apply_hadamard,
+                        )
+                        if layer_kurtosis is not None:
+                            meta["kurtosis"] = layer_kurtosis
 
                         # Store packed weights and scales
                         output_tensors[name] = packed
@@ -916,7 +956,7 @@ class MRGPTQQuantizer:
                                 shape=tensor.shape,
                                 group_size=self.group_size,
                                 format=self.format,
-                                use_hadamard=self.use_hadamard,
+                                use_hadamard=bool(meta.get("use_hadamard", False)),
                                 rmse=err.get("rmse", 0.0),
                                 max_error=err.get("max_error", 0.0),
                                 mean_relative_error=err.get("mean_relative_error", 0.0),
@@ -957,6 +997,7 @@ class MRGPTQQuantizer:
             group_size=self.group_size,
             use_hadamard=self.use_hadamard,
             hadamard_block_size=self.hadamard_block_size,
+            hadamard_kurtosis_threshold=self.hadamard_kurtosis_threshold,
             actorder=self.actorder,
             quantized_layers=quantized_count,
             skipped_layers=skipped_count,
@@ -1326,6 +1367,7 @@ class MRGPTQQuantizer:
             group_size=self.group_size,
             use_hadamard=self.use_hadamard,
             hadamard_block_size=self.hadamard_block_size,
+            hadamard_kurtosis_threshold=self.hadamard_kurtosis_threshold,
             actorder=self.actorder,
             quantized_layers=quantized_count,
             skipped_layers=skipped_count,

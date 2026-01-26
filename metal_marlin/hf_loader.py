@@ -50,6 +50,14 @@ class ModelConfig:
     use_sliding_window: bool = False
     sliding_window: int | None = None
 
+    # RoPE scaling (YaRN, linear, dynamic)
+    rope_scaling_type: str | None = None  # "yarn", "linear", "dynamic", etc.
+    rope_scaling_factor: float = 1.0
+    rope_original_max_position: int = 0  # original_max_position_embeddings
+    rope_beta_fast: float = 32.0  # YaRN beta_fast
+    rope_beta_slow: float = 1.0  # YaRN beta_slow
+    rope_mscale: float = 1.0  # YaRN mscale
+
     # MoE-specific
     num_experts: int | None = None
     num_experts_per_tok: int | None = None
@@ -71,6 +79,17 @@ class ModelConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         """Parse from HuggingFace config.json."""
+        # Parse rope_scaling config if present
+        rope_scaling = d.get("rope_scaling") or {}
+        rope_scaling_type = rope_scaling.get("type") if rope_scaling else None
+        rope_scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
+        rope_original_max_position = (
+            rope_scaling.get("original_max_position_embeddings", 0) if rope_scaling else 0
+        )
+        rope_beta_fast = rope_scaling.get("beta_fast", 32.0) if rope_scaling else 32.0
+        rope_beta_slow = rope_scaling.get("beta_slow", 1.0) if rope_scaling else 1.0
+        rope_mscale = rope_scaling.get("mscale", 1.0) if rope_scaling else 1.0
+
         return cls(
             hidden_size=d.get("hidden_size", d.get("d_model", 4096)),
             num_hidden_layers=d.get("num_hidden_layers", d.get("n_layer", 32)),
@@ -86,6 +105,13 @@ class ModelConfig:
             model_type=d.get("model_type", "llama"),
             use_sliding_window=d.get("use_sliding_window", False),
             sliding_window=d.get("sliding_window"),
+            # RoPE scaling (YaRN, linear, dynamic)
+            rope_scaling_type=rope_scaling_type,
+            rope_scaling_factor=rope_scaling_factor,
+            rope_original_max_position=rope_original_max_position,
+            rope_beta_fast=rope_beta_fast,
+            rope_beta_slow=rope_beta_slow,
+            rope_mscale=rope_mscale,
             # MoE config
             num_experts=d.get("num_local_experts", d.get("num_experts")),
             num_experts_per_tok=d.get("num_experts_per_tok", d.get("num_selected_experts")),

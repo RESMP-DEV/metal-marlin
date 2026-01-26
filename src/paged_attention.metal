@@ -66,6 +66,9 @@ constant constexpr uint PARTITION_SIZE = 256;
 // FP4 packing
 constant constexpr uint FP4_PER_UINT = 8;
 
+// FP8 packing
+constant constexpr uint FP8_PER_UINT = 4;
+
 // ---------------------------------------------------------------------------
 // Utility functions (shared with flash_attention.metal patterns)
 // ---------------------------------------------------------------------------
@@ -113,6 +116,55 @@ inline half dequant_fp4(uint nibble, half scale) {
 inline half dequant_int4(uint nibble, half scale) {
     int signed_val = int(nibble & 0xFu) - 8;
     return half(signed_val) * scale;
+}
+
+// ---------------------------------------------------------------------------
+// FP8 E4M3 dequantization for paged KV cache
+// ---------------------------------------------------------------------------
+//
+// FP8 E4M3 format: [1 sign][4 exponent (bias=7)][3 mantissa]
+//
+// Value encoding:
+//   Normal (0 < E < 15):  (-1)^S * 2^(E-7) * (1 + M/8)
+//   Subnormal (E == 0):   (-1)^S * 2^(-6) * (M/8)
+//   NaN (E == 15, M == 7): Mapped to max value (448.0)
+//   Zero (E=0, M=0):      +/- 0.0
+
+/// Dequantize a single FP8 E4M3 value to half precision with scale.
+inline half dequant_fp8_e4m3(uint8_t val, half scale) {
+    uint sign = (val >> 7) & 1u;
+    uint exp = (val >> 3) & 0xFu;
+    uint man = val & 0x7u;
+
+    // Handle NaN: E=15, M=7 -> max value 448.0
+    bool is_nan = (exp == 15u) && (man == 7u);
+
+    half magnitude;
+    if (exp == 0u) {
+        // Subnormal: value = M * 2^(-9)
+        magnitude = half(man) * half(0.001953125h);  // 2^-9
+    } else {
+        // Normal: value = (1 + M/8) * 2^(E-7)
+        half mantissa = half(1.0h) + half(man) * half(0.125h);
+        if (exp >= 7u) {
+            magnitude = mantissa * half(float(1u << (exp - 7u)));
+        } else {
+            magnitude = mantissa / half(float(1u << (7u - exp)));
+        }
+    }
+
+    half result = select(magnitude, -magnitude, bool(sign));
+    return select(result, half(448.0h), is_nan) * scale;
+}
+
+/// Dequantize 4 FP8 E4M3 values packed in a uint32 with a single scale.
+inline void dequant_fp8_e4m3_x4(uint packed, half scale,
+                                 thread half& out0, thread half& out1,
+                                 thread half& out2, thread half& out3) {
+    out0 = dequant_fp8_e4m3(uint8_t((packed >>  0) & 0xFFu), scale);
+    out1 = dequant_fp8_e4m3(uint8_t((packed >>  8) & 0xFFu), scale);
+    out2 = dequant_fp8_e4m3(uint8_t((packed >> 16) & 0xFFu), scale);
+    out3 = dequant_fp8_e4m3(uint8_t((packed >> 24) & 0xFFu), scale);
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1078,415 @@ kernel void paged_attention_v1_int4(
             if (d < head_dim) {
                 output[o_offset + d] = half(o_acc[i] * inv_l);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paged Attention V1 - FP8 E4M3 quantized KV cache
+//
+// KV blocks stored as packed FP8 E4M3 (8 bits per element) with per-token-per-head scales.
+// FP8 provides 2x memory reduction compared to FP16 with minimal accuracy loss.
+//
+// K_cache_fp8:   [num_blocks, num_kv_heads, block_size, head_dim]  (uint8_t)
+// V_cache_fp8:   [num_blocks, num_kv_heads, block_size, head_dim]  (uint8_t)
+// K_scales:      [num_blocks, num_kv_heads, block_size]            (half)
+// V_scales:      [num_blocks, num_kv_heads, block_size]            (half)
+// ---------------------------------------------------------------------------
+
+kernel void paged_attention_v1_fp8(
+    device const half* Q                [[buffer(0)]],
+    device const uint8_t* K_cache_fp8   [[buffer(1)]],
+    device const uint8_t* V_cache_fp8   [[buffer(2)]],
+    device const half* K_scales         [[buffer(3)]],
+    device const half* V_scales         [[buffer(4)]],
+    device const int* block_tables      [[buffer(5)]],
+    device const int* context_lens      [[buffer(6)]],
+    device half* output                 [[buffer(7)]],
+    constant uint& num_seqs             [[buffer(8)]],
+    constant uint& num_heads_q          [[buffer(9)]],
+    constant uint& num_kv_heads         [[buffer(10)]],
+    constant uint& head_dim             [[buffer(11)]],
+    constant uint& max_blocks_per_seq   [[buffer(12)]],
+    constant float& scale               [[buffer(13)]],
+    uint3 tgid                          [[threadgroup_position_in_grid]],
+    uint tid_in_tg                      [[thread_index_in_threadgroup]],
+    uint lane_id                        [[thread_index_in_simdgroup]],
+    uint sg_id                          [[simdgroup_index_in_threadgroup]]
+) {
+    const uint seq_idx = tgid.x;
+    const uint head_q = tgid.y;
+
+    if (seq_idx >= num_seqs) return;
+
+    const uint gqa_ratio = num_heads_q / num_kv_heads;
+    const uint head_kv = head_q / gqa_ratio;
+
+    const int ctx_len = context_lens[seq_idx];
+    if (ctx_len <= 0) return;
+    const uint context_len = uint(ctx_len);
+    const uint num_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    const uint q_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
+    const uint elems_per_lane = head_dim / SIMD_SIZE;
+    float q_reg[HEAD_DIM_MAX / SIMD_SIZE];
+    if (sg_id == 0) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
+    }
+
+    // FP8 KV cache layout: [num_blocks, num_kv_heads, block_size, head_dim]
+    const uint kv_head_stride = BLOCK_SIZE * head_dim;
+    const uint kv_block_stride = num_kv_heads * kv_head_stride;
+
+    // Scale layout: [num_blocks, num_kv_heads, block_size]
+    const uint scale_head_stride = BLOCK_SIZE;
+    const uint scale_block_stride = num_kv_heads * scale_head_stride;
+
+    threadgroup half K_smem[KV_TILES][BLOCK_SIZE][HEAD_DIM_MAX];
+    threadgroup half V_smem[KV_TILES][BLOCK_SIZE][HEAD_DIM_MAX];
+
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc[HEAD_DIM_MAX / SIMD_SIZE];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        o_acc[i] = 0.0f;
+    }
+
+    device const int* seq_block_table = block_tables + seq_idx * max_blocks_per_seq;
+
+    // Preload first block (dequantize FP8 -> FP16 into threadgroup memory)
+    {
+        int phys_block = seq_block_table[0];
+        uint kv_base = uint(phys_block) * kv_block_stride + head_kv * kv_head_stride;
+        uint scale_base = uint(phys_block) * scale_block_stride + head_kv * scale_head_stride;
+
+        uint elems_to_load = BLOCK_SIZE * head_dim;
+        uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+        for (uint i = 0; i < loads_per_thread; ++i) {
+            uint idx = tid_in_tg + i * THREADS_PER_TG;
+            if (idx < elems_to_load) {
+                uint token_in_block = idx / head_dim;
+                uint d = idx % head_dim;
+
+                half k_scale = K_scales[scale_base + token_in_block];
+                half v_scale = V_scales[scale_base + token_in_block];
+
+                uint8_t k_val = K_cache_fp8[kv_base + token_in_block * head_dim + d];
+                uint8_t v_val = V_cache_fp8[kv_base + token_in_block * head_dim + d];
+
+                K_smem[0][token_in_block][d] = dequant_fp8_e4m3(k_val, k_scale);
+                V_smem[0][token_in_block][d] = dequant_fp8_e4m3(v_val, v_scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint buf_compute = 0;
+
+    for (uint block_idx = 0; block_idx < num_blocks; ++block_idx) {
+        uint buf_load = 1 - buf_compute;
+
+        // Load next block with FP8 dequant
+        if (block_idx + 1 < num_blocks) {
+            int next_phys_block = seq_block_table[block_idx + 1];
+            uint kv_base = uint(next_phys_block) * kv_block_stride + head_kv * kv_head_stride;
+            uint scale_base = uint(next_phys_block) * scale_block_stride + head_kv * scale_head_stride;
+
+            uint elems_to_load = BLOCK_SIZE * head_dim;
+            uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+            for (uint i = 0; i < loads_per_thread; ++i) {
+                uint idx = tid_in_tg + i * THREADS_PER_TG;
+                if (idx < elems_to_load) {
+                    uint token_in_block = idx / head_dim;
+                    uint d = idx % head_dim;
+
+                    half k_scale = K_scales[scale_base + token_in_block];
+                    half v_scale = V_scales[scale_base + token_in_block];
+
+                    uint8_t k_val = K_cache_fp8[kv_base + token_in_block * head_dim + d];
+                    uint8_t v_val = V_cache_fp8[kv_base + token_in_block * head_dim + d];
+
+                    K_smem[buf_load][token_in_block][d] = dequant_fp8_e4m3(k_val, k_scale);
+                    V_smem[buf_load][token_in_block][d] = dequant_fp8_e4m3(v_val, v_scale);
+                }
+            }
+        }
+
+        uint block_start_token = block_idx * BLOCK_SIZE;
+        uint block_tokens = min(uint(BLOCK_SIZE), context_len - block_start_token);
+
+        if (sg_id == 0) {
+            float scores[BLOCK_SIZE];
+            for (uint t = 0; t < block_tokens; ++t) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_smem[buf_compute][t][d]);
+                }
+                dot = simd_reduce_sum(dot);
+                scores[t] = dot * scale;
+            }
+            for (uint t = block_tokens; t < BLOCK_SIZE; ++t) {
+                scores[t] = -INFINITY;
+            }
+
+            float m_block = -INFINITY;
+            for (uint t = 0; t < block_tokens; ++t) {
+                m_block = max(m_block, scores[t]);
+            }
+
+            float m_new = max(m_prev, m_block);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint t = 0; t < block_tokens; ++t) {
+                l_new += exp(scores[t] - m_new);
+            }
+
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= correction;
+            }
+            for (uint t = 0; t < block_tokens; ++t) {
+                float p = exp(scores[t] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_smem[buf_compute][t][d]);
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf_compute = buf_load;
+    }
+
+    if (sg_id == 0) {
+        const uint o_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                output[o_offset + d] = half(o_acc[i] * inv_l);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paged Attention V2 - FP8 E4M3 quantized KV cache (Multi-partition)
+//
+// Long context version that partitions blocks across threadgroups.
+// Uses the same FP8 dequantization approach as paged_attention_v1_fp8.
+// ---------------------------------------------------------------------------
+
+kernel void paged_attention_v2_fp8(
+    device const half* Q                [[buffer(0)]],
+    device const uint8_t* K_cache_fp8   [[buffer(1)]],
+    device const uint8_t* V_cache_fp8   [[buffer(2)]],
+    device const half* K_scales         [[buffer(3)]],
+    device const half* V_scales         [[buffer(4)]],
+    device const int* block_tables      [[buffer(5)]],
+    device const int* context_lens      [[buffer(6)]],
+    device float* partial_out           [[buffer(7)]],   // [num_seqs, num_heads_q, max_partitions, head_dim]
+    device float* partial_m             [[buffer(8)]],   // [num_seqs, num_heads_q, max_partitions]
+    device float* partial_l             [[buffer(9)]],   // [num_seqs, num_heads_q, max_partitions]
+    constant uint& num_seqs             [[buffer(10)]],
+    constant uint& num_heads_q          [[buffer(11)]],
+    constant uint& num_kv_heads         [[buffer(12)]],
+    constant uint& head_dim             [[buffer(13)]],
+    constant uint& max_blocks_per_seq   [[buffer(14)]],
+    constant uint& max_partitions       [[buffer(15)]],
+    constant float& scale               [[buffer(16)]],
+    uint3 tgid                          [[threadgroup_position_in_grid]],
+    uint tid_in_tg                      [[thread_index_in_threadgroup]],
+    uint lane_id                        [[thread_index_in_simdgroup]],
+    uint sg_id                          [[simdgroup_index_in_threadgroup]]
+) {
+    const uint seq_idx = tgid.x;
+    const uint head_q = tgid.y;
+    const uint partition_idx = tgid.z;
+
+    if (seq_idx >= num_seqs) return;
+
+    const uint gqa_ratio = num_heads_q / num_kv_heads;
+    const uint head_kv = head_q / gqa_ratio;
+
+    const int ctx_len = context_lens[seq_idx];
+    if (ctx_len <= 0) return;
+    const uint context_len = uint(ctx_len);
+
+    // Determine which blocks this partition handles
+    const uint blocks_per_partition = PARTITION_SIZE / BLOCK_SIZE;
+    const uint total_blocks = (context_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    const uint partition_start_block = partition_idx * blocks_per_partition;
+    if (partition_start_block >= total_blocks) return;
+
+    const uint partition_end_block = min(partition_start_block + blocks_per_partition, total_blocks);
+    const uint partition_num_blocks = partition_end_block - partition_start_block;
+
+    // Load Q
+    const uint q_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
+    const uint elems_per_lane = head_dim / SIMD_SIZE;
+    float q_reg[HEAD_DIM_MAX / SIMD_SIZE];
+    if (sg_id == 0) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
+    }
+
+    // FP8 KV cache strides
+    const uint kv_head_stride = BLOCK_SIZE * head_dim;
+    const uint kv_block_stride = num_kv_heads * kv_head_stride;
+    const uint scale_head_stride = BLOCK_SIZE;
+    const uint scale_block_stride = num_kv_heads * scale_head_stride;
+
+    threadgroup half K_smem[KV_TILES][BLOCK_SIZE][HEAD_DIM_MAX];
+    threadgroup half V_smem[KV_TILES][BLOCK_SIZE][HEAD_DIM_MAX];
+
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc[HEAD_DIM_MAX / SIMD_SIZE];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        o_acc[i] = 0.0f;
+    }
+
+    device const int* seq_block_table = block_tables + seq_idx * max_blocks_per_seq;
+
+    // Preload first block of this partition
+    {
+        uint blk = partition_start_block;
+        int phys_block = seq_block_table[blk];
+        uint kv_base = uint(phys_block) * kv_block_stride + head_kv * kv_head_stride;
+        uint scale_base = uint(phys_block) * scale_block_stride + head_kv * scale_head_stride;
+
+        uint elems_to_load = BLOCK_SIZE * head_dim;
+        uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+        for (uint i = 0; i < loads_per_thread; ++i) {
+            uint idx = tid_in_tg + i * THREADS_PER_TG;
+            if (idx < elems_to_load) {
+                uint token_in_block = idx / head_dim;
+                uint d = idx % head_dim;
+
+                half k_scale = K_scales[scale_base + token_in_block];
+                half v_scale = V_scales[scale_base + token_in_block];
+
+                uint8_t k_val = K_cache_fp8[kv_base + token_in_block * head_dim + d];
+                uint8_t v_val = V_cache_fp8[kv_base + token_in_block * head_dim + d];
+
+                K_smem[0][token_in_block][d] = dequant_fp8_e4m3(k_val, k_scale);
+                V_smem[0][token_in_block][d] = dequant_fp8_e4m3(v_val, v_scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint buf_compute = 0;
+
+    for (uint blk_offset = 0; blk_offset < partition_num_blocks; ++blk_offset) {
+        uint buf_load = 1 - buf_compute;
+        uint abs_block = partition_start_block + blk_offset;
+
+        // Load next block
+        if (blk_offset + 1 < partition_num_blocks) {
+            uint next_abs_block = partition_start_block + blk_offset + 1;
+            int next_phys_block = seq_block_table[next_abs_block];
+            uint kv_base = uint(next_phys_block) * kv_block_stride + head_kv * kv_head_stride;
+            uint scale_base = uint(next_phys_block) * scale_block_stride + head_kv * scale_head_stride;
+
+            uint elems_to_load = BLOCK_SIZE * head_dim;
+            uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+            for (uint i = 0; i < loads_per_thread; ++i) {
+                uint idx = tid_in_tg + i * THREADS_PER_TG;
+                if (idx < elems_to_load) {
+                    uint token_in_block = idx / head_dim;
+                    uint d = idx % head_dim;
+
+                    half k_scale = K_scales[scale_base + token_in_block];
+                    half v_scale = V_scales[scale_base + token_in_block];
+
+                    uint8_t k_val = K_cache_fp8[kv_base + token_in_block * head_dim + d];
+                    uint8_t v_val = V_cache_fp8[kv_base + token_in_block * head_dim + d];
+
+                    K_smem[buf_load][token_in_block][d] = dequant_fp8_e4m3(k_val, k_scale);
+                    V_smem[buf_load][token_in_block][d] = dequant_fp8_e4m3(v_val, v_scale);
+                }
+            }
+        }
+
+        // Compute on current block
+        uint block_start_token = abs_block * BLOCK_SIZE;
+        uint block_tokens = min(uint(BLOCK_SIZE), context_len - block_start_token);
+
+        if (sg_id == 0) {
+            float scores[BLOCK_SIZE];
+            for (uint t = 0; t < block_tokens; ++t) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_smem[buf_compute][t][d]);
+                }
+                dot = simd_reduce_sum(dot);
+                scores[t] = dot * scale;
+            }
+            for (uint t = block_tokens; t < BLOCK_SIZE; ++t) {
+                scores[t] = -INFINITY;
+            }
+
+            float m_block = -INFINITY;
+            for (uint t = 0; t < block_tokens; ++t) {
+                m_block = max(m_block, scores[t]);
+            }
+
+            float m_new = max(m_prev, m_block);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint t = 0; t < block_tokens; ++t) {
+                l_new += exp(scores[t] - m_new);
+            }
+
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= correction;
+            }
+            for (uint t = 0; t < block_tokens; ++t) {
+                float p = exp(scores[t] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_smem[buf_compute][t][d]);
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf_compute = buf_load;
+    }
+
+    // Store partial results (simdgroup 0)
+    if (sg_id == 0) {
+        const uint po_offset = ((seq_idx * num_heads_q + head_q) * max_partitions + partition_idx) * head_dim;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                partial_out[po_offset + d] = o_acc[i];
+            }
+        }
+
+        if (lane_id == 0) {
+            const uint pm_offset = (seq_idx * num_heads_q + head_q) * max_partitions + partition_idx;
+            partial_m[pm_offset] = m_prev;
+            partial_l[pm_offset] = l_prev;
         }
     }
 }

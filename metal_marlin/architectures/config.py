@@ -21,6 +21,72 @@ from .base import HybridLayerType
 
 
 @dataclass
+class RoPEScalingConfig:
+    """Configuration for RoPE scaling (YaRN, linear, etc.).
+
+    Supports YaRN (Yet another RoPE extensioN) for context window extension.
+
+    Attributes:
+        type: Scaling type ("yarn", "linear", "dynamic", "none").
+        factor: Context extension factor (e.g., 4.0 for 4x extension).
+        original_max_position_embeddings: Original training context length.
+        beta_fast: Upper wavelength boundary for YaRN (default 32).
+        beta_slow: Lower wavelength boundary for YaRN (default 1).
+        mscale: Attention temperature multiplier.
+        mscale_all_dim: Scaling coefficient for mscale computation.
+        attention_factor: Optional explicit attention scaling factor.
+    """
+
+    type: str = "none"
+    factor: float = 1.0
+    original_max_position_embeddings: int = 4096
+    beta_fast: float = 32.0
+    beta_slow: float = 1.0
+    mscale: float = 1.0
+    mscale_all_dim: float = 0.0
+    attention_factor: float | None = None
+
+    @classmethod
+    def from_hf_config(cls, rope_scaling: dict[str, Any] | None) -> RoPEScalingConfig | None:
+        """Create from HuggingFace rope_scaling dict."""
+        if rope_scaling is None:
+            return None
+
+        rope_type = rope_scaling.get("type") or rope_scaling.get("rope_type", "none")
+        if rope_type == "none":
+            return None
+
+        return cls(
+            type=rope_type,
+            factor=rope_scaling.get("factor", 1.0),
+            original_max_position_embeddings=rope_scaling.get(
+                "original_max_position_embeddings", 4096
+            ),
+            beta_fast=rope_scaling.get("beta_fast", 32.0),
+            beta_slow=rope_scaling.get("beta_slow", 1.0),
+            mscale=rope_scaling.get("mscale", 1.0),
+            mscale_all_dim=rope_scaling.get("mscale_all_dim", 0.0),
+            attention_factor=rope_scaling.get("attention_factor"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to HuggingFace-style dict."""
+        result: dict[str, Any] = {
+            "type": self.type,
+            "factor": self.factor,
+            "original_max_position_embeddings": self.original_max_position_embeddings,
+        }
+        if self.type == "yarn":
+            result["beta_fast"] = self.beta_fast
+            result["beta_slow"] = self.beta_slow
+            result["mscale"] = self.mscale
+            result["mscale_all_dim"] = self.mscale_all_dim
+            if self.attention_factor is not None:
+                result["attention_factor"] = self.attention_factor
+        return result
+
+
+@dataclass
 class AttentionLayerConfig:
     """Configuration for attention layers in hybrid models.
 
@@ -32,6 +98,7 @@ class AttentionLayerConfig:
         max_position_embeddings: Maximum sequence length for RoPE precomputation.
         sliding_window: Sliding window size for local attention. None = full attention.
         use_flash_attention: Whether to use flash attention kernels.
+        rope_scaling: Optional RoPE scaling config (for YaRN, etc.).
     """
 
     num_heads: int = 32
@@ -41,6 +108,7 @@ class AttentionLayerConfig:
     max_position_embeddings: int = 4096
     sliding_window: int | None = None
     use_flash_attention: bool = True
+    rope_scaling: RoPEScalingConfig | None = None
 
 
 @dataclass
@@ -290,12 +358,18 @@ class HybridArchitectureConfig:
         # Build layer type list based on architecture
         layer_types = _get_layer_types_for_architecture(arch, num_layers, config_dict)
 
+        # Parse rope_scaling if present
+        rope_scaling_config = RoPEScalingConfig.from_hf_config(
+            config_dict.get("rope_scaling")
+        )
+
         # Build attention config
         attention_config = AttentionLayerConfig(
             num_heads=config_dict.get("num_attention_heads", 32),
             num_kv_heads=config_dict.get("num_key_value_heads"),
             rope_theta=config_dict.get("rope_theta", 10000.0),
             max_position_embeddings=config_dict.get("max_position_embeddings", 4096),
+            rope_scaling=rope_scaling_config,
         )
 
         # Build mamba config

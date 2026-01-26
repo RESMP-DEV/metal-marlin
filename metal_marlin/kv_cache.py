@@ -98,10 +98,18 @@ class CacheConfig:
         num_kv_heads: Number of key-value heads (for GQA).
         head_dim: Dimension per head.
         max_seq_len: Maximum sequence length to allocate.
-        quantize_mode: Cache quantization mode.
+        quantize_mode: Cache quantization mode (legacy, prefer cache_dtype).
             - "none": Full precision (uses dtype_config.kv_cache)
             - "fp8": 8-bit floating point (2x memory savings)
             - "fp4": 4-bit floating point (4x memory savings)
+        cache_dtype: Cache storage dtype (takes precedence over quantize_mode).
+            - "fp16": Half precision storage
+            - "bf16": BFloat16 storage
+            - "fp8": FP8 E4M3 quantized (2x memory savings)
+            - "fp4": FP4 E2M1 quantized (4x memory savings)
+        fp8_scale_method: Scaling method for FP8 quantization.
+            - "tensor": Single scale per tensor (faster, lower memory)
+            - "channel": Scale per head dimension (better accuracy for outliers)
     """
 
     num_layers: int
@@ -110,6 +118,8 @@ class CacheConfig:
     head_dim: int
     max_seq_len: int
     quantize_mode: Literal["none", "fp8", "fp4"] = "none"
+    cache_dtype: Literal["fp16", "bf16", "fp8", "fp4"] | None = None
+    fp8_scale_method: Literal["tensor", "channel"] = "tensor"
 
 
 class KVCache:
@@ -143,6 +153,7 @@ class KVCache:
         self.seq_len = 0  # Current sequence length
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
         self.device = device
+        self._fp8_scale_method = config.fp8_scale_method
 
         # Allocate cache for all layers
         # Shape: [batch, num_kv_heads, max_seq_len, head_dim]
@@ -153,10 +164,26 @@ class KVCache:
             config.head_dim,
         )
 
-        # Determine storage mode based on quantize_mode
-        self._quantize_mode = config.quantize_mode
+        # Determine storage mode: cache_dtype takes precedence over quantize_mode
+        if config.cache_dtype is not None:
+            # New API: use cache_dtype directly
+            if config.cache_dtype == "fp8":
+                self._quantize_mode = "fp8"
+            elif config.cache_dtype == "fp4":
+                self._quantize_mode = "fp4"
+            elif config.cache_dtype in ("fp16", "bf16"):
+                self._quantize_mode = "none"
+                # Override dtype_config's kv_cache setting
+                self._storage_dtype_override = config.cache_dtype
+            else:
+                self._quantize_mode = "none"
+                self._storage_dtype_override = None
+        else:
+            # Legacy API: use quantize_mode
+            self._quantize_mode = config.quantize_mode
+            self._storage_dtype_override = None
 
-        if config.quantize_mode == "fp4":
+        if self._quantize_mode == "fp4":
             # FP4 quantized cache - pack 8 values per int32
             packed_shape = (
                 batch_size,
@@ -188,8 +215,8 @@ class KVCache:
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
             ]
-        elif config.quantize_mode == "fp8":
-            # FP8 quantized cache - store as uint8 with per-row scales
+        elif self._quantize_mode == "fp8":
+            # FP8 E4M3 quantized cache - store as uint8 with per-tensor or per-channel scales
             # PyTorch doesn't have native fp8 on MPS, so we simulate with uint8 + scales
             fp8_shape = (
                 batch_size,
@@ -205,14 +232,24 @@ class KVCache:
                 torch.zeros(fp8_shape, dtype=torch.uint8, device=device)
                 for _ in range(config.num_layers)
             ]
-            # Per-row scales for FP8 dequantization
+            # Scales for FP8 dequantization: tensor vs channel scaling
             scale_dtype = _get_torch_dtype(self.dtype_config.scales)
-            scale_shape = (
-                batch_size,
-                config.num_kv_heads,
-                config.max_seq_len,
-                1,
-            )
+            if config.fp8_scale_method == "channel":
+                # Per-channel (head_dim) scaling for better outlier handling
+                scale_shape = (
+                    batch_size,
+                    config.num_kv_heads,
+                    config.max_seq_len,
+                    config.head_dim,
+                )
+            else:
+                # Per-tensor (per-row) scaling: single scale per sequence position
+                scale_shape = (
+                    batch_size,
+                    config.num_kv_heads,
+                    config.max_seq_len,
+                    1,
+                )
             self.k_scales = [
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
@@ -222,8 +259,9 @@ class KVCache:
                 for _ in range(config.num_layers)
             ]
         else:
-            # Full precision cache using kv_cache dtype from config
-            storage_dtype = _get_torch_dtype(self.dtype_config.kv_cache)
+            # Full precision cache using cache_dtype override or dtype_config.kv_cache
+            storage_dtype_str = getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            storage_dtype = _get_torch_dtype(storage_dtype_str)
             self.k_cache = [
                 torch.zeros(cache_shape, dtype=storage_dtype, device=device)
                 for _ in range(config.num_layers)
@@ -442,29 +480,61 @@ class KVCache:
         """Quantize tensor to FP8 E4M3 format (simulated with uint8 + scale).
 
         Uses E4M3 representation: 4 exponent bits, 3 mantissa bits.
-        Max representable value is 448, min is ~2e-9.
-        """
-        # Find max absolute value per row for scaling
-        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
-        abs_max = torch.clamp(abs_max, min=1e-8)  # Avoid division by zero
+        - Dynamic range: 2^-6 to 448 (positive), with symmetric negative range
+        - Max representable value: 448 (1.75 * 2^8)
+        - Min representable normal: ~0.015625 (2^-6)
+        - Preserves outliers better than INT8 for attention patterns
 
-        # E4M3 max value is 448
-        scale = abs_max / 448.0
+        Supports two scaling methods:
+        - tensor: Single scale per row (last dim reduced) - faster, lower memory
+        - channel: Per-element scale along head_dim - better accuracy for outliers
+        """
+        # FP8 E4M3 max value is 448 (sign bit + 4 exponent + 3 mantissa)
+        FP8_E4M3_MAX = 448.0
+
+        if self._fp8_scale_method == "channel":
+            # Per-channel scaling: compute scale for each element in head_dim
+            # This preserves outliers better but uses more memory for scales
+            # Scale shape: [batch, heads, seq, head_dim]
+            abs_val = tensor.abs()
+            abs_max = torch.clamp(abs_val, min=1e-8)  # Per-element, clamped to avoid div by zero
+            # Use running max smoothed with the tensor's max to handle outliers
+            row_max = abs_val.amax(dim=-1, keepdim=True)
+            # Scale each channel independently but bounded by row max for stability
+            scale = torch.clamp(abs_max, max=row_max) / FP8_E4M3_MAX
+            scale = torch.clamp(scale, min=1e-12)  # Ensure non-zero scale
+        else:
+            # Per-tensor (per-row) scaling: single scale per sequence position
+            # Scale shape: [batch, heads, seq, 1]
+            abs_max = tensor.abs().amax(dim=-1, keepdim=True)
+            abs_max = torch.clamp(abs_max, min=1e-8)  # Avoid division by zero
+            scale = abs_max / FP8_E4M3_MAX
+
+        # Scale to E4M3 range
         scaled = tensor / scale
 
-        # Clamp to E4M3 range and quantize to 8-bit signed
-        scaled = torch.clamp(scaled, -448.0, 448.0)
+        # Clamp to E4M3 symmetric range
+        scaled = torch.clamp(scaled, -FP8_E4M3_MAX, FP8_E4M3_MAX)
 
         # Convert to uint8 with offset (128-centered for signed range)
-        quantized = torch.round(scaled / 448.0 * 127.0) + 128.0
+        # Map [-448, 448] to [0, 255] with 128 as zero point
+        quantized = torch.round(scaled / FP8_E4M3_MAX * 127.0) + 128.0
         quantized = torch.clamp(quantized, 0, 255).to(torch.uint8)
 
         scale_dtype = _get_torch_dtype(self.dtype_config.scales)
         return quantized, scale.to(scale_dtype)
 
     def _dequant_fp8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        """Dequantize FP8 tensor to float."""
+        """Dequantize FP8 tensor to float.
+
+        Supports both tensor and channel scaling methods - the scale tensor shape
+        determines which method was used during quantization.
+        """
+        FP8_E4M3_MAX = 448.0
+
         # Reverse the quantization: uint8 centered at 128 -> signed -> scaled
+        # Map [0, 255] back to [-448, 448] then apply scale
         signed = quantized.float() - 128.0
-        dequant = signed / 127.0 * 448.0 * scale.float()
+        # signed is in range [-128, 127], map to [-448, 448]
+        dequant = signed / 127.0 * FP8_E4M3_MAX * scale.float()
         return dequant

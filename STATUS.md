@@ -1,37 +1,49 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-25T22:52
+**Last Updated:** 2026-01-26T02:15
 
 ## Summary
 
-Metal shader compilation: **31/32** (97%)
-MLX removal: **0 files remaining** ✅ COMPLETE
-Task queue: 305 completed
+| Component | Status |
+|-----------|--------|
+| Metal Shaders | **34/34** ✅ |
+| MLX Removal | **Complete** ✅ |
+| Weight Quantization | Tested (GLM-4.7-Flash) |
+| Quantized Inference | **Not implemented** |
+
+---
+
+## Recent: GLM-4.7-Flash Weight Quantization
+
+Quantized `zai-org/GLM-4.7-Flash` weights (not end-to-end inference):
+
+| Metric | Value |
+|--------|-------|
+| Compression | 9.38x |
+| Weight RMSE | 0.003 |
+| Format | 99.5% FP4, 0.5% BF16 (gates) |
+
+**Note:** These are weight-level metrics only. End-to-end inference not yet implemented.
 
 ---
 
 ## Blockers
 
-### 1. Failing Shader: marlin_gemm.metal
+### 1. ~~Failing Shader: marlin_gemm.metal~~ FIXED ✅
 
-```
-error: no matching function for call to 'store_results_fp32'
-```
-
-**Root cause:** `store_results_fp32` signature changed to require staging buffer, but call sites not updated.
-
-**Fix required:** Update all kernel call sites to pass staging buffer parameter.
+All 34 Metal shaders now compile successfully.
 
 ---
 
-### 2. MLX Removal: COMPLETE ✅
+### 2. Quantized Inference Not Implemented
 
-| Status | Count |
-|--------|-------|
-| Project code | 0 files |
-| .venv (third-party) | 3 files (transformers, safetensors - not our code) |
+Current limitation: Benchmark computes quality metrics at **weight level** (RMSE 0.003 = excellent), but cannot run end-to-end inference with FP4 weights because:
 
-**Progress:** 52 → 0 files after 305 agent tasks
+1. PyTorch cannot natively load our FP4 tensors
+2. Dequantization + GEMM must be fused in Metal kernels
+3. Model forward pass needs integration with quantized weight loader
+
+**Next steps:** See `quantized_inference_tasks.yaml` for implementation plan.
 
 ---
 
@@ -48,24 +60,20 @@ All compiling:
 
 ## Quantization Formats
 
-| Format | Bits | Status |
-|--------|------|--------|
-| FP4 E2M1 | 4.0 | Primary |
-| INT4 U4/S4 | 4.0 | Working |
-| INT3/INT2 | 3.0/2.0 | Working |
-| NF3/NF2 | 3.0/2.0 | Working |
-| FP8 E4M3/E5M2 | 8.0 | Working |
+| Format | Bits | Status | Use Case |
+|--------|------|--------|----------|
+| FP4 E2M1 | 4.0 | ✅ Primary | Default weight format |
+| INT4 U4/S4 | 4.0 | ✅ Working | GPTQ compatibility |
+| INT3/INT2 | 3.0/2.0 | ✅ Working | Cold MoE experts |
+| NF3/NF2 | 3.0/2.0 | ✅ Working | QLoRA formats |
+| FP8 E4M3/E5M2 | 8.0 | ✅ Working | Higher precision |
+| 2:4 Sparse | variable | ✅ Working | Structured sparsity |
 
 ---
 
-## Quantized Models
+## Tasks
 
-**To quantize:**
-
-| Model | Type | Size (FP16) | Target Config |
-|-------|------|-------------|---------------|
-| zai-org/GLM-4.7-Flash | MoE (64 experts) | ~18 GB | FP8 attention, INT2 cold experts |
-| Qwen/Qwen3-4B | Dense | ~8 GB | FP4 weights, FP8 attention |
+See `tasks/quantized_inference.yaml` for implementation plan (24 tasks).
 
 ---
 
@@ -73,23 +81,8 @@ All compiling:
 
 | Metric | Count |
 |--------|-------|
-| Python files (metal_marlin/) | 125 |
-| Python files (tests/) | 30 |
-| Python files (benchmarks/) | 4 |
+| Python files (metal_marlin/) | ~125 |
 | Metal shaders | 35 |
-
----
-
-## Dependencies
-
-```toml
-pyobjc-core
-pyobjc-framework-Metal
-pyobjc-framework-MetalPerformanceShaders
-torch  # MPS backend
-safetensors
-transformers
-```
 
 ---
 
@@ -103,12 +96,6 @@ lib = MetalKernelLibrary.from_source_dir()
 print(f'Compiled: {len(lib._libraries)} libraries')
 "
 
-# Check MLX references
-grep -rl 'mx\.fast\|import mlx' --include='*.py' . | grep -v .venv
-
 # Run tests
 uv run pytest tests/ -v
-
-# Regenerate this file
-uv run python scripts/collect_status_facts.py
 ```

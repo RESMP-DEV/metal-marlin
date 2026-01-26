@@ -269,6 +269,15 @@ def bench(model, prompt_len, gen_len, batch_size):
     help="Disable Hadamard rotation (only applies to mr-gptq method)",
 )
 @click.option(
+    "--hadamard-kurtosis-threshold",
+    default=None,
+    type=float,
+    help=(
+        "Apply Hadamard only when excess kurtosis exceeds this threshold "
+        "(mr-gptq only)."
+    ),
+)
+@click.option(
     "--actorder/--no-actorder",
     default=True,
     help="Enable activation-order quantization for GPTQ methods (default: enabled)",
@@ -323,6 +332,7 @@ def quantize(
     calibration: str | None,
     samples: int | None,
     no_hadamard: bool,
+    hadamard_kurtosis_threshold: float | None,
     actorder: bool,
     damp: float,
     mixed_precision: str | None,
@@ -412,6 +422,11 @@ def quantize(
             click.echo(f"  Samples:      {samples}")
         if method == "mr-gptq":
             click.echo(f"  Hadamard:     {'disabled' if no_hadamard else 'enabled'}")
+            if hadamard_kurtosis_threshold is not None:
+                click.echo(
+                    "  Hadamard kurtosis threshold: "
+                    f"{hadamard_kurtosis_threshold}"
+                )
         if method in ("gptq", "mr-gptq"):
             click.echo(f"  Act-order:    {'enabled' if actorder else 'disabled'}")
             click.echo(f"  Damp:         {damp}")
@@ -466,6 +481,7 @@ def quantize(
             calibration=calibration,
             samples=samples,
             use_hadamard=not no_hadamard,
+            hadamard_kurtosis_threshold=hadamard_kurtosis_threshold,
             actorder=actorder,
             damp=damp,
             mixed_precision=mixed_precision,
@@ -631,6 +647,7 @@ def _quantize_mr_gptq(
     calibration: str | None,
     samples: int | None,
     use_hadamard: bool,
+    hadamard_kurtosis_threshold: float | None,
     actorder: bool,
     damp: float,
     mixed_precision: str | None,
@@ -665,6 +682,7 @@ def _quantize_mr_gptq(
         group_size=group_size,
         use_hadamard=use_hadamard,
         hadamard_block_size=hadamard_block_size,
+        hadamard_kurtosis_threshold=hadamard_kurtosis_threshold,
         actorder=actorder,
         damp=damp,
     )

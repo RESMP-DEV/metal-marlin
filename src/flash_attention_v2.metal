@@ -61,6 +61,76 @@ constant constexpr uint THREADS_PER_TG = SIMD_SIZE * NUM_SIMDGROUPS;
 // Memory optimization
 constant constexpr uint VECTOR_WIDTH = 4;     // half4 loads/stores
 
+// FP8 packing constants
+constant constexpr uint FP8_PER_UINT = 4;     // 4 FP8 bytes per uint32
+
+// ---------------------------------------------------------------------------
+// FP8 E4M3 dequantization for KV cache
+// ---------------------------------------------------------------------------
+//
+// FP8 E4M3 format: [1 sign][4 exponent (bias=7)][3 mantissa]
+//
+// Value encoding:
+//   Normal (0 < E < 15):  (-1)^S * 2^(E-7) * (1 + M/8)
+//   Subnormal (E == 0):   (-1)^S * 2^(-6) * (M/8)
+//   NaN (E == 15):        Mapped to max representable value (448.0)
+//   Zero (E=0, M=0):      +/- 0.0
+//
+// For KV cache quantization, we use a simplified dequantization that trades
+// perfect NaN handling for performance. NaN values (E=15, M=7) are mapped
+// to the maximum representable FP8 E4M3 value (448.0) times scale.
+
+/// Dequantize a single FP8 E4M3 value to half precision with scale.
+/// Uses branchless select() operations for performance.
+inline half dequant_fp8_e4m3(uint8_t val, half scale) {
+    uint sign = (val >> 7) & 1u;
+    uint exp = (val >> 3) & 0xFu;
+    uint man = val & 0x7u;
+
+    // Handle special cases:
+    // - NaN (E=15, M=7): Map to max value (448.0) since KV cache shouldn't have NaN
+    // - Zero (E=0, M=0): Returns 0
+    // - Subnormal (E=0, M>0): Value = M * 2^(-9)
+    // - Normal (0<E<15): Value = (1 + M/8) * 2^(E-7)
+
+    // For NaN, return scaled 448.0 (the max normal value)
+    bool is_nan = (exp == 15u) && (man == 7u);
+
+    half magnitude;
+    if (exp == 0u) {
+        // Subnormal: value = M * 2^(-9) = M / 512
+        magnitude = half(man) * half(0.001953125h);  // 2^-9
+    } else {
+        // Normal: value = (1 + M/8) * 2^(E-7)
+        // For E4M3, E ranges from 1-14, giving 2^(-6) to 2^7
+        half mantissa = half(1.0h) + half(man) * half(0.125h);
+        // 2^(E-7): E=1 gives 2^-6, E=14 gives 2^7
+        // Use integer shift for exact powers of 2
+        if (exp >= 7u) {
+            magnitude = mantissa * half(float(1u << (exp - 7u)));
+        } else {
+            // For negative exponents, divide by power of 2
+            magnitude = mantissa / half(float(1u << (7u - exp)));
+        }
+    }
+
+    // Apply sign
+    half result = select(magnitude, -magnitude, bool(sign));
+
+    // Handle NaN case by returning max value
+    return select(result, half(448.0h), is_nan) * scale;
+}
+
+/// Dequantize 4 FP8 E4M3 values packed in a uint32 with a single scale.
+inline void dequant_fp8_e4m3_x4(uint packed, half scale,
+                                 thread half& out0, thread half& out1,
+                                 thread half& out2, thread half& out3) {
+    out0 = dequant_fp8_e4m3(uint8_t((packed >>  0) & 0xFFu), scale);
+    out1 = dequant_fp8_e4m3(uint8_t((packed >>  8) & 0xFFu), scale);
+    out2 = dequant_fp8_e4m3(uint8_t((packed >> 16) & 0xFFu), scale);
+    out3 = dequant_fp8_e4m3(uint8_t((packed >> 24) & 0xFFu), scale);
+}
+
 // ---------------------------------------------------------------------------
 // Vectorized memory operations for bandwidth optimization
 // ---------------------------------------------------------------------------
@@ -1170,6 +1240,448 @@ kernel void flash_attention_v2_mqa(
             uint d = lane_id * elems_per_lane + i;
             if (d < head_dim) {
                 O[o_base + r * q_stride_s + d] = half(o_acc[r][i] * inv_l);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flash Attention V2 - FP8 Quantized KV Cache (Decode)
+//
+// Optimized for autoregressive decoding with FP8 E4M3 quantized KV cache.
+// FP8 KV cache reduces memory bandwidth by 2x compared to FP16, enabling
+// longer context lengths and higher throughput on memory-bound decode.
+//
+// K/V are stored as packed uint8_t with per-head-per-sequence scales.
+// During decode, we dequantize on-the-fly in registers before attention compute.
+//
+// Memory layout:
+//   K_fp8:    [batch, heads_kv, seq_k, head_dim]  (uint8_t packed)
+//   V_fp8:    [batch, heads_kv, seq_k, head_dim]  (uint8_t packed)
+//   K_scales: [batch, heads_kv, seq_k]            (half, per-token)
+//   V_scales: [batch, heads_kv, seq_k]            (half, per-token)
+//   Q:        [batch, heads_q, 1, head_dim]       (half)
+//   O:        [batch, heads_q, 1, head_dim]       (half)
+//
+// Dispatch: [num_seqs * num_heads_q, 1, 1] threadgroups
+// ---------------------------------------------------------------------------
+
+kernel void flash_attention_v2_fp8_kv(
+    device const half* Q                [[buffer(0)]],
+    device const uint8_t* K_fp8         [[buffer(1)]],
+    device const uint8_t* V_fp8         [[buffer(2)]],
+    device const half* K_scales         [[buffer(3)]],
+    device const half* V_scales         [[buffer(4)]],
+    device half* O                      [[buffer(5)]],
+    constant uint& num_seqs             [[buffer(6)]],
+    constant uint& num_heads_q          [[buffer(7)]],
+    constant uint& num_heads_kv         [[buffer(8)]],
+    constant uint& seq_k                [[buffer(9)]],
+    constant uint& head_dim             [[buffer(10)]],
+    constant float& scale               [[buffer(11)]],
+    uint tgid                           [[threadgroup_position_in_grid]],
+    uint tid                            [[thread_index_in_threadgroup]],
+    uint lane_id                        [[thread_index_in_simdgroup]],
+    uint sg_id                          [[simdgroup_index_in_threadgroup]]
+) {
+    // Decode has seq_q = 1, so one threadgroup per (sequence, head) pair
+    const uint seq_idx = tgid / num_heads_q;
+    const uint head_q = tgid % num_heads_q;
+
+    if (seq_idx >= num_seqs) return;
+
+    const uint gqa_ratio = num_heads_q / num_heads_kv;
+    const uint head_kv = head_q / gqa_ratio;
+
+    // Q layout: [num_seqs, num_heads_q, head_dim]
+    const uint q_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
+
+    // K/V FP8 layout: [num_seqs, num_heads_kv, seq_k, head_dim]
+    const uint kv_stride_s = head_dim;
+    const uint kv_stride_h = seq_k * head_dim;
+    const uint kv_stride_b = num_heads_kv * kv_stride_h;
+    const uint kv_base = seq_idx * kv_stride_b + head_kv * kv_stride_h;
+
+    // Scale layout: [num_seqs, num_heads_kv, seq_k]
+    const uint scale_stride_h = seq_k;
+    const uint scale_stride_b = num_heads_kv * scale_stride_h;
+    const uint scale_base = seq_idx * scale_stride_b + head_kv * scale_stride_h;
+
+    // Load Q into registers (distributed across simdgroup 0)
+    const uint elems_per_lane = head_dim / SIMD_SIZE;
+    float q_reg[HEAD_DIM_128 / SIMD_SIZE];
+
+    if (sg_id == 0) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
+    }
+
+    // Threadgroup memory for K/V (dequantized to half, double-buffered)
+    threadgroup half K_smem[2][TILE_KV][HEAD_DIM_128];
+    threadgroup half V_smem[2][TILE_KV][HEAD_DIM_128];
+
+    // Online softmax state
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+    float o_acc[HEAD_DIM_128 / SIMD_SIZE];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        o_acc[i] = 0.0f;
+    }
+
+    const uint num_tiles = (seq_k + TILE_KV - 1) / TILE_KV;
+
+    // Preload first tile (dequantize FP8 -> FP16 on load)
+    {
+        uint tile_len = min(uint(TILE_KV), seq_k);
+        uint elems = tile_len * head_dim;
+        uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+        for (uint i = 0; i < per_thread; ++i) {
+            uint idx = tid + i * THREADS_PER_TG;
+            if (idx < elems) {
+                uint kv_row = idx / head_dim;
+                uint kv_col = idx % head_dim;
+
+                // Load scales for this token
+                half k_scale = K_scales[scale_base + kv_row];
+                half v_scale = V_scales[scale_base + kv_row];
+
+                // Load and dequantize K
+                uint8_t k_packed = K_fp8[kv_base + kv_row * kv_stride_s + kv_col];
+                K_smem[0][kv_row][kv_col] = dequant_fp8_e4m3(k_packed, k_scale);
+
+                // Load and dequantize V
+                uint8_t v_packed = V_fp8[kv_base + kv_row * kv_stride_s + kv_col];
+                V_smem[0][kv_row][kv_col] = dequant_fp8_e4m3(v_packed, v_scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint buf = 0;
+
+    for (uint tile_idx = 0; tile_idx < num_tiles; ++tile_idx) {
+        uint buf_load = 1 - buf;
+        uint tile_start = tile_idx * TILE_KV;
+        uint tile_len = min(uint(TILE_KV), seq_k - tile_start);
+
+        // Load next tile (all threads) with FP8 dequantization
+        if (tile_idx + 1 < num_tiles) {
+            uint next_start = (tile_idx + 1) * TILE_KV;
+            uint next_len = min(uint(TILE_KV), seq_k - next_start);
+            uint elems = next_len * head_dim;
+            uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+            for (uint i = 0; i < per_thread; ++i) {
+                uint idx = tid + i * THREADS_PER_TG;
+                if (idx < elems) {
+                    uint kv_row = idx / head_dim;
+                    uint kv_col = idx % head_dim;
+
+                    // Token position in full sequence
+                    uint global_kv_row = next_start + kv_row;
+
+                    half k_scale = K_scales[scale_base + global_kv_row];
+                    half v_scale = V_scales[scale_base + global_kv_row];
+
+                    uint8_t k_packed = K_fp8[kv_base + global_kv_row * kv_stride_s + kv_col];
+                    K_smem[buf_load][kv_row][kv_col] = dequant_fp8_e4m3(k_packed, k_scale);
+
+                    uint8_t v_packed = V_fp8[kv_base + global_kv_row * kv_stride_s + kv_col];
+                    V_smem[buf_load][kv_row][kv_col] = dequant_fp8_e4m3(v_packed, v_scale);
+                }
+            }
+        }
+
+        // Compute (simdgroup 0 only for single Q)
+        if (sg_id == 0) {
+            float scores[TILE_KV];
+
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_smem[buf][ki][d]);
+                }
+                dot = simd_sum(dot);
+                scores[ki] = dot * scale;
+            }
+
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+                scores[ki] = -INFINITY;
+            }
+
+            // Online softmax
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float corr = exp(m_prev - m_new);
+
+            l_prev *= corr;
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= corr;
+            }
+
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                l_prev += p;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_smem[buf][ki][d]);
+                }
+            }
+
+            m_prev = m_new;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf = buf_load;
+    }
+
+    // Store output (simdgroup 0)
+    if (sg_id == 0) {
+        const uint o_offset = seq_idx * num_heads_q * head_dim + head_q * head_dim;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Flash Attention V2 - FP8 Quantized KV Cache (Causal Prefill)
+//
+// For prefill with FP8 KV cache. Similar to flash_attention_v2_causal but
+// with on-the-fly FP8 dequantization of K and V.
+// ---------------------------------------------------------------------------
+
+kernel void flash_attention_v2_fp8_kv_causal(
+    device const half* Q                [[buffer(0)]],
+    device const uint8_t* K_fp8         [[buffer(1)]],
+    device const uint8_t* V_fp8         [[buffer(2)]],
+    device const half* K_scales         [[buffer(3)]],
+    device const half* V_scales         [[buffer(4)]],
+    device half* O                      [[buffer(5)]],
+    constant AttentionParams& params    [[buffer(6)]],
+    uint3 tgid                          [[threadgroup_position_in_grid]],
+    uint tid                            [[thread_index_in_threadgroup]],
+    uint lane_id                        [[thread_index_in_simdgroup]],
+    uint sg_id                          [[simdgroup_index_in_threadgroup]]
+) {
+    const uint head_q = tgid.x;
+    const uint q_tile_idx = tgid.y;
+    const uint batch_idx = tgid.z;
+
+    const uint head_dim = params.head_dim;
+    const uint seq_q = params.seq_q;
+    const uint seq_k = params.seq_k;
+    const float attn_scale = params.scale;
+
+    const uint head_kv = head_q / params.gqa_ratio;
+
+    const uint q_start = q_tile_idx * TILE_Q;
+    if (q_start >= seq_q) return;
+
+    const uint q_rows = min(TILE_Q, seq_q - q_start);
+
+    // Strides
+    const uint q_stride_b = params.num_heads_q * seq_q * head_dim;
+    const uint q_stride_h = seq_q * head_dim;
+    const uint q_stride_s = head_dim;
+
+    const uint k_stride_b = params.num_heads_kv * seq_k * head_dim;
+    const uint k_stride_h = seq_k * head_dim;
+    const uint k_stride_s = head_dim;
+
+    // Scale strides: [batch, heads_kv, seq_k]
+    const uint scale_stride_b = params.num_heads_kv * seq_k;
+    const uint scale_stride_h = seq_k;
+
+    const uint q_base = batch_idx * q_stride_b + head_q * q_stride_h + q_start * q_stride_s;
+    const uint kv_base = batch_idx * k_stride_b + head_kv * k_stride_h;
+    const uint scale_base = batch_idx * scale_stride_b + head_kv * scale_stride_h;
+
+    threadgroup half Q_tile[TILE_Q][HEAD_DIM_128];
+    threadgroup half K_tile[2][TILE_KV][HEAD_DIM_128];
+    threadgroup half V_tile[2][TILE_KV][HEAD_DIM_128];
+
+    // Load Q tile (FP16, no dequantization needed)
+    {
+        const uint elems = q_rows * head_dim;
+        const uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        for (uint i = 0; i < per_thread; ++i) {
+            uint idx = tid + i * THREADS_PER_TG;
+            if (idx < elems) {
+                uint q_row = idx / head_dim;
+                uint q_col = idx % head_dim;
+                Q_tile[q_row][q_col] = Q[q_base + q_row * q_stride_s + q_col];
+            }
+        }
+    }
+
+    const uint rows_per_sg = TILE_Q / NUM_SIMDGROUPS;
+    const uint sg_q_start = sg_id * rows_per_sg;
+    const uint sg_q_rows = min(rows_per_sg, (q_rows > sg_q_start) ? (q_rows - sg_q_start) : 0u);
+
+    const uint elems_per_lane = head_dim / SIMD_SIZE;
+    float q_reg[4][HEAD_DIM_128 / SIMD_SIZE];
+    float m_prev[4];
+    float l_prev[4];
+    float o_acc[4][HEAD_DIM_128 / SIMD_SIZE];
+
+    for (uint r = 0; r < rows_per_sg; ++r) {
+        m_prev[r] = -INFINITY;
+        l_prev[r] = 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) o_acc[r][i] = 0.0f;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint r = 0; r < sg_q_rows; ++r) {
+        uint q_row = sg_q_start + r;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[r][i] = float(Q_tile[q_row][d]);
+        }
+    }
+
+    // Causal limit
+    const uint max_q_pos = q_start + q_rows - 1;
+    const uint causal_limit = min(max_q_pos + 1, seq_k);
+    const uint num_kv_tiles = (causal_limit + TILE_KV - 1) / TILE_KV;
+
+    // Preload first tile with FP8 dequantization
+    {
+        uint tile_len = min(uint(TILE_KV), causal_limit);
+        uint elems = tile_len * head_dim;
+        uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        for (uint i = 0; i < per_thread; ++i) {
+            uint idx = tid + i * THREADS_PER_TG;
+            if (idx < elems) {
+                uint kv_row = idx / head_dim;
+                uint kv_col = idx % head_dim;
+
+                half k_scale = K_scales[scale_base + kv_row];
+                half v_scale = V_scales[scale_base + kv_row];
+
+                uint8_t k_packed = K_fp8[kv_base + kv_row * k_stride_s + kv_col];
+                K_tile[0][kv_row][kv_col] = dequant_fp8_e4m3(k_packed, k_scale);
+
+                uint8_t v_packed = V_fp8[kv_base + kv_row * k_stride_s + kv_col];
+                V_tile[0][kv_row][kv_col] = dequant_fp8_e4m3(v_packed, v_scale);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint buf = 0;
+
+    for (uint tile_idx = 0; tile_idx < num_kv_tiles; ++tile_idx) {
+        uint buf_load = 1 - buf;
+        uint tile_start = tile_idx * TILE_KV;
+        uint tile_len = min(uint(TILE_KV), causal_limit - tile_start);
+
+        // Load next tile with FP8 dequantization
+        if (tile_idx + 1 < num_kv_tiles) {
+            uint next_start = (tile_idx + 1) * TILE_KV;
+            uint next_len = min(uint(TILE_KV), causal_limit - next_start);
+            uint elems = next_len * head_dim;
+            uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+            for (uint i = 0; i < per_thread; ++i) {
+                uint idx = tid + i * THREADS_PER_TG;
+                if (idx < elems) {
+                    uint kv_row = idx / head_dim;
+                    uint kv_col = idx % head_dim;
+                    uint global_kv_row = next_start + kv_row;
+
+                    half k_scale = K_scales[scale_base + global_kv_row];
+                    half v_scale = V_scales[scale_base + global_kv_row];
+
+                    uint8_t k_packed = K_fp8[kv_base + global_kv_row * k_stride_s + kv_col];
+                    K_tile[buf_load][kv_row][kv_col] = dequant_fp8_e4m3(k_packed, k_scale);
+
+                    uint8_t v_packed = V_fp8[kv_base + global_kv_row * k_stride_s + kv_col];
+                    V_tile[buf_load][kv_row][kv_col] = dequant_fp8_e4m3(v_packed, v_scale);
+                }
+            }
+        }
+
+        // Compute with causal mask
+        for (uint r = 0; r < sg_q_rows; ++r) {
+            uint global_q_pos = q_start + sg_q_start + r;
+            float scores[TILE_KV];
+
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                uint k_pos = tile_start + ki;
+
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[r][i] * float(K_tile[buf][ki][d]);
+                }
+                dot = simd_sum(dot);
+
+                // Branchless causal mask
+                float score = dot * attn_scale;
+                scores[ki] = select(score, -INFINITY, k_pos > global_q_pos);
+            }
+
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+                scores[ki] = -INFINITY;
+            }
+
+            // Online softmax
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev[r], m_tile);
+            float corr = exp(m_prev[r] - m_new);
+
+            l_prev[r] *= corr;
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[r][i] *= corr;
+            }
+
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                l_prev[r] += p;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[r][i] += p * float(V_tile[buf][ki][d]);
+                }
+            }
+
+            m_prev[r] = m_new;
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        buf = buf_load;
+    }
+
+    // Store output
+    const uint o_base = batch_idx * q_stride_b + head_q * q_stride_h + q_start * q_stride_s;
+
+    for (uint r = 0; r < sg_q_rows; ++r) {
+        uint global_q = q_start + sg_q_start + r;
+        if (global_q >= seq_q) continue;
+
+        float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
+
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_base + (sg_q_start + r) * q_stride_s + d] = half(o_acc[r][i] * inv_l);
             }
         }
     }

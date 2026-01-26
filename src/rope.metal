@@ -719,3 +719,402 @@ kernel void test_rope_roundtrip(
     output[base_idx + pair_idx * 2] = bwd.x;
     output[base_idx + pair_idx * 2 + 1] = bwd.y;
 }
+
+// ============================================================================
+// YaRN (Yet another RoPE extensioN) Kernels
+// ============================================================================
+//
+// Implements YaRN for context window extension as described in:
+// "YaRN: Efficient Context Window Extension" (arXiv:2309.00071)
+//
+// YaRN combines NTK-aware interpolation with per-dimension scaling:
+// 1. NTK-aware base scaling: base_scaled = base * (alpha ** (dim / (dim - 2)))
+// 2. Per-dimension mscale interpolation based on wavelength
+// 3. Attention temperature scaling: sqrt(1 / scale_factor) or mscale formula
+//
+// The inv_freq values are pre-computed on Python/CPU side using the YaRN
+// interpolation formula. These kernels apply RoPE using the pre-computed
+// YaRN-adjusted frequencies.
+//
+// ============================================================================
+
+/// YaRN RoPE forward kernel with attention scaling.
+///
+/// Uses pre-computed YaRN inv_freq values (NTK-aware + mscale interpolation).
+/// The attention_scale is applied to the output to adjust for extended context.
+///
+/// @param input          Input tensor [batch, seq_len, num_heads, head_dim]
+/// @param cos_cache      Pre-computed YaRN cos values [max_seq, head_dim/2]
+/// @param sin_cache      Pre-computed YaRN sin values [max_seq, head_dim/2]
+/// @param output         Output tensor (same shape as input)
+/// @param batch_size     Batch dimension
+/// @param seq_len        Current sequence length
+/// @param num_heads      Number of attention heads
+/// @param head_dim       Dimension per head (must be even)
+/// @param position_offset For KV cache continuation
+/// @param attention_scale YaRN attention scaling factor (typically mscale or 1/sqrt(s))
+kernel void rope_yarn_forward(
+    device const half* input          [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    device half* output               [[buffer(3)]],
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& seq_len            [[buffer(5)]],
+    constant uint& num_heads          [[buffer(6)]],
+    constant uint& head_dim           [[buffer(7)]],
+    constant uint& position_offset    [[buffer(8)]],
+    constant float& attention_scale   [[buffer(9)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint pair_idx = gid.x;      // Which pair within head_dim (0 to head_dim/2 - 1)
+    uint head_idx = gid.y;      // Which head
+    uint batch_seq = gid.z;     // Combined batch * seq index
+
+    uint half_head_dim = head_dim / 2;
+    if (pair_idx >= half_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    // Compute position with offset (for KV cache continuation)
+    uint position = seq_idx + position_offset;
+
+    // Load pre-computed YaRN cos/sin for this position and dimension
+    uint cache_idx = position * half_head_dim + pair_idx;
+    half cos_val = cos_cache[cache_idx];
+    half sin_val = sin_cache[cache_idx];
+
+    // Input index: [batch, seq, heads, head_dim]
+    uint input_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx_x = input_base + pair_idx * 2;
+    uint idx_y = input_base + pair_idx * 2 + 1;
+
+    half x = input[idx_x];
+    half y = input[idx_y];
+
+    half2 rotated = apply_rope_rotation(x, y, cos_val, sin_val);
+
+    // Apply YaRN attention scaling
+    half scale = half(attention_scale);
+    output[idx_x] = rotated.x * scale;
+    output[idx_y] = rotated.y * scale;
+}
+
+/// YaRN RoPE for MLA latent representations.
+///
+/// Applies YaRN-scaled RoPE only to the qk_rope_head_dim portion of the
+/// kv_a_proj output, leaving kv_lora_rank unchanged.
+///
+/// @param input          kv_a_proj output [batch, seq_len, kv_lora_rank + rope_dim]
+/// @param cos_cache      Pre-computed YaRN cos [max_seq, rope_dim/2]
+/// @param sin_cache      Pre-computed YaRN sin [max_seq, rope_dim/2]
+/// @param output         Output tensor (same shape)
+/// @param batch_size     Batch dimension
+/// @param seq_len        Current sequence length
+/// @param kv_lora_rank   Latent dimension (passes through unchanged)
+/// @param rope_dim       RoPE dimension (qk_rope_head_dim)
+/// @param position_offset For KV cache continuation
+/// @param attention_scale YaRN attention scaling factor
+kernel void rope_yarn_latent(
+    device const half* input          [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    device half* output               [[buffer(3)]],
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& seq_len            [[buffer(5)]],
+    constant uint& kv_lora_rank       [[buffer(6)]],
+    constant uint& rope_dim           [[buffer(7)]],
+    constant uint& position_offset    [[buffer(8)]],
+    constant float& attention_scale   [[buffer(9)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint elem_idx = gid.x;      // Element index within the total dimension
+    uint batch_seq = gid.y;     // Combined batch * seq index
+
+    uint total_dim = kv_lora_rank + rope_dim;
+    if (elem_idx >= total_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint input_idx = (batch_idx * seq_len + seq_idx) * total_dim + elem_idx;
+
+    if (elem_idx < kv_lora_rank) {
+        // Pass through latent portion unchanged
+        output[input_idx] = input[input_idx];
+    } else {
+        // Apply YaRN RoPE to the rope_dim portion
+        uint rope_idx = elem_idx - kv_lora_rank;
+        uint pair_idx = rope_idx / 2;
+        uint half_rope_dim = rope_dim / 2;
+
+        // Load YaRN cos/sin for this position and dimension
+        uint cache_idx = position * half_rope_dim + pair_idx;
+        half cos_val = cos_cache[cache_idx];
+        half sin_val = sin_cache[cache_idx];
+
+        // Load the pair
+        uint base_idx = (batch_idx * seq_len + seq_idx) * total_dim + kv_lora_rank;
+        half x = input[base_idx + pair_idx * 2];
+        half y = input[base_idx + pair_idx * 2 + 1];
+
+        half2 rotated = apply_rope_rotation(x, y, cos_val, sin_val);
+
+        // Apply YaRN attention scaling
+        half scale = half(attention_scale);
+
+        // Only write the element this thread is responsible for
+        if (rope_idx % 2 == 0) {
+            output[input_idx] = rotated.x * scale;
+        } else {
+            output[input_idx] = rotated.y * scale;
+        }
+    }
+}
+
+/// Simdgroup-optimized YaRN RoPE for MLA latents (small rope_dim).
+///
+/// Same as rope_yarn_latent but optimized for small rope_dim using simdgroup.
+kernel void rope_yarn_latent_small(
+    device const half* input          [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    device half* output               [[buffer(3)]],
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& seq_len            [[buffer(5)]],
+    constant uint& kv_lora_rank       [[buffer(6)]],
+    constant uint& rope_dim           [[buffer(7)]],
+    constant uint& position_offset    [[buffer(8)]],
+    constant float& attention_scale   [[buffer(9)]],
+    uint tg_idx                       [[threadgroup_position_in_grid]],
+    uint lane_id                      [[thread_index_in_simdgroup]]
+) {
+    uint batch_seq = tg_idx;
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint total_dim = kv_lora_rank + rope_dim;
+    uint input_base = (batch_idx * seq_len + seq_idx) * total_dim;
+
+    half scale = half(attention_scale);
+
+    // Copy latent portion unchanged
+    for (uint i = lane_id; i < kv_lora_rank; i += 32) {
+        output[input_base + i] = input[input_base + i];
+    }
+
+    // Apply YaRN RoPE to positional portion
+    uint half_rope = rope_dim / 2;
+    uint rope_base = input_base + kv_lora_rank;
+    for (uint pair_idx = lane_id; pair_idx < half_rope; pair_idx += 32) {
+        uint cache_idx = position * half_rope + pair_idx;
+        half cos_val = cos_cache[cache_idx];
+        half sin_val = sin_cache[cache_idx];
+
+        half x = input[rope_base + pair_idx * 2];
+        half y = input[rope_base + pair_idx * 2 + 1];
+        half2 rotated = apply_rope_rotation(x, y, cos_val, sin_val);
+
+        // Apply scaling and write
+        output[rope_base + pair_idx * 2] = rotated.x * scale;
+        output[rope_base + pair_idx * 2 + 1] = rotated.y * scale;
+    }
+}
+
+/// Generate YaRN RoPE cos/sin cache with NTK-aware interpolation.
+///
+/// This kernel computes the YaRN-interpolated frequencies on the GPU.
+/// For most use cases, pre-computing on CPU is preferred for flexibility.
+///
+/// YaRN interpolation factors per dimension:
+///   wavelength = 2 * pi * base^(2*i/dim)
+///   if wavelength < original_context:
+///       inv_freq[i] = base_inv_freq[i]  # No interpolation (high freq)
+///   elif wavelength > original_context * beta:
+///       inv_freq[i] = base_inv_freq[i] / factor  # Full interpolation (low freq)
+///   else:
+///       smooth = (wavelength / original_context - 1) / (beta - 1)
+///       inv_freq[i] = base_inv_freq[i] * (1 - smooth + smooth / factor)  # Ramp
+///
+/// @param cos_out        Output cos cache [seq_len, rope_dim/2]
+/// @param sin_out        Output sin cache [seq_len, rope_dim/2]
+/// @param seq_len        Number of positions to generate
+/// @param rope_dim       RoPE dimension
+/// @param base           Base frequency (default 10000)
+/// @param factor         Context extension factor (e.g., 4.0 for 4x)
+/// @param original_context Original training context length
+/// @param beta_fast      Upper wavelength boundary multiplier (default 32)
+/// @param beta_slow      Lower wavelength boundary multiplier (default 1)
+kernel void rope_yarn_generate_cache(
+    device half* cos_out              [[buffer(0)]],
+    device half* sin_out              [[buffer(1)]],
+    constant uint& seq_len            [[buffer(2)]],
+    constant uint& rope_dim           [[buffer(3)]],
+    constant float& base              [[buffer(4)]],
+    constant float& factor            [[buffer(5)]],
+    constant uint& original_context   [[buffer(6)]],
+    constant float& beta_fast         [[buffer(7)]],
+    constant float& beta_slow         [[buffer(8)]],
+    uint2 gid                         [[thread_position_in_grid]]
+) {
+    uint dim_idx = gid.x;       // Dimension pair index (0 to rope_dim/2 - 1)
+    uint pos_idx = gid.y;       // Position index
+
+    uint half_rope_dim = rope_dim / 2;
+    if (dim_idx >= half_rope_dim || pos_idx >= seq_len) return;
+
+    // Compute base inverse frequency
+    float exp_val = float(dim_idx * 2) / float(rope_dim);
+    float base_inv_freq = 1.0f / powr(base, exp_val);
+
+    // Compute wavelength for this dimension
+    float wavelength = 2.0f * M_PI_F / base_inv_freq;  // 2π * base^(2i/dim)
+
+    // Compute YaRN interpolation factor
+    float inv_freq;
+    float low_threshold = float(original_context);
+    float high_threshold = float(original_context) * beta_fast;
+
+    if (wavelength < low_threshold) {
+        // High frequency: no interpolation
+        inv_freq = base_inv_freq;
+    } else if (wavelength > high_threshold) {
+        // Low frequency: full interpolation
+        inv_freq = base_inv_freq / factor;
+    } else {
+        // Ramp region: smooth interpolation
+        // Use beta_slow for the ramp calculation (typically 1.0)
+        float low_ramp = low_threshold * beta_slow;
+        float ramp_range = high_threshold - low_ramp;
+        float smooth = (wavelength - low_ramp) / ramp_range;
+        smooth = clamp(smooth, 0.0f, 1.0f);
+        inv_freq = base_inv_freq * (1.0f - smooth + smooth / factor);
+    }
+
+    // Compute theta = position * inv_freq
+    float theta = float(pos_idx) * inv_freq;
+
+    // Write to cache
+    uint cache_idx = pos_idx * half_rope_dim + dim_idx;
+    cos_out[cache_idx] = half(cos(theta));
+    sin_out[cache_idx] = half(sin(theta));
+}
+
+/// Batched YaRN RoPE for Q and K tensors simultaneously.
+///
+/// Same as rope_qk_fused but with YaRN attention scaling.
+kernel void rope_yarn_qk_fused(
+    device const half* q_input        [[buffer(0)]],
+    device const half* k_input        [[buffer(1)]],
+    device const half* cos_cache      [[buffer(2)]],
+    device const half* sin_cache      [[buffer(3)]],
+    device half* q_output             [[buffer(4)]],
+    device half* k_output             [[buffer(5)]],
+    constant uint& batch_size         [[buffer(6)]],
+    constant uint& seq_len            [[buffer(7)]],
+    constant uint& num_heads          [[buffer(8)]],
+    constant uint& num_kv_heads       [[buffer(9)]],
+    constant uint& head_dim           [[buffer(10)]],
+    constant uint& position_offset    [[buffer(11)]],
+    constant float& attention_scale   [[buffer(12)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint pair_idx = gid.x;      // Pair within head_dim
+    uint head_idx = gid.y;      // Head index (max of num_heads, num_kv_heads)
+    uint batch_seq = gid.z;     // Combined batch * seq
+
+    uint half_head_dim = head_dim / 2;
+    if (pair_idx >= half_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint cache_idx = position * half_head_dim + pair_idx;
+    half cos_val = cos_cache[cache_idx];
+    half sin_val = sin_cache[cache_idx];
+
+    half scale = half(attention_scale);
+
+    // Process Q if head_idx < num_heads
+    if (head_idx < num_heads) {
+        uint q_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+        uint q_idx_x = q_base + pair_idx * 2;
+        uint q_idx_y = q_base + pair_idx * 2 + 1;
+
+        half q_x = q_input[q_idx_x];
+        half q_y = q_input[q_idx_y];
+        half2 q_rot = apply_rope_rotation(q_x, q_y, cos_val, sin_val);
+
+        q_output[q_idx_x] = q_rot.x * scale;
+        q_output[q_idx_y] = q_rot.y * scale;
+    }
+
+    // Process K if head_idx < num_kv_heads
+    if (head_idx < num_kv_heads) {
+        uint k_base = ((batch_idx * seq_len + seq_idx) * num_kv_heads + head_idx) * head_dim;
+        uint k_idx_x = k_base + pair_idx * 2;
+        uint k_idx_y = k_base + pair_idx * 2 + 1;
+
+        half k_x = k_input[k_idx_x];
+        half k_y = k_input[k_idx_y];
+        half2 k_rot = apply_rope_rotation(k_x, k_y, cos_val, sin_val);
+
+        k_output[k_idx_x] = k_rot.x * scale;
+        k_output[k_idx_y] = k_rot.y * scale;
+    }
+}
+
+/// In-place YaRN RoPE (overwrites input buffer).
+kernel void rope_yarn_inplace(
+    device half* data                 [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    constant uint& batch_size         [[buffer(3)]],
+    constant uint& seq_len            [[buffer(4)]],
+    constant uint& num_heads          [[buffer(5)]],
+    constant uint& head_dim           [[buffer(6)]],
+    constant uint& position_offset    [[buffer(7)]],
+    constant float& attention_scale   [[buffer(8)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint pair_idx = gid.x;
+    uint head_idx = gid.y;
+    uint batch_seq = gid.z;
+
+    uint half_head_dim = head_dim / 2;
+    if (pair_idx >= half_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint cache_idx = position * half_head_dim + pair_idx;
+    half cos_val = cos_cache[cache_idx];
+    half sin_val = sin_cache[cache_idx];
+
+    uint data_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx_x = data_base + pair_idx * 2;
+    uint idx_y = data_base + pair_idx * 2 + 1;
+
+    half x = data[idx_x];
+    half y = data[idx_y];
+
+    half2 rotated = apply_rope_rotation(x, y, cos_val, sin_val);
+
+    half scale = half(attention_scale);
+    data[idx_x] = rotated.x * scale;
+    data[idx_y] = rotated.y * scale;
+}

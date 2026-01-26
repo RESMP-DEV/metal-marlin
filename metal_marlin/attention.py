@@ -330,6 +330,61 @@ def flash_attention_metal(
     )
 
 
+def sliding_window_attention_metal(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: int,
+    scale: float | None = None,
+    causal: bool = True,
+    num_kv_heads: int | None = None,
+) -> torch.Tensor:
+    """
+    Sliding window attention for Metal/MPS devices.
+
+    Each token only attends to the most recent window_size tokens, providing
+    O(seq * window) memory complexity instead of O(seq^2). This is the
+    attention pattern used by Mistral and similar models.
+
+    Args:
+        q: Query tensor [batch, num_heads, seq_len, head_dim]
+        k: Key tensor [batch, num_kv_heads, kv_seq_len, head_dim]
+        v: Value tensor [batch, num_kv_heads, kv_seq_len, head_dim]
+        window_size: Sliding window size (e.g., 4096 for Mistral)
+        scale: Optional scale factor. If None, uses 1/sqrt(head_dim)
+        causal: Whether to apply causal masking within window
+        num_kv_heads: Number of KV heads for GQA. If provided and different
+            from num_heads, K and V will be repeated accordingly.
+
+    Returns:
+        Attention output [batch, num_heads, seq_len, head_dim]
+    """
+    # Import here to avoid circular dependency
+    from .sliding_window_attention import sliding_window_attention
+
+    if scale is None:
+        scale = q.shape[-1] ** -0.5
+
+    num_heads = q.shape[1]
+
+    # Handle GQA by repeating K/V heads
+    # Note: The sliding_window_attention kernel handles GQA natively,
+    # but for compatibility we can also expand here
+    if num_kv_heads is not None and num_kv_heads < num_heads:
+        repeat_factor = num_heads // num_kv_heads
+        k = k.repeat_interleave(repeat_factor, dim=1)
+        v = v.repeat_interleave(repeat_factor, dim=1)
+
+    return sliding_window_attention(
+        q,
+        k,
+        v,
+        window_size=window_size,
+        scale=scale,
+        causal=causal,
+    )
+
+
 def create_causal_mask(
     seq_len: int,
     kv_seq_len: int | None = None,
@@ -361,4 +416,61 @@ def create_causal_mask(
         torch.full((seq_len, kv_seq_len), float("-inf"), device=device),
         diagonal=1,
     )
+    return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]
+
+
+def create_sliding_window_mask(
+    seq_len: int,
+    window_size: int,
+    kv_seq_len: int | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor | None:
+    """
+    Create a sliding window + causal attention mask.
+
+    For use with standard attention implementations that don't have native
+    sliding window support. The mask allows each position to attend only to
+    positions within the window and before it (causal).
+
+    Note: For optimal performance, use sliding_window_attention_metal() instead
+    which uses a specialized kernel that doesn't materialize the full mask.
+
+    Args:
+        seq_len: Query sequence length
+        window_size: Sliding window size
+        kv_seq_len: Key/value sequence length (defaults to seq_len)
+        device: Device to create the mask on
+
+    Returns:
+        Mask with -inf for masked positions, or None for single-token decode
+    """
+    kv_seq_len = kv_seq_len or seq_len
+
+    # Single token decode - no masking needed
+    if seq_len == 1:
+        return None
+
+    if device is None:
+        device = _get_device()
+
+    # Create position indices
+    q_positions = torch.arange(seq_len, device=device).unsqueeze(1)
+    k_positions = torch.arange(kv_seq_len, device=device).unsqueeze(0)
+
+    # Causal mask: k_pos <= q_pos
+    causal_mask = k_positions <= q_positions
+
+    # Window mask: q_pos - k_pos < window_size
+    window_mask = (q_positions - k_positions) < window_size
+
+    # Combine: must satisfy both conditions
+    combined_mask = causal_mask & window_mask
+
+    # Convert to attention mask format (-inf for masked positions)
+    mask = torch.where(
+        combined_mask,
+        torch.tensor(0.0, device=device),
+        torch.tensor(float("-inf"), device=device),
+    )
+
     return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]
