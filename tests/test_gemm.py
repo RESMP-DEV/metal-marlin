@@ -21,17 +21,20 @@ Error budget:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
 
-from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
+from metal_marlin._compat import HAS_MPS, HAS_TORCH
+from metal_marlin._compat import torch as _torch
 
 from .conftest import requires_mps, requires_torch
 
 if TYPE_CHECKING:
     import torch as torch_types
+
+torch: Any = _torch
 
 # ---------------------------------------------------------------------------
 # FP4 E2M1 lookup table (matches llama.cpp kvalues_mxfp4_f)

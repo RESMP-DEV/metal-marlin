@@ -706,13 +706,13 @@ def benchmark_against_native(
 
     # Warmup
     for _ in range(warmup):
-        out = quantized_linear(x, w_packed, fp4_scales, group_size)
+        quantized_linear(x, w_packed, fp4_scales, group_size)
         torch.mps.synchronize()
 
     # Timed
     start = time.perf_counter()
     for _ in range(iterations):
-        out = quantized_linear(x, w_packed, fp4_scales, group_size)
+        quantized_linear(x, w_packed, fp4_scales, group_size)
         torch.mps.synchronize()
     elapsed = (time.perf_counter() - start) / iterations * 1000
     results["marlin_fp4_ms"] = elapsed
@@ -720,12 +720,12 @@ def benchmark_against_native(
 
     # --- FP16 reference (for speedup calculation) ---
     for _ in range(warmup):
-        out_ref = x @ w.T
+        x @ w.T
         torch.mps.synchronize()
 
     start = time.perf_counter()
     for _ in range(iterations):
-        out_ref = x @ w.T
+        x @ w.T
         torch.mps.synchronize()
     elapsed = (time.perf_counter() - start) / iterations * 1000
     results["fp16_ms"] = elapsed

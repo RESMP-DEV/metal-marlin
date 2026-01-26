@@ -615,19 +615,19 @@ class TestDecodePerformance:
 
         # Warmup GEMM
         for _ in range(warmup_iters):
-            out = marlin_gemm_fp4(A, packed, scales, group_size)
+            marlin_gemm_fp4(A, packed, scales, group_size)
             torch.mps.synchronize()
 
         # Benchmark GEMM
         start = time.perf_counter()
         for _ in range(bench_iters):
-            out = marlin_gemm_fp4(A, packed, scales, group_size)
+            marlin_gemm_fp4(A, packed, scales, group_size)
             torch.mps.synchronize()
         gemm_time = (time.perf_counter() - start) / bench_iters * 1000  # ms
 
         # Warmup decode (same kernel for now)
         for _ in range(warmup_iters):
-            out = marlin_gemm_fp4(A, packed, scales, group_size)
+            marlin_gemm_fp4(A, packed, scales, group_size)
             torch.mps.synchronize()
 
         # Benchmark decode

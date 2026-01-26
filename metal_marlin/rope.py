@@ -72,9 +72,7 @@ class YaRNConfig:
         if self.scale_factor < 1.0:
             raise ValueError(f"scale_factor must be >= 1.0, got {self.scale_factor}")
         if self.beta_fast <= self.beta_slow:
-            raise ValueError(
-                f"beta_fast ({self.beta_fast}) must be > beta_slow ({self.beta_slow})"
-            )
+            raise ValueError(f"beta_fast ({self.beta_fast}) must be > beta_slow ({self.beta_slow})")
 
     @classmethod
     def from_hf_config(cls, config: dict[str, Any]) -> YaRNConfig | None:
@@ -222,12 +220,8 @@ def _yarn_find_correction_range(
     Returns:
         (low_idx, high_idx) tuple defining the interpolation range.
     """
-    low = math.floor(
-        _yarn_find_correction_dim(beta_fast, dim, base, max_position_embeddings)
-    )
-    high = math.ceil(
-        _yarn_find_correction_dim(beta_slow, dim, base, max_position_embeddings)
-    )
+    low = math.floor(_yarn_find_correction_dim(beta_fast, dim, base, max_position_embeddings))
+    high = math.ceil(_yarn_find_correction_dim(beta_slow, dim, base, max_position_embeddings))
     return max(low, 0), min(high, dim - 1)
 
 
@@ -563,7 +557,6 @@ try:
     from .metal_dispatch import (
         HAS_METAL,
         HAS_MPS,
-        MetalKernelLibrary,
         dispatch_kernel,
         get_default_library,
         mps_tensor_to_metal_buffer,
@@ -759,7 +752,6 @@ def dispatch_rope_yarn_latent(
     )
 
     # Choose kernel based on rope_dim size
-    half_rope_dim = rope_dim // 2
     if rope_dim <= 64:
         # Use simdgroup-optimized kernel for small rope_dim
         grid = (batch_size * seq_len, 1, 1)

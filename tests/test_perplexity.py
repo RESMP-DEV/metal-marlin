@@ -17,8 +17,9 @@ from __future__ import annotations
 import math
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pytest
@@ -28,8 +29,14 @@ _PYTHON_DIR = Path(__file__).parent.parent / "python"
 if str(_PYTHON_DIR) not in sys.path:
     sys.path.insert(0, str(_PYTHON_DIR))
 
-from metal_marlin._compat import HAS_TORCH, torch
+from metal_marlin._compat import HAS_TORCH
+from metal_marlin._compat import torch as _torch
 from metal_marlin.eval_perplexity import load_wikitext2
+
+if TYPE_CHECKING:
+    import torch as torch_types
+
+torch: Any = _torch
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -130,7 +137,7 @@ def compute_perplexity_torch(
 
 
 def compute_perplexity_numpy(
-    logits_fn,
+    logits_fn: Callable[[np.ndarray], np.ndarray],
     tokenizer: Any,
     texts: list[str],
     max_length: int = 512,
@@ -273,7 +280,7 @@ class TestPerplexity:
         degradation from quantization (FP16 -> FP4 E2M1) should be bounded.
         """
         _require_torch()
-        transformers = _require_transformers()
+        _require_transformers()
         assert torch is not None
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -318,7 +325,7 @@ class TestPerplexity:
         accumulation bugs.
         """
         _require_torch()
-        transformers = _require_transformers()
+        _require_transformers()
         assert torch is not None
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -349,7 +356,7 @@ class TestPerplexity:
         (more scale parameters = finer granularity = less quantization error).
         """
         _require_torch()
-        transformers = _require_transformers()
+        _require_transformers()
         assert torch is not None
 
         from transformers import AutoModelForCausalLM, AutoTokenizer

@@ -346,13 +346,15 @@ def _flash_attention_v2_prefill(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output
-    O = torch.empty((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty(
+        (batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
     params_buf = params.to_buffer(device)
 
     # Compute grid
@@ -369,7 +371,7 @@ def _flash_attention_v2_prefill(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def flash_attention_v2_decode(
@@ -412,13 +414,13 @@ def flash_attention_v2_decode(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output: [num_seqs, num_heads_q, head_dim]
-    O = torch.empty((num_seqs, num_heads_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty((num_seqs, num_heads_q, head_dim), dtype=torch.float16, device="mps")
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
 
     # Create scalar constant buffers for decode kernel
     # The decode kernel uses separate buffer arguments, not a struct
@@ -466,9 +468,9 @@ def flash_attention_v2_decode(
     )
 
     if squeeze_output:
-        return O
+        return output
     else:
-        return O.unsqueeze(2)
+        return output.unsqueeze(2)
 
 
 def flash_attention_v2_gqa(
@@ -526,13 +528,15 @@ def flash_attention_v2_gqa(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output
-    O = torch.empty((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty(
+        (batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
     params_buf = params.to_buffer(device)
 
     # Compute grid for GQA: dispatch by KV heads
@@ -548,7 +552,7 @@ def flash_attention_v2_gqa(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def flash_attention_v2_mqa(
@@ -603,13 +607,15 @@ def flash_attention_v2_mqa(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output
-    O = torch.empty((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty(
+        (batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
     params_buf = params.to_buffer(device)
 
     # Compute grid for MQA
@@ -625,7 +631,7 @@ def flash_attention_v2_mqa(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def benchmark_flash_attention(
@@ -669,14 +675,14 @@ def benchmark_flash_attention(
 
     # Warmup
     for _ in range(warmup):
-        _ = flash_attention_v2(Q, K, V, scale=scale, causal=True)
+        flash_attention_v2(Q, K, V, scale=scale, causal=True)
         torch.mps.synchronize()
 
     # Benchmark
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        O = flash_attention_v2(Q, K, V, scale=scale, causal=True)
+        flash_attention_v2(Q, K, V, scale=scale, causal=True)
         torch.mps.synchronize()
         end = time.perf_counter()
         times.append(end - start)

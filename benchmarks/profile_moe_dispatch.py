@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,8 +21,6 @@ from typing import Any
 
 # Ensure metal_marlin is importable from project layout
 _ROOT = Path(__file__).parent.parent
-import sys
-
 sys.path.insert(0, str(_ROOT))
 
 from metal_marlin._compat import HAS_TORCH, torch  # noqa: E402

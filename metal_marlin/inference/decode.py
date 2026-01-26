@@ -607,7 +607,6 @@ def _dequantize_fp4_torch(
     )
 
     # Unpack: each uint32 -> 8 nibbles
-    K_packed = K // 8
     output = torch.zeros((K, N), dtype=dtype, device=device)
 
     for i in range(8):

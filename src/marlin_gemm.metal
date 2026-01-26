@@ -652,7 +652,7 @@ inline void store_results(
             } else {
                 // Boundary path: store to threadgroup staging, then scatter
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
 
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
@@ -663,7 +663,7 @@ inline void store_results(
                         C[gr * N + gc] = staging[r][c];
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }
@@ -701,7 +701,7 @@ inline void store_results_divergent(
             } else {
                 // Boundary path: store to threadgroup staging, then scatter
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
 
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
@@ -712,7 +712,7 @@ inline void store_results_divergent(
                         C[gr * N + gc] = staging[r][c];
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }
@@ -810,7 +810,7 @@ inline void store_results_fp32(
             // simdgroup_store writes to threadgroup staging, then we convert
             // and scatter to global memory with bounds checking.
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
 
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint r = elem / 8;
@@ -822,7 +822,7 @@ inline void store_results_fp32(
                     C[gr * N + gc] = half(staging[r][c]);
                 }
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }
@@ -848,7 +848,7 @@ inline void store_results_fp32_bf16(
             }
 
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
 
             if (out_row + 8 <= M && out_col + 8 <= N) {
                 if (simd_lane < 8) {
@@ -873,7 +873,7 @@ inline void store_results_fp32_bf16(
                     }
                 }
             }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }
@@ -917,7 +917,7 @@ kernel void marlin_gemm_fp4(
     // Double-buffered threadgroup memory
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -967,7 +967,7 @@ kernel void marlin_gemm_fp4(
 
     // --- Epilogue: Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -1009,7 +1009,7 @@ kernel void marlin_gemm_fp4_fp32acc(
         half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
 #endif
-    threadgroup float staging[8][8];
+    threadgroup float staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1076,11 +1076,11 @@ kernel void marlin_gemm_fp4_fp32acc(
 
     // --- Store ---
     #if defined(USE_BF16_OUTPUTS)
-    store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
-                            sg_row_offset, sg_col_offset, simd_lane, staging);
+        store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
+                                sg_row_offset, sg_col_offset, simd_lane, staging[simd_id]);
     #else
-    store_results_fp32(acc, C, M, N, tg_row, tg_col,
-                       sg_row_offset, sg_col_offset, simd_lane, staging);
+        store_results_fp32(acc, C, M, N, tg_row, tg_col,
+                           sg_row_offset, sg_col_offset, simd_lane, staging[simd_id]);
     #endif
 }
 
@@ -1130,7 +1130,7 @@ kernel void marlin_gemm_fp4_3stage(
     // Triple-buffered threadgroup memory (24576 bytes total)
     threadgroup half A_tiles[NUM_STAGES][TILE_M][TILE_K];   // 3 * 4096B = 12288B
     threadgroup half B_tiles[NUM_STAGES][TILE_K][TILE_N];   // 3 * 4096B = 12288B
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1151,7 +1151,7 @@ kernel void marlin_gemm_fp4_3stage(
     // Early exit for degenerate case
     if (num_k_tiles == 0) {
         store_results(acc, C, M, N, tg_row, tg_col,
-                      sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                      sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
         return;
     }
 
@@ -1209,7 +1209,7 @@ kernel void marlin_gemm_fp4_3stage(
 
     // --- Epilogue: Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -1237,7 +1237,7 @@ kernel void marlin_gemm_divergent_fp4(
 ) {
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[DIVERGENT_COMPUTE_SG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1260,7 +1260,7 @@ kernel void marlin_gemm_divergent_fp4(
     if (num_k_tiles == 0) {
         if (is_compute) {
             store_results_divergent(acc, C, M, N, tg_row, tg_col,
-                                    compute_id, simd_lane, staging);
+                                    compute_id, simd_lane, staging[compute_id]);
         }
         return;
     }
@@ -1298,7 +1298,7 @@ kernel void marlin_gemm_divergent_fp4(
 
     if (is_compute) {
         store_results_divergent(acc, C, M, N, tg_row, tg_col,
-                                compute_id, simd_lane, staging);
+                                compute_id, simd_lane, staging[compute_id]);
     }
 }
 
@@ -1337,7 +1337,7 @@ kernel void marlin_gemm_fp4_single_stage(
     // Double-buffered tiles to overlap loads and compute
     threadgroup half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_tiles[2][TILE_K][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1390,7 +1390,7 @@ kernel void marlin_gemm_fp4_single_stage(
 
     // --- Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -1416,7 +1416,7 @@ kernel void marlin_gemm_fp16_single_stage(
 ) {
     threadgroup half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_tiles[2][TILE_K][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -1458,7 +1458,7 @@ kernel void marlin_gemm_fp16_single_stage(
     }
 
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -2031,7 +2031,7 @@ kernel void marlin_gemm_fused_fp4(
     // --- Memory allocation ---
     threadgroup half A_tiles[2][TILE_M][TILE_K];            // 2x4096B shared
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];   // 512B per-sg
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     // --- Tile assignment ---
     const uint tg_row = tgid.y * TILE_M;
@@ -2176,7 +2176,7 @@ kernel void marlin_gemm_fused_fp4(
     // =========================================================================
 
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -2218,7 +2218,7 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
         half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];
 #endif
-    threadgroup float staging[8][8];
+    threadgroup float staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -2354,11 +2354,11 @@ kernel void marlin_gemm_fused_fp4_fp32acc(
     }
 
     #if defined(USE_BF16_OUTPUTS)
-    store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
-                            sg_row_offset, sg_col_offset, simd_lane, staging);
+        store_results_fp32_bf16(acc, C, M, N, tg_row, tg_col,
+                                sg_row_offset, sg_col_offset, simd_lane, staging[simd_id]);
     #else
-    store_results_fp32(acc, C, M, N, tg_row, tg_col,
-                       sg_row_offset, sg_col_offset, simd_lane, staging);
+        store_results_fp32(acc, C, M, N, tg_row, tg_col,
+                           sg_row_offset, sg_col_offset, simd_lane, staging[simd_id]);
     #endif
 }
 
@@ -2385,7 +2385,7 @@ kernel void marlin_gemm_fused_u4(
 ) {
     threadgroup half A_tiles[2][TILE_M][TILE_K];
     threadgroup half B_staging[SIMDGROUPS_PER_TG][8][8];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -2493,7 +2493,7 @@ kernel void marlin_gemm_fused_u4(
     }
 
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -2535,7 +2535,7 @@ kernel void marlin_gemm_fp16_pipelined(
     // Double-buffered threadgroup memory (identical footprint to FP4 kernel)
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -2581,7 +2581,7 @@ kernel void marlin_gemm_fp16_pipelined(
 
     // --- Store ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -2775,7 +2775,7 @@ kernel void marlin_gemm_fp4_async(
 
     // Staging buffer for packed B data (reused across iterations)
     threadgroup uint B_packed_staging[TILE_K / FP4_PER_UINT][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -2831,7 +2831,7 @@ kernel void marlin_gemm_fp4_async(
 
     // --- Epilogue: Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 // ===========================================================================
@@ -2866,7 +2866,7 @@ kernel void marlin_gemm_fp4_async_deep(
     threadgroup half A_tiles[NUM_STAGES][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_STAGES][TILE_K][TILE_N];
     threadgroup uint B_packed_staging[NUM_STAGES][TILE_K / FP4_PER_UINT][TILE_N];
-    threadgroup half staging[8][8];
+    threadgroup half staging[SIMDGROUPS_PER_TG][8][8];
 
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
@@ -2923,7 +2923,7 @@ kernel void marlin_gemm_fp4_async_deep(
 
     // --- Epilogue: Store accumulated results ---
     store_results(acc, C, M, N, tg_row, tg_col,
-                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging);
+                  sg_row_offset, sg_col_offset, simd_lane, simd_id, staging[simd_id]);
 }
 
 #endif // __METAL_VERSION__ >= 310

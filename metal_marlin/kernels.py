@@ -27,8 +27,7 @@ Note:
 
 from __future__ import annotations
 
-import weakref
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
@@ -39,6 +38,7 @@ from .metal_dispatch import (
     MetalKernelLibrary,
     dispatch_kernel,
     get_default_library,
+    get_shader_source,
     mps_tensor_to_metal_buffer,
     require_mps,
 )
@@ -49,6 +49,13 @@ if HAS_TORCH:
 
 if TYPE_CHECKING:
     import torch
+
+
+class _MpsTensorToMetalBuffer(Protocol):
+    def __call__(self, tensor: torch.Tensor, device: Any, *, copy_back: bool = False) -> Any: ...
+
+
+mps_tensor_to_metal_buffer: _MpsTensorToMetalBuffer
 
 
 def _metal_required(*args: Any, **kwargs: Any) -> Any:
@@ -919,7 +926,11 @@ if HAS_METAL and HAS_MPS:
     from ._buffer_pool import MetalBufferPool
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
-    _WEIGHT_BUFFER_CACHE: dict[int, Any] = {}  # data_ptr -> MTLBuffer
+
+    _WEIGHT_BUFFER_CACHE: dict[tuple[int, int, int], Any] = {}
+
+    def _cache_key(tensor: torch.Tensor) -> tuple[int, int, int]:
+        return (tensor.data_ptr(), tensor.storage_offset(), id(tensor.untyped_storage()))
 
     class MarlinGemmDispatcher:
         """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
@@ -1090,12 +1101,12 @@ if HAS_METAL and HAS_MPS:
         lib: MetalKernelLibrary,
         device: Any,
         *,
-        cache: bool,
+        cache: bool = True,
     ) -> Any:
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
-        cache_key = tensor.data_ptr()
+        cache_key = _cache_key(tensor)
         if cache and cache_key in _WEIGHT_BUFFER_CACHE:
             return _WEIGHT_BUFFER_CACHE[cache_key]
 

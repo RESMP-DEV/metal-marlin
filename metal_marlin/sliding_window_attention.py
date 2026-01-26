@@ -336,13 +336,15 @@ def _sliding_window_attention_prefill(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output
-    O = torch.empty((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty(
+        (batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
     params_buf = params.to_buffer(device)
 
     # Compute grid
@@ -359,7 +361,7 @@ def _sliding_window_attention_prefill(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def sliding_window_attention_decode(
@@ -406,13 +408,13 @@ def sliding_window_attention_decode(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output: [num_seqs, num_heads_q, head_dim]
-    O = torch.empty((num_seqs, num_heads_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty((num_seqs, num_heads_q, head_dim), dtype=torch.float16, device="mps")
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
 
     # Create scalar constant buffers for decode kernel
     def make_uint32_buffer(val: int) -> Any:
@@ -461,9 +463,9 @@ def sliding_window_attention_decode(
     )
 
     if squeeze_output:
-        return O
+        return output
     else:
-        return O.unsqueeze(2)
+        return output.unsqueeze(2)
 
 
 def sliding_window_attention_gqa(
@@ -525,13 +527,15 @@ def sliding_window_attention_gqa(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output
-    O = torch.empty((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty(
+        (batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
     K_buf = _mps_tensor_to_metal_buffer(K, device)
     V_buf = _mps_tensor_to_metal_buffer(V, device)
-    O_buf = _mps_tensor_to_metal_buffer(O, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
     params_buf = params.to_buffer(device)
 
     # Compute grid for GQA: dispatch by KV heads
@@ -547,7 +551,7 @@ def sliding_window_attention_gqa(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def benchmark_sliding_window_attention(
@@ -593,14 +597,14 @@ def benchmark_sliding_window_attention(
 
     # Warmup
     for _ in range(warmup):
-        _ = sliding_window_attention(Q, K, V, window_size=window_size, scale=scale, causal=True)
+        sliding_window_attention(Q, K, V, window_size=window_size, scale=scale, causal=True)
         torch.mps.synchronize()
 
     # Benchmark
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        O = sliding_window_attention(Q, K, V, window_size=window_size, scale=scale, causal=True)
+        sliding_window_attention(Q, K, V, window_size=window_size, scale=scale, causal=True)
         torch.mps.synchronize()
         end = time.perf_counter()
         times.append(end - start)

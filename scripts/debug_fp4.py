@@ -7,9 +7,9 @@ import torch
 from metal_marlin.metal_dispatch import (
     TILE_M,
     TILE_N,
-    _CopyBackBuffer,
-    _private_buffer_from_bytes,
-    _private_buffer_from_tensor,
+    _CopyBackBuffer,  # type: ignore[attr-defined]
+    _private_buffer_from_bytes,  # type: ignore[attr-defined]
+    _private_buffer_from_tensor,  # type: ignore[attr-defined]
     dispatch_kernel,
     get_default_library,
     get_gpu_family,
@@ -17,7 +17,7 @@ from metal_marlin.metal_dispatch import (
 )
 
 
-def main():
+def main() -> None:
     lib = get_default_library()
     device = lib.device
     family = get_gpu_family(device)
@@ -62,7 +62,9 @@ def main():
     M_buf = _private_buffer_from_bytes(lib, device, np.array([M], dtype=np.uint32).tobytes())
     N_buf = _private_buffer_from_bytes(lib, device, np.array([N], dtype=np.uint32).tobytes())
     K_buf = _private_buffer_from_bytes(lib, device, np.array([K], dtype=np.uint32).tobytes())
-    gs_buf = _private_buffer_from_bytes(lib, device, np.array([group_size], dtype=np.uint32).tobytes())
+    gs_buf = _private_buffer_from_bytes(
+        lib, device, np.array([group_size], dtype=np.uint32).tobytes()
+    )
 
     kernel_name = "marlin_gemm_fused_fp4" if family >= 9 else "marlin_gemm_fp4"
     print(f"Kernel: {kernel_name}")

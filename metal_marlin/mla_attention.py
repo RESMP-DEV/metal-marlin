@@ -64,6 +64,7 @@ import torch.nn.functional as F
 
 from .kv_cache import KVCache
 from .layers import MarlinLinear
+from .mla_kv_cache import MLAKVCache
 
 if TYPE_CHECKING:
     pass
@@ -214,106 +215,6 @@ class MLARoPE(nn.Module):
 
         return x_rotated.to(dtype)
 
-
-class MLAKVCache:
-    """KV cache for MLA storing compressed latents and position encodings.
-
-    Unlike standard KV cache which stores full K, V tensors, MLA cache stores:
-    - c_kv: Compressed latent [batch, seq, kv_lora_rank]
-    - k_pe: Position encoding [batch, seq, qk_rope_head_dim]
-
-    Memory savings: ~16x vs MHA for typical configurations.
-    """
-
-    def __init__(
-        self,
-        num_layers: int,
-        batch_size: int,
-        max_seq_len: int,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        dtype: torch.dtype = torch.float16,
-        device: str = "mps",
-    ):
-        self.num_layers = num_layers
-        self.batch_size = batch_size
-        self.max_seq_len = max_seq_len
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.dtype = dtype
-        self.device = device
-
-        # Current sequence lengths per layer (all start at 0)
-        self.seq_lens = [0] * num_layers
-
-        # Allocate cache buffers
-        # c_kv: [num_layers, batch, max_seq, kv_lora_rank]
-        self.c_kv = torch.zeros(
-            (num_layers, batch_size, max_seq_len, kv_lora_rank),
-            dtype=dtype,
-            device=device,
-        )
-        # k_pe: [num_layers, batch, max_seq, qk_rope_head_dim]
-        self.k_pe = torch.zeros(
-            (num_layers, batch_size, max_seq_len, qk_rope_head_dim),
-            dtype=dtype,
-            device=device,
-        )
-
-    def update(
-        self,
-        layer_idx: int,
-        c_kv_new: torch.Tensor,
-        k_pe_new: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Update cache with new c_kv and k_pe, return full sequence.
-
-        Args:
-            layer_idx: Which layer's cache to update
-            c_kv_new: New latent [batch, new_seq, kv_lora_rank]
-            k_pe_new: New position encoding [batch, new_seq, qk_rope_head_dim]
-
-        Returns:
-            Tuple of (all_c_kv, all_k_pe) including history
-        """
-        new_seq_len = c_kv_new.shape[1]
-        start_pos = self.seq_lens[layer_idx]
-        end_pos = start_pos + new_seq_len
-
-        if end_pos > self.max_seq_len:
-            raise ValueError(f"Sequence length {end_pos} exceeds max_seq_len {self.max_seq_len}")
-
-        # Update cache in-place
-        self.c_kv[layer_idx, :, start_pos:end_pos, :] = c_kv_new.to(self.dtype)
-        self.k_pe[layer_idx, :, start_pos:end_pos, :] = k_pe_new.to(self.dtype)
-
-        self.seq_lens[layer_idx] = end_pos
-
-        # Return full sequence up to current position
-        c_kv_full = self.c_kv[layer_idx, :, :end_pos, :]
-        k_pe_full = self.k_pe[layer_idx, :, :end_pos, :]
-
-        return c_kv_full, k_pe_full
-
-    @property
-    def seq_len(self) -> int:
-        """Current sequence length (assumes all layers are in sync)."""
-        return self.seq_lens[0] if self.seq_lens else 0
-
-    def reset(self) -> None:
-        """Clear cache for new sequence."""
-        self.seq_lens = [0] * self.num_layers
-
-    def memory_usage_mb(self) -> float:
-        """Return current memory usage in MB."""
-        bytes_per_element = 2  # float16
-        current_elements = (
-            self.batch_size
-            * max(self.seq_lens)
-            * (self.kv_lora_rank + self.qk_rope_head_dim)
-            * self.num_layers
-        )
-        return current_elements * bytes_per_element / 1024 / 1024
 
 
 class MLAAttention(nn.Module):

@@ -39,7 +39,7 @@ serve = [
     "sse-starlette>=1.6.0",
 ]
 torch = ["torch>=2.0.0"]
-dev = ["pytest>=7.0", "ruff>=0.4.0"]
+dev = ["pytest>=7.0", "ruff>=0.4.0", "transformers>=4.30.0"]
 all = ["metal-marlin[metal,serve,torch,dev]"]
 
 [build-system]
@@ -70,12 +70,20 @@ ignore = [
 "tests/*" = ["E402", "F401", "F811"]
 # calibration/__init__.py has intentional import ordering for backwards compat shim
 "metal_marlin/calibration/__init__.py" = ["E402", "F401"]
+# Attention implementations use O for output (standard QKV notation)
+"metal_marlin/sliding_window_attention.py" = ["E741"]
+"metal_marlin/tree_attention.py" = ["E741"]
+"metal_marlin/flash_attention_v2.py" = ["E741"]
+# Vision layer uses 'l' for layer in comprehensions
+"metal_marlin/vision/layer_sensitivity.py" = ["E741"]
+# Scripts have sys.path manipulation before imports
+"scripts/*" = ["E402"]
+# Benchmarks have unused variables from timing loops
+"benchmarks/*" = ["F841"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [dependency-groups]
-dev = [
-    "pyright>=1.1.408",
-]
+dev = ["pyright>=1.1.408"]

@@ -130,11 +130,8 @@ def quantize_model(
         skip_layers = list(_DEFAULT_SKIP)
 
     # Run calibration if data provided
-    calibrated_scales: dict[str, tuple[torch.Tensor, torch.Tensor | None]] | None = None
     if calibration_data is not None:
-        calibrated_scales = _run_calibration(
-            state_dict, calibration_data, quant_type, group_size
-        )
+        _run_calibration(state_dict, calibration_data, quant_type, group_size)
 
     # Quantize layers
     quantized_state: dict[str, torch.Tensor] = {}

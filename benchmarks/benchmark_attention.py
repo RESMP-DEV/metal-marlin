@@ -58,7 +58,7 @@ def _reference_attention(
 def _time_kernel(fn: Callable[[], torch.Tensor]) -> float:
     """Time a kernel with warmup and MPS synchronization."""
     for _ in range(WARMUP_ITERS):
-        out = fn()
+        fn()
         mps_sync()
 
     times: list[float] = []

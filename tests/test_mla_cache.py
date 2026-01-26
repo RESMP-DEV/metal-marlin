@@ -14,7 +14,12 @@ Tests cover:
 import numpy as np
 import pytest
 
-from metal_marlin._compat import HAS_TORCH
+try:
+    import torch
+except ImportError:  # pragma: no cover - optional dependency
+    torch = None
+
+from metal_marlin._compat import HAS_TORCH, torch
 from metal_marlin.paged.mla_cache import (
     MLABlock,
     MLABlockAllocator,
@@ -508,7 +513,6 @@ class TestMLAAttention:
         head_dim = 32
         kv_lora_rank = 64
         block_size = 4
-        max_blocks = 4
 
         # Create query
         np.random.seed(42)
@@ -608,3 +612,163 @@ class TestMLABlockRepr:
         block = MLABlock(config=cfg)
         r = repr(block)
         assert "mode=fp8" in r
+
+
+# =============================================================================
+# Torch MLAKVCache Tests (runtime cache, not paged)
+# =============================================================================
+
+
+@requires_torch
+class TestMLAKVCacheTorch:
+    """Tests for torch-based MLAKVCache implementation."""
+
+    def _device(self) -> str:
+        if torch is None:
+            return "cpu"
+        return "mps" if torch.backends.mps.is_available() else "cpu"
+
+    def test_cache_growth(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        device = self._device()
+        cache = MLAKVCache(
+            batch_size=1,
+            num_layers=1,
+            kv_lora_rank=8,
+            qk_rope_head_dim=4,
+            max_seq_len=4,
+            device=device,
+        )
+
+        c_kv_1 = torch.randn(1, 3, 8, device=device, dtype=torch.float16)
+        k_pe_1 = torch.randn(1, 3, 4, device=device, dtype=torch.float16)
+        cache.update(0, c_kv_1, k_pe_1)
+        assert cache.max_seq_len == 4
+
+        c_kv_2 = torch.randn(1, 4, 8, device=device, dtype=torch.float16)
+        k_pe_2 = torch.randn(1, 4, 4, device=device, dtype=torch.float16)
+        c_full, k_full = cache.update(0, c_kv_2, k_pe_2)
+
+        assert cache.max_seq_len >= 7
+        assert c_full.shape == (1, 7, 8)
+        assert k_full.shape == (1, 7, 4)
+
+    def test_fp8_quantization_round_trip(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        device = self._device()
+        cache = MLAKVCache(
+            batch_size=1,
+            num_layers=1,
+            kv_lora_rank=64,
+            qk_rope_head_dim=8,
+            max_seq_len=8,
+            device=device,
+            quantize_mode="fp8",
+        )
+
+        torch.manual_seed(42)
+        c_kv = torch.randn(1, 4, 64, device=device, dtype=torch.float16) * 5
+        k_pe = torch.randn(1, 4, 8, device=device, dtype=torch.float16)
+        c_full, _ = cache.update(0, c_kv, k_pe)
+
+        assert cache.c_kv.dtype == torch.uint8
+        assert cache.c_kv_scales is not None
+        assert c_full.dtype == torch.float16
+
+        rel_error = (c_full - c_kv).abs() / (c_kv.abs() + 1e-6)
+        assert torch.mean(rel_error).item() < 0.05
+
+    def test_layer_independent_lengths(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        device = self._device()
+        cache = MLAKVCache(
+            batch_size=1,
+            num_layers=2,
+            kv_lora_rank=16,
+            qk_rope_head_dim=4,
+            max_seq_len=8,
+            device=device,
+        )
+
+        c_kv_0 = torch.randn(1, 3, 16, device=device, dtype=torch.float16)
+        k_pe_0 = torch.randn(1, 3, 4, device=device, dtype=torch.float16)
+        cache.update(0, c_kv_0, k_pe_0)
+
+        c_kv_1 = torch.randn(1, 1, 16, device=device, dtype=torch.float16)
+        k_pe_1 = torch.randn(1, 1, 4, device=device, dtype=torch.float16)
+        cache.update(1, c_kv_1, k_pe_1)
+
+        assert cache.seq_lens == [3, 1]
+
+
+# =============================================================================
+# MLAKVCache (PyTorch) Tests
+# =============================================================================
+
+
+@requires_torch
+class TestMLAKVCacheCore:
+    """Test MLAKVCache growth and FP8 latent storage."""
+
+    def test_init_shapes(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        cache = MLAKVCache(
+            num_layers=2,
+            batch_size=1,
+            max_seq_len=8,
+            kv_lora_rank=16,
+            qk_rope_head_dim=4,
+            device="cpu",
+        )
+
+        assert cache.c_kv.shape == (2, 1, 8, 16)
+        assert cache.k_pe.shape == (2, 1, 8, 4)
+        assert cache.seq_lens == [0, 0]
+
+    def test_append_and_growth(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        cache = MLAKVCache(
+            num_layers=1,
+            batch_size=1,
+            max_seq_len=4,
+            kv_lora_rank=8,
+            qk_rope_head_dim=4,
+            device="cpu",
+        )
+
+        c_kv_new = torch.randn(1, 6, 8, dtype=torch.float16)
+        k_pe_new = torch.randn(1, 6, 4, dtype=torch.float16)
+        c_kv_full, k_pe_full = cache.update(0, c_kv_new, k_pe_new)
+
+        assert cache.max_seq_len >= 6
+        assert cache.seq_len == 6
+        assert c_kv_full.shape == (1, 6, 8)
+        assert k_pe_full.shape == (1, 6, 4)
+
+    def test_fp8_quantized_storage(self):
+        from metal_marlin.mla_kv_cache import MLAKVCache
+
+        cache = MLAKVCache(
+            num_layers=1,
+            batch_size=1,
+            max_seq_len=4,
+            kv_lora_rank=8,
+            qk_rope_head_dim=4,
+            quantize_mode="fp8",
+            device="cpu",
+        )
+
+        c_kv_new = torch.randn(1, 3, 8, dtype=torch.float16) * 0.5
+        k_pe_new = torch.randn(1, 3, 4, dtype=torch.float16)
+        c_kv_full, _ = cache.update(0, c_kv_new, k_pe_new)
+
+        assert cache.c_kv_quant is not None
+        assert cache.c_kv_scales is not None
+        assert cache.c_kv_quant.dtype == torch.uint8
+        assert cache.c_kv_scales.dtype == torch.float16
+        torch.testing.assert_close(c_kv_full, c_kv_new, rtol=0.3, atol=0.3)

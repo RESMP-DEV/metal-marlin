@@ -192,7 +192,6 @@ def _run_bf16(
         raise RuntimeError("transformers is required for BF16 benchmark")
 
     _sync_and_collect()
-    mem_before = _mps_memory()
 
     model = AutoModelForCausalLM.from_pretrained(
         model_id,

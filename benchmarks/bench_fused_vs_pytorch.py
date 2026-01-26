@@ -16,7 +16,7 @@ def benchmark_pytorch_path():
     # Warmup
     for _ in range(5):
         W = dequantize_fp4_torch(packed, scales, K, N, 128)
-        C = A @ W
+        A @ W
         torch.mps.synchronize()
 
     # Benchmark
@@ -25,7 +25,7 @@ def benchmark_pytorch_path():
     t0 = time.perf_counter()
     for _ in range(iters):
         W = dequantize_fp4_torch(packed, scales, K, N, 128)
-        C = A @ W
+        A @ W
     torch.mps.synchronize()
     pytorch_time = (time.perf_counter() - t0) / iters
     print(f'PyTorch (dequant+matmul): {pytorch_time * 1e6:.1f} us')
@@ -45,7 +45,7 @@ def benchmark_fused_path():
 
     # Warmup
     for _ in range(5):
-        C = marlin_gemm_fp4(A, packed, scales, group_size=128)
+        marlin_gemm_fp4(A, packed, scales, group_size=128)
         torch.mps.synchronize()
 
     # Benchmark
@@ -53,7 +53,7 @@ def benchmark_fused_path():
     torch.mps.synchronize()
     t0 = time.perf_counter()
     for _ in range(iters):
-        C = marlin_gemm_fp4(A, packed, scales, group_size=128)
+        marlin_gemm_fp4(A, packed, scales, group_size=128)
     torch.mps.synchronize()
     fused_time = (time.perf_counter() - t0) / iters
     print(f'Fused Metal kernel: {fused_time * 1e6:.1f} us')

@@ -37,6 +37,8 @@ from typing import Any
 
 import numpy as np
 
+from ._padding import pad_to_multiple, unpad
+
 # Check PyObjC Metal availability
 try:
     import Foundation
@@ -678,7 +680,9 @@ def _copy_buffer_to_tensor(buffer: Any, tensor: torch.Tensor) -> None:
     tensor.copy_(torch.from_numpy(arr).to(device=tensor.device))
 
 
-def mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any, *, copy_back: bool = False) -> Any:
+def mps_tensor_to_metal_buffer(
+    tensor: torch.Tensor, device: Any, *, copy_back: bool = False
+) -> Any:
     """Get Metal buffer from PyTorch MPS tensor.
 
     Prefers zero-copy interop; falls back to a shared buffer copy when PyObjC
@@ -953,7 +957,6 @@ def dispatch_gemm_fp4(
     else:
         kernel_name = "marlin_gemm_fp4"
 
-    orig_M = M
     orig_N = N
     pad_m = 0
     pad_n = 0
@@ -993,7 +996,9 @@ def dispatch_gemm_fp4(
     M_buf = _private_buffer_from_bytes(lib, device, np.array([M], dtype=np.uint32).tobytes())
     N_buf = _private_buffer_from_bytes(lib, device, np.array([N], dtype=np.uint32).tobytes())
     K_buf = _private_buffer_from_bytes(lib, device, np.array([K], dtype=np.uint32).tobytes())
-    gs_buf = _private_buffer_from_bytes(lib, device, np.array([group_size], dtype=np.uint32).tobytes())
+    gs_buf = _private_buffer_from_bytes(
+        lib, device, np.array([group_size], dtype=np.uint32).tobytes()
+    )
 
     # Compute grid
     grid_m = (M + TILE_M - 1) // TILE_M
@@ -1034,7 +1039,6 @@ def dispatch_gemm_fp8(
 
     device = lib.device
 
-    orig_M = M
     orig_N = N
     pad_m = 0
     pad_n = 0
@@ -1108,7 +1112,6 @@ def dispatch_gemm_int2(
 
     device = lib.device
 
-    orig_M = M
     orig_N = N
     pad_m = 0
     pad_n = 0

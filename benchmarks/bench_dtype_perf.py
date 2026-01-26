@@ -101,13 +101,13 @@ def bench_torch_mps_gemm(
 
     # Warmup
     for _ in range(warmup_iters):
-        C = torch.mm(A, B)
+        torch.mm(A, B)
     torch.mps.synchronize()
 
     # Benchmark
     start = time.perf_counter()
     for _ in range(bench_iters):
-        C = torch.mm(A, B)
+        torch.mm(A, B)
     torch.mps.synchronize()
     elapsed = time.perf_counter() - start
 

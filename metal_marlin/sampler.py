@@ -199,8 +199,6 @@ class MetalSampler:
             batch_size * 4, Metal.MTLResourceStorageModeShared
         )
 
-        # Params: vocab_size, batch_size, seed
-        params = np.array([vocab, batch_size, self._get_seed()], dtype=np.uint64)
         # Repack as the struct expects uint, uint, ulong
         params_packed = np.zeros(4, dtype=np.uint32)
         params_packed[0] = vocab

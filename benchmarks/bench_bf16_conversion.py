@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import math
 import statistics
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -34,8 +35,6 @@ import torch
 
 # Ensure metal_marlin is importable from project layout
 _ROOT = Path(__file__).parent.parent
-import sys
-
 sys.path.insert(0, str(_ROOT))
 
 from metal_marlin.metal_dispatch import (  # noqa: E402

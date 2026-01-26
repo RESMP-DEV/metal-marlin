@@ -286,7 +286,6 @@ class TestGatherAndScatterTorch:
     def test_scatter_with_varying_outputs(self):
         """Test scatter with different expert outputs."""
         batch_size = 2
-        out_dim = 2
         top_k = 2
         num_experts = 2
 

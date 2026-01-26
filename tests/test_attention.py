@@ -209,6 +209,13 @@ def _compile_shader(shader_path: Path):
         pytest.skip(f"Metal shader not found: {shader_path}")
 
     source = shader_path.read_text()
+    include_token = '#include "bf16_compat.metal"'
+    if include_token in source:
+        include_path = shader_path.parent / "bf16_compat.metal"
+        if not include_path.exists():
+            pytest.fail(f"Missing Metal include: {include_path}")
+        include_source = include_path.read_text()
+        source = source.replace(include_token, include_source)
     options = Metal.MTLCompileOptions.new()
     options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
     library, err = device.newLibraryWithSource_options_error_(source, options, None)

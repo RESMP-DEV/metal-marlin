@@ -185,7 +185,7 @@ class EagleHead(DraftModel):
             DraftOutput with tokens [batch, num_draft_tokens] and
             probs [batch, num_draft_tokens, vocab_size].
         """
-        batch_size = hidden_states.shape[0]
+        hidden_states.shape[0]
 
         # Use last position's hidden state
         h = hidden_states[:, -1, :]  # [batch, hidden_size]

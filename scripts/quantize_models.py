@@ -20,9 +20,9 @@ from time import perf_counter
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
-import numpy as np
-from safetensors import safe_open
-from safetensors.numpy import save_file
+import numpy as np  # noqa: E402
+from safetensors import safe_open  # noqa: E402
+from safetensors.numpy import save_file  # noqa: E402
 
 
 def quantize_to_fp4(

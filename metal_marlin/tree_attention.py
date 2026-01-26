@@ -343,7 +343,7 @@ def tree_attention_forward_with_positions(
     device = lib.device
 
     batch, num_heads, tree_size, head_dim = Q.shape
-    total_kv_len = K.shape[2]
+    K.shape[2]
 
     assert tree_positions.shape == (tree_size,)
 
@@ -434,7 +434,7 @@ def tree_attention_forward_packed(
     device = lib.device
 
     batch, num_heads, tree_size, head_dim = Q.shape
-    total_kv_len = K.shape[2]
+    K.shape[2]
 
     # Allocate output
     O = torch.empty_like(Q)

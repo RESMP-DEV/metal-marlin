@@ -6,6 +6,7 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Generator
 from pathlib import Path
 
 import pytest
@@ -52,7 +53,7 @@ def _port_available(port: int) -> bool:
 
 
 @pytest.fixture(scope="module")
-def server_process() -> subprocess.Popen[str]:
+def server_process() -> Generator[subprocess.Popen[str], None, None]:
     if not HAS_TORCH:
         pytest.skip("PyTorch not available")
     if not HAS_MPS:

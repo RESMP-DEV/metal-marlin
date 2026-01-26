@@ -240,7 +240,6 @@ def unpack_fp4_weights(
 
     # Unpack uint32 -> nibble indices along K axis
     # packed is [K//8, N], each uint32 contains 8 consecutive K values
-    K_packed = K // FP4_PER_U32
 
     indices = np.empty((K, N), dtype=np.uint8)
     for i in range(FP4_PER_U32):

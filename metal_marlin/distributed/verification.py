@@ -450,7 +450,7 @@ def run_verification_suite(
             print("\n4. CPU+GPU Split Mode")
             print("-" * 40)
 
-        mesh = DeviceMesh.cpu_gpu_split()
+        DeviceMesh.cpu_gpu_split()
         result = verify_column_parallel(
             in_features=512,
             out_features=1024,

@@ -10,12 +10,9 @@ Key exports:
 - HAS_TORCH: Feature flag for runtime detection
 """
 
+# Always-available imports
 from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 
-# HAS_MLX is deprecated - kept for backwards compatibility
-HAS_MLX = False
-
-# Always-available imports
 # Attention kernels
 from .attention import (
     MarlinAttention,
@@ -46,7 +43,7 @@ from .hadamard import (
     hadamard_matrix,
     inverse_hadamard_rotation,
 )
-from .kernels import marlin_gemm_fp4
+from .kernels import marlin_gemm_fp4, marlin_gemm_int4
 from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
 from .layers import MarlinLinear
 from .mixed_precision import (
@@ -119,6 +116,9 @@ from .vision import (
     detect_projector_type,
 )
 
+# HAS_MLX is deprecated - kept for backwards compatibility
+HAS_MLX = False
+
 __all__ = [
     # Feature flags
     "HAS_MLX",  # Deprecated, always False
@@ -138,6 +138,7 @@ __all__ = [
     "quantize_to_fp8",
     # FP4/INT4/NF4 quantization (CPU)
     "marlin_gemm_fp4",
+    "marlin_gemm_int4",
     "pack_fp4_weights_cpu",
     "pack_int4_weights",
     "pack_nf4_weights",

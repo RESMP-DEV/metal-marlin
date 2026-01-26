@@ -1020,8 +1020,6 @@ def compute_moe_hessians(
             if layer_prefix not in router_decisions:
                 continue
 
-            expert_indices = router_decisions[layer_prefix]  # [batch, seq, top_k]
-
             # Get input activations for this layer
             # This requires the model to expose intermediate activations
             # For now, we use a simple approach: run forward and cache
