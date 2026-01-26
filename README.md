@@ -102,8 +102,19 @@ for chunk in stream:
 On Apple Silicon M4 Max (PyTorch MPS backend):
 - Qwen3-4B FP4: ~27 tok/s decode
 - GLM-4.7-Flash MLA: In development
+- Llama-3.1-8B FP4: ~20 tok/s decode (estimated)
 
-**Note:** Currently using PyTorch MPS fallback. Fused Metal kernels are in development for higher throughput.
+**Note:** Currently using PyTorch MPS fallback. Fused Metal kernels are in development for higher throughput (target: ~100 tok/s).
+
+## Code Quality
+
+```bash
+# Linting (0 errors)
+uv run ruff check .
+
+# Type checking (0 errors, 182 warnings)
+uv run pyright metal_marlin/
+```
 
 ## Apple Silicon Performance
 

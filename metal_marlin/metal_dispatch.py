@@ -957,6 +957,13 @@ def dispatch_gemm_fp4(
     else:
         kernel_name = "marlin_gemm_fp4"
 
+    pad_m_multiple = _PAD_MULTIPLE
+    pad_n_multiple = _PAD_MULTIPLE
+    if kernel_name == "marlin_gemm_fused_fp4":
+        # Avoid partial-tile stores in fused kernel until boundary handling is fully verified.
+        pad_m_multiple = max(_PAD_MULTIPLE, TILE_M)
+        pad_n_multiple = max(_PAD_MULTIPLE, TILE_N)
+
     orig_N = N
     pad_m = 0
     pad_n = 0
@@ -967,9 +974,9 @@ def dispatch_gemm_fp4(
         scales_n = scales.shape[1]
 
         k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
-        n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
+        n_target = _round_up(max(N, packed_n, scales_n), pad_n_multiple)
 
-        A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
+        A, pad_m = pad_to_multiple(A, 0, pad_m_multiple)
         A, _ = _pad_tensor_to_size(A, 1, k_target)
         B_packed = _pad_packed_fp4(B_packed, k_target, n_target)
         scales = _pad_scales(scales, k_target, n_target, group_size)

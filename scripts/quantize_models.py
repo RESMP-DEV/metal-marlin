@@ -16,13 +16,13 @@ import sys
 from pathlib import Path
 from time import perf_counter
 
+import numpy as np
+from safetensors import safe_open
+from safetensors.numpy import save_file
+
 # Add parent to path for metal_marlin imports
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
-
-import numpy as np  # noqa: E402
-from safetensors import safe_open  # noqa: E402
-from safetensors.numpy import save_file  # noqa: E402
 
 
 def quantize_to_fp4(

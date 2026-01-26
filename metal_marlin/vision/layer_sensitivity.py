@@ -245,7 +245,7 @@ class SensitivityReport:
 
     def get_by_type(self, layer_type: VisionLayerType) -> list[VisionLayerSensitivity]:
         """Get all layers of a specific type."""
-        return [l for l in self.layers if l.layer_type == layer_type]
+        return [layer for layer in self.layers if layer.layer_type == layer_type]
 
     def get_precision_summary(self) -> dict[str, int]:
         """Get count of layers by recommended precision."""
@@ -266,15 +266,15 @@ class SensitivityReport:
             "precision_summary": self.get_precision_summary(),
             "layers": [
                 {
-                    "name": l.name,
-                    "type": l.layer_type.value,
-                    "sensitivity": l.sensitivity_score,
-                    "fp4_error": l.fp4_error,
-                    "fp8_error": l.fp8_error,
-                    "recommended_precision": l.recommended_precision,
-                    "recommended_group_size": l.recommended_group_size,
+                    "name": layer.name,
+                    "type": layer.layer_type.value,
+                    "sensitivity": layer.sensitivity_score,
+                    "fp4_error": layer.fp4_error,
+                    "fp8_error": layer.fp8_error,
+                    "recommended_precision": layer.recommended_precision,
+                    "recommended_group_size": layer.recommended_group_size,
                 }
-                for l in self.layers
+                for layer in self.layers
             ],
             "metadata": self.metadata,
         }
@@ -419,7 +419,8 @@ def analyze_vision_layer_sensitivity(
 
     # Calculate average bits
     total_bits = sum(
-        l.layer_info.num_params * _precision_to_bits(l.recommended_precision) for l in layers
+        layer.layer_info.num_params * _precision_to_bits(layer.recommended_precision)
+        for layer in layers
     )
     avg_bits = total_bits / total_params if total_params > 0 else 16
 

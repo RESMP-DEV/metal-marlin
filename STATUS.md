@@ -1,6 +1,6 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-26T19:30
+**Last Updated:** 2026-01-26T21:00
 
 ## Summary
 
@@ -11,6 +11,8 @@
 | Metal Shaders | **30/35** compiling |
 | MLX Removal | **Complete** ✅ |
 | GLM-4.7-Flash MLA | **In Progress** 🔄 |
+| Ruff Linting | **0 errors** ✅ |
+| Pyright Errors | **0 errors** ✅ |
 
 ---
 
@@ -38,6 +40,40 @@ print(pipe('The capital of France is', max_tokens=20))
 
 ---
 
+## Implementation Progress
+
+### Model Layers (Phase 33 - In Progress)
+
+| Model | Attention | MLP | Layer | Status |
+|-------|-----------|-----|-------|--------|
+| Llama | ✅ QuantizedLlamaAttention | ✅ QuantizedLlamaMLP | ✅ QuantizedLlamaLayer | Complete |
+| Qwen3 | 🔄 QuantizedQwen3Attention | 🔄 QuantizedQwen3MLP | 🔄 QuantizedQwen3Layer | In Progress |
+| GLM-4 | 🔄 QuantizedGLM4Attention (MLA) | 🔄 QuantizedGLM4MLP | 🔄 QuantizedGLM4Layer | In Progress |
+| Mixtral | ✅ MixtralAttention | ✅ MixtralExpertMLP | ✅ MixtralLayer | Complete |
+| DeepSeek | 🔄 DeepSeekMLA | 🔄 DeepSeekMoE | 🔄 DeepSeekLayer | Partial |
+
+### Attention Implementations
+
+| Implementation | Location | Purpose | Status |
+|---------------|----------|---------|--------|
+| MetalAttention | inference_metal.py | Standard MHA with Metal | ✅ Working |
+| MetalMLAAttention | inference_metal.py | MLA for GLM-4/DeepSeek | 🔄 Partial |
+| MLAAttention | mla_attention.py | Latent attention module | ✅ Working |
+| FlashAttention | flash_attention_v2.py | Flash attention v2 | ✅ Working |
+| DifferentialAttention | architectures/diff_transformer.py | Diff-transformer | ✅ Working |
+| TreeAttention | tree_attention.py | Speculative tree attn | ✅ Working |
+
+### MLP Implementations
+
+| Implementation | Location | Purpose | Status |
+|---------------|----------|---------|--------|
+| MetalMLP | inference_metal.py | SwiGLU with Metal | ✅ Working |
+| MarlinMLP | mlp.py | Quantized MLP | ✅ Working |
+| TensorParallelMLP | distributed/tensor_parallel.py | TP-sharded MLP | ✅ Working |
+| MixtralExpertMLP | models/mixtral.py | MoE expert | ✅ Working |
+
+---
+
 ## OpenAI-Compatible Server
 
 vLLM-style server scaffolded in `metal_marlin/serving/`:
@@ -55,12 +91,6 @@ python -m metal_marlin serve benchmarks/results/qwen3_4b_fp4
 - `POST /v1/chat/completions` - Chat completions (streaming supported)
 - `POST /v1/completions` - Text completions
 - `GET /health` - Health check
-
-**Files:**
-- `serving/server.py` - FastAPI routes
-- `serving/engine.py` - Inference engine wrapper  
-- `serving/openai_schemas.py` - Pydantic models
-- `serving/continuous_batch.py` - Batch scheduler (WIP)
 
 ---
 
@@ -85,6 +115,20 @@ python -m metal_marlin serve benchmarks/results/qwen3_4b_fp4
 | moe_dispatch_optimized | Function not found |
 | simdgroup_attention | Function not found |
 | test_async_copy | Removed (unsupported AIR intrinsics) |
+
+---
+
+## Stubs & Incomplete Implementations
+
+The following are intentional stubs awaiting full implementation:
+
+| Location | Function/Class | Status |
+|----------|---------------|--------|
+| kernels.py:1702 | flash_attention_fp4_kv | Stub - needs fused kernel |
+| kernels.py:1731 | moe_expert_gemm_fp4 | Stub - needs dispatch |
+| kernels.py:1751 | moe_router_topk | Stub - needs kernel |
+| speculative/engine.py:46 | TargetModel.__call__ | Protocol - by design |
+| speculative/engine.py:50 | TargetModel.create_kv_cache | Protocol - by design |
 
 ---
 
@@ -122,6 +166,17 @@ MLA implementation started in `mla_attention.py` and `mla_kv_cache.py`.
 
 ---
 
+## Task Queue
+
+Current swarm status (Phase 32-33):
+
+| Phase | Tasks | Status |
+|-------|-------|--------|
+| 32 | Buffer cache fix, INT4 export, linting | ✅ Complete |
+| 33 | Qwen3/GLM4 layer implementations | 🔄 In Progress |
+
+---
+
 ## Commands
 
 ```bash
@@ -138,4 +193,8 @@ python3 scripts/verify_kernels.py
 
 # Quantize a new model
 python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./output --bits 4
+
+# Run linting
+uv run ruff check .
+uv run pyright metal_marlin/
 ```

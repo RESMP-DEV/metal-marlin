@@ -254,14 +254,14 @@ def tree_attention_forward(
     assert total_kv_len == seq_len + tree_size
 
     # Allocate output
-    O = torch.empty_like(Q)
+    output = torch.empty_like(Q)
 
     # Convert tensors to Metal buffers
     Q_buf = mps_tensor_to_metal_buffer(Q.half().contiguous(), device)
     K_buf = mps_tensor_to_metal_buffer(K.half().contiguous(), device)
     V_buf = mps_tensor_to_metal_buffer(V.half().contiguous(), device)
     mask_buf = mps_tensor_to_metal_buffer(tree_mask.int().contiguous(), device)
-    O_buf = mps_tensor_to_metal_buffer(O, device)
+    O_buf = mps_tensor_to_metal_buffer(output, device)
 
     # Create constant buffers
     def make_uint_buffer(val: int) -> Any:
@@ -303,7 +303,7 @@ def tree_attention_forward(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def tree_attention_forward_with_positions(
@@ -343,12 +343,10 @@ def tree_attention_forward_with_positions(
     device = lib.device
 
     batch, num_heads, tree_size, head_dim = Q.shape
-    K.shape[2]
-
     assert tree_positions.shape == (tree_size,)
 
     # Allocate output
-    O = torch.empty_like(Q)
+    output = torch.empty_like(Q)
 
     # Convert tensors to Metal buffers
     Q_buf = mps_tensor_to_metal_buffer(Q.half().contiguous(), device)
@@ -356,7 +354,7 @@ def tree_attention_forward_with_positions(
     V_buf = mps_tensor_to_metal_buffer(V.half().contiguous(), device)
     mask_buf = mps_tensor_to_metal_buffer(tree_mask.int().contiguous(), device)
     pos_buf = mps_tensor_to_metal_buffer(tree_positions.int().contiguous(), device)
-    O_buf = mps_tensor_to_metal_buffer(O, device)
+    O_buf = mps_tensor_to_metal_buffer(output, device)
 
     def make_uint_buffer(val: int) -> Any:
         return device.newBufferWithBytes_length_options_(
@@ -397,7 +395,7 @@ def tree_attention_forward_with_positions(
         wait=True,
     )
 
-    return O
+    return output
 
 
 def tree_attention_forward_packed(
@@ -434,10 +432,8 @@ def tree_attention_forward_packed(
     device = lib.device
 
     batch, num_heads, tree_size, head_dim = Q.shape
-    K.shape[2]
-
     # Allocate output
-    O = torch.empty_like(Q)
+    output = torch.empty_like(Q)
 
     # Convert tensors to Metal buffers
     Q_buf = mps_tensor_to_metal_buffer(Q.half().contiguous(), device)
@@ -445,7 +441,7 @@ def tree_attention_forward_packed(
     V_buf = mps_tensor_to_metal_buffer(V.half().contiguous(), device)
     # tree_mask_packed should be uint64 (long in PyTorch)
     mask_buf = mps_tensor_to_metal_buffer(tree_mask_packed.long().contiguous(), device)
-    O_buf = mps_tensor_to_metal_buffer(O, device)
+    O_buf = mps_tensor_to_metal_buffer(output, device)
 
     def make_uint_buffer(val: int) -> Any:
         return device.newBufferWithBytes_length_options_(
@@ -485,7 +481,7 @@ def tree_attention_forward_packed(
         wait=True,
     )
 
-    return O
+    return output
 
 
 # ---------------------------------------------------------------------------
