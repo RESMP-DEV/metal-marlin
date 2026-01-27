@@ -9,6 +9,8 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 - **2:4 structured sparsity** — 1.6× additional compression
 - **Multiple formats** — HuggingFace, Safetensors, GGUF, ONNX
 
+**Status:** 97% tests passing (1439/1478). See [STATUS.md](STATUS.md) for details.
+
 ## Requirements
 
 - macOS 13.0+ (Ventura or later)
@@ -18,30 +20,76 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 ## Installation
 
 ```bash
-uv pip install numpy safetensors huggingface_hub torch \
+# Clone and install
+git clone https://github.com/RESMP-DEV/AlphaHENG.git
+cd AlphaHENG/contrib/metal_marlin
+uv venv && source .venv/bin/activate
+uv sync --extra all
+```
+
+Or install dependencies manually:
+
+```bash
+uv pip install numpy safetensors huggingface_hub torch transformers \
     pyobjc-core pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders
 ```
 
+## Supported Models
+
+| Model | Size | Memory | Speed | Status |
+|-------|------|--------|-------|--------|
+| **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Working |
+| **THUDM/glm-4-9b** | 9B | ~4.5GB FP4 | In progress | 🔄 MLA attention |
+| Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
+| Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
+
 ## Quick Start
 
+### Qwen3-4B (Recommended for Getting Started)
+
 ```bash
-# Quantize a model (Qwen3-4B fits on any Mac, ~2GB quantized)
-python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./Qwen3-4B-FP4 --bits 4
+cd contrib/metal_marlin
 
-# Benchmark against GGUF
-python -m metal_marlin.benchmark_models --models "Qwen/Qwen3-4B"
+# 1. Quantize the model (~2 minutes)
+uv run python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./qwen3_4b_fp4 --bits 4
 
-# Run inference
-python -m metal_marlin.inference ./Qwen3-4B-FP4 --prompt "The capital of France is"
+# 2. Run inference
+uv run python -c "
+from metal_marlin.inference.pipeline import MarlinPipeline
+pipe = MarlinPipeline.from_pretrained('./qwen3_4b_fp4', device='mps')
+print(pipe('The capital of France is', max_tokens=50))
+"
 ```
 
-```python
-from metal_marlin.inference import MetalInferenceEngine
-from metal_marlin.safetensors_loader import load_model
+### GLM-4.7-Flash (Multi-head Latent Attention)
 
-model = load_model("./Qwen3-4B-FP4")
-engine = MetalInferenceEngine(model)
-output = engine.generate("The capital of France is", max_tokens=50)
+```bash
+# GLM-4 uses MLA for efficient KV cache
+uv run python -m metal_marlin.hf_loader THUDM/glm-4-9b ./glm4_9b_fp4 --bits 4
+
+# Run inference (requires MLA support)
+uv run python -c "
+from metal_marlin.inference.pipeline import MarlinPipeline
+pipe = MarlinPipeline.from_pretrained('./glm4_9b_fp4', device='mps')
+print(pipe('Explain quantum computing:', max_tokens=100))
+"
+```
+
+### Python API
+
+```python
+from metal_marlin.inference.pipeline import MarlinPipeline
+
+# Load quantized model
+pipe = MarlinPipeline.from_pretrained('./qwen3_4b_fp4', device='mps')
+
+# Generate text
+output = pipe("The capital of France is", max_tokens=50)
+print(output)
+
+# Streaming generation
+for token in pipe.stream("Write a haiku:", max_tokens=50):
+    print(token, end="", flush=True)
 ```
 
 See [CLI Reference](docs/cli.md) for full options.
@@ -115,7 +163,7 @@ uv run ruff check .
 # Type checking (0 errors, 184 warnings)
 uv run pyright metal_marlin/
 
-# Tests (90% passing: 1337/1482)
+# Tests (97% passing: 1439/1478)
 uv run pytest tests/ -v
 ```
 

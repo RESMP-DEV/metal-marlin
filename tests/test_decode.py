@@ -369,16 +369,19 @@ class TestQuantizedKVAttention:
         )
 
         # Quantize to FP8 (simulated with uint8 + scales)
+        # FP8 E4M3 has max representable value of 448
+        # We normalize values to [-1, 1] range based on per-row max, then scale to uint8
         k_max = k_cache_fp.abs().amax(dim=-1, keepdim=True)
         k_max = k_max.clamp(min=1e-8)
-        k_scale = k_max / 448.0
-        k_cache_quant = ((k_cache_fp / k_scale) * 127.0 + 128.0).round()
+        k_scale = k_max / 448.0  # Scale factor to convert FP8 range to actual range
+        # Quantize: map [-k_max, k_max] to [1, 255] with 128 as zero point
+        k_cache_quant = ((k_cache_fp / k_max) * 127.0 + 128.0).round()
         k_cache_quant = k_cache_quant.clamp(0, 255).to(torch.uint8)
 
         v_max = v_cache_fp.abs().amax(dim=-1, keepdim=True)
         v_max = v_max.clamp(min=1e-8)
         v_scale = v_max / 448.0
-        v_cache_quant = ((v_cache_fp / v_scale) * 127.0 + 128.0).round()
+        v_cache_quant = ((v_cache_fp / v_max) * 127.0 + 128.0).round()
         v_cache_quant = v_cache_quant.clamp(0, 255).to(torch.uint8)
 
         torch.mps.synchronize()

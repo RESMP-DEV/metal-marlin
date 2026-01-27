@@ -185,6 +185,15 @@ def dequantize_fp4_torch(
     require_torch()
     assert torch is not None
 
+    # Use CPU for dequantization on MPS to avoid unsupported ops and ensure
+    # we can always move the result back to the requested device.
+    target_device = packed.device
+    work_device = target_device
+    if target_device.type == "mps":
+        packed = packed.to("cpu")
+        scales = scales.to("cpu")
+        work_device = packed.device
+
     # FP4 E2M1 lookup table
     E2M1_VALUES = torch.tensor(
         [
@@ -206,7 +215,7 @@ def dequantize_fp4_torch(
             -6.0,
         ],
         dtype=torch.float32,
-        device=packed.device,
+        device=work_device,
     )
 
     # Storage format from hf_loader.convert_model_to_fp4 is TRANSPOSED:
@@ -219,7 +228,7 @@ def dequantize_fp4_torch(
 
     # Unpack 8 FP4 values from each uint32
     # packed is [in_feat // 8, out_feat], indices will be [in_feat, out_feat]
-    indices = torch.zeros((in_feat, out_feat), dtype=torch.long, device=packed.device)
+    indices = torch.zeros((in_feat, out_feat), dtype=torch.long, device=work_device)
     # Convert to int64 for bitshift (uint32 rshift not implemented on CPU)
     packed_i64 = packed.to(torch.int64)
     for i in range(8):
@@ -238,7 +247,10 @@ def dequantize_fp4_torch(
     # Transpose to standard [out_feat, in_feat] layout
     values = values.T
 
-    return values.half()
+    values = values.half()
+    if values.device != target_device:
+        values = values.to(target_device)
+    return values
 
 
 class MetalMarlinModel:
@@ -390,22 +402,32 @@ class MetalMarlinModel:
         assert torch is not None
 
         if self._use_fused_kernels and self.config.get("quant_type", "fp4") == "fp4":
-            packed_name = f"{layer_name}.packed"
             scales_name = f"{layer_name}.scales"
             gs_name = f"{layer_name}.group_size"
 
-            if (
-                self._marlin_gemm_fp4 is not None
-                and packed_name in self.weights
-                and scales_name in self.weights
-            ):
-                group_size = self.group_size
-                if gs_name in self.weights:
-                    group_size = int(self.weights[gs_name].item())
+            if self._marlin_gemm_fp4 is not None and scales_name in self.weights:
+                packed_name = layer_name
+                if packed_name not in self.weights:
+                    packed_name = f"{layer_name}.packed"
 
-                packed = self.weights[packed_name]
-                scales = self.weights[scales_name]
-                return self._marlin_gemm_fp4(x, packed, scales, group_size)
+                if packed_name in self.weights:
+                    group_size = self.group_size
+                    if gs_name in self.weights:
+                        group_size = int(self.weights[gs_name].item())
+
+                    packed = self.weights[packed_name]
+                    scales = self.weights[scales_name]
+                    k_dim = x.shape[-1]
+                    if (
+                        packed.ndim == 2
+                        and scales.ndim == 2
+                        and k_dim % 8 == 0
+                        and k_dim % group_size == 0
+                        and packed.shape[0] == k_dim // 8
+                        and scales.shape[0] == k_dim // group_size
+                        and packed.shape[1] == scales.shape[1]
+                    ):
+                        return self._marlin_gemm_fp4(x, packed, scales, group_size)
 
         weight = self._get_weight(layer_name)
         return torch.nn.functional.linear(x, weight)

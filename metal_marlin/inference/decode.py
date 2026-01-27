@@ -713,12 +713,22 @@ def quantized_kv_attention(
 
     head_dim = q.shape[3]
 
-    # Dequantize K and V
-    # Simulated FP8 path uses linear mapping with per-position scale:
-    #   quant = (value / scale) * 127 + 128  => value ~= (quant - 128) / 127 * scale
-    k_dequant = (k_cache.float() - 128.0) / 127.0 * k_scales
-    v_dequant = (v_cache.float() - 128.0) / 127.0 * v_scales
+    # Dequantize K and V using exact inverse of quantization formula:
+    # Quantization: quant = round((value / max) * 127) + 128
+    # where scale = max / 448 (FP8 E4M3 max value is 448)
+    # Inverse: value = (quant - 128) / 127 * max = (quant - 128) / 127 * scale * 448
+    k_scale_f = k_scales.to(torch.float32)
+    v_scale_f = v_scales.to(torch.float32)
 
+    # Center around 128 (the zero point)
+    centered_k = k_cache.float() - 128.0
+    centered_v = v_cache.float() - 128.0
+
+    # Exact inverse: (quant - 128) / 127 * scale * 448
+    k_dequant = centered_k / 127.0 * k_scale_f * 448.0
+    v_dequant = centered_v / 127.0 * v_scale_f * 448.0
+
+    # Convert to bf16 for attention computation
     k_dequant = k_dequant.to(torch.bfloat16)
     v_dequant = v_dequant.to(torch.bfloat16)
 

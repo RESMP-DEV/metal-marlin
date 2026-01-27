@@ -65,7 +65,10 @@ if HAS_METAL:
     from ._buffer_pool import MetalBufferPool
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
-    _WEIGHT_BUFFER_CACHE: weakref.WeakKeyDictionary[Any, Any] = weakref.WeakKeyDictionary()
+    # Cache Metal buffers by tensor Python id.
+    # Store (weakref, buffer) so we can verify the tensor is still alive.
+    # This avoids PyTorch tensor __eq__ issues with WeakKeyDictionary.
+    _WEIGHT_BUFFER_CACHE: dict[int, tuple[weakref.ref, Any]] = {}
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
         pool = _STAGING_POOLS.get(id(device))
@@ -107,8 +110,14 @@ if HAS_METAL:
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
-        if cache and tensor in _WEIGHT_BUFFER_CACHE:
-            return _WEIGHT_BUFFER_CACHE[tensor]
+        tensor_id = id(tensor)
+        if cache and tensor_id in _WEIGHT_BUFFER_CACHE:
+            ref, buf = _WEIGHT_BUFFER_CACHE[tensor_id]
+            # Verify the tensor is still alive and is the same object
+            if ref() is tensor:
+                return buf
+            # Stale entry - remove it
+            del _WEIGHT_BUFFER_CACHE[tensor_id]
 
         if tensor.is_mps:
             staging = mps_tensor_to_metal_buffer(tensor, device)
@@ -122,7 +131,7 @@ if HAS_METAL:
             private_buf = _private_buffer_from_bytes(lib, device, data)
 
         if cache:
-            _WEIGHT_BUFFER_CACHE[tensor] = private_buf
+            _WEIGHT_BUFFER_CACHE[tensor_id] = (weakref.ref(tensor), private_buf)
         return private_buf
 
 
@@ -823,7 +832,7 @@ TILE_M = 64
 TILE_N = 64
 TILE_K = 32
 THREADS_PER_TG = 128
-FP32_ACCUM_K_THRESHOLD = 8192
+FP32_ACCUM_K_THRESHOLD = 256
 
 # Padding config (set METAL_MARLIN_GEMM_PADDING=0 to disable)
 _ENABLE_GEMM_PADDING = os.getenv("METAL_MARLIN_GEMM_PADDING", "1").lower() not in (

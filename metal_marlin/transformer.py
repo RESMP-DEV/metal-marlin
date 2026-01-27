@@ -47,11 +47,13 @@ class RMSNorm(_get_base_class()):
     bias, while achieving comparable training stability.
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, device: str = "mps"):
+    def __init__(self, hidden_size: int, eps: float = 1e-6, device: str | None = None):
         require_torch("RMSNorm")
         if HAS_TORCH and torch is not None:
             super().__init__()
         assert torch is not None
+        # Default to CPU for compatibility, move to MPS explicitly when needed
+        device = device or "cpu"
         self.weight = torch.nn.Parameter(torch.ones(hidden_size, device=device))
         self.eps = eps
         self.to(device)

@@ -62,6 +62,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .fused_attention_mps import fused_attention
 from .kv_cache import KVCache
 from .layers import MarlinLinear
 from .mla_kv_cache import MLAKVCache
@@ -270,6 +271,7 @@ class MLAAttention(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.rope_ratio = rope_ratio
         self.scale = self.q_head_dim**-0.5
+        self.use_fused_attention = True
 
         # Query projections
         if q_lora_rank is not None:
@@ -430,7 +432,11 @@ class MLAAttention(nn.Module):
         # Apply RoPE to q_pe and k_pe
         if self.qk_rope_head_dim > 0:
             q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+            # MLARoPE expects seq_len at the second-to-last dimension for 4D inputs.
+            # q_pe is [B, S, H, D], so transpose to [B, H, S, D] before applying RoPE.
+            q_pe = q_pe.permute(0, 2, 1, 3)
             q_pe = self.rope_q(q_pe, position_offset)
+            q_pe = q_pe.permute(0, 2, 1, 3)
             q = torch.cat([q_nope, q_pe], dim=-1)
             k_pe = self.rope_k(k_pe, position_offset)
 
@@ -459,16 +465,36 @@ class MLAAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
-        # Use PyTorch's scaled_dot_product_attention (MPS-optimized)
-        attn_output = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            is_causal=attention_mask is None and seq_len > 1,
-            scale=self.scale,
-        )
+        # Use fused Metal attention when available, fallback to PyTorch SDPA.
+        attn_output: torch.Tensor | None = None
+        is_causal = attention_mask is None and seq_len > 1
+        if (
+            self.use_fused_attention
+            and q.is_mps
+            and (attention_mask is None or attention_mask.dtype != torch.bool)
+        ):
+            try:
+                attn_output = fused_attention(
+                    q,
+                    k,
+                    v,
+                    mask=attention_mask,
+                    scale=self.scale,
+                    causal=is_causal,
+                )
+            except Exception:
+                attn_output = None
+
+        if attn_output is None:
+            attn_output = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=attention_mask,
+                dropout_p=0.0,
+                is_causal=is_causal,
+                scale=self.scale,
+            )
 
         # Reshape and project output
         attn_output = (
