@@ -40,8 +40,8 @@ constant constexpr uint MOE_K_TILES = MOE_TILE_K / 8;  // 4 sub-tiles for simdgr
 constant constexpr uint MOE_SIMDGROUPS = 4;
 constant constexpr uint MOE_THREADS = MOE_SIMDGROUPS * 32;  // 128
 
-constant constexpr uint MOE_SG_M_TILES = 2;  // 2 rows of 8x8 tiles per simdgroup
-constant constexpr uint MOE_SG_N_TILES = 4;  // 4 cols of 8x8 tiles per simdgroup
+constant constexpr uint MOE_SG_M_TILES = 8;  // rows of 8x8 tiles per simdgroup
+constant constexpr uint MOE_SG_N_TILES = 2;  // cols of 8x8 tiles per simdgroup
 
 constant constexpr uint FP4_PER_UINT = 8;
 constant constexpr uint MOE_NUM_BUFFERS = 2;
@@ -325,8 +325,8 @@ kernel void moe_expert_gemm_fp4(
     const uint tg_row = tgid.y * MOE_TILE_M;  // Token batch offset
     const uint tg_col = tgid.x * MOE_TILE_N;  // Output dimension offset
 
-    const uint sg_row_offset = (simd_id / 2) * (MOE_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (MOE_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (MOE_SG_N_TILES * 8);
 
     const uint thread_idx = simd_id * 32 + simd_lane;
 
@@ -461,8 +461,8 @@ kernel void moe_expert_gemm_fp4_grouped(
         return;
     }
 
-    const uint sg_row_offset = (simd_id / 2) * (MOE_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (MOE_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (MOE_SG_N_TILES * 8);
     const uint thread_idx = simd_id * 32 + simd_lane;
 
     // Get token range for this expert
@@ -656,8 +656,8 @@ kernel void moe_expert_gemm_shared_fp4(
     const uint tg_row = tgid.y * MOE_TILE_M;
     const uint tg_col = tgid.x * MOE_TILE_N;
 
-    const uint sg_row_offset = (simd_id / 2) * (MOE_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (MOE_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (MOE_SG_N_TILES * 8);
 
     const uint thread_idx = simd_id * 32 + simd_lane;
 

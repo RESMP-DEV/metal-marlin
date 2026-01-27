@@ -262,8 +262,13 @@ class MetalKernelLibrary:
         source = self._preprocess_includes(source)
 
         options = Metal.MTLCompileOptions.new()
-        # Enable fast math for performance
-        options.setFastMathEnabled_(True)
+        # Enable fast math for performance unless explicitly disabled.
+        disable_fast_math = os.getenv("METAL_MARLIN_DISABLE_FAST_MATH", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        options.setFastMathEnabled_(not disable_fast_math)
         # Metal 3.0 for simdgroup_matrix
         options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
 

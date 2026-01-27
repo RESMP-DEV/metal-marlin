@@ -27,8 +27,8 @@ constant constexpr uint TILE_K_LATENT = 64;
 constant constexpr uint SIMDGROUPS_PER_TG = 4;
 constant constexpr uint THREADS_PER_TG = SIMDGROUPS_PER_TG * 32;
 
-constant constexpr uint SG_M_TILES = 2;
-constant constexpr uint SG_N_TILES = 4;
+constant constexpr uint SG_M_TILES = 8;
+constant constexpr uint SG_N_TILES = 2;
 
 constant constexpr uint FP4_PER_UINT = 8;
 constant constexpr uint K_TILES_HIDDEN = TILE_K_HIDDEN / 8;  // 4
@@ -101,8 +101,8 @@ inline void apply_rope_pair(thread half& x, thread half& y, half cos_val, half s
 
     uint tg_row = tgid.y * TILE_M;
     uint tg_col = tgid.x * TILE_N;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
     for (uint mi = 0; mi < SG_M_TILES; ++mi)
@@ -335,8 +335,8 @@ inline void apply_rope_pair(thread half& x, thread half& y, half cos_val, half s
 
     uint tg_row = tgid.y * TILE_M;
     uint tg_col = tgid.x * TILE_N;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
     for (uint mi = 0; mi < SG_M_TILES; ++mi)

@@ -19,8 +19,8 @@ constant constexpr uint TILE_K = 32;
 constant constexpr uint K_TILES = TILE_K / 8;  // 4
 constant constexpr uint SIMDGROUPS_PER_TG = 4;
 constant constexpr uint THREADS_PER_TG = SIMDGROUPS_PER_TG * 32;
-constant constexpr uint SG_M_TILES = 2;
-constant constexpr uint SG_N_TILES = 4;
+constant constexpr uint SG_M_TILES = 8;
+constant constexpr uint SG_N_TILES = 2;
 constant constexpr uint FP4_PER_UINT = 8;
 constant constexpr uint NUM_BUFFERS = 2;
 
@@ -184,8 +184,8 @@ inline void compute_from_tiles(
 }
 
 // Staging buffer dimensions for store_results
-constant constexpr uint SG_TILE_ROWS = SG_M_TILES * 8;  // 16
-constant constexpr uint SG_TILE_COLS = SG_N_TILES * 8;  // 32
+constant constexpr uint SG_TILE_ROWS = SG_M_TILES * 8;  // 64
+constant constexpr uint SG_TILE_COLS = SG_N_TILES * 8;  // 16
 
 inline void store_results(
     thread simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES],
@@ -299,8 +299,8 @@ kernel void marlin_gemm_batched_fp4(
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
 
-    const uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
     for (uint mi = 0; mi < SG_M_TILES; ++mi) {
@@ -381,8 +381,8 @@ kernel void marlin_gemm_grouped_attention(
     const uint tg_row = tgid.y * TILE_M;
     const uint tg_col = tgid.x * TILE_N;
 
-    const uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
     for (uint mi = 0; mi < SG_M_TILES; ++mi) {

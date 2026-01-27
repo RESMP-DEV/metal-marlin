@@ -30,8 +30,8 @@
 using namespace metal;
 
 // Re-declare tile constants (must match marlin_gemm.metal)
-constant constexpr uint EP_SG_M_TILES = 2;
-constant constexpr uint EP_SG_N_TILES = 4;
+constant constexpr uint EP_SG_M_TILES = 8;
+constant constexpr uint EP_SG_N_TILES = 2;
 
 // ---------------------------------------------------------------------------
 // Epilogue mode enum (matches buffer constant)
@@ -413,8 +413,8 @@ inline void marlin_gemm_fused_fp4_epilogue_impl(
 
     if (tg_row >= M) return;
 
-    const uint sg_row_offset = (simd_id / 2) * (EP_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (EP_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (EP_SG_N_TILES * 8);
 
     // --- Accumulators ---
     simdgroup_matrix<half, 8, 8> acc[EP_SG_M_TILES][EP_SG_N_TILES];

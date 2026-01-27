@@ -37,8 +37,8 @@ constant constexpr uint SP_K_TILES = SP_TILE_K / 8;  // 4
 constant constexpr uint SP_SIMDGROUPS_PER_TG = 4;
 constant constexpr uint SP_THREADS_PER_TG = SP_SIMDGROUPS_PER_TG * 32;  // 128
 
-constant constexpr uint SP_SG_M_TILES = 2;
-constant constexpr uint SP_SG_N_TILES = 4;
+constant constexpr uint SP_SG_M_TILES = 8;
+constant constexpr uint SP_SG_N_TILES = 2;
 
 constant constexpr uint SP_FP4_PER_UINT = 8;
 constant constexpr uint SP_NUM_BUFFERS = 2;
@@ -345,8 +345,8 @@ kernel void marlin_gemm_sparse_fp4(
     const uint tg_row = tgid.y * SP_TILE_M;
     const uint tg_col = tgid.x * SP_TILE_N;
 
-    const uint sg_row_offset = (simd_id / 2) * (SP_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (SP_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (SP_SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SP_SG_M_TILES][SP_SG_N_TILES];
     for (uint mi = 0; mi < SP_SG_M_TILES; ++mi)
@@ -432,8 +432,8 @@ kernel void marlin_gemm_sparse_fp4_fused(
 
     const uint tg_row = tgid.y * SP_TILE_M;
     const uint tg_col = tgid.x * SP_TILE_N;
-    const uint sg_row_offset = (simd_id / 2) * (SP_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (SP_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (SP_SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SP_SG_M_TILES][SP_SG_N_TILES];
     for (uint mi = 0; mi < SP_SG_M_TILES; ++mi)

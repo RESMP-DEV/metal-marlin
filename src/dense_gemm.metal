@@ -1155,14 +1155,14 @@ kernel void dense_fused_gate_up_fp4(
     const uint tg_row = tgid.y * DENSE_TILE_M;
     const uint tg_col = tgid.x * DENSE_TILE_N;
 
-    const uint sg_row_offset = (simd_id / 2) * (2 * 8);  // SG_M_TILES=2
-    const uint sg_col_offset = (simd_id % 2) * (4 * 8);  // SG_N_TILES=4
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (2 * 8);  // SG_N_TILES=2
 
     // Two sets of accumulators: one for gate, one for up
-    simdgroup_matrix<half, 8, 8> acc_gate[2][4];
-    simdgroup_matrix<half, 8, 8> acc_up[2][4];
-    for (uint mi = 0; mi < 2; ++mi) {
-        for (uint ni = 0; ni < 4; ++ni) {
+    simdgroup_matrix<half, 8, 8> acc_gate[8][2];
+    simdgroup_matrix<half, 8, 8> acc_up[8][2];
+    for (uint mi = 0; mi < 8; ++mi) {
+        for (uint ni = 0; ni < 2; ++ni) {
             acc_gate[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
             acc_up[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
         }
@@ -1195,13 +1195,13 @@ kernel void dense_fused_gate_up_fp4(
         // Compute both gate and up projections
         const uint K_TILES_INNER = DENSE_TILE_K / 8;
         for (uint kst = 0; kst < K_TILES_INNER; ++kst) {
-            for (uint mi = 0; mi < 2; ++mi) {
+            for (uint mi = 0; mi < 8; ++mi) {
                 simdgroup_matrix<half, 8, 8> a_frag;
                 simdgroup_load(a_frag,
                                &A_tiles[buf_compute][sg_row_offset + mi * 8][kst * 8],
                                DENSE_TILE_K);
 
-                for (uint ni = 0; ni < 4; ++ni) {
+                for (uint ni = 0; ni < 2; ++ni) {
                     simdgroup_matrix<half, 8, 8> b_gate_frag;
                     simdgroup_load(b_gate_frag,
                                    &B_gate_tiles[buf_compute][kst * 8][sg_col_offset + ni * 8],
@@ -1223,23 +1223,23 @@ kernel void dense_fused_gate_up_fp4(
 
     // Apply activation and multiply: out = act(gate) * up
     // Store through staging for element-wise fusion
-    threadgroup half gate_staging[16][32];
-    threadgroup half up_staging[16][32];
+    threadgroup half gate_staging[64][16];
+    threadgroup half up_staging[64][16];
 
-    for (uint mi = 0; mi < 2; ++mi) {
-        for (uint ni = 0; ni < 4; ++ni) {
+    for (uint mi = 0; mi < 8; ++mi) {
+        for (uint ni = 0; ni < 2; ++ni) {
             // Store both to staging
-            simdgroup_store(acc_gate[mi][ni], &gate_staging[mi * 8][ni * 8], 32);
-            simdgroup_store(acc_up[mi][ni], &up_staging[mi * 8][ni * 8], 32);
+            simdgroup_store(acc_gate[mi][ni], &gate_staging[mi * 8][ni * 8], 16);
+            simdgroup_store(acc_up[mi][ni], &up_staging[mi * 8][ni * 8], 16);
         }
     }
 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     // Fused activation + multiply + store
-    for (uint elem = simd_lane; elem < 16 * 32; elem += 32) {
-        uint r = elem / 32;
-        uint c = elem % 32;
+    for (uint elem = simd_lane; elem < 64 * 16; elem += 32) {
+        uint r = elem / 16;
+        uint c = elem % 16;
         uint out_row = tg_row + sg_row_offset + r;
         uint out_col = tg_col + sg_col_offset + c;
 

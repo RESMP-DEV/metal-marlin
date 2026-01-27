@@ -106,8 +106,8 @@ TILE_N = 64
 TILE_K = 32
 SIMDGROUPS_PER_TG = 4
 THREADS_PER_TG = SIMDGROUPS_PER_TG * 32  # 128
-SG_M_TILES = 2
-SG_N_TILES = 4
+SG_M_TILES = 8
+SG_N_TILES = 2
 K_TILES = TILE_K // 8  # 4
 FP4_PER_UINT = 8
 NUM_BUFFERS = 2
@@ -303,8 +303,8 @@ kernel void marlin_gemm_fp4(
     const uint TILE_N = 64;
     const uint TILE_K = 32;
     const uint SIMDGROUPS_PER_TG = 4;
-    const uint SG_M_TILES = 2;
-    const uint SG_N_TILES = 4;
+    const uint SG_M_TILES = 8;
+    const uint SG_N_TILES = 2;
     const uint FP4_PER_UINT = 8;
     const uint NUM_BUFFERS = 2;
 
@@ -321,8 +321,8 @@ kernel void marlin_gemm_fp4(
     // Tile assignment
     uint tg_row = tgid.y * TILE_M;
     uint tg_col = tgid.x * TILE_N;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     // Accumulators
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
@@ -463,8 +463,8 @@ kernel void marlin_gemm_int4(
     const uint TILE_N = 64;
     const uint TILE_K = 32;
     const uint SIMDGROUPS_PER_TG = 4;
-    const uint SG_M_TILES = 2;
-    const uint SG_N_TILES = 4;
+    const uint SG_M_TILES = 8;
+    const uint SG_N_TILES = 2;
     const uint FP4_PER_UINT = 8;
 
     uint3 tgid = threadgroup_position_in_grid;
@@ -477,8 +477,8 @@ kernel void marlin_gemm_int4(
 
     uint tg_row = tgid.y * TILE_M;
     uint tg_col = tgid.x * TILE_N;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES];
     for (uint mi = 0; mi < SG_M_TILES; ++mi)
@@ -1357,9 +1357,15 @@ if HAS_METAL and HAS_MPS:
         S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
         C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
-        # Pack GEMM parameters in the struct expected by the kernel.
-        params = np.array([M, N, K, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        # Metal kernel expects 4 SEPARATE scalar buffers at indices 4-7:
+        #   buffer(4): constant uint& M
+        #   buffer(5): constant uint& N
+        #   buffer(6): constant uint& K
+        #   buffer(7): constant uint& group_size
+        M_buf = _params_buffer(lib, device, np.array([M], dtype=np.uint32))
+        N_buf = _params_buffer(lib, device, np.array([N], dtype=np.uint32))
+        K_buf = _params_buffer(lib, device, np.array([K], dtype=np.uint32))
+        gs_buf = _params_buffer(lib, device, np.array([group_size], dtype=np.uint32))
 
         # Tile sizes matching marlin_gemm.metal
         TILE_M = 64
@@ -1371,10 +1377,10 @@ if HAS_METAL and HAS_MPS:
 
         dispatch_kernel(
             lib,
-            function_name="marlin_gemm_fused_fp4",
+            function_name="marlin_gemm_fp4_single_stage",  # Simple non-pipelined kernel
             grid=(grid_n, grid_m, 1),
             threadgroup=(THREADS_PER_TG, 1, 1),
-            buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
+            buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
             wait=True,
         )
 
@@ -1705,6 +1711,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output tensor [batch, num_heads_q, seq_q, head_dim]. MPS tensor.
         """
+
         def _dequantize_fp4_blockscaled(
             packed: torch.Tensor,
             scales: torch.Tensor,

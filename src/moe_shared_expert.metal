@@ -58,8 +58,8 @@ constant constexpr uint MOE_SIMDGROUPS_PER_TG = 4;
 constant constexpr uint MOE_THREADS_PER_TG = MOE_SIMDGROUPS_PER_TG * 32;  // 128
 
 // Each simdgroup handles 2x4 block of 8x8 tiles (16x32 output region)
-constant constexpr uint MOE_SG_M_TILES = 2;
-constant constexpr uint MOE_SG_N_TILES = 4;
+constant constexpr uint MOE_SG_M_TILES = 8;
+constant constexpr uint MOE_SG_N_TILES = 2;
 
 // FP4 packing: 8 FP4 values per uint32
 constant constexpr uint MOE_FP4_PER_UINT = 8;
@@ -342,8 +342,8 @@ kernel void moe_shared_expert_fused(
 
     if (tg_row >= num_tokens) return;
 
-    const uint sg_row_offset = (simd_id / 2) * (MOE_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (MOE_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (MOE_SG_N_TILES * 8);
 
     const uint thread_idx = simd_id * 32 + simd_lane;
     const uint num_k_tiles = moe_div_ceil(hidden_dim, MOE_TILE_K);
@@ -588,8 +588,8 @@ kernel void moe_shared_expert_fused_fp4(
 
     if (tg_row >= num_tokens) return;
 
-    const uint sg_row_offset = (simd_id / 2) * (MOE_SG_M_TILES * 8);
-    const uint sg_col_offset = (simd_id % 2) * (MOE_SG_N_TILES * 8);
+    const uint sg_row_offset = 0;  // All simdgroups cover all rows
+    const uint sg_col_offset = simd_id * (MOE_SG_N_TILES * 8);
 
     const uint thread_idx = simd_id * 32 + simd_lane;
     const uint num_k_tiles = moe_div_ceil(hidden_dim, MOE_TILE_K);

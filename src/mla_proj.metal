@@ -49,8 +49,8 @@ constant constexpr uint THREADS_PER_TG_MLA = SIMDGROUPS_PER_TG_MLA * 32;  // 128
 constant constexpr uint THREADS_PER_TG_DECODE = 64;  // Smaller for decode GEMV
 
 // Each simdgroup handles 2x4 block of 8x8 tiles (16 rows × 32 cols)
-constant constexpr uint SG_M_TILES_MLA = 2;
-constant constexpr uint SG_N_TILES_MLA = 4;
+constant constexpr uint SG_M_TILES_MLA = 8;
+constant constexpr uint SG_N_TILES_MLA = 2;
 
 constant constexpr uint FP4_PER_UINT = 8;
 
@@ -150,8 +150,8 @@ inline void apply_rope_tg(
     \
     uint tg_row = tgid.y * TILE_M_MLA; \
     uint tg_col = tgid.x * TILE_N_MLA; \
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES_MLA * 8); \
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES_MLA * 8); \
+    uint sg_row_offset = 0;  // All simdgroups cover all rows \
+    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8); \
     \
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA]; \
     for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) \
@@ -296,8 +296,8 @@ DEFINE_MLA_PROJ_KERNEL(mla_proj_fp4_k32, TILE_K_MLA_LARGE, K_TILES_MLA_LARGE)
 
     uint tg_row = tgid.y * TILE_M_MLA;
     uint tg_col = tgid.x * TILE_N_MLA;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES_MLA * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES_MLA * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
 
     // Accumulators for final output
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
@@ -547,8 +547,8 @@ DEFINE_MLA_PROJ_KERNEL(mla_proj_fp4_k32, TILE_K_MLA_LARGE, K_TILES_MLA_LARGE)
 
     uint tg_row = tgid.y * TILE_M_MLA;
     uint tg_col = tgid.x * TILE_N_MLA;
-    uint sg_row_offset = (simd_id / 2) * (SG_M_TILES_MLA * 8);
-    uint sg_col_offset = (simd_id % 2) * (SG_N_TILES_MLA * 8);
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
     for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi)

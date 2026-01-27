@@ -554,6 +554,7 @@ inline void compute_from_tiles(
     uint sg_row_offset,
     uint sg_col_offset
 ) {
+    // Manually unrolled inner loop to avoid compiler reusing b_frag
     for (uint kt = 0; kt < K_TILES; ++kt) {
         for (uint mi = 0; mi < SG_M_TILES; ++mi) {
             simdgroup_matrix<half, 8, 8> a_frag;
@@ -561,16 +562,27 @@ inline void compute_from_tiles(
                            &A_buf[sg_row_offset + mi * 8][kt * 8],
                            TILE_K);
 
-            for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-                simdgroup_matrix<half, 8, 8> b_frag;
-                simdgroup_load(b_frag,
-                               &B_buf[kt * 8][sg_col_offset + ni * 8],
-                               TILE_N);
-
-                simdgroup_multiply_accumulate(acc[mi][ni],
-                                              a_frag,
-                                              b_frag,
-                                              acc[mi][ni]);
+            // Unroll ni loop with separate b_frag for each iteration
+            // SG_N_TILES = 4, so we need 4 separate loads
+            {
+                simdgroup_matrix<half, 8, 8> b_frag_0;
+                simdgroup_load(b_frag_0, &B_buf[kt * 8][sg_col_offset + 0], TILE_N);
+                simdgroup_multiply_accumulate(acc[mi][0], a_frag, b_frag_0, acc[mi][0]);
+            }
+            {
+                simdgroup_matrix<half, 8, 8> b_frag_1;
+                simdgroup_load(b_frag_1, &B_buf[kt * 8][sg_col_offset + 8], TILE_N);
+                simdgroup_multiply_accumulate(acc[mi][1], a_frag, b_frag_1, acc[mi][1]);
+            }
+            {
+                simdgroup_matrix<half, 8, 8> b_frag_2;
+                simdgroup_load(b_frag_2, &B_buf[kt * 8][sg_col_offset + 16], TILE_N);
+                simdgroup_multiply_accumulate(acc[mi][2], a_frag, b_frag_2, acc[mi][2]);
+            }
+            {
+                simdgroup_matrix<half, 8, 8> b_frag_3;
+                simdgroup_load(b_frag_3, &B_buf[kt * 8][sg_col_offset + 24], TILE_N);
+                simdgroup_multiply_accumulate(acc[mi][3], a_frag, b_frag_3, acc[mi][3]);
             }
         }
     }
@@ -593,11 +605,14 @@ inline void compute_from_tiles_divergent(
                            &A_buf[sg_row_offset + mi * 8][kt * 8],
                            TILE_K);
 
+            #pragma clang loop unroll(disable)
             for (uint ni = 0; ni < DIVERGENT_SG_N_TILES; ++ni) {
                 simdgroup_matrix<half, 8, 8> b_frag;
+                volatile uint col_offset = sg_col_offset + ni * 8;
                 simdgroup_load(b_frag,
-                               &B_buf[kt * 8][sg_col_offset + ni * 8],
+                               &B_buf[kt * 8][(uint)col_offset],
                                TILE_N);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
 
                 simdgroup_multiply_accumulate(acc[mi][ni],
                                               a_frag,
