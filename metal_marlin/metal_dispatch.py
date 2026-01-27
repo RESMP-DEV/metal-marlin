@@ -823,6 +823,7 @@ TILE_M = 64
 TILE_N = 64
 TILE_K = 32
 THREADS_PER_TG = 128
+FP32_ACCUM_K_THRESHOLD = 8192
 
 # Padding config (set METAL_MARLIN_GEMM_PADDING=0 to disable)
 _ENABLE_GEMM_PADDING = os.getenv("METAL_MARLIN_GEMM_PADDING", "1").lower() not in (
@@ -957,10 +958,12 @@ def dispatch_gemm_fp4(
 
     device = lib.device
     gpu_family = get_gpu_family(device)
-    if gpu_family >= 9:
-        kernel_name = "marlin_gemm_fused_fp4"
+    if K > FP32_ACCUM_K_THRESHOLD:
+        kernel_name = (
+            "marlin_gemm_fused_fp4_fp32acc" if gpu_family >= 9 else "marlin_gemm_fp4_fp32acc"
+        )
     else:
-        kernel_name = "marlin_gemm_fp4"
+        kernel_name = "marlin_gemm_fused_fp4" if gpu_family >= 9 else "marlin_gemm_fp4"
 
     pad_m_multiple = _PAD_MULTIPLE
     pad_n_multiple = _PAD_MULTIPLE

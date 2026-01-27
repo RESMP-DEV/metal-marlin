@@ -1064,20 +1064,17 @@ kernel void flash_attention_v2_gqa(
             }
         }
 
-        // On first head pass, load K/V tiles (simdgroup 0 does first load)
-        if (head_pass == 0) {
-            // Preload first K/V tile
-            uint tile_len = min(uint(TILE_KV), seq_k);
-            uint elems = tile_len * head_dim;
-            uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
-            for (uint i = 0; i < per_thread; ++i) {
-                uint idx = tid + i * THREADS_PER_TG;
-                if (idx < elems) {
-                    uint kv_row = idx / head_dim;
-                    uint kv_col = idx % head_dim;
-                    K_tile[0][kv_row][kv_col] = K[kv_base + kv_row * k_stride_s + kv_col];
-                    V_tile[0][kv_row][kv_col] = V[kv_base + kv_row * k_stride_s + kv_col];
-                }
+        // Preload first K/V tile for this head pass
+        uint tile_len = min(uint(TILE_KV), seq_k);
+        uint elems = tile_len * head_dim;
+        uint per_thread = (elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        for (uint i = 0; i < per_thread; ++i) {
+            uint idx = tid + i * THREADS_PER_TG;
+            if (idx < elems) {
+                uint kv_row = idx / head_dim;
+                uint kv_col = idx % head_dim;
+                K_tile[0][kv_row][kv_col] = K[kv_base + kv_row * k_stride_s + kv_col];
+                V_tile[0][kv_row][kv_col] = V[kv_base + kv_row * k_stride_s + kv_col];
             }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1089,8 +1086,8 @@ kernel void flash_attention_v2_gqa(
             uint tile_start = tile_idx * TILE_KV;
             uint tile_len = min(uint(TILE_KV), seq_k - tile_start);
 
-            // First pass loads next tile, other passes just sync
-            if (head_pass == 0 && tile_idx + 1 < num_kv_tiles) {
+            // Load next tile for this head pass
+            if (tile_idx + 1 < num_kv_tiles) {
                 uint next_start = (tile_idx + 1) * TILE_KV;
                 uint next_len = min(uint(TILE_KV), seq_k - next_start);
                 uint elems = next_len * head_dim;

@@ -97,8 +97,8 @@ class GPUFingerprint:
             return False
         if self.cores != other.cores:
             return False
-        # Allow 8GB memory variance (different RAM configs on same chip)
-        if abs(self.memory_gb - other.memory_gb) > 8:
+        # Allow 32GB memory variance (different RAM configs on same chip)
+        if abs(self.memory_gb - other.memory_gb) > 32:
             return False
         return True
 

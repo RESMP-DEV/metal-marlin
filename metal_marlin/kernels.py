@@ -111,6 +111,7 @@ SG_N_TILES = 2
 K_TILES = TILE_K // 8  # 4
 FP4_PER_UINT = 8
 NUM_BUFFERS = 2
+FP32_ACCUM_K_THRESHOLD = 8192
 
 # ---------------------------------------------------------------------------
 # Kernel source: all helper functions, dequant primitives, tile logic
@@ -737,19 +738,19 @@ using namespace metal;
 /// Single butterfly step: computes (a + b, a - b) where b is shuffled from another lane.
 inline float butterfly_step_f(float val, uint partner, bool is_upper) {
     float partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 /// Butterfly step for float2 (two parallel values per thread)
 inline float2 butterfly_step2_f(float2 val, uint partner, bool is_upper) {
     float2 partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 /// Butterfly step for float4 (four parallel values per thread)
 inline float4 butterfly_step4_f(float4 val, uint partner, bool is_upper) {
     float4 partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 struct HadamardParams {
@@ -1375,9 +1376,13 @@ if HAS_METAL and HAS_MPS:
         grid_m = (M + TILE_M - 1) // TILE_M
         grid_n = (N + TILE_N - 1) // TILE_N
 
+        kernel_name = "marlin_gemm_fp4_single_stage"
+        if K > FP32_ACCUM_K_THRESHOLD:
+            kernel_name = "marlin_gemm_fp4_fp32acc"
+
         dispatch_kernel(
             lib,
-            function_name="marlin_gemm_fp4_single_stage",  # Simple non-pipelined kernel
+            function_name=kernel_name,
             grid=(grid_n, grid_m, 1),
             threadgroup=(THREADS_PER_TG, 1, 1),
             buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
@@ -1427,7 +1432,21 @@ if HAS_METAL and HAS_MPS:
         if M_dispatch != M:
             A_2d, _ = pad_torch_2d(A_2d, rows_multiple=TILE_M, cols_multiple=1)
 
-        C = dispatch_gemm_fp4(lib, A_2d, B_packed, scales, M_dispatch, N, K, group_size)
+        # Use shared dispatch path to select the most stable kernel variant.
+        # Keep padding disabled here since M is already padded above.
+        from . import metal_dispatch as _metal_dispatch
+
+        C = _metal_dispatch.dispatch_gemm_fp4(
+            lib,
+            A_2d,
+            B_packed,
+            scales,
+            M_dispatch,
+            N,
+            K,
+            group_size,
+            enable_padding=False,
+        )
         if M_dispatch != M:
             C = C[:M, :]
         out_shape = list(orig_shape[:-1]) + [N]

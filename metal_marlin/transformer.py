@@ -52,7 +52,7 @@ class RMSNorm(_get_base_class()):
         if HAS_TORCH and torch is not None:
             super().__init__()
         assert torch is not None
-        self.weight = torch.nn.Parameter(torch.ones(hidden_size))
+        self.weight = torch.nn.Parameter(torch.ones(hidden_size, device=device))
         self.eps = eps
         self.to(device)
 

@@ -427,7 +427,7 @@ kernel void decode_gemv_fp4_simd(
 // For batched decode where M is small (1-8 sequences generating in parallel),
 // each thread handles one (row, col) pair.
 //
-// Dispatch: Grid (ceil(N / 32), M, 1), threadgroup (32, 4, 1)
+// Dispatch: Grid (ceil(N / 32), ceil(M / 4), 1), threadgroup (32, 4, 1)
 // ===========================================================================
 
 kernel void decode_gemv_fp4_batched(
@@ -442,7 +442,8 @@ kernel void decode_gemv_fp4_batched(
     uint3 tgid                   [[threadgroup_position_in_grid]],
     uint3 tid                    [[thread_position_in_threadgroup]]
 ) {
-    const uint row = tgid.y;  // Which sequence (0..M-1)
+    // Each threadgroup covers up to 4 rows via tid.y.
+    const uint row = tgid.y * 4 + tid.y;  // Which sequence (0..M-1)
     const uint col = tgid.x * 32 + tid.x;  // Output column
     
     if (row >= M || col >= N) return;

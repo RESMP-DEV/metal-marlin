@@ -130,121 +130,231 @@ inline void apply_rope_tg(
 
 // Macro to generate MLA projection kernels with different tile sizes
 // TILE_K_VAL: tile size for K dimension, K_TILES_VAL: number of 8x8 tiles in K
-#define DEFINE_MLA_PROJ_KERNEL(KERNEL_NAME, TILE_K_VAL, K_TILES_VAL) \
-[[kernel]] void KERNEL_NAME( \
-    device const half* A            [[buffer(0)]], \
-    device const uint* B_packed     [[buffer(1)]], \
-    device const half* scales       [[buffer(2)]], \
-    device half* out                [[buffer(3)]], \
-    constant uint& M                [[buffer(4)]], \
-    constant uint& N                [[buffer(5)]], \
-    constant uint& K                [[buffer(6)]], \
-    constant uint& group_size       [[buffer(7)]], \
-    uint3 tgid                      [[threadgroup_position_in_grid]], \
-    uint simd_lane                  [[thread_index_in_simdgroup]], \
-    uint simd_id                    [[simdgroup_index_in_threadgroup]], \
-    uint thread_idx                 [[thread_index_in_threadgroup]] \
-) { \
-    threadgroup half A_tile[TILE_M_MLA][TILE_K_VAL]; \
-    threadgroup half B_tile[TILE_K_VAL][TILE_N_MLA]; \
-    \
-    uint tg_row = tgid.y * TILE_M_MLA; \
-    uint tg_col = tgid.x * TILE_N_MLA; \
-    uint sg_row_offset = 0;  // All simdgroups cover all rows \
-    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8); \
-    \
-    simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA]; \
-    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) \
-        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) \
-            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h); \
-    \
-    uint k_packs = (K + FP4_PER_UINT - 1) / FP4_PER_UINT; \
-    uint scale_tiles = (K + group_size - 1) / group_size; \
-    \
-    for (uint k_block = 0; k_block < K; k_block += TILE_K_VAL) { \
-        { \
-            const uint elems_per_thread = (TILE_M_MLA * TILE_K_VAL) / THREADS_PER_TG_MLA; \
-            for (uint i = 0; i < elems_per_thread; ++i) { \
-                uint flat_idx = thread_idx * elems_per_thread + i; \
-                uint row = flat_idx / TILE_K_VAL; \
-                uint col = flat_idx % TILE_K_VAL; \
-                uint global_row = tg_row + row; \
-                uint global_col = k_block + col; \
-                half val = (global_row < M && global_col < K) \
-                           ? A[global_row * K + global_col] \
-                           : half(0.0h); \
-                A_tile[row][col] = val; \
-            } \
-        } \
-        { \
-            const uint packed_per_thread = (TILE_K_VAL * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT); \
-            for (uint i = 0; i < packed_per_thread; ++i) { \
-                uint flat_packed_idx = thread_idx * packed_per_thread + i; \
-                uint n_idx = flat_packed_idx / (TILE_K_VAL / FP4_PER_UINT); \
-                uint k_group_in_tile = flat_packed_idx % (TILE_K_VAL / FP4_PER_UINT); \
-                uint global_n = tg_col + n_idx; \
-                uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT; \
-                uint scale_k = global_k_base / group_size; \
-                half s = half(1.0h); \
-                if (global_n < N && scale_k < scale_tiles) { \
-                    s = scales[scale_k * N + global_n]; \
-                } \
-                uint32_t packed = 0; \
-                uint b_row = global_k_base / FP4_PER_UINT; \
-                if (global_n < N && b_row < k_packs && global_k_base < K) { \
-                    packed = B_packed[b_row * N + global_n]; \
-                } \
-                uint tile_k_base = k_group_in_tile * FP4_PER_UINT; \
-                half vals[8]; \
-                dequant_fp4x8(packed, s, vals); \
-                for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_VAL; ++v) { \
-                    if (n_idx < TILE_N_MLA) { \
-                        uint global_k = global_k_base + v; \
-                        B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h); \
-                    } \
-                } \
-            } \
-        } \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
-        for (uint kt = 0; kt < K_TILES_VAL; ++kt) { \
-            for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) { \
-                simdgroup_matrix<half, 8, 8> a_frag; \
-                simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_VAL); \
-                for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) { \
-                    simdgroup_matrix<half, 8, 8> b_frag; \
-                    simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA); \
-                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]); \
-                } \
-            } \
-        } \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
-    } \
-    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) { \
-        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) { \
-            uint out_row = tg_row + sg_row_offset + mi * 8; \
-            uint out_col = tg_col + sg_col_offset + ni * 8; \
-            if (out_row + 8 <= M && out_col + 8 <= N) { \
-                simdgroup_store(acc[mi][ni], out + out_row * N + out_col, N); \
-            } else if (out_row < M && out_col < N) { \
-                threadgroup half out_staging[8][8]; \
-                simdgroup_store(acc[mi][ni], &out_staging[0][0], 8); \
-                threadgroup_barrier(mem_flags::mem_threadgroup); \
-                for (uint elem = simd_lane; elem < 64; elem += 32) { \
-                    uint r = elem / 8; \
-                    uint c = elem % 8; \
-                    if (out_row + r < M && out_col + c < N) { \
-                        out[(out_row + r) * N + out_col + c] = out_staging[r][c]; \
-                    } \
-                } \
-                threadgroup_barrier(mem_flags::mem_threadgroup); \
-            } \
-        } \
-    } \
+
+// --- mla_proj_fp4_k16: TILE_K=16, K_TILES=2 ---
+[[kernel]] void mla_proj_fp4_k16(
+    device const half* A            [[buffer(0)]],
+    device const uint* B_packed     [[buffer(1)]],
+    device const half* scales       [[buffer(2)]],
+    device half* out                [[buffer(3)]],
+    constant uint& M                [[buffer(4)]],
+    constant uint& N                [[buffer(5)]],
+    constant uint& K                [[buffer(6)]],
+    constant uint& group_size       [[buffer(7)]],
+    uint3 tgid                      [[threadgroup_position_in_grid]],
+    uint simd_lane                  [[thread_index_in_simdgroup]],
+    uint simd_id                    [[simdgroup_index_in_threadgroup]],
+    uint thread_idx                 [[thread_index_in_threadgroup]]
+) {
+    threadgroup half A_tile[TILE_M_MLA][TILE_K_MLA];
+    threadgroup half B_tile[TILE_K_MLA][TILE_N_MLA];
+
+    uint tg_row = tgid.y * TILE_M_MLA;
+    uint tg_col = tgid.x * TILE_N_MLA;
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
+
+    simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
+    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi)
+        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni)
+            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+
+    uint k_packs = (K + FP4_PER_UINT - 1) / FP4_PER_UINT;
+    uint scale_tiles = (K + group_size - 1) / group_size;
+
+    for (uint k_block = 0; k_block < K; k_block += TILE_K_MLA) {
+        {
+            const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA) / THREADS_PER_TG_MLA;
+            for (uint i = 0; i < elems_per_thread; ++i) {
+                uint flat_idx = thread_idx * elems_per_thread + i;
+                uint row = flat_idx / TILE_K_MLA;
+                uint col = flat_idx % TILE_K_MLA;
+                uint global_row = tg_row + row;
+                uint global_col = k_block + col;
+                half val = (global_row < M && global_col < K)
+                           ? A[global_row * K + global_col]
+                           : half(0.0h);
+                A_tile[row][col] = val;
+            }
+        }
+        {
+            const uint packed_per_thread = (TILE_K_MLA * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
+            for (uint i = 0; i < packed_per_thread; ++i) {
+                uint flat_packed_idx = thread_idx * packed_per_thread + i;
+                uint n_idx = flat_packed_idx / (TILE_K_MLA / FP4_PER_UINT);
+                uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA / FP4_PER_UINT);
+                uint global_n = tg_col + n_idx;
+                uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+                uint scale_k = global_k_base / group_size;
+                half s = half(1.0h);
+                if (global_n < N && scale_k < scale_tiles) {
+                    s = scales[scale_k * N + global_n];
+                }
+                uint32_t packed = 0;
+                uint b_row = global_k_base / FP4_PER_UINT;
+                if (global_n < N && b_row < k_packs && global_k_base < K) {
+                    packed = B_packed[b_row * N + global_n];
+                }
+                uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+                half vals[8];
+                dequant_fp4x8(packed, s, vals);
+                for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA; ++v) {
+                    if (n_idx < TILE_N_MLA) {
+                        uint global_k = global_k_base + v;
+                        B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kt = 0; kt < K_TILES_MLA; ++kt) {
+            for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+                simdgroup_matrix<half, 8, 8> a_frag;
+                simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA);
+                for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+                    simdgroup_matrix<half, 8, 8> b_frag;
+                    simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
+                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+            uint out_row = tg_row + sg_row_offset + mi * 8;
+            uint out_col = tg_col + sg_col_offset + ni * 8;
+            if (out_row + 8 <= M && out_col + 8 <= N) {
+                simdgroup_store(acc[mi][ni], out + out_row * N + out_col, N);
+            } else if (out_row < M && out_col < N) {
+                threadgroup half out_staging[8][8];
+                simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint elem = simd_lane; elem < 64; elem += 32) {
+                    uint r = elem / 8;
+                    uint c = elem % 8;
+                    if (out_row + r < M && out_col + c < N) {
+                        out[(out_row + r) * N + out_col + c] = out_staging[r][c];
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+    }
 }
 
-// Generate kernel variants for different TILE_K values
-DEFINE_MLA_PROJ_KERNEL(mla_proj_fp4_k16, TILE_K_MLA, K_TILES_MLA)
-DEFINE_MLA_PROJ_KERNEL(mla_proj_fp4_k32, TILE_K_MLA_LARGE, K_TILES_MLA_LARGE)
+// --- mla_proj_fp4_k32: TILE_K=32, K_TILES=4 ---
+[[kernel]] void mla_proj_fp4_k32(
+    device const half* A            [[buffer(0)]],
+    device const uint* B_packed     [[buffer(1)]],
+    device const half* scales       [[buffer(2)]],
+    device half* out                [[buffer(3)]],
+    constant uint& M                [[buffer(4)]],
+    constant uint& N                [[buffer(5)]],
+    constant uint& K                [[buffer(6)]],
+    constant uint& group_size       [[buffer(7)]],
+    uint3 tgid                      [[threadgroup_position_in_grid]],
+    uint simd_lane                  [[thread_index_in_simdgroup]],
+    uint simd_id                    [[simdgroup_index_in_threadgroup]],
+    uint thread_idx                 [[thread_index_in_threadgroup]]
+) {
+    threadgroup half A_tile[TILE_M_MLA][TILE_K_MLA_LARGE];
+    threadgroup half B_tile[TILE_K_MLA_LARGE][TILE_N_MLA];
+
+    uint tg_row = tgid.y * TILE_M_MLA;
+    uint tg_col = tgid.x * TILE_N_MLA;
+    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
+
+    simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
+    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi)
+        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni)
+            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+
+    uint k_packs = (K + FP4_PER_UINT - 1) / FP4_PER_UINT;
+    uint scale_tiles = (K + group_size - 1) / group_size;
+
+    for (uint k_block = 0; k_block < K; k_block += TILE_K_MLA_LARGE) {
+        {
+            const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA_LARGE) / THREADS_PER_TG_MLA;
+            for (uint i = 0; i < elems_per_thread; ++i) {
+                uint flat_idx = thread_idx * elems_per_thread + i;
+                uint row = flat_idx / TILE_K_MLA_LARGE;
+                uint col = flat_idx % TILE_K_MLA_LARGE;
+                uint global_row = tg_row + row;
+                uint global_col = k_block + col;
+                half val = (global_row < M && global_col < K)
+                           ? A[global_row * K + global_col]
+                           : half(0.0h);
+                A_tile[row][col] = val;
+            }
+        }
+        {
+            const uint packed_per_thread = (TILE_K_MLA_LARGE * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
+            for (uint i = 0; i < packed_per_thread; ++i) {
+                uint flat_packed_idx = thread_idx * packed_per_thread + i;
+                uint n_idx = flat_packed_idx / (TILE_K_MLA_LARGE / FP4_PER_UINT);
+                uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA_LARGE / FP4_PER_UINT);
+                uint global_n = tg_col + n_idx;
+                uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+                uint scale_k = global_k_base / group_size;
+                half s = half(1.0h);
+                if (global_n < N && scale_k < scale_tiles) {
+                    s = scales[scale_k * N + global_n];
+                }
+                uint32_t packed = 0;
+                uint b_row = global_k_base / FP4_PER_UINT;
+                if (global_n < N && b_row < k_packs && global_k_base < K) {
+                    packed = B_packed[b_row * N + global_n];
+                }
+                uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+                half vals[8];
+                dequant_fp4x8(packed, s, vals);
+                for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA_LARGE; ++v) {
+                    if (n_idx < TILE_N_MLA) {
+                        uint global_k = global_k_base + v;
+                        B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint kt = 0; kt < K_TILES_MLA_LARGE; ++kt) {
+            for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+                simdgroup_matrix<half, 8, 8> a_frag;
+                simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA_LARGE);
+                for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+                    simdgroup_matrix<half, 8, 8> b_frag;
+                    simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
+                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+        for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+            uint out_row = tg_row + sg_row_offset + mi * 8;
+            uint out_col = tg_col + sg_col_offset + ni * 8;
+            if (out_row + 8 <= M && out_col + 8 <= N) {
+                simdgroup_store(acc[mi][ni], out + out_row * N + out_col, N);
+            } else if (out_row < M && out_col < N) {
+                threadgroup half out_staging[8][8];
+                simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint elem = simd_lane; elem < 64; elem += 32) {
+                    uint r = elem / 8;
+                    uint c = elem % 8;
+                    if (out_row + r < M && out_col + c < N) {
+                        out[(out_row + r) * N + out_col + c] = out_staging[r][c];
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // Kernel 2: Fused kv_a + kv_b Projection

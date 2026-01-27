@@ -78,10 +78,11 @@ constant constexpr uint DIVERGENT_COMPUTE_SG = 2;
 constant constexpr uint DIVERGENT_SG_M_TILES = TILE_M / (DIVERGENT_COMPUTE_SG * 8);
 constant constexpr uint DIVERGENT_SG_N_TILES = TILE_N / 8;
 
-// Each simdgroup is responsible for a 2x4 block of 8x8 M×N tiles
-// (16 rows × 32 cols per simdgroup, 4 simdgroups tile the 64×64 output)
-constant constexpr uint SG_M_TILES = 2;  // rows of 8x8 tiles per simdgroup
-constant constexpr uint SG_N_TILES = 4;  // cols of 8x8 tiles per simdgroup
+// Each simdgroup is responsible for a 4x4 block of 8x8 M×N tiles
+// (32 rows × 32 cols per simdgroup)
+// 4 simdgroups in 2×2 arrangement: 2*32=64 rows, 2*32=64 cols
+constant constexpr uint SG_M_TILES = 4;  // rows of 8x8 tiles per simdgroup (32 rows)
+constant constexpr uint SG_N_TILES = 4;  // cols of 8x8 tiles per simdgroup (32 cols)
 
 // FP4 packing: 8 FP4 values per uint32 (4 bits each)
 constant constexpr uint FP4_PER_UINT = 8;
@@ -546,10 +547,17 @@ inline void load_A_tile_bf16_fp32(
 // ---------------------------------------------------------------------------
 // Simdgroup compute: multiply A sub-tile by B sub-tile, accumulate
 // ---------------------------------------------------------------------------
+// NOTE: Uses pointers instead of array references to work around a Metal
+// compiler bug when passing slices of 3D threadgroup arrays (e.g. A_tiles[buf_idx])
+// to functions expecting 2D array references. The compiler incorrectly handles
+// the slice offset calculation.
+// CRITICAL: __attribute__((always_inline)) is required to work around Metal
+// compiler bug that corrupts acc array access when not inlined.
 
+__attribute__((always_inline))
 inline void compute_from_tiles(
-    threadgroup const half (&A_buf)[TILE_M][TILE_K],
-    threadgroup const half (&B_buf)[TILE_K][TILE_N],
+    threadgroup const half* A_ptr,  // Pointer to A_tiles[buf_idx][0][0]
+    threadgroup const half* B_ptr,  // Pointer to B_tiles[buf_idx][0][0]
     thread simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES],
     uint sg_row_offset,
     uint sg_col_offset
@@ -558,36 +566,39 @@ inline void compute_from_tiles(
     for (uint kt = 0; kt < K_TILES; ++kt) {
         for (uint mi = 0; mi < SG_M_TILES; ++mi) {
             simdgroup_matrix<half, 8, 8> a_frag;
+            // A_ptr[row][col] -> A_ptr + row * TILE_K + col
             simdgroup_load(a_frag,
-                           &A_buf[sg_row_offset + mi * 8][kt * 8],
+                           A_ptr + (sg_row_offset + mi * 8) * TILE_K + kt * 8,
                            TILE_K);
 
             // Unroll ni loop with separate b_frag for each iteration
             // SG_N_TILES = 4, so we need 4 separate loads
+            // B_ptr[row][col] -> B_ptr + row * TILE_N + col
             {
                 simdgroup_matrix<half, 8, 8> b_frag_0;
-                simdgroup_load(b_frag_0, &B_buf[kt * 8][sg_col_offset + 0], TILE_N);
+                simdgroup_load(b_frag_0, B_ptr + kt * 8 * TILE_N + sg_col_offset + 0, TILE_N);
                 simdgroup_multiply_accumulate(acc[mi][0], a_frag, b_frag_0, acc[mi][0]);
             }
             {
                 simdgroup_matrix<half, 8, 8> b_frag_1;
-                simdgroup_load(b_frag_1, &B_buf[kt * 8][sg_col_offset + 8], TILE_N);
+                simdgroup_load(b_frag_1, B_ptr + kt * 8 * TILE_N + sg_col_offset + 8, TILE_N);
                 simdgroup_multiply_accumulate(acc[mi][1], a_frag, b_frag_1, acc[mi][1]);
             }
             {
                 simdgroup_matrix<half, 8, 8> b_frag_2;
-                simdgroup_load(b_frag_2, &B_buf[kt * 8][sg_col_offset + 16], TILE_N);
+                simdgroup_load(b_frag_2, B_ptr + kt * 8 * TILE_N + sg_col_offset + 16, TILE_N);
                 simdgroup_multiply_accumulate(acc[mi][2], a_frag, b_frag_2, acc[mi][2]);
             }
             {
                 simdgroup_matrix<half, 8, 8> b_frag_3;
-                simdgroup_load(b_frag_3, &B_buf[kt * 8][sg_col_offset + 24], TILE_N);
+                simdgroup_load(b_frag_3, B_ptr + kt * 8 * TILE_N + sg_col_offset + 24, TILE_N);
                 simdgroup_multiply_accumulate(acc[mi][3], a_frag, b_frag_3, acc[mi][3]);
             }
         }
     }
 }
 
+__attribute__((always_inline))
 inline void compute_from_tiles_divergent(
     threadgroup const half (&A_buf)[TILE_M][TILE_K],
     threadgroup const half (&B_buf)[TILE_K][TILE_N],
@@ -632,8 +643,11 @@ inline void compute_from_tiles_divergent(
 // Parameters:
 //   staging: threadgroup buffer declared in the calling kernel, used for
 //            boundary handling when tiles partially exceed M or N bounds.
+// CRITICAL: __attribute__((always_inline)) is required to work around Metal
+// compiler bug that corrupts acc array access when not inlined.
 // ---------------------------------------------------------------------------
 
+__attribute__((always_inline))
 inline void store_results(
     thread simdgroup_matrix<half, 8, 8> acc[SG_M_TILES][SG_N_TILES],
     device half* C,
@@ -684,6 +698,7 @@ inline void store_results(
     }
 }
 
+__attribute__((always_inline))
 inline void store_results_divergent(
     thread simdgroup_matrix<half, 8, 8>
         acc[DIVERGENT_SG_M_TILES][DIVERGENT_SG_N_TILES],
@@ -737,6 +752,7 @@ inline void store_results_divergent(
 // Simdgroup compute (FP32 accumulation)
 // ---------------------------------------------------------------------------
 
+__attribute__((always_inline))
 inline void compute_from_tiles_fp32(
     threadgroup const half (&A_buf)[TILE_M][TILE_K],
     threadgroup const half (&B_buf)[TILE_K][TILE_N],
@@ -768,6 +784,7 @@ inline void compute_from_tiles_fp32(
     }
 }
 
+__attribute__((always_inline))
 inline void compute_from_tiles_fp32_full(
     threadgroup const float (&A_buf)[TILE_M][TILE_K],
     threadgroup const float (&B_buf)[TILE_K][TILE_N],
@@ -801,6 +818,7 @@ inline void compute_from_tiles_fp32_full(
 // Store accumulated FP32 results to FP16 output
 // ---------------------------------------------------------------------------
 
+__attribute__((always_inline))
 inline void store_results_fp32(
     thread simdgroup_matrix<float, 8, 8> acc[SG_M_TILES][SG_N_TILES],
     device half* C,
@@ -842,6 +860,7 @@ inline void store_results_fp32(
     }
 }
 
+__attribute__((always_inline))
 inline void store_results_fp32_bf16(
     thread simdgroup_matrix<float, 8, 8> acc[SG_M_TILES][SG_N_TILES],
     device ushort* C,
@@ -972,7 +991,7 @@ kernel void marlin_gemm_fp4(
         }
 
         // Compute on current buffer
-        compute_from_tiles(A_tiles[buf_compute], B_tiles[buf_compute],
+        compute_from_tiles(&A_tiles[buf_compute][0][0], &B_tiles[buf_compute][0][0],
                            acc, sg_row_offset, sg_col_offset);
 
         // Barrier: ensures next tile load is visible before swap
@@ -1211,7 +1230,7 @@ kernel void marlin_gemm_fp4_3stage(
         }
 
         // Compute on the buffer that was loaded prologue_tiles iterations ago
-        compute_from_tiles(A_tiles[stage_compute], B_tiles[stage_compute],
+        compute_from_tiles(&A_tiles[stage_compute][0][0], &B_tiles[stage_compute][0][0],
                            acc, sg_row_offset, sg_col_offset);
 
         // Barrier: ensures prefetch store is visible before stage_load is reused
@@ -1395,7 +1414,7 @@ kernel void marlin_gemm_fp4_single_stage(
             }
 
             // Compute on current buffer
-            compute_from_tiles(A_tiles[buf_idx], B_tiles[buf_idx],
+            compute_from_tiles(&A_tiles[buf_idx][0][0], &B_tiles[buf_idx][0][0],
                                acc, sg_row_offset, sg_col_offset);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1465,7 +1484,7 @@ kernel void marlin_gemm_fp16_single_stage(
                 load_B_tile_fp16(B, B_tiles[buf_load], K, N, tg_col, next_k, thread_idx);
             }
 
-            compute_from_tiles(A_tiles[buf_idx], B_tiles[buf_idx],
+            compute_from_tiles(&A_tiles[buf_idx][0][0], &B_tiles[buf_idx][0][0],
                                acc, sg_row_offset, sg_col_offset);
             threadgroup_barrier(mem_flags::mem_threadgroup);
             buf_idx = buf_load;
@@ -2587,7 +2606,7 @@ kernel void marlin_gemm_fp16_pipelined(
         }
 
         // Compute on current buffer: pure MMA, zero dequant overhead
-        compute_from_tiles(A_tiles[buf_compute], B_tiles[buf_compute],
+        compute_from_tiles(&A_tiles[buf_compute][0][0], &B_tiles[buf_compute][0][0],
                            acc, sg_row_offset, sg_col_offset);
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2829,7 +2848,7 @@ kernel void marlin_gemm_fp4_async(
         }
 
         // Compute on current buffer while load is in flight
-        compute_from_tiles(A_tiles[buf_compute], B_tiles[buf_compute],
+        compute_from_tiles(&A_tiles[buf_compute][0][0], &B_tiles[buf_compute][0][0],
                            acc, sg_row_offset, sg_col_offset);
 
         // Wait for A load and perform staged B load+dequant
@@ -2927,7 +2946,7 @@ kernel void marlin_gemm_fp4_async_deep(
         }
 
         // Stage: Compute on tile[k]
-        compute_from_tiles(A_tiles[stage_compute], B_tiles[stage_compute],
+        compute_from_tiles(&A_tiles[stage_compute][0][0], &B_tiles[stage_compute][0][0],
                            acc, sg_row_offset, sg_col_offset);
 
         // Rotate stages

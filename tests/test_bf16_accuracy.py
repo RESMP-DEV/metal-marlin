@@ -82,7 +82,7 @@ def _ordered_int_fp32(values: np.ndarray) -> np.ndarray:
     bits = values.astype(np.float32).view(np.int32)
     ordered = bits.copy()
     neg_mask = bits < 0
-    ordered[neg_mask] = np.int32(0x80000000) - ordered[neg_mask]
+    ordered[neg_mask] = np.int32(-2147483648) - ordered[neg_mask]
     return ordered
 
 

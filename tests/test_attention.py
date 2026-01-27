@@ -531,10 +531,24 @@ def run_flash_attention_v2_decode(
     output_size = int(np.prod(output_shape)) * 2
     buf_O = device.newBufferWithLength_options_(output_size, Metal.MTLResourceStorageModeShared)
 
-    params = _pack_attention_params(batch, heads_q, heads_kv, 1, seq_k, head_dim, scale, 1, 0)
-    buf_params = device.newBufferWithBytes_length_options_(
-        params, len(params), Metal.MTLResourceStorageModeShared
-    )
+    def _make_uint32_buffer(val: int):
+        data = np.array([val], dtype=np.uint32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    def _make_float_buffer(val: float):
+        data = np.array([val], dtype=np.float32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    buf_num_seqs = _make_uint32_buffer(batch)
+    buf_heads_q = _make_uint32_buffer(heads_q)
+    buf_heads_kv = _make_uint32_buffer(heads_kv)
+    buf_seq_k = _make_uint32_buffer(seq_k)
+    buf_head_dim = _make_uint32_buffer(head_dim)
+    buf_scale = _make_float_buffer(scale)
 
     queue = device.newCommandQueue()
     cmd_buf = queue.commandBuffer()
@@ -545,12 +559,17 @@ def run_flash_attention_v2_decode(
     encoder.setBuffer_offset_atIndex_(buf_K, 0, 1)
     encoder.setBuffer_offset_atIndex_(buf_V, 0, 2)
     encoder.setBuffer_offset_atIndex_(buf_O, 0, 3)
-    encoder.setBuffer_offset_atIndex_(buf_params, 0, 4)
+    encoder.setBuffer_offset_atIndex_(buf_num_seqs, 0, 4)
+    encoder.setBuffer_offset_atIndex_(buf_heads_q, 0, 5)
+    encoder.setBuffer_offset_atIndex_(buf_heads_kv, 0, 6)
+    encoder.setBuffer_offset_atIndex_(buf_seq_k, 0, 7)
+    encoder.setBuffer_offset_atIndex_(buf_head_dim, 0, 8)
+    encoder.setBuffer_offset_atIndex_(buf_scale, 0, 9)
 
-    # Decode: one threadgroup per (head, batch) pair
-    grid_x = heads_q
+    # Decode: one threadgroup per (sequence, head) pair
+    grid_x = batch * heads_q
     grid_y = 1
-    grid_z = batch
+    grid_z = 1
 
     encoder.dispatchThreadgroups_threadsPerThreadgroup_(
         Metal.MTLSizeMake(grid_x, grid_y, grid_z),

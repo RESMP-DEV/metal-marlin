@@ -447,9 +447,9 @@ class TestMixedPrecisionPackUnpack:
         unpacked = unpack_fp4(packed, scales, group_size=128)
 
         # Check shapes
-        assert packed.shape == (128, 32)  # 256 / 8 = 32
-        assert scales.shape == (128, 2)  # 256 / 128 = 2 groups
-        assert unpacked.shape == small_weight_matrix.shape
+        assert packed.shape == (32, 128)  # K/8 x N = 256/8 x 128
+        assert scales.shape == (2, 128)  # K/group_size x N = 256/128 x 128
+        assert unpacked.shape == small_weight_matrix.T.shape
 
         # Values should be close (within FP4 quantization error)
         error = compute_quantization_error(small_weight_matrix, packed, scales, group_size=128)
@@ -671,7 +671,7 @@ class TestEndToEndQuantizeInference:
         y_original = x @ small_weight_matrix.T.astype(np.float16)
 
         # Quantized output
-        y_quantized = x @ dequantized.T
+        y_quantized = x @ dequantized
 
         # Should be reasonably close
         relative_error = np.mean(np.abs(y_original - y_quantized)) / np.mean(np.abs(y_original))
@@ -756,10 +756,11 @@ class TestEndToEndQuantizeInference:
         packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
 
         # Verify packed format
-        assert packed.shape == (128, 32)
+        assert packed.shape == (32, 128)
 
         # Unpack and dequantize
         dequantized = unpack_fp4(packed, scales, group_size=128)
+        dequantized = dequantized.T
 
         # Compare
         assert dequantized.shape == small_weight_matrix.shape
@@ -783,7 +784,7 @@ class TestEndToEndQuantizeInference:
         assert scales is not None
 
         unpacked = unpack_fp4(packed, scales, group_size=64)
-        assert unpacked.shape == W.shape
+        assert unpacked.shape == W.T.shape
 
 
 # =============================================================================
@@ -800,7 +801,7 @@ class TestEdgeCases:
         W = np.random.randn(64, 128).astype(np.float32)
 
         packed, scales = quantize_fp4(W, group_size=128)
-        assert scales.shape == (64, 1)
+        assert scales.shape == (1, 64)
 
     def test_many_groups_quantization(self):
         """Quantization with many small groups."""
@@ -808,7 +809,7 @@ class TestEdgeCases:
         W = np.random.randn(64, 256).astype(np.float32)
 
         packed, scales = quantize_fp4(W, group_size=32)
-        assert scales.shape == (64, 8)  # 256 / 32 = 8 groups
+        assert scales.shape == (8, 64)  # 256 / 32 = 8 groups
 
     def test_zero_weight_handling(self):
         """Quantization should handle zero weights."""

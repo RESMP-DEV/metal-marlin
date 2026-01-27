@@ -49,19 +49,19 @@ using namespace metal;
 /// @return          Butterfly result for this lane
 inline half butterfly_step(half val, uint partner, bool is_upper) {
     half partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 /// Same for half2 (two parallel values per thread)
 inline half2 butterfly_step2(half2 val, uint partner, bool is_upper) {
     half2 partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 /// Same for half4 (four parallel values per thread)
 inline half4 butterfly_step4(half4 val, uint partner, bool is_upper) {
     half4 partner_val = simd_shuffle(val, ushort(partner));
-    return is_upper ? (val - partner_val) : (val + partner_val);
+    return is_upper ? (partner_val - val) : (val + partner_val);
 }
 
 // ============================================================================
@@ -174,8 +174,8 @@ kernel void hadamard_transform_64(
         half2 partner_val = simd_shuffle(val, ushort(partner));
         bool is_upper = (lane_id & 1) != 0;
         if (is_upper) {
-            val.x = val.x - partner_val.x;
-            val.y = val.y - partner_val.y;
+            val.x = partner_val.x - val.x;
+            val.y = partner_val.y - val.y;
         } else {
             val.x = val.x + partner_val.x;
             val.y = val.y + partner_val.y;
@@ -359,7 +359,7 @@ kernel void hadamard_transform_64_vec(
         uint partner = lane_id ^ 1;
         half2 partner_val = simd_shuffle(val, ushort(partner));
         bool is_upper = (lane_id & 1) != 0;
-        val = is_upper ? (val - partner_val) : (val + partner_val);
+        val = is_upper ? (partner_val - val) : (val + partner_val);
     }
 
     // Stage 2: stride 4
@@ -444,7 +444,7 @@ kernel void hadamard_transform_64_scaled(
         uint partner = lane_id ^ 1;
         half2 partner_val = simd_shuffle(val, ushort(partner));
         bool is_upper = (lane_id & 1) != 0;
-        val = is_upper ? (val - partner_val) : (val + partner_val);
+        val = is_upper ? (partner_val - val) : (val + partner_val);
     }
 
     {
@@ -522,7 +522,7 @@ kernel void hadamard_inverse_64(
         uint partner = lane_id ^ 1;
         half2 partner_val = simd_shuffle(val, ushort(partner));
         bool is_upper = (lane_id & 1) != 0;
-        val = is_upper ? (val - partner_val) : (val + partner_val);
+        val = is_upper ? (partner_val - val) : (val + partner_val);
     }
 
     {

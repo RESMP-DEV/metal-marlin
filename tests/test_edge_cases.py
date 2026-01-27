@@ -223,7 +223,7 @@ def cpu_fp4_matmul(
 
     Args:
         A: Input activations [M, K] or [*, K]
-        packed: Packed FP4 weights [K, N//8] as uint32 (8 N-values per uint32)
+        packed: Packed FP4 weights [K//8, N] as uint32 (8 K-values packed per element)
         scales: Per-group scales [K//group_size, N]
         meta: Metadata from pack_fp4_weights
         group_size: Quantization group size
@@ -235,24 +235,22 @@ def cpu_fp4_matmul(
     N = meta["padded_N"]
 
     # Dequantize weights using numpy reference
-    # Packed layout: [K, N//8] where 8 consecutive N-dimension values are packed
+    # Packed layout: [K//8, N] where 8 consecutive K-dimension values are packed
     packed_np = packed.numpy()
     scales_np = scales.numpy().astype(np.float32)
 
     W = np.zeros((K, N), dtype=np.float32)
-    packed_n = N // 8
+    packed_k = K // 8  # 8 FP4 values packed along K dimension
 
-    for k in range(K):
-        group_idx = k // group_size
-
-        for n_pack in range(packed_n):
-            packed_val = int(packed_np[k, n_pack])
-            n_base = n_pack * 8
+    for k_pack in range(packed_k):
+        for n in range(N):
+            packed_val = int(packed_np[k_pack, n])
 
             for bit_pos in range(8):
-                n = n_base + bit_pos
-                if n < N:
+                k = k_pack * 8 + bit_pos
+                if k < K:
                     nibble = (packed_val >> (bit_pos * 4)) & 0xF
+                    group_idx = k // group_size
                     scale = float(scales_np[group_idx, n])
                     W[k, n] = FP4_E2M1_TABLE[nibble] * scale
 
