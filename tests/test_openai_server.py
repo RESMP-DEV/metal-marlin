@@ -17,6 +17,7 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH
 _PORT = 8123
 _BASE_URL = f"http://localhost:{_PORT}"
 _MODEL_NAME = "qwen3_4b_fp4"
+_USE_MOCK = os.getenv("METAL_MARLIN_MOCK_MODEL", "1") == "1"
 
 
 def _project_root() -> Path:
@@ -54,13 +55,14 @@ def _port_available(port: int) -> bool:
 
 @pytest.fixture(scope="module")
 def server_process() -> Generator[subprocess.Popen[str], None, None]:
-    if not HAS_TORCH:
-        pytest.skip("PyTorch not available")
-    if not HAS_MPS:
-        pytest.skip("MPS not available")
+    if not _USE_MOCK:
+        if not HAS_TORCH:
+            pytest.skip("PyTorch not available")
+        if not HAS_MPS:
+            pytest.skip("MPS not available")
 
     model_path = _model_path()
-    if not model_path.exists():
+    if not _USE_MOCK and not model_path.exists():
         pytest.skip(f"Model path not found: {model_path}")
 
     if not _port_available(_PORT):
@@ -79,6 +81,11 @@ def server_process() -> Generator[subprocess.Popen[str], None, None]:
         str(_PORT),
     ]
 
+    env = os.environ.copy()
+    if _USE_MOCK:
+        env["METAL_MARLIN_MOCK_MODEL"] = "1"
+        env["METAL_MARLIN_MOCK_MODEL_NAME"] = _MODEL_NAME
+
     process = subprocess.Popen(
         cmd,
         cwd=_project_root(),
@@ -86,6 +93,7 @@ def server_process() -> Generator[subprocess.Popen[str], None, None]:
         stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
+        env=env,
     )
 
     try:

@@ -27,6 +27,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+inference = [
+    "transformers>=4.30.0",
+    "huggingface_hub>=0.23.0",
+]
 metal = [
     "pyobjc-core>=10.0",
     "pyobjc-framework-Metal>=10.0",

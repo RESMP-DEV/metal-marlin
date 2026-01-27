@@ -61,7 +61,7 @@ class SpeculativeConfig:
             - "eagle": Use EAGLE v3 tree attention for high-acceptance drafting.
         num_speculative_tokens: Initial (and target) number of tokens to speculate.
         min_speculative_tokens: Adaptive floor.
-        max_speculative_tokens: Adaptive ceiling (can exceed initial if acceptance is high).
+        max_speculative_tokens: Adaptive ceiling (capped at num_speculative_tokens).
         temperature: Sampling temperature for target model verification.
         top_p: Nucleus sampling threshold.
         acceptance_threshold: Reduce K when windowed rate drops below this.
@@ -420,7 +420,7 @@ class SpeculativeEngine:
                     new_tokens=step.new_tokens,
                     num_new_tokens=torch.minimum(
                         step.num_new_tokens,
-                        torch.full((batch_size,), pos, dtype=torch.int32, device=self.device),
+                        torch.full((batch_size,), pos + 1, dtype=torch.int32, device=self.device),
                     ),
                     num_target_calls=step.num_target_calls,
                     num_draft_tokens=step.num_draft_tokens,
@@ -523,6 +523,8 @@ class SpeculativeEngine:
         """
         self._acceptance_history.append(acceptance_rate)
 
+        effective_max = min(self.config.max_speculative_tokens, self.config.num_speculative_tokens)
+
         if self.config.adaptive_depth:
             # Exponential moving average for smooth adaptation
             alpha = self.config.adaptive_depth_alpha
@@ -535,7 +537,7 @@ class SpeculativeEngine:
             if self._ema_acceptance < 0.1:
                 optimal_depth = self.config.min_speculative_tokens
             elif self._ema_acceptance > 0.95:
-                optimal_depth = self.config.max_speculative_tokens
+                optimal_depth = effective_max
             else:
                 # Geometric series expected length: 1/(1-p) - 1 accepted before rejection
                 # We use a slightly conservative estimate
@@ -546,7 +548,7 @@ class SpeculativeEngine:
             if optimal_depth > self._current_num_spec:
                 self._current_num_spec = min(
                     self._current_num_spec + 1,
-                    self.config.max_speculative_tokens,
+                    effective_max,
                 )
             elif optimal_depth < self._current_num_spec:
                 self._current_num_spec = max(
@@ -565,7 +567,7 @@ class SpeculativeEngine:
                 )
             elif avg_rate > self.config.increase_threshold:
                 self._current_num_spec = min(
-                    self.config.max_speculative_tokens,
+                    effective_max,
                     self._current_num_spec + 1,
                 )
 

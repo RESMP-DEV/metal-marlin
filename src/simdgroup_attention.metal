@@ -13,7 +13,7 @@
 // Kernel variants:
 //   1. simdgroup_attention_qk      - Q×K^T with simdgroup_matrix (outputs scores)
 //   2. simdgroup_attention_pv      - P×V with simdgroup_matrix
-//   3. simdgroup_flash_attention   - Full fused attention using simdgroup_matrix
+//   3. simdgroup_attention         - Full fused attention using simdgroup_matrix
 //
 // Memory layout (all row-major):
 //   Q: [batch, num_heads, seq_q, head_dim]
@@ -421,10 +421,12 @@ kernel void simdgroup_attention_qk(
 // ---------------------------------------------------------------------------
 
 constant constexpr uint Q_ROWS_PER_TG_FA = 8;   // Query rows per threadgroup
-constant constexpr uint KV_TILE_FA = 32;        // K/V rows per tile
+// KV_TILE_FA tuned to keep threadgroup memory <= 32KB on Apple GPUs.
+// 32 would exceed the limit once K/V tiles are double-buffered.
+constant constexpr uint KV_TILE_FA = 24;        // K/V rows per tile
 constant constexpr uint THREADS_FA = 128;       // 4 simdgroups
 
-kernel void simdgroup_flash_attention(
+kernel void simdgroup_attention(
     device const input_t* Q       [[buffer(0)]],
     device const input_t* K       [[buffer(1)]],
     device const input_t* V       [[buffer(2)]],

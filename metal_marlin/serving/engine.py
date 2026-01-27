@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 
 from ..inference.pipeline import MarlinPipeline
@@ -17,6 +18,53 @@ from .openai_schemas import (
     Usage,
 )
 from .request import GenerationRequest, RequestStatus
+
+
+class _MockTokenizer:
+    def apply_chat_template(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tokenize: bool = False,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        parts = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            parts.append(f"{role}: {content}")
+        if add_generation_prompt:
+            parts.append("assistant:")
+        return "\n".join(parts)
+
+    def encode(self, text: str) -> list[int]:
+        # Simple tokenization by whitespace for counting.
+        return [idx for idx, _ in enumerate(text.split())]
+
+
+class _MockPipeline:
+    def __init__(self, model_name: str):
+        self.tokenizer = _MockTokenizer()
+        self.device = "cpu"
+        self._model_name = model_name
+
+    def __call__(
+        self,
+        prompt: str | list[str],
+        *,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        stream: bool = False,
+    ) -> str | Iterator[str]:
+        _ = (max_tokens, temperature, top_p)
+        response = " mock response"
+        if isinstance(prompt, list):
+            prompt = prompt[0] if prompt else ""
+        if stream:
+            pieces = [piece + " " for piece in response.split()]
+            return iter(pieces)
+        return f"{prompt}{response}"
 
 
 @dataclass
@@ -36,10 +84,18 @@ class ServingEngine:
 
     def __init__(self, config: EngineConfig):
         self.config = config
-        self.pipeline = MarlinPipeline.from_pretrained(
-            config.model_path, device=config.device
-        )
-        self.model_name = str(config.model_path).split("/")[-1]
+        use_mock = os.getenv("METAL_MARLIN_MOCK_MODEL") == "1"
+        model_name = os.getenv("METAL_MARLIN_MOCK_MODEL_NAME")
+        if model_name is None:
+            model_name = str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
+
+        if use_mock:
+            self.pipeline = _MockPipeline(model_name)
+        else:
+            self.pipeline = MarlinPipeline.from_pretrained(
+                config.model_path, device=config.device
+            )
+        self.model_name = model_name
         self._request_queue: asyncio.Queue[GenerationRequest] = asyncio.Queue()
         self._results: dict[str, asyncio.Future] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)

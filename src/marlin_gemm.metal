@@ -173,7 +173,7 @@ inline half dequant_fp4_bitwise(uint nibble) {
 
     half magnitude;
     if (exp_bits == 0) {
-        magnitude = half(man_bit) * half(0.25h);
+        magnitude = half(man_bit) * half(0.5h);
     } else {
         half power = half(1u << (exp_bits - 1));
         half mantissa = half(1.0h) + half(man_bit) * half(0.5h);
@@ -1983,7 +1983,7 @@ inline half fused_dequant_fp4_scalar(uint nibble) {
     uint man_bit  = nibble & 1;
 
     // Subnormal (exp=0): 0.0 or 0.25
-    half sub_mag = half(man_bit) * half(0.25h);
+    half sub_mag = half(man_bit) * half(0.5h);
     // Normal (exp>0): 2^(exp-1) * (1 + mantissa*0.5)
     half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
 

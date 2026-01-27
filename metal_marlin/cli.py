@@ -1,5 +1,6 @@
 """Command-line interface for Metal Marlin inference and quantization."""
 
+import os
 from pathlib import Path
 
 import click
@@ -65,7 +66,7 @@ def chat(model, system, quant):
 
 
 @click.command()
-@click.argument("model_path", type=click.Path(exists=True))
+@click.argument("model_path", type=click.Path())
 @click.option("--host", default="0.0.0.0", help="Bind address")
 @click.option("--port", default=8000, type=int, help="Port number")
 @click.option("--device", default="mps", help="Device (mps/cuda/cpu)")
@@ -81,6 +82,10 @@ def serve(model_path: str, host: str, port: int, device: str):
           -d '{"model": "qwen3_4b_fp4", "messages": [{"role": "user", "content": "Hello"}]}'
     """
     from .serving.server import run_server
+
+    if os.getenv("METAL_MARLIN_MOCK_MODEL") != "1":
+        if not Path(model_path).exists():
+            raise click.ClickException(f"Model path not found: {model_path}")
 
     run_server(model_path, host=host, port=port, device=device)
 

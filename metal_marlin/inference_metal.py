@@ -26,6 +26,7 @@ Requirements:
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -400,10 +401,12 @@ class MetalRMSNorm(nn.Module):
     LayerNorm since it skips mean centering.
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
+    def __init__(self, hidden_size: int, eps: float = 1e-6, device: str | torch.device | None = None):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
+        if device is not None:
+            self.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         variance = x.pow(2).mean(-1, keepdim=True)
@@ -932,6 +935,8 @@ class MetalTransformerBlock(nn.Module):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Forward pass through the transformer block."""
+        if self._needs_device_move(hidden_states.device):
+            self.to(hidden_states.device)
         # Self-attention with residual
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -950,6 +955,12 @@ class MetalTransformerBlock(nn.Module):
         hidden_states = residual + hidden_states
 
         return hidden_states
+
+    def _needs_device_move(self, device: torch.device) -> bool:
+        param = next(self.parameters(), None)
+        if param is None:
+            return False
+        return param.device != device
 
 
 # ---------------------------------------------------------------------------
@@ -989,8 +1000,14 @@ class MetalMLAAttention(nn.Module):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.scale = self.head_dim**-0.5
 
+        def _compatible_group_size(in_features: int, default_group_size: int) -> int:
+            if in_features % default_group_size == 0:
+                return default_group_size
+            return math.gcd(in_features, default_group_size) or 1
+
         # Query projections
         if q_lora_rank is not None:
+            q_b_group_size = _compatible_group_size(q_lora_rank, group_size)
             self.q_a_proj = MetalQuantizedLinear(
                 hidden_size,
                 q_lora_rank,
@@ -1002,7 +1019,7 @@ class MetalMLAAttention(nn.Module):
                 q_lora_rank,
                 num_heads * self.head_dim,
                 bits=bits,
-                group_size=group_size,
+                group_size=q_b_group_size,
                 bias=bias,
             )
         else:
@@ -1023,11 +1040,12 @@ class MetalMLAAttention(nn.Module):
             group_size=group_size,
             bias=bias,
         )
+        kv_b_group_size = _compatible_group_size(kv_lora_rank, group_size)
         self.kv_b_proj = MetalQuantizedLinear(
             kv_lora_rank,
             num_heads * self.head_dim * 2,
             bits=bits,
-            group_size=group_size,
+            group_size=kv_b_group_size,
             bias=bias,
         )
 
@@ -1221,6 +1239,9 @@ class MetalGLM47Model(nn.Module):
 
         # LM head (tied to embeddings or separate)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+        # Ensure all params/buffers live on MPS for MPS input IDs.
+        self.to("mps")
 
     def forward(
         self,

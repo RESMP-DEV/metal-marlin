@@ -127,7 +127,7 @@ inline half dequant_fp4_scalar(uint nibble) {
     uint exp_bits = (nibble >> 1) & 0x3;
     uint man_bit  = nibble & 1;
 
-    half sub_mag = half(man_bit) * half(0.25h);
+    half sub_mag = half(man_bit) * half(0.5h);
     half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
     half magnitude = select(norm_mag, sub_mag, exp_bits == 0);
     return select(magnitude, -magnitude, bool(sign_bit));
@@ -924,6 +924,11 @@ if HAS_METAL and HAS_MPS:
     import Metal
 
     from ._buffer_pool import MetalBufferPool
+    from .moe_dispatch import (
+        gather_for_experts,
+        group_tokens_by_expert_full,
+        scatter_expert_outputs,
+    )
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
 
@@ -1352,11 +1357,9 @@ if HAS_METAL and HAS_MPS:
         S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
         C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
-        # Create separate param buffers (kernel expects buffers at indices 4, 5, 6, 7)
-        M_buf = _params_buffer(lib, device, np.array([M], dtype=np.uint32))
-        N_buf = _params_buffer(lib, device, np.array([N], dtype=np.uint32))
-        K_buf = _params_buffer(lib, device, np.array([K], dtype=np.uint32))
-        gs_buf = _params_buffer(lib, device, np.array([group_size], dtype=np.uint32))
+        # Pack GEMM parameters in the struct expected by the kernel.
+        params = np.array([M, N, K, group_size], dtype=np.uint32)
+        params_buf = _params_buffer(lib, device, params)
 
         # Tile sizes matching marlin_gemm.metal
         TILE_M = 64
@@ -1371,7 +1374,7 @@ if HAS_METAL and HAS_MPS:
             function_name="marlin_gemm_fused_fp4",
             grid=(grid_n, grid_m, 1),
             threadgroup=(THREADS_PER_TG, 1, 1),
-            buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
+            buffers=[A_buf, B_buf, S_buf, C_buf, params_buf],
             wait=True,
         )
 
@@ -1412,9 +1415,11 @@ if HAS_METAL and HAS_MPS:
         A_2d = A.reshape(M, K).half().contiguous()
         N = B_packed.shape[1]
 
-        M_dispatch = round_up(M, 8)
+        # The fused kernel's partial-tile stores are still sensitive for small M.
+        # Pad to full TILE_M so the kernel only sees complete tiles, then slice back.
+        M_dispatch = round_up(M, TILE_M)
         if M_dispatch != M:
-            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
+            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=TILE_M, cols_multiple=1)
 
         C = dispatch_gemm_fp4(lib, A_2d, B_packed, scales, M_dispatch, N, K, group_size)
         if M_dispatch != M:
@@ -1560,7 +1565,8 @@ if HAS_METAL and HAS_MPS:
         scales_half = scales if scales.dtype == torch.float16 else scales.half()
         scales_half = scales_half.contiguous()
         S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-        out_buf = mps_tensor_to_metal_buffer(out, device)
+        # Use copy-back for outputs in case zero-copy MPS interop is unavailable.
+        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
         params = np.array([K, N, group_size], dtype=np.uint32)
         params_buf = _params_buffer(lib, device, params)
@@ -1699,10 +1705,79 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output tensor [batch, num_heads_q, seq_q, head_dim]. MPS tensor.
         """
-        raise NotImplementedError(
-            "Flash attention with FP4 KV cache requires full kernel implementation. "
-            "Use standard attention with dequantized KV as a fallback."
-        )
+        def _dequantize_fp4_blockscaled(
+            packed: torch.Tensor,
+            scales: torch.Tensor,
+            head_dim: int,
+        ) -> torch.Tensor:
+            """CPU fallback dequantization for FP4 KV cache with per-row scales."""
+            packed_cpu = packed.detach().cpu()
+            scales_cpu = scales.detach().cpu()
+            if scales_cpu.dim() == 4 and scales_cpu.shape[-1] == 1:
+                scales_cpu = scales_cpu[..., 0]
+
+            if packed_cpu.dtype != torch.uint32:
+                packed_cpu = packed_cpu.to(torch.uint32)
+
+            batch, heads, seq, packed_dim = packed_cpu.shape
+            unpacked_dim = packed_dim * FP4_PER_UINT
+            if unpacked_dim < head_dim:
+                raise ValueError(
+                    f"Packed FP4 head_dim too small: packed_dim={packed_dim} "
+                    f"(unpacked {unpacked_dim}) < head_dim={head_dim}"
+                )
+
+            # E2M1 lookup table (matches Metal dequant_fp4_scalar).
+            fp4_table = torch.tensor(
+                [
+                    0.0,
+                    0.25,
+                    1.0,
+                    1.5,
+                    2.0,
+                    3.0,
+                    4.0,
+                    6.0,
+                    -0.0,
+                    -0.25,
+                    -1.0,
+                    -1.5,
+                    -2.0,
+                    -3.0,
+                    -4.0,
+                    -6.0,
+                ],
+                dtype=torch.float32,
+            )
+
+            packed_i64 = packed_cpu.to(torch.int64)
+            scales_expanded = scales_cpu.to(torch.float32).unsqueeze(-1)
+            out = torch.empty((batch, heads, seq, unpacked_dim), dtype=torch.float32)
+
+            for i in range(FP4_PER_UINT):
+                nibbles = (packed_i64 >> (i * 4)) & 0xF
+                vals = fp4_table[nibbles]
+                out[..., i::FP4_PER_UINT] = vals * scales_expanded
+
+            out = out[..., :head_dim].to(torch.float16)
+            return out.to(packed.device)
+
+        head_dim = Q.shape[-1]
+        K = _dequantize_fp4_blockscaled(K_packed, K_scales, head_dim)
+        V = _dequantize_fp4_blockscaled(V_packed, V_scales, head_dim)
+
+        heads_q = num_heads_q if num_heads_q is not None else Q.shape[1]
+        heads_k = num_heads_k if num_heads_k is not None else K.shape[1]
+        if heads_q != heads_k:
+            if heads_k <= 0 or heads_q % heads_k != 0:
+                raise ValueError(
+                    f"Invalid GQA head counts: num_heads_q={heads_q}, num_heads_k={heads_k}"
+                )
+            repeat_factor = heads_q // heads_k
+            K = K.repeat_interleave(repeat_factor, dim=1)
+            V = V.repeat_interleave(repeat_factor, dim=1)
+
+        return torch.nn.functional.scaled_dot_product_attention(Q, K, V, scale=scale)
 
     def moe_expert_gemm_fp4(
         activations: torch.Tensor,
@@ -1728,7 +1803,36 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output tensor [batch, hidden_out]. MPS tensor.
         """
-        raise NotImplementedError("MoE expert GEMM requires full kernel implementation.")
+        require_mps()
+
+        num_experts = expert_weights.shape[0]
+        dispatch_info = group_tokens_by_expert_full(expert_ids, num_experts)
+        gathered = gather_for_experts(activations, dispatch_info)
+
+        out_dim = expert_weights.shape[-1]
+        expert_outputs = torch.empty(
+            (dispatch_info.total_assignments, out_dim),
+            dtype=torch.float16,
+            device=activations.device,
+        )
+
+        for e in range(num_experts):
+            start = int(dispatch_info.expert_offsets[e].item())
+            end = int(dispatch_info.expert_offsets[e + 1].item())
+            if start == end:
+                continue
+            try:
+                expert_outputs[start:end] = marlin_gemm_fp4(
+                    gathered[start:end], expert_weights[e], scales[e], group_size
+                )
+            except Exception:
+                # Fallback: dequantize then matmul if fused GEMM cannot run.
+                k_dim = gathered.shape[1]
+                n_dim = expert_weights.shape[-1]
+                dequant = dequant_fp4(expert_weights[e], scales[e], k_dim, n_dim, group_size)
+                expert_outputs[start:end] = gathered[start:end] @ dequant
+
+        return scatter_expert_outputs(expert_outputs, expert_probs, dispatch_info)
 
     def moe_router_topk(
         hidden: torch.Tensor,
@@ -1748,7 +1852,19 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (expert_ids [batch, top_k], expert_probs [batch, top_k]).
         """
-        raise NotImplementedError("MoE router requires full kernel implementation.")
+        # Router forward: compute logits and apply softmax
+        # hidden: [batch, hidden_dim]
+        # router_weights: [hidden_dim, num_experts]
+        logits = torch.matmul(hidden, router_weights)  # [batch, num_experts]
+        probs = torch.softmax(logits, dim=-1)
+
+        # Select top-k experts per token
+        topk_probs, topk_ids = torch.topk(probs, k=top_k, dim=-1)
+
+        # Renormalize probabilities for selected experts
+        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+
+        return topk_ids, topk_probs
 
     def hadamard_transform(
         x: torch.Tensor,

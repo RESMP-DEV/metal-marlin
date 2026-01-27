@@ -45,6 +45,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..attention import RoPE
+
 if TYPE_CHECKING:
     from ..kv_cache import KVCache
 
@@ -178,78 +180,6 @@ def parse_diff_transformer_config(config_dict: dict[str, Any]) -> DifferentialAt
         q2k2_quant_type=q2k2_quant_type,
         use_fused_kernel=use_fused_kernel,
     )
-
-
-class RoPE(nn.Module):
-    """Rotary Position Embedding for differential attention.
-
-    Identical to standard RoPE but handles the split head dimensions
-    appropriately for differential attention.
-    """
-
-    def __init__(self, dims: int, traditional: bool = False, base: float = 10000.0):
-        super().__init__()
-        self.dims = dims
-        self.traditional = traditional
-        self.base = base
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        offset: int = 0,
-    ) -> torch.Tensor:
-        """Apply RoPE to input tensor.
-
-        Args:
-            x: Input tensor [batch, num_heads, seq_len, head_dim]
-            offset: Position offset for KV cache
-
-        Returns:
-            Tensor with RoPE applied
-        """
-        shape = x.shape
-        seq_len = shape[2]
-        head_dim = shape[3]
-        device = x.device
-        dtype = x.dtype
-
-        # Compute position indices
-        positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=device)
-
-        # Compute inverse frequencies
-        inv_freq = 1.0 / (
-            self.base
-            ** (torch.arange(0, self.dims, 2, dtype=torch.float32, device=device) / self.dims)
-        )
-
-        # Compute angles: [seq_len, dims/2]
-        freqs = torch.outer(positions, inv_freq)
-
-        # Compute cos and sin
-        cos = torch.cos(freqs)
-        sin = torch.sin(freqs)
-
-        # Expand dims for broadcasting: [1, 1, seq_len, dims/2]
-        cos = cos.unsqueeze(0).unsqueeze(0)
-        sin = sin.unsqueeze(0).unsqueeze(0)
-
-        # Split into even and odd indices
-        x_even = x[..., ::2]
-        x_odd = x[..., 1::2]
-
-        # Apply rotation (Llama-style)
-        if self.traditional:
-            x_rotated_even = x_even * cos - x_odd * sin
-            x_rotated_odd = x_even * sin + x_odd * cos
-        else:
-            x_rotated_even = x_even * cos - x_odd * sin
-            x_rotated_odd = x_odd * cos + x_even * sin
-
-        # Interleave back
-        x_rotated = torch.stack([x_rotated_even, x_rotated_odd], dim=-1)
-        x_rotated = x_rotated.view(*shape[:-1], head_dim)
-
-        return x_rotated.to(dtype)
 
 
 class DifferentialAttention(nn.Module):

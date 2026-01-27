@@ -524,22 +524,22 @@ inline void store_small_batch_fp32_bf16(
 
 constant constexpr uint SMALL_K_TILES = SMALL_TILE_K / 8;  // 4
 
-kernel void dense_gemm_small_batch_fp4(
-    device const half* A         [[buffer(0)]],
-    device const uint* B         [[buffer(1)]],
-    device const half* scales    [[buffer(2)]],
-    device half* C               [[buffer(3)]],
-    constant uint& M             [[buffer(4)]],
-    constant uint& N             [[buffer(5)]],
-    constant uint& K             [[buffer(6)]],
-    constant uint& group_size    [[buffer(7)]],
-    uint3 tgid                   [[threadgroup_position_in_grid]],
-    uint simd_lane               [[thread_index_in_simdgroup]],
-    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+inline void dense_gemm_small_batch_fp4_impl(
+    device const half* A,
+    device const uint* B,
+    device const half* scales,
+    device half* C,
+    threadgroup half (&A_tiles)[NUM_BUFFERS][SMALL_TILE_M][SMALL_TILE_K],
+    threadgroup half (&B_tiles)[NUM_BUFFERS][SMALL_TILE_K][SMALL_TILE_N],
+    threadgroup half (&staging)[8][8],
+    constant uint& M,
+    constant uint& N,
+    constant uint& K,
+    constant uint& group_size,
+    uint3 tgid,
+    uint simd_lane,
+    uint simd_id
 ) {
-    threadgroup half A_tiles[NUM_BUFFERS][SMALL_TILE_M][SMALL_TILE_K];
-    threadgroup half B_tiles[NUM_BUFFERS][SMALL_TILE_K][SMALL_TILE_N];
-
     const uint tg_row = tgid.y * SMALL_TILE_M;
     const uint tg_col = tgid.x * SMALL_TILE_N;
 
@@ -608,7 +608,6 @@ kernel void dense_gemm_small_batch_fp4(
             if (out_row + 8 <= M && out_col + 8 <= N) {
                 simdgroup_store(acc[mi][ni], C + out_row * N + out_col, N);
             } else if (out_row < M && out_col < N) {
-                threadgroup half staging[8][8];
                 simdgroup_store(acc[mi][ni], &staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -622,6 +621,48 @@ kernel void dense_gemm_small_batch_fp4(
             }
         }
     }
+}
+
+kernel void dense_gemm(
+    device const half* A         [[buffer(0)]],
+    device const uint* B         [[buffer(1)]],
+    device const half* scales    [[buffer(2)]],
+    device half* C               [[buffer(3)]],
+    constant uint& M             [[buffer(4)]],
+    constant uint& N             [[buffer(5)]],
+    constant uint& K             [[buffer(6)]],
+    constant uint& group_size    [[buffer(7)]],
+    uint3 tgid                   [[threadgroup_position_in_grid]],
+    uint simd_lane               [[thread_index_in_simdgroup]],
+    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup half A_tiles[NUM_BUFFERS][SMALL_TILE_M][SMALL_TILE_K];
+    threadgroup half B_tiles[NUM_BUFFERS][SMALL_TILE_K][SMALL_TILE_N];
+    threadgroup half staging[8][8];
+
+    dense_gemm_small_batch_fp4_impl(A, B, scales, C, A_tiles, B_tiles, staging,
+                                    M, N, K, group_size, tgid, simd_lane, simd_id);
+}
+
+kernel void dense_gemm_small_batch_fp4(
+    device const half* A         [[buffer(0)]],
+    device const uint* B         [[buffer(1)]],
+    device const half* scales    [[buffer(2)]],
+    device half* C               [[buffer(3)]],
+    constant uint& M             [[buffer(4)]],
+    constant uint& N             [[buffer(5)]],
+    constant uint& K             [[buffer(6)]],
+    constant uint& group_size    [[buffer(7)]],
+    uint3 tgid                   [[threadgroup_position_in_grid]],
+    uint simd_lane               [[thread_index_in_simdgroup]],
+    uint simd_id                 [[simdgroup_index_in_threadgroup]]
+) {
+    threadgroup half A_tiles[NUM_BUFFERS][SMALL_TILE_M][SMALL_TILE_K];
+    threadgroup half B_tiles[NUM_BUFFERS][SMALL_TILE_K][SMALL_TILE_N];
+    threadgroup half staging[8][8];
+
+    dense_gemm_small_batch_fp4_impl(A, B, scales, C, A_tiles, B_tiles, staging,
+                                    M, N, K, group_size, tgid, simd_lane, simd_id);
 }
 
 // ---------------------------------------------------------------------------

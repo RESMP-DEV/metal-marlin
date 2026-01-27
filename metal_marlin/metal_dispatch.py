@@ -1449,9 +1449,9 @@ def benchmark_dequant_fp4(
 # ---------------------------------------------------------------------------
 
 # MoE tile dimensions (must match moe_dispatch_optimized.metal)
-MOE_TILE_M = 32
-MOE_TILE_N = 128
-MOE_THREADS_PER_TG = 128
+MOE_TILE_M = 16
+MOE_TILE_N = 64
+MOE_THREADS_PER_TG = 64
 
 
 def dispatch_moe_optimized(
@@ -1533,7 +1533,7 @@ def dispatch_moe_optimized(
     # Dispatch
     dispatch_kernel(
         lib,
-        function_name="moe_dispatch_ultra_optimized",
+        function_name="moe_dispatch_optimized",
         grid=(grid_n, grid_m, 1),
         threadgroup=(MOE_THREADS_PER_TG, 1, 1),
         buffers=[

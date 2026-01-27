@@ -767,8 +767,8 @@ class TestMLAKVCacheCore:
         k_pe_new = torch.randn(1, 3, 4, dtype=torch.float16)
         c_kv_full, _ = cache.update(0, c_kv_new, k_pe_new)
 
-        assert cache.c_kv_quant is not None
+        assert cache.c_kv is not None
         assert cache.c_kv_scales is not None
-        assert cache.c_kv_quant.dtype == torch.uint8
+        assert cache.c_kv.dtype == torch.uint8
         assert cache.c_kv_scales.dtype == torch.float16
         torch.testing.assert_close(c_kv_full, c_kv_new, rtol=0.3, atol=0.3)

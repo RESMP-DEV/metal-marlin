@@ -44,13 +44,14 @@ constant constexpr uint NUM_EXPERTS = 64;
 constant constexpr uint TOP_K = 4;
 constant constexpr uint HAS_SHARED_EXPERT = 1;
 
-// Tile dimensions - tuned for M4 Max
-constant constexpr uint OPT_TILE_M = 32;    // Tokens per threadgroup (reduced for better grouping)
-constant constexpr uint OPT_TILE_N = 128;   // Output dimension tile (larger for better GEMM efficiency)
+// Tile dimensions - tuned for Apple Silicon threadgroup memory limits
+// NOTE: OPT_TILE_M * OPT_TILE_N drives threadgroup memory usage. Keep <= 32 KB.
+constant constexpr uint OPT_TILE_M = 16;    // Tokens per threadgroup
+constant constexpr uint OPT_TILE_N = 64;    // Output dimension tile
 constant constexpr uint OPT_TILE_K = 64;    // Hidden dimension tile
 
-constant constexpr uint OPT_SIMDGROUPS = 4;
-constant constexpr uint OPT_THREADS = OPT_SIMDGROUPS * 32;  // 128
+constant constexpr uint OPT_SIMDGROUPS = 2;
+constant constexpr uint OPT_THREADS = OPT_SIMDGROUPS * 32;  // 64
 
 // Simdgroup matrix tiling: each simdgroup handles 8x32 output region
 constant constexpr uint OPT_SG_M_TILES = 1;  // 1x 8-row tile
@@ -418,7 +419,7 @@ inline void opt_compute_gemm(
 // Grid dispatch: [ceil(out_dim / TILE_N), ceil(batch / TILE_M)]
 // ===========================================================================
 
-kernel void moe_dispatch_ultra_optimized(
+kernel void moe_dispatch_optimized(
     device const half* activations       [[buffer(0)]],   // [batch, hidden]
     device const half* router_weights    [[buffer(1)]],   // [hidden, num_experts]
     device const uint* expert_weights    [[buffer(2)]],   // [num_experts, K/8, N] packed FP4
@@ -447,8 +448,8 @@ kernel void moe_dispatch_ultra_optimized(
     const uint tg_row = tgid.y * OPT_TILE_M;  // Token offset
     const uint tg_col = tgid.x * OPT_TILE_N;  // Output column offset
 
-    // Simdgroup layout: 4 simdgroups handle different rows
-    // SG0: rows 0-7, SG1: rows 8-15, SG2: rows 16-23, SG3: rows 24-31
+    // Simdgroup layout: 2 simdgroups handle different rows
+    // SG0: rows 0-7, SG1: rows 8-15
     const uint sg_row_offset = simd_id * 8;
     const uint sg_col_offset = 0;  // All simdgroups cover full N tile
 

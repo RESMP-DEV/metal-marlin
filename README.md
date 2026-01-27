@@ -112,8 +112,11 @@ On Apple Silicon M4 Max (PyTorch MPS backend):
 # Linting (0 errors)
 uv run ruff check .
 
-# Type checking (0 errors, 182 warnings)
+# Type checking (0 errors, 184 warnings)
 uv run pyright metal_marlin/
+
+# Tests (90% passing: 1337/1482)
+uv run pytest tests/ -v
 ```
 
 ## Apple Silicon Performance

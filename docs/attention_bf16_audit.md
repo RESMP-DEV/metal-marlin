@@ -28,7 +28,7 @@ Dtypes and paths:
 
 Kernels:
 - `simdgroup_attention_qk`
-- `simdgroup_flash_attention`
+- `simdgroup_attention`
 - `simdgroup_attention_pv`
 
 Dtypes and paths:
@@ -36,11 +36,11 @@ Dtypes and paths:
   - Q/K/V are `device const half*`. Threadgroup tiles are `half`, then cast to `float` for dot products.
   - `simdgroup_attention_pv` uses `P` as `device const half*` (softmax weights) and `V` as `half`.
 - Softmax accumulator dtype:
-  - `simdgroup_flash_attention` uses `float` for scores and softmax stats (`m0/m1`, `l0/l1`, `o*_acc`).
+  - `simdgroup_attention` uses `float` for scores and softmax stats (`m0/m1`, `l0/l1`, `o*_acc`).
   - `simdgroup_attention_qk` and `simdgroup_attention_pv` are not softmax kernels; they only compute scores or apply precomputed weights.
 - Output dtype + conversion path:
   - `simdgroup_attention_qk` writes `S` as `half` (score computed in float).
-  - `simdgroup_flash_attention` writes `O` as `half` from `float` accumulators.
+  - `simdgroup_attention` writes `O` as `half` from `float` accumulators.
   - `simdgroup_attention_pv` writes `O` as `half` (accumulators are `simdgroup_matrix<half>` with half precision math).
 - Explicit BF16 calls:
   - None.

@@ -119,7 +119,10 @@ inline void store_output_scalar(device half* dst, uint idx, float val) {
 
 // Tile dimensions - tuned for M4 Max with head_dim=64
 constant constexpr uint TILE_Q = 16;          // Query rows per threadgroup
-constant constexpr uint TILE_KV = 64;         // K/V rows per tile
+// NOTE: TILE_KV is tuned to keep threadgroup memory <= 32KB on Apple GPUs.
+// With HEAD_DIM_128 and double-buffered K/V, TILE_KV=24 keeps the kernels
+// under the 32KB limit so pipeline creation succeeds across M1/M2/M3/M4.
+constant constexpr uint TILE_KV = 24;         // K/V rows per tile
 constant constexpr uint HEAD_DIM_64 = 64;     // Compile-time constant for head_dim=64
 constant constexpr uint HEAD_DIM_128 = 128;   // Compile-time constant for head_dim=128
 
