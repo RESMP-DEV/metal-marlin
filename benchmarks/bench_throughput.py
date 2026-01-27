@@ -7,10 +7,19 @@ import argparse
 import statistics
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from metal_marlin._compat import HAS_TORCH, torch
-from metal_marlin.inference import load_quantized_model
+from metal_marlin.hf_loader import load_quantized_weights
+from metal_marlin.inference_metal import MetalQuantizedLinear
+from metal_marlin.layer_replacement import replace_linear_layers
+
+try:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+except Exception:  # pragma: no cover - optional dependency
+    AutoModelForCausalLM = None
+    AutoTokenizer = None
 
 
 @dataclass
@@ -111,110 +120,77 @@ def _build_input_ids(tokenizer: Any, prompt: str, device: str):
     return input_ids.to(device)
 
 
-def _benchmark_quantized_model(
-    model_path: str,
-    prompt: str,
-    num_tokens: int,
-    num_runs: int,
-) -> tuple[BenchmarkStats, int, str]:
+def _apply_quantized_weights(
+    model: Any,
+    quantized: dict[str, dict[str, Any]],
+    *,
+    device: str,
+) -> int:
     _require_torch()
     assert torch is not None
-    device = _get_device()
-    model, tokenizer = load_quantized_model(model_path, device=device)
-    model.eval()
-
-    input_ids = _build_input_ids(tokenizer, prompt, device)
-    prompt_tokens = int(input_ids.shape[1])
-
-    memory = MemoryTracker(device)
-
-    # Warmup
-    with torch.no_grad():
-        kv_cache = model.create_kv_cache(batch_size=1)
-        _ = model(input_ids, kv_cache=kv_cache)
-        kv_cache.advance(input_ids.shape[1])
-        _sync_device(device)
-
-    prefill_times: list[float] = []
-    decode_times: list[float] = []
-    decode_latencies_ms: list[float] = []
-    first_token_latencies_ms: list[float] = []
-
-    with torch.no_grad():
-        for _ in range(num_runs):
-            kv_cache = model.create_kv_cache(batch_size=1)
-
-            _sync_device(device)
-            start = time.perf_counter()
-            logits = model(input_ids, kv_cache=kv_cache)
-            kv_cache.advance(input_ids.shape[1])
-            _sync_device(device)
-            prefill_time = time.perf_counter() - start
-            prefill_times.append(prefill_time)
-            memory.update()
-
-            next_token = torch.argmax(logits[:, -1, :], dim=-1)
-
-            decode_start = time.perf_counter()
-            for step in range(num_tokens):
-                next_input = next_token.view(1, 1)
-                _sync_device(device)
-                step_start = time.perf_counter()
-                logits = model(next_input, kv_cache=kv_cache)
-                kv_cache.advance(1)
-                _sync_device(device)
-                step_time_ms = (time.perf_counter() - step_start) * 1000.0
-                decode_latencies_ms.append(step_time_ms)
-                if step == 0:
-                    first_token_latencies_ms.append(step_time_ms)
-                next_token = torch.argmax(logits[:, -1, :], dim=-1)
-                memory.update()
-            decode_times.append(time.perf_counter() - decode_start)
-
-    prefill_tok_s = prompt_tokens / statistics.mean(prefill_times)
-    decode_tok_s = num_tokens / statistics.mean(decode_times)
-    first_token_ms = statistics.mean(first_token_latencies_ms)
-    p50_ms = _percentile(decode_latencies_ms, 0.50)
-    p99_ms = _percentile(decode_latencies_ms, 0.99)
-
-    stats = BenchmarkStats(
-        prefill_tok_s=float(prefill_tok_s),
-        decode_tok_s=float(decode_tok_s),
-        memory_peak_mb=float(memory.peak_mb),
-        first_token_ms=float(first_token_ms),
-        p50_ms=float(p50_ms),
-        p99_ms=float(p99_ms),
-        prefill_times_s=prefill_times,
-        decode_times_s=decode_times,
-        decode_latencies_ms=decode_latencies_ms,
-    )
-    return stats, prompt_tokens, device
+    loaded = 0
+    for name, module in model.named_modules():
+        if not isinstance(module, MetalQuantizedLinear):
+            continue
+        entry = quantized.get(f"{name}.weight")
+        if not entry or "packed" not in entry:
+            continue
+        packed = torch.from_numpy(entry["packed"]).to(device=device, dtype=torch.uint32)
+        scales = torch.from_numpy(entry["scales"]).to(device=device, dtype=torch.float16)
+        if module._needs_output_slice:
+            pad_cols = module._padded_out_features - module.out_features
+            packed = torch.nn.functional.pad(packed, (0, pad_cols, 0, 0))
+            scales = torch.nn.functional.pad(scales, (0, pad_cols, 0, 0))
+        module.weight_packed.copy_(packed)
+        module.scales.copy_(scales)
+        loaded += 1
+    return loaded
 
 
-def _benchmark_bf16_model(
-    model_path: str,
-    prompt: str,
-    num_tokens: int,
-    num_runs: int,
-) -> tuple[BenchmarkStats, int, str]:
+def _load_quantized_transformers_model(
+    model_id: str,
+    quantized_path: str | None,
+    device: str,
+    *,
+    bits: int = 4,
+) -> tuple[Any, Any]:
     _require_torch()
-    assert torch is not None
+    if AutoModelForCausalLM is None or AutoTokenizer is None:
+        raise RuntimeError("transformers is required for quantized benchmarking.")
+    if device != "mps":
+        raise RuntimeError("Quantized benchmarks require MPS device.")
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    device = _get_device()
-    dtype = torch.bfloat16 if device != "cpu" else torch.float32
-
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=dtype,
+        model_id,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True,
-        low_cpu_mem_usage=True,
+        device_map="mps",
     )
-    if device != "cpu":
-        model = model.to(device)
+    replace_linear_layers(model, bits=bits)
+
+    quantized_dir = Path(quantized_path) if quantized_path else None
+    if quantized_dir and quantized_dir.exists():
+        quantized = load_quantized_weights(quantized_dir)
+        loaded = _apply_quantized_weights(model, quantized, device=device)
+        if loaded == 0:
+            raise RuntimeError(f"No quantized weights matched modules in {quantized_dir}")
+
+    tokenizer_source = str(quantized_dir) if quantized_dir and quantized_dir.exists() else model_id
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, trust_remote_code=True)
     model.eval()
+    return model, tokenizer
+
+
+def _benchmark_transformers_model(
+    model: Any,
+    tokenizer: Any,
+    prompt: str,
+    num_tokens: int,
+    num_runs: int,
+    device: str,
+) -> tuple[BenchmarkStats, int, str]:
+    _require_torch()
+    assert torch is not None
 
     input_ids = _build_input_ids(tokenizer, prompt, device)
     prompt_tokens = int(input_ids.shape[1])
@@ -281,21 +257,85 @@ def _benchmark_bf16_model(
     return stats, prompt_tokens, device
 
 
-def benchmark_model(
+def _benchmark_quantized_model(
+    model_id: str,
+    quantized_path: str | None,
+    prompt: str,
+    num_tokens: int,
+    num_runs: int,
+) -> tuple[BenchmarkStats, int, str]:
+    _require_torch()
+    assert torch is not None
+    device = _get_device()
+    model, tokenizer = _load_quantized_transformers_model(
+        model_id=model_id,
+        quantized_path=quantized_path,
+        device=device,
+    )
+    return _benchmark_transformers_model(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        num_tokens=num_tokens,
+        num_runs=num_runs,
+        device=device,
+    )
+
+
+def _benchmark_bf16_model(
     model_path: str,
+    prompt: str,
+    num_tokens: int,
+    num_runs: int,
+) -> tuple[BenchmarkStats, int, str]:
+    _require_torch()
+    assert torch is not None
+
+    if AutoModelForCausalLM is None or AutoTokenizer is None:
+        raise RuntimeError("transformers is required for BF16 benchmarking.")
+
+    device = _get_device()
+    dtype = torch.bfloat16 if device != "cpu" else torch.float32
+
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+    )
+    if device != "cpu":
+        model = model.to(device)
+    model.eval()
+
+    return _benchmark_transformers_model(
+        model=model,
+        tokenizer=tokenizer,
+        prompt=prompt,
+        num_tokens=num_tokens,
+        num_runs=num_runs,
+        device=device,
+    )
+
+
+def benchmark_model(
+    model_id: str,
+    quantized_path: str | None,
     prompt: str = "Explain quantum computing in simple terms.",
     num_tokens: int = 100,
     num_runs: int = 5,
 ) -> dict:
     """Benchmark tokens/second for quantized model."""
     stats, prompt_tokens, device = _benchmark_quantized_model(
-        model_path=model_path,
+        model_id=model_id,
+        quantized_path=quantized_path,
         prompt=prompt,
         num_tokens=num_tokens,
         num_runs=num_runs,
     )
     return {
-        "model_path": model_path,
+        "model_path": model_id,
+        "quantized_path": quantized_path,
         "backend": "quantized_marlin",
         "device": device,
         "prompt_tokens": prompt_tokens,
@@ -351,6 +391,7 @@ def benchmark_compare(
     num_runs: int,
 ) -> dict[str, dict]:
     quantized = benchmark_model(
+        bf16_path,
         quantized_path,
         prompt=prompt,
         num_tokens=num_tokens,

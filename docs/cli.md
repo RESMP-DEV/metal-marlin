@@ -1,156 +1,124 @@
 # CLI Reference
 
-Complete command-line interface documentation for Metal Marlin.
+Metal Marlin ships a unified `metal-marlin` CLI (Click-based). Run
+`metal-marlin --help` to see all commands.
 
-## Quantize (`hf_loader`)
+## Command Summary
 
-Download and quantize HuggingFace models.
+- `quantize` - Convert HuggingFace or local models to Metal Marlin format
+- `convert` - Convert between HF/GGUF/Marlin formats
+- `generate` - One-shot text generation
+- `chat` - Interactive chat session
+- `serve` - OpenAI-compatible HTTP server
+- `bench` - Throughput benchmark
+- `eval` - Perplexity / KL evaluation framework
+- `analyze` - Layer sensitivity analysis
+
+## Quantize (`metal-marlin quantize`)
+
+Quantize a model into Metal Marlin format.
 
 ```bash
-python -m metal_marlin.hf_loader MODEL OUTPUT [OPTIONS]
+metal-marlin quantize -i MODEL -o OUTPUT [OPTIONS]
 ```
 
-**Arguments:**
-
-| Argument | Description |
-|----------|-------------|
-| `MODEL` | HuggingFace model ID (e.g., `zai-org/GLM-4.7-Flash`) or local path |
-| `OUTPUT` | Directory to save quantized model |
-
-**Options:**
+**Key options:**
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--group-size` | 128 | Quantization group size. Smaller = better quality, larger weights |
-| `--bits` | 4 | Bits per weight (2-8). Higher bits = better quality for MoE cold experts |
-| `--mixed-precision` | auto | Precision preset: `dense`, `moe`, `moe-mtp`, or `auto` |
-| `--calibration` | none | Calibration file path for activation-aware quantization |
-| `--validate` | true | Compute per-layer quantization error (RMSE) |
-| `--token` | none | HuggingFace token for gated models |
+| `-m, --method` | `rtn` | `rtn`, `gptq`, `mr-gptq` |
+| `-b, --bits` | `4` | Bit width (2/3/4/8) |
+| `-f, --format` | `fp4` | `fp4`, `int4`, `nf4`, `int3`, `int2`, `int8` |
+| `-g, --group-size` | `128` | Elements per quantization group |
+| `-c, --calibration` | none | `bartowski-v3`, `wikitext2`, `c4`, or file path |
+| `-s, --samples` | all | Calibration sample count |
+| `--mixed-precision` | none | `dense`, `moe`, `moe-mtp`, `quality`, `speed` |
+| `--precision-config` | none | `moe-balanced`, `dense-optimal`, `quality-max`, `speed-max` |
+| `--layerwise` | false | Memory-efficient layer-wise conversion |
+| `--validate/--no-validate` | true | Compute quantization error stats |
+| `-w, --workers` | `1` | Parallel layer workers |
+| `--token` | env | HuggingFace token (gated models) |
+| `-v, --verbose` | false | Verbose output |
 
-**Example output:**
-
-```
-======================================================================
-METAL MARLIN QUANTIZATION
-======================================================================
-  Model:      glm4 (47 layers)
-  Hidden:     2,048
-  MoE:        Yes (64 experts)
-  Vocabulary: 154,880
-======================================================================
-
-[1/3] Processing embeddings...
-[2/3] Processing 47 transformer layers...
-[3/3] Processing output layers...
-
-======================================================================
-QUANTIZATION COMPLETE
-======================================================================
-  Original size:   58.42 GB
-  Quantized size:  14.61 GB
-  Compression:     4.00x
-  Mean RMSE:       0.000342
-======================================================================
-```
-
-## Benchmark (`benchmark_models`)
-
-Compare Metal Marlin against GGUF quantizations.
+**Examples:**
 
 ```bash
-python -m metal_marlin.benchmark_models --models MODEL [OPTIONS]
+# RTN quantization (fast)
+metal-marlin quantize -i Qwen/Qwen3-4B -o ./qwen3_4b_fp4
+
+# MR-GPTQ with calibration
+metal-marlin quantize \
+  -i zai-org/GLM-4.7-Flash \
+  -o ./glm47_fp4 \
+  -m mr-gptq \
+  -c bartowski-v3 \
+  -g 128
 ```
 
-**Options:**
+## Convert (`metal-marlin convert`)
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--models` | required | Comma-separated HuggingFace model IDs |
-| `--output` | `benchmark_results.json` | Output JSON file |
-| `--calibration` | `bartowski-v3` | Calibration dataset: `bartowski-v3`, `c4`, or file path |
-| `--samples` | 100 | Number of evaluation samples |
-| `--max-length` | 512 | Maximum sequence length |
-| `--preset` | `auto` | Precision preset: `auto`, `uniform`, `quality`, `speed` |
-| `-q, --quiet` | false | Suppress verbose output |
+Convert between formats (HF, GGUF, Marlin).
+
+```bash
+metal-marlin convert -i INPUT -o OUTPUT [OPTIONS]
+```
+
+**Common options:**
+- `--from-format` (`auto`, `safetensors`, `gguf`, `pytorch`, `hf`)
+- `--to-format` (`marlin`, `safetensors`, `gguf`)
+- `--quant` (`fp4`, `int4`, `nf4`, `int3`, `int2`, `int8`)
+- `--group-size` (default 128)
+- `--dequant-first` (dequantize to FP16 before re-quantizing)
 
 **Example:**
+```bash
+metal-marlin convert -i model.gguf -o ./model-marlin --dequant-first
+```
+
+## Generate (`metal-marlin generate`)
+
+One-shot generation from a prompt:
 
 ```bash
-# Single model with Bartowski calibration
-python -m metal_marlin.benchmark_models \
-    --models "zai-org/GLM-4.7-Flash" \
-    --calibration bartowski-v3
-
-# Multiple models
-python -m metal_marlin.benchmark_models \
-    --models "zai-org/GLM-4.7-Flash,Qwen/Qwen3-4B" \
-    --output comparison.json
+metal-marlin generate -m ./glm47_fp4 -p "Hello" --max-tokens 64 --quant fp4
 ```
 
-## Perplexity Evaluation (`eval_perplexity`)
+## Chat (`metal-marlin chat`)
 
-Compute perplexity on a quantized or FP16 model.
+Interactive chat session:
 
 ```bash
-python -m metal_marlin.eval_perplexity MODEL [OPTIONS]
+metal-marlin chat -m ./glm47_fp4 --system "You are a helpful assistant."
 ```
 
-**Options:**
+## Serve (`metal-marlin serve`)
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--dataset` | `bartowski-v3` | Evaluation dataset |
-| `--samples` | 100 | Number of samples |
-| `--max-length` | 512 | Maximum sequence length |
-| `--batch-size` | 1 | Batch size for evaluation |
-
-## MR-GPTQ Quantization (`mr_gptq`)
-
-Hessian-aware quantization with calibration data.
+Start an OpenAI-compatible HTTP server:
 
 ```bash
-python -m metal_marlin.mr_gptq MODEL OUTPUT [OPTIONS]
+metal-marlin serve ./glm47_fp4 --host 0.0.0.0 --port 8000 --device mps
 ```
 
-**Options:**
+## Bench (`metal-marlin bench`)
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--calibration` | `bartowski-v3` | Calibration dataset |
-| `--bits` | 4 | Quantization bits (2-8) |
-| `--group-size` | 128 | Group size for per-group quantization |
-| `--damp-percent` | 0.01 | Damping for Hessian inverse |
-| `--symmetric` | false | Use symmetric quantization |
+Simple throughput benchmark:
 
-## Memory Management
-
-Metal Marlin automatically manages RAM during quantization:
-
-1. **Auto-detection**: Queries available system memory
-2. **Layer batching**: Estimates per-layer memory requirements
-3. **Parallel execution**: Processes multiple layers within RAM budget
-
-**Memory formula:**
-
-```
-parallel_layers = (available_ram * 0.8) / per_layer_memory
+```bash
+metal-marlin bench --model ./glm47_fp4 --prompt-len 128 --gen-len 128 --batch-size 1
 ```
 
-For a 30B MoE model on 64GB M3 Max:
-- Available (80%): ~51 GB
-- Parallel layers: 16 (capped)
-- Speedup: ~4x over sequential
+## Eval (`metal-marlin eval`)
 
-**Override settings:**
+Evaluation framework (perplexity / KL):
 
-```python
-from metal_marlin.hf_loader import convert_model_parallel
+```bash
+metal-marlin eval -m ./glm47_fp4 --metric perplexity --dataset wikitext2
+```
 
-stats = convert_model_parallel(
-    "zai-org/GLM-4.7-Flash",
-    "./output",
-    max_workers=8,        # Force 8 parallel layers
-    ram_budget_gb=32.0,   # Override RAM detection
-)
+## Analyze (`metal-marlin analyze`)
+
+Layer sensitivity analysis for precision planning:
+
+```bash
+metal-marlin analyze -i zai-org/GLM-4.7-Flash -o sensitivity_report.json --samples 256
 ```

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import math
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,27 +130,36 @@ class MetalQuantizedLinear(nn.Module):
             raise ValueError(
                 f"in_features ({in_features}) must be divisible by group_size ({group_size})"
             )
-        if out_features % self.pack_factor != 0:
+        if in_features % self.pack_factor != 0:
             raise ValueError(
-                f"out_features ({out_features}) must be divisible by pack factor ({self.pack_factor})"
+                f"in_features ({in_features}) must be divisible by pack_factor ({self.pack_factor})"
             )
 
-        # Packed weights: [K, N // pack_factor] as uint32
+        # Pad out_features to next multiple of pack_factor if needed (for dispatch padding)
+        self._needs_output_slice = out_features % self.pack_factor != 0
+        self._padded_out_features = (
+            ((out_features + self.pack_factor - 1) // self.pack_factor) * self.pack_factor
+            if self._needs_output_slice
+            else out_features
+        )
+
+        # Packed weights: [K // pack_factor, N_padded] as uint32 (K-dim packing)
+        # This matches the kernel expectation: B_packed shape [(K+pad)//8, N+pad]
         self.register_buffer(
             "weight_packed",
             torch.zeros(
-                (in_features, out_features // self.pack_factor),
+                (in_features // self.pack_factor, self._padded_out_features),
                 dtype=torch.uint32,
                 device="mps",
             ),
         )
 
-        # Per-group scales: [K // group_size, N] as half
+        # Per-group scales: [K // group_size, N_padded] as half
         num_groups = in_features // group_size
         self.register_buffer(
             "scales",
             torch.ones(
-                (num_groups, out_features),
+                (num_groups, self._padded_out_features),
                 dtype=torch.float16,
                 device="mps",
             ),
@@ -187,7 +197,7 @@ class MetalQuantizedLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         M = x_2d.shape[0]
 
-        # Dispatch to appropriate Metal GEMM kernel
+        # Dispatch to appropriate Metal GEMM kernel (use padded dimensions)
         if self.bits == 4:
             out = dispatch_gemm_fp4(
                 self.lib,
@@ -195,7 +205,7 @@ class MetalQuantizedLinear(nn.Module):
                 self.weight_packed,
                 self.scales,
                 M=M,
-                N=self.out_features,
+                N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
             )
@@ -206,7 +216,7 @@ class MetalQuantizedLinear(nn.Module):
                 self.weight_packed,
                 self.scales,
                 M=M,
-                N=self.out_features,
+                N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
             )
@@ -217,10 +227,14 @@ class MetalQuantizedLinear(nn.Module):
                 self.weight_packed,
                 self.scales,
                 M=M,
-                N=self.out_features,
+                N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
             )
+
+        # Slice to original out_features if we used padding
+        if self._needs_output_slice:
+            out = out[..., : self.out_features]
 
         # Add bias if present
         if self.bias is not None:
@@ -260,8 +274,11 @@ class MetalQuantizedLinear(nn.Module):
             bias=has_bias,
         )
 
-        # Quantize weights
+        # Quantize weights - pad to _padded_out_features if needed
         weight = linear.weight.detach().float()
+        if layer._needs_output_slice:
+            pad_cols = layer._padded_out_features - out_features
+            weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_cols), value=0.0)
 
         if bits == 4:
             packed, scales = cls._quantize_fp4(weight, group_size)
@@ -287,7 +304,7 @@ class MetalQuantizedLinear(nn.Module):
             group_size: Quantization group size along in_features
 
         Returns:
-            (packed [in_features, out_features // 8] uint32,
+            (packed [in_features // 8, out_features] uint32 (K-dim packing),
              scales [in_features // group_size, out_features] float16)
         """
         out_features, in_features = weight.shape
@@ -316,10 +333,10 @@ class MetalQuantizedLinear(nn.Module):
         # Reshape back to [K, N]
         w_quant = w_quant.reshape(K, N)
 
-        # Pack 8 FP4 values per uint32
-        packed = torch.zeros((K, N // 8), dtype=torch.uint32)
+        # Pack 8 FP4 values per uint32 along K dimension -> [K // 8, N]
+        packed = torch.zeros((K // 8, N), dtype=torch.uint32)
         for i in range(8):
-            packed |= w_quant[:, i::8].to(torch.uint32) << (i * 4)
+            packed |= w_quant[i::8, :].to(torch.uint32) << (i * 4)
 
         return packed, scales.to(torch.float16)
 
@@ -344,10 +361,10 @@ class MetalQuantizedLinear(nn.Module):
         w_quant = w_quant.clamp(0, 255).to(torch.uint8)
         w_quant = w_quant.reshape(K, N)
 
-        # Pack 4 FP8 values per uint32
-        packed = torch.zeros((K, N // 4), dtype=torch.uint32)
+        # Pack 4 FP8 values per uint32 along K dimension -> [K // 4, N]
+        packed = torch.zeros((K // 4, N), dtype=torch.uint32)
         for i in range(4):
-            packed |= w_quant[:, i::4].to(torch.uint32) << (i * 8)
+            packed |= w_quant[i::4, :].to(torch.uint32) << (i * 8)
 
         return packed, scales.to(torch.float16)
 
@@ -372,10 +389,10 @@ class MetalQuantizedLinear(nn.Module):
         w_quant = w_quant.clamp(0, 3)
         w_quant = w_quant.reshape(K, N)
 
-        # Pack 16 INT2 values per uint32
-        packed = torch.zeros((K, N // 16), dtype=torch.uint32)
+        # Pack 16 INT2 values per uint32 along K dimension -> [K // 16, N]
+        packed = torch.zeros((K // 16, N), dtype=torch.uint32)
         for i in range(16):
-            packed |= w_quant[:, i::16].to(torch.uint32) << (i * 2)
+            packed |= w_quant[i::16, :].to(torch.uint32) << (i * 2)
 
         return packed, scales.to(torch.float16)
 
@@ -401,7 +418,9 @@ class MetalRMSNorm(nn.Module):
     LayerNorm since it skips mean centering.
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-6, device: str | torch.device | None = None):
+    def __init__(
+        self, hidden_size: int, eps: float = 1e-6, device: str | torch.device | None = None
+    ):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
@@ -562,16 +581,21 @@ class MetalKVCache:
 
 
 class MetalAttention(nn.Module):
-    """Multi-head attention with Metal flash attention kernel.
+    """
+    DEPRECATED: Attention implementations should come from Transformers.
 
-    Uses MetalQuantizedLinear for Q/K/V/O projections and dispatches to
-    Metal flash attention kernel for the attention computation.
+    Metal Marlin's value is in MetalQuantizedLinear, not attention patterns.
+    The attention mechanism (how Q, K, V interact) is architecture-specific
+    and already implemented correctly in Transformers.
 
-    Supports:
-        - Standard MHA (num_heads == num_kv_heads)
-        - Grouped Query Attention (num_kv_heads < num_heads)
-        - RoPE position embeddings
-        - KV caching for autoregressive generation
+    What we optimize:
+    - Q/K/V projections: nn.Linear -> MetalQuantizedLinear
+    - Output projection: nn.Linear -> MetalQuantizedLinear
+
+    What Transformers handles:
+    - Attention pattern (standard, sliding window, MLA, etc.)
+    - Position embeddings (RoPE, ALiBi, etc.)
+    - KV cache management
     """
 
     def __init__(
@@ -586,7 +610,15 @@ class MetalAttention(nn.Module):
         rope_ratio: float = 1.0,
         max_position_embeddings: int = 4096,
         bias: bool = False,
+        warn_if_standalone: bool = True,
     ):
+        if warn_if_standalone:
+            warnings.warn(
+                "MetalAttention is deprecated. Model architecture should come from "
+                "Transformers. Use replace_linear_layers() to quantize projections.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         super().__init__()
         require_mps()
 
@@ -728,7 +760,10 @@ class MetalAttention(nn.Module):
 
 
 class MetalMLP(nn.Module):
-    """Gated MLP (SwiGLU) with quantized projections."""
+    """DEPRECATED: Use Transformers' MLP with MetalQuantizedLinear.
+
+    Gated MLP (SwiGLU) with quantized projections.
+    """
 
     def __init__(
         self,
@@ -737,7 +772,15 @@ class MetalMLP(nn.Module):
         bits: Literal[2, 4, 8] = 4,
         group_size: int = 128,
         activation: str = "silu",
+        warn_if_standalone: bool = True,
     ):
+        if warn_if_standalone:
+            warnings.warn(
+                "MetalMLP is deprecated. Use Transformers' MLP implementation "
+                "and replace_linear_layers() to quantize Linear layers.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         super().__init__()
 
         self.gate_proj = MetalQuantizedLinear(
@@ -817,7 +860,13 @@ class MetalMoELayer(nn.Module):
         # Expert MLPs
         self.experts = nn.ModuleList(
             [
-                MetalMLP(hidden_size, intermediate_size, bits=bits, group_size=group_size)
+                MetalMLP(
+                    hidden_size,
+                    intermediate_size,
+                    bits=bits,
+                    group_size=group_size,
+                    warn_if_standalone=False,
+                )
                 for _ in range(num_experts)
             ]
         )
@@ -917,6 +966,7 @@ class MetalTransformerBlock(nn.Module):
             rope_theta=rope_theta,
             rope_ratio=rope_ratio,
             max_position_embeddings=max_position_embeddings,
+            warn_if_standalone=False,
         )
 
         self.post_attention_layernorm = MetalRMSNorm(hidden_size, eps=rms_norm_eps)
@@ -925,6 +975,7 @@ class MetalTransformerBlock(nn.Module):
             intermediate_size=intermediate_size,
             bits=bits,
             group_size=group_size,
+            warn_if_standalone=False,
         )
 
     def forward(
@@ -969,10 +1020,10 @@ class MetalTransformerBlock(nn.Module):
 
 
 class MetalMLAAttention(nn.Module):
-    """Multi-head Latent Attention for Metal inference.
+    """Optional MLA implementation for custom optimizations.
 
-    MLA compresses KV cache through learned latent projections. Used by
-    GLM-4.7-Flash and DeepSeek models.
+    Transformers' MLA implementations work fine for most cases; use this
+    class only when you need custom Metal-specific changes.
     """
 
     def __init__(
@@ -982,23 +1033,36 @@ class MetalMLAAttention(nn.Module):
         kv_lora_rank: int = 512,
         q_lora_rank: int | None = 1536,
         qk_rope_head_dim: int = 64,
+        qk_nope_head_dim: int | None = None,
+        v_head_dim: int | None = None,
         head_dim: int | None = None,
         rope_theta: float = 10000.0,
         rope_ratio: float = 1.0,
         max_position_embeddings: int = 4096,
         bits: Literal[2, 4, 8] = 4,
         group_size: int = 128,
+        o_proj_group_size: int | None = None,
         bias: bool = False,
+        warn_if_standalone: bool = True,
     ):
+        _ = warn_if_standalone  # retained for backward compatibility
         super().__init__()
 
         self.hidden_size = hidden_size
         self.num_heads = num_heads
-        self.head_dim = head_dim or (hidden_size // num_heads)
+        # GLM-4 uses separate nope/rope dims; fallback to hidden_size/num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim or (hidden_size // num_heads - qk_rope_head_dim)
+        self.v_head_dim = v_head_dim or (hidden_size // num_heads)
+        # head_dim for queries = qk_nope + qk_rope
+        self.head_dim = head_dim or (self.qk_nope_head_dim + qk_rope_head_dim)
         self.kv_lora_rank = kv_lora_rank
         self.q_lora_rank = q_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.scale = self.head_dim**-0.5
+
+        # Use o_proj_group_size if provided; often checkpoint uses larger gs for o_proj
+        if o_proj_group_size is None:
+            o_proj_group_size = group_size
 
         def _compatible_group_size(in_features: int, default_group_size: int) -> int:
             if in_features % default_group_size == 0:
@@ -1041,20 +1105,25 @@ class MetalMLAAttention(nn.Module):
             bias=bias,
         )
         kv_b_group_size = _compatible_group_size(kv_lora_rank, group_size)
+        # kv_b projects to k_nope + v for each head
+        kv_b_out_dim = num_heads * (self.qk_nope_head_dim + self.v_head_dim)
         self.kv_b_proj = MetalQuantizedLinear(
             kv_lora_rank,
-            num_heads * self.head_dim * 2,
+            kv_b_out_dim,
             bits=bits,
             group_size=kv_b_group_size,
             bias=bias,
         )
 
-        # Output projection
+        # Output projection - input is num_heads * v_head_dim
+        # Uses separate o_proj_group_size (checkpoint often uses larger gs for o_proj)
+        o_proj_in_dim = num_heads * self.v_head_dim
+        actual_o_proj_group_size = _compatible_group_size(o_proj_in_dim, o_proj_group_size)
         self.o_proj = MetalQuantizedLinear(
-            num_heads * self.head_dim,
+            o_proj_in_dim,
             hidden_size,
             bits=bits,
-            group_size=group_size,
+            group_size=actual_o_proj_group_size,
             bias=bias,
         )
 
@@ -1102,13 +1171,22 @@ class MetalMLAAttention(nn.Module):
 
         # Decompress KV
         kv_full = self.kv_b_proj(c_kv)
-        kv_full = kv_full.view(batch_size, seq_len, self.num_heads, self.head_dim * 2)
-        k_content, v = kv_full.chunk(2, dim=-1)
+        # kv_b outputs [qk_nope_head_dim + v_head_dim] per head
+        kv_dim_per_head = self.qk_nope_head_dim + self.v_head_dim
+        kv_full = kv_full.view(batch_size, seq_len, self.num_heads, kv_dim_per_head)
+        # Split into k_nope and v
+        k_nope = kv_full[..., : self.qk_nope_head_dim]
+        v = kv_full[..., self.qk_nope_head_dim :]
+
+        # Concatenate k_nope with k_pe to form full key [qk_nope + qk_rope = head_dim]
+        # k_pe shape: [B, S, qk_rope] -> expand to [B, S, H, qk_rope]
+        k_pe_expanded = k_pe.unsqueeze(2).expand(-1, -1, self.num_heads, -1)
+        k = torch.cat([k_nope, k_pe_expanded], dim=-1)
 
         # Transpose for attention
-        q = q.transpose(1, 2)
-        k = k_content.transpose(1, 2)
-        v = v.transpose(1, 2)
+        q = q.transpose(1, 2)  # [B, H, S, head_dim]
+        k = k.transpose(1, 2)  # [B, H, S, head_dim]
+        v = v.transpose(1, 2)  # [B, H, S, v_head_dim]
 
         # Attention
         attn_output = F.scaled_dot_product_attention(
@@ -1121,7 +1199,8 @@ class MetalMLAAttention(nn.Module):
 
         # Output projection
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
+        # Output dimension is num_heads * v_head_dim
+        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.v_head_dim)
         return self.o_proj(attn_output)
 
 
@@ -1143,7 +1222,18 @@ class MetalGenerationConfig:
 
 
 class MetalGLM47Model(nn.Module):
-    """Complete GLM-4.7-Flash model using Metal inference.
+    """DEPRECATED: use Glm4MoeLiteForCausalLM + replace_linear_layers().
+
+    This legacy model reimplements GLM-4.7-Flash and does not support MoE.
+    Prefer loading the HF model and replacing linear layers:
+
+        from transformers import Glm4MoeLiteForCausalLM
+        from metal_marlin import replace_linear_layers
+
+        model = Glm4MoeLiteForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash")
+        replace_linear_layers(model, bits=4)
+
+    Complete GLM-4.7-Flash model using Metal inference.
 
     A full decoder-only transformer with MLA attention, optimized for
     Apple Silicon via Metal compute kernels.
@@ -1173,15 +1263,36 @@ class MetalGLM47Model(nn.Module):
         kv_lora_rank: int = 512,
         q_lora_rank: int = 1536,
         qk_rope_head_dim: int = 64,
+        qk_nope_head_dim: int | None = None,
+        v_head_dim: int | None = None,
         max_position_embeddings: int = 4096,
         rms_norm_eps: float = 1e-6,
         rope_theta: float = 10000.0,
         rope_ratio: float = 1.0,
         bits: Literal[2, 4, 8] = 4,
         group_size: int = 128,
+        o_proj_group_size: int | None = None,
+        mlp_group_size: int | None = None,
     ):
+        warnings.warn(
+            "MetalGLM47Model is deprecated and does not support MoE. "
+            "Use Glm4MoeLiteForCausalLM + replace_linear_layers() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__()
         require_mps()
+
+        # Default o_proj_group_size and mlp_group_size to larger group_size if not provided
+        if o_proj_group_size is None:
+            o_proj_group_size = 128  # checkpoint typically uses 128 for o_proj
+        if mlp_group_size is None:
+            mlp_group_size = 128  # checkpoint typically uses 128 for MLP
+
+        # Compute default head dimensions if not provided
+        default_head_dim = hidden_size // num_heads
+        qk_nope_head_dim = qk_nope_head_dim or (default_head_dim - qk_rope_head_dim)
+        v_head_dim = v_head_dim or default_head_dim
 
         self.config = {
             "vocab_size": vocab_size,
@@ -1192,6 +1303,8 @@ class MetalGLM47Model(nn.Module):
             "kv_lora_rank": kv_lora_rank,
             "q_lora_rank": q_lora_rank,
             "qk_rope_head_dim": qk_rope_head_dim,
+            "qk_nope_head_dim": qk_nope_head_dim,
+            "v_head_dim": v_head_dim,
             "max_position_embeddings": max_position_embeddings,
             "rms_norm_eps": rms_norm_eps,
             "bits": bits,
@@ -1217,18 +1330,23 @@ class MetalGLM47Model(nn.Module):
                         kv_lora_rank=kv_lora_rank,
                         q_lora_rank=q_lora_rank,
                         qk_rope_head_dim=qk_rope_head_dim,
+                        qk_nope_head_dim=qk_nope_head_dim,
+                        v_head_dim=v_head_dim,
                         rope_theta=rope_theta,
                         rope_ratio=rope_ratio,
                         max_position_embeddings=max_position_embeddings,
                         bits=bits,
                         group_size=group_size,
+                        o_proj_group_size=o_proj_group_size,
+                        warn_if_standalone=False,
                     ),
                     "post_attention_layernorm": MetalRMSNorm(hidden_size, eps=rms_norm_eps),
                     "mlp": MetalMLP(
                         hidden_size=hidden_size,
                         intermediate_size=intermediate_size,
                         bits=bits,
-                        group_size=group_size,
+                        group_size=mlp_group_size,
+                        warn_if_standalone=False,
                     ),
                 }
             )
@@ -1449,24 +1567,6 @@ class MetalGLM47Model(nn.Module):
         else:
             raise FileNotFoundError(f"config.json not found in {model_path}")
 
-        # Extract model parameters from config
-        model = cls(
-            vocab_size=config.get("vocab_size", 151552),
-            hidden_size=config.get("hidden_size", 4096),
-            num_layers=config.get("num_hidden_layers", config.get("num_layers", 32)),
-            num_heads=config.get("num_attention_heads", 32),
-            intermediate_size=config.get("intermediate_size", 11008),
-            kv_lora_rank=config.get("kv_lora_rank", 512),
-            q_lora_rank=config.get("q_lora_rank", 1536),
-            qk_rope_head_dim=config.get("qk_rope_head_dim", 64),
-            max_position_embeddings=config.get("max_position_embeddings", 4096),
-            rms_norm_eps=config.get("rms_norm_eps", 1e-6),
-            rope_theta=config.get("rope_theta", 10000.0),
-            rope_ratio=config.get("rope_ratio", 1.0),
-            bits=bits,
-            group_size=config.get("group_size", 128),
-        )
-
         # Load weights from safetensors
         try:
             from safetensors.torch import load_file
@@ -1485,6 +1585,49 @@ class MetalGLM47Model(nn.Module):
         for sf_path in safetensors_files:
             state_dict.update(load_file(sf_path, device="mps"))
 
+        # Extract group_size from checkpoint (different layers may use different group_sizes)
+        # GLM-4 pattern: q/kv projections use 64, o_proj and MLP use 128
+        # Use layer 0 as reference since layers 1+ may be MoE with different dims
+        attn_group_size = 64  # Default for q/kv attention projections
+        o_proj_group_size = 128  # Default for o_proj
+        mlp_group_size = 128  # Default for MLP
+        for k, v in state_dict.items():
+            if ".weight.group_size" in k:
+                gs = int(v.item())
+                # Only check layer 0 for reference (before MoE layers)
+                if "layers.0." in k:
+                    if "o_proj" in k:
+                        o_proj_group_size = gs
+                    elif "self_attn" in k:
+                        attn_group_size = gs
+                    elif "mlp" in k and "expert" not in k:
+                        mlp_group_size = gs
+
+        # Use smallest attention group_size for q/kv layers
+        model_group_size = attn_group_size
+
+        # Extract model parameters from config
+        model = cls(
+            vocab_size=config.get("vocab_size", 151552),
+            hidden_size=config.get("hidden_size", 4096),
+            num_layers=config.get("num_hidden_layers", config.get("num_layers", 32)),
+            num_heads=config.get("num_attention_heads", 32),
+            intermediate_size=config.get("intermediate_size", 11008),
+            kv_lora_rank=config.get("kv_lora_rank", 512),
+            q_lora_rank=config.get("q_lora_rank", 1536),
+            qk_rope_head_dim=config.get("qk_rope_head_dim", 64),
+            qk_nope_head_dim=config.get("qk_nope_head_dim"),
+            v_head_dim=config.get("v_head_dim"),
+            max_position_embeddings=config.get("max_position_embeddings", 4096),
+            rms_norm_eps=config.get("rms_norm_eps", 1e-6),
+            rope_theta=config.get("rope_theta", 10000.0),
+            rope_ratio=config.get("rope_ratio", 1.0),
+            bits=bits,
+            group_size=model_group_size,
+            o_proj_group_size=o_proj_group_size,
+            mlp_group_size=mlp_group_size,
+        )
+
         # Load weights with key mapping
         model._load_quantized_state_dict(state_dict)
 
@@ -1499,29 +1642,69 @@ class MetalGLM47Model(nn.Module):
         Handles the mapping from checkpoint key names to module parameters,
         including .packed and .scales suffixes for quantized layers.
         """
-        # Build key mapping for our model structure
-        # This handles conversion from HuggingFace-style keys
+        # Build normalized state dict - strip 'model.' prefix if present
+        normalized_sd = {}
+        for k, v in state_dict.items():
+            norm_key = k[6:] if k.startswith("model.") else k
+            normalized_sd[norm_key] = v
 
+        # Key name mappings for GLM-4 architecture differences
+        key_mappings = {
+            "kv_a_proj_with_mqa": "kv_a_proj",  # Checkpoint name -> model name
+        }
+
+        def map_key(key: str) -> str:
+            """Map checkpoint key to model buffer key."""
+            for ckpt_name, model_name in key_mappings.items():
+                if ckpt_name in key:
+                    key = key.replace(ckpt_name, model_name)
+            return key
+
+        # Load parameters (norms, embeddings)
         for name, param in self.named_parameters():
-            if name in state_dict:
-                param.data.copy_(state_dict[name])
-            elif name.replace(".", "_") in state_dict:
-                param.data.copy_(state_dict[name.replace(".", "_")])
+            if name in normalized_sd:
+                param.data.copy_(normalized_sd[name])
+            elif name.replace(".", "_") in normalized_sd:
+                param.data.copy_(normalized_sd[name.replace(".", "_")])
 
+        # Load quantized weight buffers
         for name, buffer in self.named_buffers():
-            # Handle quantized weight buffers
             if name.endswith(".weight_packed"):
+                # Model buffer: layers.0.mlp.gate_proj.weight_packed
+                # Checkpoint key: layers.0.mlp.gate_proj.weight
                 base_name = name.replace(".weight_packed", ".weight")
-                packed_key = f"{base_name}.packed"
-                if packed_key in state_dict:
-                    buffer.copy_(state_dict[packed_key])
-                elif base_name in state_dict:
-                    # Weight provided as float, need to quantize
-                    pass  # Skip, quantization should be done at conversion time
+                mapped_name = map_key(base_name)
+
+                ckpt_tensor = None
+                if mapped_name in normalized_sd:
+                    ckpt_tensor = normalized_sd[mapped_name]
+                elif base_name in normalized_sd:
+                    ckpt_tensor = normalized_sd[base_name]
+
+                if ckpt_tensor is not None:
+                    if buffer.shape != ckpt_tensor.shape:
+                        # Skip mismatched shapes (e.g., MoE vs dense layer mismatch)
+                        continue
+                    buffer.copy_(ckpt_tensor)
+
             elif name.endswith(".scales"):
+                # Model buffer: layers.0.mlp.gate_proj.scales
+                # Checkpoint key: layers.0.mlp.gate_proj.weight.scales
                 base_name = name.replace(".scales", ".weight")
                 scales_key = f"{base_name}.scales"
-                if scales_key in state_dict:
-                    buffer.copy_(state_dict[scales_key])
-            elif name in state_dict:
-                buffer.copy_(state_dict[name])
+                mapped_scales_key = f"{map_key(base_name)}.scales"
+
+                if mapped_scales_key in normalized_sd:
+                    ckpt_tensor = normalized_sd[mapped_scales_key]
+                    if buffer.shape != ckpt_tensor.shape:
+                        # Skip mismatched shapes (e.g., MoE layers vs dense MLP)
+                        continue
+                    buffer.copy_(ckpt_tensor)
+                elif scales_key in normalized_sd:
+                    ckpt_tensor = normalized_sd[scales_key]
+                    if buffer.shape != ckpt_tensor.shape:
+                        continue
+                    buffer.copy_(ckpt_tensor)
+
+            elif name in normalized_sd:
+                buffer.copy_(normalized_sd[name])

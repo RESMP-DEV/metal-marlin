@@ -2301,6 +2301,269 @@ def convert_model_with_calibration(
 
 
 # ============================================================================
+# Transformers-based Quantization (In-Place)
+# ============================================================================
+
+
+def convert_model_transformers(
+    model_id: str | Path,
+    output_path: str | Path,
+    group_size: int = 128,
+    mixed_precision: MixedPrecisionConfig | None = None,
+    calibration: CalibrationData | str | Path | None = None,
+    calibration_source: str | None = None,
+    validate: bool = True,
+    verbose: bool = True,
+    token: str | None = None,
+) -> dict[str, Any]:
+    """Quantize a model via Transformers and save a Marlin-compatible checkpoint.
+
+    This path loads the model with HuggingFace Transformers (handles sharding,
+    MoE architectures, and new model types automatically), quantizes weights,
+    and saves a standalone Metal Marlin checkpoint (model.safetensors +
+    quantization_config.json + configs).
+
+    Args:
+        model_id: HuggingFace model ID or local path.
+        output_path: Directory to save converted model.
+        group_size: Default FP4 quantization group size.
+        mixed_precision: Optional MixedPrecisionConfig for layer-specific handling.
+        calibration: Optional CalibrationData or path to activation_ranges.json.
+        calibration_source: Calibration dataset name to run if calibration is None.
+        validate: Compute quantization errors.
+        verbose: Print progress.
+        token: HuggingFace API token.
+
+    Returns:
+        Statistics dict with counts, sizes, errors.
+    """
+    from safetensors.numpy import save_file
+
+    from .quantize_model import quantize_model
+
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except ImportError as exc:
+        raise ImportError(
+            "transformers and torch are required for --use-transformers. "
+            "Install with: pip install transformers torch"
+        ) from exc
+
+    model_id = str(model_id)
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Load or run calibration
+    calib_data: CalibrationData | None = None
+    if calibration is not None:
+        if isinstance(calibration, CalibrationData):
+            calib_data = calibration
+        elif isinstance(calibration, (str, Path)):
+            calib_data = CalibrationData.from_json(calibration)
+        else:
+            raise TypeError(
+                f"calibration must be CalibrationData, str, or Path, got {type(calibration)}"
+            )
+    elif calibration_source is not None:
+        if verbose:
+            print(f"Running calibration with {calibration_source}...")
+        cal_output = run_calibration(
+            model_id,
+            calibration_source=calibration_source,
+            token=token,
+            verbose=verbose,
+        )
+        calib_data = CalibrationData(
+            layer_ranges=cal_output["layer_ranges"],
+            percentile=cal_output.get("percentile", 99.9),
+            smooth_factor=cal_output.get("smooth_factor", 0.8),
+        )
+
+    if verbose:
+        print(f"Loading model via Transformers: {model_id}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        token=token,
+        torch_dtype="auto",
+        trust_remote_code=True,
+    )
+    model.eval()
+
+    # Save configs + tokenizer
+    model.config.save_pretrained(output_path)
+    if getattr(model, "generation_config", None) is not None:
+        try:
+            model.generation_config.save_pretrained(output_path)
+        except Exception:
+            if verbose:
+                print("Warning: unable to save generation_config.json")
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, token=token, trust_remote_code=True)
+        tokenizer.save_pretrained(output_path)
+    except Exception:
+        if verbose:
+            print("Warning: unable to save tokenizer files")
+
+    stats: dict[str, Any] = {
+        "quantized_count": 0,
+        "skipped_count": 0,
+        "original_bytes": 0,
+        "quantized_bytes": 0,
+        "errors": [],
+        "tensors": {},
+        "by_precision": {},
+    }
+
+    output_tensors: dict[str, np.ndarray] = {}
+
+    # Helper for calibration lookup (support module-name calibration keys)
+    def _activation_ranges_for_name(weight_name: str) -> dict[str, Any] | None:
+        if calib_data is None:
+            return None
+        ranges = calib_data.get_activation_ranges(weight_name)
+        if ranges is not None:
+            return ranges
+        if weight_name.endswith(".weight"):
+            return calib_data.get_activation_ranges(weight_name[: -len(".weight")])
+        return None
+
+    # Lazy import to avoid optional dependency penalties
+    if mixed_precision is not None:
+        from .mixed_precision import Precision, should_quantize
+    else:
+        Precision = None  # type: ignore[assignment]
+
+    # Quantize from state_dict (Transformers-loaded weights)
+    if verbose:
+        print("Quantizing weights...")
+    for name, tensor in model.state_dict().items():
+        if not isinstance(tensor, torch.Tensor):
+            continue
+
+        tensor_cpu = tensor.detach().cpu()
+        if tensor_cpu.dtype == torch.bfloat16:
+            tensor_np = tensor_cpu.float().numpy()
+        else:
+            tensor_np = tensor_cpu.numpy()
+
+        if mixed_precision is not None:
+            assert Precision is not None
+            do_quant, layer_cfg = should_quantize(name, tensor_np, mixed_precision)
+            precision = layer_cfg.precision if do_quant else Precision.FP16
+            actual_gs = layer_cfg.group_size
+        else:
+            do_quant = should_quantize_tensor(name, tensor_np)
+            precision = None
+            actual_gs = group_size
+
+        prec_key = (
+            precision.value if hasattr(precision, "value") else ("fp4" if do_quant else "fp16")
+        )
+        stats["by_precision"][prec_key] = stats["by_precision"].get(prec_key, 0) + tensor_np.size
+
+        if do_quant and (precision is None or precision != Precision.FP16):
+            if verbose:
+                print(f"  Quantizing {name}: {tensor_np.shape}")
+
+            out_feat, in_feat = tensor_np.shape
+
+            # Ensure group_size divides in_feat
+            if in_feat % actual_gs != 0:
+                for gs in [256, 128, 64, 32, 16, 8]:
+                    if gs <= actual_gs and in_feat % gs == 0:
+                        actual_gs = gs
+                        break
+
+            activation_ranges = _activation_ranges_for_name(name)
+            if activation_ranges is not None and verbose:
+                input_range = activation_ranges["input_range"]
+                print(f"    Using calibration: input_range={input_range}")
+
+            packed, scales = quantize_fp4(
+                tensor_np, group_size=actual_gs, activation_ranges=activation_ranges
+            )
+
+            output_tensors[name] = packed
+            output_tensors[f"{name}.scales"] = scales
+            output_tensors[f"{name}.group_size"] = np.array([actual_gs], dtype=np.int32)
+
+            stats["quantized_count"] += 1
+            stats["original_bytes"] += tensor_np.nbytes
+            stats["quantized_bytes"] += packed.nbytes + scales.nbytes
+
+            if validate:
+                err = compute_quantization_error(tensor_np, packed, scales, actual_gs)
+                stats["errors"].append({"name": name, **err})
+                stats["tensors"][name] = {
+                    "shape": list(tensor_np.shape),
+                    "group_size": actual_gs,
+                    "precision": prec_key,
+                    "rmse": err["rmse"],
+                }
+        else:
+            if verbose:
+                print(f"  Keeping {name}: {tensor_np.shape} ({tensor_np.dtype})")
+            output_tensors[name] = tensor_np
+            stats["skipped_count"] += 1
+
+    # Replace Linear layers in-place (Transformers-based path)
+    try:
+        quantize_model(model, group_size=group_size)
+    except Exception:
+        if verbose:
+            print("Warning: in-place Linear replacement skipped due to an error.")
+
+    # Save quantized model
+    output_file = output_path / "model.safetensors"
+    if verbose:
+        print(f"\nSaving to {output_file}...")
+    save_file(output_tensors, str(output_file))
+
+    # Save quantization metadata
+    meta: dict[str, Any] = {
+        "format": "marlin_fp4",
+        "conversion_method": "transformers",
+        "group_size": group_size,
+        "mixed_precision": mixed_precision is not None,
+        "calibration": calibration_source or (str(calibration) if calibration else None),
+        "calibration_aware": calib_data is not None,
+        "quantized_count": stats["quantized_count"],
+        "skipped_count": stats["skipped_count"],
+        "compression_ratio": stats["original_bytes"] / max(stats["quantized_bytes"], 1),
+        "by_precision": stats["by_precision"],
+    }
+    if calib_data is not None:
+        meta["calibration_config"] = {
+            "percentile": calib_data.percentile,
+            "smooth_factor": calib_data.smooth_factor,
+            "layers_calibrated": len(calib_data.layer_ranges),
+        }
+    if stats["errors"]:
+        meta["mean_rmse"] = float(np.mean([e["rmse"] for e in stats["errors"]]))
+        meta["max_error"] = float(max(e["max_error"] for e in stats["errors"]))
+
+    with open(output_path / "quantization_config.json", "w") as f:
+        json.dump(meta, f, indent=2)
+
+    if verbose:
+        print(f"\n{'=' * 60}")
+        print("Transformers-based conversion complete!")
+        print(f"  Quantized: {stats['quantized_count']} tensors")
+        print(f"  Skipped:   {stats['skipped_count']} tensors")
+        if stats["original_bytes"] > 0:
+            ratio = stats["original_bytes"] / max(stats["quantized_bytes"], 1)
+            print(f"  Compression: {ratio:.2f}x")
+        if "mean_rmse" in meta:
+            print(f"  Mean RMSE: {meta['mean_rmse']:.6f}")
+        print(f"{'=' * 60}")
+
+    stats.update(meta)
+    return stats
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 
@@ -2417,6 +2680,11 @@ Examples:
         "--layerwise",
         action="store_true",
         help="Use memory-efficient layer-wise conversion (for large models)",
+    )
+    convert_hf.add_argument(
+        "--use-transformers",
+        action="store_true",
+        help="Load via Transformers and quantize in-place before saving",
     )
     convert_hf.add_argument(
         "-q",
@@ -2563,8 +2831,38 @@ Examples:
                 # Assume it's a path to a calibration JSON
                 cal_path = args.calibration
 
+        # Transformers-based path (in-place)
+        if getattr(args, "use_transformers", False):
+            if getattr(args, "layerwise", False):
+                print("Warning: --use-transformers ignores --layerwise")
+
+            # Load mixed-precision config if requested
+            mp_config = None
+            if args.mixed_precision:
+                from .mixed_precision import MixedPrecisionConfig as MPConfig
+
+                preset_map = {
+                    "dense": MPConfig.default_dense,
+                    "moe": MPConfig.default_moe,
+                    "moe-mtp": MPConfig.default_moe_mtp,
+                    "quality": MPConfig.quality_first,
+                    "speed": MPConfig.speed_first,
+                }
+                mp_config = preset_map[args.mixed_precision]()
+
+            convert_model_transformers(
+                model_id=args.model_id,
+                output_path=args.output_dir,
+                group_size=args.group_size,
+                mixed_precision=mp_config,
+                calibration=cal_path,
+                calibration_source=cal_source,
+                validate=not args.no_validate,
+                verbose=not args.quiet,
+                token=token,
+            )
         # Check if --layerwise flag is set
-        if getattr(args, "layerwise", False):
+        elif getattr(args, "layerwise", False):
             # Load mixed-precision config
             mp_config = None
             if args.mixed_precision:

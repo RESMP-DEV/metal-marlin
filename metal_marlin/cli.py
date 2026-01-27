@@ -1,6 +1,8 @@
 """Command-line interface for Metal Marlin inference and quantization."""
 
+import json
 import os
+import tempfile
 from pathlib import Path
 
 import click
@@ -13,6 +15,9 @@ QUANT_FORMATS = ["fp4", "int4", "nf4", "int3", "int2", "int8"]
 
 # Calibration sources
 CALIBRATION_SOURCES = ["bartowski-v3", "wikitext2", "c4"]
+
+# Quality benchmark datasets (aliases normalized below)
+QUALITY_DATASETS = ["wikitext", "wikitext2", "wikitext-2", "c4", "bartowski-v3"]
 
 
 @click.group()
@@ -349,6 +354,11 @@ def bench(model, prompt_len, gen_len, batch_size):
     type=click.Choice(["moe-balanced", "dense-optimal", "quality-max", "speed-max"]),
     help="Precision configuration preset for layer-specific bit widths",
 )
+@click.option(
+    "--use-transformers",
+    is_flag=True,
+    help="Load via Transformers and quantize in-place before saving",
+)
 def quantize(
     input_path: str,
     output_path: str,
@@ -369,6 +379,7 @@ def quantize(
     token: str | None,
     workers: int,
     precision_config: str | None,
+    use_transformers: bool,
 ):
     """Quantize a model to Metal Marlin format.
 
@@ -459,6 +470,7 @@ def quantize(
         if precision_config:
             click.echo(f"  Prec config:  {precision_config}")
         click.echo(f"  Layer-wise:   {'enabled' if layerwise else 'disabled'}")
+        click.echo(f"  Transformers: {'enabled' if use_transformers else 'disabled'}")
         click.echo(f"  Workers:      {workers}")
         click.echo("=" * 60)
 
@@ -474,6 +486,7 @@ def quantize(
             mixed_precision=mixed_precision,
             precision_config=precision_config,
             layerwise=layerwise,
+            use_transformers=use_transformers,
             validate=validate,
             verbose=verbose,
             token=token,
@@ -527,6 +540,7 @@ def _quantize_rtn(
     mixed_precision: str | None,
     precision_config: str | None,
     layerwise: bool,
+    use_transformers: bool,
     validate: bool,
     verbose: bool,
     token: str | None,
@@ -537,6 +551,7 @@ def _quantize_rtn(
         CalibrationData,
         convert_model_layerwise,
         convert_model_to_fp4,
+        convert_model_transformers,
         convert_model_with_calibration,
     )
 
@@ -553,7 +568,36 @@ def _quantize_rtn(
             cal_path = calibration
 
     # Route based on options
-    if layerwise:
+    if use_transformers:
+        if layerwise:
+            click.echo("Warning: --use-transformers ignores --layerwise", err=True)
+
+        # Load mixed-precision config if requested
+        mp_config = None
+        if mixed_precision:
+            from .mixed_precision import MixedPrecisionConfig as MPConfig
+
+            preset_map = {
+                "dense": MPConfig.default_dense,
+                "moe": MPConfig.default_moe,
+                "moe-mtp": MPConfig.default_moe_mtp,
+                "quality": MPConfig.quality_first,
+                "speed": MPConfig.speed_first,
+            }
+            mp_config = preset_map[mixed_precision]()
+
+        stats = convert_model_transformers(
+            model_id=input_path,
+            output_path=output_path,
+            group_size=group_size,
+            mixed_precision=mp_config,
+            calibration=cal_path,
+            calibration_source=cal_source,
+            validate=validate,
+            verbose=verbose,
+            token=token,
+        )
+    elif layerwise:
         # Load mixed-precision config
         mp_config = None
         if mixed_precision:
@@ -792,6 +836,460 @@ def _print_quantization_summary(stats: dict, output_path: str, method: str):
         click.echo(f"  Max error:    {stats['max_error']:.6f}")
 
     click.echo("=" * 60)
+
+
+def _normalize_quality_dataset(dataset: str) -> str:
+    dataset = dataset.lower()
+    if dataset in ("wikitext", "wikitext2"):
+        return "wikitext-2"
+    return dataset
+
+
+def _load_quality_texts(dataset: str, samples: int) -> list[str]:
+    from .benchmark_models import load_eval_data
+
+    dataset = _normalize_quality_dataset(dataset)
+    return load_eval_data(dataset, num_samples=samples)
+
+
+def _resolve_model_path(model: str, verbose: bool = False) -> Path | None:
+    model_path = Path(model)
+    if model_path.exists():
+        return model_path
+
+    try:
+        from .hf_loader import download_model
+
+        if verbose:
+            click.echo(f"Downloading reference model: {model}")
+        return download_model(model)
+    except Exception as exc:
+        if verbose:
+            click.echo(f"Warning: could not resolve model path ({exc})", err=True)
+        return None
+
+
+def _estimate_model_memory_gb(model_path: Path, overhead: float = 1.1) -> float | None:
+    if model_path is None or not model_path.exists():
+        return None
+    total_bytes = 0
+    for file_path in model_path.glob("*.safetensors"):
+        total_bytes += file_path.stat().st_size
+    if total_bytes == 0:
+        return None
+    return (total_bytes / 1e9) * overhead
+
+
+def _load_quantization_metadata(
+    quantized_path: Path,
+    bits: int | None = None,
+    quant_format: str | None = None,
+    group_size: int | None = None,
+) -> tuple[dict[str, int | str | None], float | None]:
+    meta: dict[str, object] = {}
+    config_path = quantized_path / "quantization_config.json"
+    if config_path.exists():
+        meta = json.loads(config_path.read_text())
+
+    format_bits_map = {
+        "fp4": 4,
+        "int4": 4,
+        "nf4": 4,
+        "int3": 3,
+        "int2": 2,
+        "int8": 8,
+    }
+
+    if bits is not None:
+        try:
+            bits = int(bits)
+        except (TypeError, ValueError):
+            bits = None
+
+    raw_format = (
+        quant_format
+        or meta.get("quant_format")
+        or meta.get("format")
+        or meta.get("quantization_format")
+    )
+    fmt = None
+    if raw_format:
+        fmt = str(raw_format).lower().replace("marlin_", "").replace("marlin-", "")
+        if fmt.startswith("fp4"):
+            fmt = "fp4"
+
+    if bits is None:
+        if "bits" in meta and meta.get("bits") is not None:
+            try:
+                bits = int(meta["bits"])  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                bits = None
+        elif fmt in format_bits_map:
+            bits = format_bits_map[fmt]
+
+    if fmt is None and bits in format_bits_map.values():
+        # Default to fp4 when bits=4 and format not provided
+        fmt = "fp4" if bits == 4 else None
+
+    if group_size is None:
+        try:
+            group_size = int(meta.get("group_size", 0)) or None
+        except (TypeError, ValueError):
+            group_size = None
+
+    quant_info = {
+        "bits": bits,
+        "format": fmt,
+        "group_size": group_size,
+    }
+
+    mean_rmse = meta.get("mean_rmse")
+    if mean_rmse is not None:
+        try:
+            mean_rmse = float(mean_rmse)  # type: ignore[assignment]
+        except (TypeError, ValueError):
+            mean_rmse = None
+
+    return quant_info, mean_rmse
+
+
+def _write_quality_report(report: dict, output_path: str | None) -> None:
+    payload = json.dumps(report, indent=2)
+    if output_path:
+        Path(output_path).write_text(payload)
+        click.echo(f"Wrote quality report to {output_path}")
+    else:
+        click.echo(payload)
+
+
+def _compute_layer_rmse(
+    model_path: Path,
+    quantized_path: Path,
+    verbose: bool = False,
+) -> tuple[dict[str, float], float | None]:
+    from .hf_loader import load_layer_weights, load_model_config, load_quantized_weights
+    from .quantize_fp4 import compute_quantization_error
+
+    if model_path is None or not model_path.exists():
+        raise click.ClickException("Reference model path not found for layer analysis.")
+
+    quantized = load_quantized_weights(quantized_path)
+    layer_map: dict[int, list[str]] = {}
+    for name, entry in quantized.items():
+        if "packed" not in entry:
+            continue
+        if not name.startswith("model.layers."):
+            continue
+        parts = name.split(".")
+        if len(parts) < 3:
+            continue
+        try:
+            layer_idx = int(parts[2])
+        except ValueError:
+            continue
+        layer_map.setdefault(layer_idx, []).append(name)
+
+    config = load_model_config(model_path)
+    num_layers = getattr(config, "num_hidden_layers", None)
+    if num_layers is None:
+        num_layers = max(layer_map.keys(), default=-1) + 1
+
+    layer_rmse: dict[str, float] = {}
+    rmse_values: list[float] = []
+
+    for layer_idx in range(num_layers):
+        names = layer_map.get(layer_idx)
+        if not names:
+            continue
+        if verbose:
+            click.echo(f"Analyzing layer {layer_idx} ({len(names)} tensors)...")
+        weights = load_layer_weights(model_path, layer_idx)
+        for name in names:
+            entry = quantized.get(name, {})
+            if "packed" not in entry:
+                continue
+            original = weights.get(name)
+            if original is None:
+                if verbose:
+                    click.echo(f"  Warning: missing reference tensor {name}", err=True)
+                continue
+            if original.ndim != 2:
+                continue
+            err = compute_quantization_error(
+                original,
+                entry["packed"],
+                entry["scales"],
+                group_size=entry.get("group_size", 128),
+            )
+            layer_rmse[name] = float(err["rmse"])
+            rmse_values.append(float(err["rmse"]))
+
+    mean_rmse = float(sum(rmse_values) / len(rmse_values)) if rmse_values else None
+    return layer_rmse, mean_rmse
+
+
+@cli.group("quality")
+def quality():
+    """Quality benchmarks for quantized models."""
+
+
+@quality.command("compare")
+@click.option("--model", "-m", required=True, help="Reference model path or HuggingFace ID")
+@click.option("--quantized", "-q", required=True, help="Path to quantized model")
+@click.option(
+    "--dataset",
+    default="wikitext",
+    type=click.Choice(QUALITY_DATASETS, case_sensitive=False),
+    help="Evaluation dataset",
+)
+@click.option("--samples", default=100, type=int, help="Number of evaluation samples")
+@click.option("--max-length", default=512, type=int, help="Max sequence length")
+@click.option("--output", "-o", default=None, help="Output JSON path (stdout if omitted)")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def quality_compare(
+    model: str,
+    quantized: str,
+    dataset: str,
+    samples: int,
+    max_length: int,
+    output: str | None,
+    verbose: bool,
+):
+    """Compare quantized model quality against a BF16 reference."""
+    from .benchmark_models import PUBLISHED_FP16_PPL, _benchmark_marlin, _compute_kl_divergence
+
+    quantized_path = Path(quantized)
+    if not quantized_path.exists():
+        raise click.ClickException(f"Quantized model path not found: {quantized}")
+
+    model_path = _resolve_model_path(model, verbose=verbose)
+
+    quant_info, mean_rmse = _load_quantization_metadata(quantized_path)
+
+    try:
+        texts = _load_quality_texts(dataset, samples)
+    except Exception as exc:
+        if verbose:
+            click.echo(f"Warning: failed to load dataset ({exc})", err=True)
+        texts = []
+
+    ppl_quant, throughput_quant, memory_quant = _benchmark_marlin(
+        quantized_path, texts, max_length, verbose
+    )
+
+    ppl_ref = PUBLISHED_FP16_PPL.get(model)
+    if ppl_ref is None and verbose:
+        click.echo("Warning: reference perplexity not found; using null", err=True)
+
+    delta_pct = None
+    if ppl_ref is not None and ppl_ref != 0:
+        delta_pct = ((ppl_quant - ppl_ref) / ppl_ref) * 100.0
+
+    kl_mean = None
+    kl_max = None
+    if model_path is not None:
+        try:
+            kl_mean, kl_max, _ = _compute_kl_divergence(
+                model_path,
+                quantized_path,
+                texts[: max(1, min(samples, 50))],
+                max_length,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            if verbose:
+                click.echo(f"Warning: KL divergence skipped ({exc})", err=True)
+
+    ref_memory = _estimate_model_memory_gb(model_path) if model_path else None
+    compression = None
+    if ref_memory and memory_quant:
+        compression = ref_memory / memory_quant if memory_quant > 0 else None
+
+    speedup = None
+    ref_throughput = None
+    if ref_throughput and throughput_quant:
+        speedup = throughput_quant / ref_throughput
+
+    report = {
+        "model_id": model,
+        "quantization": quant_info,
+        "perplexity": {"ref": ppl_ref, "quant": ppl_quant, "delta_pct": delta_pct},
+        "kl_divergence": {"mean": kl_mean, "max": kl_max},
+        "layer_rmse": {},
+        "mean_rmse": mean_rmse,
+        "throughput": {
+            "ref_tok_s": ref_throughput,
+            "quant_tok_s": throughput_quant,
+            "speedup": speedup,
+        },
+        "memory_gb": {"ref": ref_memory, "quant": memory_quant, "compression": compression},
+    }
+
+    _write_quality_report(report, output)
+
+
+@quality.command("quick")
+@click.option("--model", "-m", required=True, help="Reference model path or HuggingFace ID")
+@click.option(
+    "--bits",
+    default=4,
+    type=click.Choice([2, 3, 4, 8], case_sensitive=False),
+    help="Quantization bit width",
+)
+@click.option(
+    "--format",
+    "quant_format",
+    default="fp4",
+    type=click.Choice(QUANT_FORMATS, case_sensitive=False),
+    help="Quantization format",
+)
+@click.option("--group-size", "-g", default=128, type=int, help="Quantization group size")
+@click.option(
+    "--dataset",
+    default="wikitext",
+    type=click.Choice(QUALITY_DATASETS, case_sensitive=False),
+    help="Evaluation dataset",
+)
+@click.option("--samples", default=20, type=int, help="Number of evaluation samples")
+@click.option("--max-length", default=512, type=int, help="Max sequence length")
+@click.option("--output", "-o", default=None, help="Output JSON path (stdout if omitted)")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def quality_quick(
+    model: str,
+    bits: int,
+    quant_format: str,
+    group_size: int,
+    dataset: str,
+    samples: int,
+    max_length: int,
+    output: str | None,
+    verbose: bool,
+):
+    """Quick quality check (reduced samples, no layer RMSE)."""
+    try:
+        bits = int(bits)
+    except (TypeError, ValueError):
+        raise click.BadParameter("Bits must be an integer.")
+
+    if bits != 4 or str(quant_format).lower() != "fp4":
+        raise click.BadParameter("quality quick currently supports fp4 4-bit only.")
+
+    from .benchmark_models import PUBLISHED_FP16_PPL, _benchmark_marlin, _compute_kl_divergence
+    from .hf_loader import convert_model_parallel
+
+    model_path = _resolve_model_path(model, verbose=verbose)
+
+    with tempfile.TemporaryDirectory(prefix="metal_marlin_quality_") as tmp_dir:
+        quantized_path = Path(tmp_dir)
+        if verbose:
+            click.echo("Quantizing model (quick mode)...")
+        convert_model_parallel(
+            model_path or model,
+            quantized_path,
+            group_size=group_size,
+            validate=False,
+            verbose=verbose,
+        )
+
+        quant_info = {"bits": bits, "format": "fp4", "group_size": group_size}
+
+        try:
+            texts = _load_quality_texts(dataset, samples)
+        except Exception as exc:
+            if verbose:
+                click.echo(f"Warning: failed to load dataset ({exc})", err=True)
+            texts = []
+
+        ppl_quant, throughput_quant, memory_quant = _benchmark_marlin(
+            quantized_path, texts, max_length, verbose
+        )
+
+        ppl_ref = PUBLISHED_FP16_PPL.get(model)
+        delta_pct = None
+        if ppl_ref is not None and ppl_ref != 0:
+            delta_pct = ((ppl_quant - ppl_ref) / ppl_ref) * 100.0
+
+        kl_mean = None
+        kl_max = None
+        if model_path is not None:
+            try:
+                kl_mean, kl_max, _ = _compute_kl_divergence(
+                    model_path,
+                    quantized_path,
+                    texts[: max(1, min(samples, 50))],
+                    max_length,
+                    verbose=verbose,
+                )
+            except Exception as exc:
+                if verbose:
+                    click.echo(f"Warning: KL divergence skipped ({exc})", err=True)
+
+        ref_memory = _estimate_model_memory_gb(model_path) if model_path else None
+        compression = None
+        if ref_memory and memory_quant:
+            compression = ref_memory / memory_quant if memory_quant > 0 else None
+
+        report = {
+            "model_id": model,
+            "quantization": quant_info,
+            "perplexity": {"ref": ppl_ref, "quant": ppl_quant, "delta_pct": delta_pct},
+            "kl_divergence": {"mean": kl_mean, "max": kl_max},
+            "layer_rmse": {},
+            "mean_rmse": None,
+            "throughput": {
+                "ref_tok_s": None,
+                "quant_tok_s": throughput_quant,
+                "speedup": None,
+            },
+            "memory_gb": {"ref": ref_memory, "quant": memory_quant, "compression": compression},
+        }
+
+        _write_quality_report(report, output)
+
+
+@quality.command("layers")
+@click.option("--model", "-m", required=True, help="Reference model path or HuggingFace ID")
+@click.option("--quantized", "-q", required=True, help="Path to quantized model")
+@click.option("--output", "-o", default=None, help="Output JSON path (stdout if omitted)")
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+def quality_layers(
+    model: str,
+    quantized: str,
+    output: str | None,
+    verbose: bool,
+):
+    """Layer-by-layer RMSE analysis for a quantized model."""
+    quantized_path = Path(quantized)
+    if not quantized_path.exists():
+        raise click.ClickException(f"Quantized model path not found: {quantized}")
+
+    model_path = _resolve_model_path(model, verbose=verbose)
+    quant_info, mean_rmse_meta = _load_quantization_metadata(quantized_path)
+
+    layer_rmse = {}
+    mean_rmse = mean_rmse_meta
+    try:
+        layer_rmse, mean_rmse = _compute_layer_rmse(
+            model_path,
+            quantized_path,
+            verbose=verbose,
+        )
+    except Exception as exc:
+        if verbose:
+            click.echo(f"Warning: layer RMSE skipped ({exc})", err=True)
+
+    report = {
+        "model_id": model,
+        "quantization": quant_info,
+        "perplexity": {"ref": None, "quant": None, "delta_pct": None},
+        "kl_divergence": {"mean": None, "max": None},
+        "layer_rmse": layer_rmse,
+        "mean_rmse": mean_rmse,
+        "throughput": {"ref_tok_s": None, "quant_tok_s": None, "speedup": None},
+        "memory_gb": {"ref": None, "quant": None, "compression": None},
+    }
+
+    _write_quality_report(report, output)
 
 
 @cli.command("eval")

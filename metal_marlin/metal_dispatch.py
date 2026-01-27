@@ -1131,7 +1131,54 @@ def dispatch_gemm_int2(
     """Dispatch INT2 quantized GEMM: C = A @ dequant(B).
 
     For cold MoE experts with extreme compression.
+    Uses PyTorch fallback since Metal INT2 kernel is not yet implemented.
     """
+    require_mps()
+
+    # PyTorch fallback for INT2 GEMM (Metal kernel not yet implemented)
+    # INT2 packs 16 values per uint32 along N dimension: [K, N//16]
+    A_2d = A.reshape(M, K).to(torch.float32)
+    device = A.device
+    K_actual, N_packed = B_packed.shape
+    N_full = N_packed * 16  # Each uint32 holds 16 INT2 values
+
+    # Unpack INT2 to FP32: [K, N]
+    B_full = torch.empty((K_actual, N_full), device=device, dtype=torch.float32)
+    for j in range(16):  # 16 values per uint32, along N dimension
+        nibbles = ((B_packed >> (j * 2)) & 0x3).to(torch.int32)
+        # INT2 codebook: 0->-1.5, 1->-0.5, 2->0.5, 3->1.5 (symmetric)
+        vals = nibbles.float() - 1.5  # Map to [-1.5, 1.5] range
+        B_full[:, j::16] = vals
+
+    # Trim to actual N if padded
+    if N_full > N:
+        B_full = B_full[:, :N]
+
+    # Apply scales: [K//group_size, N] -> [K, N]
+    scales_f = scales.to(torch.float32)
+    scales_exp = scales_f.repeat_interleave(group_size, dim=0)
+    if scales_exp.shape[0] > K_actual:
+        scales_exp = scales_exp[:K_actual, :]
+    if scales_exp.shape[1] > N:
+        scales_exp = scales_exp[:, :N]
+    B_full = B_full[:K_actual, :N] * scales_exp[:K_actual, :N]
+
+    out = (A_2d[:, :K_actual] @ B_full).to(torch.float16)
+    return out
+
+
+def _dispatch_gemm_int2_metal(
+    lib: MetalKernelLibrary,
+    A: torch.Tensor,
+    B_packed: torch.Tensor,
+    scales: torch.Tensor,
+    M: int,
+    N: int,
+    K: int,
+    group_size: int = 128,
+    enable_padding: bool | None = None,
+) -> torch.Tensor:
+    """Metal kernel dispatch for INT2 GEMM (not yet implemented)."""
     require_mps()
 
     device = lib.device

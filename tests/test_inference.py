@@ -204,7 +204,7 @@ class TestMetalQuantizedLinear:
         # Dimensions must be divisible by group_size and pack_factor
         layer = MetalQuantizedLinear(
             in_features=256,  # divisible by 128
-            out_features=128,  # divisible by 8 (pack_factor for FP4)
+            out_features=128,  # can be any size (kernel handles padding)
             bits=4,
             group_size=128,
         )
@@ -212,7 +212,8 @@ class TestMetalQuantizedLinear:
         assert layer.in_features == 256
         assert layer.out_features == 128
         assert layer.bits == 4
-        assert layer.weight_packed.shape == (256, 128 // 8)
+        # K-dimension packing: [K // pack_factor, N_padded]
+        assert layer.weight_packed.shape == (256 // 8, 128)
         assert layer.scales.shape == (256 // 128, 128)
 
     def test_layer_creation_fp8(self):
@@ -225,19 +226,21 @@ class TestMetalQuantizedLinear:
         )
 
         assert layer.bits == 8
-        assert layer.weight_packed.shape == (256, 128 // 4)  # 4 FP8 per uint32
+        # K-dimension packing: [K // pack_factor, N]
+        assert layer.weight_packed.shape == (256 // 4, 128)
 
     def test_layer_creation_int2(self):
         """Test INT2 quantized layer creation."""
         layer = MetalQuantizedLinear(
             in_features=256,
-            out_features=256,  # must be divisible by 16
+            out_features=256,
             bits=2,
             group_size=128,
         )
 
         assert layer.bits == 2
-        assert layer.weight_packed.shape == (256, 256 // 16)  # 16 INT2 per uint32
+        # K-dimension packing: [K // pack_factor, N]
+        assert layer.weight_packed.shape == (256 // 16, 256)
 
     def test_layer_with_bias(self):
         """Test quantized layer with bias."""

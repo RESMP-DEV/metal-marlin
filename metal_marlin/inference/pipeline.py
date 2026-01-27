@@ -9,23 +9,23 @@ Backend support:
     - Falls back to CPU if MPS unavailable
 
 Usage:
-    from metal_marlin.inference import MarlinPipeline, load_quantized_model
+    from metal_marlin.inference import MarlinPipeline
 
     # Load pre-quantized model
-    model, tokenizer = load_quantized_model("./glm4-fp4/")
+    pipe = MarlinPipeline.from_pretrained("./glm4-fp4/")
 
     # Generate text
-    pipe = MarlinPipeline(model, tokenizer)
     output = pipe("What is the meaning of life?", max_tokens=100)
 """
 
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from .._compat import HAS_MPS, require_torch, torch
 
@@ -727,132 +727,145 @@ class MetalMarlinModel:
 KVCache = Any
 
 
+def _load_safetensors_keys(path: Path) -> set[str]:
+    st_path = path / "model.safetensors"
+    if not st_path.exists():
+        return set()
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        return set()
+    with safe_open(str(st_path), framework="pt") as f:
+        return set(f.keys())
+
+
+def _is_legacy_checkpoint(path: str | Path) -> bool:
+    """Detect legacy Marlin FP4 checkpoints stored in model.safetensors."""
+    model_path = Path(path)
+    if not model_path.exists():
+        return False
+    keys = _load_safetensors_keys(model_path)
+    if not keys:
+        return False
+    if any(key.endswith(".weight_packed") for key in keys):
+        return False
+    return any(key.endswith(".scales") or key.endswith(".group_size") for key in keys)
+
+
+def _load_legacy_checkpoint(
+    path: str | Path,
+    device: str,
+) -> tuple[Any, Any]:
+    """Load legacy Marlin checkpoints via the Transformers-compatible loader."""
+    from .pipeline_v2 import _load_marlin_quantized_model, _require_transformers
+
+    _require_transformers()
+    require_torch()
+
+    from transformers import AutoTokenizer
+
+    model_path = Path(path)
+    model = _load_marlin_quantized_model(model_path, device=device)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    return model, tokenizer
+
+
+def _load_new_checkpoint(
+    path: str | Path,
+    device: str,
+    **kwargs: Any,
+) -> tuple[Any, Any]:
+    from .pipeline_v2 import TransformersMarlinPipeline
+
+    pipeline = TransformersMarlinPipeline.from_pretrained(
+        str(path),
+        device=device,
+        **kwargs,
+    )
+    return pipeline.model, pipeline.tokenizer
+
+
 class MarlinPipeline:
     """
-    High-level pipeline for text generation.
+    DEPRECATED: Use TransformersMarlinPipeline instead.
 
-    Works with any model implementing the MarlinModel protocol.
-    Uses PyTorch for tensor operations and MPS for GPU acceleration.
-
-    Usage:
-        model = MetalMarlinModel.from_quantized("./glm4-fp4/")
-        pipe = MarlinPipeline(model, tokenizer)
-        output = pipe("What is the meaning of life?", max_tokens=100)
+    This class is maintained for backwards compatibility but internally
+    now uses Transformers + layer replacement.
     """
 
     def __init__(
         self,
-        model: MarlinModel,
-        tokenizer: Any,
-        config: GenerationConfig | None = None,
-        device: str | None = None,
-    ):
-        require_torch()
+        model: Any,
+        tokenizer: Any | None = None,
+        device: str | None = "mps",
+    ) -> None:
+        warnings.warn(
+            "MarlinPipeline is deprecated. Use TransformersMarlinPipeline instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
-        self.model = model
-        self.tokenizer = tokenizer
-        self.config = config or GenerationConfig()
-        self._kv_cache = None
+        from .pipeline_v2 import TransformersMarlinPipeline
 
-        # Get device from model or auto-detect
-        if device is not None:
-            self._device = device
-        elif hasattr(model, "device"):
-            self._device = model.device
+        if isinstance(model, TransformersMarlinPipeline):
+            self._pipeline = model
         else:
-            self._device = get_device()
+            if tokenizer is None:
+                raise ValueError("tokenizer is required when constructing MarlinPipeline from a model.")
+            if device is None:
+                device = getattr(model, "device", get_device())
+            self._pipeline = TransformersMarlinPipeline(model, tokenizer, device=device)
+
+        self.model = self._pipeline.model
+        self.tokenizer = self._pipeline.tokenizer
 
     @property
     def device(self) -> str:
         """Return the active device for this pipeline."""
-        return self._device
+        return getattr(self._pipeline, "device", get_device())
 
     @classmethod
     def from_pretrained(
         cls,
-        model_path: str | Path,
+        path: str | Path,
         quant_type: str = "fp4",
         device: str | None = None,
+        **kwargs: Any,
     ) -> MarlinPipeline:
-        """
-        Load a pretrained model from safetensors + config.json.
+        """Load from quantized checkpoint directory or HF model id."""
+        if device is None:
+            device = get_device()
+        if quant_type not in {"fp4", "int4"}:
+            warnings.warn(
+                f"Unsupported quant_type='{quant_type}' for Transformers-based pipeline; "
+                "falling back to fp4 behavior.",
+                UserWarning,
+                stacklevel=2,
+            )
 
-        Args:
-            model_path: Path to model directory
-            quant_type: Quantization type (fp4, int4) - informational only
-            device: Device to load to (mps, cuda, cpu). Auto-detects if None.
+        if _is_legacy_checkpoint(path):
+            model, tokenizer = _load_legacy_checkpoint(path, device)
+            return cls(model, tokenizer, device=device)
 
-        Returns:
-            MarlinPipeline ready for inference
-        """
-        require_torch()
-
-        model_path = Path(model_path)
-        config = load_config(model_path)
-
-        # Detect model architecture
-        arch = config.get("architectures", [""])[0]
-
-        if "GLM" in arch or config.get("model_type") == "glm4_moe_lite":
-            from ..models.glm4_model import GLM4MoEModel
-
-            model = GLM4MoEModel.from_quantized(model_path, device=device)
-        elif "Qwen" in arch:
-            model = MetalMarlinModel.from_quantized(model_path, device=device)
-        else:
-            model = MetalMarlinModel.from_quantized(model_path, device=device)
-
-        # Load tokenizer
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-        return cls(model, tokenizer, device=model.device)
+        model, tokenizer = _load_new_checkpoint(path, device, **kwargs)
+        return cls(model, tokenizer, device=device)
 
     def __call__(
         self,
         prompt: str | list[str],
-        max_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        stream: bool = False,
-    ) -> str | Iterator[str]:
-        """
-        Generate text from prompt.
-
-        Args:
-            prompt: Input text or list of texts
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            top_p: Nucleus sampling threshold
-            stream: If True, return iterator yielding tokens
-
-        Returns:
-            Generated text or iterator
-        """
-        require_torch()
-        assert torch is not None
-
-        # Handle single prompt
-        if isinstance(prompt, str):
-            prompt = [prompt]
-
-        # Tokenize
-        inputs = self.tokenizer(prompt, return_tensors="pt", padding=True)
-        input_ids = inputs["input_ids"].to(self._device)
-
-        # Update config
-        gen_config = GenerationConfig(
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            eos_token_id=self.tokenizer.eos_token_id or 2,
-        )
-
-        if stream:
-            return self._stream_generate(input_ids, gen_config)
-        else:
-            return self._generate(input_ids, gen_config)
+        **kwargs: Any,
+    ) -> str | Iterator[str] | list[str]:
+        kwargs = dict(kwargs)
+        stream = bool(kwargs.pop("stream", False))
+        if isinstance(prompt, list):
+            if stream:
+                first_prompt = prompt[0] if prompt else ""
+                return self._pipeline(first_prompt, stream=True, **kwargs)
+            if hasattr(self._pipeline, "batch_generate"):
+                return self._pipeline.batch_generate(prompt, **kwargs)
+            first_prompt = prompt[0] if prompt else ""
+            return self._pipeline(first_prompt, stream=False, **kwargs)
+        return self._pipeline(prompt, stream=stream, **kwargs)
 
     def stream_generate(
         self,
@@ -861,145 +874,9 @@ class MarlinPipeline:
         temperature: float = 1.0,
         top_p: float = 1.0,
     ) -> Iterator[str]:
-        """Yield tokens as they are generated for streaming responses."""
-        require_torch()
-        assert torch is not None
-
-        input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self._device)
-        kv_cache = self.model.create_kv_cache(batch_size=1)
-
-        # Prefill
-        logits = self.model(input_ids, kv_cache=kv_cache)
-        kv_cache.advance(input_ids.shape[1])
-
-        eos_token_id = self.tokenizer.eos_token_id or 2
-
-        for _ in range(max_tokens):
-            next_token_id = self._sample(
-                logits[0, -1],
-                temperature=temperature,
-                top_p=top_p,
-                do_sample=True,
-            )
-            token_str = self.tokenizer.decode([next_token_id])
-            yield token_str
-
-            if next_token_id == eos_token_id:
-                break
-
-            # Decode step
-            next_input = torch.tensor([[next_token_id]], device=self._device, dtype=torch.long)
-            logits = self.model(next_input, kv_cache=kv_cache)
-            kv_cache.advance(1)
-
-    def _generate(
-        self,
-        input_ids: torch_typing.Tensor,
-        config: GenerationConfig,
-    ) -> str:
-        """Standard autoregressive generation."""
-        require_torch()
-        assert torch is not None
-
-        # Create KV cache for efficient decoding
-        kv_cache = self.model.create_kv_cache(batch_size=1)
-
-        # Prefill: process entire prompt
-        logits = self.model(input_ids, kv_cache=kv_cache)
-        kv_cache.advance(input_ids.shape[1])
-
-        generated_ids = input_ids.tolist()[0]
-
-        for _ in range(config.max_new_tokens):
-            next_token_id = self._sample(
-                logits[:, -1, :][0],
-                temperature=config.temperature,
-                top_p=config.top_p,
-                do_sample=config.do_sample,
-            )
-            generated_ids.append(next_token_id)
-
-            # Check for EOS
-            if next_token_id == config.eos_token_id:
-                break
-
-            # Decode step
-            next_input = torch.tensor([[next_token_id]], device=self._device, dtype=torch.long)
-            logits = self.model(next_input, kv_cache=kv_cache)
-            kv_cache.advance(1)
-
-        return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-    def _stream_generate(
-        self,
-        input_ids: torch_typing.Tensor,
-        config: GenerationConfig,
-    ) -> Iterator[str]:
-        """Streaming generation yielding tokens one at a time."""
-        require_torch()
-        assert torch is not None
-
-        kv_cache = self.model.create_kv_cache(batch_size=1)
-
-        # Prefill
-        logits = self.model(input_ids, kv_cache=kv_cache)
-        kv_cache.advance(input_ids.shape[1])
-
-        generated_ids = input_ids.tolist()[0]
-        prev_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-
-        for _ in range(config.max_new_tokens):
-            next_token_id = self._sample(
-                logits[:, -1, :][0],
-                temperature=config.temperature,
-                top_p=config.top_p,
-                do_sample=config.do_sample,
-            )
-
-            if next_token_id == config.eos_token_id:
-                break
-
-            generated_ids.append(next_token_id)
-
-            # Yield new text
-            full_text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-            yield full_text[len(prev_text) :]
-            prev_text = full_text
-
-            # Decode step
-            next_input = torch.tensor([[next_token_id]], device=self._device, dtype=torch.long)
-            logits = self.model(next_input, kv_cache=kv_cache)
-            kv_cache.advance(1)
-
-    def _sample(
-        self,
-        logits: torch_typing.Tensor,
-        temperature: float,
-        top_p: float,
-        do_sample: bool,
-    ) -> int:
-        """Sample a token id from logits with temperature and top-p."""
-        assert torch is not None
-
-        if temperature > 0:
-            logits = logits / temperature
-
-        if do_sample and temperature > 0:
-            probs = torch.nn.functional.softmax(logits, dim=-1)
-
-            if top_p < 1.0:
-                sorted_probs, sorted_indices = torch.sort(probs, descending=True)
-                cumsum = torch.cumsum(sorted_probs, dim=-1)
-                mask = cumsum - sorted_probs > top_p
-                sorted_probs[mask] = 0.0
-                sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-                next_token = sorted_indices[torch.multinomial(sorted_probs, 1)]
-            else:
-                next_token = torch.multinomial(probs, 1)
-        else:
-            next_token = torch.argmax(logits, dim=-1)
-
-        return int(next_token.item())
+        """Yield tokens for streaming responses."""
+        result = self(prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, stream=True)
+        return cast(Iterator[str], result)
 
     def info(self) -> ModelInfo:
         """Get model information."""
@@ -1012,33 +889,34 @@ class MarlinPipeline:
                 memory_mb=0.0,
             )
 
-        if isinstance(config, dict):
-            vocab_size = config.get("vocab_size", 32000)
-            hidden_size = config.get("hidden_size", 4096)
-            num_hidden_layers = config.get("num_hidden_layers", 32)
-            intermediate_size = config.get("intermediate_size", 11008)
-            quant_type = config.get("quant_type", "fp4")
+        if hasattr(config, "to_dict"):
+            config_dict = config.to_dict()
+        elif isinstance(config, dict):
+            config_dict = config
         else:
-            vocab_size = getattr(config, "vocab_size", 32000)
-            hidden_size = getattr(config, "hidden_size", 4096)
-            num_hidden_layers = getattr(config, "num_hidden_layers", 32)
-            intermediate_size = getattr(config, "intermediate_size", 11008)
-            quant_type = getattr(config, "quant_type", "fp4")
+            config_dict = {}
 
-        num_params = (
-            vocab_size * hidden_size  # Embeddings
-            + num_hidden_layers
-            * (
-                4 * hidden_size * hidden_size  # Attention
-                + 3 * hidden_size * intermediate_size  # MLP
-            )
+        vocab_size = config_dict.get("vocab_size", getattr(config, "vocab_size", 32000))
+        hidden_size = config_dict.get("hidden_size", getattr(config, "hidden_size", 4096))
+        num_hidden_layers = config_dict.get(
+            "num_hidden_layers",
+            getattr(config, "num_hidden_layers", 32),
+        )
+        intermediate_size = config_dict.get(
+            "intermediate_size",
+            getattr(config, "intermediate_size", 11008),
+        )
+        quant_type = config_dict.get(
+            "quant_type",
+            getattr(config, "quant_type", "fp4"),
         )
 
-        if quant_type in ("fp4", "int4"):
-            bits_per_param = 4
-        else:
-            bits_per_param = 16
+        num_params = (
+            vocab_size * hidden_size
+            + num_hidden_layers * (4 * hidden_size * hidden_size + 3 * hidden_size * intermediate_size)
+        )
 
+        bits_per_param = 4 if quant_type in ("fp4", "int4") else 16
         memory_mb = num_params * bits_per_param / 8 / 1024 / 1024
 
         return ModelInfo(
@@ -1047,6 +925,9 @@ class MarlinPipeline:
             quant_type=quant_type,
             memory_mb=memory_mb,
         )
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pipeline, name)
 
 
 def load_quantized_model(

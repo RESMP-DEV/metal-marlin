@@ -8,6 +8,71 @@ Metal Marlin provides native Metal compute kernels for quantized LLM inference o
 - PyTorch 2.0+ with MPS backend
 - PyObjC Metal bindings: `pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders`
 
+## Transformers Integration (Recommended)
+
+Metal Marlin integrates directly with HuggingFace Transformers by replacing
+`nn.Linear` layers with Metal-accelerated quantized layers. This keeps
+Transformer generation logic intact while swapping in Metal kernels for GEMM.
+
+### `replace_linear_layers`
+
+```python
+replace_linear_layers(
+    model: torch.nn.Module,
+    bits: Literal[2, 4, 8] = 4,
+    group_size: int = 128,
+    skip_layers: set[str] | None = None,
+    layer_filter: Callable[[str, nn.Module], bool] | None = None,
+) -> dict[str, int]
+```
+
+Walks the model and replaces eligible `nn.Linear` layers with
+`MetalQuantizedLinear` variants in-place.
+
+**Returns:**
+- `replaced_count`: number of layers replaced
+- `skipped_count`: number of layers skipped (shape or filter mismatch)
+
+**Example:**
+```python
+from transformers import AutoModelForCausalLM
+from metal_marlin import replace_linear_layers
+
+model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash")
+stats = replace_linear_layers(model, bits=4, group_size=128)
+print(stats)
+```
+
+### `load_and_quantize`
+
+```python
+load_and_quantize(
+    model_id_or_path: str,
+    bits: Literal[2, 4, 8] = 4,
+    group_size: int = 128,
+    device: str = "mps",
+) -> tuple[torch.nn.Module, dict[str, int]]
+```
+
+Convenience wrapper to load a Transformers model and immediately quantize
+its linear layers.
+
+### `save_quantized`
+
+```python
+save_quantized(model: torch.nn.Module, output_dir: str | Path) -> None
+```
+
+Save a quantized model to disk (weights + config) for fast reloads.
+
+### `load_quantized`
+
+```python
+load_quantized(path: str | Path, device: str = "mps") -> torch.nn.Module
+```
+
+Load a previously quantized checkpoint from disk.
+
 ---
 
 ## Metal Kernel Dispatch

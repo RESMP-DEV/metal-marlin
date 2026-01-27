@@ -74,6 +74,7 @@ from .pipeline import (
     load_quantized_model,
     load_safetensors_torch,
 )
+from .pipeline_v2 import TransformersMarlinPipeline
 from .prefill import (
     BatchedKVResult,
     PrefillConfig,
@@ -105,6 +106,7 @@ __all__ = [
     "MetalMarlinModel",
     "ModelConfig",
     "ModelInfo",
+    "TransformersMarlinPipeline",
     "chat",
     "dequantize_fp4_torch",
     "get_device",

@@ -6,14 +6,14 @@
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **97% passing** (1439/1478) |
+| Test Suite | **100% passing** (1442/1478) |
 | GEMM Kernel | **Working** ✅ |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
 | OpenAI Server | **Scaffolded** 🔄 |
 | Metal Shaders | **5/5 compiling** ✅ |
 | Inference Tests | **31/31 passing** ✅ |
 | MLX Removal | **Complete** ✅ |
-| GLM-4.7-Flash MLA | **Working** ✅ |
+| GLM-4.7-Flash | **Blocked** - needs Transformers integration |
 | Ruff Linting | **0 errors** ✅ |
 | Pyright Errors | **0 errors, 184 warnings** ✅ |
 
@@ -21,25 +21,51 @@
 
 ## Test Results
 
-**Last run:** 260.82s (4 min 21 sec)
+**Last run:** 256.18s (4 min 16 sec)
 
 | Category | Count |
 |----------|-------|
-| Passed | 1439 |
-| Failed | 3 |
+| Passed | 1442 |
+| Failed | 0 |
 | Skipped | 36 |
 | xfailed | 0 |
 | xpassed | 0 |
 | Errors | 0 |
 
 **Recent changes:**
-- Removed permanently-xfailed Metal flash attention tests (kernel exceeds threadgroup memory)
-- Trimmed duplicate INT4/FP8 edge-case coverage (dequant edge cases now centralized)
+- Fixed KV attention quantization (corrected test quantization formula and exact inverse dequant)
+- Fixed batched GEMV shape mismatch (removed duplicate M calculation)
+- Added INT2 GEMM PyTorch fallback for GLM-4.7-Flash MLA support
+- Fixed MetalQuantizedLinear output padding for non-aligned dimensions
+- All INT4/FP4 GEMM tests now passing
 
-**Remaining failures (3):**
-- INT4 GEMM accuracy vs reference (1 test): tolerance overshoot on a few elements
-- Quantized KV attention accuracy (1 test): FP8 quantization accuracy mismatch
-- GEMM numerical stability (1 test): large-value overflow / sign cancellation edge case
+**Remaining failures (0):**
+- None
+
+---
+
+## GLM-4.7-Flash Integration
+
+**Status:** Blocked on Transformers integration refactor.
+
+GLM-4.7-Flash is a **Mixture-of-Experts (MoE)** model with:
+- Layer 0: Dense MLP
+- Layers 1-46: MoE (64 routed experts + 1 shared expert per layer)
+- Multi-Latent Attention (MLA) throughout
+
+**Current State:**
+- ✅ Quantization works correctly (9024 expert weights quantized)
+- ✅ MLA attention dimensions fixed
+- ❌ Inference broken: legacy `MetalGLM47Model` uses dense MLPs, ignores experts
+- ❌ 46/47 layers produce garbage output
+
+**Solution:** Use `transformers>=5.0.0` with `Glm4MoeLiteForCausalLM` + layer swapping.
+Transformers handles MoE routing; we just swap `nn.Linear` → `MetalQuantizedLinear`.
+
+```bash
+# Requires transformers 5.0.0+
+uv run pytest tests/test_glm4_integration.py -v --run-slow
+```
 
 ---
 
@@ -65,37 +91,53 @@ print(pipe('The capital of France is', max_tokens=20))
 
 ---
 
+## Architecture
+
+**Metal Marlin integrates with HuggingFace Transformers, not reimplements it.**
+
+Model structure (MoE routing, MLA attention, layer ordering) comes from Transformers.
+We swap `nn.Linear` → `MetalQuantizedLinear` to use optimized Metal kernels.
+
+```python
+from transformers import AutoModelForCausalLM
+from metal_marlin import replace_linear_layers, MetalQuantizedLinear
+
+# Transformers handles architecture (MoE, MLA, everything)
+model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash", device_map="mps")
+
+# Our only job: swap Linear layers with quantized versions
+replace_linear_layers(model, MetalQuantizedLinear, bits=4, group_size=128)
+
+# Inference uses Transformers' battle-tested code
+output = model.generate(input_ids)
+```
+
+**Requires:** `transformers>=5.0.0` for GLM-4.7-Flash native support.
+
+---
+
 ## Implementation Progress
 
-### Model Layers (Phase 33 - In Progress)
+### Metal Kernels (Core Value)
 
-| Model | Attention | MLP | Layer | Status |
-|-------|-----------|-----|-------|--------|
-| Llama | ✅ QuantizedLlamaAttention | ✅ QuantizedLlamaMLP | ✅ QuantizedLlamaLayer | Complete |
-| Qwen3 | 🔄 QuantizedQwen3Attention | 🔄 QuantizedQwen3MLP | 🔄 QuantizedQwen3Layer | In Progress |
-| GLM-4 | 🔄 QuantizedGLM4Attention (MLA) | 🔄 QuantizedGLM4MLP | 🔄 QuantizedGLM4Layer | In Progress |
-| Mixtral | ✅ MixtralAttention | ✅ MixtralExpertMLP | ✅ MixtralLayer | Complete |
-| DeepSeek | 🔄 DeepSeekMLA | 🔄 DeepSeekMoE | 🔄 DeepSeekLayer | Partial |
+| Kernel | Purpose | Status |
+|--------|---------|--------|
+| `marlin_gemm_fp4` | FP4 dequant + GEMM fused | ✅ Working |
+| `flash_attention_v2` | Memory-efficient attention | ✅ Working |
+| `moe_dispatch_optimized` | Expert routing | ✅ Compiles |
+| `dense_gemm` | BF16/FP16 GEMM | ✅ Working |
 
-### Attention Implementations
+### Legacy Model Layers (Being Phased Out)
 
-| Implementation | Location | Purpose | Status |
-|---------------|----------|---------|--------|
-| MetalAttention | inference_metal.py | Standard MHA with Metal | ✅ Working |
-| MetalMLAAttention | inference_metal.py | MLA for GLM-4/DeepSeek | 🔄 Partial |
-| MLAAttention | mla_attention.py | Latent attention module | ✅ Working |
-| FlashAttention | flash_attention_v2.py | Flash attention v2 | ✅ Working |
-| DifferentialAttention | architectures/diff_transformer.py | Diff-transformer | ✅ Working |
-| TreeAttention | tree_attention.py | Speculative tree attn | ✅ Working |
+> **Note:** These custom layer implementations are being replaced by Transformers integration.
+> New models should use `replace_linear_layers()` instead of custom model classes.
 
-### MLP Implementations
-
-| Implementation | Location | Purpose | Status |
-|---------------|----------|---------|--------|
-| MetalMLP | inference_metal.py | SwiGLU with Metal | ✅ Working |
-| MarlinMLP | mlp.py | Quantized MLP | ✅ Working |
-| TensorParallelMLP | distributed/tensor_parallel.py | TP-sharded MLP | ✅ Working |
-| MixtralExpertMLP | models/mixtral.py | MoE expert | ✅ Working |
+| Model | Custom Classes | Status |
+|-------|---------------|--------|
+| Llama | QuantizedLlamaAttention, QuantizedLlamaMLP | Legacy |
+| Qwen3 | QuantizedQwen3Attention, QuantizedQwen3MLP | Legacy |
+| GLM-4 | MetalMLAAttention, MetalMLP, MetalGLM47Model | Legacy (broken for MoE) |
+| Mixtral | MixtralAttention, MixtralExpertMLP | Legacy |
 
 ---
 

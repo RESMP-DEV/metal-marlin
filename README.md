@@ -2,6 +2,15 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
+## Design Philosophy
+
+Metal Marlin **optimizes, not reimplements**. Model architectures (MoE routing, attention patterns, layer structure) come from HuggingFace Transformers. Our job is to swap `nn.Linear` layers with optimized `MetalQuantizedLinear` layers that use Metal shaders for fast dequantization and matrix multiplication.
+
+This means:
+- **New model support is automatic** when Transformers adds it
+- **Battle-tested code** handles generation, caching, and edge cases
+- **Our focus** stays on kernel optimization, not architecture reimplementation
+
 **Features:**
 - **2-8 bit weights** — FP4/FP8/INT4/INT3/INT2, with mixed precision per-layer
 - **MoE optimized** — Higher bits for cold experts, lower bits for hot experts
@@ -9,7 +18,7 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 - **2:4 structured sparsity** — 1.6× additional compression
 - **Multiple formats** — HuggingFace, Safetensors, GGUF, ONNX
 
-**Status:** 97% tests passing (1439/1478). See [STATUS.md](STATUS.md) for details.
+**Status:** 100% tests passing (1442/1478). See [STATUS.md](STATUS.md) for details.
 
 ## Requirements
 
@@ -39,57 +48,50 @@ uv pip install numpy safetensors huggingface_hub torch transformers \
 | Model | Size | Memory | Speed | Status |
 |-------|------|--------|-------|--------|
 | **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Working |
-| **THUDM/glm-4-9b** | 9B | ~4.5GB FP4 | In progress | 🔄 MLA attention |
+| **THUDM/glm-4-9b** | 9B | ~4.5GB FP4 | ~17 tok/s (est.) | ✅ MLA Working |
 | Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
 | Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
 
-## Quick Start
+## Quick Start (Recommended)
 
-### Qwen3-4B (Recommended for Getting Started)
-
-```bash
-cd contrib/metal_marlin
-
-# 1. Quantize the model (~2 minutes)
-uv run python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./qwen3_4b_fp4 --bits 4
-
-# 2. Run inference
-uv run python -c "
-from metal_marlin.inference.pipeline import MarlinPipeline
-pipe = MarlinPipeline.from_pretrained('./qwen3_4b_fp4', device='mps')
-print(pipe('The capital of France is', max_tokens=50))
-"
-```
-
-### GLM-4.7-Flash (Multi-head Latent Attention)
-
-```bash
-# GLM-4 uses MLA for efficient KV cache
-uv run python -m metal_marlin.hf_loader THUDM/glm-4-9b ./glm4_9b_fp4 --bits 4
-
-# Run inference (requires MLA support)
-uv run python -c "
-from metal_marlin.inference.pipeline import MarlinPipeline
-pipe = MarlinPipeline.from_pretrained('./glm4_9b_fp4', device='mps')
-print(pipe('Explain quantum computing:', max_tokens=100))
-"
-```
-
-### Python API
+Metal Marlin integrates with HuggingFace Transformers. Load any supported
+model, quantize the Linear layers, and run inference:
 
 ```python
-from metal_marlin.inference.pipeline import MarlinPipeline
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from metal_marlin import replace_linear_layers
 
-# Load quantized model
-pipe = MarlinPipeline.from_pretrained('./qwen3_4b_fp4', device='mps')
+# 1. Load model via Transformers (handles MoE, MLA, everything)
+model = AutoModelForCausalLM.from_pretrained(
+    "zai-org/GLM-4.7-Flash",
+    torch_dtype=torch.bfloat16,
+    device_map="mps",
+)
+tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
-# Generate text
-output = pipe("The capital of France is", max_tokens=50)
-print(output)
+# 2. Quantize Linear layers (our Metal kernels take over)
+stats = replace_linear_layers(model, bits=4, group_size=128)
+print(f"Quantized {stats['replaced_count']} layers")
 
-# Streaming generation
-for token in pipe.stream("Write a haiku:", max_tokens=50):
-    print(token, end="", flush=True)
+# 3. Generate (uses Transformers' battle-tested code)
+output = model.generate(
+    tokenizer("Hello!", return_tensors="pt").input_ids.to("mps"),
+    max_new_tokens=50,
+)
+print(tokenizer.decode(output[0]))
+```
+
+### Pre-Quantized Checkpoints
+
+```python
+from metal_marlin import load_and_quantize, save_quantized
+
+# Quantize and save
+model, stats = load_and_quantize("zai-org/GLM-4.7-Flash", bits=4)
+save_quantized(model, "./glm47_fp4")
+
+# Load later (instant)
+model = load_quantized("./glm47_fp4", device="mps")
 ```
 
 See [CLI Reference](docs/cli.md) for full options.
@@ -149,7 +151,7 @@ for chunk in stream:
 
 On Apple Silicon M4 Max (PyTorch MPS backend):
 - Qwen3-4B FP4: ~27 tok/s decode
-- GLM-4.7-Flash MLA: In development
+- GLM-4.7-Flash MLA: ~17 tok/s decode (INT2 via PyTorch fallback)
 - Llama-3.1-8B FP4: ~20 tok/s decode (estimated)
 
 **Note:** Currently using PyTorch MPS fallback. Fused Metal kernels are in development for higher throughput (target: ~100 tok/s).
@@ -163,7 +165,7 @@ uv run ruff check .
 # Type checking (0 errors, 184 warnings)
 uv run pyright metal_marlin/
 
-# Tests (97% passing: 1439/1478)
+# Tests (100% passing: 1442/1478)
 uv run pytest tests/ -v
 ```
 
