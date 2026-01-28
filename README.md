@@ -90,7 +90,7 @@ save_quantized(model, "./glm47_fp4")
 model = load_quantized("./glm47_fp4", device="mps")
 ```
 
-See [CLI Reference](docs/cli.md) for full options.
+See [CLI Reference](docs/guides/cli.md) for full options.
 
 ## OpenAI-Compatible Server
 
@@ -161,9 +161,21 @@ uv run ruff check .
 # Type checking
 uv run pyright metal_marlin/
 
-# Tests
+# Tests (full suite: ~1444 tests, 4 min)
 uv run pytest tests/ -v
+
+# Quick smoke tests only
+uv run pytest tests/ -v -m smoke
+
+# Skip slow/expensive tests
+uv run pytest tests/ -v -m "not slow and not expensive"
 ```
+
+**Test suite status:** 1444 passing, 0 failing, 53 skipped (256s)
+
+A test cleanup initiative is in progress to reduce redundancy across the 46 test files
+(~24K lines). See [STATUS.md](STATUS.md#test-suite-cleanup-in-progress) for details and
+`tasks/test_cleanup.yaml` for the task breakdown.
 
 See [STATUS.md](STATUS.md) for the latest results and tracked metrics.
 
@@ -171,7 +183,7 @@ See [STATUS.md](STATUS.md) for the latest results and tracked metrics.
 
 On M3/M4, BF16 and FP16 have nearly identical throughput (~14.8 TFLOPS on M4 Max), with FP32 only ~10% slower. **Prefer BF16** — same speed as FP16 but 8× larger dynamic range.
 
-Run `python benchmarks/bench_dtype_perf.py` to measure your hardware. See [dtype configuration](docs/dtype_configuration.md) for details.
+Run `python benchmarks/bench_dtype_perf.py` to measure your hardware. See [dtype configuration](docs/formats/dtype_configuration.md) for details.
 
 ## Architecture
 
@@ -190,7 +202,7 @@ PyTorch MPS tensors → zero-copy MTLBuffer → custom Metal shaders → results
 | INT3/INT2 | 2-3 | Extreme compression, cold experts |
 | 2:4 Sparse | varies | Additional 1.6× compression |
 
-See [Architecture](docs/architecture.md) and [Why Not MLX?](docs/why_not_mlx.md) for details.
+See [Architecture](docs/concepts/architecture.md) and [Why Not MLX?](docs/comparisons/why_not_mlx.md) for details.
 
 ## How It Works
 
@@ -198,16 +210,16 @@ Metal Marlin ports [Marlin](https://arxiv.org/abs/2408.11743) (fast quantized GE
 
 ## Documentation
 
-- **[Getting Started](docs/getting_started.md)** — Install, quantize, run, verify
-- [CLI Reference](docs/cli.md) — Full command-line options
-- [Calibration Guide](docs/calibration.md) — Custom calibration for higher quality
-- [Mixed Precision](docs/mixed_precision.md) — Per-layer precision for MoE
-- [Architecture](docs/architecture.md) — Internal design
-- [Troubleshooting](docs/troubleshooting.md) — Common issues
+- **[Getting Started](docs/guides/getting_started.md)** — Install, quantize, run, verify
+- [CLI Reference](docs/guides/cli.md) — Full command-line options
+- [Calibration Guide](docs/guides/calibration.md) — Custom calibration for higher quality
+- [Mixed Precision](docs/concepts/mixed_precision.md) — Per-layer precision for MoE
+- [Architecture](docs/concepts/architecture.md) — Internal design
+- [Troubleshooting](docs/guides/troubleshooting.md) — Common issues
 
 ## References
 
-Based on [Marlin](https://arxiv.org/abs/2408.11743), [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [FlashAttention](https://arxiv.org/abs/2205.14135), and [vLLM PagedAttention](https://arxiv.org/abs/2309.06180). See [docs/references.md](docs/references.md) for full citations.
+Based on [Marlin](https://arxiv.org/abs/2408.11743), [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), [FlashAttention](https://arxiv.org/abs/2205.14135), and [vLLM PagedAttention](https://arxiv.org/abs/2309.06180). See [docs/comparisons/references.md](docs/comparisons/references.md) for full citations.
 
 ## Status
 

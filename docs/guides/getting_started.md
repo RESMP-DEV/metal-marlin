@@ -71,6 +71,6 @@ Any model in HuggingFace Transformers with Linear layers can be quantized:
 
 ## Next Steps
 
-- [API Reference](api.md) — Full Python API
+- [API Reference](../reference/api.md) — Full Python API
 - [CLI Reference](cli.md) — Command-line tools
-- [Mixed Precision](mixed_precision.md) — Per-layer precision for MoE models
+- [Mixed Precision](../concepts/mixed_precision.md) — Per-layer precision for MoE models

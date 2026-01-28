@@ -1,20 +1,106 @@
 # Metal Marlin Documentation
 
-## Overview
-Metal Marlin provides quantized GEMM kernels and a lightweight integration layer to run large language models efficiently on Apple Silicon, focusing on fast dequantization and matrix multiplication while relying on upstream model architectures for correctness and feature coverage.
+Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-## Quick Links
-- [Getting Started](getting_started.md)
-- [CLI Reference](cli.md)
-- [Troubleshooting](troubleshooting.md)
+---
 
-## API Reference
-- [API Reference](api.md)
+## 🚀 Start Here
 
-## Technical Deep Dives
-- [Architecture](architecture.md)
-- [Inference Architecture](inference_architecture.md)
-- [MoE Architecture](moe_architecture.md)
+| Guide | Description |
+|-------|-------------|
+| [**Getting Started**](guides/getting_started.md) | Install, quantize, run a model in 5 minutes |
+| [**CLI Reference**](guides/cli.md) | Command-line tools and options |
+| [**Troubleshooting**](guides/troubleshooting.md) | Common issues and solutions |
 
-## Contributing
-If you are adding kernel support, start by identifying the target operator and data types, then add or extend the Metal shader, wire it into the kernel registry, and verify numerical parity against a reference implementation. Add targeted benchmarks for the new kernel and document any constraints (alignment, tile sizes, supported layouts). Testing requirements: run the unit tests that cover your kernel path, add a focused regression test for edge cases, and run the relevant performance or integration tests before submitting changes.
+---
+
+## 📚 Documentation Sections
+
+### [User Guides](guides/index.md)
+Step-by-step tutorials and workflows for using Metal Marlin.
+
+- [Getting Started](guides/getting_started.md) — Quick installation and first model
+- [CLI Reference](guides/cli.md) — Command-line tools
+- [Calibration Guide](guides/calibration.md) — Custom calibration for quality
+- [Troubleshooting](guides/troubleshooting.md) — Fix common problems
+
+### [API Reference](reference/index.md)
+Technical reference for APIs, models, and integrations.
+
+- [Python API](reference/api.md) — Full API documentation
+- [Supported Models](reference/supported_models.md) — Model compatibility matrix
+- [Integration Guide](reference/integration.md) — Embedding in your application
+
+### [Core Concepts](concepts/index.md)
+Understand the fundamental ideas behind Metal Marlin.
+
+- [Architecture Overview](concepts/architecture.md) — System design
+- [Inference Architecture](concepts/inference_architecture.md) — End-to-end inference flow
+- [MoE Architecture](concepts/moe_architecture.md) — Mixture of Experts support
+- [Quantization & Dequantization](concepts/dequantization.md) — How weights work
+- [Mixed Precision](concepts/mixed_precision.md) — Per-layer precision strategies
+- [KV Cache](concepts/kv_cache.md) — Quantized key-value cache
+
+### [Quantization Formats](formats/index.md)
+Supported formats and data type configurations.
+
+- [GGUF Support](formats/gguf_quantization.md) — GGUF format
+- [MR-GPTQ](formats/mr_gptq.md) — Metal Marlin GPTQ
+- [Data Type Configuration](formats/dtype_configuration.md) — Choosing optimal types
+
+### [Metal Kernel Internals](internals/index.md)
+Low-level documentation for kernel developers.
+
+- [CUDA to Metal Mapping](internals/cuda_metal_mapping.md) — Translating concepts
+- [Porting Guide](internals/porting_guide.md) — Adding new kernels
+- [Tile Sizing](internals/tile_sizing.md) — Choosing dimensions
+- [Memory Access Patterns](internals/memory_access_patterns.md) — Coalesced access
+
+### [Technical Audits](audits/index.md)
+Investigation reports and bug analyses.
+
+- [Metal Kernel Audit](audits/metal_kernel_audit.md) — Kernel review
+- [Resolved Bugs](audits/resolved_bugs.md) — Fixed issues
+
+### [Comparisons](comparisons/index.md)
+How Metal Marlin compares to alternatives.
+
+- [Why Not MLX?](comparisons/why_not_mlx.md) — PyTorch MPS vs MLX
+- [vLLM Comparison](comparisons/vllm_comparison.md) — Feature comparison
+
+---
+
+## 🧩 Model Architectures
+
+Special architecture support:
+
+- [MLA (Multi-head Latent Attention)](architectures/mla.md) — GLM-4.7-Flash attention
+- [Byte-level Models](architectures/byte_models.md) — Byte tokenization
+
+---
+
+## 🔧 Contributing
+
+If you are adding kernel support:
+
+1. Identify the target operator and data types
+2. Add or extend the Metal shader in `src/`
+3. Wire it into the kernel registry
+4. Verify numerical parity against a reference implementation
+5. Add targeted benchmarks for the new kernel
+6. Document any constraints (alignment, tile sizes, supported layouts)
+
+**Testing requirements:**
+- Run unit tests covering your kernel path
+- Add a focused regression test for edge cases
+- Run relevant performance or integration tests before submitting
+
+---
+
+## 📖 Quick Links
+
+| Resource | Link |
+|----------|------|
+| GitHub Repository | [RESMP-DEV/AlphaHENG](https://github.com/RESMP-DEV/AlphaHENG) |
+| Implementation Status | [STATUS.md](../STATUS.md) |
+| Academic References | [References](comparisons/references.md) |
