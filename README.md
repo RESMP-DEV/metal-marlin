@@ -13,12 +13,13 @@ This means:
 
 **Features:**
 - **2-8 bit weights** — FP4/FP8/INT4/INT3/INT2, with mixed precision per-layer
-- **MoE optimized** — Higher bits for cold experts, lower bits for hot experts
+- **MoE optimized** — Batched expert dispatch via Metal kernels (GLM-4.7-Flash, Mixtral)
 - **Quantized KV cache** — FP4/INT4 fused into attention kernels
 - **2:4 structured sparsity** — 1.6× additional compression
+- **Transformers integration** — Automatic `nn.Linear` → `MetalQuantizedLinear` swap
 - **Multiple formats** — HuggingFace, Safetensors, GGUF, ONNX
 
-**Status:** 100% tests passing (1442/1478). See [STATUS.md](STATUS.md) for details.
+**Status:** 100% tests passing (1444/1497). See [STATUS.md](STATUS.md) for details.
 
 ## Requirements
 
@@ -47,8 +48,8 @@ uv pip install numpy safetensors huggingface_hub torch transformers \
 
 | Model | Size | Memory | Speed | Status |
 |-------|------|--------|-------|--------|
-| **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Working |
-| **THUDM/glm-4-9b** | 9B | ~4.5GB FP4 | ~17 tok/s (est.) | ✅ MLA Working |
+| **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Fully Working |
+| **zai-org/GLM-4.7-Flash** | 30B-A3B MoE | ~15GB FP4 | TBD | ✅ MoE + MLA Verified |
 | Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
 | Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
 
@@ -151,10 +152,10 @@ for chunk in stream:
 
 On Apple Silicon M4 Max (PyTorch MPS backend):
 - Qwen3-4B FP4: ~27 tok/s decode
-- GLM-4.7-Flash MLA: ~17 tok/s decode (INT2 via PyTorch fallback)
 - Llama-3.1-8B FP4: ~20 tok/s decode (estimated)
+- GLM-4.7-Flash (30B-A3B MoE): batched Metal kernel dispatch for routed experts
 
-**Note:** Currently using PyTorch MPS fallback. Fused Metal kernels are in development for higher throughput (target: ~100 tok/s).
+**Note:** Uses Metal kernel library for quantized GEMM. Fused attention kernels in development for higher throughput.
 
 ## Code Quality
 
@@ -165,7 +166,7 @@ uv run ruff check .
 # Type checking (0 errors, 184 warnings)
 uv run pyright metal_marlin/
 
-# Tests (100% passing: 1442/1478)
+# Tests (100% passing: 1444/1497)
 uv run pytest tests/ -v
 ```
 

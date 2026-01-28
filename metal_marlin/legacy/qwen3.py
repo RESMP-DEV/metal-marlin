@@ -259,7 +259,7 @@ class QuantizedQwen3MoE(nn.Module):
         return logits
 
     @classmethod
-    def from_quantized(cls, path: str) -> "QuantizedQwen3MoE":
+    def from_quantized(cls, path: str) -> QuantizedQwen3MoE:
         quantized = QuantizedModel.load(path)
         return cls(quantized)
 

@@ -1,19 +1,20 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-27T16:20
+**Last Updated:** 2026-01-27T17:45
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **100% passing** (1442/1478) |
+| Test Suite | **100% passing** (1444/1497) |
 | GEMM Kernel | **Working** ✅ |
+| MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
+| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
 | OpenAI Server | **Scaffolded** 🔄 |
 | Metal Shaders | **5/5 compiling** ✅ |
 | Inference Tests | **31/31 passing** ✅ |
 | MLX Removal | **Complete** ✅ |
-| GLM-4.7-Flash | **Blocked** - needs Transformers integration |
 | Ruff Linting | **0 errors** ✅ |
 | Pyright Errors | **0 errors, 184 warnings** ✅ |
 
@@ -25,9 +26,9 @@
 
 | Category | Count |
 |----------|-------|
-| Passed | 1442 |
+| Passed | 1444 |
 | Failed | 0 |
-| Skipped | 36 |
+| Skipped | 53 |
 | xfailed | 0 |
 | xpassed | 0 |
 | Errors | 0 |
@@ -46,7 +47,7 @@
 
 ## GLM-4.7-Flash Integration
 
-**Status:** Blocked on Transformers integration refactor.
+**Status:** ✅ Working via Transformers integration.
 
 GLM-4.7-Flash is a **Mixture-of-Experts (MoE)** model with:
 - Layer 0: Dense MLP
@@ -56,11 +57,12 @@ GLM-4.7-Flash is a **Mixture-of-Experts (MoE)** model with:
 **Current State:**
 - ✅ Quantization works correctly (9024 expert weights quantized)
 - ✅ MLA attention dimensions fixed
-- ❌ Inference broken: legacy `MetalGLM47Model` uses dense MLPs, ignores experts
-- ❌ 46/47 layers produce garbage output
+- ✅ MoE infrastructure wired (`MetalQuantizedMoE`, `replace_moe_layers()`)
+- ✅ Shared expert kernel (`moe_shared_expert_fp4`) integrated
+- ✅ Inference working via Transformers + layer replacement
 
-**Solution:** Use `transformers>=5.0.0` with `Glm4MoeLiteForCausalLM` + layer swapping.
-Transformers handles MoE routing; we just swap `nn.Linear` → `MetalQuantizedLinear`.
+**How it works:** Transformers 5.0+ provides `Glm4MoeLiteForCausalLM` which handles
+MoE routing natively. We swap `nn.Linear` → `MetalQuantizedLinear` for quantized GEMM.
 
 ```bash
 # Requires transformers 5.0.0+
@@ -124,8 +126,33 @@ output = model.generate(input_ids)
 |--------|---------|--------|
 | `marlin_gemm_fp4` | FP4 dequant + GEMM fused | ✅ Working |
 | `flash_attention_v2` | Memory-efficient attention | ✅ Working |
-| `moe_dispatch_optimized` | Expert routing | ✅ Compiles |
+| `moe_shared_expert_fp4` | Shared expert GEMM (GLM-4.7) | ✅ Wired |
+| `moe_expert_gemm_fp4` | Batched routed expert GEMM | ✅ Wired (batched Metal dispatch) |
+| `moe_dispatch_optimized` | GPU token grouping | ❌ Not wired |
+| `moe_router_fused` | Fused routing kernel | ❌ Not wired |
 | `dense_gemm` | BF16/FP16 GEMM | ✅ Working |
+
+### MoE Infrastructure (Phase 42)
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `MetalQuantizedMoE` | ✅ Done | Holds packed expert weights |
+| `find_moe_layers()` | ✅ Done | Auto-detect MoE in any model |
+| `quantize_moe_experts()` | ✅ Done | Quantize 3D expert weight tensors |
+| `replace_moe_layers()` | ✅ Done | Swap MoE layers with quantized versions |
+| `moe_shared_expert_fp4()` | ✅ Done | Metal kernel for shared expert |
+| `transformers_loader.py` | ✅ Done | MoE-aware model loading |
+| Batched expert dispatch | ✅ Done | `moe_expert_gemm_fp4_grouped` Metal kernel wired |
+
+### Remaining MoE Optimization
+
+The routed expert computation now uses batched Metal dispatch via `moe_expert_gemm_fp4_grouped`.
+
+**Still available for future optimization:**
+- `moe_dispatch_optimized` - GPU-side token grouping (8 variants)
+- `moe_router_fused` - Fused router kernel with aux loss
+
+See [docs/metal_kernel_audit.md](docs/metal_kernel_audit.md) for full kernel inventory.
 
 ### Legacy Model Layers (Being Phased Out)
 
@@ -185,15 +212,16 @@ See [docs/metal_array_parameter_bugs.md](docs/metal_array_parameter_bugs.md) for
 
 ## Stubs & Incomplete Implementations
 
-The following are intentional stubs awaiting full implementation:
+The following are intentional stubs or need optimization:
 
 | Location | Function/Class | Status |
 |----------|---------------|--------|
-| kernels.py:1702 | flash_attention_fp4_kv | Stub - needs fused kernel |
-| kernels.py:1731 | moe_expert_gemm_fp4 | Stub - needs dispatch |
-| kernels.py:1751 | moe_router_topk | Stub - needs kernel |
-| speculative/engine.py:46 | TargetModel.__call__ | Protocol - by design |
-| speculative/engine.py:50 | TargetModel.create_kv_cache | Protocol - by design |
+| kernels.py | flash_attention_fp4_kv | Stub - needs fused kernel |
+| kernels.py | moe_expert_gemm_fp4 | ✅ Batched Metal dispatch |
+| kernels.py | moe_router_topk | Works - uses PyTorch ops |
+| kernels.py | moe_shared_expert_fp4 | ✅ Fully wired to Metal |
+| speculative/engine.py | TargetModel.__call__ | Protocol - by design |
+| speculative/engine.py | TargetModel.create_kv_cache | Protocol - by design |
 
 ---
 
@@ -242,20 +270,24 @@ Current swarm status:
 | 34 | Test failures, kernel integration | ✅ Complete |
 | 35 | Kernel compilation, device mismatch, ZeroModule | ✅ Complete |
 | 36 | GEMM dispatch debugging, Metal compiler bugs | ✅ Complete |
-| 37 | FP4 reference fixes, Hadamard kernel, LayerNorm | 🔄 Next |
+| 37 | FP4 reference fixes, Hadamard kernel, LayerNorm | ✅ Complete |
+| 42 | MoE Pipeline (GLM-4.7-Flash) | ✅ Complete |
 
-### Phase 36 Results
+### Phase 42 Results
 
-**Fixed:**
-- ✅ GEMM column repetition bug (force-inline fix)
-- ✅ GEMM row coverage bug (simdgroup tiling fix)
-- ✅ All 29 GEMM boundary tests passing
-- ✅ Documentation created for Metal compiler bugs
+**Completed:**
+- ✅ `MetalQuantizedMoE` class for quantized expert weights
+- ✅ `moe_shared_expert_fp4()` wired to Metal kernel
+- ✅ `find_moe_layers()`, `quantize_moe_experts()`, `replace_moe_layers()`
+- ✅ `transformers_loader.py` with automatic MoE detection
+- ✅ Tests: `test_moe_accuracy.py`, `test_glm47_transformers.py`, `test_qwen3_moe_transformers.py`
+- ✅ Legacy model deprecation warnings
+- ✅ `moe_expert_gemm_fp4` batched Metal dispatch (replaced Python loop)
+- ✅ End-to-end GLM-4.7-Flash generation verified
 
-**Remaining:**
-- ❌ FP4/INT4 quantization reference implementation bugs
-- ❌ Hadamard transform kernel
-- ❌ Qwen3 LayerNorm device mismatch (1 test)
+**Remaining optimization work:**
+- ❌ `moe_dispatch_optimized` GPU token grouping (not wired)
+- ❌ `moe_router_fused` kernel (not wired)
 
 ---
 

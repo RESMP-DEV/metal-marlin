@@ -194,6 +194,7 @@ class MetalQuantizedLinear(nn.Module):
         """
         # Handle batched input
         orig_shape = x.shape
+        orig_dtype = x.dtype
         x_2d = x.reshape(-1, self.in_features)
         M = x_2d.shape[0]
 
@@ -242,7 +243,13 @@ class MetalQuantizedLinear(nn.Module):
 
         # Reshape back to original batch dims
         out_shape = list(orig_shape[:-1]) + [self.out_features]
-        return out.reshape(out_shape)
+        out = out.reshape(out_shape)
+
+        # Preserve input dtype (Metal kernels output float16, but model may use bfloat16)
+        if out.dtype != orig_dtype:
+            out = out.to(orig_dtype)
+
+        return out
 
     @classmethod
     def from_float(
@@ -916,6 +923,37 @@ class MetalMoELayer(nn.Module):
             output[expert_mask] += weights * expert_output
 
         return output.view(batch_size, seq_len, hidden_size)
+
+    def forward_fused_gate_up(
+        self,
+        hidden_states: torch.Tensor,
+        gate_up_packed: torch.Tensor,
+        gate_up_scales: torch.Tensor,
+        down_packed: torch.Tensor,
+        down_scales: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_probs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward pass for fused gate/up experts using MoE kernels.
+
+        This path expects fused gate_up weights per expert (hidden -> 2*intermediate)
+        and performs:
+            gate_up = W_gate_up @ hidden
+            gate, up = split(gate_up)
+            hidden = silu(gate) * up
+            output = W_down @ hidden
+        """
+        from .moe_ops import fused_moe_forward
+
+        return fused_moe_forward(
+            hidden_states,
+            gate_up_packed,
+            gate_up_scales,
+            down_packed,
+            down_scales,
+            expert_ids,
+            expert_probs,
+        )
 
 
 # ---------------------------------------------------------------------------

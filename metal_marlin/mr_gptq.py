@@ -345,32 +345,44 @@ def collect_hessian_from_activations(
 def quantize_to_grid(
     values: NDArray[np.float32],
     grid: NDArray[np.float32],
-    scale: float,
+    scale: float | NDArray[np.float32],
 ) -> tuple[NDArray[np.float32], NDArray[np.int32]]:
     """
     Quantize values to nearest grid point.
 
     Args:
-        values: Values to quantize
+        values: Values to quantize [out_features] or [out_features, 1]
         grid: Quantization grid (normalized, e.g., FP4 grid is [-6, ..., 6])
-        scale: Per-group scale factor
+        scale: Per-group scale factor (scalar or array matching values shape)
 
     Returns:
         (quantized_values, indices) where quantized_values = grid[indices] * scale
     """
+    original_shape = values.shape
+
+    # Flatten both values and scale for uniform processing
+    values_flat = values.flatten()
+    if isinstance(scale, np.ndarray):
+        scale_flat = scale.flatten()
+        # Broadcast scale to match values if needed
+        if scale_flat.shape[0] != values_flat.shape[0]:
+            # scale is per-output-feature, values is also per-output-feature
+            scale_flat = np.broadcast_to(scale_flat, values_flat.shape)
+    else:
+        scale_flat = scale
+
     # Normalize by scale
-    normalized = values / max(scale, 1e-10)
+    scale_safe = np.maximum(scale_flat, 1e-10)
+    normalized = values_flat / scale_safe
 
     # Find nearest grid point for each value
-    # Expand dims for broadcasting: values[..., None] vs grid[None, None, ...]
-    flat_norm = normalized.flatten()
-    dists = np.abs(flat_norm[:, None] - grid[None, :])
+    dists = np.abs(normalized[:, None] - grid[None, :])
     indices = np.argmin(dists, axis=1).astype(np.int32)
 
     # Dequantize to get actual quantized values
-    quantized = grid[indices] * scale
-    quantized = quantized.reshape(values.shape)
-    indices = indices.reshape(values.shape)
+    quantized = grid[indices] * scale_safe
+    quantized = quantized.reshape(original_shape)
+    indices = indices.reshape(original_shape)
 
     return quantized, indices
 

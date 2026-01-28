@@ -26,9 +26,10 @@ _METAL_MARLIN_ROOT = _ROOT / "contrib" / "metal_marlin"
 sys.path.insert(0, str(_METAL_MARLIN_ROOT))
 
 import torch  # noqa: E402
+from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+
 from metal_marlin.benchmarks.quality import QualityMetrics, compare_models  # noqa: E402
 from metal_marlin.layer_replacement import replace_linear_layers  # noqa: E402
-from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 
 def _sync_device(device: str) -> None:

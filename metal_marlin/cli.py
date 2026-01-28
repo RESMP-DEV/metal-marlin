@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 import click
@@ -60,14 +61,131 @@ def generate(model, prompt, max_tokens, temperature, top_p, quant, stream):
 
 
 @cli.command()
-@click.option("--model", "-m", required=True, help="Model path")
+@click.option("--model", "-m", required=True, help="Model path or HF repo id")
 @click.option("--system", default="You are a helpful assistant.")
+@click.option("--bits", default=4, type=int, show_default=True)
+@click.option("--group-size", default=128, type=int, show_default=True)
+@click.option("--max-tokens", default=256, type=int, show_default=True)
+@click.option("--temperature", default=0.7, type=float, show_default=True)
+@click.option("--top-p", default=0.9, type=float, show_default=True)
+@click.option("--top-k", default=0, type=int, show_default=True)
 @click.option("--quant", default="fp4", type=click.Choice(["fp4", "int4"]))
-def chat(model, system, quant):
-    """Interactive chat session."""
-    from .inference import chat as run_chat
+def chat(
+    model: str,
+    system: str,
+    bits: int,
+    group_size: int,
+    max_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    quant: str,
+) -> None:
+    """Interactive chat session (Transformers + Marlin FP4)."""
+    if quant != "fp4":
+        raise click.ClickException("Only quant='fp4' is supported for chat.")
+    if bits != 4:
+        raise click.ClickException("Only --bits 4 is supported for chat.")
 
-    run_chat(model, system_prompt=system)
+    from ._compat import HAS_MPS, HAS_TORCH, torch
+    from .inference import TransformersMarlinPipeline
+
+    def _mps_memory_bytes() -> dict[str, int]:
+        if not HAS_TORCH or torch is None or not HAS_MPS:
+            return {}
+        stats: dict[str, int] = {}
+        if hasattr(torch.mps, "current_allocated_memory"):
+            stats["current"] = int(torch.mps.current_allocated_memory())
+        if hasattr(torch.mps, "driver_allocated_memory"):
+            stats["driver"] = int(torch.mps.driver_allocated_memory())
+        return stats
+
+    def _format_bytes(value: int) -> str:
+        sign = "-" if value < 0 else ""
+        abs_value = abs(value)
+        if abs_value >= 1024**3:
+            return f"{sign}{abs_value / 1024**3:.2f} GB"
+        if abs_value >= 1024**2:
+            return f"{sign}{abs_value / 1024**2:.1f} MB"
+        if abs_value >= 1024:
+            return f"{sign}{abs_value / 1024:.1f} KB"
+        return f"{sign}{abs_value} B"
+
+    def _format_memory_line(prefix: str, stats: dict[str, int] | None) -> str:
+        if not stats:
+            return f"{prefix}: MPS memory unavailable"
+        parts = []
+        if "current" in stats:
+            parts.append(f"current={_format_bytes(stats['current'])}")
+        if "driver" in stats:
+            parts.append(f"driver={_format_bytes(stats['driver'])}")
+        return f"{prefix}: " + ", ".join(parts)
+
+    def _format_memory_delta(before: dict[str, int], after: dict[str, int]) -> str:
+        if not before or not after:
+            return "MPS memory delta unavailable"
+        parts = []
+        if "current" in before and "current" in after:
+            delta = after["current"] - before["current"]
+            parts.append(f"current_delta={_format_bytes(delta)}")
+        if "driver" in before and "driver" in after:
+            delta = after["driver"] - before["driver"]
+            parts.append(f"driver_delta={_format_bytes(delta)}")
+        return ", ".join(parts) if parts else "MPS memory delta unavailable"
+
+    def _sync_mps() -> None:
+        if HAS_TORCH and torch is not None and HAS_MPS and hasattr(torch.mps, "synchronize"):
+            torch.mps.synchronize()
+
+    click.echo("Loading model and quantizing to FP4...")
+    pipeline = TransformersMarlinPipeline.from_pretrained(
+        model,
+        bits=bits,
+        group_size=group_size,
+    )
+    tokenizer = pipeline.tokenizer
+
+    click.echo(_format_memory_line("MPS memory after load", _mps_memory_bytes()))
+    click.echo("Type 'quit' to exit.\n")
+
+    history: list[dict[str, str]] = [{"role": "system", "content": system}]
+    while True:
+        user_input = input("You: ").strip()
+        if user_input.lower() == "quit":
+            break
+        history.append({"role": "user", "content": user_input})
+        click.echo("Assistant: ", nl=False)
+
+        mem_before = _mps_memory_bytes()
+        _sync_mps()
+        start = time.perf_counter()
+        streamer = pipeline.chat(
+            history,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            stream=True,
+        )
+        response = ""
+        for token in streamer:
+            click.echo(token, nl=False)
+            response += token
+        _sync_mps()
+        elapsed = time.perf_counter() - start
+        mem_after = _mps_memory_bytes()
+
+        history.append({"role": "assistant", "content": response})
+        token_count = len(tokenizer.encode(response, add_special_tokens=False))
+        tok_per_s = token_count / elapsed if elapsed > 0 else 0.0
+        click.echo()
+        click.echo(
+            "[metrics] "
+            f"new_tokens={token_count} "
+            f"elapsed={elapsed:.2f}s "
+            f"tok/s={tok_per_s:.2f} "
+            f"{_format_memory_delta(mem_before, mem_after)}"
+        )
 
 
 @click.command()

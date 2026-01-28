@@ -48,10 +48,14 @@ from .hadamard import (
 from .kernels import marlin_gemm_fp4, marlin_gemm_int4
 from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
 from .layer_replacement import (
+    MetalQuantizedMoE,
     find_linear_layers,
+    find_moe_layers,
     get_parent_module,
     quantize_linear_layer,
+    quantize_moe_experts,
     replace_linear_layers,
+    replace_moe_layers,
 )
 from .layers import MarlinLinear
 from .mixed_precision import (
@@ -73,6 +77,7 @@ from .moe_dispatch import (
     group_tokens_by_expert_full,
     scatter_expert_outputs,
 )
+from .moe_ops import fused_moe_forward
 from .mr_gptq import MRGPTQQuantizer, QuantizationFormat, QuantizationReport
 from .onnx_graph import (
     ONNXGraphInfo,
@@ -181,9 +186,13 @@ __all__ = [
     # Core modules
     "MarlinLinear",
     "find_linear_layers",
+    "find_moe_layers",
     "get_parent_module",
     "quantize_linear_layer",
+    "quantize_moe_experts",
     "replace_linear_layers",
+    "replace_moe_layers",
+    "MetalQuantizedMoE",
     "MoEDispatchInfo",
     "ONNXGraphInfo",
     "ONNXOp",
@@ -200,6 +209,7 @@ __all__ = [
     "parse_onnx_graph",
     "parse_onnx_graph_full",
     "scatter_expert_outputs",
+    "fused_moe_forward",
     "summarize_graph",
     # Vision projectors
     "VisionProjector",
