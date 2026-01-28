@@ -750,6 +750,10 @@ class MetalAttention(nn.Module):
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
         """Compute attention. Uses PyTorch SDPA which dispatches to Metal."""
+        # Ensure consistent dtypes (KV cache may store as float16 while q is float32)
+        if q.dtype != k.dtype:
+            q = q.to(k.dtype)
+
         # PyTorch 2.0+ scaled_dot_product_attention uses Metal on MPS
         is_causal = mask is None and q.shape[2] == k.shape[2] and q.shape[2] > 1
 
