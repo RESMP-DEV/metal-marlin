@@ -10,8 +10,6 @@ Key exports:
 - HAS_TORCH: Feature flag for runtime detection
 """
 
-import warnings
-
 # Always-available imports
 from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 
@@ -93,7 +91,7 @@ from .onnx_loader import (
     list_onnx_tensors,
     normalize_onnx_name,
 )
-from .quantize import (  # FP8 quantization  # FP8 quantization
+from .quantize import (  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization
     FP8_E4M3_MAX,
     FP8_E4M3_VALUES,
     FP8_E5M2_MAX,
@@ -243,57 +241,4 @@ __all__ = [
     "flash_attention_metal",
     "scaled_dot_product_attention_metal",
     "sliding_window_attention_metal",
-    # Legacy exports (deprecated)
-    "QuantizedLlama",
-    "QuantizedLlamaAttention",
-    "QuantizedLlamaLayer",
-    "QuantizedLlamaMLP",
-    "QuantizedQwen3Attention",
-    "QuantizedQwen3Layer",
-    "QuantizedQwen3MLP",
-    "QuantizedQwen3MoE",
-    "MetalAttention",
-    "MetalMLAAttention",
-    "MetalMLP",
-    "MetalGLM47Model",
 ]
-
-
-def _legacy_module():
-    from . import legacy as legacy_pkg
-
-    return legacy_pkg
-
-
-_LEGACY_EXPORTS = {
-    "QuantizedLlama": lambda: _legacy_module().QuantizedLlama,
-    "QuantizedLlamaAttention": lambda: _legacy_module().QuantizedLlamaAttention,
-    "QuantizedLlamaLayer": lambda: _legacy_module().QuantizedLlamaLayer,
-    "QuantizedLlamaMLP": lambda: _legacy_module().QuantizedLlamaMLP,
-    "QuantizedQwen3Attention": lambda: _legacy_module().QuantizedQwen3Attention,
-    "QuantizedQwen3Layer": lambda: _legacy_module().QuantizedQwen3Layer,
-    "QuantizedQwen3MLP": lambda: _legacy_module().QuantizedQwen3MLP,
-    "QuantizedQwen3MoE": lambda: _legacy_module().QuantizedQwen3MoE,
-    "MetalAttention": lambda: _legacy_module().MetalAttention,
-    "MetalMLAAttention": lambda: _legacy_module().MetalMLAAttention,
-    "MetalMLP": lambda: _legacy_module().MetalMLP,
-    "MetalGLM47Model": lambda: _legacy_module().MetalGLM47Model,
-}
-
-
-def __getattr__(name: str):
-    if name in _LEGACY_EXPORTS:
-        warnings.warn(
-            f"metal_marlin.{name} is deprecated. "
-            "Use Transformers + replace_linear_layers() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        value = _LEGACY_EXPORTS[name]()
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module 'metal_marlin' has no attribute '{name}'")
-
-
-def __dir__() -> list[str]:
-    return sorted(list(globals().keys()) + __all__)

@@ -811,7 +811,9 @@ class MarlinPipeline:
             self._pipeline = model
         else:
             if tokenizer is None:
-                raise ValueError("tokenizer is required when constructing MarlinPipeline from a model.")
+                raise ValueError(
+                    "tokenizer is required when constructing MarlinPipeline from a model."
+                )
             if device is None:
                 device = getattr(model, "device", get_device())
             self._pipeline = TransformersMarlinPipeline(model, tokenizer, device=device)
@@ -875,7 +877,9 @@ class MarlinPipeline:
         top_p: float = 1.0,
     ) -> Iterator[str]:
         """Yield tokens for streaming responses."""
-        result = self(prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, stream=True)
+        result = self(
+            prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, stream=True
+        )
         return cast(Iterator[str], result)
 
     def info(self) -> ModelInfo:
@@ -911,9 +915,8 @@ class MarlinPipeline:
             getattr(config, "quant_type", "fp4"),
         )
 
-        num_params = (
-            vocab_size * hidden_size
-            + num_hidden_layers * (4 * hidden_size * hidden_size + 3 * hidden_size * intermediate_size)
+        num_params = vocab_size * hidden_size + num_hidden_layers * (
+            4 * hidden_size * hidden_size + 3 * hidden_size * intermediate_size
         )
 
         bits_per_param = 4 if quant_type in ("fp4", "int4") else 16
@@ -992,16 +995,11 @@ def chat(
         history.append({"role": "assistant", "content": response})
 
 
-# Backward compatibility aliases
-MetalGLM47Model = MetalMarlinModel
-
-
 __all__ = [
     "GenerationConfig",
     "MarlinModel",
     "MarlinPipeline",
     "MetalMarlinModel",
-    "MetalGLM47Model",
     "ModelConfig",
     "ModelInfo",
     "chat",
