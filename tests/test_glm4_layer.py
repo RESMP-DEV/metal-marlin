@@ -1,7 +1,8 @@
-"""Unit tests for GLM-4 quantized layer components.
+"""Legacy GLM-4 layer component tests.
 
-These tests focus on MLA configuration, attention shapes, dense MLP behavior,
-and the full layer forward pass contract (xfail until implemented).
+Tests deprecated MetalMLAAttention and MetalMLP classes.
+Primary GLM-4.7 validation: test_glm47_transformers.py
+Kept for regression testing of layer internals.
 """
 
 from __future__ import annotations
@@ -73,9 +74,7 @@ def _populate_glm4_attention_weights(model, layer_idx: int = 0) -> None:
     prefix = f"model.layers.{layer_idx}.self_attn"
 
     if q_lora_rank is not None:
-        model.weights[f"{prefix}.q_a_proj.weight"] = torch.randn(
-            q_lora_rank, hidden_size
-        )
+        model.weights[f"{prefix}.q_a_proj.weight"] = torch.randn(q_lora_rank, hidden_size)
         model.weights[f"{prefix}.q_b_proj.weight"] = torch.randn(
             num_heads * (qk_nope_head_dim + qk_rope_head_dim), q_lora_rank
         )
@@ -90,34 +89,24 @@ def _populate_glm4_attention_weights(model, layer_idx: int = 0) -> None:
     model.weights[f"{prefix}.kv_b_proj.weight"] = torch.randn(
         num_heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank
     )
-    model.weights[f"{prefix}.o_proj.weight"] = torch.randn(
-        hidden_size, num_heads * v_head_dim
-    )
+    model.weights[f"{prefix}.o_proj.weight"] = torch.randn(hidden_size, num_heads * v_head_dim)
 
 
 def _populate_glm4_mlp_weights(model, layer_idx: int = 0, intermediate_size: int = 128) -> None:
     hidden_size = model.config["hidden_size"]
     prefix = f"model.layers.{layer_idx}.mlp"
 
-    model.weights[f"{prefix}.gate_proj.weight"] = torch.randn(
-        intermediate_size, hidden_size
-    )
-    model.weights[f"{prefix}.up_proj.weight"] = torch.randn(
-        intermediate_size, hidden_size
-    )
-    model.weights[f"{prefix}.down_proj.weight"] = torch.randn(
-        hidden_size, intermediate_size
-    )
+    model.weights[f"{prefix}.gate_proj.weight"] = torch.randn(intermediate_size, hidden_size)
+    model.weights[f"{prefix}.up_proj.weight"] = torch.randn(intermediate_size, hidden_size)
+    model.weights[f"{prefix}.down_proj.weight"] = torch.randn(hidden_size, intermediate_size)
 
 
 def _populate_glm4_norm_weights(model, layer_idx: int = 0) -> None:
     hidden_size = model.config["hidden_size"]
-    model.bf16_weights[
-        f"model.layers.{layer_idx}.input_layernorm.weight"
-    ] = torch.ones(hidden_size)
-    model.bf16_weights[
-        f"model.layers.{layer_idx}.post_attention_layernorm.weight"
-    ] = torch.ones(hidden_size)
+    model.bf16_weights[f"model.layers.{layer_idx}.input_layernorm.weight"] = torch.ones(hidden_size)
+    model.bf16_weights[f"model.layers.{layer_idx}.post_attention_layernorm.weight"] = torch.ones(
+        hidden_size
+    )
 
 
 def test_glm4_mla_config():
