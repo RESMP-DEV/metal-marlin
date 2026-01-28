@@ -14,6 +14,10 @@ try:
 except Exception as exc:  # pragma: no cover - optional dependency path
     pytest.skip(f"Metal inference engine unavailable: {exc}", allow_module_level=True)
 
+pytestmark = pytest.mark.skip(
+    reason="Legacy inference engine - use Transformers integration tests instead"
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 

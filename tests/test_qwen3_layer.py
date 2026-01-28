@@ -12,14 +12,17 @@ if HAS_TORCH:
     import torch.nn as nn
     import torch.nn.functional as F
 
-    from metal_marlin.models.qwen3 import (
+    from metal_marlin.legacy.qwen3 import (
         QuantizedQwen3Attention,
         QuantizedQwen3Layer,
         QuantizedQwen3MLP,
     )
 
 
-pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
+pytestmark = [
+    pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch"),
+    pytest.mark.skip(reason="Legacy components - use Transformers integration tests instead"),
+]
 
 
 def create_mock_quantized_model(hidden_size: int = 2048, num_heads: int = 16, num_layers: int = 2):
