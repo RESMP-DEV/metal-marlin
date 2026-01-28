@@ -6,9 +6,9 @@ using AlphaHENG's orchestration and ZeroMQ infrastructure.
 Architecture:
     ┌─────────────────────────────────────────────────────────────────┐
     │                     Coordinator (Mac)                           │
-    │   - Loads model weights (safetensors)                          │
-    │   - Distributes layers to workers                              │
-    │   - Aggregates results and saves output                        │
+    │   - Loads model weights (safetensors)                           │
+    │   - Distributes layers to workers                               │
+    │   - Aggregates results and saves output                         │
     └─────────────────────────────────────────────────────────────────┘
                                  │
             ┌────────────────────┼────────────────────┐
