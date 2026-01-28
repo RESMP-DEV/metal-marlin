@@ -1735,14 +1735,43 @@ class RemoteGPTQServer:
 
 
 def main():
-    """CLI for remote GPTQ server."""
+    """CLI for remote GPTQ server.
+
+    Usage (assuming each machine has the repo cloned):
+        # On CUDA workers:
+        cd /path/to/AlphaHENG/contrib/metal_marlin
+        uv run python -m metal_marlin.gptq_accelerated server --port 5556
+
+        # On Mac coordinator:
+        uv run python -m metal_marlin.gptq_accelerated benchmark
+    """
     import argparse
 
-    parser = argparse.ArgumentParser(description="GPU-Accelerated GPTQ Server")
+    parser = argparse.ArgumentParser(
+        description="GPU-Accelerated GPTQ (AlphaHENG worker)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples (all machines have repo cloned):
+    # Start worker on CUDA machine
+    cd ~/AlphaHENG/contrib/metal_marlin
+    uv run python -m metal_marlin.gptq_accelerated server
+
+    # Start worker on specific GPU
+    uv run python -m metal_marlin.gptq_accelerated server --device 1
+
+    # Run benchmark
+    uv run python -m metal_marlin.gptq_accelerated benchmark
+
+Memory usage:
+    - Weights stay in DRAM (CPU memory)
+    - Only computation buffers use VRAM
+    - VRAM needed: ~64MB per 4096-dim layer (Hessian matrix)
+""",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Server command
-    server_parser = subparsers.add_parser("server", help="Start GPTQ server")
+    server_parser = subparsers.add_parser("server", help="Start GPTQ worker server")
     server_parser.add_argument("--port", type=int, default=5556, help="Port to listen on")
     server_parser.add_argument("--device", type=int, default=0, help="CUDA device ID")
 
