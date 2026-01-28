@@ -68,7 +68,7 @@ Takeaways:
 
 ## Test shader (this repo)
 
-Path: `contrib/metal_marlin/src/test_async_copy.metal`
+Path: `contrib/metal_marlin/src/test_async_copy.metal.disabled`
 
 Contents:
 - `test_async_copy_gemm`: tile-based GEMM using `simdgroup_async_copy` to stage A and B.
@@ -91,6 +91,7 @@ Both kernels emit `stats` for bandwidth reporting:
 
 - The async kernel assumes M, N, and K are multiples of 8 and uses a threadgroup size of `(8, 8, 1)`.
 - This shader intentionally uses the private instruction form to avoid relying on headers that may not exist in modern SDKs.
+- To compile it, rename the file to `test_async_copy.metal` or include it explicitly in your build rules.
 
 ## References
 

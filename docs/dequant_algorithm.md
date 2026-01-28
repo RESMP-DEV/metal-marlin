@@ -446,43 +446,40 @@ For `skip_flop=false` (with zero-point correction), add 1 SUB and 1 FMA.
 ### 4.1 Memory vs. ALU on Modern GPUs
 
 On both NVIDIA and Apple Silicon GPUs, the fundamental performance characteristic
-is the same: ALU operations are essentially free compared to memory accesses,
-even for threadgroup/shared memory.
+is the same: ALU operations are cheap compared to memory accesses, even for
+threadgroup/shared memory. Exact cycle counts vary by GPU generation, clocks,
+and compiler scheduling, so treat the ordering below as relative:
 
-| Operation | Latency (NVIDIA A100) | Latency (Apple M4 Max) |
-|-----------|-----------------------|------------------------|
-| Integer ALU (AND, OR, SHIFT) | 4-6 cycles | ~1-2 cycles |
-| FP16 MUL/FMA | 4-8 cycles | ~2-4 cycles |
-| Shared/TG memory load | 20-30 cycles | ~10-15 cycles |
-| L1 cache hit | 30-50 cycles | ~15-20 cycles |
-| Global memory (uncached) | 200-800 cycles | 100-300 cycles |
+| Operation | Relative cost (order-of-magnitude) |
+|-----------|------------------------------------|
+| Integer ALU (AND, OR, SHIFT) | 1x |
+| FP16 MUL/FMA | ~1-2x |
+| Shared/TG memory load | ~5-10x |
+| L1 cache hit | ~8-15x |
+| Global memory (uncached) | ~50-200x |
 
 ### 4.2 Throughput Bottleneck Analysis
 
 For a quantized GEMM, the dequantization throughput must match the MMA
 (matrix multiply-accumulate) throughput to avoid being the bottleneck.
 
-**NVIDIA tensor cores** consume one `FragB` (4 FP16 values) per MMA instruction.
-At 256 TOPS (INT8-equivalent) on H100, the tensor cores demand approximately
-128 billion FP16 values/second from dequantization.
-
-**LUT approach bottleneck:**
-Each value requires one shared memory load. Shared memory on H100 has bandwidth
-of ~19.5 TB/s across 132 SMs, or ~150 billion bytes/second. Each 4-byte float
-load gives ~37.5 billion loads/second, which is below the 128B values/second
-demand. The LUT is the bottleneck.
+**Tensor cores** consume packed `FragB` values at extremely high throughput.
+If each value requires a shared-memory lookup, that lookup can become the
+bottleneck before the MMA pipeline saturates. The exact break-even point
+depends on GPU generation and clock, but the qualitative outcome is stable:
+shared-memory LUT loads compete with MMA demand.
 
 **Bitwise approach:**
-All operations are register ALU. The integer ALU units on H100 can sustain
-2048 ops/SM/cycle * 132 SMs * 1.83 GHz = ~494 trillion ops/second. This is
-orders of magnitude above the demand. Dequantization is never the bottleneck.
+All operations are register ALU. Integer ALU throughput is typically orders
+of magnitude higher than the dequantization demand, so the bitwise path
+rarely becomes the bottleneck.
 
 ### 4.3 Bank Conflicts
 
 Shared memory LUT access patterns suffer from bank conflicts when multiple
-threads in a warp access the same bank. The 16-entry FP4 LUT occupies 64 bytes
-(16 * 4B), spanning only 2 banks (32B each). When multiple threads decode the
-same 4-bit value, they all hit the same bank, serializing access.
+threads in a warp access the same bank. The 16-entry FP4 LUT is small, but
+many threads can still contend for the same bank or cache line when they
+decode the same 4-bit value, serializing access.
 
 The bitwise approach has zero bank conflicts because it uses no shared memory.
 
@@ -491,7 +488,7 @@ The bitwise approach has zero bank conflicts because it uses no shared memory.
 The LUT approach requires either:
 - Threadgroup memory allocation (barrier overhead, occupancy impact), or
 - Constant memory (cache pollution, limited bandwidth), or
-- Register-resident LUT (16 * 32-bit = 64 registers per thread, devastating)
+- Register-resident LUT (16 * 32-bit = 16 registers per thread, non-trivial)
 
 The bitwise approach uses only immediate constants embedded in the instruction
 stream and 2-4 temporary registers.
@@ -518,8 +515,10 @@ The shared memory stage is eliminated entirely. This saves:
 2. Barrier synchronization (threadgroup_barrier latency)
 3. One memory-to-register transfer
 
-On Apple Silicon where threadgroup memory is carved from device memory (not
-SRAM like on NVIDIA), this advantage is even more pronounced.
+On Apple Silicon, threadgroup memory allocation can still reduce occupancy and
+adds synchronization overhead, so eliminating the shared-memory stage remains
+advantageous even if the underlying physical implementation differs from
+NVIDIA's shared-memory model.
 
 ### 4.6 Instruction-Level Parallelism
 
@@ -596,15 +595,15 @@ inline void dequant_u4b8(uint q, thread half2& out_lo, thread half2& out_hi) {
 
 ### 5.3 Performance on Metal
 
-On Apple M4 Max:
-- The lop3 decomposition costs one extra cycle (AND+OR vs single lop3)
+On Metal:
+- The lop3 decomposition costs one extra integer op (AND+OR vs single lop3).
 - The overall pipeline benefit is preserved because the shared memory stage is
-  still eliminated
+  still eliminated.
 - simdgroup_multiply_accumulate can consume dequantized values directly from
-  registers
-- Expected throughput improvement over LUT: 1.5-2.5x for dequant-bound kernels
+  registers.
 
 The real-world speedup depends on whether the kernel is compute-bound or
-memory-bound. For batch size 1 (memory-bound), the dequant approach matters
-less. For batch sizes 8+ (approaching compute-bound), eliminating shared memory
-overhead directly translates to higher throughput.
+memory-bound. For batch size 1 (often memory-bound), the dequant approach
+matters less. As batch size grows and compute dominates, removing shared
+memory traffic and barriers more directly improves throughput. Measure with
+the in-repo profiling tools for device-specific results.

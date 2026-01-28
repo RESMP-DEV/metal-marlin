@@ -487,7 +487,7 @@ Rationale:
 
 ## Implementation Status
 
-### Implemented
+### Implemented (Core)
 
 - [x] FP4/INT4/FP8 dequantization kernels
 - [x] Generic batched GEMM (`batched_gemm.metal`)
@@ -496,15 +496,19 @@ Rationale:
 - [x] Sub-4-bit quantization module (INT2, INT3, NF2, NF3)
 - [x] Layer classification for MoE patterns
 
-### Planned (Phase 20)
+### Implemented (Phase 42 MoE Pipeline - Complete)
 
-- [ ] `moe_expert_gemm.metal`: Batched expert GEMM
-- [ ] `moe_router.metal`: Fused router + top-k
-- [ ] `moe_shared_expert.metal`: Shared expert fusion
-- [ ] `moe_dispatch.py`: Dynamic token-to-expert grouping
-- [ ] `expert_cache.py`: LRU dequant tile cache
-- [ ] `dequant_sub4bit.metal`: Metal kernels for INT2/INT3/NF3
-- [ ] `test_sub4bit.py`: Comprehensive sub-4-bit tests
+- [x] `MetalQuantizedMoE` class for quantized expert weights
+- [x] `moe_shared_expert_fp4()` wired to Metal kernel
+- [x] `find_moe_layers()`, `quantize_moe_experts()`, `replace_moe_layers()`
+- [x] `transformers_loader.py` with automatic MoE detection
+- [x] `moe_expert_gemm_fp4` batched Metal dispatch
+- [x] End-to-end GLM-4.7-Flash generation verified
+
+### Remaining MoE Optimization (Post-Phase 42)
+
+- [ ] `moe_dispatch_optimized` GPU token grouping (not wired)
+- [ ] `moe_router_fused` kernel (not wired)
 
 ## References
 

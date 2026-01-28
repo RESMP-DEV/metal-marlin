@@ -7,6 +7,8 @@ Evaluates:
 - RMSE (quantization reconstruction error)
 - Perplexity on WikiText-2
 
+Uses Bartowski v3 calibration data (recommended for GPTQ quantization).
+
 Usage:
   cd contrib/metal_marlin
   uv run python benchmarks/bench_moe_gptq_hessian.py --layers 3
@@ -205,39 +207,74 @@ def benchmark_quantization_quality(
     num_layers: int,
     group_size: int = 128,
     use_gptq: bool = True,
-    calibration_samples: int = 10,
+    calibration_samples: int = 256,
+    use_streaming: bool = True,
 ) -> QuantizationQuality:
-    """Benchmark quantization quality with proper GPTQ + Hessian."""
-    from metal_marlin.eval_perplexity import load_wikitext2
-    from metal_marlin.layer_replacement import replace_moe_layers
+    """Benchmark quantization quality with proper GPTQ + Hessian.
 
-    method = "GPTQ+Hessian" if use_gptq else "RTN (no calibration)"
+    Uses Bartowski v3 calibration data for best quality.
+    Uses STREAMING mode by default for memory efficiency.
+    """
+    from metal_marlin.calibration import CalibrationDataset
+    from metal_marlin.layer_replacement import replace_moe_layers, replace_moe_layers_streaming
 
-    # Prepare calibration data for GPTQ
+    method = "GPTQ+Hessian (Bartowski v3)" if use_gptq else "RTN (no calibration)"
+    if use_streaming:
+        method += " [streaming]"
+
+    # Prepare calibration data for GPTQ using Bartowski v3
     calibration_inputs = None
     if use_gptq:
-        texts = load_wikitext2(max_samples=calibration_samples)
-        if texts:
-            calibration_inputs = [
-                tokenizer(text, return_tensors="pt", truncation=True, max_length=512).input_ids.to(
-                    device
-                )
-                for text in texts
-            ]
-            print(f"  Prepared {len(calibration_inputs)} calibration samples")
+        print("  Loading Bartowski v3 calibration data...")
+        dataset = CalibrationDataset.v3(max_samples=calibration_samples)
+        print(f"  Loaded {len(dataset)} calibration samples")
 
-    # Quantize with calibration
+        calibration_inputs = [
+            tokenizer(text, return_tensors="pt", truncation=True, max_length=512).input_ids.to(
+                device
+            )
+            for text in dataset.samples
+        ]
+        print(f"  Tokenized {len(calibration_inputs)} calibration samples")
+
+    # Progress tracking for streaming
+    layers_completed = [0]
+    params_completed = [0]
+
+    def on_layer_complete(layer_name: str, params: int, quant_method: str) -> None:
+        layers_completed[0] += 1
+        params_completed[0] += params
+        gc.collect()
+        if device == "mps":
+            torch.mps.empty_cache()
+
+    # Quantize with calibration - use streaming for memory efficiency
     start = time.perf_counter()
-    result = replace_moe_layers(
-        model,
-        bits=4,
-        group_size=group_size,
-        format="fp4",
-        calibration_inputs=calibration_inputs,
-        use_gptq=use_gptq,
-        device=device,
-        verbose=True,
-    )
+    if use_streaming:
+        print("  Using STREAMING mode (layer-by-layer, memory efficient)")
+        result = replace_moe_layers_streaming(
+            model,
+            bits=4,
+            group_size=group_size,
+            format="fp4",
+            calibration_inputs=calibration_inputs,
+            use_gptq=use_gptq,
+            device=device,
+            verbose=True,
+            on_layer_complete=on_layer_complete,
+        )
+    else:
+        print("  Using BATCH mode (all Hessians upfront)")
+        result = replace_moe_layers(
+            model,
+            bits=4,
+            group_size=group_size,
+            format="fp4",
+            calibration_inputs=calibration_inputs,
+            use_gptq=use_gptq,
+            device=device,
+            verbose=True,
+        )
     quant_time = time.perf_counter() - start
 
     return QuantizationQuality(
@@ -258,10 +295,22 @@ def main() -> int:
     parser.add_argument("--device", default="auto", choices=["auto", "mps", "cuda", "cpu"])
     parser.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--group-size", type=int, default=128)
+    parser.add_argument(
+        "--calibration-samples",
+        type=int,
+        default=256,
+        help="Number of Bartowski v3 calibration samples (256-512 recommended)",
+    )
     parser.add_argument("--ppl-samples", type=int, default=5)
     parser.add_argument("--skip-gptq", action="store_true", help="Skip GPTQ (only test RTN)")
+    parser.add_argument("--skip-rtn", action="store_true", help="Skip RTN (only test GPTQ)")
     parser.add_argument("--skip-throughput", action="store_true")
     parser.add_argument("--skip-perplexity", action="store_true")
+    parser.add_argument(
+        "--no-streaming",
+        action="store_true",
+        help="Disable streaming mode (collect all Hessians upfront - requires more RAM)",
+    )
     parser.add_argument("--output", default="benchmarks/results/moe_gptq_benchmark.json")
     args = parser.parse_args()
 
@@ -288,6 +337,8 @@ def main() -> int:
     print(f"Device: {device}")
     print(f"Dtype: {args.dtype}")
     print(f"Group size: {args.group_size}")
+    print(f"Calibration samples: {args.calibration_samples} (Bartowski v3)")
+    print(f"Streaming mode: {not args.no_streaming}")
     print()
 
     # Load model with limited layers
@@ -328,36 +379,14 @@ def main() -> int:
     )
 
     # Test 1: Fast RTN quantization
-    print("\n" + "=" * 50)
-    print("[1/4] Fast RTN Quantization")
-    print("=" * 50)
-
-    # Clone model for RTN test
-    model_rtn = AutoModelForCausalLM.from_pretrained(
-        args.model_id,
-        config=config,
-        trust_remote_code=True,
-        torch_dtype=torch_dtype,
-        device_map=device,
-        low_cpu_mem_usage=True,
-    )
-    model_rtn.eval()
-
-    rtn_quality = benchmark_quantization_quality(
-        model_rtn, tokenizer, device, args.layers, args.group_size, use_gptq=False
-    )
-    results.rtn_quality = rtn_quality
-    print(f"  Method: {rtn_quality.method}")
-    print(f"  Time: {rtn_quality.quant_time_s:.2f}s")
-    print(f"  Params quantized: {rtn_quality.params_quantized / 1e6:.1f}M")
-
-    # Test 2: GPTQ + Hessian quantization
-    if not args.skip_gptq:
+    model_rtn = None
+    if not args.skip_rtn:
         print("\n" + "=" * 50)
-        print("[2/4] GPTQ + Hessian Quantization")
+        print("[1/4] Fast RTN Quantization")
         print("=" * 50)
 
-        model_gptq = AutoModelForCausalLM.from_pretrained(
+        # Clone model for RTN test
+        model_rtn = AutoModelForCausalLM.from_pretrained(
             args.model_id,
             config=config,
             trust_remote_code=True,
@@ -365,10 +394,45 @@ def main() -> int:
             device_map=device,
             low_cpu_mem_usage=True,
         )
-        model_gptq.eval()
+        model_rtn.eval()
+
+        rtn_quality = benchmark_quantization_quality(
+            model_rtn,
+            tokenizer,
+            device,
+            args.layers,
+            args.group_size,
+            use_gptq=False,
+            calibration_samples=args.calibration_samples,
+            use_streaming=not args.no_streaming,
+        )
+        results.rtn_quality = rtn_quality
+        print(f"  Method: {rtn_quality.method}")
+        print(f"  Time: {rtn_quality.quant_time_s:.2f}s")
+        print(f"  Params quantized: {rtn_quality.params_quantized / 1e6:.1f}M")
+    else:
+        print("\n[1/4] RTN skipped")
+
+    # Test 2: GPTQ + Hessian quantization
+    model_gptq = None
+    if not args.skip_gptq:
+        print("\n" + "=" * 50)
+        print("[2/4] GPTQ + Hessian Quantization (Bartowski v3)")
+        print("=" * 50)
+
+        # Reuse the already-loaded model instead of loading again (saves memory)
+        model_gptq = model
+        model = None  # Clear reference to avoid double-free
 
         gptq_quality = benchmark_quantization_quality(
-            model_gptq, tokenizer, device, args.layers, args.group_size, use_gptq=True
+            model_gptq,
+            tokenizer,
+            device,
+            args.layers,
+            args.group_size,
+            use_gptq=True,
+            calibration_samples=args.calibration_samples,
+            use_streaming=not args.no_streaming,
         )
         results.gptq_quality = gptq_quality
         print(f"  Method: {gptq_quality.method}")
@@ -376,23 +440,30 @@ def main() -> int:
         print(f"  Params quantized: {gptq_quality.params_quantized / 1e6:.1f}M")
 
         # Speed comparison
-        if rtn_quality.quant_time_s > 0:
-            speedup = gptq_quality.quant_time_s / rtn_quality.quant_time_s
+        if results.rtn_quality and results.rtn_quality.quant_time_s > 0:
+            speedup = gptq_quality.quant_time_s / results.rtn_quality.quant_time_s
             print(f"  RTN is {speedup:.1f}x faster than GPTQ")
     else:
         print("\n[2/4] GPTQ skipped")
 
-    # Test 3: Throughput
+    # Test 3: Throughput (use GPTQ model if available, else RTN)
     if not args.skip_throughput:
         print("\n" + "=" * 50)
         print("[3/4] Throughput Measurement")
         print("=" * 50)
 
-        throughput = measure_throughput(model_rtn, tokenizer, device)
-        results.throughput = throughput
-        print(f"  Prefill: {throughput.prefill_tok_s:.1f} tok/s")
-        print(f"  Decode: {throughput.decode_tok_s:.1f} tok/s")
-        print(f"  Memory peak: {throughput.memory_peak_mb:.1f} MB")
+        # Prefer GPTQ model for throughput since it has better quality
+        throughput_model = model_gptq if model_gptq is not None else model_rtn
+        if throughput_model is None:
+            print("  ERROR: No model available for throughput test")
+        else:
+            model_type = "GPTQ" if model_gptq is not None else "RTN"
+            print(f"  Using {model_type} quantized model")
+            throughput = measure_throughput(throughput_model, tokenizer, device)
+            results.throughput = throughput
+            print(f"  Prefill: {throughput.prefill_tok_s:.1f} tok/s")
+            print(f"  Decode: {throughput.decode_tok_s:.1f} tok/s")
+            print(f"  Memory peak: {throughput.memory_peak_mb:.1f} MB")
     else:
         print("\n[3/4] Throughput skipped")
 

@@ -8,9 +8,10 @@ Metal Marlin ships a unified `metal-marlin` CLI (Click-based). Run
 - `quantize` - Convert HuggingFace or local models to Metal Marlin format
 - `convert` - Convert between HF/GGUF/Marlin formats
 - `generate` - One-shot text generation
-- `chat` - Interactive chat session
+- `chat` - Interactive chat session (Transformers + Marlin FP4)
 - `serve` - OpenAI-compatible HTTP server
 - `bench` - Throughput benchmark
+- `quality` - Quality benchmarks (`compare`, `quick`, `layers`)
 - `eval` - Perplexity / KL evaluation framework
 - `analyze` - Layer sensitivity analysis
 
@@ -32,10 +33,15 @@ metal-marlin quantize -i MODEL -o OUTPUT [OPTIONS]
 | `-g, --group-size` | `128` | Elements per quantization group |
 | `-c, --calibration` | none | `bartowski-v3`, `wikitext2`, `c4`, or file path |
 | `-s, --samples` | all | Calibration sample count |
+| `--no-hadamard` | false | Disable Hadamard rotation (MR-GPTQ only) |
+| `--hadamard-kurtosis-threshold` | none | Apply Hadamard only above threshold (MR-GPTQ only) |
+| `--actorder/--no-actorder` | true | Activation-order quantization (GPTQ/MR-GPTQ) |
+| `--damp` | `0.01` | GPTQ Hessian damping |
 | `--mixed-precision` | none | `dense`, `moe`, `moe-mtp`, `quality`, `speed` |
 | `--precision-config` | none | `moe-balanced`, `dense-optimal`, `quality-max`, `speed-max` |
 | `--layerwise` | false | Memory-efficient layer-wise conversion |
 | `--validate/--no-validate` | true | Compute quantization error stats |
+| `--use-transformers` | false | Load via Transformers and quantize in-place |
 | `-w, --workers` | `1` | Parallel layer workers |
 | `--token` | env | HuggingFace token (gated models) |
 | `-v, --verbose` | false | Verbose output |
@@ -69,6 +75,7 @@ metal-marlin convert -i INPUT -o OUTPUT [OPTIONS]
 - `--quant` (`fp4`, `int4`, `nf4`, `int3`, `int2`, `int8`)
 - `--group-size` (default 128)
 - `--dequant-first` (dequantize to FP16 before re-quantizing)
+- `-v, --verbose` (verbose output)
 
 **Example:**
 ```bash
@@ -91,6 +98,9 @@ Interactive chat session:
 metal-marlin chat -m ./glm47_fp4 --system "You are a helpful assistant."
 ```
 
+Notes:
+- `--quant` must be `fp4` and `--bits` must be `4` (other values raise an error).
+
 ## Serve (`metal-marlin serve`)
 
 Start an OpenAI-compatible HTTP server:
@@ -105,6 +115,26 @@ Simple throughput benchmark:
 
 ```bash
 metal-marlin bench --model ./glm47_fp4 --prompt-len 128 --gen-len 128 --batch-size 1
+```
+
+## Quality (`metal-marlin quality`)
+
+Quality benchmark subcommands:
+
+```bash
+metal-marlin quality compare -m MODEL -q QUANTIZED [OPTIONS]
+metal-marlin quality quick -m MODEL [OPTIONS]
+metal-marlin quality layers -m MODEL -q QUANTIZED [OPTIONS]
+```
+
+**Subcommands:**
+- `compare` - Full quality comparison vs reference (perplexity, KL, throughput, memory)
+- `quick` - Reduced-sample FP4-only quality check (no layer RMSE)
+- `layers` - Layer-by-layer RMSE analysis
+
+Example:
+```bash
+metal-marlin quality compare -m Qwen/Qwen3-4B -q ./qwen3_4b_fp4 --dataset wikitext2
 ```
 
 ## Eval (`metal-marlin eval`)

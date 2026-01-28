@@ -1,17 +1,17 @@
 # Inference Architecture
 
-Metal Marlin uses a format-agnostic, layered architecture. Instead of hardcoding model implementations (like the old `llama.py`), the system loads any transformer from standard weight formats and executes through a generic graph or protocol-based pipeline.
+Metal Marlin uses a format-agnostic, layered architecture. Instead of hardcoding model implementations, the system integrates with HuggingFace Transformers by replacing `nn.Linear` layers, and it can also execute ONNX graphs directly.
 
 ## Stack Layers
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                          User API                                           │
-│              MarlinPipeline  /  ONNXExecutor  /  CLI                        │
+│      Transformers + replace_linear_layers  /  ONNXExecutor  /  CLI          │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│                       Graph Executor                                        │
-│         ONNXExecutor: parse graph, dispatch ops to kernels                  │
-│         MarlinPipeline: protocol-based forward pass                         │
+│                       Model Integration                                     │
+│  Transformers: forward/generate with MetalQuantizedLinear                   │
+│  ONNXExecutor: parse graph, dispatch ops to kernels                         │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                       Format Loaders                                        │
 │    ┌──────────────┐   ┌──────────────────┐   ┌──────────────────┐          │
@@ -89,18 +89,18 @@ Flash attention with optional KV cache quantization:
 
 ## Layer 2: Format Loaders
 
-Format loaders convert standard weight files into Marlin's packed FP4/INT4 representation. They have no knowledge of model architecture; they operate on raw tensors.
+Format loaders and conversion utilities transform standard weight files into Marlin's packed FP4/INT4 representation. They have no knowledge of model architecture; they operate on raw tensors.
 
-### ONNX (`converters/onnx_executor.py`)
+### ONNX (`converters/onnx_executor.py`, `metal_marlin/onnx_loader.py`)
 
-Parses the ONNX protobuf graph and loads initializers (weights). Weight tensors from MatMul/Gemm nodes are automatically quantized to FP4 during load.
+Parses the ONNX protobuf graph and loads initializers (weights). Weight tensors from MatMul/Gemm nodes can be quantized to FP4 during load.
 
 ```python
 executor = ONNXExecutor.from_file("model.onnx", quantize=True)
 output = executor(input_ids=tokens)
 ```
 
-### Safetensors (`safetensors_loader.py`)
+### Safetensors (`metal_marlin/safetensors_loader.py`)
 
 Streams safetensors files and quantizes weights on-the-fly, producing `.marlin.safetensors` output. Avoids loading the full FP16 model into memory at once.
 
@@ -113,9 +113,28 @@ from metal_marlin.gguf_loader import load_gguf
 weights = load_gguf("model.gguf")  # Returns {name: (packed, scales)}
 ```
 
-## Layer 3: Graph Executor
+## Layer 3: Model Integration
 
 Two execution paths, both architecture-agnostic:
+
+### Transformers Integration (Recommended)
+
+Use HuggingFace Transformers for model structure and generation, then swap
+`nn.Linear` layers to Metal-backed quantized layers with `replace_linear_layers()`.
+This keeps the model code untouched while routing GEMM-heavy ops through Metal.
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from metal_marlin import replace_linear_layers
+from metal_marlin.inference import TransformersMarlinPipeline
+
+model = AutoModelForCausalLM.from_pretrained("your-model-id")
+tokenizer = AutoTokenizer.from_pretrained("your-model-id")
+replace_linear_layers(model, bits=4, group_size=128)
+
+pipe = TransformersMarlinPipeline(model, tokenizer)
+output = pipe("Prompt", max_tokens=128)
+```
 
 ### ONNXExecutor
 
@@ -132,36 +151,17 @@ Reshape / Transpose → shape manipulation
 
 The executor knows nothing about Llama, Mistral, or any other architecture. Any transformer exported to ONNX runs without modification.
 
-### MarlinPipeline (Protocol-Based)
+## Why We Avoid Model-Specific Code
 
-For non-ONNX use, `MarlinPipeline` accepts any model implementing the `MarlinModel` protocol:
+Model-specific Python implementations do not scale: every new architecture would
+require a dedicated file, duplicate logic, and hard-code weight naming
+conventions. The current design removes this entire class of work:
 
-```python
-@runtime_checkable
-class MarlinModel(Protocol):
-    def __call__(self, input_ids: Tensor, kv_cache=None) -> Tensor: ...
-    def create_kv_cache(self, batch_size: int = 1): ...
-```
-
-Models built from `MarlinLinear`, `MarlinMLP`, and `MarlinTransformerBlock` satisfy this protocol automatically. The pipeline handles tokenization, prefill/decode phases, sampling, and streaming.
-
-## Why We Removed Model-Specific Code
-
-The old architecture had `models/llama.py` with a hardcoded `MarlinLlamaForCausalLM` class. This was problematic:
-
-1. **Every new architecture required new code.** Supporting Mistral, Gemma, Qwen, etc. each needed a dedicated Python file duplicating 90% of the same logic.
-
-2. **Config proliferation.** Each model's config (hidden_size, num_heads, intermediate_size) was validated and wired separately, despite all being standard transformer parameters.
-
-3. **Tight coupling to HuggingFace conventions.** Weight names, config keys, and layer ordering were baked in.
-
-The current design eliminates this entirely:
-
-- **ONNX path**: Export any model to ONNX once, run it forever via `ONNXExecutor`. No Python model code needed.
-- **Safetensors path**: Load raw weights, build layers from `MarlinLinear` / `MarlinTransformerBlock`. The `ModelConfig` dataclass covers all standard transformer parameters generically.
-- **GGUF path**: Convert GGML quantized models directly to Marlin format. Community quantizations work out of the box.
-
-The old `llama.py` is preserved in `_archived/` for reference but is no longer part of the active codebase.
+- **Transformers path**: Use HuggingFace models as-is and swap `nn.Linear` layers
+  with `replace_linear_layers()`. No model reimplementation.
+- **ONNX path**: Export any model to ONNX once and run it forever via `ONNXExecutor`.
+- **GGUF path**: Convert GGML quantized models directly to Marlin format. Community
+  quantizations work out of the box.
 
 ## End-to-End Data Flow
 
@@ -183,12 +183,12 @@ The old `llama.py` is preserved in `_archived/` for reference but is no longer p
             ┌──────────────────┼──────────────────┐
             │                  │                   │
             ▼                  ▼                   ▼
-  ┌─────────────────┐ ┌───────────────┐ ┌─────────────────┐
-  │  ONNXExecutor   │ │MarlinPipeline │ │  Direct Kernel  │
-  │  (graph walk)   │ │  (protocol)   │ │    Calls        │
-  └────────┬────────┘ └───────┬───────┘ └────────┬────────┘
-           │                   │                   │
-           └───────────────────┼───────────────────┘
+  ┌─────────────────┐ ┌────────────────────────────┐ ┌─────────────────┐
+  │  ONNXExecutor   │ │ Transformers + layer swap  │ │  Direct Kernel  │
+  │  (graph walk)   │ │  replace_linear_layers()   │ │    Calls        │
+  └────────┬────────┘ └──────────────┬─────────────┘ └────────┬────────┘
+           │                          │                        │
+           └──────────────────────────┼────────────────────────┘
                                │
                      ┌─────────▼──────────┐
                      │   Kernel Dispatch   │
@@ -211,7 +211,7 @@ The old `llama.py` is preserved in `_archived/` for reference but is no longer p
 
 ## Prefill / Decode Phases
 
-Both execution paths (ONNX and pipeline) follow the same two-phase pattern:
+Both execution paths (ONNX and Transformers integration) follow the same two-phase pattern:
 
 **Prefill**: Process the full prompt in a single batched pass. All tokens attend to each other. KV cache is populated for all layers. The last logit position produces the first generated token.
 
@@ -222,10 +222,18 @@ Both execution paths (ONNX and pipeline) follow the same two-phase pattern:
 executor = ONNXExecutor.from_file("model.onnx")
 logits = executor(input_ids=prompt_tokens)
 
-# Pipeline path
-pipe = MarlinPipeline(model, tokenizer)
-for token in pipe.generate_stream("prompt", max_tokens=256):
-    print(tokenizer.decode([token]), end="")
+# Transformers path
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from metal_marlin import replace_linear_layers
+
+model = AutoModelForCausalLM.from_pretrained("your-model-id")
+tokenizer = AutoTokenizer.from_pretrained("your-model-id")
+replace_linear_layers(model, bits=4, group_size=128)
+model.to("mps")
+
+inputs = tokenizer("prompt", return_tensors="pt").to("mps")
+output_ids = model.generate(**inputs, max_new_tokens=256)
+print(tokenizer.decode(output_ids[0], skip_special_tokens=True))
 ```
 
 ## Performance Characteristics
@@ -240,40 +248,43 @@ for token in pipe.generate_stream("prompt", max_tokens=256):
 
 The autotune framework (`autotune.py`) selects the optimal kernel variant per (M, N, K) problem size automatically.
 
-## File Map
+## File Map (Key Files)
 
 ```
 src/
-├── marlin_gemm.metal          # 12 GEMM kernel variants
+├── marlin_gemm.metal          # GEMM kernel variants
+├── dense_gemm.metal           # FP16/FP32 dense GEMM fallback
 ├── flash_attention.metal      # Attention with quantized KV
-├── sparse_gemm.metal          # 2:4 structured sparsity
+├── flash_attention_v2.metal   # Updated flash attention kernels
+├── attention.metal            # Attention primitives
 ├── dequant.metal              # INT4/U4 dequant (magic bias)
 ├── dequant_int8.metal         # INT8 dequant
 ├── dequant_fp8.metal          # FP8 E4M3/E5M2
+├── dequant_sub4bit.metal      # Sub-4bit dequant paths
 ├── batched_gemm.metal         # Batch multiply, GQA
 ├── gemm_epilogue.metal        # Bias, activation fusion
+├── sparse_gemm.metal          # 2:4 structured sparsity
 ├── sparse.metal               # General N:M sparsity
 ├── bf16_compat.metal          # BF16 layer
 └── kernels_autotune.metal     # Autotune templates
 
 metal_marlin/
+├── layer_replacement.py       # replace_linear_layers() / MetalQuantizedLinear
+├── transformers_loader.py     # HF model loading + layer swap helpers
+├── quantize_model.py          # Convenience wrapper for layer replacement
+├── inference/pipeline_v2.py   # TransformersMarlinPipeline
+├── inference_metal.py         # MetalQuantizedLinear + kernel dispatch
 ├── kernels.py                 # Metal kernel wrappers
-├── layers.py                  # MarlinLinear (quantized nn.Linear)
-├── mlp.py                     # MarlinMLP (SwiGLU / standard)
-├── transformer.py             # MarlinTransformerBlock, RMSNorm
-├── attention.py               # MarlinAttention + RoPE
 ├── kv_cache.py                # KV cache with optional quantization
-├── quantize.py                # Weight packing (FP4, INT4)
-├── inference.py               # MarlinPipeline (protocol-based)
-├── generate.py                # Sampling, beam search, streaming
+├── quantize.py                # Weight packing (FP4/INT4/FP8)
+├── onnx_graph.py              # ONNX graph parsing utilities
+├── onnx_loader.py             # ONNX weight loading helpers
 ├── gguf_loader.py             # GGUF format support
 ├── safetensors_loader.py      # Safetensors streaming loader
-├── autotune.py                # Per-problem-size kernel selection
+├── generate.py                # Sampling + streaming utilities
 └── cli.py                     # Command-line interface
 
 converters/
-└── onnx_executor.py           # ONNX graph → Metal Marlin dispatch
-
-_archived/
-└── llama.py                   # Old model-specific code (deprecated)
+├── onnx_executor.py           # ONNX graph → Metal Marlin dispatch
+└── safetensors_loader.py      # HF config mapping + quantization
 ```

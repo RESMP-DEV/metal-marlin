@@ -1041,3 +1041,255 @@ def _resolve_shared_expert_weights(
             return gate_up, down
 
     return None, None
+
+
+# =============================================================================
+# STREAMING LAYER-BY-LAYER QUANTIZATION (Memory Efficient)
+# =============================================================================
+
+
+def collect_single_layer_hessians(
+    model: nn.Module,
+    target_layer_name: str,
+    calibration_inputs: list[torch.Tensor],
+    device: str = "cpu",
+    damp_ratio: float = 0.01,
+) -> dict[int, np.ndarray]:
+    """Collect Hessians for a SINGLE MoE layer only.
+
+    Memory-efficient alternative to collect_moe_expert_hessians.
+    Only stores Hessians for one layer at a time (~1.5GB vs ~70GB for all layers).
+
+    Args:
+        model: Model with MoE layers
+        target_layer_name: Exact name of the MoE layer to collect Hessians for
+        calibration_inputs: List of input_ids tensors for calibration
+        device: Device for forward pass
+        damp_ratio: Damping ratio for Hessian stability
+
+    Returns:
+        Dict mapping expert_idx -> Hessian [in_features, in_features]
+    """
+    moe_layers = find_moe_layers(model)
+    if target_layer_name not in moe_layers:
+        raise ValueError(
+            f"Layer '{target_layer_name}' not found. Available: {list(moe_layers.keys())}"
+        )
+
+    moe = moe_layers[target_layer_name]
+    experts = getattr(moe, "experts", None)
+    if experts is None:
+        raise ValueError(f"Layer '{target_layer_name}' has no 'experts' attribute")
+
+    gate_up = getattr(experts, "gate_up_proj", None)
+    weight = _resolve_moe_weight(gate_up)
+    if weight is None or weight.ndim != 3:
+        raise ValueError(f"Layer '{target_layer_name}' has invalid weight shape")
+
+    num_experts, out_features, in_features = weight.shape
+
+    # Storage for this single layer only
+    hessian_accumulators: dict[int, tuple[np.ndarray, int]] = {
+        idx: (np.zeros((in_features, in_features), dtype=np.float64), 0)
+        for idx in range(num_experts)
+    }
+
+    def expert_hook(module, inputs, output):
+        """Accumulate Hessians based on expert routing."""
+        router = getattr(module, "gate", None) or getattr(module, "router", None)
+        if router is None:
+            return
+
+        if len(inputs) > 0 and isinstance(inputs[0], torch.Tensor):
+            x = inputs[0].detach().float()
+            if x.ndim == 3:
+                batch, seq, hidden = x.shape
+                x_flat = x.reshape(-1, hidden)
+
+                with torch.no_grad():
+                    router_logits = router(x_flat)
+                    if hasattr(router_logits, "topk_indices"):
+                        topk_indices = router_logits.topk_indices
+                    elif isinstance(router_logits, tuple):
+                        topk_indices = router_logits[0]
+                    else:
+                        _, topk_indices = torch.topk(router_logits, k=2, dim=-1)
+
+                x_np = x_flat.cpu().numpy().astype(np.float64)
+                indices_np = topk_indices.cpu().numpy()
+
+                for token_idx in range(x_np.shape[0]):
+                    for expert_idx in indices_np[token_idx]:
+                        expert_idx = int(expert_idx)
+                        h_sum, count = hessian_accumulators[expert_idx]
+                        token_vec = x_np[token_idx : token_idx + 1]
+                        h_sum += token_vec.T @ token_vec
+                        hessian_accumulators[expert_idx] = (h_sum, count + 1)
+
+    # Register hook on this single layer only
+    hook = moe.register_forward_hook(expert_hook)
+
+    # Run calibration forward passes
+    model.eval()
+    with torch.no_grad():
+        for input_ids in calibration_inputs:
+            input_ids = input_ids.to(device)
+            _ = model(input_ids)
+
+    # Remove hook immediately
+    hook.remove()
+
+    # Convert to final Hessians with damping
+    result: dict[int, np.ndarray] = {}
+    for expert_idx, (h_sum, count) in hessian_accumulators.items():
+        if count > 0:
+            H = h_sum / count
+            damp = damp_ratio * np.mean(np.diag(H))
+            H += damp * np.eye(H.shape[0])
+            result[expert_idx] = H.astype(np.float32)
+        else:
+            result[expert_idx] = np.eye(in_features, dtype=np.float32)
+
+    return result
+
+
+def replace_moe_layers_streaming(
+    model: nn.Module,
+    *,
+    bits: int = 4,
+    group_size: int = 128,
+    format: str = "fp4",
+    skip_patterns: list[str] | None = None,
+    calibration_inputs: list[torch.Tensor] | None = None,
+    use_gptq: bool = True,
+    max_workers: int | None = None,
+    device: str = "cpu",
+    verbose: bool = True,
+    on_layer_complete: callable | None = None,
+) -> dict[str, Any]:
+    """Replace MoE layers with STREAMING layer-by-layer quantization.
+
+    Memory-efficient alternative to replace_moe_layers.
+    Phase 1: For each layer, collect Hessians -> quantize -> store result (discard Hessians)
+    Phase 2: Replace all layers at once (keeps original model intact during calibration)
+
+    Peak memory: ~1.5GB per-layer Hessians + quantized weights staging area
+    vs ~47GB for all Hessians collected upfront.
+
+    Args:
+        model: Model to quantize
+        bits: Quantization bits (4 only)
+        group_size: Quantization group size
+        format: Quantization format ("fp4", "int4", "nf4")
+        skip_patterns: Module name patterns to skip
+        calibration_inputs: List of input_ids tensors for Hessian collection
+        use_gptq: Use GPTQ when calibration data available (default True)
+        max_workers: Max parallel workers for expert quantization (auto if None)
+        device: Device for calibration forward passes
+        verbose: Print progress
+        on_layer_complete: Optional callback(layer_name, params_quantized, method)
+
+    Returns:
+        Same as replace_moe_layers - dict with replaced_count, params, etc.
+    """
+    skip_patterns = skip_patterns or []
+
+    # Find all MoE layers to process
+    moe_layers = find_moe_layers(model)
+    replacements: list[tuple[str, MoEModule]] = []
+    skipped_count = 0
+
+    for name, module in moe_layers.items():
+        if any(pattern in name for pattern in skip_patterns):
+            skipped_count += 1
+            continue
+        replacements.append((name, module))
+
+    if verbose:
+        print(f"Found {len(replacements)} MoE layers to quantize (streaming mode)")
+        if calibration_inputs is not None and use_gptq:
+            print(f"  Using {len(calibration_inputs)} calibration samples for GPTQ")
+
+    # Phase 1: Collect Hessians and quantize each layer, storing results
+    # (keep original model intact for forward passes)
+    quantized_results: dict[
+        str, tuple[MetalQuantizedMoE, int, str]
+    ] = {}  # name -> (quantized, params, method)
+    replaced_layers: list[str] = []
+    total_params_quantized = 0
+
+    for layer_idx, (name, module) in enumerate(replacements):
+        experts = getattr(module, "experts", None)
+        gate_weight = _resolve_moe_weight(getattr(experts, "gate_up_proj", None))
+        down_weight = _resolve_moe_weight(getattr(experts, "down_proj", None))
+        if gate_weight is None or down_weight is None:
+            skipped_count += 1
+            continue
+
+        setattr(module, "_metal_marlin_layer_name", name)
+
+        # Streaming: collect Hessians for THIS layer only (uses original model forward pass)
+        layer_hessians: dict[int, np.ndarray] | None = None
+        if calibration_inputs is not None and use_gptq:
+            if verbose:
+                print(f"  [{layer_idx + 1}/{len(replacements)}] Collecting Hessians for {name}...")
+            layer_hessians = collect_single_layer_hessians(
+                model, name, calibration_inputs, device=device
+            )
+
+        # Quantize this layer (but DON'T replace yet - need original for next layer's forward pass)
+        try:
+            quantized = quantize_moe_experts(
+                module,
+                bits=bits,
+                group_size=group_size,
+                format=format,
+                hessians=layer_hessians,
+                use_gptq=use_gptq and (layer_hessians is not None),
+                max_workers=max_workers,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"    Failed to quantize {name}: {e}")
+            skipped_count += 1
+            _cleanup_layer_overrides(module)
+            continue
+
+        layer_params = gate_weight.numel() + down_weight.numel()
+        method = "GPTQ" if layer_hessians is not None else "RTN"
+
+        # Store quantized result for Phase 2
+        quantized_results[name] = (quantized, layer_params, method)
+        replaced_layers.append(name)
+        total_params_quantized += layer_params
+
+        if verbose:
+            print(f"    {name}: {layer_params / 1e6:.1f}M params ({method})")
+
+        # Callback for progress tracking
+        if on_layer_complete is not None:
+            on_layer_complete(name, layer_params, method)
+
+        # Free Hessians for this layer immediately
+        _cleanup_layer_overrides(module)
+        del layer_hessians
+
+    # Phase 2: Replace all layers now that calibration is complete
+    if verbose:
+        print(f"\n  Replacing {len(quantized_results)} layers with quantized weights...")
+
+    for name, (quantized, layer_params, method) in quantized_results.items():
+        # Get the module again
+        for moe_name, moe_module in find_moe_layers(model).items():
+            if moe_name == name:
+                experts = getattr(moe_module, "experts", None)
+                setattr(moe_module, "_metal_marlin_experts_fp16", experts)
+                setattr(moe_module, "experts", quantized)
+                break
+
+    return {
+        "replaced_count": len(replaced_layers),
+        "skipped_count": skipped_count,
+        "replaced_layers": replaced_layers,
+        "total_params_quantized": total_params_quantized,
+    }

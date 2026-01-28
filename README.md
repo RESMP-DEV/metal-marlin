@@ -19,7 +19,7 @@ This means:
 - **Transformers integration** — Automatic `nn.Linear` → `MetalQuantizedLinear` swap
 - **Multiple formats** — HuggingFace, Safetensors, GGUF, ONNX
 
-**Status:** 100% tests passing (1444/1497). See [STATUS.md](STATUS.md) for details.
+**Status:** See [STATUS.md](STATUS.md) for implementation progress and latest test results.
 
 ## Requirements
 
@@ -46,12 +46,7 @@ uv pip install numpy safetensors huggingface_hub torch transformers \
 
 ## Supported Models
 
-| Model | Size | Memory | Speed | Status |
-|-------|------|--------|-------|--------|
-| **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Fully Working |
-| **zai-org/GLM-4.7-Flash** | 30B-A3B MoE | ~15GB FP4 | TBD | ✅ MoE + MLA Verified |
-| Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
-| Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
+See [STATUS.md](STATUS.md) for the full compatibility matrix and verification notes.
 
 ## Quick Start (Recommended)
 
@@ -160,15 +155,17 @@ On Apple Silicon M4 Max (PyTorch MPS backend):
 ## Code Quality
 
 ```bash
-# Linting (0 errors)
+# Linting
 uv run ruff check .
 
-# Type checking (0 errors, 184 warnings)
+# Type checking
 uv run pyright metal_marlin/
 
-# Tests (100% passing: 1444/1497)
+# Tests
 uv run pytest tests/ -v
 ```
+
+See [STATUS.md](STATUS.md) for the latest results and tracked metrics.
 
 ## Apple Silicon Performance
 

@@ -5,7 +5,10 @@ Quantize and run a model in under 5 minutes.
 ## Installation
 
 ```bash
-uv pip install metal-marlin
+git clone https://github.com/RESMP-DEV/AlphaHENG.git
+cd AlphaHENG/contrib/metal_marlin
+uv venv && source .venv/bin/activate
+uv sync --extra all
 ```
 
 ## Quick Start (Recommended)
@@ -37,19 +40,7 @@ output = model.generate(
 print(tokenizer.decode(output[0]))
 ```
 
-## Supported Models
-
-Any model in HuggingFace Transformers with Linear layers can be quantized:
-
-| Model | Architecture | Special Features |
-|-------|--------------|------------------|
-| GLM-4.7-Flash | glm4_moe_lite | MoE (64 experts), MLA attention |
-| Qwen3-30B-A3B | qwen3_moe | MoE (128 experts) |
-| Llama-3.1-* | llama | Standard transformer |
-| Mistral-* | mistral | Sliding window attention |
-| Mixtral-* | mixtral | MoE (8 experts) |
-
-## Pre-Quantized Checkpoints
+### Pre-Quantized Checkpoints
 
 For faster loading, save quantized checkpoints:
 
@@ -63,6 +54,20 @@ save_quantized(model, "./glm47_fp4")
 # Load later (instant)
 model = load_quantized("./glm47_fp4", device="mps")
 ```
+
+See [CLI Reference](cli.md) for full options.
+
+## Supported Models
+
+Any model in HuggingFace Transformers with Linear layers can be quantized:
+
+| Model | Architecture | Special Features |
+|-------|--------------|------------------|
+| GLM-4.7-Flash | glm4_moe_lite | MoE (64 experts), MLA attention |
+| Qwen3-30B-A3B | qwen3_moe | MoE (128 experts) |
+| Llama-3.1-* | llama | Standard transformer |
+| Mistral-* | mistral | Sliding window attention |
+| Mixtral-* | mixtral | MoE (8 experts) |
 
 ## Next Steps
 

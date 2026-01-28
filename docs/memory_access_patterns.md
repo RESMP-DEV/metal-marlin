@@ -4,7 +4,7 @@ This document details memory access pattern issues identified across Metal Marli
 
 ## Executive Summary
 
-Memory access patterns are a critical performance factor for GPU kernels. Non-coalesced access can reduce memory throughput by 10-32x. Our analysis identified 60 patterns requiring attention across 6 priority shader files:
+Memory access patterns are a critical performance factor for GPU kernels. Non-coalesced access can reduce throughput by an order of magnitude. The counts below are a snapshot from a prior audit; rerun the Memory Audit Tool in this repo to refresh them for the current kernels.
 
 | Category | Count | Severity |
 |----------|-------|----------|
@@ -14,7 +14,7 @@ Memory access patterns are a critical performance factor for GPU kernels. Non-co
 
 ## Priority Findings
 
-### 1. FP4 Dequantization (CRITICAL)
+### 1. FP4 Dequantization (Potential Hotspot)
 
 **File:** `src/dequant.metal`
 
@@ -26,7 +26,7 @@ uint group_idx = base_idx / group_size;
 half scale = scales[group_idx];  // Sequential global load per thread group
 ```
 
-**Impact:** Each thread independently loads scales from global memory. When group_size=128, all 8 threads processing one packed uint32 share a scale, but adjacent thread groups access different scale addresses without coalescing.
+**Impact (potential):** Each thread loads scales from global memory. When group_size=128, all 8 threads processing one packed uint32 share a scale, so caching scales can reduce redundant traffic. Coalescing depends on group layout and how scales are laid out in memory.
 
 **Fix:** Preload scales into threadgroup memory before the main loop:
 
@@ -60,7 +60,7 @@ for (uint d = 0; d < head_dim; ++d) {
 }
 ```
 
-**Impact:** Each thread loads head_dim values sequentially, causing strided access between threads (stride = head_dim).
+**Impact (potential):** Each thread loads head_dim values sequentially, causing strided access between threads (stride = head_dim).
 
 **Fix Options:**
 
@@ -80,7 +80,7 @@ p_ptr[k_idx] = half(score);
 float score = float(p_ptr[k_idx]);
 ```
 
-**Impact:** Round-trip to global memory for softmax normalization.
+**Impact (potential):** Round-trip to global memory for softmax normalization.
 
 **Fix:** Keep scores in registers for small seq_k, or use single-pass online softmax (already implemented in `attention_fused_qkv`).
 
@@ -98,7 +98,7 @@ for (uint d = 0; d < hidden_dim; ++d) {
 }
 ```
 
-**Impact:** Strided memory access with stride equal to num_experts (typically 64-256).
+**Impact (potential):** Strided memory access with stride equal to num_experts (typically 64-256).
 
 **Fix:** Transpose router weights to `[num_experts, hidden_dim]` row-major:
 
@@ -122,7 +122,7 @@ uint token_id = token_batch[row];
 val = activations[token_id * hidden_dim + col];  // Scattered access
 ```
 
-**Impact:** Indirect indexing causes non-coalesced global loads when tokens have diverse expert assignments.
+**Impact (potential):** Indirect indexing causes non-coalesced global loads when tokens have diverse expert assignments.
 
 **Fix:** Pre-sort tokens by expert ID on the host before dispatch:
 
@@ -190,7 +190,7 @@ buffer[indices[tid]]       // Scattered if indices are non-sequential
 
 ### Memory Audit Tool
 
-Run the memory audit to analyze your kernels:
+Run the memory audit to analyze your kernels (use `uv run` when executing Python in this repo):
 
 ```python
 from metal_marlin.profiling import MemoryAuditor, generate_full_report

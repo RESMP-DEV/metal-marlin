@@ -136,8 +136,9 @@ Threadgroup memory per threadgroup:
 
 ### 2.3 Occupancy Impact
 
-M4 Max has 32 KB threadgroup memory per compute unit. The maximum concurrent
-threadgroups per CU is limited by:
+Metal limits threadgroup memory to 32 KB per threadgroup. The maximum concurrent
+threadgroups per compute unit is limited by the per-CU shared capacity and
+register usage, so the numbers below are theoretical upper bounds:
 
 ```
 Traditional (double-buffered):  floor(32768 / 16384) = 2 threadgroups/CU
@@ -171,9 +172,9 @@ Thread timeline (traditional):
                                   128-thread synchronization
 ```
 
-The slowest thread in any simdgroup stalls the entire threadgroup. On M4 Max,
-threadgroup_barrier costs approximately 16 cycles of idle time across all
-threads.
+The slowest thread in any simdgroup stalls the entire threadgroup. The exact
+cost of threadgroup_barrier depends on occupancy and GPU generation, but it is
+typically on the order of tens of cycles.
 
 ### 3.2 Fused: Simdgroup Barrier Only
 
@@ -198,7 +199,8 @@ Thread timeline (fused):
 ```
 
 Each simdgroup can proceed to compute as soon as its own 8 active lanes finish
-dequantizing. No cross-simdgroup dependency exists for B data.
+dequantizing. No cross-simdgroup dependency exists for B data, and the barrier
+is limited to the 32 threads in that simdgroup.
 
 
 ## 4. Inner Loop Structure
@@ -215,7 +217,7 @@ for kt in 0..K_TILES (4 iterations, covering 32 K values):
     k_pack_idx = k_sub_base / 8       ← which packed uint32 row
     group_idx  = k_sub_base / group_size  ← which scale group
 
-    for mi in 0..SG_M_TILES (2 iterations):
+    for mi in 0..SG_M_TILES (4 iterations):
         simdgroup_load(a_frag, A_tile[sg_row + mi*8][kt*8])
 
         for ni in 0..SG_N_TILES (4 iterations):
@@ -288,10 +290,10 @@ Traditional:                         Fused:
   B_tile → 2 simdgroups (2 reads)     = 2 loads of same data
 ```
 
-Each packed uint32 is loaded from global memory SG_M_TILES = 2 times per
+Each packed uint32 is loaded from global memory SG_M_TILES = 4 times per
 simdgroup (once for each mi iteration). Since simdgroups are assigned different
 M regions but share N columns, a column of B data is accessed by 2 simdgroups
-(those sharing the same sg_col_offset), for a total of SG_M_TILES * 2 = 4
+(those sharing the same sg_col_offset), for a total of SG_M_TILES * 2 = 8
 global loads per packed word per k_block.
 
 ### 5.2 L2 Cache Mitigation
@@ -299,18 +301,18 @@ global loads per packed word per k_block.
 The repeated loads are acceptable because:
 
 1. **Temporal locality**: All accesses to a given B word occur within the same
-   k_block iteration, spanning only the mi and ni inner loops. On M4 Max with
-   its 4 MB L2 cache, the B sub-tile data (8 * 4B = 32 bytes per lane, 256
-   bytes per sub-tile) remains in L2 across these iterations.
+   k_block iteration, spanning only the mi and ni inner loops. The B sub-tile
+   data (8 * 4B = 32 bytes per lane, 256 bytes per sub-tile) is small enough
+   to stay hot in L2 on most Apple Silicon GPUs.
 
 2. **Working set fits in L2**: For one k_block, the total B data accessed by
    one threadgroup is TILE_K * TILE_N / 8 * 4B = 32 * 64 / 8 * 4 = 1024 bytes.
-   This is negligible relative to the 4 MB L2.
+   This is tiny relative to typical L2 capacities, so reuse is likely.
 
-3. **L2 hit latency vs. threadgroup memory**: L2 hits on M4 Max cost
-   approximately 15-20 cycles. Threadgroup memory loads cost 10-15 cycles but
-   require the threadgroup_barrier overhead. The net difference is minimal, and
-   the fused kernel wins by eliminating the barrier.
+3. **L2 hit latency vs. threadgroup memory**: L2 hits are slower than
+   threadgroup memory loads, but threadgroup loads require barrier overhead.
+   The net difference is often small, and the fused kernel wins by eliminating
+   the full-threadgroup barrier. Verify with profiling on your target GPU.
 
 ### 5.3 When This Trade-off Fails
 
@@ -426,8 +428,8 @@ K-tile 0:
 ```
 
 Overhead per K-tile: 1 threadgroup barrier (A_tile ready) + K_TILES * SG_M_TILES
-* SG_N_TILES simdgroup barriers. The simdgroup barriers are approximately free
-(same warp, no cross-warp synchronization needed on Apple Silicon).
+* SG_N_TILES simdgroup barriers. The simdgroup barriers are low-overhead because
+they synchronize only 32 threads and avoid cross-simdgroup coordination.
 
 
 ## 8. INT4 Variant (marlin_gemm_fused_u4)

@@ -20,8 +20,20 @@
 
 ---
 
+## Model Compatibility (Detailed)
+
+| Model | Size | Memory | Speed | Status |
+|-------|------|--------|-------|--------|
+| **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Fully Working |
+| **zai-org/GLM-4.7-Flash** | 30B-A3B MoE | ~15GB FP4 | TBD | ✅ MoE + MLA Verified |
+| Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
+| Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
+
+---
+
 ## Test Results
 
+**Last verified:** 2026-01-27
 **Last run:** 256.18s (4 min 16 sec)
 
 | Category | Count |

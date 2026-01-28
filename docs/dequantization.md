@@ -1,8 +1,11 @@
-# Dequantization Algorithms
+# Dequantization Algorithms (Overview)
+
+This document is a high-level overview. For exact bitwise masks, packing rules,
+and bias correction used in the kernels, see [dequant_algorithm.md](dequant_algorithm.md).
 
 ## FP4 E2M1 Dequantization
 
-### Scalar Implementation
+### Scalar reference implementation
 
 ```metal
 half dequant_fp4_scalar(uchar fp4_code, half scale) {
@@ -21,72 +24,48 @@ half dequant_fp4_scalar(uchar fp4_code, half scale) {
     }
 
     // Apply sign
-    if (sign) val = -val;
+    if (sign) {
+        val = -val;
+    }
 
     return val * scale;
 }
 ```
 
-### Optimized Vectorized Implementation
+### Packed bitwise approach (kernel path)
 
-The scalar loop is slow. Instead, we use bitwise operations to dequant
-8 values in parallel:
+In the kernel path, FP4 values are packed into a `uint32_t` (8 nibbles per
+word). The conversion is done by placing each nibble into bits [15:12] of each
+16-bit lane, then:
 
-```metal
-// Process 8 FP4 values packed in one uint32
-half8 dequant_fp4_x8(uint packed, half scale) {
-    half8 result;
+1. Mask the sign bits.
+2. Mask and shift the exponent+mantissa bits into FP16 field positions.
+3. Multiply by `2^14` to correct the bias mismatch (FP4 bias 1 vs FP16 bias 15).
+4. Multiply by the per-group scale (often fused with step 3).
 
-    // Extract sign bits
-    uint signs = (packed >> 3) & 0x11111111u;  // Every 4th bit starting at bit 3
-
-    // Extract exponent (2 bits each)
-    uint exps = (packed >> 1) & 0x33333333u;
-
-    // Extract mantissa (1 bit each)
-    uint mants = packed & 0x11111111u;
-
-    // Vectorized decode using lookup or bit manipulation
-    // ...
-
-    return result * scale;
-}
-```
-
-### CUDA lop3.b32 Approach (Reference)
-
-CUDA Marlin uses `lop3.b32` (3-input LUT) for efficient bit manipulation:
-
-```cuda
-// Extract low nibbles (values 0,2,4,6) and high nibbles (1,3,5,7)
-uint32_t lo = lop3<0xea>(packed, 0x0f0f0f0f, 0x00ff00ff);  // Complex LUT
-uint32_t hi = lop3<0xea>(packed >> 4, 0x0f0f0f0f, 0x00ff00ff);
-```
-
-Metal doesn't have lop3, so we compose from AND/OR/XOR.
+See `dequant_algorithm.md` for the exact masks and code.
 
 ## INT4 Magic-Bias Dequantization
 
-### The Magic-Bias Trick
+### Magic-bias trick
 
-Instead of:
-```
-fp_value = (int4_value - zero_point) * scale
-```
+The "magic bias" approach embeds a small integer into the FP16 mantissa by
+OR-ing with a constant that has a known exponent:
 
-We use FP16 bit manipulation:
 ```
-// FP16 representation: s | eeeee | mmmmmmmmmm
-// Adding 1024.0 (0x6400) to a small integer creates:
-// 0 | 10100 | int_value << 6
-
-// This trick extracts 4-bit int into FP16 mantissa position
-half val = as_half((uint16_t)(int4_value | 0x6400)) - 1024.0h;
+0x6400 = 0b0_11001_0000000000  // FP16 value 1024.0
 ```
 
-This avoids integer-to-float conversion instructions.
+If `N` is a 4-bit integer (0-15), then:
 
-### Vectorized INT4 Dequant
+```
+as_fp16(0x6400 | N) = 1024.0 + N
+```
+
+Subtracting 1024.0 recovers `N` without an integer-to-float conversion. For
+U4B8, subtract 1032.0 instead (1024 + bias 8) to yield `N - 8`.
+
+### Vectorized INT4 dequant (pseudocode)
 
 ```metal
 half8 dequant_u4x8(uint packed, half scale, half zero) {
@@ -98,18 +77,20 @@ half8 dequant_u4x8(uint packed, half scale, half zero) {
     }
 
     // Interpret as FP16 and subtract bias
-    half8 result = as_half8(unpacked) - half8(1024.0h);
+    half8 result = as_type<half8>(unpacked) - half8(1024.0h);
 
     // Apply scale and zero
     return (result - zero) * scale;
 }
 ```
 
-## Performance Comparison
+## Performance Notes (Qualitative)
 
-| Method | Cycles/element | Notes |
-|--------|----------------|-------|
-| Scalar FP4 | ~8 | Branch-heavy |
-| Vectorized FP4 | ~2 | Bitwise parallel |
-| Scalar INT4 | ~4 | int->float conversion |
-| Magic-bias INT4 | ~1.5 | No conversion |
+- Scalar FP4 is branchy and slow; use only for validation.
+- Bitwise FP4 avoids LUT loads and integer-to-float conversions.
+- Magic-bias INT4 is the fastest path for 4-bit integer dequant.
+- Actual throughput depends on memory traffic and kernel fusion.
+
+## See Also
+
+- [dequant_algorithm.md](dequant_algorithm.md) for the exact bitwise algorithms and constants.

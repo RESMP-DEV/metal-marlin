@@ -1,5 +1,11 @@
 # Storage Mode Audit (Metal buffers)
 
+Status (2026-01-28)
+- GEMM/dequant paths in `metal_marlin/kernels.py` now allocate parameter buffers
+  via private buffers (managed staging + blit) instead of shared.
+- `autotune.py`, `mla_kernels.py`, and `sampler_metal.py` still use shared buffers
+  for scalar params and sampling scratch.
+
 Scope: `metal_marlin/kernels.py`, `metal_marlin/sampler_metal.py`,
 `metal_marlin/autotune.py`, `metal_marlin/inference_metal.py`,
 `metal_marlin/mla_kernels.py`.
@@ -23,35 +29,35 @@ Function: `run_kernel` (around line 260)
 
 ## `metal_marlin/kernels.py`
 
-Function: `marlin_gemm_fp4` (around line 1146)
+Function: `marlin_gemm_fp4` (params buffers)
 
 | Buffer | Current mode | Purpose | Access pattern | Suggested mode |
 | --- | --- | --- | --- | --- |
-| `params_buf` | Shared | Constant params (M, N, K, group_size) | CPU write, GPU read | Managed |
+| `params_buf` | Private (staged) | Constant params (M, N, K, group_size) | CPU write -> blit -> GPU read | Private (current) |
 
-Function: `marlin_gemm_int4` (around line 1230)
-
-| Buffer | Current mode | Purpose | Access pattern | Suggested mode |
-| --- | --- | --- | --- | --- |
-| `params_buf` | Shared | Constant params (M, N, K, group_size) | CPU write, GPU read | Managed |
-
-Function: `dequant_fp4` (around line 1295)
+Function: `marlin_gemm_int4` (params buffers)
 
 | Buffer | Current mode | Purpose | Access pattern | Suggested mode |
 | --- | --- | --- | --- | --- |
-| `params_buf` | Shared | Constant params (K, N, group_size) | CPU write, GPU read | Managed |
+| `params_buf` | Private (staged) | Constant params (M, N, K, group_size) | CPU write -> blit -> GPU read | Private (current) |
 
-Function: `hadamard_transform` (around line 1528)
-
-| Buffer | Current mode | Purpose | Access pattern | Suggested mode |
-| --- | --- | --- | --- | --- |
-| `params_buf` | Shared | Constant params (n, normalize flag) | CPU write, GPU read | Managed |
-
-Function: `decode_gemv_fp4` (around line 1601)
+Function: `dequant_fp4` (params buffers)
 
 | Buffer | Current mode | Purpose | Access pattern | Suggested mode |
 | --- | --- | --- | --- | --- |
-| `params_buf` | Shared | Constant params (K, N, group_size) | CPU write, GPU read | Managed |
+| `params_buf` | Private (staged) | Constant params (K, N, group_size) | CPU write -> blit -> GPU read | Private (current) |
+
+Function: `hadamard_transform` (params buffers)
+
+| Buffer | Current mode | Purpose | Access pattern | Suggested mode |
+| --- | --- | --- | --- | --- |
+| `params_buf` | Private (staged) | Constant params (n, normalize flag) | CPU write -> blit -> GPU read | Private (current) |
+
+Function: `decode_gemv_fp4` (params buffers)
+
+| Buffer | Current mode | Purpose | Access pattern | Suggested mode |
+| --- | --- | --- | --- | --- |
+| `params_buf` | Private (staged) | Constant params (K, N, group_size) | CPU write -> blit -> GPU read | Private (current) |
 
 ## `metal_marlin/mla_kernels.py`
 
@@ -118,3 +124,7 @@ Function: `_greedy_sample_metal` (around line 895)
 ## `metal_marlin/inference_metal.py`
 
 No `newBuffer*` calls in this file.
+
+## Resolved issues
+- GEMM/dequant parameter buffers in `kernels.py` are no longer shared.
+  See `docs/resolved_bugs.md`.

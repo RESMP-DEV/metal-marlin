@@ -8,15 +8,16 @@ Optimal tile dimensions for the Metal Marlin GEMM kernels, derived from M4 Max h
 
 | Parameter | M4 Max Value | Constraint Source |
 |-----------|:------------:|-------------------|
-| GPU cores | 40 | Chip spec |
+| GPU cores | 40 | `metal_marlin.profiling.AppleSiliconGPU` |
 | Threads per simdgroup | 32 | Fixed (Apple GPU ISA) |
 | Max threads per threadgroup | 1024 | Metal API limit |
-| Threadgroup memory | 32 KB | Per-threadgroup allocation |
+| Threadgroup memory | 32 KB | Per-threadgroup limit (Metal) |
 | simdgroup_matrix tile | 8x8 | Metal Shading Language fixed |
-| L1 cache per core | 64 KB | Shared instruction/data |
-| L2 cache (shared) | 32 MB | System-level cache |
-| Register file | ~64 KB per simdgroup | Estimated from occupancy data |
-| Memory bandwidth | 546 GB/s | Unified memory (M4 Max) |
+| L1 cache per core | Not publicly specified | Device-dependent |
+| L2 cache (shared) | Not publicly specified | Device-dependent |
+| Register file | Not publicly specified | Device-dependent |
+| Peak FP16 throughput | ~32 TFLOPS | `metal_marlin.profiling.AppleSiliconGPU` |
+| Memory bandwidth | 546 GB/s | `metal_marlin.profiling.AppleSiliconGPU` |
 
 ---
 
@@ -92,114 +93,39 @@ consuming 128 FMA operations (8*8*2 per output element = 2 MADs per element for 
 
 ### 3.2 Work Distribution Within a Threadgroup
 
-With 4 simdgroups (128 threads), the output tile is partitioned:
+With 4 simdgroups (128 threads) and TILE_M=TILE_N=64, each simdgroup computes a
+4x4 block of 8x8 tiles (32x32 output). The 4 simdgroups form a 2x2 grid over the
+64x64 output tile. This matches the constants in `src/marlin_gemm.metal`:
 
 ```
-TILE_M x TILE_N output tile (e.g., 64x64)
-
-Simdgroup layout (2 rows x 2 cols of simdgroup blocks):
-
-  ┌─────────────────────────────────────────────────────────────┐
-  │  SG 0: rows [0,15], cols [0,31]    │  SG 1: rows [0,15], cols [32,63]   │
-  │  2 x 4 = 8 tiles of 8x8            │  2 x 4 = 8 tiles of 8x8            │
-  ├─────────────────────────────────────────────────────────────┤
-  │  SG 2: rows [16,31], cols [0,31]   │  SG 3: rows [16,31], cols [32,63]  │
-  │  2 x 4 = 8 tiles of 8x8            │  2 x 4 = 8 tiles of 8x8            │
-  └─────────────────────────────────────────────────────────────┘
-
-  Wait - that only covers 32 rows. For 64 rows with 4 simdgroups:
-```
-
-The actual layout in `marlin_gemm.metal` uses:
-
-```
-SG_M_TILES = 2    (2 rows of 8x8 = 16 rows per simdgroup)
+SG_M_TILES = 4    (4 rows of 8x8 = 32 rows per simdgroup)
 SG_N_TILES = 4    (4 cols of 8x8 = 32 cols per simdgroup)
 
-sg_row_offset = (simd_id / 2) * 16    → SG 0,1: row 0;  SG 2,3: row 16
-sg_col_offset = (simd_id % 2) * 32    → SG 0,2: col 0;  SG 1,3: col 32
+sg_row_offset = (simd_id / 2) * (SG_M_TILES * 8)  // 0 or 32
+sg_col_offset = (simd_id % 2) * (SG_N_TILES * 8)  // 0 or 32
 ```
 
-This covers 32x64 of the 64x64 output. The remaining 32 rows require the simdgroups to iterate. In the current kernel, `SG_M_TILES=2` means each simdgroup handles only a 16x32 sub-block, and 4 simdgroups tile the full 64x64:
+Layout:
 
 ```
   ┌───────────────────────────────────────────────┐
-  │  SG 0 (16x32)      │  SG 1 (16x32)           │  rows 0-15
+  │  SG 0 (rows 0-31, cols 0-31)  │  SG 1 (rows 0-31, cols 32-63) │
   ├───────────────────────────────────────────────┤
-  │  SG 2 (16x32)      │  SG 3 (16x32)           │  rows 16-31
+  │  SG 2 (rows 32-63, cols 0-31) │  SG 3 (rows 32-63, cols 32-63)│
   └───────────────────────────────────────────────┘
-            ↕  But TILE_M = 64, not 32!
 ```
 
-Correction: examining the kernel more carefully, the 4 simdgroups only cover a 32x64 sub-tile (rows 0-31). For the full 64x64 tile, either:
-- Each simdgroup would need to handle `SG_M_TILES=4` (4 rows of 8x8 = 32 rows), covering 32x32 per SG, and 4 SGs tile 64x64 as a 2x2 grid, or
-- The current kernel intentionally processes only half the M-tile per simdgroup pass (which would leave the bottom 32 rows uncomputed).
+### 3.3 Alternative Simdgroup Decompositions
 
-The actual implementation uses `SG_M_TILES=2, SG_N_TILES=4` with the simdgroup layout `(simd_id/2, simd_id%2)`, giving each simdgroup a 16x32 block. The 4 simdgroups cover exactly 2*16 = 32 rows and 2*32 = 64 columns. **This means the effective coverage is 32x64, not 64x64.** The remaining 32 rows of the 64-row tile go uncomputed in the current simdgroup assignment.
+For tiles larger than 64x64, you have two primary options:
 
-This is a kernel bug in the reference implementation. The fix is either:
-1. Increase `SG_M_TILES` to 4 (each SG handles 32x32, 4 SGs tile 64x64)
-2. Change the SG layout to `(simd_id/4, simd_id%4)` for a 1x4 split (16x64 per SG, 4 SGs = 64x64)
+1. Increase SG_M_TILES / SG_N_TILES so each simdgroup covers a larger block
+   (more accumulators and register pressure), or
+2. Keep SG_M_TILES / SG_N_TILES fixed and loop over additional M or N blocks
+   (more passes, less register pressure).
 
-For this document, we analyze the *corrected* configurations.
-
-### 3.3 Corrected Simdgroup Decompositions
-
-**Configuration A: 64x64x32, SG_M=4, SG_N=2 (each SG: 32x16)**
-
-```
-4 simdgroups, each handles 4 M-tiles x 2 N-tiles of 8x8:
-  SG 0: rows [0,31],  cols [0,15]
-  SG 1: rows [0,31],  cols [16,31]
-  SG 2: rows [0,31],  cols [32,47]
-  SG 3: rows [0,31],  cols [48,63]
-
-Problem: only covers 32 rows. Need SG_M=8 for 64 rows with 1 col each,
-or restructure to 2x2 grid with SG_M=4, SG_N=4 per SG (32x32 per SG).
-```
-
-**Configuration B: 64x64x32, SG_M=4, SG_N=4 (each SG: 32x32, 2x2 grid)**
-
-```
-sg_row_offset = (simd_id / 2) * 32
-sg_col_offset = (simd_id % 2) * 32
-
-SG 0: rows [0,31],  cols [0,31]     SG 1: rows [0,31],  cols [32,63]
-SG 2: rows [32,63], cols [0,31]     SG 3: rows [32,63], cols [32,63]
-```
-
-Each simdgroup computes 4*4 = 16 `simdgroup_multiply_accumulate` calls per K sub-tile, times K_TILES=4 K sub-tiles = 64 MMA ops per K-block. This yields:
-
-```
-FLOPs per K-block: 64 * 256 = 16,384
-Bytes loaded per K-block: (64*32 + 32*64) * 2 = 8,192 bytes
-Arithmetic intensity: 16,384 / 8,192 = 2.0 FLOPs/byte
-```
-
-**Configuration C: 128x64x16, SG_M=4, SG_N=4 (each SG: 32x32)**
-
-```
-sg_row_offset = (simd_id / 2) * 32
-sg_col_offset = (simd_id % 2) * 32
-
-Only covers 64 of the 128 M rows → need 8 simdgroups or SG_M=8.
-With 4 SGs: each handles 32x32, covering 64x64 of the 128x64 tile.
-Remaining 64 rows require a second pass (reduces effective throughput).
-```
-
-Better: use SG_M=8, SG_N=2 (each SG: 64x16):
-
-```
-sg_row_offset = (simd_id / 2) * 64   → Problem: simd_id/2 gives 0,0,1,1
-```
-
-The constraint is that 4 simdgroups can tile at most 4 independent regions. For 128x64:
-
-```
-4x1 layout: each SG handles 32x64 (SG_M=4, SG_N=8)
-  → 32 MMA ops per K sub-tile, K_TILES=2 → 64 total per K-block
-  → 16,384 FLOPs, 6,144 bytes loaded → AI = 2.67
-```
+Both approaches are valid; choose based on register pressure, occupancy, and
+dispatch overhead for your target workload.
 
 ### 3.4 Accumulator Register Pressure
 
@@ -212,7 +138,10 @@ Each `simdgroup_matrix<half, 8, 8>` accumulator occupies 128 bytes across the 32
 | 128x64 (4x1 SG) | 4 | 8 | 32 | 128 | 256 |
 | 32x128 (1x4 SG) | 4 | 4 | 16 | 64 | 128 |
 
-Apple Silicon has generous register files (~64 KB per simdgroup estimated, i.e., ~2048 bytes per thread). Even 32 accumulators (256 bytes/thread with FP32 internal) represent only ~12.5% of register capacity. Register pressure is not a binding constraint for any practical tile size.
+Apple Silicon has large register files, but the exact size is not publicly
+specified. Even 32 accumulators (256 bytes/thread with FP32 internal) are
+typically manageable, yet register pressure can still limit occupancy in some
+kernels. Use the occupancy tooling to validate per-kernel limits.
 
 ---
 
@@ -223,11 +152,14 @@ Occupancy on Apple Silicon GPUs is the number of concurrent threadgroups executi
 ### 4.1 Limiting Factors
 
 Each GPU core has:
-- 32 KB threadgroup memory (shared across all active threadgroups on that core)
-- A fixed number of thread slots (estimated 1024-2048 per core)
-- Register file partitioned among active simdgroups
+- A per-threadgroup memory limit of 32 KB (Metal)
+- A fixed number of thread slots (device-dependent)
+- A register file shared across active simdgroups
 
-**Threadgroup memory is the primary limiter.** If a kernel uses X bytes of threadgroup memory, the maximum concurrent threadgroups per core is `floor(32768 / X)`.
+**Threadgroup memory is often the primary limiter.** The formula
+`floor(32768 / X)` is a useful upper bound, but actual occupancy can be lower
+due to thread and register limits. Use the occupancy tooling for device-specific
+results.
 
 | Kernel Variant | TG Memory | Max Concurrent TGs | Threads/core |
 |:---:|:---:|:---:|:---:|
@@ -291,7 +223,11 @@ Per tile iteration:
 | 128x128x16 | 524,288 | 4,096 | 1,024 | **102.4** |
 | 64x64x64 | 524,288 | 8,192 | 2,048 | **51.2** |
 
-All configurations are deeply compute-bound (AI >> 10). The M4 Max achieves ~27.8 TFLOPS FP16 with 546 GB/s bandwidth, giving a machine balance of ~51 FLOPs/byte. All configs exceed this threshold, meaning the kernel should be compute-bound with perfect scheduling.
+All configurations have high arithmetic intensity. Using the M4 Max model values
+in `metal_marlin.profiling` (about 32 TFLOPS FP16 and 546 GB/s), the machine
+balance is roughly 59 FLOPs/byte. With that balance, 64x64x32 is near the
+compute/memory boundary, while larger tiles are more comfortably compute-bound.
+Recompute this threshold for your exact device using the profiling tools.
 
 ### 5.2 Comparison with FP16 (No Quantization)
 
@@ -303,7 +239,9 @@ With FP16 B weights (2 bytes per element instead of 0.5):
 | 128x64x16 | 42.7 | 56.9 | 1.3x |
 | 32x128x32 | 32.0 | 64.0 | 2.0x |
 
-FP4 quantization reduces B-matrix memory traffic by 4x, pushing all configurations firmly into the compute-bound regime where the benefit comes from reduced memory bandwidth consumption.
+FP4 quantization reduces B-matrix memory traffic by 4x, increasing arithmetic
+intensity. Whether a configuration is compute-bound or memory-bound still
+depends on the device's peak FLOPs/byte balance.
 
 ### 5.3 Dequant Compute Overhead
 

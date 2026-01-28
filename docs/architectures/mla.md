@@ -451,4 +451,4 @@ Typical speedup: 5-15% for attention-bound workloads.
 - [Mixed Precision](../mixed_precision.md) - Layer-wise precision configuration
 - [MoE Architecture](../moe_architecture.md) - MoE-specific considerations
 - [MR-GPTQ](../mr_gptq.md) - Hadamard rotation and Hessian calibration
-- [RoPE Implementation](../rope.md) - RoPE kernel documentation
+- [RoPE Implementation](../metal_kernel_audit.md#position-encoding-15-variants) - RoPE kernel documentation

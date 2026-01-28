@@ -2,12 +2,6 @@
 
 Metal Marlin provides native Metal compute kernels for quantized LLM inference on Apple Silicon. All APIs use PyTorch MPS tensors with custom Metal shaders dispatched via PyObjC.
 
-## Requirements
-
-- macOS with Apple Silicon (M1/M2/M3/M4)
-- PyTorch 2.0+ with MPS backend
-- PyObjC Metal bindings: `pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders`
-
 ## Transformers Integration (Recommended)
 
 Metal Marlin integrates directly with HuggingFace Transformers by replacing
@@ -72,6 +66,14 @@ load_quantized(path: str | Path, device: str = "mps") -> torch.nn.Module
 ```
 
 Load a previously quantized checkpoint from disk.
+
+For migration details from legacy classes, see `migration_guide.md`.
+
+## Requirements
+
+- macOS with Apple Silicon (M1/M2/M3/M4)
+- PyTorch 2.0+ with MPS backend
+- PyObjC Metal bindings: `pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders`
 
 ---
 
@@ -400,83 +402,6 @@ Pre-norm transformer decoder block: `x -> RMSNorm -> Attention -> + -> RMSNorm -
 
 ---
 
-## Model Classes
-
-### `MetalGLM47Model`
-
-```python
-class MetalGLM47Model(nn.Module):
-    def __init__(
-        self,
-        vocab_size: int = 151552,
-        hidden_size: int = 4096,
-        num_layers: int = 32,
-        num_heads: int = 32,
-        intermediate_size: int = 11008,
-        kv_lora_rank: int = 512,
-        q_lora_rank: int = 1536,
-        qk_rope_head_dim: int = 64,
-        max_position_embeddings: int = 4096,
-        rms_norm_eps: float = 1e-6,
-        rope_theta: float = 10000.0,
-        rope_ratio: float = 1.0,
-        bits: Literal[2, 4, 8] = 4,
-        group_size: int = 128,
-    )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        kv_cache: MetalKVCache | None = None,
-    ) -> torch.Tensor
-
-    def create_kv_cache(self, batch_size: int = 1) -> MetalKVCache
-
-    def generate(
-        self,
-        input_ids: torch.Tensor,
-        max_tokens: int = 256,
-        temperature: float = 0.7,
-        top_p: float = 0.9,
-        top_k: int = 50,
-        repetition_penalty: float = 1.1,
-        eos_token_id: int = 2,
-        streamer: Callable[[int], None] | None = None,
-    ) -> torch.Tensor
-
-    def generate_stream(
-        self,
-        input_ids: torch.Tensor,
-        config: MetalGenerationConfig,
-    ) -> Iterator[int]
-
-    @classmethod
-    def from_quantized(
-        cls,
-        model_path: Path | str,
-        bits: Literal[2, 4, 8] = 4,
-    ) -> MetalGLM47Model
-```
-
-Complete GLM-4.7-Flash model with MLA attention, optimized for Apple Silicon.
-
-**Example:**
-```python
-from metal_marlin.inference_metal import MetalGLM47Model
-
-model = MetalGLM47Model.from_quantized("path/to/model", bits=4)
-
-# Simple generation
-output = model.generate(input_ids, max_tokens=128, temperature=0.7)
-
-# Streaming generation
-for token_id in model.generate_stream(input_ids, config):
-    print(tokenizer.decode([token_id]), end="", flush=True)
-```
-
----
-
 ## Token Sampling
 
 ### `MetalSampler`
@@ -742,3 +667,155 @@ metal_buffer_to_numpy(
 ```
 
 Read Metal buffer contents to numpy array (copy).
+
+---
+
+## Deprecated Classes (Legacy)
+
+These classes are deprecated and will be removed in a future major release.
+Use the Transformers integration (`replace_linear_layers`) or
+`TransformersMarlinPipeline` instead. See `migration_guide.md` for migration steps.
+
+### `MetalGLM47Model`
+
+**Deprecated:** Use `AutoModelForCausalLM` + `replace_linear_layers()` instead.
+
+```python
+class MetalGLM47Model(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int = 151552,
+        hidden_size: int = 4096,
+        num_layers: int = 32,
+        num_heads: int = 32,
+        intermediate_size: int = 11008,
+        kv_lora_rank: int = 512,
+        q_lora_rank: int = 1536,
+        qk_rope_head_dim: int = 64,
+        max_position_embeddings: int = 4096,
+        rms_norm_eps: float = 1e-6,
+        rope_theta: float = 10000.0,
+        rope_ratio: float = 1.0,
+        bits: Literal[2, 4, 8] = 4,
+        group_size: int = 128,
+    )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        kv_cache: MetalKVCache | None = None,
+    ) -> torch.Tensor
+
+    def create_kv_cache(self, batch_size: int = 1) -> MetalKVCache
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        top_k: int = 50,
+        repetition_penalty: float = 1.1,
+        eos_token_id: int = 2,
+        streamer: Callable[[int], None] | None = None,
+    ) -> torch.Tensor
+
+    def generate_stream(
+        self,
+        input_ids: torch.Tensor,
+        config: MetalGenerationConfig,
+    ) -> Iterator[int]
+
+    @classmethod
+    def from_quantized(
+        cls,
+        model_path: Path | str,
+        bits: Literal[2, 4, 8] = 4,
+    ) -> MetalGLM47Model
+```
+
+**Recommended replacement:**
+```python
+from transformers import AutoModelForCausalLM
+from metal_marlin import replace_linear_layers
+
+model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash")
+replace_linear_layers(model, bits=4, group_size=128)
+```
+
+---
+
+### `QuantizedLlamaLayer`
+
+**Deprecated:** Use `AutoModelForCausalLM` + `replace_linear_layers()` instead.
+
+```python
+class QuantizedLlamaLayer(nn.Module):
+    def __init__(
+        self,
+        quantized_model: QuantizedModel,
+        layer_idx: int,
+        warn_if_standalone: bool = True,
+    )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        kv_cache: Any | None = None,
+        layer_idx: int = 0,
+    ) -> torch.Tensor
+```
+
+**Recommended replacement:**
+```python
+from transformers import AutoModelForCausalLM
+from metal_marlin import replace_linear_layers
+
+model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
+replace_linear_layers(model, bits=4, group_size=128)
+```
+
+---
+
+### `MarlinPipeline`
+
+**Deprecated:** Use `TransformersMarlinPipeline` instead (or Transformers +
+`replace_linear_layers()` for manual control).
+
+```python
+class MarlinPipeline:
+    def __init__(
+        self,
+        model: Any,
+        tokenizer: Any | None = None,
+        device: str | None = "mps",
+    ) -> None
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        path: str | Path,
+        quant_type: str = "fp4",
+        device: str | None = None,
+        **kwargs: Any,
+    ) -> MarlinPipeline
+
+    def __call__(
+        self,
+        prompt: str | list[str],
+        **kwargs: Any,
+    ) -> str | Iterator[str] | list[str]
+```
+
+**Recommended replacement:**
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from metal_marlin import replace_linear_layers
+
+model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash")
+tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
+replace_linear_layers(model, bits=4, group_size=128)
+```
