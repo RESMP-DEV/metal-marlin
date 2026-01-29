@@ -48,11 +48,13 @@
 
 **Quantization:**
 - [x] Dequant (dequant.metal) - FP4 unpacking
-- [x] Dequant FP8 (dequant_fp8.metal)
-- [x] Dequant INT8 (dequant_int8.metal)
-- [x] Dequant Sub-4bit (dequant_sub4bit.metal)
-- [x] Viterbi Quantization (viterbi_quant.metal)
-- [x] Hessian (hessian.metal)
+- [x] Dequant FP8 (dequant_fp8.metal) - FP8 unpacking
+- [x] Dequant INT8 (dequant_int8.metal) - INT8 unpacking
+- [x] Dequant Sub-4bit (dequant_sub4bit.metal) - Sub-4bit unpacking
+- [⚠️] Hessian (hessian.metal) - **Python wrapper complete, using PyTorch MPS fallback**
+  - Issue: Threadgroup memory exceeds 32KB limit (33024 bytes)
+  - Issue: FP16 kernel compilation errors  
+  - Status: gptq_metal.py dispatches via MPS matmul: `H = 2.0 * (X.T @ X)`
 - [x] Cholesky (cholesky.metal)
 
 **Other:**

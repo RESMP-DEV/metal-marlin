@@ -1942,6 +1942,133 @@ def benchmark_moe_dispatch(
 
 
 # ---------------------------------------------------------------------------
+# Hessian Computation Dispatch (Metal-accelerated H = X^T @ X)
+# ---------------------------------------------------------------------------
+
+
+def dispatch_hessian_compute(
+    lib: MetalKernelLibrary,
+    X: torch.Tensor,
+    sigma_reg: float = 0.01,
+) -> torch.Tensor:
+    """Dispatch Metal Hessian computation kernel.
+
+    Computes H = 2 * X^T @ X using optimized simdgroup matrix operations.
+    Much faster than PyTorch MPS for large matrices (4K+ hidden dim).
+
+    Args:
+        lib: MetalKernelLibrary with hessian.metal compiled
+        X: Activation matrix [n_samples, hidden_dim], float16/bf16/float32, MPS tensor
+        sigma_reg: Regularization as fraction of diagonal mean (default 0.01)
+
+    Returns:
+        H: Hessian matrix [hidden_dim, hidden_dim], float32, MPS tensor
+    """
+    require_mps()
+
+    device = lib.device
+    n_samples, hidden_dim = X.shape
+
+    # Convert to float16 for Metal kernel (uses FP32 accumulation internally)
+    X_fp16 = X.half().contiguous()
+
+    # Allocate output Hessian
+    H = torch.zeros(hidden_dim, hidden_dim, dtype=torch.float32, device="mps")
+
+    # Create Metal buffers
+    X_buf = mps_tensor_to_metal_buffer(X_fp16, device)
+    H_buf = mps_tensor_to_metal_buffer(H, device, copy_back=True)
+
+    # Create parameter buffers
+    n_samples_buf = device.newBufferWithBytes_length_options_(
+        np.array([n_samples], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hidden_dim_buf = device.newBufferWithBytes_length_options_(
+        np.array([hidden_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    # Tile dimensions from hessian.metal (HESSIAN_TILE_DIM = 64)
+    TILE_DIM = 64
+    THREADS_PER_TG = 128  # 4 simdgroups * 32 threads
+
+    grid_x = (hidden_dim + TILE_DIM - 1) // TILE_DIM
+    grid_y = (hidden_dim + TILE_DIM - 1) // TILE_DIM
+
+    # Dispatch hessian_compute_fp16 kernel
+    dispatch_kernel(
+        lib,
+        function_name="hessian_compute_fp16",
+        grid=(grid_x, grid_y, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[X_buf, H_buf, n_samples_buf, hidden_dim_buf],
+        wait=True,
+    )
+
+    # Apply regularization: H += sigma_reg * mean(diag(H)) * I
+    diag_mean = H.diagonal().mean()
+    H += sigma_reg * diag_mean * torch.eye(hidden_dim, device="mps", dtype=torch.float32)
+
+    # Normalize: H /= n_samples (the kernel computes 2 * X^T @ X, we want X^T @ X / n_samples)
+    # Actually the kernel already multiplies by 2, so we divide by 2 * n_samples
+    H /= 2 * n_samples
+
+    return H
+
+
+def dispatch_hessian_accumulate(
+    lib: MetalKernelLibrary,
+    X: torch.Tensor,
+    H: torch.Tensor,
+) -> torch.Tensor:
+    """Accumulate into existing Hessian: H += 2 * X^T @ X.
+
+    For streaming/batched Hessian collection.
+
+    Args:
+        lib: MetalKernelLibrary with hessian.metal compiled
+        X: Activation matrix [n_samples, hidden_dim], MPS tensor
+        H: Existing Hessian [hidden_dim, hidden_dim], float32, MPS tensor (modified in-place)
+
+    Returns:
+        H: Updated Hessian (same tensor, modified in-place)
+    """
+    require_mps()
+
+    device = lib.device
+    n_samples, hidden_dim = X.shape
+
+    X_fp16 = X.half().contiguous()
+    H = H.contiguous()
+
+    X_buf = mps_tensor_to_metal_buffer(X_fp16, device)
+    H_buf = mps_tensor_to_metal_buffer(H, device, copy_back=True)
+
+    n_samples_buf = device.newBufferWithBytes_length_options_(
+        np.array([n_samples], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hidden_dim_buf = device.newBufferWithBytes_length_options_(
+        np.array([hidden_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    TILE_DIM = 64
+    THREADS_PER_TG = 128
+
+    grid_x = (hidden_dim + TILE_DIM - 1) // TILE_DIM
+    grid_y = (hidden_dim + TILE_DIM - 1) // TILE_DIM
+
+    dispatch_kernel(
+        lib,
+        function_name="hessian_accumulate",
+        grid=(grid_x, grid_y, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[X_buf, H_buf, n_samples_buf, hidden_dim_buf],
+        wait=True,
+    )
+
+    return H
+
+
+# ---------------------------------------------------------------------------
 # Viterbi Quantization Dispatch
 # ---------------------------------------------------------------------------
 
