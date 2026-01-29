@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from ._compat import Metal
 from .metal_dispatch import (
     dispatch_kernel,
     get_default_library,
@@ -90,17 +91,17 @@ def group_tokens_by_expert_metal(
     batch_size_buf = device.newBufferWithBytes_length_options_(
         np.array([batch_size], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     top_k_buf = device.newBufferWithBytes_length_options_(
         np.array([top_k], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     num_experts_buf = device.newBufferWithBytes_length_options_(
         np.array([num_experts], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
 
     # Dispatch moe_compute_grouping kernel

@@ -11,9 +11,8 @@ pytestmark = pytest.mark.skipif(not _USE_METAL, reason="Metal not available")
     (256, 4, 64),
 ])
 def test_group_tokens_matches_pytorch(batch, top_k, num_experts):
-    from metal_marlin.moe_dispatch_metal import group_tokens_by_expert_metal
-
     import metal_marlin.moe_dispatch as mod
+    from metal_marlin.moe_dispatch_metal import group_tokens_by_expert_metal
 
     torch.manual_seed(42)
     expert_ids = torch.randint(0, num_experts, (batch, top_k), device="mps")

@@ -9,6 +9,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from ._compat import Metal
 from .metal_dispatch import (
     dispatch_kernel,
     get_default_library,
@@ -74,17 +75,17 @@ def rmsnorm_metal(
     num_tokens_buf = device.newBufferWithBytes_length_options_(
         np.array([num_tokens], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     hidden_dim_buf = device.newBufferWithBytes_length_options_(
         np.array([hidden_dim], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     eps_buf = device.newBufferWithBytes_length_options_(
         np.array([eps], dtype=np.float32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
 
     # Compute grid dimensions - one threadgroup per token
@@ -173,17 +174,17 @@ def layernorm_metal(
     num_tokens_buf = device.newBufferWithBytes_length_options_(
         np.array([num_tokens], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     hidden_dim_buf = device.newBufferWithBytes_length_options_(
         np.array([hidden_dim], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     eps_buf = device.newBufferWithBytes_length_options_(
         np.array([eps], dtype=np.float32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
 
     # Compute grid dimensions - one threadgroup per token
@@ -271,17 +272,17 @@ def rmsnorm_fused_residual_metal(
     num_tokens_buf = device.newBufferWithBytes_length_options_(
         np.array([num_tokens], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     hidden_dim_buf = device.newBufferWithBytes_length_options_(
         np.array([hidden_dim], dtype=np.uint32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
     eps_buf = device.newBufferWithBytes_length_options_(
         np.array([eps], dtype=np.float32).tobytes(),
         4,
-        device.MTLResourceStorageModeShared,
+        Metal.MTLResourceStorageModeShared,
     )
 
     # Compute grid dimensions - one threadgroup per token
