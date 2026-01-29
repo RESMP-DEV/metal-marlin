@@ -524,6 +524,20 @@ class MetalMarlinModel:
         assert torch is not None
 
         weight = self._get_weight(weight_name)
+
+        # Try Metal implementation if available
+        try:
+            from ..layernorm_metal import require_metal, require_mps, rmsnorm_metal
+            from ..metal_dispatch import HAS_METAL
+
+            if HAS_METAL and x.is_mps and weight.is_mps:
+                require_metal()
+                require_mps()
+                return rmsnorm_metal(x, weight, self.rms_norm_eps)
+        except Exception:
+            pass
+
+        # Fallback to PyTorch implementation
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.rms_norm_eps)
         return x * weight
@@ -541,6 +555,26 @@ class MetalMarlinModel:
         """
         assert torch is not None
 
+        # Try Metal implementation if available
+        try:
+            from ..layernorm_metal import require_metal, require_mps, rmsnorm_metal
+            from ..metal_dispatch import HAS_METAL
+
+            if HAS_METAL and x.is_mps and weight.is_mps:
+                require_metal()
+                require_mps()
+                # Reshape for per-head processing
+                orig_shape = x.shape
+                batch, heads, seq_len, head_dim = orig_shape
+                x_reshaped = x.view(batch * heads * seq_len, head_dim)
+                # Expand weight to match all tokens
+                weight_expanded = weight.unsqueeze(0).expand(batch * heads * seq_len, -1)
+                result = rmsnorm_metal(x_reshaped, weight_expanded, self.rms_norm_eps)
+                return result.view(orig_shape)
+        except Exception:
+            pass
+
+        # Fallback to PyTorch implementation
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.rms_norm_eps)
         return x * weight
@@ -689,10 +723,13 @@ class MetalMarlinModel:
         gate = self._quantized_linear(hidden, f"{prefix}.gate_proj.weight")
         up = self._quantized_linear(hidden, f"{prefix}.up_proj.weight")
 
-        # SwiGLU activation - use fused Metal kernel (handles fallback internally)
-        from ..activation_metal import swiglu_fused_metal
+        # SwiGLU activation - use fused Metal kernel
+        from ..activation_metal import _USE_METAL_ACTIVATION, swiglu_fused_metal
 
-        hidden = swiglu_fused_metal(gate, up)
+        if _USE_METAL_ACTIVATION and gate.is_mps:
+            hidden = swiglu_fused_metal(gate, up)
+        else:
+            hidden = torch.nn.functional.silu(gate) * up
 
         return self._quantized_linear(hidden, f"{prefix}.down_proj.weight")
 

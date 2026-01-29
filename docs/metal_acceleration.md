@@ -60,40 +60,14 @@ output = inference_metal.compute_marlin_gemm(input, weight, scales, zeros)
 
 | Operation | Metal Shader | Python Module | Fallback |
 |-----------|--------------|---------------|----------|
-| FP4 GEMM | `gemm_fp4_optimized.metal` | `quantize_fp4.py` | PyTorch `nn.Linear` |
-| Marlin GEMM | `marlin_gemm.metal` | `inference_metal.py` | PyTorch matmul |
-| Dense GEMM | `dense_gemm.metal` | `inference_metal.py` | PyTorch matmul |
-| Batched GEMM | `batched_gemm.metal` | `inference_metal.py` | `torch.bmm` |
-| Int8 Dequantization | `dequant_int8.metal` | `inference_metal.py` | NumPy dequant |
-| FP8 Dequantization | `dequant_fp8.metal` | `fp8_utils.py` | NumPy dequant |
-| Sub-4-bit Dequant | `dequant_sub4bit.metal` | `sub4bit.py` | NumPy dequant |
-| Flash Attention v2 | `flash_attention_v2.metal` | `flash_attention_v2.py` | `torch.nn.functional.scaled_dot_product_attention` |
-| Standard Attention | `attention.metal` | `attention.py` | PyTorch attention |
-| Paged Attention | `paged_attention.metal` | `kv_cache.py` | `kv_cache_torch.py` |
-| MLA Attention | `mla_proj.metal` | `mla_attention.py` | PyTorch matmul |
-| Sliding Window Attention | `sliding_window_attention.metal` | `sliding_window_attention.py` | PyTorch attention |
-| Diff Attention | `diff_attention.metal` | `attention.py` | PyTorch attention |
-| Tree Attention | `tree_attention.metal` | `tree_attention.py` | PyTorch attention |
-| SiMD Group Attention | `simdgroup_attention.metal` | `attention.py` | PyTorch attention |
-| MoE Dispatch | `moe_dispatch.metal`, `moe_dispatch_optimized.metal` | `moe_dispatch.py` | PyTorch indexing |
-| MoE Expert GEMM | `moe_expert_gemm.metal` | `moe_ops.py` | PyTorch matmul |
-| MoE Router | `moe_router.metal` | `moe_dispatch.py` | PyTorch softmax |
-| MoE Shared Expert | `moe_shared_expert.metal` | `moe_ops.py` | PyTorch matmul |
-| Token Sampling | `sampling.metal` | `sampler_metal.py`, `sampler.py` | PyTorch multinomial |
-| Top-k/p Sampling | `sampling.metal` | `sampler_metal.py` | PyTorch operations |
-| Hadamard Transform | `hadamard.metal` | `hadamard.py` | NumPy hadamard |
-| RoPE Embeddings | `rope.metal` | `rope.py` | PyTorch RoPE |
-| RMSNorm / LayerNorm | `gemm_epilogue.metal` | `inference_metal.py` | `torch.nn.functional.rms_norm` |
-| All-Reduce | `all_reduce.metal` | `distributed_gptq.py` | `torch.distributed` |
-| Sparse GEMM | `sparse_gemm.metal`, `sparse.metal` | `inference_metal.py` | `torch.sparse` |
-| Decode GEMV | `decode_gemv.metal` | `inference_metal.py` | PyTorch matmul |
-| Viterbi Quantization | `viterbi_quant.metal` | `quantize.py` | NumPy quantization |
-| Vision Preprocessing | `vision_preprocess.metal` | (loader modules) | TorchVision |
-| RWKV WKV Kernel | `rwkv_wkv.metal` | `transformer.py` | PyTorch RNN ops |
-| BF16 Compatibility | `bf16_compat.metal` | `metal_dispatch.py` | FP32 cast |
-| KV Cache Management | `paged_attention.metal` | `cache_metal.py`, `kv_cache.py` | `kv_cache_torch.py` |
-| Autotune Kernels | `kernels_autotune.metal` | `autotune.py` | Default configs |
-| GEMM Epilogue Fusion | `gemm_epilogue.metal` | `inference_metal.py` | Separate ops |
+| Hessian computation | hessian.metal | gptq_metal.py | numpy |
+| Cholesky decomposition | cholesky.metal | gptq_metal.py | numpy |
+| FP4 quantization | fp4_quantize.metal | quantize_fp4_metal.py | numpy |
+| Hadamard transform | hadamard.metal | hadamard_metal.py | numpy |
+| Token sampling | sampling.metal | sampler.py | torch |
+| MoE dispatch | moe_dispatch_metal.metal | moe_dispatch_metal.py | torch |
+| Activations (SiLU/GELU) | activation.metal | activation_metal.py | torch |
+| RMSNorm/LayerNorm | layernorm.metal | layernorm_metal.py | torch |
 
 ## Performance Benchmarks
 
@@ -101,14 +75,14 @@ output = inference_metal.compute_marlin_gemm(input, weight, scales, zeros)
 
 | Operation | Metal vs PyTorch CPU | Metal vs MPS Graph | Notes |
 |-----------|---------------------|-------------------|-------|
-| FP4 GEMM | 8-12x | 1.5-2x | Quantized inference |
-| Marlin GEMM | 6-10x | 1.3-1.8x | 4-bit quantized |
-| Flash Attention v2 | 4-6x | 1.2-1.5x | Memory-bound ops |
-| MoE Dispatch | 3-5x | 1.1-1.3x | Indexing overhead |
-| Token Sampling | 2-4x | 1.0-1.2x | Small kernel |
-| Hadamard Transform | 5-8x | 1.4-2x | Butterfly pattern |
-| RMSNorm | 2-3x | 1.0-1.1x | Element-wise |
-| Paged Attention | 4-7x | 1.3-1.6x | KV-cache optimized |
+| Hessian computation | 6-10x | 1.3-1.8x | GPTQ calibration |
+| Cholesky decomposition | 4-8x | 1.2-1.6x | Matrix factorization |
+| FP4 quantization | 8-12x | 1.5-2x | Quantized inference |
+| Hadamard transform | 5-8x | 1.4-2x | Butterfly pattern |
+| Token sampling | 2-4x | 1.0-1.2x | Small kernel |
+| MoE dispatch | 3-5x | 1.1-1.3x | Indexing overhead |
+| Activations | 2-3x | 1.0-1.1x | Element-wise |
+| RMSNorm/LayerNorm | 2-3x | 1.0-1.1x | Element-wise |
 
 ### Overall Inference Speedup
 
@@ -124,7 +98,7 @@ End-to-end inference speedups for common models (batch size 1, sequence length 4
 
 **Key factors affecting speedup:**
 - **Batch size**: Larger batches see diminishing returns (compute-bound)
-- **Sequence length**: Longer sequences benefit more from Flash Attention
+- **Sequence length**: Longer sequences benefit more from optimized kernels
 - **Quantization**: 4-bit quantized models show highest gains
 - **Memory bandwidth**: Metal kernels optimized for unified memory on Apple Silicon
 

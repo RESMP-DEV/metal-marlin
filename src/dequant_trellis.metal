@@ -370,3 +370,151 @@ inline half dequant_trellis_fused(
     }
     return half(grid[idx] * scale);
 }
+
+// ============================================================================
+// Sign Flip Kernels for Hadamard Inverse
+// ============================================================================
+
+/// Apply sign flips from su (row signs) and sv (column signs).
+///
+/// The trellis quantization uses Hadamard rotation with sign absorbing:
+///   W_rotated = diag(su) @ Had @ W_orig @ Had.T @ diag(sv)
+///
+/// To recover the original weight space (or get a usable approximation):
+///   W_dequant = diag(su) @ W_trellis_decoded @ diag(sv)
+///
+/// This kernel applies the sign flip: out[k,n] = su[k] * w[k,n] * sv[n]
+/// where su and sv contain ±1 values.
+///
+/// @param weights  Dequantized weights [K, N] half, modified in-place
+/// @param su       Row sign vector [K] float32 (±1 values)
+/// @param sv       Column sign vector [N] float32 (±1 values)
+/// @param K        Number of rows
+/// @param N        Number of columns
+kernel void apply_sign_flips(
+    device half* weights [[buffer(0)]],
+    device const float* su [[buffer(1)]],
+    device const float* sv [[buffer(2)]],
+    constant uint& K [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint n_idx = gid.x;
+    uint k_idx = gid.y;
+    
+    if (n_idx >= N || k_idx >= K) return;
+    
+    // Load signs (±1 values stored as float32)
+    float sign_k = su[k_idx];
+    float sign_n = sv[n_idx];
+    float combined_sign = sign_k * sign_n;
+    
+    // Apply combined sign flip
+    uint idx = k_idx * N + n_idx;
+    weights[idx] = half(float(weights[idx]) * combined_sign);
+}
+
+/// Vectorized sign flip kernel using half4 for better throughput.
+///
+/// Requires N to be a multiple of 4.
+///
+/// @param weights  Dequantized weights [K, N] as half4 array
+/// @param su       Row sign vector [K] float32
+/// @param sv       Column sign vector [N] float32  
+/// @param K        Number of rows
+/// @param N        Number of columns (must be multiple of 4)
+kernel void apply_sign_flips_vec4(
+    device half4* weights [[buffer(0)]],
+    device const float* su [[buffer(1)]],
+    device const float* sv [[buffer(2)]],
+    constant uint& K [[buffer(3)]],
+    constant uint& N [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint n_base = gid.x * 4;
+    uint k_idx = gid.y;
+    
+    if (n_base + 3 >= N || k_idx >= K) return;
+    
+    float sign_k = su[k_idx];
+    
+    // Load 4 column signs
+    float4 sign_n = float4(sv[n_base], sv[n_base + 1], sv[n_base + 2], sv[n_base + 3]);
+    float4 combined = sign_k * sign_n;
+    
+    // Load, apply, store
+    uint idx = k_idx * (N / 4) + gid.x;
+    half4 w = weights[idx];
+    weights[idx] = half4(float4(w) * combined);
+}
+
+// ============================================================================
+// Combined Dequant + Sign Flip Kernel
+// ============================================================================
+
+/// Fused trellis dequantization with sign flip application.
+///
+/// Combines dequant_trellis and apply_sign_flips into one kernel pass
+/// for better memory efficiency.
+///
+/// @param indices     Trellis indices [tiles_k, tiles_n, 256] int16
+/// @param scales      Per-group scales [n_groups, N] float32
+/// @param grid        Codebook grid [n_levels] float32
+/// @param su          Row sign vector [K] float32
+/// @param sv          Column sign vector [N] float32
+/// @param output      Dequantized output [K, N] half
+/// @param K           Number of rows
+/// @param N           Number of columns
+/// @param n_levels    Number of quantization levels
+/// @param group_size  Elements per quantization group
+kernel void dequant_trellis_with_signs(
+    device const short* indices [[buffer(0)]],
+    device const float* scales [[buffer(1)]],
+    device const float* grid [[buffer(2)]],
+    device const float* su [[buffer(3)]],
+    device const float* sv [[buffer(4)]],
+    device half* output [[buffer(5)]],
+    constant uint& K [[buffer(6)]],
+    constant uint& N [[buffer(7)]],
+    constant uint& n_levels [[buffer(8)]],
+    constant uint& group_size [[buffer(9)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint n_idx = gid.x;
+    uint k_idx = gid.y;
+    
+    if (n_idx >= N || k_idx >= K) return;
+    
+    // Compute tile coordinates
+    uint tile_k = k_idx / TILE_DIM;
+    uint tile_n = n_idx / TILE_DIM;
+    uint local_k = k_idx % TILE_DIM;
+    uint local_n = n_idx % TILE_DIM;
+    
+    uint tiles_n = (N + TILE_DIM - 1) / TILE_DIM;
+    
+    // Load trellis index
+    uint tile_offset = tile_k * tiles_n + tile_n;
+    uint local_offset = local_k * TILE_DIM + local_n;
+    uint idx = tile_offset * TILE_SIZE + local_offset;
+    
+    short trellis_idx = indices[idx];
+    if (trellis_idx < 0 || uint(trellis_idx) >= n_levels) {
+        trellis_idx = 0;
+    }
+    
+    // Load scale
+    uint group_idx = k_idx / group_size;
+    float scale = scales[group_idx * N + n_idx];
+    
+    // Dequantize
+    float dequant_val = grid[trellis_idx] * scale;
+    
+    // Apply sign flips
+    float sign_k = su[k_idx];
+    float sign_n = sv[n_idx];
+    dequant_val *= sign_k * sign_n;
+    
+    // Write output
+    output[k_idx * N + n_idx] = half(dequant_val);
+}

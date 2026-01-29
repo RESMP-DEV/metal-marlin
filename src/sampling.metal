@@ -592,6 +592,258 @@ kernel void sample_top_k(
 }
 
 // ---------------------------------------------------------------------------
+// Top-K Selection (values and indices)
+// ---------------------------------------------------------------------------
+
+struct TopKSelectionParams {
+    uint n;          // Total number of elements
+    uint k;          // Number of top elements to select
+    uint batch_size; // Batch dimension
+};
+
+// Helper: min-heap insertion for small k (< 64)
+inline void heap_insert_topk(
+    thread float* heap_vals,
+    thread uint* heap_indices,
+    thread uint& heap_size,
+    uint max_k,
+    float val,
+    uint idx
+) {
+    if (heap_size < max_k) {
+        // Insert into heap
+        heap_vals[heap_size] = val;
+        heap_indices[heap_size] = idx;
+        heap_size++;
+        
+        // Sift up (min-heap)
+        uint pos = heap_size - 1;
+        while (pos > 0) {
+            uint parent = (pos - 1) / 2;
+            if (heap_vals[pos] < heap_vals[parent]) {
+                float temp_val = heap_vals[pos];
+                uint temp_idx = heap_indices[pos];
+                heap_vals[pos] = heap_vals[parent];
+                heap_indices[pos] = heap_indices[parent];
+                heap_vals[parent] = temp_val;
+                heap_indices[parent] = temp_idx;
+                pos = parent;
+            } else {
+                break;
+            }
+        }
+    } else if (val > heap_vals[0]) {
+        // Replace min and sift down
+        heap_vals[0] = val;
+        heap_indices[0] = idx;
+        
+        uint pos = 0;
+        while (true) {
+            uint left = 2 * pos + 1;
+            uint right = 2 * pos + 2;
+            uint smallest = pos;
+            
+            if (left < heap_size && heap_vals[left] < heap_vals[smallest]) {
+                smallest = left;
+            }
+            if (right < heap_size && heap_vals[right] < heap_vals[smallest]) {
+                smallest = right;
+            }
+            
+            if (smallest != pos) {
+                float temp_val = heap_vals[pos];
+                uint temp_idx = heap_indices[pos];
+                heap_vals[pos] = heap_vals[smallest];
+                heap_indices[pos] = heap_indices[smallest];
+                heap_vals[smallest] = temp_val;
+                heap_indices[smallest] = temp_idx;
+                pos = smallest;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+// Bitonic sort for top-k selection when k is large (>= 64)
+// More efficient than heap for larger k values
+inline void bitonic_sort_partial(
+    thread float* vals,
+    thread uint* indices,
+    uint size,
+    uint k
+) {
+    // Sort first k elements using bitonic sort
+    for (uint stride = 2; stride <= k; stride <<= 1) {
+        for (uint i = stride; i > 0; i >>= 1) {
+            for (uint j = 0; j < k; j++) {
+                uint ixj = j ^ i;
+                if (ixj > j && ixj < k) {
+                    bool ascending = (j & stride) == 0;
+                    bool should_swap = ascending ? (vals[j] < vals[ixj]) : (vals[j] > vals[ixj]);
+                    
+                    if (should_swap) {
+                        float temp_val = vals[j];
+                        uint temp_idx = indices[j];
+                        vals[j] = vals[ixj];
+                        indices[j] = indices[ixj];
+                        vals[ixj] = temp_val;
+                        indices[ixj] = temp_idx;
+                    }
+                }
+            }
+        }
+    }
+    
+    // Process remaining elements if any
+    for (uint i = k; i < size; i++) {
+        if (vals[i] > vals[0]) {
+            vals[0] = vals[i];
+            indices[0] = indices[i];
+            
+            // Bubble down to maintain sorted order (descending)
+            for (uint j = 0; j < k - 1; j++) {
+                if (vals[j] < vals[j + 1]) {
+                    float temp_val = vals[j];
+                    uint temp_idx = indices[j];
+                    vals[j] = vals[j + 1];
+                    indices[j] = indices[j + 1];
+                    vals[j + 1] = temp_val;
+                    indices[j + 1] = temp_idx;
+                }
+            }
+        }
+    }
+}
+
+// Top-k selection kernel - returns both values and indices
+// Efficient parallel top-k using heap for small k and bitonic sort for large k
+kernel void topk_values_indices(
+    device const float* input [[buffer(0)]],      // [batch, n]
+    device float* values_out [[buffer(1)]],        // [batch, k]
+    device uint* indices_out [[buffer(2)]],        // [batch, k]
+    constant TopKSelectionParams& params [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint batch_idx = gid.y;
+    uint tid = gid.x;
+    
+    if (batch_idx >= params.batch_size) return;
+    
+    const uint n = params.n;
+    const uint k = min(params.k, n);
+    
+    // Input pointer for this batch
+    device const float* row = input + batch_idx * n;
+    
+    // Output pointers for this batch
+    device float* values_row = values_out + batch_idx * k;
+    device uint* indices_row = indices_out + batch_idx * k;
+    
+    // Use different strategies based on k value
+    const bool USE_HEAP = k < 64;
+    
+    if (USE_HEAP) {
+        // Heap-based approach for small k
+        // Each thread maintains its own local heap
+        const uint MAX_K = 64;
+        thread float local_heap[MAX_K];
+        thread uint local_indices[MAX_K];
+        uint heap_size = 0;
+        
+        // Each thread processes a subset of elements
+        for (uint i = tid; i < n; i += 32) { // Assume 32 threads per row
+            heap_insert_topk(local_heap, local_indices, heap_size, k, row[i], i);
+        }
+        
+        // Merge heaps - thread 0 collects and sorts
+        threadgroup float merged_vals[32 * MAX_K];
+        threadgroup uint merged_indices[32 * MAX_K];
+        threadgroup uint heap_sizes[32];
+        
+        // Store heap sizes
+        heap_sizes[tid] = heap_size;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Store heap contents
+        uint offset = tid * MAX_K;
+        for (uint i = 0; i < heap_size; i++) {
+            merged_vals[offset + i] = local_heap[i];
+            merged_indices[offset + i] = local_indices[i];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Thread 0 merges final results
+        if (tid == 0) {
+            float final_heap[MAX_K];
+            uint final_indices[MAX_K];
+            uint final_size = 0;
+            
+            // Merge all thread heaps
+            for (uint t = 0; t < 32; t++) {
+                uint t_offset = t * MAX_K;
+                uint t_size = heap_sizes[t];
+                
+                for (uint i = 0; i < t_size; i++) {
+                    heap_insert_topk(final_heap, final_indices, final_size, k, 
+                                    merged_vals[t_offset + i], merged_indices[t_offset + i]);
+                }
+            }
+            
+            // Sort final heap in descending order
+            for (uint i = 0; i < final_size; i++) {
+                for (uint j = i + 1; j < final_size; j++) {
+                    if (final_heap[i] < final_heap[j]) {
+                        float temp_val = final_heap[i];
+                        uint temp_idx = final_indices[i];
+                        final_heap[i] = final_heap[j];
+                        final_indices[i] = final_indices[j];
+                        final_heap[j] = temp_val;
+                        final_indices[j] = temp_idx;
+                    }
+                }
+            }
+            
+            // Write output
+            for (uint i = 0; i < k; i++) {
+                if (i < final_size) {
+                    values_row[i] = final_heap[i];
+                    indices_row[i] = final_indices[i];
+                } else {
+                    values_row[i] = NEG_INF;
+                    indices_row[i] = 0;
+                }
+            }
+        }
+    } else {
+        // Bitonic sort approach for large k
+        // Use threadgroup memory for sorting
+        threadgroup float tg_vals[1024];  // Adjust size as needed
+        threadgroup uint tg_indices[1024];
+        
+        // Load elements into threadgroup memory
+        uint load_size = min(n, 1024);
+        for (uint i = tid; i < load_size; i += 32) {
+            tg_vals[i] = (i < n) ? row[i] : NEG_INF;
+            tg_indices[i] = i;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Perform bitonic sort
+        if (tid == 0) {
+            bitonic_sort_partial(tg_vals, tg_indices, load_size, k);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Write top-k results
+        for (uint i = tid; i < k; i += 32) {
+            values_row[i] = tg_vals[i];
+            indices_row[i] = tg_indices[i];
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Top-P (Nucleus) Sampling
 // ---------------------------------------------------------------------------
 

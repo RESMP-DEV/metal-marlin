@@ -23,62 +23,25 @@
 
 ## Metal Acceleration Status
 
-### Complete (40 Metal Shaders)
-
-**Core GEMM:**
+### Complete
 - [x] GEMM (marlin_gemm.metal) - FP4/INT4/INT8 dequant + matmul
-- [x] GEMM Optimized (gemm_fp4_optimized.metal) - Tuned variant (2.4x speedup)
-- [x] Dense GEMM (dense_gemm.metal) - BF16/FP16 GEMM
-- [x] Batched GEMM (batched_gemm.metal) - Multi-batch matmul
-- [x] Decode GEMV (decode_gemv.metal) - Vector-matrix multiply
-
-**Attention:**
-- [x] Flash Attention (flash_attention.metal, flash_attention_v2.metal)
-- [x] Simdgroup Attention (simdgroup_attention.metal)
-- [x] Paged Attention (paged_attention.metal)
-- [x] Sliding Window (sliding_window_attention.metal)
-- [x] Tree Attention (tree_attention.metal)
-- [x] Diff Attention (diff_attention.metal)
-- [x] MLA Projection (mla_proj.metal)
-
-**MoE:**
-- [x] MoE Dispatch (moe_dispatch.metal, moe_dispatch_optimized.metal, moe_dispatch_metal.metal)
-- [x] MoE Expert GEMM (moe_expert_gemm.metal)
-- [x] MoE Router (moe_router.metal)
-- [x] MoE Shared Expert (moe_shared_expert.metal)
-
-**Quantization:**
-- [x] Dequant (dequant.metal) - FP4 unpacking
-- [x] Dequant FP8 (dequant_fp8.metal) - FP8 unpacking
-- [x] Dequant INT8 (dequant_int8.metal) - INT8 unpacking
-- [x] Dequant Sub-4bit (dequant_sub4bit.metal) - Sub-4bit unpacking
-- [x] Hessian (hessian.metal) - **Fully working on Metal** ✅
-  - Rewritten with optimized tiling (~17KB threadgroup memory, well under 32KB limit)
-  - Python wrapper: `gptq_metal.py` dispatches to `hessian_compute` kernel
-  - Tests: `test_gptq_metal.py::TestHessianComputation` passes
-- [x] Cholesky (cholesky.metal)
-
-**Other:**
+- [x] Attention (flash_attention.metal) - Flash attention v1/v2
 - [x] RoPE (rope.metal) - YaRN and standard RoPE
 - [x] Sampling (sampling.metal) - argmax, top-k, top-p
-- [x] LayerNorm (layernorm.metal)
-- [x] Hadamard (hadamard.metal)
-- [x] Sparse GEMM (sparse_gemm.metal, sparse.metal)
-- [x] Scatter/Gather (scatter_gather.metal)
-- [x] All-Reduce (all_reduce.metal)
-- [x] RWKV WKV (rwkv_wkv.metal)
-- [x] Vision Preprocess (vision_preprocess.metal)
-- [x] BF16 Compat (bf16_compat.metal)
+
+### In Progress (Phase 45-51)
+- [ ] Hessian computation (GPTQ calibration)
+- [ ] Cholesky decomposition (GPTQ quantization)
+- [ ] FP4 quantization (weight packing)
+- [ ] Hadamard transform (outlier dispersal)
+- [ ] MoE dispatch (token grouping)
+- [ ] Activations (SwiGLU fused)
+- [ ] LayerNorm/RMSNorm
 
 ### Remaining on CPU/MPS
-- (none - all significant compute operations are on Metal)
-
-### Now on Metal (previously listed as CPU/MPS)
-- ONNX graph execution → `converters/onnx_executor.py` dispatches to Metal kernels
-- Model loading → File I/O (not a compute operation, N/A for Metal)
-- Vision preprocessing → `vision/vision_metal.py` dispatches to 16 Metal kernels:
-  - `image_resize_bilinear`, `image_resize_bicubic`, `image_normalize`
-  - `vit_patch_extract`, `dynamic_resize_qwen2vl`, fused variants
+- Image preprocessing (scipy.ndimage)
+- ONNX graph execution
+- Model loading (safetensors)
 
 ---
 

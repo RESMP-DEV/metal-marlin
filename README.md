@@ -78,6 +78,47 @@ response = client.chat.completions.create(
 
 Benchmarked on M4 Max with PyTorch MPS backend.
 
+## EXL3 Model Compatibility
+
+Metal Marlin can load EXL3 quantized models directly from HuggingFace:
+
+### Quick Start
+
+```python
+from metal_marlin import load_exl3_from_hub
+
+# Load any EXL3 model from HuggingFace
+model = load_exl3_from_hub("turboderp/Llama-3.1-8B-EXL3-4.0bpw")
+
+# Generate text
+output = model.generate("Hello, I am")
+print(output)
+```
+
+### CLI Usage
+
+```bash
+# Download model
+metal-marlin download turboderp/Llama-3.1-8B-EXL3-4.0bpw
+
+# Generate text
+metal-marlin generate models/Llama-3.1-8B-EXL3 -p "Hello"
+```
+
+### Supported Formats
+
+| Format | Source | Support |
+|--------|--------|---------|
+| EXL3 (trellis) | ExllamaV3 | ✅ Full |
+| EXL2 | ExllamaV2 | ⚠️ Partial |
+| GPTQ | Various | ⚠️ Partial |
+
+### Finding Models
+
+Search for EXL3 models on HuggingFace:
+- [Filter: EXL3](https://huggingface.co/models?other=exl3)
+- [turboderp](https://huggingface.co/turboderp) - Official ExllamaV3 models
+
 ## Documentation
 
 | Guide | Description |
