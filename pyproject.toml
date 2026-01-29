@@ -20,7 +20,9 @@ classifiers = [
 ]
 
 dependencies = [
+    "accelerate>=1.12.0",
     "numpy>=1.24.0",
+    "psutil>=7.2.2",
     "pyobjc-framework-metal>=12.1",
     "pyobjc-framework-metalperformanceshaders>=12.1",
     "requests>=2.32.5",

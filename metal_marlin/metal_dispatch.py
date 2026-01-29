@@ -2004,13 +2004,12 @@ def dispatch_hessian_compute(
         wait=True,
     )
 
-    # Apply regularization: H += sigma_reg * mean(diag(H)) * I
+    # Normalize first: kernel computes 2 * X^T @ X, we want X^T @ X / n_samples
+    H /= 2 * n_samples
+
+    # Then apply regularization: H += sigma_reg * mean(diag(H)) * I
     diag_mean = H.diagonal().mean()
     H += sigma_reg * diag_mean * torch.eye(hidden_dim, device="mps", dtype=torch.float32)
-
-    # Normalize: H /= n_samples (the kernel computes 2 * X^T @ X, we want X^T @ X / n_samples)
-    # Actually the kernel already multiplies by 2, so we divide by 2 * n_samples
-    H /= 2 * n_samples
 
     return H
 

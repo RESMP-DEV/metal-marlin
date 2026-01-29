@@ -427,7 +427,8 @@ class StreamingQuantizer:
     def compute_hessian_from_cache(self, layer: LayerInfo, sigma_reg: float = 0.01) -> np.ndarray:
         """Compute Hessian for a layer using cached activations.
 
-        Uses MPS acceleration when available (10-50x faster for large matrices).
+        Uses Metal shader acceleration when available, falls back to MPS/CPU.
+        Note: Metal hessian kernel requires threadgroup memory reduction for M4.
         """
         block_idx = layer.block_idx
 
@@ -442,8 +443,8 @@ class StreamingQuantizer:
             # use synthetic activations of correct size
             X = torch.randn(X.shape[0], layer.in_features) * 0.5
 
-        # Use MPS for matrix multiply if available (much faster than CPU numpy)
-        if torch.backends.mps.is_available() and X.shape[1] > 1000:
+        # MPS path: fast matrix multiply (H = X^T @ X / n_samples + regularization)
+        if torch.backends.mps.is_available() and X.shape[1] > 500:
             X_mps = X.to(dtype=torch.float32, device="mps")
             H_mps = X_mps.T @ X_mps
             H_mps /= X.shape[0]

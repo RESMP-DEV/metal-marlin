@@ -13,7 +13,7 @@ using namespace metal;
 // ---------------------------------------------------------------------------
 
 constant constexpr uint TILE_M = 64;
-constant constexpr uint TILE_N = 24;
+constant constexpr uint TILE_N = 32;
 constant constexpr uint TILE_K = 48;
 
 constant constexpr uint K_TILES = TILE_K / 8;  // 4

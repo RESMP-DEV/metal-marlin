@@ -30,21 +30,21 @@ using namespace metal;
 // We only compute the upper triangle and mirror if needed.
 //
 // TILE_DIM = 64: Covers a 64x64 tile of the Hessian
-// TILE_K = 32: Process 32 samples at a time (K dimension = n_samples)
+// TILE_K = 16: Process 16 samples at a time (K dimension = n_samples)
 //
 // Threadgroup memory (double-buffered):
-//   X_tiles: 2 * 32 * 64 * 2B = 8192 bytes (treating X^T as K x D)
-//   Total < 32KB per threadgroup
+//   X_tiles: 2 * 16 * 64 * 2B = 4096 bytes (treating X^T as K x D)
+//   Total < 16KB per threadgroup
 // ---------------------------------------------------------------------------
 
 constant constexpr uint HESSIAN_TILE_DIM = 64;
-constant constexpr uint HESSIAN_TILE_K = 32;
+constant constexpr uint HESSIAN_TILE_K = 16;
 constant constexpr uint HESSIAN_SIMDGROUPS_PER_TG = 4;
 constant constexpr uint HESSIAN_THREADS_PER_TG = HESSIAN_SIMDGROUPS_PER_TG * 32;  // 128
 
 // Number of 8x8 sub-tiles in each dimension
 constant constexpr uint HESSIAN_SG_TILES = HESSIAN_TILE_DIM / 8;  // 8
-constant constexpr uint HESSIAN_K_TILES = HESSIAN_TILE_K / 8;     // 4
+constant constexpr uint HESSIAN_K_TILES = HESSIAN_TILE_K / 8;     // 2
 
 // Sub-tiles per simdgroup (4 simdgroups cover 8x8 tile grid = 2x2 per simdgroup)
 constant constexpr uint SG_TILES_PER_DIM = HESSIAN_SG_TILES / 2;  // 4
@@ -64,11 +64,13 @@ inline uint div_ceil(uint a, uint b) {
 // Cooperative tile loaders for X (activations)
 //
 // X is [n_samples, hidden_dim] row-major
-// We need X^T for the computation, so we load columns of X (rows of X^T)
+// For computing H = X^T @ X, we need:
+//   - X_left_T stored as [TILE_DIM, TILE_K] (transposed) for left operand
+//   - X_right stored as [TILE_K, TILE_DIM] (normal) for right operand
 // ---------------------------------------------------------------------------
 
-/// Load a tile of X into threadgroup memory.
-/// X is [n_samples, hidden_dim], we load X[k_offset : k_offset+TILE_K, d_offset : d_offset+TILE_DIM]
+/// Load a tile of X into threadgroup memory (normal layout for right operand).
+/// X is [n_samples, hidden_dim], we load X[k_offset:k_offset+TILE_K, d_offset:d_offset+TILE_DIM]
 inline void load_X_tile_bf16(
     device const ushort* X,  // BF16 storage
     threadgroup float (&X_buf)[HESSIAN_TILE_K][HESSIAN_TILE_DIM],
@@ -76,11 +78,11 @@ inline void load_X_tile_bf16(
     uint k_block, uint d_block,
     uint thread_idx
 ) {
-    const uint elems_per_thread = (HESSIAN_TILE_K * HESSIAN_TILE_DIM) / HESSIAN_THREADS_PER_TG;  // 16
+    const uint elems_per_thread = (HESSIAN_TILE_K * HESSIAN_TILE_DIM) / HESSIAN_THREADS_PER_TG;
     for (uint i = 0; i < elems_per_thread; ++i) {
         uint flat_idx = thread_idx * elems_per_thread + i;
-        uint row = flat_idx / HESSIAN_TILE_DIM;  // k dimension (sample index)
-        uint col = flat_idx % HESSIAN_TILE_DIM;  // d dimension (hidden dim)
+        uint row = flat_idx / HESSIAN_TILE_DIM;  // k dimension
+        uint col = flat_idx % HESSIAN_TILE_DIM;  // d dimension
         
         uint global_k = k_block + row;
         uint global_d = d_block + col;
@@ -93,7 +95,34 @@ inline void load_X_tile_bf16(
     }
 }
 
-/// Load X tile for FP16 input
+/// Load X tile TRANSPOSED into threadgroup memory (for left operand in X^T @ X).
+/// Input X is [n_samples, hidden_dim], output is X_buf_T[TILE_DIM][TILE_K] = X^T
+inline void load_X_tile_bf16_transposed(
+    device const ushort* X,  // BF16 storage
+    threadgroup float (&X_buf_T)[HESSIAN_TILE_DIM][HESSIAN_TILE_K],
+    uint n_samples, uint hidden_dim,
+    uint k_block, uint d_block,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (HESSIAN_TILE_K * HESSIAN_TILE_DIM) / HESSIAN_THREADS_PER_TG;
+    for (uint i = 0; i < elems_per_thread; ++i) {
+        uint flat_idx = thread_idx * elems_per_thread + i;
+        uint row = flat_idx / HESSIAN_TILE_DIM;  // k dimension (will become col)
+        uint col = flat_idx % HESSIAN_TILE_DIM;  // d dimension (will become row)
+        
+        uint global_k = k_block + row;
+        uint global_d = d_block + col;
+        
+        float val = 0.0f;
+        if (global_k < n_samples && global_d < hidden_dim) {
+            val = bf16_bits_to_float(X[global_k * hidden_dim + global_d]);
+        }
+        // Store transposed: X_buf_T[d][k] = X[k][d]
+        X_buf_T[col][row] = val;
+    }
+}
+
+/// Load X tile for FP16 input (normal layout)
 inline void load_X_tile_fp16(
     device const half* X,
     threadgroup float (&X_buf)[HESSIAN_TILE_K][HESSIAN_TILE_DIM],
@@ -118,42 +147,77 @@ inline void load_X_tile_fp16(
     }
 }
 
+/// Load X tile TRANSPOSED for FP16 input
+inline void load_X_tile_fp16_transposed(
+    device const half* X,
+    threadgroup float (&X_buf_T)[HESSIAN_TILE_DIM][HESSIAN_TILE_K],
+    uint n_samples, uint hidden_dim,
+    uint k_block, uint d_block,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (HESSIAN_TILE_K * HESSIAN_TILE_DIM) / HESSIAN_THREADS_PER_TG;
+    for (uint i = 0; i < elems_per_thread; ++i) {
+        uint flat_idx = thread_idx * elems_per_thread + i;
+        uint row = flat_idx / HESSIAN_TILE_DIM;  // k dimension
+        uint col = flat_idx % HESSIAN_TILE_DIM;  // d dimension
+        
+        uint global_k = k_block + row;
+        uint global_d = d_block + col;
+        
+        float val = 0.0f;
+        if (global_k < n_samples && global_d < hidden_dim) {
+            val = float(X[global_k * hidden_dim + global_d]);
+        }
+        // Store transposed
+        X_buf_T[col][row] = val;
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Simdgroup compute for Hessian: X^T @ X
+// Simdgroup compute for Hessian: H = X^T @ X
 //
-// For Hessian tile at (d_i, d_j):
-//   H[d_i:d_i+8, d_j:d_j+8] += X[:, d_i:d_i+8]^T @ X[:, d_j:d_j+8]
+// X_left_T is stored TRANSPOSED as [TILE_DIM, TILE_K] (i.e., X^T layout)
+// X_right is stored NORMAL as [TILE_K, TILE_DIM]
 //
-// We process K in tiles, loading X[k:k+TILE_K, d_i:d_i+TILE_DIM] and
-// X[k:k+TILE_K, d_j:d_j+TILE_DIM], then computing the matrix product.
+// For output tile H[d_i:d_i+64, d_j:d_j+64]:
+//   We compute X_left_T @ X_right = [TILE_DIM, TILE_K] @ [TILE_K, TILE_DIM]
+//   = [64, K] @ [K, 64] = [64, 64]
+//
+// simdgroup_multiply_accumulate(C, A, B, C):
+//   C += A @ B where A is loaded with stride and B with stride
+//   For 8x8 tiles: C[8,8] += A[8,K] @ B[K,8]
 // ---------------------------------------------------------------------------
 
 __attribute__((always_inline))
-inline void hessian_compute_from_tiles(
-    threadgroup const float (&X_left)[HESSIAN_TILE_K][HESSIAN_TILE_DIM],
-    threadgroup const float (&X_right)[HESSIAN_TILE_K][HESSIAN_TILE_DIM],
+inline void hessian_compute_from_tiles_transpose(
+    threadgroup const float (&X_left_T)[HESSIAN_TILE_DIM][HESSIAN_TILE_K],  // [D, K] = X^T
+    threadgroup const float (&X_right)[HESSIAN_TILE_K][HESSIAN_TILE_DIM],   // [K, D] = X
     thread simdgroup_matrix<float, 8, 8> (&acc)[SG_TILES_PER_DIM][SG_TILES_PER_DIM],
     uint sg_row_offset,
     uint sg_col_offset
 ) {
-    // Process K_TILES sub-tiles in the K dimension
+    // For each 8-wide K block (HESSIAN_K_TILES = TILE_K / 8)
     for (uint kt = 0; kt < HESSIAN_K_TILES; ++kt) {
+        // For each row-block mi in [0, SG_TILES_PER_DIM)
         for (uint mi = 0; mi < SG_TILES_PER_DIM; ++mi) {
+            // Load A from X_left_T: 8 rows of D, 8 cols of K
+            // A[d, k] = X_left_T[sg_row_offset + mi*8 + d][kt*8 + k]
             simdgroup_matrix<float, 8, 8> a_frag;
             simdgroup_load(a_frag,
-                           &X_left[kt * 8][sg_row_offset + mi * 8],
-                           HESSIAN_TILE_DIM);
+                           &X_left_T[sg_row_offset + mi * 8][kt * 8],
+                           HESSIAN_TILE_K);  // stride = TILE_K (columns of X^T)
             
             for (uint ni = 0; ni < SG_TILES_PER_DIM; ++ni) {
+                // Load B from X_right: 8 rows of K, 8 cols of D  
+                // B[k, d] = X_right[kt*8 + k][sg_col_offset + ni*8 + d]
                 simdgroup_matrix<float, 8, 8> b_frag;
                 simdgroup_load(b_frag,
                                &X_right[kt * 8][sg_col_offset + ni * 8],
-                               HESSIAN_TILE_DIM);
+                               HESSIAN_TILE_DIM);  // stride = TILE_DIM
                 
-                simdgroup_multiply_accumulate(acc[mi][ni],
-                                              a_frag,
-                                              b_frag,
-                                              acc[mi][ni]);
+                // acc[mi][ni] += A @ B = [8, 8] @ [8, 8] = [8, 8]
+                // This computes: sum_k X^T[d_i, k] * X[k, d_j] = X^T @ X
+                simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
             }
         }
     }
@@ -224,9 +288,12 @@ kernel void hessian_compute(
     uint simd_id                [[simdgroup_index_in_threadgroup]]
 ) {
     // Double-buffered threadgroup memory
-    threadgroup float X_left[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
+    // X_left_T: transposed layout [TILE_DIM, TILE_K] for left operand (X^T)
+    // X_right: normal layout [TILE_K, TILE_DIM] for right operand (X)
+    threadgroup float X_left_T[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_DIM][HESSIAN_TILE_K];
     threadgroup float X_right[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
-    threadgroup float staging[8][8];
+    // Per-simdgroup staging (4 simdgroups, each needs 8x8)
+    threadgroup float staging[HESSIAN_SIMDGROUPS_PER_TG][8][8];
     
     // Tile position in Hessian output
     const uint d_i = tgid.y * HESSIAN_TILE_DIM;  // Row in Hessian
@@ -251,16 +318,16 @@ kernel void hessian_compute(
         return;
     }
     
-    // For diagonal tiles (d_i == d_j), we only need to load X once
+    // For diagonal tiles (d_i == d_j), X_left_T and X_right have same source
     const bool is_diagonal = (d_i == d_j);
     
     uint buf_compute = 0;
     
     // Prologue: Load first K-tile
-    load_X_tile_bf16(X, X_left[0], n_samples, hidden_dim, 0, d_i, thread_idx);
-    if (!is_diagonal) {
-        load_X_tile_bf16(X, X_right[0], n_samples, hidden_dim, 0, d_j, thread_idx);
-    }
+    // Left operand: load TRANSPOSED into X_left_T[D][K]
+    load_X_tile_bf16_transposed(X, X_left_T[0], n_samples, hidden_dim, 0, d_i, thread_idx);
+    // Right operand: load NORMAL into X_right[K][D]
+    load_X_tile_bf16(X, X_right[0], n_samples, hidden_dim, 0, is_diagonal ? d_i : d_j, thread_idx);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     // Main K-reduction loop
@@ -271,28 +338,20 @@ kernel void hessian_compute(
         
         // Prefetch next tile
         if (next_k < n_samples) {
-            load_X_tile_bf16(X, X_left[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
-            if (!is_diagonal) {
-                load_X_tile_bf16(X, X_right[buf_load], n_samples, hidden_dim, next_k, d_j, thread_idx);
-            }
+            load_X_tile_bf16_transposed(X, X_left_T[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
+            load_X_tile_bf16(X, X_right[buf_load], n_samples, hidden_dim, next_k, is_diagonal ? d_i : d_j, thread_idx);
         }
         
-        // Compute on current buffer
-        if (is_diagonal) {
-            // For diagonal: X_left^T @ X_left
-            hessian_compute_from_tiles(X_left[buf_compute], X_left[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        } else {
-            // For off-diagonal: X_left^T @ X_right
-            hessian_compute_from_tiles(X_left[buf_compute], X_right[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        }
+        // Compute: acc += X_left_T @ X_right = X^T @ X
+        hessian_compute_from_tiles_transpose(X_left_T[buf_compute], X_right[buf_compute],
+                                             acc, sg_row_offset, sg_col_offset);
         
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
     
     // Store results with multiply by 2: H = 2 * X^T @ X
+    // Each simdgroup stores its own tiles using its own staging memory
     for (uint mi = 0; mi < SG_TILES_PER_DIM; ++mi) {
         uint out_row = d_i + sg_row_offset + mi * 8;
         if (out_row >= hidden_dim) continue;
@@ -301,20 +360,11 @@ kernel void hessian_compute(
             uint out_col = d_j + sg_col_offset + ni * 8;
             if (out_col >= hidden_dim) continue;
             
-            // Multiply by 2 using simdgroup math
-            // We do: result = acc * 2 by loading, scaling, and storing
-            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            // Store to this simdgroup's private staging area
+            simdgroup_store(acc[mi][ni], &staging[simd_id][0][0], 8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
             
-            // Scale by 2
-            for (uint elem = simd_lane; elem < 64; elem += 32) {
-                uint r = elem / 8;
-                uint c = elem % 8;
-                staging[r][c] *= 2.0f;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            
-            // Store to global memory
+            // Read and write to global memory with 2x scaling
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint r = elem / 8;
                 uint c = elem % 8;
@@ -322,7 +372,7 @@ kernel void hessian_compute(
                 uint gc = out_col + c;
                 
                 if (gr < hidden_dim && gc < hidden_dim) {
-                    H[gr * hidden_dim + gc] = staging[r][c];
+                    H[gr * hidden_dim + gc] = staging[simd_id][r][c] * 2.0f;
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -343,9 +393,11 @@ kernel void hessian_compute_fp16(
     uint simd_lane              [[thread_index_in_simdgroup]],
     uint simd_id                [[simdgroup_index_in_threadgroup]]
 ) {
-    threadgroup float X_left[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
+    // X_left_T: transposed [TILE_DIM, TILE_K], X_right: normal [TILE_K, TILE_DIM]
+    threadgroup float X_left_T[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_DIM][HESSIAN_TILE_K];
     threadgroup float X_right[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
-    threadgroup float staging[8][8];
+    // Per-simdgroup staging to avoid race conditions (4 simdgroups)
+    threadgroup float staging[4][8][8];
     
     const uint d_i = tgid.y * HESSIAN_TILE_DIM;
     const uint d_j = tgid.x * HESSIAN_TILE_DIM;
@@ -368,10 +420,9 @@ kernel void hessian_compute_fp16(
     const bool is_diagonal = (d_i == d_j);
     uint buf_compute = 0;
     
-    load_X_tile_fp16(X, X_left[0], n_samples, hidden_dim, 0, d_i, thread_idx);
-    if (!is_diagonal) {
-        load_X_tile_fp16(X, X_right[0], n_samples, hidden_dim, 0, d_j, thread_idx);
-    }
+    // Load first K-tile
+    load_X_tile_fp16_transposed(X, X_left_T[0], n_samples, hidden_dim, 0, d_i, thread_idx);
+    load_X_tile_fp16(X, X_right[0], n_samples, hidden_dim, 0, is_diagonal ? d_i : d_j, thread_idx);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     for (uint kt = 0; kt < num_k_tiles; ++kt) {
@@ -380,25 +431,20 @@ kernel void hessian_compute_fp16(
         uint buf_load = 1 - buf_compute;
         
         if (next_k < n_samples) {
-            load_X_tile_fp16(X, X_left[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
-            if (!is_diagonal) {
-                load_X_tile_fp16(X, X_right[buf_load], n_samples, hidden_dim, next_k, d_j, thread_idx);
-            }
+            load_X_tile_fp16_transposed(X, X_left_T[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
+            load_X_tile_fp16(X, X_right[buf_load], n_samples, hidden_dim, next_k, is_diagonal ? d_i : d_j, thread_idx);
         }
         
-        if (is_diagonal) {
-            hessian_compute_from_tiles(X_left[buf_compute], X_left[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        } else {
-            hessian_compute_from_tiles(X_left[buf_compute], X_right[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        }
+        // Compute: acc += X_left_T @ X_right
+        hessian_compute_from_tiles_transpose(X_left_T[buf_compute], X_right[buf_compute],
+                                             acc, sg_row_offset, sg_col_offset);
         
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
     
-    // Store results with multiply by 2
+    // Store results with multiply by 2: H = 2 * X^T @ X
+    // Each simdgroup uses its own staging memory
     for (uint mi = 0; mi < SG_TILES_PER_DIM; ++mi) {
         uint out_row = d_i + sg_row_offset + mi * 8;
         if (out_row >= hidden_dim) continue;
@@ -407,17 +453,10 @@ kernel void hessian_compute_fp16(
             uint out_col = d_j + sg_col_offset + ni * 8;
             if (out_col >= hidden_dim) continue;
             
-            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            simdgroup_store(acc[mi][ni], &staging[simd_id][0][0], 8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
             
-            // Scale by 2
-            for (uint elem = simd_lane; elem < 64; elem += 32) {
-                uint r = elem / 8;
-                uint c = elem % 8;
-                staging[r][c] *= 2.0f;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            
+            // Write to global memory with 2x scaling
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint r = elem / 8;
                 uint c = elem % 8;
@@ -425,7 +464,7 @@ kernel void hessian_compute_fp16(
                 uint gc = out_col + c;
                 
                 if (gr < hidden_dim && gc < hidden_dim) {
-                    H[gr * hidden_dim + gc] = staging[r][c];
+                    H[gr * hidden_dim + gc] = staging[simd_id][r][c] * 2.0f;
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -449,9 +488,11 @@ kernel void hessian_accumulate(
     uint simd_lane              [[thread_index_in_simdgroup]],
     uint simd_id                [[simdgroup_index_in_threadgroup]]
 ) {
-    threadgroup float X_left[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
+    // X_left_T: transposed [TILE_DIM, TILE_K], X_right: normal [TILE_K, TILE_DIM]
+    threadgroup float X_left_T[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_DIM][HESSIAN_TILE_K];
     threadgroup float X_right[HESSIAN_NUM_BUFFERS][HESSIAN_TILE_K][HESSIAN_TILE_DIM];
-    threadgroup float staging[8][8];
+    // Per-simdgroup staging to avoid race conditions (4 simdgroups)
+    threadgroup float staging[4][8][8];
     
     const uint d_i = tgid.y * HESSIAN_TILE_DIM;
     const uint d_j = tgid.x * HESSIAN_TILE_DIM;
@@ -474,10 +515,8 @@ kernel void hessian_accumulate(
     const bool is_diagonal = (d_i == d_j);
     uint buf_compute = 0;
     
-    load_X_tile_bf16(X, X_left[0], n_samples, hidden_dim, 0, d_i, thread_idx);
-    if (!is_diagonal) {
-        load_X_tile_bf16(X, X_right[0], n_samples, hidden_dim, 0, d_j, thread_idx);
-    }
+    load_X_tile_bf16_transposed(X, X_left_T[0], n_samples, hidden_dim, 0, d_i, thread_idx);
+    load_X_tile_bf16(X, X_right[0], n_samples, hidden_dim, 0, is_diagonal ? d_i : d_j, thread_idx);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     for (uint kt = 0; kt < num_k_tiles; ++kt) {
@@ -486,25 +525,19 @@ kernel void hessian_accumulate(
         uint buf_load = 1 - buf_compute;
         
         if (next_k < n_samples) {
-            load_X_tile_bf16(X, X_left[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
-            if (!is_diagonal) {
-                load_X_tile_bf16(X, X_right[buf_load], n_samples, hidden_dim, next_k, d_j, thread_idx);
-            }
+            load_X_tile_bf16_transposed(X, X_left_T[buf_load], n_samples, hidden_dim, next_k, d_i, thread_idx);
+            load_X_tile_bf16(X, X_right[buf_load], n_samples, hidden_dim, next_k, is_diagonal ? d_i : d_j, thread_idx);
         }
         
-        if (is_diagonal) {
-            hessian_compute_from_tiles(X_left[buf_compute], X_left[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        } else {
-            hessian_compute_from_tiles(X_left[buf_compute], X_right[buf_compute],
-                                       acc, sg_row_offset, sg_col_offset);
-        }
+        hessian_compute_from_tiles_transpose(X_left_T[buf_compute], X_right[buf_compute],
+                                             acc, sg_row_offset, sg_col_offset);
         
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
     
     // Load existing Hessian and accumulate: H += 2 * X^T @ X
+    // Each simdgroup uses its own staging memory
     for (uint mi = 0; mi < SG_TILES_PER_DIM; ++mi) {
         uint out_row = d_i + sg_row_offset + mi * 8;
         if (out_row >= hidden_dim) continue;
@@ -518,44 +551,24 @@ kernel void hessian_accumulate(
             if (out_row + 8 <= hidden_dim && out_col + 8 <= hidden_dim) {
                 simdgroup_load(existing, H + out_row * hidden_dim + out_col, hidden_dim);
             } else {
-                // Bounds-checked load
+                // Bounds-checked load using per-simdgroup staging
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
                     uint c = elem % 8;
                     uint gr = out_row + r;
                     uint gc = out_col + c;
-                    staging[r][c] = (gr < hidden_dim && gc < hidden_dim) ? 
-                                    H[gr * hidden_dim + gc] : 0.0f;
+                    staging[simd_id][r][c] = (gr < hidden_dim && gc < hidden_dim) ? 
+                                              H[gr * hidden_dim + gc] : 0.0f;
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);
-                simdgroup_load(existing, &staging[0][0], 8);
+                simdgroup_load(existing, &staging[simd_id][0][0], 8);
             }
             
-            // contribution = 2 * acc
-            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            // Store acc to staging, scale by 2, write back accumulated
+            simdgroup_store(acc[mi][ni], &staging[simd_id][0][0], 8);
             simdgroup_barrier(mem_flags::mem_threadgroup);
             
-            for (uint elem = simd_lane; elem < 64; elem += 32) {
-                uint r = elem / 8;
-                uint c = elem % 8;
-                staging[r][c] *= 2.0f;
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            
-            simdgroup_matrix<float, 8, 8> contribution;
-            simdgroup_load(contribution, &staging[0][0], 8);
-            
-            // H += contribution using multiply_accumulate with identity
-            // result = existing + contribution
-            // We use: result = 1 * existing + contribution via multiply_accumulate
-            simdgroup_matrix<float, 8, 8> one = make_filled_simdgroup_matrix<float, 8, 8>(1.0f);
-            simdgroup_matrix<float, 8, 8> result;
-            simdgroup_multiply_accumulate(result, one, existing, contribution);
-            
-            // Store back
-            simdgroup_store(result, &staging[0][0], 8);
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            
+            // Load existing into thread locals, compute accumulated value, write
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint r = elem / 8;
                 uint c = elem % 8;
@@ -563,7 +576,9 @@ kernel void hessian_accumulate(
                 uint gc = out_col + c;
                 
                 if (gr < hidden_dim && gc < hidden_dim) {
-                    H[gr * hidden_dim + gc] = staging[r][c];
+                    float existing_val = H[gr * hidden_dim + gc];
+                    float new_contrib = staging[simd_id][r][c] * 2.0f;
+                    H[gr * hidden_dim + gc] = existing_val + new_contrib;
                 }
             }
             simdgroup_barrier(mem_flags::mem_threadgroup);
