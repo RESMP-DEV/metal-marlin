@@ -8,7 +8,6 @@ Uses Metal GPU acceleration when available (Apple Silicon), falls back to CPU.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import numpy as np
@@ -102,37 +101,33 @@ def quantize_tile_viterbi(
         indices: [256] quantized indices (int16 for packed storage)
         dequantized: [16, 16] reconstructed tile
     """
-    bits = codebook.bits
     grid = codebook.get_grid()
     n_states = len(grid)
 
-    # Flatten tile to 1D array
-    tile_flat = tile.reshape(-1)
+    # Flatten tile to 1D array and normalize
+    tile_flat = tile.reshape(-1) / scale
     n_elements = len(tile_flat)
 
-    # Viterbi forward pass
-    costs = np.full((n_elements, n_states), np.inf, dtype=np.float32)
-    edges = np.zeros((n_elements, n_states), dtype=np.int16)
+    # Viterbi with uniform transitions simplifies to tracking min cost path
+    # Since transition costs are uniform, best_prev is independent of current state
+    costs = np.zeros((n_elements, n_states), dtype=np.float32)
+    edges = np.zeros(n_elements, dtype=np.int16)  # best_prev is same for all states
 
-    # Initialize first element
-    costs[0] = (tile_flat[0] / scale - grid) ** 2
+    # Initialize first element (vectorized over all states)
+    costs[0] = (tile_flat[0] - grid) ** 2
 
-    # Forward pass: find min-cost path to each state
+    # Forward pass: fully vectorized per position
     for i in range(1, n_elements):
-        for s in range(n_states):
-            # Cost of quantizing element i to state s
-            quant_cost = (tile_flat[i] / scale - grid[s]) ** 2
-            # Transition cost (EXL3 uses uniform transitions)
-            total_costs = costs[i - 1] + quant_cost
-            best_prev = np.argmin(total_costs)
-            costs[i, s] = total_costs[best_prev]
-            edges[i, s] = best_prev
+        min_prev_cost = np.min(costs[i - 1])
+        edges[i] = np.argmin(costs[i - 1])
+        # Vectorized cost computation for all states
+        costs[i] = min_prev_cost + (tile_flat[i] - grid) ** 2
 
     # Backtrack to find optimal path
     indices = np.zeros(n_elements, dtype=np.int16)
     indices[-1] = np.argmin(costs[-1])
     for i in range(n_elements - 2, -1, -1):
-        indices[i] = edges[i + 1, indices[i + 1]]
+        indices[i] = edges[i + 1]
 
     # Reconstruct
     dequantized = (grid[indices] * scale).reshape(16, 16)
@@ -222,22 +217,34 @@ def quantize_tiles_fast(
 
             return all_indices, all_dequant
 
-    # CPU fallback with thread pool
-    all_indices = np.zeros((n_tiles, 256), dtype=np.int16)
-    all_dequant = np.zeros((n_tiles, 16, 16), dtype=np.float32)
+    # CPU fallback - batched vectorized Viterbi (fast, GIL-friendly)
+    grid = codebook.get_grid()
+    n_states = len(grid)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                quantize_tile_viterbi, tiles_flat[i].reshape(16, 16), codebook, scales[i]
-            ): i
-            for i in range(n_tiles)
-        }
-        for future in as_completed(futures):
-            i = futures[future]
-            indices, dequant = future.result()
-            all_indices[i] = indices
-            all_dequant[i] = dequant
+    # Normalize all tiles at once: [n_tiles, 256] / [n_tiles, 1]
+    tiles_norm = tiles_flat / scales[:, None]
+
+    # Batched Viterbi forward pass
+    # costs: [n_tiles, n_states] - cost to reach each state at current position
+    costs = (tiles_norm[:, 0:1] - grid[None, :]) ** 2  # [n_tiles, n_states]
+
+    # Track edges for backtracking: [n_tiles, 256]
+    edges = np.zeros((n_tiles, 256), dtype=np.int16)
+
+    # Forward pass
+    for i in range(1, 256):
+        min_prev = costs.min(axis=1, keepdims=True)  # [n_tiles, 1]
+        edges[:, i] = costs.argmin(axis=1)  # [n_tiles]
+        costs = min_prev + (tiles_norm[:, i : i + 1] - grid[None, :]) ** 2
+
+    # Backtrack: all tiles in parallel
+    all_indices = np.zeros((n_tiles, 256), dtype=np.int16)
+    all_indices[:, -1] = costs.argmin(axis=1)
+    for i in range(254, -1, -1):
+        all_indices[:, i] = edges[:, i + 1]
+
+    # Reconstruct
+    all_dequant = (grid[all_indices] * scales[:, None]).reshape(n_tiles, 16, 16)
 
     return all_indices, all_dequant
 

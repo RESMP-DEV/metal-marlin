@@ -575,7 +575,7 @@ kernel void moe_dispatch_optimized(
         }
     }
 
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_none);
 
     // =========================================================================
     // Phase 2: Compute shared expert contribution (if enabled)

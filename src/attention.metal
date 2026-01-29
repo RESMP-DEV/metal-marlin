@@ -74,7 +74,7 @@ inline float threadgroup_reduce_max(
     if (lane == 0) {
         scratch[sg_id] = sg_max;
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    simdgroup_barrier(mem_flags::mem_none);
 
     // Step 3: first simdgroup reduces across simdgroup leaders
     float result;

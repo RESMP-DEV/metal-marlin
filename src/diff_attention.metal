@@ -115,6 +115,7 @@ kernel void diff_attention(
     uint lane_id                    [[thread_index_in_simdgroup]],
     uint sg_id                      [[simdgroup_index_in_threadgroup]]
 ) {
+    // Prefetch hint: consider simdgroup_async_copy for better memory throughput
     const uint head_q = tgid.x;
     const uint q_row_base = tgid.y * ROWS_PER_TG;
     const uint b = tgid.z;

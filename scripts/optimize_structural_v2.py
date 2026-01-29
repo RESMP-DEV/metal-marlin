@@ -41,14 +41,13 @@ ALPHAHENG_ROOT = (
 
 # Structural transformations with regex patterns and replacements
 STRUCTURAL_TRANSFORMS: dict[str, dict] = {
-    # Loop unrolling - adds #pragma unroll before for loops
-    "unroll_inner_loop": {
-        "description": "Add #pragma unroll to inner loops for better instruction scheduling",
-        "pattern": r"(\s+)(for\s*\([^)]+\)\s*\{)",
-        "replacement": r"\1#pragma unroll\n\1\2",
-        "max_applications": 3,  # Don't unroll all loops
-        "applicable_to": ["gemm", "attention", "moe"],
-    },
+    # DISABLED: Loop unrolling causes duplicate pragma errors on most attention kernels
+    # Most Metal kernels already have #pragma unroll where needed
+    # "unroll_inner_loop": {
+    #     "description": "Add #pragma unroll to inner loops",
+    #     "pattern": r"...",
+    #     "applicable_to": ["attention", "moe"],
+    # },
     # Async copy prefetch - wrap device reads in async copy
     "async_prefetch_hint": {
         "description": "Add memory prefetch hint before main loop",
@@ -65,29 +64,23 @@ STRUCTURAL_TRANSFORMS: dict[str, dict] = {
         "max_applications": 1,  # Conservative - only first occurrence
         "applicable_to": ["gemm", "attention", "moe"],
     },
-    # Thread execution width hint
-    "thread_width_hint": {
-        "description": "Add thread execution width attribute for better scheduling",
-        "pattern": r"(kernel\s+void\s+)(\w+)",
-        "replacement": r"\1[[thread_execution_width(32)]] \2",
-        "max_applications": 1,
-        "applicable_to": ["gemm", "attention", "moe", "quant"],
-    },
-    # Max threads per threadgroup attribute
+    # NOTE: thread_execution_width is NOT a valid Metal attribute.
+    # SIMD width is implicitly 32 on Apple Silicon. Removed invalid transform.
+    # Max threads per threadgroup attribute - correct Metal syntax
     "max_threads_256": {
         "description": "Limit max threads per threadgroup to 256 for better occupancy",
-        "pattern": r"(kernel\s+void\s+)(\w+)",
-        "replacement": r"\1[[max_total_threads_per_threadgroup(256)]] \2",
+        "pattern": r"^(kernel\s+void\s+)(\w+\s*\()",
+        "replacement": r"[[max_total_threads_per_threadgroup(256)]]\n\1\2",
         "max_applications": 1,
-        "applicable_to": ["gemm", "attention"],
+        "applicable_to": ["attention"],
     },
     # Reduce register pressure with explicit casting
     "half_precision_compute": {
         "description": "Use half precision for intermediate computations",
-        "pattern": r"float\s+(\w+)\s*=\s*([^;]+);(\s*//[^\n]*)?",
-        "replacement": r"half \1 = half(\2);\3",
+        "pattern": r"(\s+)float\s+(\w+)\s*=\s*([^;]+);(\s*//[^\n]*)?",
+        "replacement": r"\1half \2 = half(\3);\4",
         "max_applications": 2,  # Only first few occurrences
-        "applicable_to": ["attention", "elementwise"],
+        "applicable_to": ["elementwise"],
     },
 }
 
@@ -127,6 +120,8 @@ def get_problem_sizes_for_category(category: str) -> list[tuple[int, int, int]]:
 
 def get_applicable_transforms(kernel_path: Path) -> list[tuple[str, dict]]:
     """Get transforms applicable to this kernel."""
+    import re as re_module
+
     category = categorize_kernel(kernel_path)
     content = kernel_path.read_text()
 
@@ -136,10 +131,15 @@ def get_applicable_transforms(kernel_path: Path) -> list[tuple[str, dict]]:
         if category not in transform.get("applicable_to", []):
             continue
 
-        # Check if pattern exists in kernel
-        import re
+        # Check if we should skip (e.g., already has this optimization)
+        skip_if = transform.get("skip_if_contains")
+        if skip_if and skip_if in content:
+            continue
 
-        if not re.search(transform["pattern"], content):
+        # Check if pattern exists in kernel (use MULTILINE for ^ patterns)
+        pattern = transform["pattern"]
+        flags = re_module.MULTILINE if pattern.startswith("^") else 0
+        if not re_module.search(pattern, content, flags):
             continue
 
         applicable.append((name, transform))
@@ -155,8 +155,6 @@ def generate_benchmark_code(
     problem_sizes: list[tuple[int, int, int]],
 ) -> str:
     """Generate Python benchmark code that ALWAYS runs and saves results."""
-
-    kernel_rel = kernel_path.relative_to(METAL_MARLIN_ROOT)
     problem_str = ", ".join(f"[{m},{n},{k}]" for m, n, k in problem_sizes)
     variant_hash = hashlib.md5(f"{transform_name}:{kernel_path.name}".encode()).hexdigest()[:8]
 
@@ -204,36 +202,36 @@ if count == 0:
 else:
     # Write modified kernel
     kernel_path.write_text(modified)
-    
+
     try:
         from metal_marlin._compat import HAS_MPS, torch
         from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_gemm_fp4
         from metal_marlin.kernels import pack_fp4_weights
-        
+
         if not HAS_MPS:
             raise RuntimeError('MPS not available')
-        
+
         # Recompile with modified source
         lib = MetalKernelLibrary.from_source_dir()
-        
+
         problem_sizes = {problem_str}
         baseline_results = {{}}
         modified_results = {{}}
-        
+
         # Benchmark BASELINE first (restore original, run, then re-apply modified)
         kernel_path.write_text(original)
         lib_baseline = MetalKernelLibrary.from_source_dir()
-        
+
         for M, N, K in problem_sizes:
             A = torch.randn(M, K, dtype=torch.float16, device='mps')
             weight = torch.randn(N, K, dtype=torch.float16, device='mps')
             B_packed, scales = pack_fp4_weights(weight, group_size=32)
-            
+
             # Warmup
             for _ in range(5):
                 _ = dispatch_gemm_fp4(lib_baseline, A, B_packed, scales, M, N, K, 32)
             torch.mps.synchronize()
-            
+
             # Benchmark baseline
             start = time.perf_counter()
             for _ in range(20):
@@ -241,21 +239,21 @@ else:
             torch.mps.synchronize()
             elapsed = time.perf_counter() - start
             baseline_results[(M, N, K)] = (elapsed / 20) * 1e6
-        
+
         # Benchmark MODIFIED
         kernel_path.write_text(modified)
         lib_modified = MetalKernelLibrary.from_source_dir()
-        
+
         for M, N, K in problem_sizes:
             A = torch.randn(M, K, dtype=torch.float16, device='mps')
             weight = torch.randn(N, K, dtype=torch.float16, device='mps')
             B_packed, scales = pack_fp4_weights(weight, group_size=32)
-            
+
             # Warmup
             for _ in range(5):
                 _ = dispatch_gemm_fp4(lib_modified, A, B_packed, scales, M, N, K, 32)
             torch.mps.synchronize()
-            
+
             # Benchmark modified
             start = time.perf_counter()
             for _ in range(20):
@@ -263,22 +261,22 @@ else:
             torch.mps.synchronize()
             elapsed = time.perf_counter() - start
             modified_results[(M, N, K)] = (elapsed / 20) * 1e6
-        
+
         # Calculate speedup
         total_baseline = sum(baseline_results.values())
         total_modified = sum(modified_results.values())
         speedup = total_baseline / total_modified if total_modified > 0 else 1.0
-        
+
         result['compile_success'] = True
         result['baseline_us'] = {{str(k): v for k, v in baseline_results.items()}}
         result['modified_us'] = {{str(k): v for k, v in modified_results.items()}}
         result['speedup'] = speedup
         result['timestamp'] = time.time()
-        
+
         print(f'{transform_name}: speedup={{speedup:.3f}}x')
         for sz in problem_sizes:
             print(f'  {{sz}}: {{baseline_results[tuple(sz)]:.2f}} -> {{modified_results[tuple(sz)]:.2f}} us')
-        
+
     except Exception as e:
         result['compile_success'] = False
         result['error'] = str(e)
@@ -363,12 +361,12 @@ all_results = []
 for f in sorted(results_dir.glob('*.json')):
     data = json.loads(f.read_text())
     all_results.append(data)
-    
+
     kernel = data.get('kernel', 'unknown')
     variant = data.get('variant', 'unknown')
     speedup = data.get('speedup', 1.0)
     success = data.get('compile_success', False)
-    
+
     if success and speedup > 1.05:
         winners.append((kernel, variant, speedup))
         print(f'WINNER: {{kernel}} - {{variant}}: {{speedup:.3f}}x')
@@ -484,6 +482,141 @@ tasks:
     return output_path
 
 
+def run_benchmark_directly(
+    kernel_path: Path,
+    transform_name: str,
+    transform: dict,
+    session_id: str,
+) -> dict:
+    """Run benchmark directly without going through task queue."""
+    import re
+    import time
+
+    try:
+        from metal_marlin._compat import HAS_MPS, torch
+        from metal_marlin.kernels import pack_fp4_weights
+        from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_gemm_fp4
+    except ImportError as e:
+        return {
+            "variant": transform_name,
+            "kernel": kernel_path.name,
+            "compile_success": False,
+            "error": f"Import failed: {e}",
+        }
+
+    if not HAS_MPS:
+        return {
+            "variant": transform_name,
+            "kernel": kernel_path.name,
+            "compile_success": False,
+            "error": "MPS not available",
+        }
+
+    original = kernel_path.read_text()
+    pattern = transform["pattern"]
+    replacement = transform["replacement"]
+    max_applications = transform.get("max_applications", 1)
+
+    # Use MULTILINE for patterns that use ^ (start of line)
+    flags = re.MULTILINE if pattern.startswith("^") else 0
+
+    # Apply transformation
+    modified = original
+    count = 0
+    for _ in range(max_applications):
+        new_modified = re.sub(pattern, replacement, modified, count=1, flags=flags)
+        if new_modified == modified:
+            break
+        modified = new_modified
+        count += 1
+
+    result = {
+        "variant": transform_name,
+        "kernel": kernel_path.name,
+        "transform_applied": count > 0,
+        "transform_count": count,
+        "description": transform["description"],
+    }
+
+    if count == 0:
+        result["compile_success"] = True
+        result["note"] = "Pattern not found - optimization not applicable"
+        return result
+
+    # Write modified kernel
+    kernel_path.write_text(modified)
+
+    try:
+        category = categorize_kernel(kernel_path)
+        problem_sizes = get_problem_sizes_for_category(category)
+
+        # Benchmark BASELINE first
+        kernel_path.write_text(original)
+        lib_baseline = MetalKernelLibrary.from_source_dir()
+
+        baseline_results = {}
+        for M, N, K in problem_sizes:
+            A = torch.randn(M, K, dtype=torch.float16, device="mps")
+            weight = torch.randn(N, K, dtype=torch.float16, device="mps")
+            B_packed, scales = pack_fp4_weights(weight, group_size=32)
+
+            # Warmup
+            for _ in range(5):
+                _ = dispatch_gemm_fp4(lib_baseline, A, B_packed, scales, M, N, K, 32)
+            torch.mps.synchronize()
+
+            # Benchmark
+            start = time.perf_counter()
+            for _ in range(20):
+                _ = dispatch_gemm_fp4(lib_baseline, A, B_packed, scales, M, N, K, 32)
+            torch.mps.synchronize()
+            elapsed = time.perf_counter() - start
+            baseline_results[(M, N, K)] = (elapsed / 20) * 1e6
+
+        # Benchmark MODIFIED
+        kernel_path.write_text(modified)
+        lib_modified = MetalKernelLibrary.from_source_dir()
+
+        modified_results = {}
+        for M, N, K in problem_sizes:
+            A = torch.randn(M, K, dtype=torch.float16, device="mps")
+            weight = torch.randn(N, K, dtype=torch.float16, device="mps")
+            B_packed, scales = pack_fp4_weights(weight, group_size=32)
+
+            # Warmup
+            for _ in range(5):
+                _ = dispatch_gemm_fp4(lib_modified, A, B_packed, scales, M, N, K, 32)
+            torch.mps.synchronize()
+
+            # Benchmark
+            start = time.perf_counter()
+            for _ in range(20):
+                _ = dispatch_gemm_fp4(lib_modified, A, B_packed, scales, M, N, K, 32)
+            torch.mps.synchronize()
+            elapsed = time.perf_counter() - start
+            modified_results[(M, N, K)] = (elapsed / 20) * 1e6
+
+        # Calculate speedup
+        total_baseline = sum(baseline_results.values())
+        total_modified = sum(modified_results.values())
+        speedup = total_baseline / total_modified if total_modified > 0 else 1.0
+
+        result["compile_success"] = True
+        result["baseline_us"] = {str(k): v for k, v in baseline_results.items()}
+        result["modified_us"] = {str(k): v for k, v in modified_results.items()}
+        result["speedup"] = speedup
+        result["timestamp"] = time.time()
+
+    except Exception as e:
+        result["compile_success"] = False
+        result["error"] = str(e)
+    finally:
+        # ALWAYS restore original
+        kernel_path.write_text(original)
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate structural optimization tasks with embedded benchmarks",
@@ -503,6 +636,11 @@ def main():
         "--list",
         action="store_true",
         help="List applicable transforms per kernel without generating tasks",
+    )
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Run benchmarks directly instead of generating tasks",
     )
 
     args = parser.parse_args()
@@ -539,14 +677,79 @@ def main():
     # Generate session ID
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Generate tasks
+    # Direct execution mode
+    if args.run:
+        print("=" * 70)
+        print("Structural Metal Kernel Optimization v2 - DIRECT RUN")
+        print("=" * 70)
+        print(f"Session: {session_id}")
+        print(f"Testing {len(kernel_transforms)} transformations...")
+        print()
+
+        results_dir = METAL_MARLIN_ROOT / "agent_workspace" / f"struct_{session_id}"
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        all_results = []
+        winners = []
+
+        for i, (kernel, name, transform) in enumerate(kernel_transforms, 1):
+            print(f"[{i}/{len(kernel_transforms)}] {kernel.name} - {name}...")
+
+            result = run_benchmark_directly(kernel, name, transform, session_id)
+            all_results.append(result)
+
+            # Save individual result
+            result_file = results_dir / f"{kernel.stem}_{name}.json"
+            result_file.write_text(json.dumps(result, indent=2))
+
+            # Print result
+            if result.get("compile_success"):
+                speedup = result.get("speedup", 1.0)
+                if speedup > 1.05:
+                    winners.append((kernel.name, name, speedup))
+                    print(f"  WINNER: {speedup:.3f}x speedup")
+                elif "note" in result:
+                    print(f"  Skip: {result['note']}")
+                else:
+                    print(f"  {speedup:.3f}x (no significant change)")
+            else:
+                print(f"  FAILED: {result.get('error', 'Unknown error')}")
+
+        # Summary
+        print()
+        print("=" * 70)
+        print("SUMMARY")
+        print("=" * 70)
+        print(f"Total tests: {len(all_results)}")
+        print(f"Winners (>5% speedup): {len(winners)}")
+        print()
+
+        if winners:
+            print("Winning optimizations:")
+            for kernel, variant, speedup in sorted(winners, key=lambda x: -x[2]):
+                print(f"  {kernel} - {variant}: {speedup:.3f}x")
+        else:
+            print("No significant improvements found.")
+
+        # Save summary
+        summary = {
+            "session": session_id,
+            "total_tests": len(all_results),
+            "winners": [{"kernel": k, "variant": v, "speedup": s} for k, v, s in winners],
+        }
+        summary_file = results_dir / "summary.json"
+        summary_file.write_text(json.dumps(summary, indent=2))
+        print(f"\nResults saved to: {results_dir}")
+        return
+
+    # Generate tasks for AlphaHENG
     tasks = []
     for kernel, name, transform in kernel_transforms:
         task = generate_task(kernel, name, transform, session_id)
         tasks.append(task)
 
     # Add collect and apply tasks
-    tasks.append(generate_collect_task(session_id, tasks[:-0] if tasks else []))
+    tasks.append(generate_collect_task(session_id, list(tasks)))
     tasks.append(generate_apply_task(session_id))
 
     # Generate YAML

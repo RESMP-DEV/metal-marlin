@@ -244,7 +244,7 @@ inline void store_results(
                                 N);
             } else {
                 simdgroup_store(acc[mi][ni], &edge_staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_none);
 
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
@@ -282,6 +282,7 @@ kernel void marlin_gemm_batched_fp4(
     uint simd_lane                [[thread_index_in_simdgroup]],
     uint simd_id                  [[simdgroup_index_in_threadgroup]]
 ) {
+    // Prefetch hint: consider simdgroup_async_copy for better memory throughput
     uint batch_idx = tgid.z;
     if (batch_idx >= batch_count) {
         return;

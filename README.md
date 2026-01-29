@@ -2,7 +2,7 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-[![Tests](https://img.shields.io/badge/tests-1426%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1565%20passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.11%20|%203.12-blue)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 

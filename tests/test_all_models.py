@@ -7,6 +7,8 @@ that layer replacement + generation works correctly.
 
 import pytest
 import torch
+
+transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from metal_marlin import replace_linear_layers
@@ -18,7 +20,6 @@ MODELS_TO_TEST = [
     ("Qwen/Qwen3-4B", "qwen3"),
     ("mistralai/Mistral-7B-v0.1", "mistral"),
     ("microsoft/phi-2", "phi"),
-
     # MoE models
     ("Qwen/Qwen3-30B-A3B", "qwen3_moe"),
     ("zai-org/GLM-4.7-Flash", "glm4_moe_lite"),

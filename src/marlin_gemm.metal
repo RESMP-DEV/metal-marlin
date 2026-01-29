@@ -948,6 +948,7 @@ kernel void marlin_gemm_fp4(
     uint simd_lane               [[thread_index_in_simdgroup]],
     uint simd_id                 [[simdgroup_index_in_threadgroup]]
 ) {
+    // Prefetch hint: consider simdgroup_async_copy for better memory throughput
     // Double-buffered threadgroup memory
     threadgroup half A_tiles[NUM_BUFFERS][TILE_M][TILE_K];
     threadgroup half B_tiles[NUM_BUFFERS][TILE_K][TILE_N];

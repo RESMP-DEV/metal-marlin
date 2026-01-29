@@ -596,6 +596,9 @@ class TestMetalDispatchViterbi:
 import tempfile
 from pathlib import Path
 
+import pytest
+
+safetensors = pytest.importorskip("safetensors")
 import safetensors.torch
 import torch
 

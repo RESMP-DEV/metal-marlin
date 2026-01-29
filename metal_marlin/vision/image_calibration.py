@@ -45,6 +45,15 @@ import numpy as np
 if TYPE_CHECKING:
     pass
 
+# VisionMetal import with fallback for non-Apple systems
+try:
+    from .vision_metal import VisionMetal
+    _VISION_METAL = VisionMetal()
+    HAS_VISION_METAL = True
+except Exception:
+    _VISION_METAL = None
+    HAS_VISION_METAL = False
+
 
 @dataclass
 class ImageInfo:
@@ -510,9 +519,14 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             low_res = rng.standard_normal((H // 8, W // 8))
 
             # Upsample with bilinear interpolation for smoothness
-            from scipy.ndimage import zoom
-
-            smooth = zoom(low_res, (8, 8), order=1)
+            if HAS_VISION_METAL:
+                import torch
+                low_res_t = torch.from_numpy(low_res).unsqueeze(0).unsqueeze(0).to('mps')
+                smooth_t = _VISION_METAL.resize_bilinear(low_res_t, (H, W))
+                smooth = smooth_t.squeeze().cpu().numpy()
+            else:
+                from scipy.ndimage import zoom
+                smooth = zoom(low_res, (8, 8), order=1)
 
             # Add high-frequency detail
             detail = rng.standard_normal((H, W)) * 0.3
@@ -615,12 +629,18 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             pil_img = pil_img.resize((W, H), Image.BILINEAR)
             img = np.array(pil_img)
         except ImportError:
-            from scipy.ndimage import zoom
-
-            scale_h = H / img.shape[0]
-            scale_w = W / img.shape[1]
-            img = zoom(img, (scale_h, scale_w, 1), order=1)
-            img = np.clip(img, 0, 255).astype(np.uint8)
+            if HAS_VISION_METAL:
+                import torch
+                img_t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to('mps')
+                img_resized_t = _VISION_METAL.resize_bilinear(img_t, (H, W))
+                img = img_resized_t.squeeze().permute(1, 2, 0).cpu().numpy()
+                img = np.clip(img, 0, 255).astype(np.uint8)
+            else:
+                from scipy.ndimage import zoom
+                scale_h = H / img.shape[0]
+                scale_w = W / img.shape[1]
+                img = zoom(img, (scale_h, scale_w, 1), order=1)
+                img = np.clip(img, 0, 255).astype(np.uint8)
 
         # Convert to float and normalize
         img = img.astype(np.float32) / 255.0

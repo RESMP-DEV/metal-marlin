@@ -12,8 +12,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-import safetensors.torch
 import torch
+from safetensors import safe_open
 
 
 @dataclass
@@ -53,7 +53,7 @@ class LayerStreamer:
 
         if self.model_path.is_file() and self.model_path.suffix == ".safetensors":
             # Single file model
-            with safetensors.torch.safe_open(self.model_path, framework="pt") as f:
+            with safe_open(self.model_path, framework="pt") as f:
                 for key in f.keys():
                     index[key] = (self.model_path, key)
 
@@ -74,7 +74,7 @@ class LayerStreamer:
                 # Look for safetensors files in directory
                 safetensor_files = sorted(self.model_path.glob("*.safetensors"))
                 for file_path in safetensor_files:
-                    with safetensors.torch.safe_open(file_path, framework="pt") as f:
+                    with safe_open(file_path, framework="pt") as f:
                         for key in f.keys():
                             index[key] = (file_path, key)
 
@@ -128,7 +128,7 @@ class LayerStreamer:
             file_path, tensor_key = self._index[key]
 
             # Load weight tensor
-            with safetensors.torch.safe_open(file_path, framework="pt") as f:
+            with safe_open(file_path, framework="pt") as f:
                 weight = f.get_tensor(tensor_key)
 
             # Ensure weight is 2D (linear layers should be [out, in])
@@ -140,7 +140,7 @@ class LayerStreamer:
             bias = None
             if bias_key in self._index:
                 bias_file, bias_tensor_key = self._index[bias_key]
-                with safetensors.torch.safe_open(bias_file, framework="pt") as f:
+                with safe_open(bias_file, framework="pt") as f:
                     bias = f.get_tensor(bias_tensor_key)
 
             yield LayerWeights(
@@ -165,7 +165,7 @@ class LayerStreamer:
 
         for key in linear_keys:
             file_path, tensor_key = self._index[key]
-            with safetensors.torch.safe_open(file_path, framework="pt") as f:
+            with safe_open(file_path, framework="pt") as f:
                 # Use get_slice to get shape/dtype without loading full tensor
                 slice_obj = f.get_slice(tensor_key)
                 shape = slice_obj.get_shape()
@@ -186,7 +186,7 @@ class LayerStreamer:
                 bias_key = key.replace(".weight", ".bias")
                 if bias_key in self._index:
                     bias_file, bias_tensor_key = self._index[bias_key]
-                    with safetensors.torch.safe_open(bias_file, framework="pt") as f2:
+                    with safe_open(bias_file, framework="pt") as f2:
                         bias_slice = f2.get_slice(bias_tensor_key)
                         bias_shape = bias_slice.get_shape()
                         bias_params = 1

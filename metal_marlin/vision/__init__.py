@@ -45,6 +45,10 @@ from .projector import (
     VisionProjectorConfig,
     detect_projector_type,
 )
+from .vision_metal import (
+    VisionMetal,
+    preprocess_for_vit,
+)
 
 __all__ = [
     "VisionProjector",
@@ -60,4 +64,6 @@ __all__ = [
     "build_vision_precision_map",
     "build_vlm_precision_map",
     "pack_vlm_mixed_format",
+    "VisionMetal",
+    "preprocess_for_vit",
 ]

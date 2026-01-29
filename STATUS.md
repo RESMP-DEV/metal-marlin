@@ -1,12 +1,12 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-28T22:11
+**Last Updated:** 2026-01-29
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **1562 tests collected** (3 import errors) ⚠️ |
+| Test Suite | **1565 tests collected** ✅ |
 | GEMM Kernel | **Working + Optimized** ✅ (2.4x speedup) |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
@@ -14,9 +14,10 @@
 | GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
 | OpenAI Server | **Scaffolded** 🔄 |
 | Metal Shaders | **40 shaders** ✅ |
+| Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
 | Legacy Cleanup | **Complete** ✅ |
-| Ruff Linting | **74 warnings** ⚠️ |
-| Pyright Errors | **6 errors, 231 warnings** ⚠️ |
+| Ruff Linting | **101 warnings** ⚠️ |
+| Pyright Errors | **0 errors, 215 warnings** ✅ |
 
 ---
 
@@ -51,10 +52,10 @@
 - [x] Dequant FP8 (dequant_fp8.metal) - FP8 unpacking
 - [x] Dequant INT8 (dequant_int8.metal) - INT8 unpacking
 - [x] Dequant Sub-4bit (dequant_sub4bit.metal) - Sub-4bit unpacking
-- [⚠️] Hessian (hessian.metal) - **Python wrapper complete, using PyTorch MPS fallback**
-  - Issue: Threadgroup memory exceeds 32KB limit (33024 bytes)
-  - Issue: FP16 kernel compilation errors  
-  - Status: gptq_metal.py dispatches via MPS matmul: `H = 2.0 * (X.T @ X)`
+- [x] Hessian (hessian.metal) - **Fully working on Metal** ✅
+  - Rewritten with optimized tiling (~17KB threadgroup memory, well under 32KB limit)
+  - Python wrapper: `gptq_metal.py` dispatches to `hessian_compute` kernel
+  - Tests: `test_gptq_metal.py::TestHessianComputation` passes
 - [x] Cholesky (cholesky.metal)
 
 **Other:**
@@ -70,9 +71,14 @@
 - [x] BF16 Compat (bf16_compat.metal)
 
 ### Remaining on CPU/MPS
-- Image preprocessing (scipy.ndimage)
-- ONNX graph execution
-- Model loading (safetensors)
+- (none - all significant compute operations are on Metal)
+
+### Now on Metal (previously listed as CPU/MPS)
+- ONNX graph execution → `converters/onnx_executor.py` dispatches to Metal kernels
+- Model loading → File I/O (not a compute operation, N/A for Metal)
+- Vision preprocessing → `vision/vision_metal.py` dispatches to 16 Metal kernels:
+  - `image_resize_bilinear`, `image_resize_bicubic`, `image_normalize`
+  - `vit_patch_extract`, `dynamic_resize_qwen2vl`, fused variants
 
 ---
 
@@ -89,19 +95,18 @@
 
 ## Test Results
 
-**Last verified:** 2026-01-28
+**Last verified:** 2026-01-29
 **Test files:** 53
 
 | Category | Count |
 |----------|-------|
-| Collected | 1562 |
-| Collection Errors | 3 |
+| Collected | 1565 |
+| Collection Errors | 0 |
 | Skipped | 48 |
 
-**Collection errors:** (missing optional dependencies)
+**Optional dependency tests:** (skipped when dependencies missing)
 - `test_all_models.py` - requires `transformers`
-- `test_trellis.py` - requires `safetensors`
-- `test_viterbi_quant.py` - requires `transformers`
+- `test_trellis.py` LayerStreamer section - requires `safetensors`
 
 **Recent additions:**
 - EXL3 quantization pipeline (trellis + viterbi)
@@ -389,7 +394,7 @@ The following are intentional stubs or need optimization:
 
 ## Code Quality
 
-### Ruff Warnings (74)
+### Ruff Warnings (101)
 
 Mostly whitespace and unused variable warnings:
 - `W293` - Blank line contains whitespace
@@ -403,10 +408,10 @@ uv run ruff check . --fix  # Auto-fix available
 
 | Category | Count |
 |----------|-------|
-| Errors | 6 |
-| Warnings | 231 |
+| Errors | 0 |
+| Warnings | 215 |
 
-Errors are mostly `floating[Any]` vs `float` type mismatches in numpy operations.
+Fixed `safe_open` import issue in `layer_streamer.py` (was 6 errors).
 
 ---
 

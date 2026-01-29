@@ -147,6 +147,7 @@ kernel void dense_decode_gemv_fp4(
     uint tgid_x                  [[threadgroup_position_in_grid]],
     uint tid                     [[thread_position_in_threadgroup]]
 ) {
+    // Prefetch hint: consider simdgroup_async_copy for better memory throughput
     const uint tg_col_base = tgid_x * DECODE_TILE_N;
     const uint col_base = tg_col_base + tid * DECODE_COLS_PER_THREAD;
 

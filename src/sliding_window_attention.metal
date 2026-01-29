@@ -97,6 +97,7 @@ struct SlidingWindowParams {
 // Dispatch: [num_heads_q, ceil(seq_q / TILE_Q_SW), batch] threadgroups
 // ---------------------------------------------------------------------------
 
+[[max_total_threads_per_threadgroup(256)]]
 kernel void sliding_window_attention_prefill(
     device const half* Q            [[buffer(0)]],
     device const half* K            [[buffer(1)]],

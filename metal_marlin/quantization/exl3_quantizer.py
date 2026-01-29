@@ -83,12 +83,14 @@ class EXL3Quantizer:
         had_k: int = 128,
         sigma_reg: float = 0.025,
         max_workers: int | None = None,
+        use_metal: bool = True,
     ):
         self.bits = bits
         self.group_size = group_size
         self.had_k = had_k
         self.sigma_reg = sigma_reg
         self.max_workers = max_workers
+        self.use_metal = use_metal
         self.codebook = TrellisCodebook(bits=bits)
 
     def quantize_layer(
@@ -101,10 +103,10 @@ class EXL3Quantizer:
 
         Steps:
         1. Preprocess Hessian with Hadamard rotation
-        2. Block LDL decomposition
-        3. Rotate weights
-        4. LDLQ quantization with error compensation
-        5. Return packed result
+        2. Eigendecomposition to enforce PSD
+        3. Block LDL decomposition
+        4. Rotate weights
+        5. LDLQ quantization with error compensation
         """
         start = time.perf_counter()
 
@@ -114,20 +116,18 @@ class EXL3Quantizer:
         H_rot, su, _ = preprocess_hessian_exl3(hessian, self.had_k)
 
         # Step 2: Ensure positive definiteness via eigendecomposition
-        # Use torch for faster eigh (better BLAS/LAPACK than numpy)
-        H_rot_t = torch.from_numpy(H_rot).to(dtype=torch.float64)
-        eigenvalues, eigenvectors = torch.linalg.eigh(H_rot_t)
-        eigenvalues = torch.clamp(eigenvalues, min=self.sigma_reg)
-        H_psd_t = eigenvectors @ torch.diag(eigenvalues) @ eigenvectors.T
-        H_psd = H_psd_t.numpy()
+        # Use numpy (releases GIL during LAPACK calls) instead of torch (holds GIL)
+        eigenvalues, eigenvectors = np.linalg.eigh(H_rot)
+        eigenvalues = np.maximum(eigenvalues, self.sigma_reg)
+        H_psd = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
 
         # Step 3: Block LDL decomposition
         L, D = block_ldl(H_psd, block_size=16)
 
-        # Step 3: Rotate weights
+        # Step 4: Rotate weights
         W_rot = rotate_weights_exl3(W, su, had_k=self.had_k)
 
-        # Step 4: LDLQ quantization
+        # Step 5: LDLQ quantization
         encoded, scales, W_q = ldlq_quantize_layer(
             W_rot,
             L,
@@ -135,6 +135,7 @@ class EXL3Quantizer:
             self.codebook,
             group_size=self.group_size,
             max_workers=self.max_workers,
+            use_metal=self.use_metal,
         )
 
         # Compute reconstruction error
@@ -161,6 +162,7 @@ def ldlq_quantize_layer(
     codebook: TrellisCodebook,
     group_size: int = 128,
     max_workers: int | None = None,
+    use_metal: bool = True,
 ) -> tuple[NDArray[np.int16], NDArray[np.float32], NDArray[np.float32]]:
     """Quantize layer using LDLQ (Layer-wise Dynamic Low-precision Quantization).
 
@@ -227,10 +229,15 @@ def ldlq_quantize_layer(
             tile_scales[tile_idx] = np.mean(scales[group_idx, row_start:row_end])
 
     # === QUANTIZE TILES (METAL GPU ACCELERATED) ===
-    if _USE_FAST and quantize_tiles_fast is not None:
+    if _USE_FAST and quantize_tiles_fast is not None and use_metal:
         # Fast path: pass raw array directly to Metal
         all_indices, all_dequant = quantize_tiles_fast(
-            tiles_data, codebook, tile_scales, max_workers=max_workers
+            tiles_data, codebook, tile_scales, max_workers=max_workers, use_metal=True
+        )
+    elif _USE_FAST and quantize_tiles_fast is not None:
+        # CPU-only fast path (for thread safety)
+        all_indices, all_dequant = quantize_tiles_fast(
+            tiles_data, codebook, tile_scales, max_workers=max_workers, use_metal=False
         )
     else:
         # Fallback: create TrellisTile objects
@@ -243,7 +250,7 @@ def ldlq_quantize_layer(
             for i in range(n_tiles)
         ]
         all_indices, all_dequant = quantize_tiles_parallel(
-            tiles, codebook, tile_scales, max_workers=max_workers
+            tiles, codebook, tile_scales, max_workers=max_workers, use_metal=use_metal
         )
 
     # Reshape encoded indices to [tiles_n, tiles_k, 256]
