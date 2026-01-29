@@ -2,7 +2,7 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-[![Tests](https://img.shields.io/badge/tests-1444%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1426%20passing-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.11%20|%203.12-blue)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 
@@ -90,7 +90,7 @@ Benchmarked on M4 Max with PyTorch MPS backend.
 ## Development
 
 ```bash
-uv run pytest tests/ -v              # Full suite (~4 min)
+uv run pytest tests/ -v              # Full suite (~4 min, 1426 tests)
 uv run pytest tests/ -v -m smoke     # Quick smoke tests
 uv run ruff check .                  # Linting
 uv run pyright metal_marlin/         # Type checking

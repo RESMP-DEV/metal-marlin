@@ -1942,6 +1942,153 @@ def benchmark_moe_dispatch(
 
 
 # ---------------------------------------------------------------------------
+# Viterbi Quantization Dispatch
+# ---------------------------------------------------------------------------
+
+
+def dispatch_viterbi_quantize(
+    lib: MetalKernelLibrary,
+    tiles: torch.Tensor,
+    scales: torch.Tensor,
+    grid: torch.Tensor,
+    use_u4_kernel: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch Viterbi trellis quantization on Metal GPU.
+
+    Uses the viterbi_quant.metal shader for parallel tile quantization.
+    Each tile is 16x16 (256 elements) processed by one threadgroup.
+
+    Args:
+        lib: MetalKernelLibrary with viterbi_quant compiled
+        tiles: Input tiles [n_tiles, 256], float32, MPS tensor
+        scales: Per-tile scale factors [n_tiles], float32, MPS tensor
+        grid: Quantization grid values [n_states], float32, MPS tensor
+        use_u4_kernel: Use optimized 4-bit kernel (16 states) if True
+
+    Returns:
+        indices: Quantized state indices [n_tiles, 256], int16, MPS tensor
+        dequantized: Reconstructed values [n_tiles, 256], float32, MPS tensor
+    """
+    require_mps()
+
+    device = lib.device
+    n_tiles = tiles.shape[0]
+    n_states = grid.shape[0]
+
+    # Ensure contiguous float32 tensors
+    tiles = tiles.float().contiguous()
+    scales = scales.float().contiguous()
+    grid = grid.float().contiguous()
+
+    # Allocate output buffers
+    indices = torch.zeros(n_tiles, 256, dtype=torch.int16, device="mps")
+    dequantized = torch.zeros(n_tiles, 256, dtype=torch.float32, device="mps")
+
+    # Create Metal buffers
+    tiles_buf = mps_tensor_to_metal_buffer(tiles, device)
+    scales_buf = mps_tensor_to_metal_buffer(scales, device)
+    grid_buf = mps_tensor_to_metal_buffer(grid, device)
+    indices_buf = mps_tensor_to_metal_buffer(indices, device, copy_back=True)
+    dequant_buf = mps_tensor_to_metal_buffer(dequantized, device, copy_back=True)
+
+    # Parameters buffer
+    params = np.array([n_tiles, n_states], dtype=np.uint32)
+    params_buf = device.newBufferWithBytes_length_options_(
+        params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
+    )
+
+    # Select kernel
+    if use_u4_kernel and n_states == 16:
+        kernel_name = "quantize_tiles_viterbi_u4"
+        # U4 kernel only needs n_tiles param (n_states fixed at 16)
+        params = np.array([n_tiles], dtype=np.uint32)
+        params_buf = device.newBufferWithBytes_length_options_(
+            params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
+        )
+        buffers = [tiles_buf, scales_buf, grid_buf, indices_buf, dequant_buf, params_buf]
+    else:
+        kernel_name = "quantize_tiles_viterbi"
+        buffers = [
+            tiles_buf,
+            scales_buf,
+            grid_buf,
+            indices_buf,
+            dequant_buf,
+            params_buf,
+            params_buf,
+        ]
+        # Note: second params_buf is for n_states
+
+    # Dispatch: one threadgroup per tile, 256 threads per group
+    dispatch_kernel(
+        lib,
+        function_name=kernel_name,
+        grid=(n_tiles, 1, 1),
+        threadgroup=(256, 1, 1),
+        buffers=buffers,
+        wait=True,
+    )
+
+    return indices, dequantized
+
+
+def dispatch_viterbi_quantize_naive(
+    lib: MetalKernelLibrary,
+    tiles: torch.Tensor,
+    scales: torch.Tensor,
+    grid: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch naive (greedy) quantization on Metal GPU.
+
+    Faster but lower quality than Viterbi - useful for comparison.
+
+    Args:
+        lib: MetalKernelLibrary with viterbi_quant compiled
+        tiles: Input tiles [n_tiles, 256], float32, MPS tensor
+        scales: Per-tile scale factors [n_tiles], float32, MPS tensor
+        grid: Quantization grid values [n_states], float32, MPS tensor
+
+    Returns:
+        indices: Quantized state indices [n_tiles, 256], int16, MPS tensor
+        dequantized: Reconstructed values [n_tiles, 256], float32, MPS tensor
+    """
+    require_mps()
+
+    device = lib.device
+    n_tiles = tiles.shape[0]
+    n_states = grid.shape[0]
+
+    tiles = tiles.float().contiguous()
+    scales = scales.float().contiguous()
+    grid = grid.float().contiguous()
+
+    indices = torch.zeros(n_tiles, 256, dtype=torch.int16, device="mps")
+    dequantized = torch.zeros(n_tiles, 256, dtype=torch.float32, device="mps")
+
+    tiles_buf = mps_tensor_to_metal_buffer(tiles, device)
+    scales_buf = mps_tensor_to_metal_buffer(scales, device)
+    grid_buf = mps_tensor_to_metal_buffer(grid, device)
+    indices_buf = mps_tensor_to_metal_buffer(indices, device, copy_back=True)
+    dequant_buf = mps_tensor_to_metal_buffer(dequantized, device, copy_back=True)
+
+    params = np.array([n_tiles, n_states], dtype=np.uint32)
+    params_buf = device.newBufferWithBytes_length_options_(
+        params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
+    )
+
+    dispatch_kernel(
+        lib,
+        function_name="quantize_tiles_naive",
+        grid=(n_tiles, 1, 1),
+        threadgroup=(256, 1, 1),
+        buffers=[tiles_buf, scales_buf, grid_buf, indices_buf, dequant_buf, params_buf, params_buf],
+        wait=True,
+    )
+
+    return indices, dequantized
+
+
+# ---------------------------------------------------------------------------
 # Module-level singleton for convenience
 # ---------------------------------------------------------------------------
 

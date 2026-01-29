@@ -1,20 +1,19 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-28T09:00
+**Last Updated:** 2026-01-28T13:30
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **100% passing** (1444/1497) — cleanup in progress |
+| Test Suite | **100% passing** (1426 tests) ✅ |
 | GEMM Kernel | **Working** ✅ |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
 | GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
 | OpenAI Server | **Scaffolded** 🔄 |
 | Metal Shaders | **5/5 compiling** ✅ |
-| Inference Tests | **31/31 passing** ✅ |
-| MLX Removal | **Complete** ✅ |
+| Legacy Cleanup | **Complete** ✅ |
 | Ruff Linting | **0 errors** ✅ |
 | Pyright Errors | **0 errors, 184 warnings** ✅ |
 
@@ -33,24 +32,24 @@
 
 ## Test Results
 
-**Last verified:** 2026-01-27
-**Last run:** 256.18s (4 min 16 sec)
+**Last verified:** 2026-01-28
+**Last run:** 249.38s (4 min 9 sec)
 
 | Category | Count |
 |----------|-------|
-| Passed | 1444 |
+| Passed | 1426 |
 | Failed | 0 |
-| Skipped | 53 |
+| Skipped | 48 |
 | xfailed | 0 |
 | xpassed | 0 |
 | Errors | 0 |
 
 **Recent changes:**
-- Fixed KV attention quantization (corrected test quantization formula and exact inverse dequant)
-- Fixed batched GEMV shape mismatch (removed duplicate M calculation)
-- Added INT2 GEMM PyTorch fallback for GLM-4.7-Flash MLA support
-- Fixed MetalQuantizedLinear output padding for non-aligned dimensions
-- All INT4/FP4 GEMM tests now passing
+- Removed legacy/ directory and all legacy model implementations
+- Deleted unused model files (llama.py, qwen3.py, mixtral.py, moe.py)
+- Cleaned up test_inference.py (removed MetalGLM47Model, MetalGenerationConfig tests)
+- Fixed KV attention quantization (corrected test quantization formula)
+- All INT4/FP4 GEMM tests passing
 
 **Remaining failures (0):**
 - None
@@ -113,7 +112,7 @@ MoE routing natively. We swap `nn.Linear` → `MetalQuantizedLinear` for quantiz
 
 ```bash
 # Requires transformers 5.0.0+
-uv run pytest tests/test_glm4_integration.py -v --run-slow
+RUN_GLM47_TRANSFORMERS=1 uv run pytest tests/test_glm47_transformers.py -v
 ```
 
 ---
@@ -201,17 +200,20 @@ The routed expert computation now uses batched Metal dispatch via `moe_expert_ge
 
 See [docs/metal_kernel_audit.md](docs/metal_kernel_audit.md) for full kernel inventory.
 
-### Legacy Model Layers (Being Phased Out)
+### Legacy Model Layers (Removed)
 
-> **Note:** These custom layer implementations are being replaced by Transformers integration.
-> New models should use `replace_linear_layers()` instead of custom model classes.
+> **Note:** Legacy model implementations have been removed. All models should use
+> Transformers + `replace_linear_layers()` for inference.
 
-| Model | Custom Classes | Status |
-|-------|---------------|--------|
-| Llama | QuantizedLlamaAttention, QuantizedLlamaMLP | Legacy |
-| Qwen3 | QuantizedQwen3Attention, QuantizedQwen3MLP | Legacy |
-| GLM-4 | MetalMLAAttention, MetalMLP, MetalGLM47Model | Legacy (broken for MoE) |
-| Mixtral | MixtralAttention, MixtralExpertMLP | Legacy |
+**Deleted:**
+- `metal_marlin/legacy/` - All files
+- `metal_marlin/models/llama.py` - QuantizedLlama* classes
+- `metal_marlin/models/qwen3.py` - QuantizedQwen3* classes
+- `metal_marlin/models/mixtral.py` - Mixtral* classes
+- `metal_marlin/models/moe.py` - QuantizedMoELayer
+
+**Remaining in `metal_marlin/models/`:**
+- `deepseek.py` - DeepSeekQwenModel (working)
 
 ---
 
@@ -319,6 +321,7 @@ Current swarm status:
 | 36 | GEMM dispatch debugging, Metal compiler bugs | ✅ Complete |
 | 37 | FP4 reference fixes, Hadamard kernel, LayerNorm | ✅ Complete |
 | 42 | MoE Pipeline (GLM-4.7-Flash) | ✅ Complete |
+| 43 | Legacy Code Cleanup | ✅ Complete |
 
 ### Phase 42 Results
 
@@ -335,6 +338,16 @@ Current swarm status:
 **Remaining optimization work:**
 - ❌ `moe_dispatch_optimized` GPU token grouping (not wired)
 - ❌ `moe_router_fused` kernel (not wired)
+
+### Phase 43 Results (Legacy Cleanup)
+
+**Completed:**
+- ✅ Deleted `metal_marlin/legacy/` directory
+- ✅ Deleted `metal_marlin/models/llama.py`, `qwen3.py`, `mixtral.py`, `moe.py`
+- ✅ Removed legacy exports from `__init__.py` files
+- ✅ Cleaned `test_inference.py` (removed MetalGLM47Model tests)
+- ✅ Removed root directory junk files
+- ✅ All tests passing (1426 passed, 48 skipped)
 
 ---
 
