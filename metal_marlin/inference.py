@@ -6,6 +6,7 @@ from .models.nemotron import QuantizedNemotron
 from .models.qwen3_dense import QuantizedQwen3Dense
 from .models.qwen3_moe import QuantizedQwen3MoE
 from .quantized_loader import QuantizedModel
+from .sampler import MetalSampler
 
 
 class MetalInferenceEngine:
@@ -26,6 +27,9 @@ class MetalInferenceEngine:
             self.quantized.config.get("base_model_id")
         )
         self.device = device
+        self.sampler = MetalSampler(
+            vocab_size=self.quantized.config.get("vocab_size", 32000)
+        )
 
     def _load_model(self):
         arch = self.quantized.config.get("architecture")
@@ -54,25 +58,15 @@ class MetalInferenceEngine:
 
         return self.tokenizer.decode(input_ids[0])
 
-    def _sample(self, logits: torch.Tensor, temperature: float, top_p: float) -> torch.Tensor:
-        if temperature <= 0:
-            return torch.argmax(logits, dim=-1)
-
-        logits = logits / max(temperature, 1e-6)
-
-        if top_p >= 1.0:
-            probs = torch.softmax(logits, dim=-1)
-            return torch.multinomial(probs, num_samples=1).squeeze(-1)
-
-        sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-        sorted_probs = torch.softmax(sorted_logits, dim=-1)
-        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
-
-        sorted_mask = cumulative_probs > top_p
-        if sorted_mask.shape[-1] > 1:
-            sorted_mask[..., 0] = False
-
-        filtered_logits = sorted_logits.masked_fill(sorted_mask, float("-inf"))
-        filtered_probs = torch.softmax(filtered_logits, dim=-1)
-        next_indices = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
-        return sorted_indices.gather(-1, next_indices.unsqueeze(-1)).squeeze(-1)
+    def _sample(
+        self, logits: torch.Tensor, temperature: float, top_p: float, top_k: int = 0
+    ) -> torch.Tensor:
+        if temperature == 0:
+            token_id = self.sampler.argmax(logits)
+        elif top_p < 1.0:
+            token_id = self.sampler.sample_top_p(logits, top_p, temperature)
+        elif top_k > 0:
+            token_id = self.sampler.sample_top_k(logits, top_k, temperature)
+        else:
+            token_id = self.sampler.sample_categorical(logits, temperature)
+        return torch.tensor(token_id, device=logits.device)

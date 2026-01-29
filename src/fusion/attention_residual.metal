@@ -41,7 +41,7 @@ using namespace metal;
 
 constant constexpr uint FUSED_TG_SIZE = 128;
 constant constexpr uint SIMDGROUP_SIZE = 32;
-constant constexpr uint TILE_M = 16;
+constant constexpr uint TILE_M = 64;
 constant constexpr uint TILE_N = 64;
 constant constexpr uint TILE_K = 32;
 constant constexpr uint FP4_PER_UINT = 8;

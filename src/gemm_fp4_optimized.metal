@@ -23,8 +23,8 @@ using namespace metal;
 // Tile dimensions - optimized for M4 Max
 // ===========================================================================
 
-constant constexpr uint TILE_M = 64;      // Output rows per threadgroup
-constant constexpr uint TILE_N = 64;      // Output cols per threadgroup
+constant constexpr uint TILE_M = 128;      // Output rows per threadgroup
+constant constexpr uint TILE_N = 128;      // Output cols per threadgroup
 constant constexpr uint TILE_K = 32;      // K-reduction per mainloop iteration
 constant constexpr uint K_TILES = TILE_K / 8;  // 4 simdgroup MMA ops per K-block
 

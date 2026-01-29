@@ -50,7 +50,7 @@ constant constexpr uint BLOCKS_PER_U32_2_8 = 5;   // floor(32 / 6)
 constant constexpr uint BLOCKS_PER_U32_4_8 = 4;   // floor(32 / 7)
 
 // Tile dimensions for dequant_sparse_fp4_tile
-constant constexpr uint TILE_K = 64;              // K dimension per tile
+constant constexpr uint TILE_K = 8;              // K dimension per tile
 constant constexpr uint TILE_N = 64;              // N dimension per tile
 constant constexpr uint THREADS_PER_TG = 256;     // Threads per threadgroup
 

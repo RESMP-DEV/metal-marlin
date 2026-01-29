@@ -33,6 +33,21 @@ import torch
 from torch import Tensor
 
 from ..kv_cache import KVCache
+from ..sampler import MetalSampler
+
+# Global sampler cache for Metal-accelerated sampling
+_sampler: MetalSampler | None = None
+
+
+def _get_sampler(vocab_size: int) -> MetalSampler:
+    """Get or create a MetalSampler for the given vocab size.
+    
+    The sampler is cached and reused to avoid repeated initialization.
+    """
+    global _sampler
+    if _sampler is None or _sampler.vocab_size != vocab_size:
+        _sampler = MetalSampler(vocab_size=vocab_size)
+    return _sampler
 
 
 @dataclass
@@ -615,11 +630,12 @@ def _sample_tree_next_token(
                         device,
                     ).item()
                 else:
-                    # Sample from normalized residual
+                    # Sample from normalized residual using Metal
                     residual_normalized = residual / residual_sum
-                    next_tokens[b] = torch.multinomial(
-                        residual_normalized.unsqueeze(0), num_samples=1
-                    ).squeeze().item()
+                    sampler = _get_sampler(residual_normalized.shape[-1])
+                    next_tokens[b] = sampler.sample_categorical(
+                        torch.log(residual_normalized.unsqueeze(0) + 1e-10), temperature=1.0
+                    )
 
     return next_tokens
 
@@ -723,11 +739,10 @@ def _sample_residual_batched(
             # Fall back to sampling from target directly.
             token = _sample(target_logits[b : b + 1, pos, :], temperature, top_p, device)
         else:
-            # Sample from normalized residual
+            # Sample from normalized residual using Metal
             log_residual = torch.log(residual / residual_sum + 1e-10)
-            token = torch.multinomial(
-                torch.softmax(log_residual, dim=-1).unsqueeze(0), num_samples=1
-            )
+            sampler = _get_sampler(log_residual.shape[-1])
+            token = sampler.sample_categorical(log_residual.unsqueeze(0), temperature=1.0)
 
         token_val = int(token.reshape(()).item())
         next_token[b] = token_val
@@ -759,7 +774,9 @@ def _sample(logits: Tensor, temperature: float, top_p: float, device: torch.devi
     if top_p < 1.0:
         probs = _apply_top_p(probs, top_p)
 
-    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+    # Use Metal-accelerated sampling
+    sampler = _get_sampler(probs.shape[-1])
+    return sampler.sample_categorical(torch.log(probs + 1e-10), temperature=1.0)
 
 
 def _apply_top_p(probs: Tensor, p: float) -> Tensor:

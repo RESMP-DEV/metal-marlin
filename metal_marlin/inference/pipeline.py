@@ -689,8 +689,10 @@ class MetalMarlinModel:
         gate = self._quantized_linear(hidden, f"{prefix}.gate_proj.weight")
         up = self._quantized_linear(hidden, f"{prefix}.up_proj.weight")
 
-        # SwiGLU activation
-        hidden = torch.nn.functional.silu(gate) * up
+        # SwiGLU activation - use fused Metal kernel (handles fallback internally)
+        from ..activation_metal import swiglu_fused_metal
+
+        hidden = swiglu_fused_metal(gate, up)
 
         return self._quantized_linear(hidden, f"{prefix}.down_proj.weight")
 

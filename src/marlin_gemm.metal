@@ -52,7 +52,7 @@ using namespace metal;
 // M4 Max has 32KB threadgroup memory per threadgroup, 32 threads per simdgroup.
 // We target 4 simdgroups per threadgroup for good occupancy.
 //
-// TILE_M = 64: 8 rows of 8x8 tiles (thread_m_blocks = 8)
+// TILE_M = 128: 16 rows of 8x8 tiles (thread_m_blocks = 16)
 // TILE_N = 64: 8 cols of 8x8 tiles (thread_n_blocks = 8)
 // TILE_K = 32: 4 depth tiles per mainloop iteration
 //
@@ -62,9 +62,9 @@ using namespace metal;
 //   Total = 16384 bytes, within 32KB budget
 // ---------------------------------------------------------------------------
 
-constant constexpr uint TILE_M = 64;
-constant constexpr uint TILE_N = 64;
-constant constexpr uint TILE_K = 32;
+constant constexpr uint TILE_M = 128;
+constant constexpr uint TILE_N = 24;
+constant constexpr uint TILE_K = 16;
 
 // Number of 8x8 sub-tiles in the K (reduction) dimension
 constant constexpr uint K_TILES = TILE_K / 8;  // 4
@@ -81,14 +81,14 @@ constant constexpr uint DIVERGENT_SG_N_TILES = TILE_N / 8;
 // Each simdgroup is responsible for a 4x4 block of 8x8 M×N tiles
 // (32 rows × 32 cols per simdgroup)
 // 4 simdgroups in 2×2 arrangement: 2*32=64 rows, 2*32=64 cols
-constant constexpr uint SG_M_TILES = 4;  // rows of 8x8 tiles per simdgroup (32 rows)
-constant constexpr uint SG_N_TILES = 4;  // cols of 8x8 tiles per simdgroup (32 cols)
+constant constexpr uint SG_M_TILES = 4;
+constant constexpr uint SG_N_TILES = 8;
 
 // FP4 packing: 8 FP4 values per uint32 (4 bits each)
 constant constexpr uint FP4_PER_UINT = 8;
 
 // Pipeline depth
-constant constexpr uint NUM_BUFFERS = 2;    // Double-buffered variant
+constant constexpr uint NUM_BUFFERS = 3;
 constant constexpr uint NUM_STAGES = 3;     // Triple-buffered variant
 
 // Maximum K-parallel slices: host should allocate reduction_buf for up to 16 slices.

@@ -13,16 +13,16 @@ using namespace metal;
 // ---------------------------------------------------------------------------
 
 constant constexpr uint TILE_M = 64;
-constant constexpr uint TILE_N = 64;
-constant constexpr uint TILE_K = 32;
+constant constexpr uint TILE_N = 24;
+constant constexpr uint TILE_K = 48;
 
 constant constexpr uint K_TILES = TILE_K / 8;  // 4
 constant constexpr uint SIMDGROUPS_PER_TG = 4;
 constant constexpr uint THREADS_PER_TG = SIMDGROUPS_PER_TG * 32;
 constant constexpr uint SG_M_TILES = 8;
-constant constexpr uint SG_N_TILES = 2;
+constant constexpr uint SG_N_TILES = 4;
 constant constexpr uint FP4_PER_UINT = 8;
-constant constexpr uint NUM_BUFFERS = 2;
+constant constexpr uint NUM_BUFFERS = 4;
 
 // ---------------------------------------------------------------------------
 // FP4 dequant helpers

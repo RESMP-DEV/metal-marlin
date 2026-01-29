@@ -127,6 +127,26 @@ from .vision import (
     detect_projector_type,
 )
 
+# Metal GPU dispatchers (optional - require Apple Silicon + PyObjC)
+try:
+    from .fp4_metal import FP4Metal, dequantize_fp4_metal, quantize_fp4_metal
+except ImportError:
+    FP4Metal = None  # type: ignore[misc, assignment]
+    quantize_fp4_metal = None  # type: ignore[misc, assignment]
+    dequantize_fp4_metal = None  # type: ignore[misc, assignment]
+
+try:
+    from .gptq_metal import GPTQMetal, compute_hessian_metal
+except ImportError:
+    GPTQMetal = None  # type: ignore[misc, assignment]
+    compute_hessian_metal = None  # type: ignore[misc, assignment]
+
+try:
+    from .hadamard_metal import HadamardMetal, hadamard_transform_metal
+except ImportError:
+    HadamardMetal = None  # type: ignore[misc, assignment]
+    hadamard_transform_metal = None  # type: ignore[misc, assignment]
+
 # HAS_MLX is deprecated - kept for backwards compatibility
 HAS_MLX = False
 
@@ -241,4 +261,12 @@ __all__ = [
     "flash_attention_metal",
     "scaled_dot_product_attention_metal",
     "sliding_window_attention_metal",
+    # Metal GPU dispatchers
+    "FP4Metal",
+    "GPTQMetal",
+    "HadamardMetal",
+    "compute_hessian_metal",
+    "dequantize_fp4_metal",
+    "hadamard_transform_metal",
+    "quantize_fp4_metal",
 ]

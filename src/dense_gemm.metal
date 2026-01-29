@@ -61,7 +61,7 @@ constant constexpr uint DECODE_COLS_PER_THREAD = 4;
 constant constexpr uint SIMDGROUPS_PER_TG = 4;
 constant constexpr uint THREADS_PER_TG = SIMDGROUPS_PER_TG * 32;  // 128
 constant constexpr uint FP4_PER_UINT = 8;
-constant constexpr uint NUM_BUFFERS = 2;
+constant constexpr uint NUM_BUFFERS = 3;
 
 // Split-K configuration (used in host-side dispatch, documented here)
 // constant constexpr uint MAX_SPLIT_K = 16;  // Maximum K-parallel slices

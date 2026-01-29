@@ -21,6 +21,8 @@ classifiers = [
 
 dependencies = [
     "numpy>=1.24.0",
+    "pyobjc-framework-metal>=12.1",
+    "pyobjc-framework-metalperformanceshaders>=12.1",
     "requests>=2.32.5",
     "safetensors>=0.4.0",
     "scipy>=1.10.0",

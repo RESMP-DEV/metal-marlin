@@ -31,8 +31,45 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+# Metal acceleration availability
+_USE_METAL = False
+_gptq_metal = None
+try:
+    from . import gptq_metal
+
+    _gptq_metal = gptq_metal
+    _USE_METAL = True
+except ImportError:
+    pass
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+def _cholesky_numpy(
+    H_damped: NDArray[np.float64],
+    H: NDArray[np.float64],
+    diag_mean: float,
+    in_features: int,
+) -> NDArray[np.float64]:
+    """Compute Cholesky decomposition using NumPy with fallback.
+
+    Args:
+        H_damped: Damped Hessian matrix (already with regularization added)
+        H: Original Hessian matrix (for fallback recomputation)
+        diag_mean: Mean of Hessian diagonal (for fallback regularization)
+        in_features: Dimension of the matrix
+
+    Returns:
+        Lower triangular Cholesky factor L where H = L @ L^T
+    """
+    try:
+        L = np.linalg.cholesky(H_damped)
+    except np.linalg.LinAlgError:
+        # Fallback: add more damping
+        H_damped_fallback = H + 0.1 * diag_mean * np.eye(in_features, dtype=np.float64)
+        L = np.linalg.cholesky(H_damped_fallback)
+    return L
 
 
 @dataclass
@@ -179,12 +216,15 @@ class GPTQQuantizer:
 
         # Compute Cholesky decomposition: H = L @ L^T
         # We need H^{-1} for error updates, computed via Cholesky
-        try:
-            L = np.linalg.cholesky(H_damped)
-        except np.linalg.LinAlgError:
-            # Fallback: add more damping
-            H_damped = H + 0.1 * diag_mean * np.eye(in_features, dtype=np.float64)
-            L = np.linalg.cholesky(H_damped)
+        # Use Metal acceleration if available for large matrices
+        if _USE_METAL and _gptq_metal is not None and in_features >= 512:
+            try:
+                L = _gptq_metal.cholesky_decompose(H_damped)
+            except (RuntimeError, AttributeError):
+                # Fallback to numpy if Metal fails or cholesky_decompose not available
+                L = _cholesky_numpy(H_damped, H, diag_mean, in_features)
+        else:
+            L = _cholesky_numpy(H_damped, H, diag_mean, in_features)
 
         # H_inv = L^{-T} @ L^{-1}, but we compute columns as needed
         # For efficiency, we compute H_inv_diag once and update columns block-wise

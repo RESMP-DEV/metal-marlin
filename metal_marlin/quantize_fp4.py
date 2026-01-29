@@ -21,6 +21,16 @@ from pathlib import Path
 
 import numpy as np
 
+# Auto-detect Metal availability for transparent acceleration
+_USE_METAL = False
+_fp4_metal = None
+try:
+    from .fp4_metal import FP4Metal
+    _USE_METAL = True
+    _fp4_metal = FP4Metal()
+except ImportError:
+    pass
+
 # FP4 E2M1 representable values (NVFP4/MXFP4 format)
 # Bits: [sign(1) | exponent(2, bias=1) | mantissa(1)]
 E2M1_VALUES = np.array(
@@ -51,11 +61,12 @@ _E2M1_NEGATIVE = -_E2M1_POSITIVE  # [0, -0.5, -1, -1.5, -2, -3, -4, -6]
 
 
 def quantize_to_fp4(values: np.ndarray) -> np.ndarray:
-    """
-    Quantize float values to FP4 E2M1 indices (0-15).
+    """Quantize values to FP4 E2M1 indices.
 
     Uses vectorized nearest-value matching. Each value maps to the closest
     representable E2M1 value, then encodes as 4-bit index.
+
+    Uses Metal GPU acceleration when available, falling back to NumPy otherwise.
 
     Args:
         values: Float array of any shape
@@ -63,6 +74,11 @@ def quantize_to_fp4(values: np.ndarray) -> np.ndarray:
     Returns:
         uint8 array of same shape with values in [0, 15]
     """
+    if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
+        indices, _ = _fp4_metal.quantize(values, group_size=len(values))
+        return indices if isinstance(indices, np.ndarray) else indices.numpy()
+
+    # Original CPU implementation
     flat = values.flatten().astype(np.float32)
     result = np.zeros(len(flat), dtype=np.uint8)
 
@@ -90,7 +106,22 @@ def quantize_to_fp4(values: np.ndarray) -> np.ndarray:
 
 
 def dequantize_fp4(indices: np.ndarray) -> np.ndarray:
-    """Dequantize FP4 indices back to float values."""
+    """Dequantize FP4 indices back to float values.
+
+    Uses Metal GPU acceleration when available, falling back to NumPy otherwise.
+
+    Args:
+        indices: uint8 array with FP4 indices in [0, 15]
+
+    Returns:
+        Float array with dequantized values
+    """
+    if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
+        # Need dummy scales for Metal dispatcher
+        scales = np.ones(1, dtype=np.float32)
+        return _fp4_metal.dequantize(indices, scales, group_size=len(indices.flatten()))
+
+    # Original CPU implementation
     return E2M1_VALUES[indices.astype(np.int32)]
 
 
@@ -132,6 +163,11 @@ def quantize_fp4(
     Returns:
         (packed_weights, scales) where layout depends on marlin_layout flag.
     """
+    # Use Metal for basic quantization (no activation_ranges)
+    if _USE_METAL and _fp4_metal is not None and _fp4_metal.available and activation_ranges is None:
+        return _fp4_metal.quantize(weight, group_size=group_size, marlin_layout=marlin_layout)
+
+    # Fall back to NumPy for calibration-aware quantization
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -291,6 +327,11 @@ def unpack_fp4(
         - Legacy: [out_feat, in_feat]
         - Marlin: [K, N] (transpose back to get original shape)
     """
+    # Use Metal for unpacking when available
+    if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
+        return _fp4_metal.dequantize(packed, scales, group_size=group_size, marlin_layout=marlin_layout)
+
+    # Fall back to NumPy implementation
     # Auto-detect layout if not specified
     if marlin_layout is None:
         # Marlin layout: packed [K/8, N], scales [K/gs, N]

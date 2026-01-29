@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 # Default device for MoE dispatch operations
 _DEFAULT_DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 
+# Metal availability flag
+_USE_METAL = torch.backends.mps.is_available()
+
 
 @dataclass
 class MoEDispatchInfo:

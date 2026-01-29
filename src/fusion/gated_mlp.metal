@@ -49,7 +49,7 @@ using namespace metal;
 
 constant constexpr uint FUSED_TG_SIZE = 128;
 constant constexpr uint SIMDGROUP_SIZE = 32;
-constant constexpr uint TILE_M = 8;       // Fewer tokens for register pressure
+constant constexpr uint TILE_M = 128;     // Optimized: more tokens for better occupancy
 constant constexpr uint TILE_N = 64;      // Output features
 constant constexpr uint TILE_K = 32;      // Input features per iteration
 constant constexpr uint TILE_INTER = 32;  // Intermediate features per iteration

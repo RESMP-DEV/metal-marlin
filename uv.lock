@@ -430,6 +430,8 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
+    { name = "pyobjc-framework-metal" },
+    { name = "pyobjc-framework-metalperformanceshaders" },
     { name = "requests" },
     { name = "safetensors" },
     { name = "scipy" },
@@ -487,7 +489,9 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.24.0" },
     { name = "pydantic", marker = "extra == 'serve'", specifier = ">=2.0.0" },
     { name = "pyobjc-core", marker = "extra == 'metal'", specifier = ">=10.0" },
+    { name = "pyobjc-framework-metal", specifier = ">=12.1" },
     { name = "pyobjc-framework-metal", marker = "extra == 'metal'", specifier = ">=10.0" },
+    { name = "pyobjc-framework-metalperformanceshaders", specifier = ">=12.1" },
     { name = "pyobjc-framework-metalperformanceshaders", marker = "extra == 'metal'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "requests", specifier = ">=2.32.5" },

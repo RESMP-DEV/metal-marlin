@@ -19,6 +19,23 @@ import numpy as np
 from ._compat import HAS_TORCH, torch
 from .layers import MarlinLinear
 
+# Try to import Metal activation functions
+try:
+    from .activation_metal import (
+        gelu_metal,
+        relu_metal,
+        silu_metal,
+        swiglu_fused_metal,
+    )
+
+    _USE_METAL_ACTIVATION = True
+except ImportError:
+    _USE_METAL_ACTIVATION = False
+    silu_metal = None  # type: ignore[misc]
+    gelu_metal = None  # type: ignore[misc]
+    relu_metal = None  # type: ignore[misc]
+    swiglu_fused_metal = None  # type: ignore[misc]
+
 
 def _silu_numpy(x: np.ndarray) -> np.ndarray:
     """SiLU (Swish) activation: x * sigmoid(x)."""
@@ -94,9 +111,22 @@ class _MarlinMLPBase:
 
     def _forward(self, x: Any) -> Any:
         if self.gated and self.gate_proj is not None:
-            gate = self._activate(self.gate_proj(x))
-            up = self.up_proj(x)
-            x = gate * up
+            # Use fused SwiGLU path for MPS tensors when available
+            if (
+                _USE_METAL_ACTIVATION
+                and HAS_TORCH
+                and torch is not None
+                and isinstance(x, torch.Tensor)
+                and x.is_mps
+                and swiglu_fused_metal is not None
+            ):
+                gate = self.gate_proj(x)
+                up = self.up_proj(x)
+                x = swiglu_fused_metal(gate, up)
+            else:
+                gate = self._activate(self.gate_proj(x))
+                up = self.up_proj(x)
+                x = gate * up
         else:
             x = self._activate(self.up_proj(x))
 
@@ -108,8 +138,19 @@ class _MarlinMLPBase:
         return self._activate_numpy(x)
 
     def _activate_torch(self, x: Any) -> Any:
-        """PyTorch activation functions."""
+        """PyTorch activation functions with Metal dispatch for MPS tensors."""
         assert torch is not None
+
+        # Use Metal activation functions for MPS tensors when available
+        if _USE_METAL_ACTIVATION and x.is_mps:
+            if self.activation == "silu":
+                return silu_metal(x)
+            elif self.activation == "gelu":
+                return gelu_metal(x)
+            elif self.activation == "relu":
+                return relu_metal(x)
+
+        # Fallback to standard PyTorch implementations
         if self.activation == "silu":
             return torch.nn.functional.silu(x)
         elif self.activation == "gelu":

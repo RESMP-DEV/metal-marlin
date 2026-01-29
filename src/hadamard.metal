@@ -333,11 +333,6 @@ kernel void hadamard_transform_64_vec(
 ) {
     if (tg_idx >= n) return;
 
-    // Each thread loads 2 half4 (8 elements), but we need 64/32 = 2 elements per thread
-    // So we load a portion and use shuffle
-    // Actually: 64 elements / 32 lanes = 2 elements per lane
-    // Let's reload as half2 from the half4 array
-
     device const half* input_h = (device const half*)input;
     device half* output_h = (device half*)output;
 
@@ -609,4 +604,607 @@ kernel void test_hadamard_roundtrip_64(
 
     output[base + lane_id * 2] = val.x;
     output[base + lane_id * 2 + 1] = val.y;
+}
+
+// ============================================================================
+// WEIGHT MATRIX HADAMARD TRANSFORM KERNELS
+// ============================================================================
+//
+// For weight rotation (QuIP#, HQQ), we apply block-diagonal Hadamard to weight
+// matrices. Input W [K, N] is partitioned into blocks of size `block_size` 
+// along dimension K. Each block is transformed: W_rot[block] = H @ W[block].
+//
+// Layout:
+//   - Weights are stored in row-major: W[k, n] at index k * N + n
+//   - Each thread processes one row (one n index) across all k blocks
+//   - Butterfly operations happen within each K-block
+//
+// ============================================================================
+
+// ============================================================================
+// hadamard_forward_fast_64: Optimized O(n log n) butterfly for weights [K, N]
+// Each thread handles one column n, applies butterfly across K blocks
+// ============================================================================
+
+/// Fast Hadamard transform for weight matrices [K, N] using butterfly operations.
+/// O(n log n) complexity instead of O(n²) for matrix multiplication.
+///
+/// Layout: W [K, N] row-major, K must be divisible by 64
+/// Grid: (N, K/64) - one thread per (n, block) pair
+/// Each simdgroup handles one 64-element block for one n column.
+///
+/// Uses the fast Walsh-Hadamard transform with log2(64) = 6 butterfly stages:
+///   Stage 0: stride 1 (within thread)
+///   Stage 1: stride 2 (simd shuffle)
+///   Stage 2-5: stride 4, 8, 16, 32 (simd shuffle)
+///
+/// Normalization: 1/sqrt(64) = 0.125 (orthonormal Hadamard)
+///
+/// @param W           Input weight matrix [K, N] in half precision
+/// @param W_rot       Output rotated weights [K, N]
+/// @param K           Size of K dimension (must be multiple of 64)
+/// @param N           Size of N dimension
+kernel void hadamard_forward_fast_64(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;  // Global column index
+    uint block_k = gid.y;  // Which 64-row block
+    
+    if (n >= N || block_k >= (K / 64)) return;
+    
+    uint k_base = block_k * 64;
+    
+    // Each lane handles 2 elements (64 elements / 32 lanes = 2 per lane)
+    // Load from global memory: W[k, n] at index k * N + n
+    half2 val;
+    val.x = W[(k_base + lane_id * 2) * N + n];
+    val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+    
+    // Butterfly Stage 0: stride 1 (within half2)
+    {
+        half sum = val.x + val.y;
+        half diff = val.x - val.y;
+        val.x = sum;
+        val.y = diff;
+    }
+    
+    // Butterfly Stage 1: stride 2 (shuffle between lanes)
+    {
+        uint partner = lane_id ^ 1;
+        half2 partner_val = simd_shuffle(val, ushort(partner));
+        bool is_upper = (lane_id & 1) != 0;
+        val = is_upper ? (partner_val - val) : (val + partner_val);
+    }
+    
+    // Butterfly Stage 2: stride 4
+    {
+        uint partner = lane_id ^ 2;
+        bool is_upper = (lane_id & 2) != 0;
+        val = butterfly_step2(val, partner, is_upper);
+    }
+    
+    // Butterfly Stage 3: stride 8
+    {
+        uint partner = lane_id ^ 4;
+        bool is_upper = (lane_id & 4) != 0;
+        val = butterfly_step2(val, partner, is_upper);
+    }
+    
+    // Butterfly Stage 4: stride 16
+    {
+        uint partner = lane_id ^ 8;
+        bool is_upper = (lane_id & 8) != 0;
+        val = butterfly_step2(val, partner, is_upper);
+    }
+    
+    // Butterfly Stage 5: stride 32
+    {
+        uint partner = lane_id ^ 16;
+        bool is_upper = (lane_id & 16) != 0;
+        val = butterfly_step2(val, partner, is_upper);
+    }
+    
+    // Normalize by 1/sqrt(64) = 0.125 for orthonormal Hadamard
+    // This ensures H @ H = I (identity matrix)
+    val *= half(0.125h);
+    
+    // Write back to global memory
+    W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+    W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+}
+
+/// Fast Hadamard transform for weight matrices [K, N] with block_size = 128.
+/// Each lane handles 4 elements (128 elements / 32 lanes = 4 per lane).
+///
+/// 7 butterfly stages: stride 1 (intra-lane), 2, 4, 8, 16, 32, 64 (inter-lane shuffle)
+/// Normalization: 1/sqrt(128) ≈ 0.088388
+///
+/// @param W           Input weight matrix [K, N] in half precision
+/// @param W_rot       Output rotated weights [K, N]
+/// @param K           Size of K dimension (must be multiple of 128)
+/// @param N           Size of N dimension
+kernel void hadamard_forward_fast_128(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 128)) return;
+    
+    uint k_base = block_k * 128;
+    
+    // Each lane loads 4 elements
+    half4 val;
+    val.x = W[(k_base + lane_id * 4) * N + n];
+    val.y = W[(k_base + lane_id * 4 + 1) * N + n];
+    val.z = W[(k_base + lane_id * 4 + 2) * N + n];
+    val.w = W[(k_base + lane_id * 4 + 3) * N + n];
+    
+    // Stage 0: stride 1 (pairs within half4: (0,1), (2,3))
+    {
+        half sum0 = val.x + val.y;
+        half diff0 = val.x - val.y;
+        half sum1 = val.z + val.w;
+        half diff1 = val.z - val.w;
+        val = half4(sum0, diff0, sum1, diff1);
+    }
+    
+    // Stage 1: stride 2 (pairs: (0,2), (1,3))
+    {
+        half sum0 = val.x + val.z;
+        half diff0 = val.x - val.z;
+        half sum1 = val.y + val.w;
+        half diff1 = val.y - val.w;
+        val = half4(sum0, sum1, diff0, diff1);
+    }
+    
+    // Stage 2: stride 4 (inter-lane shuffle)
+    {
+        uint partner = lane_id ^ 1;
+        bool is_upper = (lane_id & 1) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Stage 3: stride 8
+    {
+        uint partner = lane_id ^ 2;
+        bool is_upper = (lane_id & 2) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Stage 4: stride 16
+    {
+        uint partner = lane_id ^ 4;
+        bool is_upper = (lane_id & 4) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Stage 5: stride 32
+    {
+        uint partner = lane_id ^ 8;
+        bool is_upper = (lane_id & 8) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Stage 6: stride 64
+    {
+        uint partner = lane_id ^ 16;
+        bool is_upper = (lane_id & 16) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Normalize by 1/sqrt(128) ≈ 0.088388
+    val *= half(0.0883883476h);
+    
+    // Write back
+    W_rot[(k_base + lane_id * 4) * N + n] = val.x;
+    W_rot[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+    W_rot[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+    W_rot[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+}
+
+// ============================================================================
+// hadamard_inverse_block: Inverse transform for weight matrices [K, N]
+// Since Hadamard is self-inverse (H @ H = n*I), inverse = forward for normalized H
+// ============================================================================
+
+/// Inverse Hadamard transform for weight matrices [K, N] with block_size = 64.
+/// Since H @ H = n*I, the inverse is H^-1 = H / n.
+/// For orthonormal Hadamard (normalized by 1/sqrt(n)), H @ H = I, so inverse = H.
+/// This kernel applies the same butterfly as forward - they are identical for 
+/// normalized Hadamard.
+///
+/// @param W_rot       Rotated weights [K, N]
+/// @param W           Output original weights [K, N]
+/// @param K           Size of K dimension
+/// @param N           Size of N dimension
+kernel void hadamard_inverse_block_64(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 64)) return;
+    
+    uint k_base = block_k * 64;
+    
+    // Load
+    half2 val;
+    val.x = W_rot[(k_base + lane_id * 2) * N + n];
+    val.y = W_rot[(k_base + lane_id * 2 + 1) * N + n];
+    
+    // Same butterfly stages as forward
+    {
+        half sum = val.x + val.y;
+        half diff = val.x - val.y;
+        val.x = sum;
+        val.y = diff;
+    }
+    
+    {
+        uint partner = lane_id ^ 1;
+        half2 partner_val = simd_shuffle(val, ushort(partner));
+        bool is_upper = (lane_id & 1) != 0;
+        val = is_upper ? (partner_val - val) : (val + partner_val);
+    }
+    
+    for (uint stage = 2; stage < 6; ++stage) {
+        uint stride = 1u << stage;
+        uint partner = lane_id ^ stride;
+        bool is_upper = (lane_id & stride) != 0;
+        val = butterfly_step2(val, partner, is_upper);
+    }
+    
+    // Apply same normalization (orthonormal Hadamard)
+    val *= half(0.125h);
+    
+    // Store
+    W[(k_base + lane_id * 2) * N + n] = val.x;
+    W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+}
+
+/// Inverse Hadamard transform for weight matrices [K, N] with block_size = 128.
+kernel void hadamard_inverse_block_128(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 128)) return;
+    
+    uint k_base = block_k * 128;
+    
+    half4 val;
+    val.x = W_rot[(k_base + lane_id * 4) * N + n];
+    val.y = W_rot[(k_base + lane_id * 4 + 1) * N + n];
+    val.z = W_rot[(k_base + lane_id * 4 + 2) * N + n];
+    val.w = W_rot[(k_base + lane_id * 4 + 3) * N + n];
+    
+    // Stage 0
+    {
+        half sum0 = val.x + val.y;
+        half diff0 = val.x - val.y;
+        half sum1 = val.z + val.w;
+        half diff1 = val.z - val.w;
+        val = half4(sum0, diff0, sum1, diff1);
+    }
+    
+    // Stage 1
+    {
+        half sum0 = val.x + val.z;
+        half diff0 = val.x - val.z;
+        half sum1 = val.y + val.w;
+        half diff1 = val.y - val.w;
+        val = half4(sum0, sum1, diff0, diff1);
+    }
+    
+    // Stages 2-6
+    for (uint stage = 2; stage < 7; ++stage) {
+        uint stride = 1u << (stage - 1);
+        uint partner = lane_id ^ stride;
+        bool is_upper = (lane_id & stride) != 0;
+        val = butterfly_step4(val, partner, is_upper);
+    }
+    
+    // Normalize
+    val *= half(0.0883883476h);
+    
+    W[(k_base + lane_id * 4) * N + n] = val.x;
+    W[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+    W[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+    W[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+}
+
+// ============================================================================
+// Generic entry points (dispatch based on block_size parameter)
+// ============================================================================
+
+/// Generic forward Hadamard transform for weight matrices.
+/// Dispatches to the appropriate optimized kernel based on block_size.
+///
+/// @param W           Input weight matrix [K, N] in half precision
+/// @param W_rot       Output rotated weights [K, N]
+/// @param K           Size of K dimension (must be multiple of block_size)
+/// @param N           Size of N dimension
+/// @param block_size  Hadamard block size (64 or 128)
+kernel void hadamard_forward_block(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    constant uint& block_size   [[buffer(4)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    // This is a wrapper that should be dispatched to the appropriate 
+    // specialized kernel. For runtime selection, use hadamard_forward_fast_64
+    // or hadamard_forward_fast_128 directly.
+    //
+    // For single-kernel entry point with block_size parameter:
+    if (block_size == 64) {
+        // Delegate to specialized 64-version logic inline
+        uint n = gid.x;
+        uint block_k = gid.y;
+        
+        if (n >= N || block_k >= (K / 64)) return;
+        
+        uint k_base = block_k * 64;
+        half2 val;
+        val.x = W[(k_base + lane_id * 2) * N + n];
+        val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+        
+        // Butterfly stages
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);
+        
+        W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+        W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+    }
+    // Note: block_size 128 would need separate grid sizing
+}
+
+/// Generic inverse Hadamard transform for weight matrices.
+/// Applies the same transform as forward for normalized Hadamard.
+///
+/// @param W_rot       Rotated weights [K, N]
+/// @param W           Output original weights [K, N]
+/// @param K           Size of K dimension
+/// @param N           Size of N dimension
+/// @param block_size  Hadamard block size (64 or 128)
+kernel void hadamard_inverse_block(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    constant uint& block_size   [[buffer(4)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    // For normalized Hadamard (orthonormal), inverse is identical to forward
+    // H @ H = I, so H^-1 = H^T = H (Hadamard is symmetric)
+    if (block_size == 64) {
+        uint n = gid.x;
+        uint block_k = gid.y;
+        
+        if (n >= N || block_k >= (K / 64)) return;
+        
+        uint k_base = block_k * 64;
+        half2 val;
+        val.x = W_rot[(k_base + lane_id * 2) * N + n];
+        val.y = W_rot[(k_base + lane_id * 2 + 1) * N + n];
+        
+        // Butterfly stages (same as forward)
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);
+        
+        W[(k_base + lane_id * 2) * N + n] = val.x;
+        W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+    }
+}
+
+/// Fast Hadamard transform entry point (alias for hadamard_forward_fast_64).
+/// Optimized O(n log n) butterfly implementation.
+///
+/// @param W           Input weight matrix [K, N] in half precision
+/// @param W_rot       Output rotated weights [K, N]
+/// @param K           Size of K dimension (must be multiple of 64)
+/// @param N           Size of N dimension
+/// @param block_size  Hadamard block size (64 or 128) - stored but dispatch uses grid
+kernel void hadamard_forward_fast(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    constant uint& block_size   [[buffer(4)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    // Fast O(n log n) butterfly transform using simdgroup shuffle
+    // Each thread handles one column n, one 64-row block
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 64)) return;
+    
+    uint k_base = block_k * 64;
+    
+    // Load 2 elements per lane
+    half2 val;
+    val.x = W[(k_base + lane_id * 2) * N + n];
+    val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+    
+    // Stage 0: stride 1 (intra-lane)
+    {
+        half sum = val.x + val.y;
+        half diff = val.x - val.y;
+        val.x = sum;
+        val.y = diff;
+    }
+    
+    // Stages 1-5: stride 2, 4, 8, 16, 32 (inter-lane shuffle)
+    for (uint stage = 1; stage < 6; ++stage) {
+        uint stride = 1u << (stage - 1);
+        uint partner = lane_id ^ stride;
+        bool is_upper = (lane_id & stride) != 0;
+        half2 partner_val = simd_shuffle(val, ushort(partner));
+        val = is_upper ? (partner_val - val) : (val + partner_val);
+    }
+    
+    // Normalize: 1/sqrt(64) = 0.125
+    val *= half(0.125h);
+    
+    // Store
+    W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+    W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+}
+
+// ============================================================================
+// Float variants for high-precision weight transforms
+// ============================================================================
+
+/// Fast Hadamard transform for float weights [K, N], block_size = 64
+/// Float version for higher precision during weight preprocessing
+kernel void hadamard_forward_fast_64_float(
+    device const float* W       [[buffer(0)]],
+    device float* W_rot         [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 64)) return;
+    
+    uint k_base = block_k * 64;
+    
+    // Load as float2
+    float2 val;
+    val.x = W[(k_base + lane_id * 2) * N + n];
+    val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+    
+    // Butterfly stages for float
+    {
+        float sum = val.x + val.y;
+        float diff = val.x - val.y;
+        val.x = sum;
+        val.y = diff;
+    }
+    
+    for (uint stage = 1; stage < 6; ++stage) {
+        uint stride = 1u << (stage - 1);
+        uint partner = lane_id ^ stride;
+        bool is_upper = (lane_id & stride) != 0;
+        
+        float2 partner_val = simd_shuffle(val, ushort(partner));
+        val = is_upper ? (partner_val - val) : (val + partner_val);
+    }
+    
+    // Normalize
+    val *= float(0.125);
+    
+    // Store
+    W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+    W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+}
+
+/// Inverse Hadamard transform for float weights [K, N], block_size = 64
+kernel void hadamard_inverse_block_64_float(
+    device const float* W_rot   [[buffer(0)]],
+    device float* W             [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id              [[thread_index_in_simdgroup]]
+)
+{
+    // Same as forward for normalized Hadamard
+    uint n = gid.x;
+    uint block_k = gid.y;
+    
+    if (n >= N || block_k >= (K / 64)) return;
+    
+    uint k_base = block_k * 64;
+    
+    float2 val;
+    val.x = W_rot[(k_base + lane_id * 2) * N + n];
+    val.y = W_rot[(k_base + lane_id * 2 + 1) * N + n];
+    
+    {
+        float sum = val.x + val.y;
+        float diff = val.x - val.y;
+        val.x = sum;
+        val.y = diff;
+    }
+    
+    for (uint stage = 1; stage < 6; ++stage) {
+        uint stride = 1u << (stage - 1);
+        uint partner = lane_id ^ stride;
+        bool is_upper = (lane_id & stride) != 0;
+        
+        float2 partner_val = simd_shuffle(val, ushort(partner));
+        val = is_upper ? (partner_val - val) : (val + partner_val);
+    }
+    
+    val *= float(0.125);
+    
+    W[(k_base + lane_id * 2) * N + n] = val.x;
+    W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
 }

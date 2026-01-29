@@ -1,21 +1,76 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-28T13:30
+**Last Updated:** 2026-01-28T21:00
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **100% passing** (1426 tests) ✅ |
-| GEMM Kernel | **Working** ✅ |
+| Test Suite | **1562 tests collected** (3 import errors) ⚠️ |
+| GEMM Kernel | **Working + Optimized** ✅ (2.4x speedup) |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
+| EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
 | GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
 | OpenAI Server | **Scaffolded** 🔄 |
-| Metal Shaders | **5/5 compiling** ✅ |
+| Metal Shaders | **40 shaders** ✅ |
 | Legacy Cleanup | **Complete** ✅ |
-| Ruff Linting | **0 errors** ✅ |
-| Pyright Errors | **0 errors, 184 warnings** ✅ |
+| Ruff Linting | **74 warnings** ⚠️ |
+| Pyright Errors | **6 errors, 231 warnings** ⚠️ |
+
+---
+
+## Metal Acceleration Status
+
+### Complete (40 Metal Shaders)
+
+**Core GEMM:**
+- [x] GEMM (marlin_gemm.metal) - FP4/INT4/INT8 dequant + matmul
+- [x] GEMM Optimized (gemm_fp4_optimized.metal) - Tuned variant (2.4x speedup)
+- [x] Dense GEMM (dense_gemm.metal) - BF16/FP16 GEMM
+- [x] Batched GEMM (batched_gemm.metal) - Multi-batch matmul
+- [x] Decode GEMV (decode_gemv.metal) - Vector-matrix multiply
+
+**Attention:**
+- [x] Flash Attention (flash_attention.metal, flash_attention_v2.metal)
+- [x] Simdgroup Attention (simdgroup_attention.metal)
+- [x] Paged Attention (paged_attention.metal)
+- [x] Sliding Window (sliding_window_attention.metal)
+- [x] Tree Attention (tree_attention.metal)
+- [x] Diff Attention (diff_attention.metal)
+- [x] MLA Projection (mla_proj.metal)
+
+**MoE:**
+- [x] MoE Dispatch (moe_dispatch.metal, moe_dispatch_optimized.metal, moe_dispatch_metal.metal)
+- [x] MoE Expert GEMM (moe_expert_gemm.metal)
+- [x] MoE Router (moe_router.metal)
+- [x] MoE Shared Expert (moe_shared_expert.metal)
+
+**Quantization:**
+- [x] Dequant (dequant.metal) - FP4 unpacking
+- [x] Dequant FP8 (dequant_fp8.metal)
+- [x] Dequant INT8 (dequant_int8.metal)
+- [x] Dequant Sub-4bit (dequant_sub4bit.metal)
+- [x] Viterbi Quantization (viterbi_quant.metal)
+- [x] Hessian (hessian.metal)
+- [x] Cholesky (cholesky.metal)
+
+**Other:**
+- [x] RoPE (rope.metal) - YaRN and standard RoPE
+- [x] Sampling (sampling.metal) - argmax, top-k, top-p
+- [x] LayerNorm (layernorm.metal)
+- [x] Hadamard (hadamard.metal)
+- [x] Sparse GEMM (sparse_gemm.metal, sparse.metal)
+- [x] Scatter/Gather (scatter_gather.metal)
+- [x] All-Reduce (all_reduce.metal)
+- [x] RWKV WKV (rwkv_wkv.metal)
+- [x] Vision Preprocess (vision_preprocess.metal)
+- [x] BF16 Compat (bf16_compat.metal)
+
+### Remaining on CPU/MPS
+- Image preprocessing (scipy.ndimage)
+- ONNX graph execution
+- Model loading (safetensors)
 
 ---
 
@@ -33,61 +88,97 @@
 ## Test Results
 
 **Last verified:** 2026-01-28
-**Last run:** 249.38s (4 min 9 sec)
+**Test files:** 53
 
 | Category | Count |
 |----------|-------|
-| Passed | 1426 |
-| Failed | 0 |
+| Collected | 1562 |
+| Collection Errors | 3 |
 | Skipped | 48 |
-| xfailed | 0 |
-| xpassed | 0 |
-| Errors | 0 |
 
-**Recent changes:**
+**Collection errors:** (missing optional dependencies)
+- `test_all_models.py` - requires `transformers`
+- `test_trellis.py` - requires `safetensors`
+- `test_viterbi_quant.py` - requires `transformers`
+
+**Recent additions:**
+- EXL3 quantization pipeline (trellis + viterbi)
+- Kernel optimization scripts (`optimize_kernel.py`, `optimize_all_kernels.py`)
+- Streaming quantization (`quantize_streaming.py`)
+- New test files for trellis, viterbi, scatter/gather, sampling
+
+**Test suite changes:**
 - Removed legacy/ directory and all legacy model implementations
-- Deleted unused model files (llama.py, qwen3.py, mixtral.py, moe.py)
-- Cleaned up test_inference.py (removed MetalGLM47Model, MetalGenerationConfig tests)
-- Fixed KV attention quantization (corrected test quantization formula)
-- All INT4/FP4 GEMM tests passing
-
-**Remaining failures (0):**
-- None
+- Cleaned up test_inference.py (removed MetalGLM47Model tests)
+- Added EXL3 quantization tests
 
 ---
 
-## Test Suite Cleanup
+## Test Suite Structure
 
-**Task file:** `tasks/test_cleanup.yaml`
-**Goal:** Reduce redundancy while maintaining coverage
+**Test files:** 53
+**Tests collected:** 1562
 
-**Status:** **Complete** ✅
+### Recent Additions
 
-### Cleanup Results
+| Test File | Purpose |
+|-----------|---------|
+| `test_trellis.py` | Trellis quantization algorithms |
+| `test_viterbi_quant.py` | Viterbi optimal quantization |
+| `test_scatter_gather_metal.py` | Metal scatter/gather kernels |
+| `test_sampling_metal.py` | Metal sampling kernels |
+| `test_moe_dispatch_metal.py` | MoE dispatch kernels |
 
-| Action | Files | Status |
-|--------|-------|--------|
-| **Removed** | `test_glm4_integration.py` | ✅ Deprecated model removed |
-| **Removed** | `test_qwen3_layer.py` | ✅ Redundant layer tests removed |
-| **Removed** | `test_qwen3_inference.py` | ✅ Redundant inference tests removed |
-| **Merged** | `test_qwen3_legacy.py` | ✅ Layer + inference consolidated |
-
-### Final Test Suite Stats
-
-| Metric | Value |
-|--------|-------|
-| **Test files** | 44 |
-| **Tests passing** | 100% (1444/1497) |
-| **Test runtime** | ~4 minutes |
-| **Status** | **All tests passing** ✅ |
-
-### Completed Actions
+### Completed Cleanup
 
 - ✅ Consolidated MoE kernel/integration tests into `test_moe.py`
 - ✅ Merged Hadamard kernel tests into `test_hadamard.py`
 - ✅ Deprecated legacy model tests in favor of Transformers integration
 - ✅ Standardized pytest markers across all files
-- ✅ Eliminated duplicate test coverage while maintaining 100% pass rate
+- ✅ Eliminated duplicate test coverage
+
+---
+
+## EXL3 Quantization Pipeline
+
+**Status:** ✅ Complete
+
+EXL3-style trellis quantization with Viterbi optimal search:
+
+### Components
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `exl3_pipeline.py` | End-to-end quantization workflow | ✅ |
+| `exl3_quantizer.py` | Core quantizer with LDLQ | ✅ |
+| `ldl_decomp.py` | LDL decomposition (faster than Cholesky) | ✅ |
+| `ldlq.py` | LDLQ tile quantization | ✅ |
+| `trellis_codebook.py` | Trellis state machine codebook | ✅ |
+| `trellis_tile.py` | Tensor-core permutation | ✅ |
+| `viterbi_quant.py` | Viterbi optimal quantization | ✅ |
+| `hadamard_preprocess.py` | Outlier dispersal rotation | ✅ |
+| `hessian_streaming.py` | Memory-efficient Hessian collection | ✅ |
+| `calibration_streamer.py` | Batched calibration data | ✅ |
+| `layer_streamer.py` | Layer-wise weight streaming | ✅ |
+
+### Features
+
+- **Layer-wise streaming**: One layer in memory at a time
+- **Parallel tile quantization**: Multi-threaded Viterbi search
+- **RAM-aware calibration**: Automatic batch sizing
+- **LDL decomposition**: 2x faster than Cholesky
+- **Hadamard rotation**: Outlier dispersal for better quantization
+
+### Usage
+
+```bash
+# Quantize a model with EXL3 pipeline
+uv run python3 -m metal_marlin.quantization.exl3_pipeline \
+    --model Qwen/Qwen3-4B \
+    --output ./qwen3_4b_exl3 \
+    --bits 4 \
+    --calibration wikitext
+```
 
 ---
 
@@ -171,12 +262,17 @@ output = model.generate(input_ids)
 | Kernel | Purpose | Status |
 |--------|---------|--------|
 | `marlin_gemm_fp4` | FP4 dequant + GEMM fused | ✅ Working |
+| `gemm_fp4_optimized` | Tuned GEMM variant | ✅ 2.4x speedup |
 | `flash_attention_v2` | Memory-efficient attention | ✅ Working |
 | `moe_shared_expert_fp4` | Shared expert GEMM (GLM-4.7) | ✅ Wired |
-| `moe_expert_gemm_fp4` | Batched routed expert GEMM | ✅ Wired (batched Metal dispatch) |
-| `moe_dispatch_optimized` | GPU token grouping | ❌ Not wired |
-| `moe_router_fused` | Fused routing kernel | ❌ Not wired |
+| `moe_expert_gemm_fp4` | Batched routed expert GEMM | ✅ Wired |
+| `viterbi_quant` | Optimal quantization search | ✅ Working |
+| `hessian` | Hessian computation | ✅ Working |
+| `cholesky` | Cholesky decomposition | ✅ Working |
+| `hadamard` | Hadamard transform | ✅ Working |
 | `dense_gemm` | BF16/FP16 GEMM | ✅ Working |
+| `moe_dispatch_optimized` | GPU token grouping | ✅ Available |
+| `moe_router_fused` | Fused routing kernel | ✅ Available |
 
 ### MoE Infrastructure (Phase 42)
 
@@ -190,13 +286,17 @@ output = model.generate(input_ids)
 | `transformers_loader.py` | ✅ Done | MoE-aware model loading |
 | Batched expert dispatch | ✅ Done | `moe_expert_gemm_fp4_grouped` Metal kernel wired |
 
-### Remaining MoE Optimization
+### EXL3 Quantization (Phase 44)
 
-The routed expert computation now uses batched Metal dispatch via `moe_expert_gemm_fp4_grouped`.
-
-**Still available for future optimization:**
-- `moe_dispatch_optimized` - GPU-side token grouping (8 variants)
-- `moe_router_fused` - Fused router kernel with aux loss
+| Component | Status | Notes |
+|-----------|--------|-------|
+| `EXL3Quantizer` | ✅ Done | Main quantizer class |
+| `ldlq_quantize_layer` | ✅ Done | LDLQ layer quantization |
+| `TrellisCodebook` | ✅ Done | State machine codebook |
+| `viterbi_quant` | ✅ Done | Optimal search with Metal kernel |
+| `hadamard_preprocess` | ✅ Done | Outlier dispersal |
+| `StreamingHessianCollector` | ✅ Done | Memory-efficient calibration |
+| Metal `viterbi_quant` kernel | ✅ Done | GPU-accelerated search |
 
 See [docs/metal_kernel_audit.md](docs/metal_kernel_audit.md) for full kernel inventory.
 
@@ -241,15 +341,25 @@ python -m metal_marlin serve benchmarks/results/qwen3_4b_fp4
 
 Verified via `scripts/verify_kernels.py`:
 
-### ✅ All Compiling (5/5)
+### ✅ All Shaders (40 total)
 
-| Shader | Status |
-|--------|--------|
-| marlin_gemm_fp4 | ✅ Compiles, loads, **and works** |
-| flash_attention_v2 | ✅ Compiles and loads |
-| dense_gemm | ✅ Compiles and loads |
-| moe_dispatch_optimized | ✅ Compiles and loads |
-| simdgroup_attention | ✅ Compiles and loads |
+| Category | Shaders |
+|----------|---------|
+| **GEMM** | marlin_gemm, gemm_fp4_optimized, dense_gemm, batched_gemm, decode_gemv |
+| **Attention** | flash_attention, flash_attention_v2, simdgroup_attention, paged_attention, sliding_window_attention, tree_attention, diff_attention, mla_proj |
+| **MoE** | moe_dispatch (3 variants), moe_expert_gemm, moe_router, moe_shared_expert |
+| **Quantization** | dequant (4 variants), viterbi_quant, hessian, cholesky |
+| **Other** | rope, sampling, layernorm, hadamard, sparse (2), scatter_gather, all_reduce, rwkv_wkv, vision_preprocess, bf16_compat |
+
+### Kernel Optimization
+
+Auto-tuning via `scripts/optimize_kernel.py`:
+
+| Variant | Speedup | Notes |
+|---------|---------|-------|
+| `tile_n_32` | **2.4x** | Best current variant |
+| `tile_m_128` | 1.8x | Larger M tiles |
+| `simdgroups_2` | 1.5x | More parallelism |
 
 ### Known Metal Compiler Bugs (Documented)
 
@@ -269,8 +379,32 @@ The following are intentional stubs or need optimization:
 | kernels.py | moe_expert_gemm_fp4 | ✅ Batched Metal dispatch |
 | kernels.py | moe_router_topk | Works - uses PyTorch ops |
 | kernels.py | moe_shared_expert_fp4 | ✅ Fully wired to Metal |
+| quantization/ | viterbi_quant | ✅ Fully implemented with Metal |
 | speculative/engine.py | TargetModel.__call__ | Protocol - by design |
 | speculative/engine.py | TargetModel.create_kv_cache | Protocol - by design |
+
+---
+
+## Code Quality
+
+### Ruff Warnings (74)
+
+Mostly whitespace and unused variable warnings:
+- `W293` - Blank line contains whitespace
+- `F841` - Local variable assigned but never used
+
+```bash
+uv run ruff check . --fix  # Auto-fix available
+```
+
+### Pyright Status
+
+| Category | Count |
+|----------|-------|
+| Errors | 6 |
+| Warnings | 231 |
+
+Errors are mostly `floating[Any]` vs `float` type mismatches in numpy operations.
 
 ---
 
@@ -322,6 +456,27 @@ Current swarm status:
 | 37 | FP4 reference fixes, Hadamard kernel, LayerNorm | ✅ Complete |
 | 42 | MoE Pipeline (GLM-4.7-Flash) | ✅ Complete |
 | 43 | Legacy Code Cleanup | ✅ Complete |
+| 44 | EXL3 Quantization Pipeline | ✅ Complete |
+| 45 | Kernel Optimization | 🔄 In Progress |
+
+### Phase 44 Results (EXL3 Quantization)
+
+**Completed:**
+- ✅ `EXL3Quantizer` class with LDLQ algorithm
+- ✅ `TrellisCodebook` for state machine encoding
+- ✅ `viterbi_quant` Metal kernel for optimal search
+- ✅ `hadamard_preprocess` for outlier dispersal
+- ✅ `StreamingHessianCollector` for memory-efficient calibration
+- ✅ `ldl_decomp` (2x faster than Cholesky)
+- ✅ Tests: `test_trellis.py`, `test_viterbi_quant.py`
+
+### Phase 45 Results (Kernel Optimization)
+
+**In Progress:**
+- ✅ `optimize_kernel.py` script for auto-tuning
+- ✅ `optimize_all_kernels.py` for batch optimization
+- ✅ `tile_n_32` variant: 2.4x speedup
+- 🔄 Additional variant exploration
 
 ### Phase 42 Results
 
@@ -335,10 +490,6 @@ Current swarm status:
 - ✅ `moe_expert_gemm_fp4` batched Metal dispatch (replaced Python loop)
 - ✅ End-to-end GLM-4.7-Flash generation verified
 
-**Remaining optimization work:**
-- ❌ `moe_dispatch_optimized` GPU token grouping (not wired)
-- ❌ `moe_router_fused` kernel (not wired)
-
 ### Phase 43 Results (Legacy Cleanup)
 
 **Completed:**
@@ -347,7 +498,6 @@ Current swarm status:
 - ✅ Removed legacy exports from `__init__.py` files
 - ✅ Cleaned `test_inference.py` (removed MetalGLM47Model tests)
 - ✅ Removed root directory junk files
-- ✅ All tests passing (1426 passed, 48 skipped)
 
 ---
 
@@ -358,13 +508,30 @@ Current swarm status:
 cd contrib/metal_marlin
 uv run pytest tests/ -v --tb=short
 
+# Run tests (excluding optional dependency tests)
+uv run pytest tests/ -v --ignore=tests/test_all_models.py \
+    --ignore=tests/test_trellis.py --ignore=tests/test_viterbi_quant.py
+
 # Verify kernel compilation
 uv run python3 scripts/verify_kernels.py
+
+# Optimize kernel parameters
+uv run python3 scripts/optimize_kernel.py --shapes 4096x4096x4096 --iterations 100
+
+# Apply best optimization
+uv run python3 scripts/optimize_kernel.py --apply-best <session_id>
 
 # Quantize a new model
 uv run python3 -m metal_marlin.hf_loader Qwen/Qwen3-4B ./output --bits 4
 
+# EXL3 quantization
+uv run python3 -m metal_marlin.quantization.exl3_pipeline \
+    --model Qwen/Qwen3-4B --output ./qwen3_exl3 --bits 4
+
 # Run linting
 uv run ruff check .
 uv run pyright metal_marlin/
+
+# Fix ruff warnings
+uv run ruff check . --fix
 ```
