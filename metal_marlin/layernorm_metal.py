@@ -25,17 +25,17 @@ def rmsnorm_metal(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """Apply RMSNorm using Metal kernel.
-    
+
     RMSNorm is defined as: output = x / sqrt(mean(x^2) + eps) * weight
-    
+
     Args:
         x: Input tensor of shape [..., hidden_size] on MPS device
         weight: Scale tensor of shape [hidden_size] on MPS device
         eps: Small constant for numerical stability
-        
+
     Returns:
         Normalized tensor of same shape as input
-        
+
     Example:
         >>> x = torch.randn(32, 128, 4096, device="mps", dtype=torch.float16)
         >>> weight = torch.randn(4096, device="mps", dtype=torch.float16)
@@ -113,18 +113,18 @@ def layernorm_metal(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Apply LayerNorm using Metal kernel.
-    
+
     LayerNorm is defined as: output = (x - mean) / sqrt(var + eps) * weight + bias
-    
+
     Args:
         x: Input tensor of shape [..., hidden_size] on MPS device
         weight: Scale tensor of shape [hidden_size] on MPS device
         bias: Bias tensor of shape [hidden_size] on MPS device, or None
         eps: Small constant for numerical stability
-        
+
     Returns:
         Normalized tensor of same shape as input
-        
+
     Example:
         >>> x = torch.randn(32, 4096, device="mps", dtype=torch.float16)
         >>> weight = torch.randn(4096, device="mps", dtype=torch.float16)
@@ -211,22 +211,22 @@ def rmsnorm_fused_residual_metal(
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused residual add + RMSNorm.
-    
+
     Fused kernel that performs:
         1. residual_out = x + residual
         2. normed = RMSNorm(residual_out)
-    
+
     Args:
         x: Input tensor of shape [..., hidden_size] on MPS device
         residual: Residual tensor of shape [..., hidden_size] on MPS device
         weight: Scale tensor of shape [hidden_size] on MPS device
         eps: Small constant for numerical stability
-        
+
     Returns:
         Tuple of (normed_output, residual_output) where:
         - normed_output: RMSNorm result of same shape as input
         - residual_output: x + residual (for next layer)
-        
+
     Example:
         >>> x = torch.randn(32, 128, 4096, device="mps", dtype=torch.float16)
         >>> residual = torch.randn(32, 128, 4096, device="mps", dtype=torch.float16)
@@ -296,8 +296,14 @@ def rmsnorm_fused_residual_metal(
         grid=grid,
         threadgroup=threadgroup,
         buffers=[
-            x_buf, residual_buf, weight_buf, normed_out_buf, residual_out_buf,
-            num_tokens_buf, hidden_dim_buf, eps_buf
+            x_buf,
+            residual_buf,
+            weight_buf,
+            normed_out_buf,
+            residual_out_buf,
+            num_tokens_buf,
+            hidden_dim_buf,
+            eps_buf,
         ],
         wait=True,
     )
