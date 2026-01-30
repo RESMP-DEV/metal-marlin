@@ -18,10 +18,10 @@ For comparing against llama.cpp benchmarks, use compute_perplexity_wikitext()
 which wraps the sliding window method with WikiText-2 loading.
 
 Usage:
-    python -m metal_marlin.eval_perplexity ./model-fp4/ --samples 100
+    python -m metal_marlin.eval.perplexity ./model-fp4/ --samples 100
 
 Example (programmatic):
-    from metal_marlin.eval_perplexity import compute_perplexity_wikitext
+    from metal_marlin.eval import compute_perplexity_wikitext
     result = compute_perplexity_wikitext(
         logits_fn=model.forward,
         tokenizer=tokenizer,
@@ -47,6 +47,7 @@ def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None
     Supports:
     - tokenizer.json (fast tokenizer)
     - tokenizer.model (sentencepiece)
+    - config.json with tokenizer_id field (for quantized models)
 
     Args:
         model_path: Path to model directory or HF model ID.
@@ -55,6 +56,8 @@ def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None
     Returns:
         Tokenizer instance.
     """
+    import json
+
     from transformers import AutoTokenizer
 
     model_path = Path(model_path)
@@ -69,6 +72,16 @@ def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None
         )
         if has_tokenizer:
             return AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+
+        # Check config.json for tokenizer_id (quantized models store this)
+        config_path = model_path / "config.json"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+            tokenizer_id = config.get("tokenizer_id")
+            if tokenizer_id:
+                print(f"Loading tokenizer from config.json: {tokenizer_id}")
+                return AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
 
         # Use fallback tokenizer if provided
         if fallback_tokenizer:

@@ -59,10 +59,16 @@ class RelativePositionalEncoding(nn.Module):
 
         Returns:
             Positional embedding tensor of shape (batch_size, seq_len, hidden_size)
+
+        Note:
+            When tracing for CoreML/ANE, seq_len must be <= max_length.
+            The assertion is skipped during tracing for compatibility.
         """
         seq_len = x.size(1)
-        assert seq_len <= self.max_length, (
-            f"Sequence length {seq_len} exceeds max_length {self.max_length}"
-        )
+        # Skip assertion during tracing for CoreML compatibility
+        if not torch.jit.is_tracing():
+            assert seq_len <= self.max_length, (
+                f"Sequence length {seq_len} exceeds max_length {self.max_length}"
+            )
 
         return self.pe[:seq_len].unsqueeze(0).expand(x.size(0), -1, -1)

@@ -16,7 +16,7 @@ To generate results:
 
 2. **Run perplexity evaluation:**
    ```bash
-   uv run python -m metal_marlin.eval_perplexity ./path/to/model --samples 100
+   uv run python -m metal_marlin.eval.perplexity ./path/to/model --samples 100
    ```
 
 3. **Regenerate this report:**

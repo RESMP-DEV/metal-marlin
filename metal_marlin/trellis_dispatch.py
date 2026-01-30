@@ -251,6 +251,98 @@ def dispatch_trellis_dequant_fused(
     return output
 
 
+def dispatch_trellis_dequant_packed(
+    lib: MetalKernelLibrary,
+    packed_indices: torch.Tensor,
+    scales: torch.Tensor,
+    grid: torch.Tensor,
+    su: torch.Tensor,
+    sv: torch.Tensor,
+    K: int,
+    N: int,
+    bits: int,
+) -> torch.Tensor:
+    """Dequantize packed trellis indices to FP16 weights.
+
+    Uses the packed uint8 format directly without unpacking on CPU.
+
+    Args:
+        lib: MetalKernelLibrary with dequant_trellis compiled
+        packed_indices: Packed trellis indices [tiles_k, tiles_n, packed_bytes] uint8, MPS tensor
+        scales: Per-group scales [n_groups, N] float32, MPS tensor
+        grid: Codebook grid [n_levels] float32, MPS tensor
+        su: Row sign vector [K] float32, MPS tensor
+        sv: Column sign vector [N] float32, MPS tensor
+        K: Number of rows in output
+        N: Number of columns in output
+        bits: Quantization bit width (2, 3, or 4)
+
+    Returns:
+        Dequantized weights [K, N] float16, MPS tensor
+    """
+    require_mps()
+
+    device = lib.device
+    n_levels = grid.shape[0]
+
+    # Ensure proper types and contiguity
+    packed_indices = packed_indices.contiguous()
+    scales = scales.float().contiguous()
+    grid = grid.float().contiguous()
+    su = su.float().contiguous()
+    sv = sv.float().contiguous()
+
+    # Allocate output
+    output = torch.zeros(K, N, dtype=torch.float16, device="mps")
+
+    # Create Metal buffers
+    packed_indices_buf = mps_tensor_to_metal_buffer(packed_indices, device)
+    scales_buf = mps_tensor_to_metal_buffer(scales, device)
+    grid_buf = mps_tensor_to_metal_buffer(grid, device)
+    su_buf = mps_tensor_to_metal_buffer(su, device)
+    sv_buf = mps_tensor_to_metal_buffer(sv, device)
+    output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+
+    # Create separate buffers for each constant parameter
+    def make_uint_buffer(val: int) -> Any:
+        data = np.array([val], dtype=np.uint32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    K_buf = make_uint_buffer(K)
+    N_buf = make_uint_buffer(N)
+    n_levels_buf = make_uint_buffer(n_levels)
+    bits_buf = make_uint_buffer(bits)
+
+    # Dispatch with one thread per output element
+    threads_per_tg = 16
+    grid_x = (N + threads_per_tg - 1) // threads_per_tg
+    grid_y = (K + threads_per_tg - 1) // threads_per_tg
+
+    dispatch_kernel(
+        lib,
+        function_name="dequant_trellis_packed",
+        grid=(grid_x, grid_y, 1),
+        threadgroup=(threads_per_tg, threads_per_tg, 1),
+        buffers=[
+            packed_indices_buf,
+            scales_buf,
+            grid_buf,
+            su_buf,
+            sv_buf,
+            output_buf,
+            K_buf,
+            N_buf,
+            n_levels_buf,
+            bits_buf,
+        ],
+        wait=True,
+    )
+
+    return output
+
+
 def dequantize_trellis_weight(
     weight: TrellisWeight,
     lib: MetalKernelLibrary | None = None,

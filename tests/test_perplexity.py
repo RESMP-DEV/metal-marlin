@@ -31,7 +31,7 @@ if str(_PYTHON_DIR) not in sys.path:
 
 from metal_marlin._compat import HAS_TORCH
 from metal_marlin._compat import torch as _torch
-from metal_marlin.eval_perplexity import load_wikitext2
+from metal_marlin.eval import load_wikitext2
 
 if TYPE_CHECKING:
     import torch as torch_types

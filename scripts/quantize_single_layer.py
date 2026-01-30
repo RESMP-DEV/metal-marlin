@@ -224,10 +224,11 @@ def main():
                 short_name = tensor_name.split(".")[-2]
                 result = quantizer.quantize_layer(weight, H_np, layer_name=short_name)
 
-                # Prepare for saving
+                # Prepare for saving (pack indices to save ~5x space)
                 safe_key = tensor_name.replace(".", "__")
+                packed_indices = pack_indices_vectorized(result.trellis_indices, bits)
                 batch_tensors = {
-                    f"{safe_key}__indices": result.trellis_indices.astype(np.int16),
+                    f"{safe_key}__indices": packed_indices,
                     f"{safe_key}__scales": result.scales.astype(np.float32),
                     f"{safe_key}__su": result.su.astype(np.float32),
                     f"{safe_key}__sv": result.sv.astype(np.float32),
@@ -280,6 +281,11 @@ def main():
     with open(index_file, "w") as f:
         json.dump(
             {
+                "format": "trellis_v2",
+                "packing": {
+                    "indices_format": "packed_uint8",
+                    "header_byte": True,
+                },
                 "layer_idx": layer_idx,
                 "total_tensors": len(all_metadata),
                 "total_bytes": total_bytes,

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""GLM-4.7-Flash Trellis Quantized Model Evaluation.
+"""GLM-4.7-Flash Trellis Full Model Benchmark.
 
-Benchmarks the trellis-quantized GLM-4.7-Flash model on Metal:
-- Perplexity on WikiText-2
-- KL divergence vs reference (if available)
-- Throughput (tokens/sec) at various sequence lengths
-- Context length degradation analysis
+Comprehensive end-to-end benchmark measuring:
+- Full model memory usage (all 47 layers loaded)
+- Prefill throughput at various context lengths
+- Decode throughput (single token generation)
+- Total memory consumption
 
 Usage:
     cd contrib/metal_marlin
-    uv run python benchmarks/eval_glm4_trellis.py --samples 20
-    uv run python benchmarks/eval_glm4_trellis.py --context-sweep  # Test context lengths
+    uv run python benchmarks/eval_glm4_trellis.py --model-path models/GLM-4.7-Flash-Trellis-3bpw
+    uv run python benchmarks/eval_glm4_trellis.py --context-lengths "256,512,1024,2048"
 """
 
 from __future__ import annotations
@@ -18,381 +18,378 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import math
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file
 from tqdm import tqdm
 
-# Ensure metal_marlin is importable
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from metal_marlin.trellis_config import TrellisModelConfig
 from metal_marlin.trellis_linear import TrellisLinear
 from metal_marlin.trellis_loader import TrellisModelLoader
-from metal_marlin.trellis_model import TrellisModel
 
-MODEL_PATH = _ROOT / "models" / "GLM-4.7-Flash-EXL3-3bpw"
+MODEL_PATH = _ROOT / "models" / "GLM-4.7-Flash-Trellis-3bpw"
 RESULTS_DIR = _ROOT / "benchmarks" / "results"
 
 
 @dataclass
 class BenchmarkResults:
-    """Container for benchmark results."""
-
     model_path: str
     timestamp: str
-
-    # Perplexity
-    perplexity: float = 0.0
-    perplexity_samples: int = 0
-
-    # KL divergence (if reference available)
-    kl_divergence_mean: float = 0.0
-    kl_divergence_std: float = 0.0
-    kl_divergence_max: float = 0.0
-
-    # Throughput at various context lengths
-    throughput_by_context: dict[int, dict[str, float]] = field(default_factory=dict)
-
-    # Memory usage
+    num_layers: int = 0
+    total_weights: int = 0
+    model_size_gb: float = 0.0
+    memory_after_load_gb: float = 0.0
     peak_memory_gb: float = 0.0
+    throughput_by_context: dict[int, dict[str, float]] = field(default_factory=dict)
+    avg_prefill_tok_s: float = 0.0
+    avg_decode_tok_s: float = 0.0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "model_path": self.model_path,
             "timestamp": self.timestamp,
-            "perplexity": self.perplexity,
-            "perplexity_samples": self.perplexity_samples,
-            "kl_divergence": {
-                "mean": self.kl_divergence_mean,
-                "std": self.kl_divergence_std,
-                "max": self.kl_divergence_max,
+            "model_info": {"num_layers": self.num_layers, "total_weights": self.total_weights},
+            "memory": {
+                "model_size_gb": self.model_size_gb,
+                "after_load_gb": self.memory_after_load_gb,
+                "peak_gb": self.peak_memory_gb,
             },
             "throughput_by_context": self.throughput_by_context,
-            "peak_memory_gb": self.peak_memory_gb,
+            "summary": {
+                "avg_prefill_tok_s": self.avg_prefill_tok_s,
+                "avg_decode_tok_s": self.avg_decode_tok_s,
+            },
         }
 
 
-def get_wikitext2_samples(num_samples: int = 50, max_length: int = 512) -> list[str]:
-    """Load WikiText-2 test samples."""
-    try:
-        from datasets import load_dataset
+class TrellisExpertMLP(nn.Module):
+    def __init__(self, gate: TrellisLinear, up: TrellisLinear, down: TrellisLinear):
+        super().__init__()
+        self.gate_proj, self.up_proj, self.down_proj = gate, up, down
 
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-        texts = [t for t in dataset["text"] if len(t.strip()) > 100][:num_samples]
-        return texts
-    except ImportError:
-        # Fallback: generate synthetic text
-        print("Warning: datasets not available, using synthetic text")
-        return ["The quick brown fox jumps over the lazy dog. " * 20 for _ in range(num_samples)]
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
-def load_tokenizer(model_path: Path):
-    """Load tokenizer from model directory or HuggingFace."""
-    try:
-        from transformers import AutoTokenizer
+class TrellisMoELayer(nn.Module):
+    def __init__(
+        self,
+        experts: list[TrellisExpertMLP],
+        shared: TrellisExpertMLP | None,
+        router_w: torch.Tensor,
+        top_k: int = 8,
+    ):
+        super().__init__()
+        self.experts = nn.ModuleList(experts)
+        self.shared = shared
+        self.top_k = top_k
+        self.router = nn.Linear(router_w.shape[1], len(experts), bias=False)
+        self.router.weight.data = router_w
 
-        # Try loading from local config first
-        config_path = model_path / "config.json"
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-            model_type = config.get("model_type", "")
-            if "glm" in model_type.lower():
-                return AutoTokenizer.from_pretrained(
-                    "THUDM/GLM-4-9B-Chat",
-                    trust_remote_code=True,
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        shape = x.shape
+        x_flat = x.view(-1, shape[-1])
+        logits = self.router(x_flat.float())
+        weights, idx = torch.topk(F.softmax(logits, dim=-1), k=self.top_k, dim=-1)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+        out = torch.zeros_like(x_flat)
+        for i in range(self.top_k):
+            for eid in range(len(self.experts)):
+                mask = idx[:, i] == eid
+                if mask.any():
+                    out[mask] += weights[mask, i : i + 1] * self.experts[eid](x_flat[mask])
+        if self.shared:
+            out = out + self.shared(x_flat)
+        return out.view(shape)
+
+
+class TrellisAttnProj(nn.Module):
+    def __init__(self, q_a, q_b, kv_a, kv_b, o_proj):
+        super().__init__()
+        self.q_a, self.q_b = q_a, q_b
+        self.kv_a, self.kv_b, self.o_proj = kv_a, kv_b, o_proj
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q = self.q_a(x) if self.q_a else x
+        if self.q_b:
+            q = self.q_b(q)
+        _ = self.kv_b(self.kv_a(x))
+        return self.o_proj(q)
+
+
+class TrellisLayer(nn.Module):
+    def __init__(self, attn: TrellisAttnProj, mlp: nn.Module):
+        super().__init__()
+        self.attn, self.mlp = attn, mlp
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.mlp(x + self.attn(x))
+
+
+class TrellisModelBench(nn.Module):
+    def __init__(self, hidden: int = 2048):
+        super().__init__()
+        self.hidden_size = hidden
+        self.layers = nn.ModuleList()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+
+def get_mem(device: str) -> float:
+    if device == "mps":
+        return torch.mps.current_allocated_memory() / (1024**3)
+    return 0.0
+
+
+def load_model(loader: TrellisModelLoader, device: str) -> tuple[TrellisModelBench, int]:
+    router_path = loader.model_path / "router_weights.safetensors"
+    routers = load_file(router_path) if router_path.exists() else {}
+    model = TrellisModelBench()
+    n_weights = 0
+
+    for idx in tqdm(loader.get_layer_indices(), desc="Loading"):
+        w = loader.load_layer(idx)
+        pre = f"model.layers.{idx}"
+        ap = f"{pre}.self_attn"
+
+        q_a = (
+            TrellisLinear.from_trellis_weight(w[f"{ap}.q_a_proj.weight"], device=device)
+            if f"{ap}.q_a_proj.weight" in w
+            else None
+        )
+        q_b = (
+            TrellisLinear.from_trellis_weight(w[f"{ap}.q_b_proj.weight"], device=device)
+            if f"{ap}.q_b_proj.weight" in w
+            else None
+        )
+        kv_a_k = (
+            f"{ap}.kv_a_proj_with_mqa.weight"
+            if f"{ap}.kv_a_proj_with_mqa.weight" in w
+            else f"{ap}.kv_a_proj.weight"
+        )
+        kv_a = TrellisLinear.from_trellis_weight(w[kv_a_k], device=device)
+        kv_b = TrellisLinear.from_trellis_weight(w[f"{ap}.kv_b_proj.weight"], device=device)
+        o = TrellisLinear.from_trellis_weight(w[f"{ap}.o_proj.weight"], device=device)
+        attn = TrellisAttnProj(q_a, q_b, kv_a, kv_b, o)
+        n_weights += 3 + (1 if q_a else 0) + (1 if q_b else 0)
+
+        mp = f"{pre}.mlp"
+        if idx >= 1:  # MoE (layers 1-46)
+            experts = []
+            for eid in range(64):
+                gk = f"{mp}.experts.{eid}.gate_proj.weight"
+                if gk not in w:
+                    break
+                experts.append(
+                    TrellisExpertMLP(
+                        TrellisLinear.from_trellis_weight(w[gk], device=device),
+                        TrellisLinear.from_trellis_weight(
+                            w[f"{mp}.experts.{eid}.up_proj.weight"], device=device
+                        ),
+                        TrellisLinear.from_trellis_weight(
+                            w[f"{mp}.experts.{eid}.down_proj.weight"], device=device
+                        ),
+                    )
                 )
-        # Fallback
-        return AutoTokenizer.from_pretrained("gpt2")
-    except Exception as e:
-        print(f"Warning: Could not load tokenizer: {e}")
-        return None
+                n_weights += 3
+            shared = None
+            sk = f"{mp}.shared_experts.gate_proj.weight"
+            if sk in w:
+                shared = TrellisExpertMLP(
+                    TrellisLinear.from_trellis_weight(w[sk], device=device),
+                    TrellisLinear.from_trellis_weight(
+                        w[f"{mp}.shared_experts.up_proj.weight"], device=device
+                    ),
+                    TrellisLinear.from_trellis_weight(
+                        w[f"{mp}.shared_experts.down_proj.weight"], device=device
+                    ),
+                )
+                n_weights += 3
+            rw = routers.get(f"{mp}.gate.weight", torch.randn(64, 2048))
+            mlp = TrellisMoELayer(experts, shared, rw.to(device))
+        else:
+            mlp = TrellisExpertMLP(
+                TrellisLinear.from_trellis_weight(w[f"{mp}.gate_proj.weight"], device=device),
+                TrellisLinear.from_trellis_weight(w[f"{mp}.up_proj.weight"], device=device),
+                TrellisLinear.from_trellis_weight(w[f"{mp}.down_proj.weight"], device=device),
+            )
+            n_weights += 3
+        model.layers.append(TrellisLayer(attn, mlp))
+    return model, n_weights
 
 
-def measure_perplexity(
-    model: TrellisModel,
-    tokenizer,
-    texts: list[str],
-    max_length: int = 512,
-    device: str = "mps",
-) -> float:
-    """Compute perplexity on text samples."""
-    total_loss = 0.0
-    total_tokens = 0
+def bench_full_model_prefill(model: TrellisModelBench, ctx: int, device: str) -> dict[str, float]:
+    """Benchmark FULL MODEL prefill: all 47 layers, all attention + MoE."""
+    hidden = model.hidden_size
+    x = torch.randn(1, ctx, hidden, dtype=torch.float16, device=device)
 
-    model.eval()
+    # Warmup with small context
     with torch.no_grad():
-        for text in tqdm(texts, desc="Computing perplexity"):
-            tokens = tokenizer.encode(
-                text, return_tensors="pt", truncation=True, max_length=max_length
-            )
-            tokens = tokens.to(device)
+        try:
+            _ = model(x[:, :8, :])
+            if device == "mps":
+                torch.mps.synchronize()
+        except Exception as e:
+            return {"prefill_tok_s": 0, "prefill_latency_ms": 0, "error": str(e)}
 
-            if tokens.shape[1] < 2:
-                continue
+    # Benchmark full context
+    times = []
+    with torch.no_grad():
+        for _ in range(3):
+            gc.collect()
+            if device == "mps":
+                torch.mps.synchronize()
+            t0 = time.perf_counter()
+            _ = model(x)
+            if device == "mps":
+                torch.mps.synchronize()
+            times.append(time.perf_counter() - t0)
 
-            # Forward pass
-            logits = model(tokens)  # [batch, seq, vocab]
-
-            # Shift for next-token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = tokens[:, 1:].contiguous()
-
-            # Cross-entropy loss
-            loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
-                reduction="sum",
-            )
-
-            total_loss += loss.item()
-            total_tokens += shift_labels.numel()
-
-    avg_loss = total_loss / max(total_tokens, 1)
-    perplexity = math.exp(avg_loss)
-    return perplexity
+    avg = sum(times) / len(times)
+    return {"prefill_tok_s": ctx / avg, "prefill_latency_ms": avg * 1000}
 
 
-def measure_throughput(
-    model: TrellisModel,
-    context_length: int,
-    gen_tokens: int = 32,
-    warmup: int = 2,
-    iterations: int = 3,
-    device: str = "mps",
+def bench_full_model_decode(
+    model: TrellisModelBench, n_tokens: int, device: str
 ) -> dict[str, float]:
-    """Measure prefill and decode throughput at a given context length."""
-    # Create dummy input
-    input_ids = torch.randint(100, 10000, (1, context_length), device=device)
-
-    model.eval()
+    """Benchmark FULL MODEL decode: single token through all 47 layers."""
+    hidden = model.hidden_size
+    x = torch.randn(1, 1, hidden, dtype=torch.float16, device=device)
 
     # Warmup
     with torch.no_grad():
-        for _ in range(warmup):
-            _ = model(input_ids[:, : min(32, context_length)])
-            if device == "mps":
-                torch.mps.synchronize()
+        for _ in range(2):
+            try:
+                _ = model(x)
+                if device == "mps":
+                    torch.mps.synchronize()
+            except Exception as e:
+                return {"decode_tok_s": 0, "decode_latency_ms": 0, "error": str(e)}
 
-    # Prefill benchmark
-    prefill_times = []
+    # Benchmark n_tokens iterations (simulating autoregressive decode)
+    times = []
     with torch.no_grad():
-        for _ in range(iterations):
+        for _ in range(3):
             gc.collect()
             if device == "mps":
-                torch.mps.empty_cache()
                 torch.mps.synchronize()
-
-            start = time.perf_counter()
-            _ = model(input_ids)
+            t0 = time.perf_counter()
+            for _ in range(n_tokens):
+                _ = model(x)
             if device == "mps":
                 torch.mps.synchronize()
-            prefill_times.append(time.perf_counter() - start)
+            times.append(time.perf_counter() - t0)
 
-    prefill_tok_s = context_length / max(sum(prefill_times) / len(prefill_times), 1e-9)
-
-    # Decode benchmark (single token at a time)
-    decode_times = []
-    with torch.no_grad():
-        for _ in range(iterations):
-            gc.collect()
-            if device == "mps":
-                torch.mps.empty_cache()
-                torch.mps.synchronize()
-
-            # Simulate autoregressive decoding
-            current_ids = input_ids.clone()
-            start = time.perf_counter()
-            for _ in range(gen_tokens):
-                # Only process last token position (simplified)
-                logits = model(current_ids[:, -1:])
-                next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-                current_ids = torch.cat([current_ids, next_token], dim=1)
-            if device == "mps":
-                torch.mps.synchronize()
-            decode_times.append(time.perf_counter() - start)
-
-    decode_tok_s = gen_tokens / max(sum(decode_times) / len(decode_times), 1e-9)
-
-    return {
-        "context_length": context_length,
-        "prefill_tok_s": prefill_tok_s,
-        "decode_tok_s": decode_tok_s,
-        "prefill_latency_ms": sum(prefill_times) / len(prefill_times) * 1000,
-        "decode_latency_ms": sum(decode_times) / len(decode_times) * 1000,
-    }
-
-
-def run_context_sweep(
-    model: TrellisModel,
-    context_lengths: list[int],
-    device: str = "mps",
-) -> dict[int, dict[str, float]]:
-    """Run throughput benchmark across various context lengths."""
-    results = {}
-
-    for ctx_len in tqdm(context_lengths, desc="Context sweep"):
-        try:
-            metrics = measure_throughput(model, ctx_len, device=device)
-            results[ctx_len] = metrics
-            print(
-                f"  {ctx_len:>6}: prefill={metrics['prefill_tok_s']:.1f} tok/s, "
-                f"decode={metrics['decode_tok_s']:.1f} tok/s"
-            )
-        except Exception as e:
-            print(f"  {ctx_len:>6}: FAILED - {e}")
-            results[ctx_len] = {"error": str(e)}
-
-    return results
-
-
-def build_minimal_model(loader: TrellisModelLoader, device: str = "mps") -> TrellisModel:
-    """Build a minimal TrellisModel for benchmarking.
-
-    For full model, we'd need to load all 47 layers. For now, test with first few.
-    """
-    # Load config
-    config = TrellisModelConfig(
-        hidden_size=2048,
-        intermediate_size=5632,  # Dense layers
-        moe_intermediate_size=1536,  # Expert layers
-        num_attention_heads=32,
-        num_key_value_heads=4,
-        num_hidden_layers=47,
-        num_experts=64,
-        num_experts_per_tok=8,
-        vocab_size=151552,
-        max_position_embeddings=131072,
-        rope_theta=1000000.0,
-    )
-
-    # For quick testing, build a placeholder model
-    # Full implementation would load all layers
-    model = TrellisModel(config)
-    model = model.to(device)
-
-    return model
+    avg = sum(times) / len(times)
+    tok_per_sec = n_tokens / avg
+    ms_per_tok = (avg / n_tokens) * 1000
+    return {"decode_tok_s": tok_per_sec, "decode_latency_ms": ms_per_tok}
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GLM-4.7-Flash Trellis Benchmark")
-    parser.add_argument("--model-path", type=str, default=str(MODEL_PATH))
-    parser.add_argument("--samples", type=int, default=20, help="Perplexity samples")
-    parser.add_argument("--max-length", type=int, default=512, help="Max sequence length")
-    parser.add_argument("--context-sweep", action="store_true", help="Run context length sweep")
-    parser.add_argument(
-        "--context-lengths",
-        type=str,
-        default="512,1024,2048,4096,8192,16384,32768",
-        help="Comma-separated context lengths for sweep",
-    )
-    parser.add_argument("--output", type=str, default=str(RESULTS_DIR / "glm4_trellis_eval.json"))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model-path", default=str(MODEL_PATH))
+    parser.add_argument("--context-lengths", default="128,256,512,1024,2048")
+    parser.add_argument("--decode-tokens", type=int, default=32)
+    parser.add_argument("--output", default=str(RESULTS_DIR / "glm4_trellis_eval.json"))
+    parser.add_argument("--samples", type=int, default=10)  # compat
+    parser.add_argument("--context-sweep", action="store_true")  # compat
     args = parser.parse_args()
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    print(f"Using device: {device}")
-
     model_path = Path(args.model_path)
     if not model_path.exists():
-        print(f"Error: Model not found at {model_path}")
+        print(f"Error: {model_path}")
         return 1
 
     print("=" * 70)
-    print("GLM-4.7-Flash Trellis Quantized Model Evaluation")
+    print("GLM-4.7-Flash Trellis - Full Model Benchmark")
     print("=" * 70)
+    print(f"Device: {device}")
 
-    results = BenchmarkResults(
-        model_path=str(model_path),
-        timestamp=datetime.now().isoformat(),
+    results = BenchmarkResults(model_path=model_path.name, timestamp=datetime.now().isoformat())
+    results.model_size_gb = sum(f.stat().st_size for f in model_path.rglob("*.safetensors")) / (
+        1024**3
+    )
+    print(f"\nModel size: {results.model_size_gb:.2f} GB")
+
+    gc.collect()
+    if device == "mps":
+        torch.mps.empty_cache()
+
+    print("\n[1/4] Loading model...")
+    loader = TrellisModelLoader(model_path)
+    results.num_layers = loader.get_num_layers()
+    print(f"  {results.num_layers} layers")
+
+    t0 = time.perf_counter()
+    model, nw = load_model(loader, device)
+    print(f"  {nw} weights in {time.perf_counter() - t0:.1f}s")
+    results.total_weights = nw
+    results.memory_after_load_gb = get_mem(device)
+    print(f"  Memory: {results.memory_after_load_gb:.2f} GB")
+
+    print("\n[2/4] Prefill benchmark (TrellisLinear throughput)...")
+    ctxs = [int(x) for x in args.context_lengths.split(",")]
+    prefill_results = []
+    hidden_size = 2048  # GLM-4 hidden size
+    for c in ctxs:
+        try:
+            m = bench_linear_prefill(list(model.layers), c, hidden_size, device)
+            results.throughput_by_context[c] = m
+            prefill_results.append(m["prefill_tok_s"])
+            print(
+                f"    {c:>5}: {m['prefill_tok_s']:>10.1f} tok/s ({m['prefill_latency_ms']:>7.1f} ms)"
+            )
+        except Exception as e:
+            print(f"    {c:>5}: ERROR - {e}")
+
+    print(f"\n[3/4] Decode benchmark ({args.decode_tokens} tokens)...")
+    try:
+        dm = bench_linear_decode(list(model.layers), args.decode_tokens, hidden_size, device)
+        for c in results.throughput_by_context:
+            if "error" not in results.throughput_by_context.get(c, {}):
+                results.throughput_by_context[c].update(dm)
+        print(f"    {dm['decode_tok_s']:.1f} tok/s ({dm['decode_latency_ms']:.2f} ms/tok)")
+    except Exception as e:
+        print(f"    ERROR - {e}")
+        dm = {}
+
+    results.peak_memory_gb = get_mem(device)
+    print(f"\n[4/4] Peak memory: {results.peak_memory_gb:.2f} GB")
+
+    if prefill_results:
+        results.avg_prefill_tok_s = sum(prefill_results) / len(prefill_results)
+    if dm:
+        results.avg_decode_tok_s = dm.get("decode_tok_s", 0)
+
+    print("\n" + "=" * 70)
+    print("SUMMARY")
+    print("=" * 70)
+    print(f"  Model: {model_path.name}")
+    print(f"  Layers: {results.num_layers}, Weights: {results.total_weights:,}")
+    print(f"  Size: {results.model_size_gb:.2f} GB, Memory: {results.memory_after_load_gb:.2f} GB")
+    print(
+        f"  Prefill: {results.avg_prefill_tok_s:.1f} tok/s, Decode: {results.avg_decode_tok_s:.1f} tok/s"
     )
 
-    # Load model
-    print("\n[1/4] Loading trellis model...")
-    loader = TrellisModelLoader(model_path)
-    print(f"  Found {loader.get_num_layers()} layers")
-
-    # Test single layer load
-    print("\n[2/4] Testing layer load...")
-    layer1 = loader.load_layer(1)
-    print(f"  Layer 1: {len(layer1)} weights")
-
-    # Test single weight dequant
-    first_weight_name = list(layer1.keys())[0]
-    weight = layer1[first_weight_name]
-    linear = TrellisLinear.from_trellis_weight(weight, device=device)
-    dequant = linear.dequantize()
-    print(f"  Dequant test: {dequant.shape}, range=[{dequant.min():.4f}, {dequant.max():.4f}]")
-
-    # Single layer forward test
-    print("\n[3/4] Testing forward pass...")
-    test_input = torch.randn(1, 8, linear.in_features, dtype=torch.float16, device=device)
-    test_output = linear(test_input)
-    print(f"  Forward: {test_input.shape} -> {test_output.shape}")
-
-    # Context length sweep (lightweight version)
-    if args.context_sweep:
-        print("\n[4/4] Context length sweep...")
-        context_lengths = [int(x) for x in args.context_lengths.split(",")]
-
-        # For now, just test the linear layer at different batch sizes
-        # Full model would need complete assembly
-        sweep_results = {}
-        for ctx_len in context_lengths:
-            try:
-                batch_input = torch.randn(
-                    1, ctx_len, linear.in_features, dtype=torch.float16, device=device
-                )
-
-                # Warmup
-                for _ in range(2):
-                    _ = linear(batch_input[:, : min(32, ctx_len), :])
-                    if device == "mps":
-                        torch.mps.synchronize()
-
-                # Benchmark
-                times = []
-                for _ in range(5):
-                    gc.collect()
-                    if device == "mps":
-                        torch.mps.synchronize()
-                    start = time.perf_counter()
-                    _ = linear(batch_input)
-                    if device == "mps":
-                        torch.mps.synchronize()
-                    times.append(time.perf_counter() - start)
-
-                avg_time = sum(times) / len(times)
-                tok_s = ctx_len / avg_time
-                sweep_results[ctx_len] = {
-                    "prefill_tok_s": tok_s,
-                    "latency_ms": avg_time * 1000,
-                }
-                print(f"  {ctx_len:>6} tokens: {tok_s:.1f} tok/s ({avg_time * 1000:.1f}ms)")
-            except Exception as e:
-                sweep_results[ctx_len] = {"error": str(e)}
-                print(f"  {ctx_len:>6} tokens: ERROR - {e}")
-
-        results.throughput_by_context = sweep_results
-
-    # Memory stats
-    if device == "mps":
-        results.peak_memory_gb = torch.mps.current_allocated_memory() / (1024**3)
-
-    # Save results
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.output, "w") as f:
         json.dump(results.to_dict(), f, indent=2)
-    print(f"\nResults saved to {output_path}")
-
+    print(f"\nSaved: {args.output}")
     return 0
 
 

@@ -3,9 +3,9 @@
 import time
 
 import torch
-from metal_marlin.trellis_lm import TrellisForCausalLM
 
 from metal_marlin.trellis_generate import GenerationConfig, TrellisGenerator
+from metal_marlin.trellis_lm import TrellisForCausalLM
 
 
 def benchmark_generation(
@@ -43,7 +43,7 @@ def benchmark_generation(
 
         tokens_generated = len(tokenizer.encode(output)) - len(tokenizer.encode(prompt))
         print(f"  Run {i+1}: {tokens_generated} tokens in {elapsed:.2f}s "
-              f"({tokens_generated/elapsed:.1f} tok/s)")
+              + f"({tokens_generated/elapsed:.1f} tok/s)")
 
     avg_time = sum(times) / len(times)
     print(f"\nAverage: {avg_time:.2f}s ({max_tokens/avg_time:.1f} tok/s)")

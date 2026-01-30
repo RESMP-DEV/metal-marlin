@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from metal_marlin.calibration import CalibrationDataset
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
+from metal_marlin.trellis_packing import pack_indices_vectorized
 
 # Layers that need higher precision
 SENSITIVE_PATTERNS = {
@@ -707,18 +708,19 @@ class ParallelLayerwiseQuantizer:
                 if meta.success and meta.actual_bits in bit_counts:
                     bit_counts[meta.actual_bits] += 1
 
-                # Add to batch save dict
+                # Add to batch save dict (pack indices for ~5x space savings)
                 if quant_data is not None and output_path is not None:
                     safe_key = quant_data.name.replace(".", "__")
-                    batch_tensors[f"{safe_key}__indices"] = quant_data.trellis_indices.astype(
-                        np.int16
+                    packed_indices = pack_indices_vectorized(
+                        quant_data.trellis_indices, quant_data.bits
                     )
+                    batch_tensors[f"{safe_key}__indices"] = packed_indices
                     batch_tensors[f"{safe_key}__scales"] = quant_data.scales.astype(np.float32)
                     batch_tensors[f"{safe_key}__su"] = quant_data.su.astype(np.float32)
                     batch_tensors[f"{safe_key}__sv"] = quant_data.sv.astype(np.float32)
 
                     bytes_this = (
-                        quant_data.trellis_indices.nbytes
+                        packed_indices.nbytes
                         + quant_data.scales.nbytes
                         + quant_data.su.nbytes
                         + quant_data.sv.nbytes
@@ -811,6 +813,11 @@ class ParallelLayerwiseQuantizer:
         with open(index_file, "w") as f:
             json.dump(
                 {
+                    "format": "trellis_v2",
+                    "packing": {
+                        "indices_format": "packed_uint8",
+                        "header_byte": True,
+                    },
                     "layer_idx": layer_idx,
                     "total_tensors": len(metadata),
                     "total_bytes": total_bytes,
@@ -848,22 +855,18 @@ class ParallelLayerwiseQuantizer:
             # Create safe key from tensor name
             safe_key = qt.name.replace(".", "__")
 
-            # Use view if already correct dtype, otherwise cast (creates copy)
-            indices = (
-                qt.trellis_indices
-                if qt.trellis_indices.dtype == np.int16
-                else qt.trellis_indices.astype(np.int16)
-            )
+            # Pack indices for efficient storage (~5x savings)
+            packed_indices = pack_indices_vectorized(qt.trellis_indices, qt.bits)
             scales = qt.scales if qt.scales.dtype == np.float32 else qt.scales.astype(np.float32)
             su = qt.su.astype(np.float32)  # Always float64 -> float32
             sv = qt.sv.astype(np.float32)
 
-            tensors_to_save[f"{safe_key}__indices"] = indices
+            tensors_to_save[f"{safe_key}__indices"] = packed_indices
             tensors_to_save[f"{safe_key}__scales"] = scales
             tensors_to_save[f"{safe_key}__su"] = su
             tensors_to_save[f"{safe_key}__sv"] = sv
 
-            total_bytes += indices.nbytes + scales.nbytes + su.nbytes + sv.nbytes
+            total_bytes += packed_indices.nbytes + scales.nbytes + su.nbytes + sv.nbytes
 
             metadata_entries.append(
                 {

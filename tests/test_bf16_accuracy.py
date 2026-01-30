@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from metal_marlin._compat import HAS_TORCH, torch
-from metal_marlin.eval_perplexity import compute_perplexity_from_logits, load_wikitext2
+from metal_marlin.eval import compute_perplexity_from_logits, load_wikitext2
 
 from .conftest import requires_torch
 

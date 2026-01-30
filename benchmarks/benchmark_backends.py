@@ -30,6 +30,7 @@ from metal_marlin.asr.tdt_config import TDTConfig
 @dataclass
 class BenchmarkResult:
     """Result from a single benchmark configuration."""
+
     backend: str
     audio_sec: float
     avg_latency_ms: float
@@ -59,7 +60,9 @@ def create_model() -> ParakeetTDT:
     return ParakeetTDT(conformer_cfg, tdt_cfg)
 
 
-def benchmark_mps_baseline(model: ParakeetTDT, audio_sec: float, num_runs: int = 10) -> BenchmarkResult:
+def benchmark_mps_baseline(
+    model: ParakeetTDT, audio_sec: float, num_runs: int = 10
+) -> BenchmarkResult:
     """Benchmark PyTorch MPS baseline."""
     model = model.to("mps")
     model.eval()
@@ -88,16 +91,21 @@ def benchmark_mps_baseline(model: ParakeetTDT, audio_sec: float, num_runs: int =
         audio_sec=audio_sec,
         avg_latency_ms=avg,
         p50_ms=statistics.median(latencies),
-        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)] if len(latencies) >= 20 else max(latencies),
+        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)]
+        if len(latencies) >= 20
+        else max(latencies),
         realtime_factor=audio_sec / (avg / 1000),
         memory_mb=torch.mps.current_allocated_memory() / 1024 / 1024,
     )
 
 
-def benchmark_metal_int8(model: ParakeetTDT, audio_sec: float, num_runs: int = 10) -> BenchmarkResult:
+def benchmark_metal_int8(
+    model: ParakeetTDT, audio_sec: float, num_runs: int = 10
+) -> BenchmarkResult:
     """Benchmark Metal INT8 custom kernel."""
     try:
         from metal_marlin.asr.replace_layers_metal import replace_parakeet_encoder_layers
+
         model = replace_parakeet_encoder_layers(model, quant_type="int8")
     except Exception as e:
         print(f"Metal INT8 setup failed: {e}")
@@ -134,23 +142,33 @@ def benchmark_metal_int8(model: ParakeetTDT, audio_sec: float, num_runs: int = 1
         audio_sec=audio_sec,
         avg_latency_ms=avg,
         p50_ms=statistics.median(latencies),
-        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)] if len(latencies) >= 20 else max(latencies),
+        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)]
+        if len(latencies) >= 20
+        else max(latencies),
         realtime_factor=audio_sec / (avg / 1000),
         memory_mb=torch.mps.current_allocated_memory() / 1024 / 1024,
     )
 
 
-def benchmark_coreml_ane(model: ParakeetTDT, audio_sec: float, num_runs: int = 10) -> BenchmarkResult:
-    """Benchmark CoreML ANE execution."""
+def benchmark_coreml_ane(
+    model: ParakeetTDT, audio_sec: float, num_runs: int = 10
+) -> BenchmarkResult:
+    """Benchmark CoreML ANE execution with INT8 quantization."""
     try:
         from metal_marlin.ane import HAS_COREMLTOOLS, ANEEncoder, export_encoder_to_coreml
+
         if not HAS_COREMLTOOLS:
             raise ImportError("coremltools not available")
 
-        mlmodel_path = Path("/tmp/parakeet_encoder.mlpackage")
+        # Export with INT8 quantization for ANE
+        mlmodel_path = Path("/tmp/parakeet_encoder_int8.mlpackage")
         if not mlmodel_path.exists():
-            print("Exporting encoder to CoreML...")
-            export_encoder_to_coreml(model.encoder, mlmodel_path)
+            print("Exporting encoder to CoreML with INT8 quantization...")
+            export_encoder_to_coreml(
+                model.encoder,
+                mlmodel_path,
+                quantize_weights="int8",  # INT8 for ANE
+            )
 
         ane_encoder = ANEEncoder(mlmodel_path)
     except Exception as e:
@@ -181,7 +199,9 @@ def benchmark_coreml_ane(model: ParakeetTDT, audio_sec: float, num_runs: int = 1
         audio_sec=audio_sec,
         avg_latency_ms=avg,
         p50_ms=statistics.median(latencies),
-        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)] if len(latencies) >= 20 else max(latencies),
+        p95_ms=sorted(latencies)[int(len(latencies) * 0.95)]
+        if len(latencies) >= 20
+        else max(latencies),
         realtime_factor=audio_sec / (avg / 1000),
         memory_mb=0,  # Can't easily measure CoreML memory
     )
@@ -189,17 +209,26 @@ def benchmark_coreml_ane(model: ParakeetTDT, audio_sec: float, num_runs: int = 1
 
 def main():
     parser = argparse.ArgumentParser(description="Backend comparison benchmark")
-    parser.add_argument("--backends", nargs="+",
-                        default=["mps_baseline", "metal_int8", "coreml_ane"],
-                        help="Backends to benchmark")
-    parser.add_argument("--audio-lengths", nargs="+", type=float,
-                        default=[1.0, 5.0, 10.0],
-                        help="Audio lengths in seconds")
-    parser.add_argument("--runs", type=int, default=10,
-                        help="Number of benchmark runs")
-    parser.add_argument("--output", type=Path,
-                        default=Path("benchmarks/results/backend_comparison.json"),
-                        help="Output JSON file")
+    parser.add_argument(
+        "--backends",
+        nargs="+",
+        default=["mps_baseline", "metal_int8", "coreml_ane"],
+        help="Backends to benchmark",
+    )
+    parser.add_argument(
+        "--audio-lengths",
+        nargs="+",
+        type=float,
+        default=[1.0, 5.0, 10.0],
+        help="Audio lengths in seconds",
+    )
+    parser.add_argument("--runs", type=int, default=10, help="Number of benchmark runs")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("benchmarks/results/backend_comparison.json"),
+        help="Output JSON file",
+    )
     args = parser.parse_args()
 
     print("=== Backend Comparison Benchmark ===\n")

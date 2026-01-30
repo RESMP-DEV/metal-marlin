@@ -39,11 +39,10 @@ try:
     from transformers import AutoTokenizer, Glm4MoeLiteForCausalLM
 except Exception as exc:  # pragma: no cover - runtime guard
     raise SystemExit(
-        "Transformers>=5.0.0 required with Glm4MoeLiteForCausalLM available. "
-        f"Import error: {exc}"
+        f"Transformers>=5.0.0 required with Glm4MoeLiteForCausalLM available. Import error: {exc}"
     )
 
-from metal_marlin.eval_perplexity import (  # noqa: E402
+from metal_marlin.eval import (  # noqa: E402
     compute_perplexity_from_logits,
     load_wikitext2,
 )
@@ -124,8 +123,14 @@ def _extract_tensor(output: Any) -> torch.Tensor | None:
     return None
 
 
-def _infer_topk(indices: torch.Tensor, weights: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if indices.dtype.is_floating_point and weights is not None and not weights.dtype.is_floating_point:
+def _infer_topk(
+    indices: torch.Tensor, weights: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if (
+        indices.dtype.is_floating_point
+        and weights is not None
+        and not weights.dtype.is_floating_point
+    ):
         return weights, indices
     return indices, weights
 
@@ -158,7 +163,11 @@ def _parse_router_output(output: Any) -> tuple[torch.Tensor | None, torch.Tensor
     if indices is None:
         return None, None
 
-    if weights is not None and isinstance(indices, torch.Tensor) and isinstance(weights, torch.Tensor):
+    if (
+        weights is not None
+        and isinstance(indices, torch.Tensor)
+        and isinstance(weights, torch.Tensor)
+    ):
         indices, weights = _infer_topk(indices, weights)
 
     return indices, weights
@@ -168,7 +177,9 @@ def _norm_stats_store() -> dict[int, dict[str, float]]:
     return defaultdict(lambda: {"sum_sq": 0.0, "numel": 0.0})
 
 
-def analyze_expert_usage(model, input_ids_list: list[torch.Tensor]) -> tuple[
+def analyze_expert_usage(
+    model, input_ids_list: list[torch.Tensor]
+) -> tuple[
     dict[tuple[int, int], int],
     dict[tuple[int, int], float],
     ExpertEnergyStats,
@@ -198,6 +209,7 @@ def analyze_expert_usage(model, input_ids_list: list[torch.Tensor]) -> tuple[
                 flat_weights = weights.reshape(-1).detach().cpu().tolist()
                 for idx, weight in zip(flat_indices, flat_weights):
                     expert_weight_sums[(layer_idx, int(idx))] += float(weight)
+
         return hook
 
     def make_norm_hook(store: dict[int, dict[str, float]], layer_idx: int):
@@ -208,6 +220,7 @@ def analyze_expert_usage(model, input_ids_list: list[torch.Tensor]) -> tuple[
             data = tensor.detach().float()
             store[layer_idx]["sum_sq"] += float((data * data).sum().item())
             store[layer_idx]["numel"] += float(data.numel())
+
         return hook
 
     for i, layer in enumerate(backbone.layers[1:], 1):  # Skip dense layer 0
@@ -411,10 +424,7 @@ def main() -> int:
     )
 
     print(f"  experts_used: {experts_used_count}/{n_routed} ({experts_used_ratio * 100:.1f}%)")
-    print(
-        "  shared_energy_ratio: "
-        f"{shared_vs_routed.shared_energy_ratio * 100:.2f}%"
-    )
+    print(f"  shared_energy_ratio: {shared_vs_routed.shared_energy_ratio * 100:.2f}%")
 
     # Optional perplexity (quick estimate)
     def logits_fn(input_ids_np: np.ndarray) -> np.ndarray:

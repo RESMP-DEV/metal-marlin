@@ -1,4 +1,11 @@
-"""Export Conformer encoder to CoreML for ANE execution."""
+"""Export Conformer encoder to CoreML for ANE execution.
+
+ANE INT8 Performance:
+- M4 Max ANE: 38 TOPS INT8
+- CoreML handles quantization during conversion
+- No PyObjC dispatch overhead (unlike custom Metal shaders)
+- Use compute_precision="int8" for ANE-optimized inference
+"""
 
 from __future__ import annotations
 
@@ -10,10 +17,12 @@ import torch.nn as nn
 
 try:
     import coremltools as ct
+    from coremltools.models.neural_network import quantization_utils
 
     HAS_COREMLTOOLS = True
 except ImportError:
     ct = None
+    quantization_utils = None
     HAS_COREMLTOOLS = False
 
 
@@ -43,8 +52,9 @@ def export_encoder_to_coreml(
     n_mels: int = 80,
     max_seq_len: int = 3000,
     compute_units: str = "CPU_AND_NE",
+    quantize_weights: str | None = "int8",
 ) -> Any:
-    """Export Conformer encoder to CoreML.
+    """Export Conformer encoder to CoreML with optional INT8 quantization.
 
     Args:
         encoder: ConformerEncoder module
@@ -52,9 +62,16 @@ def export_encoder_to_coreml(
         n_mels: Number of mel channels
         max_seq_len: Maximum sequence length
         compute_units: CoreML compute units ("CPU_AND_NE", "ALL", "CPU_ONLY")
+        quantize_weights: Weight quantization ("int8", "int4", None for FP16)
 
     Returns:
         Compiled CoreML model
+
+    Note:
+        INT8 quantization is optimal for ANE:
+        - ANE hardware: 38 TOPS INT8 on M4 Max
+        - ~2x memory reduction vs FP16
+        - Minimal accuracy loss for encoder
     """
     if not HAS_COREMLTOOLS:
         raise ImportError("coremltools required: pip install coremltools")
@@ -91,6 +108,43 @@ def export_encoder_to_coreml(
         minimum_deployment_target=ct.target.macOS14,
         convert_to="mlprogram",
     )
+
+    # Apply weight quantization for ANE optimization
+    if quantize_weights:
+        try:
+            from coremltools.optimize.coreml import (
+                OpLinearQuantizerConfig,
+                OptimizationConfig,
+                linear_quantize_weights,
+            )
+
+            if quantize_weights == "int8":
+                # INT8 symmetric quantization - optimal for ANE
+                op_config = OpLinearQuantizerConfig(
+                    mode="linear_symmetric",
+                    dtype="int8",
+                    granularity="per_channel",
+                )
+            elif quantize_weights == "int4":
+                # INT4 for more compression (slightly less accurate)
+                op_config = OpLinearQuantizerConfig(
+                    mode="linear_symmetric",
+                    dtype="int4",
+                    granularity="per_block",
+                    block_size=32,
+                )
+            else:
+                op_config = None
+
+            if op_config:
+                config = OptimizationConfig(global_config=op_config)
+                mlmodel = linear_quantize_weights(mlmodel, config=config)
+                print(f"Applied {quantize_weights} weight quantization for ANE")
+
+        except ImportError:
+            print("Warning: coremltools.optimize not available, skipping quantization")
+        except Exception as e:
+            print(f"Warning: Quantization failed: {e}")
 
     # Save model
     output_path.parent.mkdir(parents=True, exist_ok=True)

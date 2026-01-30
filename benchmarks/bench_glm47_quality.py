@@ -28,7 +28,7 @@ sys.path.insert(0, str(_ROOT))
 
 import torch  # noqa: E402
 
-from metal_marlin.eval_perplexity import (  # noqa: E402
+from metal_marlin.eval import (  # noqa: E402
     compute_perplexity_sliding_window,
     load_tokenizer,
     load_wikitext2,

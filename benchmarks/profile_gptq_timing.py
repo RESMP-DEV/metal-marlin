@@ -6,7 +6,7 @@ import time
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from metal_marlin.eval_perplexity import load_wikitext2
+from metal_marlin.eval import load_wikitext2
 from metal_marlin.layer_replacement import (
     collect_moe_expert_hessians,
     find_moe_layers,

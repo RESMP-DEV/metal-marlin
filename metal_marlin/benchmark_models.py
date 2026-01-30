@@ -724,8 +724,7 @@ def _compute_kl_divergence(
     Returns:
         (kl_mean, kl_max, kl_std)
     """
-    from .eval_kl_divergence import compute_kl_divergence_np
-    from .eval_perplexity import load_tokenizer
+    from .eval import compute_kl_divergence_np, load_tokenizer
 
     if not HAS_TORCH or torch is None:
         if verbose:

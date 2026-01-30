@@ -1,14 +1,19 @@
-"""Loader for EXL3 trellis-quantized models.
+"""Loader for Trellis-quantized models.
 
-The EXL3 format stores each layer in a separate directory with:
+The Trellis format stores each layer in a separate directory with:
 - index.json: Metadata about the tensors in the layer
 - tensor_*.safetensors: Safetensors files containing the quantized weights
 
 Each quantized weight is stored as four components:
-- {name}__indices: int16 trellis indices [tiles_k, tiles_n, 256]
+- {name}__indices: Packed uint8 (trellis_v2) or int16 (legacy) trellis indices
 - {name}__scales: float32 per-tile scales [n_groups, N]
 - {name}__su: float32 row sign vector [K]
 - {name}__sv: float32 column sign vector [N]
+
+For packed indices (trellis_v2 format):
+- First byte is bits value (2-8)
+- Remaining bytes are bit-packed indices
+- Indices are kept in packed uint8 format for memory efficiency
 """
 
 from __future__ import annotations
@@ -27,13 +32,13 @@ class TrellisWeight:
     """A trellis-quantized weight tensor.
 
     The trellis quantization scheme decomposes a weight matrix W into:
-    - indices: Trellis codebook indices for each 16x16 tile
+    - packed_indices: Packed trellis codebook indices for each 16x16 tile (uint8)
     - scales: Per-tile or per-group scaling factors
     - su: Row sign vector for sign restoration
     - sv: Column sign vector for sign restoration
 
     Attributes:
-        indices: Trellis indices [tiles_k, tiles_n, 256] int16
+        packed_indices: Packed trellis indices [tiles_k, tiles_n, packed_size] uint8
         scales: Per-tile scales [n_groups, N] float32
         su: Row sign vector [K] float32
         sv: Column sign vector [N] float32
@@ -41,7 +46,7 @@ class TrellisWeight:
         original_shape: Original weight shape (K, N)
     """
 
-    indices: torch.Tensor  # [tiles_k, tiles_n, 256] int16
+    packed_indices: torch.Tensor  # [tiles_k, tiles_n, packed_size] uint8
     scales: torch.Tensor  # [n_groups, N] float32
     su: torch.Tensor  # [K] float32
     sv: torch.Tensor  # [N] float32
@@ -60,7 +65,7 @@ class TrellisWeight:
 
 
 class TrellisModelLoader:
-    """Loader for EXL3 trellis-quantized models.
+    """Loader for Trellis-quantized models.
 
     Models are structured with layers in separate directories:
     ```
@@ -70,8 +75,12 @@ class TrellisModelLoader:
         ...
     ```
 
+    Supports both formats:
+    - trellis_v2: Packed uint8 indices (new, ~5x smaller)
+    - legacy: Unpacked int16 indices (backward compatible)
+
     Example:
-        >>> loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
+        >>> loader = TrellisModelLoader("models/GLM-4.7-Flash-Trellis-3bpw")
         >>> print(f"Layers: {loader.get_num_layers()}")
         >>> layer0 = loader.load_layer(0)
         >>> for name, weight in layer0.items():
@@ -273,21 +282,39 @@ class TrellisModelLoader:
         # Convert each weight
         for base_name, components in weight_groups.items():
             if "indices" in components:
+                indices = components["indices"]
+                # Ensure indices are in packed uint8 format
+                if indices.dtype != torch.uint8:
+                    raise ValueError(
+                        f"ExLlamaV3 format must be converted to packed uint8. "
+                        f"Got {indices.dtype} for {base_name}. "
+                        f"Use the metal_marlin packed format instead."
+                    )
                 weights[base_name] = TrellisWeight(
-                    indices=components["indices"],
+                    packed_indices=indices,
                     scales=components.get("scales", components.get("scale")),
                     su=components.get("su", components.get("row_scale")),
                     sv=components.get("sv", components.get("col_scale")),
-                    bits=self._infer_bits(components["indices"]),
+                    bits=self._infer_bits(indices),
                     original_shape=self._infer_shape(components),
                 )
 
         return weights
 
     def _find_tensor_files(self, layer_idx: int) -> list[Path]:
-        """Find all safetensor files for a layer."""
+        """Find all safetensor files for a layer.
+
+        Supports both naming conventions:
+        - tensor_*.safetensors (from quantize_single_layer.py)
+        - batch_*.safetensors (from quantize_layerwise_parallel.py)
+        """
         layer_path = self._get_layer_path(layer_idx)
-        return sorted(layer_path.glob("tensor_*.safetensors"))
+        # Try tensor_* first (single-layer quantizer)
+        tensor_files = sorted(layer_path.glob("tensor_*.safetensors"))
+        if not tensor_files:
+            # Fall back to batch_* (parallel quantizer)
+            tensor_files = sorted(layer_path.glob("batch_*.safetensors"))
+        return tensor_files
 
     def load_layer(self, layer_idx: int) -> dict[str, TrellisWeight]:
         """Load all weights for a single layer.
@@ -328,7 +355,12 @@ class TrellisModelLoader:
         all_tensors: dict[str, torch.Tensor],
         metadata: dict[str, Any],
     ) -> dict[str, TrellisWeight]:
-        """Load weights in metal_marlin native format."""
+        """Load weights in metal_marlin native format.
+
+        Supports both packed (uint8) and unpacked (int16) indices:
+        - uint8: trellis_v2 format, ~5x smaller, first byte is bits value
+        - int16: legacy format, indices stored directly
+        """
         weights: dict[str, TrellisWeight] = {}
         tensor_infos = metadata.get("tensors", [])
 
@@ -354,14 +386,47 @@ class TrellisModelLoader:
             if sv_key not in all_tensors:
                 raise ValueError(f"Missing sv for tensor: {name} (key: {sv_key})")
 
-            indices = all_tensors[indices_key]
+            indices_raw = all_tensors[indices_key]
             scales = all_tensors[scales_key]
             su = all_tensors[su_key]
             sv = all_tensors[sv_key]
 
-            # Validate shapes and dtypes
-            if indices.dtype != torch.int16:
-                raise ValueError(f"Indices must be int16, got {indices.dtype} for {name}")
+            # Handle packed vs unpacked indices
+            if indices_raw.dtype == torch.uint8:
+                # Packed format (trellis_v2): keep as uint8, don't unpack
+                # Format: [1 byte header (bits value)] + [packed data]
+                # Packed data is stored tile-contiguous without per-tile headers
+                K, N = shape
+                tiles_k = (K + 15) // 16
+                tiles_n = (N + 15) // 16
+                # Packed bytes per tile = ceil(256 * bits / 8)
+                packed_bytes_per_tile = (256 * bits + 7) // 8
+                # Total expected size: 1 header byte + tiles_k * tiles_n * packed_bytes_per_tile
+                expected_data_bytes = tiles_k * tiles_n * packed_bytes_per_tile
+                expected_total_bytes = 1 + expected_data_bytes
+
+                if indices_raw.numel() != expected_total_bytes:
+                    raise ValueError(
+                        f"Packed indices size mismatch for {name}: "
+                        f"expected {expected_total_bytes} (1 header + {expected_data_bytes} data), "
+                        f"got {indices_raw.numel()}"
+                    )
+
+                # Strip header byte and reshape to [tiles_k, tiles_n, packed_bytes_per_tile]
+                packed_indices = indices_raw[1:].reshape(tiles_k, tiles_n, packed_bytes_per_tile)
+            elif indices_raw.dtype == torch.int16:
+                # Legacy format: not supported for memory-efficient loading
+                raise ValueError(
+                    f"Legacy int16 format not supported. "
+                    f"Please use packed uint8 format for {name}"
+                )
+            else:
+                raise ValueError(
+                    f"Indices must be uint8 (packed), "
+                    f"got {indices_raw.dtype} for {name}"
+                )
+
+            # Validate other dtypes
             if scales.dtype != torch.float32:
                 raise ValueError(f"Scales must be float32, got {scales.dtype} for {name}")
             if su.dtype != torch.float32:
@@ -370,7 +435,7 @@ class TrellisModelLoader:
                 raise ValueError(f"sv must be float32, got {sv.dtype} for {name}")
 
             weights[name] = TrellisWeight(
-                indices=indices,
+                packed_indices=packed_indices,
                 scales=scales,
                 su=su,
                 sv=sv,
@@ -555,6 +620,45 @@ class TrellisModelLoader:
                 layer_weights[rel_name] = tensor
 
         return layer_weights
+
+    def load_weight(self, layer_idx: int, tensor_name: str) -> TrellisWeight:
+        """Load a single weight tensor from a layer.
+
+        Args:
+            layer_idx: Layer index to load from.
+            tensor_name: Name of the tensor. Can be:
+                - Relative name: 'mlp.gate_proj' -> expands to 'model.layers.{layer_idx}.mlp.gate_proj.weight'
+                - Full name: 'model.layers.0.mlp.gate_proj.weight'
+
+        Returns:
+            TrellisWeight object for the requested tensor.
+
+        Raises:
+            FileNotFoundError: If the layer doesn't exist.
+            ValueError: If the tensor is not found in the layer.
+        """
+        layer_weights = self.load_layer(layer_idx)
+
+        # Try the name as-is first
+        if tensor_name in layer_weights:
+            return layer_weights[tensor_name]
+
+        # Try with .weight suffix if not present
+        if not tensor_name.endswith(".weight"):
+            full_name = f"{tensor_name}.weight"
+            if full_name in layer_weights:
+                return layer_weights[full_name]
+
+        # Try expanding relative name to full name
+        if not tensor_name.startswith("model.layers."):
+            full_name = f"model.layers.{layer_idx}.{tensor_name}.weight"
+            if full_name in layer_weights:
+                return layer_weights[full_name]
+
+        raise ValueError(
+            f"Tensor '{tensor_name}' not found in layer {layer_idx}. "
+            f"Available tensors: {list(layer_weights.keys())}"
+        )
 
     def clear_layer_cache(self, layer_idx: int) -> None:
         """Clear cached metadata for a layer to save memory.

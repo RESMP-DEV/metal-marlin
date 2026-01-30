@@ -28,7 +28,7 @@ SAMPLE_PROMPTS = {
     "quicksort": "def quicksort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot =",
     "story": "Once upon a time",
     "math": "What is 2 + 2? The answer is",
-    "code": "import numpy as np\n\ndef matrix_multiply(A, B):\n    \"\"\"Compute matrix product.\"\"\"\n    return",
+    "code": 'import numpy as np\n\ndef matrix_multiply(A, B):\n    """Compute matrix product."""\n    return',
 }
 
 # Expected patterns for coherence checking
@@ -77,7 +77,7 @@ def tokenizer(model_available):
         # Fallback to a generic tokenizer
         try:
             tokenizer = AutoTokenizer.from_pretrained(
-                "THUDM/glm-4-9b-chat", trust_remote_code=True
+                "zai-org/GLM-4.7-Flash", trust_remote_code=True
             )
         except Exception:
             pytest.skip("Could not load tokenizer")
@@ -149,13 +149,12 @@ class TestTrellisGenerationQuality:
         patterns = COHERENCE_PATTERNS.get(prompt_name, [])
         if patterns:
             has_match = any(
-                re.search(pattern, generated_part, re.IGNORECASE)
-                for pattern in patterns
+                re.search(pattern, generated_part, re.IGNORECASE) for pattern in patterns
             )
             if not has_match:
                 # Don't fail immediately - just warn, as this is heuristic
                 # Instead check that output looks like valid text
-                assert generated_part[0].isalnum() or generated_part[0] in " ([{\'\"", (
+                assert generated_part[0].isalnum() or generated_part[0] in " ([{'\"", (
                     f"Output starts unexpectedly: '{generated_part[:50]}'"
                 )
 
@@ -189,9 +188,7 @@ class TestTrellisGenerationQuality:
 
         # Should be identical for greedy decoding
         assert output1 == output2, (
-            f"Greedy decoding not deterministic:\n"
-            f"  Run 1: {output1}\n"
-            f"  Run 2: {output2}"
+            f"Greedy decoding not deterministic:\n  Run 1: {output1}\n  Run 2: {output2}"
         )
 
     @pytest.mark.slow
@@ -230,9 +227,7 @@ class TestTrellisGenerationQuality:
 
         # Sanity checks on probability distribution
         probs_sum = top_probs.sum().item()
-        assert 0.5 < probs_sum < 1.0, (
-            f"Top-5 probability mass suspicious: {probs_sum:.3f}"
-        )
+        assert 0.5 < probs_sum < 1.0, f"Top-5 probability mass suspicious: {probs_sum:.3f}"
 
         # Top token should have reasonable probability
         top_prob = top_probs[0].item()
@@ -287,9 +282,7 @@ class TestTrellisGenerationQuality:
         # All outputs should be reasonable strings
         for temp, samples in outputs.items():
             for sample in samples:
-                assert len(sample) > len(prompt), (
-                    f"Temperature {temp}: Generated text too short"
-                )
+                assert len(sample) > len(prompt), f"Temperature {temp}: Generated text too short"
                 assert not any(ord(c) < 32 and c not in "\n\t\r" for c in sample), (
                     f"Temperature {temp}: Output contains control characters"
                 )

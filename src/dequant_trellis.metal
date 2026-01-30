@@ -518,3 +518,109 @@ kernel void dequant_trellis_with_signs(
     // Write output
     output[k_idx * N + n_idx] = half(dequant_val);
 }
+
+// ============================================================================
+// Packed Index Dequantization Kernel
+// ============================================================================
+
+/// Unpack a single trellis index from packed byte array.
+///
+/// Supports 2-bit, 3-bit, and 4-bit packing schemes.
+/// For 3-bit: 256 indices * 3 bits = 768 bits = 96 bytes/tile
+/// For 4-bit: 256 indices * 4 bits = 1024 bits = 128 bytes/tile
+/// For 2-bit: 256 indices * 2 bits = 512 bits = 64 bytes/tile
+///
+/// @param packed      Packed indices for this tile
+/// @param idx_in_tile Index within tile [0, 255]
+/// @param bits        Bit width (2, 3, or 4)
+/// @return            Unpacked codebook index
+inline uint unpack_index(device const uchar* packed, uint idx_in_tile, uint bits) {
+    uint bit_offset = idx_in_tile * bits;
+    uint byte_idx = bit_offset / 8;
+    uint bit_in_byte = bit_offset % 8;
+    uint mask = (1u << bits) - 1;
+    
+    // Read 1-2 bytes depending on whether we span a boundary
+    uint packed_val = packed[byte_idx];
+    if (bit_in_byte + bits > 8) {
+        packed_val |= (uint(packed[byte_idx + 1]) << 8);
+    }
+    
+    return (packed_val >> bit_in_byte) & mask;
+}
+
+/// Dequantize trellis weights from packed uint8 indices.
+///
+/// This kernel operates directly on the packed byte format, unpacking
+/// indices on-the-fly to avoid the 5x memory inflation of pre-unpacking.
+///
+/// Input Layout:
+///   - packed_indices: [tiles_k, tiles_n, packed_bytes] uint8
+///     packed_bytes = ceil(256 * bits / 8)
+///   - scales: [n_groups, N] float32
+///   - grid: [n_levels] float32 codebook
+///   - su: [K] float32 row signs
+///   - sv: [N] float32 column signs
+///
+/// @param packed_indices  Packed byte array [tiles_k, tiles_n, packed_bytes]
+/// @param scales          Per-group scales [n_groups, N]
+/// @param grid            Codebook grid [n_levels]
+/// @param su              Row sign vector [K]
+/// @param sv              Column sign vector [N]
+/// @param output          Dequantized output [K, N]
+/// @param K               Number of rows
+/// @param N               Number of columns
+/// @param n_levels        Number of quantization levels (2^bits)
+/// @param bits            Quantization bit width
+kernel void dequant_trellis_packed(
+    device const uchar* packed_indices [[buffer(0)]],
+    device const float* scales [[buffer(1)]],
+    device const float* grid [[buffer(2)]],
+    device const float* su [[buffer(3)]],
+    device const float* sv [[buffer(4)]],
+    device half* output [[buffer(5)]],
+    constant uint& K [[buffer(6)]],
+    constant uint& N [[buffer(7)]],
+    constant uint& n_levels [[buffer(8)]],
+    constant uint& bits [[buffer(9)]],
+    uint2 gid [[thread_position_in_grid]]
+) {
+    uint n_idx = gid.x;
+    uint k_idx = gid.y;
+    
+    if (n_idx >= N || k_idx >= K) return;
+    
+    // Compute tile coordinates
+    uint tile_k = k_idx / TILE_DIM;
+    uint tile_n = n_idx / TILE_DIM;
+    uint local_k = k_idx % TILE_DIM;
+    uint local_n = n_idx % TILE_DIM;
+    
+    uint tiles_n = (N + TILE_DIM - 1) / TILE_DIM;
+    uint idx_in_tile = local_k * TILE_DIM + local_n;
+    
+    // Packed bytes per tile: ceil(256 * bits / 8)
+    uint packed_bytes_per_tile = (TILE_SIZE * bits + 7) / 8;
+    
+    // Offset into packed_indices
+    uint tile_offset = (tile_k * tiles_n + tile_n) * packed_bytes_per_tile;
+    
+    // Unpack the trellis index
+    uint trellis_idx = unpack_index(packed_indices + tile_offset, idx_in_tile, bits);
+    
+    // Clamp to valid range
+    if (trellis_idx >= n_levels) {
+        trellis_idx = 0;
+    }
+    
+    // Load scale (group size = 128)
+    uint group_size = 128;
+    uint group_idx = k_idx / group_size;
+    float scale = scales[group_idx * N + n_idx];
+    
+    // Dequantize: grid[idx] * scale * su * sv
+    float dequant_val = grid[trellis_idx] * scale;
+    dequant_val *= su[k_idx] * sv[n_idx];
+    
+    output[k_idx * N + n_idx] = half(dequant_val);
+}

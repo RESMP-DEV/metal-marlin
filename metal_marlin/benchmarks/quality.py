@@ -9,8 +9,7 @@ from typing import Any
 import numpy as np
 
 from .._compat import HAS_TORCH, torch
-from ..eval_kl_divergence import evaluate_kl_divergence
-from ..eval_perplexity import compute_perplexity_from_logits, load_wikitext2
+from ..eval import compute_perplexity_from_logits, evaluate_kl_divergence, load_wikitext2
 from ..inference_metal import MetalQuantizedLinear
 from ..quantize import unpack_fp4_weights
 

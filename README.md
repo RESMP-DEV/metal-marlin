@@ -2,7 +2,7 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-[![Tests](https://img.shields.io/badge/tests-1565%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-1565%20collected-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.11%20|%203.12-blue)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 
@@ -171,7 +171,7 @@ RTF = Real-Time Factor (higher is better)
 ## Development
 
 ```bash
-uv run pytest tests/ -v              # Full suite (~4 min, 1426 tests)
+uv run pytest tests/ -v              # Full suite (~4 min, 1565 tests)
 uv run pytest tests/ -v -m smoke     # Quick smoke tests
 uv run ruff check .                  # Linting
 uv run pyright metal_marlin/         # Type checking

@@ -90,9 +90,9 @@ class ConvSubsampling(nn.Module):
         x = F.relu(x)
 
         # Reshape to (B, T//4, hidden_size * (n_mels//4))
-        b, c, t, f = x.shape
+        # Use flatten instead of view with computed dims for CoreML traceability
         x = x.transpose(1, 2).contiguous()  # (B, T//4, hidden_size, n_mels//4)
-        x = x.view(b, t, c * f)  # (B, T//4, hidden_size * (n_mels//4))
+        x = x.flatten(start_dim=2)  # (B, T//4, hidden_size * (n_mels//4))
 
         # Project to hidden_size using a linear layer if needed
         if self.projection is not None:

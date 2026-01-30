@@ -169,7 +169,7 @@ def compute_perplexity(
     max_length: int = 256,
 ) -> tuple[float, int]:
     """Compute perplexity on WikiText-2."""
-    from metal_marlin.eval_perplexity import compute_perplexity_from_logits, load_wikitext2
+    from metal_marlin.eval import compute_perplexity_from_logits, load_wikitext2
 
     texts = load_wikitext2(max_samples=max_samples)
     if not texts:

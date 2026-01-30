@@ -25,7 +25,10 @@ import torch.nn as nn
 
 from .metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
 from .quantization.trellis_codebook import TrellisCodebook
-from .trellis_dispatch import dequantize_trellis_weight, dispatch_trellis_dequant_fused
+from .trellis_dispatch import (
+    dequantize_trellis_weight,
+    dispatch_trellis_dequant_packed,
+)
 
 if TYPE_CHECKING:
     from .trellis_loader import TrellisWeight
@@ -71,9 +74,10 @@ class TrellisLinear(nn.Module):
         tiles_n = (out_features + TILE_DIM - 1) // TILE_DIM
 
         # Register buffers (not parameters - these aren't trained)
+        packed_bytes = {2: 64, 3: 96, 4: 128}[bits]
         self.register_buffer(
-            "indices",
-            torch.zeros(tiles_k, tiles_n, 256, dtype=torch.int16, device=device),
+            "packed_indices",
+            torch.zeros(tiles_k, tiles_n, packed_bytes, dtype=torch.uint8, device=device),
         )
         self.register_buffer(
             "scales",
@@ -143,7 +147,7 @@ class TrellisLinear(nn.Module):
             return t.to(device) if device else t
 
         # Register buffers with actual weight data
-        module.register_buffer("indices", to_dev(weight.indices.clone()))
+        module.register_buffer("packed_indices", to_dev(weight.packed_indices.clone()))
         module.register_buffer("scales", to_dev(weight.scales.clone()))
         module.register_buffer("su", to_dev(weight.su.clone()))
         module.register_buffer("sv", to_dev(weight.sv.clone()))
@@ -186,29 +190,27 @@ class TrellisLinear(nn.Module):
         # K = out_features, N = in_features (weight matrix convention)
         K, N = self.out_features, self.in_features
 
-        if HAS_METAL and HAS_MPS and self.indices.is_mps:
+        if HAS_METAL and HAS_MPS and self.packed_indices.is_mps:
             lib = self._get_lib()
-            n_groups = self.scales.shape[0]
-            group_size = (K + n_groups - 1) // n_groups
 
-            weights = dispatch_trellis_dequant_fused(
+            weights = dispatch_trellis_dequant_packed(
                 lib,
-                self.indices,
+                self.packed_indices,  # uint8 packed
                 self.scales,
                 self.grid,
                 self.su,
                 self.sv,
                 K,
                 N,
-                group_size,
+                self.bits,
             )
         else:
-            # CPU fallback - create TrellisWeight-like object
+            # CPU fallback - unpack then dequant
             from dataclasses import dataclass
 
             @dataclass
             class _FakeWeight:
-                indices: torch.Tensor
+                packed_indices: torch.Tensor
                 scales: torch.Tensor
                 su: torch.Tensor
                 sv: torch.Tensor
@@ -216,7 +218,7 @@ class TrellisLinear(nn.Module):
                 original_shape: tuple[int, int]
 
             fake_weight = _FakeWeight(
-                indices=self.indices,
+                packed_indices=self.packed_indices,
                 scales=self.scales,
                 su=self.su,
                 sv=self.sv,
@@ -230,14 +232,13 @@ class TrellisLinear(nn.Module):
 
         return weights
 
-        if use_cache:
-            self._dequantized_cache = weights
-
-        return weights
-
     def clear_cache(self) -> None:
         """Clear dequantized weight cache to free memory."""
         self._dequantized_cache = None
+
+    # Class-level setting to control weight caching behavior
+    # Set to False for MoE models to prevent excessive memory usage
+    enable_cache: bool = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with on-the-fly dequantization.
@@ -248,8 +249,8 @@ class TrellisLinear(nn.Module):
         Returns:
             Output tensor [..., out_features].
         """
-        # Dequantize weights
-        weights = self.dequantize()
+        # Dequantize weights (use cache setting from class variable)
+        weights = self.dequantize(use_cache=TrellisLinear.enable_cache)
 
         # Ensure input is on same device and dtype
         if x.device != weights.device:

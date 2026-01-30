@@ -26,7 +26,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash", trust_remote_code=True)
 
     # Load calibration data
-    from metal_marlin.eval_perplexity import load_wikitext2
+    from metal_marlin.eval import load_wikitext2
 
     texts = load_wikitext2(max_samples=5)
     calibration_inputs = [

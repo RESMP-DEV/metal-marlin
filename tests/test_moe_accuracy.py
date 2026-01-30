@@ -34,7 +34,7 @@ if not HAS_MPS:
 
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from metal_marlin.eval_perplexity import (  # noqa: E402
+from metal_marlin.eval import (  # noqa: E402
     compute_perplexity_from_logits,
     load_wikitext2,
 )

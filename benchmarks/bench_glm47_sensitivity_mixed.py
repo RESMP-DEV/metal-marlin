@@ -56,7 +56,7 @@ from metal_marlin.calibration.sensitivity import (  # noqa: E402
     LayerSensitivity,
     compute_model_sensitivity_profile,
 )
-from metal_marlin.eval_perplexity import (  # noqa: E402
+from metal_marlin.eval import (  # noqa: E402
     compute_perplexity_sliding_window,
     load_tokenizer,
     load_wikitext2,

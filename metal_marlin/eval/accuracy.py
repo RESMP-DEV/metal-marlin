@@ -12,7 +12,7 @@ Target KL values (from vLLM/llama.cpp experience):
 - KL > 0.10: Poor (significant degradation)
 
 Usage:
-    python -m metal_marlin.eval_kl_divergence \
+    python -m metal_marlin.eval.accuracy \
         --original ./model-fp16/ \
         --quantized ./model-fp4/ \
         --samples 50
@@ -228,7 +228,7 @@ def evaluate_kl_from_paths(
     Returns:
         KLResult with KL divergence statistics
     """
-    from .eval_perplexity import load_tokenizer, load_wikitext2
+    from .perplexity import load_tokenizer, load_wikitext2
 
     if verbose:
         print(f"Loading tokenizer from {original_path}...")

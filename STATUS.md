@@ -1,6 +1,6 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-01-29
+**Last Updated:** 2026-01-30
 
 ## Summary
 
@@ -487,6 +487,21 @@ Current swarm status:
 | 44 | EXL3 Quantization Pipeline | ✅ Complete |
 | 45 | Kernel Optimization | 🔄 In Progress |
 | 50-57 | Trellis Inference Pipeline | ✅ Complete |
+| **68** | **Codebase Consolidation** | 📋 **Queued** |
+
+### Phase 68: Codebase Consolidation
+
+**Goal:** Reduce sprawl without losing capability.
+
+| Category | Before | Target |
+|----------|--------|--------|
+| Benchmark files | 42 (15K LOC) | ~15 active + archive |
+| Task YAML files | 90+ | ~10 active + archive |
+| Hardcoded model IDs | ~20 files | Centralized registry |
+| Duplicate tokenizers | ~5 copies | 0 (load from HF) |
+| MLX remnants | 2-3 files | 0 |
+
+**Task file:** `tasks/phase68_codebase_consolidation.yaml`
 
 ### Phase 50-57 Results (Trellis Inference)
 
