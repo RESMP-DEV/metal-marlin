@@ -4,10 +4,10 @@ name: Trellis Tests
 "on":
   push:
     paths:
-      - 'contrib/metal_marlin/**'
+      - '**'
   pull_request:
     paths:
-      - 'contrib/metal_marlin/**'
+      - '**'
 
 jobs:
   test-trellis:
@@ -20,18 +20,15 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        working-directory: contrib/metal_marlin
         run: uv sync --extra all
 
       - name: Run trellis unit tests
-        working-directory: contrib/metal_marlin
         run: |
           uv run pytest tests/test_trellis*.py -v --tb=short \
             --ignore=tests/test_e2e_trellis.py \
             -m "not slow"
 
       - name: Check imports
-        working-directory: contrib/metal_marlin
         run: |
           uv run python -c "
           from metal_marlin.trellis_loader import TrellisModelLoader
@@ -51,18 +48,15 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Install dependencies
-        working-directory: contrib/metal_marlin
         run: uv sync --extra all
 
       - name: Download test model (small)
-        working-directory: contrib/metal_marlin
         run: |
           # Download a small EXL3 model for testing
           # (This would need to be set up with an actual small model)
           echo "Skipping model download for now"
 
       - name: Run e2e tests
-        working-directory: contrib/metal_marlin
         run: |
           if [ -d "models/test-model" ]; then
             uv run pytest tests/test_e2e_trellis.py -v --tb=short

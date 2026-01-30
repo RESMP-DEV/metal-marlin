@@ -161,7 +161,41 @@ curl http://localhost:8000/v1/models
 curl http://localhost:8000/health
 ```
 
-Response: `{"status": "ok"}`
+Response: `{"status": "ok", "model_loaded": true}`
+
+## Attention Mode
+
+The server supports two attention modes:
+
+### Non-Paged Attention (Current Default)
+
+The server currently uses **non-paged attention** for maximum compatibility:
+
+- Each request runs sequentially through the model pipeline
+- No KV cache sharing between requests
+- Best for single-user or low-concurrency scenarios
+- Simple and reliable
+
+**To use:** This is the default, no configuration needed.
+
+### Paged Attention (CLI Enabled)
+
+Enable continuous batching with shared KV cache:
+
+```bash
+metal-marlin serve ./models/qwen3_4b_fp4 --enable-batching
+
+# With custom KV cache sizing
+metal-marlin serve ./models/qwen3_4b_fp4 \
+  --enable-batching \
+  --num-kv-blocks 1024 \
+  --block-size 32
+```
+
+Benefits:
+- Higher throughput for concurrent requests
+- KV cache block allocation and reuse
+- Dynamic batch composition
 
 ### Metrics
 
@@ -240,6 +274,9 @@ metal-marlin serve [MODEL_PATH] [OPTIONS]
 | `--timeout` | `120` | Request timeout in seconds |
 | `--log-level` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `--enable-metrics` | `true` | Enable metrics endpoint |
+| `--enable-batching` | `false` | Enable paged attention with continuous batching |
+| `--num-kv-blocks` | `512` | Number of KV cache blocks (with --enable-batching) |
+| `--block-size` | `16` | Tokens per KV cache block (with --enable-batching) |
 
 ### Environment Variables
 
@@ -445,7 +482,33 @@ http {
 }
 ```
 
-### Production Checklist
+## Testing
+
+Run the server test suite (28 tests):
+
+```bash
+cd contrib/metal_marlin
+
+# All tests (uses mock model, fast)
+uv run pytest tests/test_openai_server.py -v
+
+# Specific test categories
+uv run pytest tests/test_openai_server.py -v -k "streaming"
+uv run pytest tests/test_openai_server.py -v -k "concurrent"
+uv run pytest tests/test_openai_server.py -v -k "validation"
+
+# With real model (slower)
+METAL_MARLIN_MOCK_MODEL=0 uv run pytest tests/test_openai_server.py -v
+```
+
+**Test coverage:**
+- Basic functionality: health, models, chat, completions
+- Streaming responses with SSE format
+- Concurrent requests (10 requests, 5 workers)
+- Input validation (missing fields, wrong types → 422)
+- Error handling (wrong model → 404, no model loaded → 503)
+
+## Production Checklist
 
 - [ ] Configure HTTPS with valid SSL certificates
 - [ ] Set up rate limiting

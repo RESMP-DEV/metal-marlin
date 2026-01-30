@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .._compat import require_torch, torch
+from ..kv_cache import CacheConfig, KVCache
 
 if TYPE_CHECKING:
     import torch as torch_typing
@@ -110,11 +111,20 @@ class TrellisGenerator:
         # For GLM-4 MLA, we use the decomposed K/V dimensions
         num_layers = model_config.get("num_hidden_layers", 32)
         num_attention_heads = model_config.get("num_attention_heads", 20)
-        num_kv_heads = model_config.get("num_key_value_heads", num_attention_heads)
+        # TrellisModelConfig uses num_kv_heads, HuggingFace uses num_key_value_heads
+        num_kv_heads = model_config.get(
+            "num_kv_heads", model_config.get("num_key_value_heads", num_attention_heads)
+        )
 
         # GLM-4 MLA dimensions: K uses qk_head_dim=256, V uses v_head_dim=256
         # Standard models use head_dim for both K and V
-        head_dim = model_config.get("v_head_dim", model_config.get("head_dim", 256))
+        # For MLA, K and V have the same dimension after the up-projection
+        qk_nope = model_config.get("qk_nope_head_dim", 192)
+        qk_rope = model_config.get("qk_rope_head_dim", 64)
+        qk_head_dim = qk_nope + qk_rope  # K dimension
+        v_head_dim = model_config.get("v_head_dim", model_config.get("head_dim", 256))
+        # Use max of K and V dimensions for cache allocation
+        head_dim = max(qk_head_dim, v_head_dim)
 
         cache_config = CacheConfig(
             num_layers=num_layers,
@@ -472,6 +482,7 @@ class TrellisGenerator:
         """
         # Prefill phase: process entire prompt
         logits = self.model(input_ids, attention_mask=attention_mask, kv_cache=kv_cache)
+        kv_cache.advance(input_ids.shape[1])  # Update cache position after prefill
         next_token_logits = logits[:, -1, :]
 
         generated_tokens: list[int] = []
@@ -497,6 +508,7 @@ class TrellisGenerator:
                 next_token_tensor,
                 kv_cache=kv_cache,
             )
+            kv_cache.advance(1)  # Update cache position after each decode step
             next_token_logits = logits[:, -1, :]
 
         # Combine prompt and generated tokens
@@ -528,6 +540,7 @@ class TrellisGenerator:
         """
         # Prefill phase
         logits = self.model(input_ids, attention_mask=attention_mask, kv_cache=kv_cache)
+        kv_cache.advance(input_ids.shape[1])  # Update cache position after prefill
         next_token_logits = logits[:, -1, :]
 
         generated_tokens: list[int] = []
@@ -556,6 +569,7 @@ class TrellisGenerator:
                 next_token_tensor,
                 kv_cache=kv_cache,
             )
+            kv_cache.advance(1)  # Update cache position after each decode step
             next_token_logits = logits[:, -1, :]
 
     def _sample(
@@ -702,18 +716,10 @@ class TrellisGenerator:
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask")
 
-        # Get model config for KV cache
-        model_config = self._get_model_config()
-        num_layers = model_config.get("num_hidden_layers", 32)
-        kv_lora_rank = model_config.get("kv_lora_rank", 512)
-
         # Initialize KV cache
-        kv_cache = TrellisKVCache(
-            num_layers=num_layers,
+        kv_cache = self._create_kv_cache(
             batch_size=1,
             max_seq_len=input_ids.shape[1] + config.max_new_tokens,
-            kv_lora_rank=kv_lora_rank,
-            device=self.device,
         )
 
         # Prefill phase
@@ -783,18 +789,10 @@ class TrellisGenerator:
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask")
 
-        # Get model config for KV cache
-        model_config = self._get_model_config()
-        num_layers = model_config.get("num_hidden_layers", 32)
-        kv_lora_rank = model_config.get("kv_lora_rank", 512)
-
         # Initialize KV cache
-        kv_cache = TrellisKVCache(
-            num_layers=num_layers,
+        kv_cache = self._create_kv_cache(
             batch_size=1,
             max_seq_len=input_ids.shape[1] + config.max_new_tokens,
-            kv_lora_rank=kv_lora_rank,
-            device=self.device,
         )
 
         # Prefill phase
@@ -832,11 +830,15 @@ class TrellisGenerator:
         Returns:
             Dictionary with model configuration.
         """
+        import dataclasses
+
         # Try to get config from wrapped model
         if hasattr(self.model, "config"):
             config = self.model.config
             if hasattr(config, "to_dict"):
                 return config.to_dict()
+            if dataclasses.is_dataclass(config):
+                return dataclasses.asdict(config)
             if isinstance(config, dict):
                 return config
 
@@ -845,6 +847,8 @@ class TrellisGenerator:
             config = self.model.model.config
             if hasattr(config, "to_dict"):
                 return config.to_dict()
+            if dataclasses.is_dataclass(config):
+                return dataclasses.asdict(config)
             if isinstance(config, dict):
                 return config
 

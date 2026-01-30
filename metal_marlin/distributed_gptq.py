@@ -1,7 +1,7 @@
-"""Distributed GPTQ Quantization via AlphaHENG.
+"""Distributed GPTQ Quantization.
 
 This module enables distributed GPTQ quantization across multiple machines
-using AlphaHENG's orchestration and ZeroMQ infrastructure.
+using ZeroMQ for orchestration.
 
 Architecture:
     ┌─────────────────────────────────────────────────────────────────┐

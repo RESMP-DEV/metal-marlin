@@ -13,7 +13,7 @@
 | **Trellis Inference** | **Complete** ✅ (11 modules, 3500 LOC, fused GEMM ~50x speedup) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
 | GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
-| OpenAI Server | **Scaffolded** 🔄 |
+| OpenAI Server | **Complete** ✅ (28 tests, paged attention via CLI) |
 | Metal Shaders | **40 shaders** ✅ |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
 | Legacy Cleanup | **Complete** ✅ |
@@ -386,7 +386,9 @@ See [docs/metal_kernel_audit.md](docs/metal_kernel_audit.md) for full kernel inv
 
 ## OpenAI-Compatible Server
 
-vLLM-style server scaffolded in `metal_marlin/serving/`:
+**Status:** ✅ Complete (28 tests passing)
+
+FastAPI-based OpenAI-compatible server in `metal_marlin/serving/`:
 
 ```bash
 # Start server
@@ -394,13 +396,43 @@ metal-marlin serve benchmarks/results/qwen3_4b_fp4 --port 8000
 
 # Or with Python
 python -m metal_marlin serve benchmarks/results/qwen3_4b_fp4
+
+# Test with mock model
+METAL_MARLIN_MOCK_MODEL=1 python -m metal_marlin serve /tmp/any --port 8000
 ```
 
 **Endpoints:**
-- `GET /v1/models` - List models
-- `POST /v1/chat/completions` - Chat completions (streaming supported)
-- `POST /v1/completions` - Text completions
-- `GET /health` - Health check
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/v1/models` | GET | List available models |
+| `/v1/models/{id}` | GET | Model info (capabilities, config) |
+| `/v1/chat/completions` | POST | Chat completions (streaming supported) |
+| `/v1/completions` | POST | Text completions |
+| `/metrics` | GET | Prometheus metrics |
+
+**Test Coverage (28 tests):**
+- Basic functionality: health, models, chat, completions
+- Streaming responses with SSE
+- Concurrent requests (10 requests, 5 workers)
+- Input validation (missing fields, wrong types → 422)
+- Error handling (wrong model → 404, no model loaded → 503)
+
+**Current behavior (non-paged attention):**
+- Each request runs sequentially through the model pipeline
+- No KV cache sharing between requests
+- Good for single-user or low-concurrency scenarios
+
+**Paged attention (CLI-enabled with `--enable-batching`):**
+- Enable via: `metal-marlin serve MODEL --enable-batching`
+- Tune KV cache: `--num-kv-blocks 512 --block-size 16`
+- `continuous_batch.py`: BatchScheduler, KVCacheManager
+- `runner.py`: BatchedModelRunner with paged KV execution
+- `paged/`: BlockAllocator, PageTable, paged_attention kernels
+- Enables continuous batching, KV cache reuse, higher throughput
+
+**Usage:** See [serving guide](docs/guides/serving.md) for full API reference and OpenAI SDK examples.
 
 ---
 

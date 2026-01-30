@@ -34,3 +34,11 @@ _archived/
 *.tmp
 *.log
 *.aria2
+
+# AlphaHENG development artifacts (not for public release)
+agent_workspace/
+tasks/
+scripts/collect_status_facts.py
+scripts/optimize_all_kernels.py
+scripts/optimize_kernel.py
+scripts/optimize_structural_v2.py

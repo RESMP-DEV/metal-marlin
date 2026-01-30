@@ -195,6 +195,10 @@ def chat(
 @click.option("--device", default="mps", help="Device (mps/cpu)")
 @click.option("--batch-size", default=32, type=int, help="Max concurrent requests")
 @click.option("--enable-batching", is_flag=True, help="Enable continuous batching")
+@click.option("--num-kv-blocks", default=512, type=int,
+              help="Number of KV cache blocks (only with --enable-batching)")
+@click.option("--block-size", default=16, type=int,
+              help="Tokens per KV cache block (only with --enable-batching)")
 def serve(
     model_path: str,
     host: str,
@@ -202,6 +206,8 @@ def serve(
     device: str,
     batch_size: int,
     enable_batching: bool,
+    num_kv_blocks: int,
+    block_size: int,
 ):
     """Start OpenAI-compatible API server.
 
@@ -237,6 +243,8 @@ def serve(
             device=device,
             batch_size=batch_size,
             enable_batching=enable_batching,
+            num_kv_blocks=num_kv_blocks,
+            block_size=block_size,
         )
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")

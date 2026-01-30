@@ -167,6 +167,8 @@ def run_server(
     device: str = "mps",
     batch_size: int = 32,
     enable_batching: bool = False,
+    num_kv_blocks: int = 512,
+    block_size: int = 16,
 ):
     """Start the OpenAI-compatible API server.
 
@@ -177,6 +179,8 @@ def run_server(
         device: Device to use (mps/cpu)
         batch_size: Max concurrent requests
         enable_batching: Enable continuous batching
+        num_kv_blocks: Number of KV cache blocks to allocate
+        block_size: Number of tokens per KV cache block
     """
     import signal
     import sys
@@ -185,6 +189,9 @@ def run_server(
         model_path,
         device=device,
         max_batch_size=batch_size,
+        enable_batching=enable_batching,
+        num_kv_blocks=num_kv_blocks,
+        block_size=block_size,
     )
 
     # Handle Ctrl+C gracefully

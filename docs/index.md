@@ -9,6 +9,7 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 | Guide | Description |
 |-------|-------------|
 | [**Getting Started**](guides/getting_started.md) | Install, quantize, run a model in 5 minutes |
+| [**Serving Models**](guides/serving.md) | OpenAI-compatible API server |
 | [**CLI Reference**](guides/cli.md) | Command-line tools and options |
 | [**Troubleshooting**](guides/troubleshooting.md) | Common issues and solutions |
 
@@ -101,6 +102,6 @@ If you are adding kernel support:
 
 | Resource | Link |
 |----------|------|
-| GitHub Repository | [RESMP-DEV/AlphaHENG](https://github.com/RESMP-DEV/AlphaHENG) |
+| GitHub Repository | [metal-marlin/metal-marlin](https://github.com/metal-marlin/metal-marlin) |
 | Implementation Status | [STATUS.md](../STATUS.md) |
 | Academic References | [References](comparisons/references.md) |

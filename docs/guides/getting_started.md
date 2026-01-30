@@ -5,8 +5,8 @@ Quantize and run a model in under 5 minutes.
 ## Installation
 
 ```bash
-git clone https://github.com/RESMP-DEV/AlphaHENG.git
-cd AlphaHENG/contrib/metal_marlin
+git clone https://github.com/RESMP-DEV/metal-marlin.git
+cd metal-marlin
 uv venv && source .venv/bin/activate
 uv sync --extra all
 ```

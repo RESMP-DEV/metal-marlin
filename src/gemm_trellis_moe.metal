@@ -70,7 +70,7 @@ inline half trellis_dequant_3bit(
     device const half* su,
     device const half* sv,
     device const half* grid,
-    const TrellisParams& p,
+    TrellisParams p,
     uint expert_id
 ) {
     // Unpack 3 bits from packed bytes
@@ -110,7 +110,7 @@ inline void load_trellis_tile(
     uint k_block,
     uint n_block,
     uint expert_id,
-    const TrellisParams& p,
+    TrellisParams p,
     uint thread_idx
 ) {
     const uint elems_per_thread = (MOE_TILE_K * MOE_TILE_N) / MOE_THREADS;
@@ -148,7 +148,7 @@ inline void load_activation_tile(
     threadgroup half (&A_buf)[MOE_TILE_M][MOE_TILE_K],
     uint m_block,
     uint k_block,
-    const TrellisParams& p,
+    TrellisParams p,
     uint thread_idx
 ) {
     const uint elems_per_thread = (MOE_TILE_M * MOE_TILE_K) / MOE_THREADS;
@@ -204,7 +204,7 @@ inline void store_weighted_scatter(
     device const uint* expert_ids,
     device const half* expert_probs,
     uint expert_slot,
-    const TrellisParams& p,
+    TrellisParams p,
     uint m_block,
     uint n_block,
     uint sg_row_offset,
@@ -247,10 +247,10 @@ inline void store_weighted_scatter(
                 half prob = expert_probs[global_m * p.top_k + expert_slot];
                 half val = staging[simd_id][local_row][local_col] * prob;
 
-                // Use atomic for accumulation (simpler approach)
-                // For production, use separate buffers per expert then combine
-                device atomic<half>* out_ptr = (device atomic<half>*)&output[global_m * p.N + global_n];
-                atomic_fetch_add_explicit(out_ptr, val, memory_order_relaxed);
+                // Accumulate weighted output
+                // Note: Non-atomic accumulation. For production with overlapping token-expert
+                // pairs across threadgroups, use separate per-slot buffers then reduce.
+                output[global_m * p.N + global_n] += val;
             }
         }
     }
@@ -293,7 +293,7 @@ kernel void moe_trellis_swiglu(
     threadgroup half B_gate[MOE_TILE_K][MOE_TILE_N];          // Gate weights
     threadgroup half B_up[MOE_TILE_K][MOE_TILE_N];            // Up weights
     threadgroup half B_down[MOE_TILE_K][MOE_TILE_N];          // Down weights
-    threadgroup half gate_up staging[MOE_SIMDGROUPS][MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
+    threadgroup half staging[MOE_SIMDGROUPS][MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
     threadgroup half down_staging[MOE_SIMDGROUPS][MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
 
     const uint tg_m = tgid.y * MOE_TILE_M;
@@ -365,21 +365,44 @@ kernel void moe_trellis_swiglu(
             sgmm(A_tiles[0], B_up, acc_up, sg_row_offset, sg_col_offset, 1);
 
             // Apply SwiGLU: silu(gate) * up
+            // Must stage to threadgroup memory since simdgroup_matrix doesn't support indexing
+            threadgroup half gate_staging[MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
+            threadgroup half up_staging[MOE_SG_M_TILES * 8][MOE_SG_N_TILES * 8];
+
+            // Store gate and up results to threadgroup
             for (uint mi = 0; mi < MOE_SG_M_TILES; ++mi) {
                 for (uint ni = 0; ni < MOE_SG_N_TILES; ++ni) {
-                    simdgroup_matrix<half, 8, 8> silu_result;
-                    for (uint i = 0; i < 8; ++i) {
-                        for (uint j = 0; j < 8; ++j) {
-                            half g = acc_gate[mi][ni][i * 8 + j];
-                            half u = acc_up[mi][ni][i * 8 + j];
-                            silu_result[i * 8 + j] = g / (1.0h + fabs(g)) * u;
-                        }
-                    }
-                    acc_gate[mi][ni] = silu_result;
+                    simdgroup_store(acc_gate[mi][ni],
+                                  &gate_staging[mi * 8][ni * 8],
+                                  MOE_SG_N_TILES * 8);
+                    simdgroup_store(acc_up[mi][ni],
+                                  &up_staging[mi * 8][ni * 8],
+                                  MOE_SG_N_TILES * 8);
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Apply SwiGLU element-wise in threadgroup memory
+            for (uint idx = simd_lane; idx < MOE_SG_M_TILES * 8 * MOE_SG_N_TILES * 8; idx += 32) {
+                uint row = idx / (MOE_SG_N_TILES * 8);
+                uint col = idx % (MOE_SG_N_TILES * 8);
+                half g = gate_staging[row][col];
+                half u = up_staging[row][col];
+                // SiLU: x * sigmoid(x) ≈ x / (1 + |x|) for speed
+                gate_staging[row][col] = (g / (1.0h + fabs(g))) * u;
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Reload SwiGLU result back into acc_gate for use in down projection
+            for (uint mi = 0; mi < MOE_SG_M_TILES; ++mi) {
+                for (uint ni = 0; ni < MOE_SG_N_TILES; ++ni) {
+                    simdgroup_load(acc_gate[mi][ni],
+                                 &gate_staging[mi * 8][ni * 8],
+                                 MOE_SG_N_TILES * 8);
                 }
             }
 
-            // Store intermediate to staging (simplified - should be double-buffered)
+            // Store intermediate to staging for down projection
             for (uint mi = 0; mi < MOE_SG_M_TILES; ++mi) {
                 for (uint ni = 0; ni < MOE_SG_N_TILES; ++ni) {
                     simdgroup_store(acc_gate[mi][ni],

@@ -11,6 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..inference.pipeline import MarlinPipeline
+from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
+from .openai_schemas import (
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    CompletionRequest,
+    CompletionResponse,
+    Usage,
+)
+from .request import GenerationRequest, RequestStatus, RequestTimeoutError
 
 
 def _detect_model_format(model_path: str) -> str:
@@ -44,18 +54,6 @@ def _detect_model_format(model_path: str) -> str:
     return "marlin"
 
 
-from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
-from .openai_schemas import (
-    ChatCompletionChunk,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    CompletionRequest,
-    CompletionResponse,
-    Usage,
-)
-from .request import GenerationRequest, RequestStatus, RequestTimeoutError
-
-
 class _MockTokenizer:
     def apply_chat_template(
         self,
@@ -76,6 +74,10 @@ class _MockTokenizer:
     def encode(self, text: str) -> list[int]:
         # Simple tokenization by whitespace for counting.
         return [idx for idx, _ in enumerate(text.split())]
+
+    def decode(self, tokens: list[int]) -> str:
+        # Simple decoding for mock mode.
+        return " ".join(f"token{i}" for i in range(len(tokens)))
 
 
 class _MockPipeline:
@@ -198,6 +200,13 @@ class ServingEngine:
 
         if request.stream:
             return self._stream_generate(prompt, request)
+
+        # Use batched generation when scheduler is available.
+        # Skip batched path for mock pipelines since they don't integrate
+        # with the scheduler's inference loop.
+        if self.scheduler is not None and not isinstance(self.pipeline, _MockPipeline):
+            return await self._batched_generate(prompt, request)
+
         return await self._generate(prompt, request)
 
     async def completion(

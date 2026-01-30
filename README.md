@@ -26,9 +26,8 @@ Metal Marlin ports [Marlin](https://arxiv.org/abs/2408.11743) quantized GEMM ker
 ## Installation
 
 ```bash
-git clone https://github.com/RESMP-DEV/AlphaHENG.git
-cd AlphaHENG/contrib/metal_marlin
-uv venv && source .venv/bin/activate
+git clone https://github.com/RESMP-DEV/metal-marlin.git
+cd metal-marlin
 uv sync --extra all
 ```
 
@@ -51,32 +50,40 @@ print(tokenizer.decode(output[0]))
 
 ## Serving
 
+OpenAI-compatible API server with streaming, concurrent requests, and Prometheus metrics.
+
 ```bash
 # Quantize and serve
 metal-marlin quantize Qwen/Qwen3-4B --format fp4 -o qwen3_4b_fp4
 metal-marlin serve qwen3_4b_fp4 --port 8000
 ```
 
+**Endpoints:**
+- `GET /v1/models` - List models
+- `POST /v1/chat/completions` - Chat completions (streaming supported)
+- `POST /v1/completions` - Text completions
+- `GET /metrics` - Prometheus metrics
+
 Compatible with OpenAI SDK:
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+
+# Non-streaming
 response = client.chat.completions.create(
     model="qwen3_4b_fp4",
     messages=[{"role": "user", "content": "Hello!"}],
 )
+
+# Streaming
+for chunk in client.chat.completions.create(
+    model="qwen3_4b_fp4",
+    messages=[{"role": "user", "content": "Count to 10"}],
+    stream=True
+):
+    print(chunk.choices[0].delta.content or "", end="")
 ```
-
-## Performance
-
-| Model | Memory | Speed |
-|-------|--------|-------|
-| Qwen3-4B FP4 | ~2GB | ~27 tok/s |
-| Llama-3.1-8B FP4 | ~4GB | ~20 tok/s |
-| GLM-4.7-Flash (30B MoE) | ~15GB | Batched dispatch |
-
-Benchmarked on M4 Max with PyTorch MPS backend.
 
 ## Trellis Inference
 
@@ -288,9 +295,9 @@ Expected VRAM/RAM for different models (Apple Silicon):
 
 | Model | Quantization | Memory | Context (4K) | Context (8K) |
 |-------|-------------|--------|--------------|--------------|
-| GLM-4.7-Flash | 2-bit (EXL3-2bpw) | ~6 GB | ~7 GB | ~9 GB |
-| GLM-4.7-Flash | 3-bit (EXL3-3bpw) | ~8 GB | ~9 GB | ~11 GB |
-| GLM-4.7-Flash | 4-bit (EXL3-4bpw) | ~10 GB | ~11 GB | ~13 GB |
+| GLM-4.7-Flash | 2-bit  | ~6 GB | ~7 GB | ~9 GB |
+| GLM-4.7-Flash | 3-bit  | ~8 GB | ~9 GB | ~11 GB |
+| GLM-4.7-Flash | 4-bit  | ~10 GB | ~11 GB | ~13 GB |
 | Qwen3-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
 | Llama-3.1-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
 | Llama-3.1-70B | FP4 | ~35 GB | ~40 GB | ~50 GB |

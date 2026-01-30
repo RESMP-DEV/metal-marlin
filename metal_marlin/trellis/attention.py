@@ -210,7 +210,7 @@ class TrellisMLAttention(nn.Module):
         # === Apply RoPE ===
         # Create position_ids if not provided
         if position_ids is None:
-            offset = kv_cache.get_seq_len() if kv_cache else 0
+            offset = kv_cache.seq_len if kv_cache else 0
             position_ids = torch.arange(
                 offset, offset + seq_len, device=hidden_states.device
             ).unsqueeze(0)
@@ -233,7 +233,9 @@ class TrellisMLAttention(nn.Module):
         # === KV Cache Update ===
         if kv_cache is not None:
             k, v = kv_cache.update(layer_idx, k, v)
-            kv_cache.advance(seq_len)
+            # Ensure k, v match query dtype for SDPA
+            k = k.to(q.dtype)
+            v = v.to(q.dtype)
 
         # === Handle GQA (repeat K/V heads if needed) ===
         if self.num_kv_heads < self.num_heads:

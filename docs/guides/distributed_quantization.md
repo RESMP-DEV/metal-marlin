@@ -305,44 +305,6 @@ quantizer = AcceleratedMRGPTQQuantizer.create(
 )
 ```
 
-## Integration with AlphaHENG
-
-For maximum parallelization, integrate with AlphaHENG agent swarm:
-
-```yaml
-# tasks/quantize_glm47.yaml
-# yaml-language-server: $schema=
-tasks:
-  - name: hessian-collection
-    prompt: |
-      Run Hessian collection for GLM-4.7-Flash.
-      
-      cd contrib/metal_marlin
-      uv run python -c "
-      from metal_marlin.calibration import CalibrationDatasetLoader
-      from metal_marlin.gptq_accelerated import GPTQAccelerated
-      
-      calibration = CalibrationDatasetLoader.v3()
-      # ... collect Hessians and save to disk
-      "
-    priority: P0
-    
-  - name: quantize-layers-batch-1
-    prompt: |
-      Quantize layers 0-49 using accelerated backend.
-      Uses Hessians from hessian-collection task.
-    priority: P1
-    dependencies:
-      - hessian-collection
-      
-  - name: quantize-layers-batch-2
-    prompt: |
-      Quantize layers 50-99 using accelerated backend.
-    priority: P1
-    dependencies:
-      - hessian-collection
-```
-
 ## API Reference
 
 ### `AcceleratedMRGPTQQuantizer`

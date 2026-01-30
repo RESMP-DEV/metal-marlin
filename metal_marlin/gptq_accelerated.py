@@ -646,14 +646,14 @@ class CUDABackend:
 
 
 # =============================================================================
-# Remote CUDA Server Protocol (ZeroMQ-based, AlphaHENG-compatible)
+# Remote CUDA Server Protocol (ZeroMQ-based)
 # =============================================================================
 
 
 class ZMQGPTQProtocol:
     """ZeroMQ-based protocol for remote GPTQ operations.
 
-    Follows AlphaHENG's DEALER/ROUTER pattern with:
+    Uses DEALER/ROUTER pattern with:
     - TCP keepalive for reliable connection detection
     - Heartbeat messages for fault tolerance
     - Multipart messages for efficient array transfer
@@ -673,7 +673,7 @@ class ZMQGPTQProtocol:
         error: Error response
     """
 
-    # TCP Keepalive settings (matching AlphaHENG worker/pool.py)
+    # TCP Keepalive settings
     TCP_KEEPALIVE = 1
     TCP_KEEPALIVE_IDLE = 30  # Start probes after 30s idle
     TCP_KEEPALIVE_INTVL = 10  # Probe every 10s
@@ -692,7 +692,7 @@ class ZMQGPTQProtocol:
 
     @staticmethod
     def configure_socket(sock: zmq.Socket) -> None:
-        """Configure ZeroMQ socket with AlphaHENG-compatible settings."""
+        """Configure ZeroMQ socket with reliable connection settings."""
         import zmq
 
         # TCP keepalive for reliable connection detection over Wi-Fi/WAN
@@ -884,8 +884,6 @@ class RemoteGPTQClient:
     - Automatic reconnection on failure
     - Heartbeat messages for liveness detection
 
-    Compatible with AlphaHENG's ZeroMQ patterns.
-
     Example:
         client = RemoteGPTQClient("tcp://gpu-server.local:5556")
         client.connect()
@@ -929,7 +927,7 @@ class RemoteGPTQClient:
         # Set identity for routing
         sock.setsockopt_string(zmq.IDENTITY, self._identity)
 
-        # Configure with AlphaHENG-compatible settings
+        # Configure socket
         ZMQGPTQProtocol.configure_socket(sock)
 
         # Connect to server
@@ -1496,8 +1494,6 @@ class RemoteGPTQServer:
     - Heartbeat response for client liveness checks
     - Clean shutdown handling
 
-    Compatible with AlphaHENG's ZeroMQ architecture.
-
     Example:
         # On CUDA machine:
         from metal_marlin.gptq_accelerated import RemoteGPTQServer
@@ -1538,7 +1534,7 @@ class RemoteGPTQServer:
         context = zmq.Context()
         router = context.socket(zmq.ROUTER)
 
-        # Configure with AlphaHENG-compatible settings
+        # Configure socket
         ZMQGPTQProtocol.configure_socket(router)
 
         # Bind to port
@@ -1737,9 +1733,9 @@ class RemoteGPTQServer:
 def main():
     """CLI for remote GPTQ server.
 
-    Usage (assuming each machine has the repo cloned):
+    Usage:
         # On CUDA workers:
-        cd /path/to/AlphaHENG/contrib/metal_marlin
+        cd /path/to/metal_marlin
         uv run python -m metal_marlin.gptq_accelerated server --port 5556
 
         # On Mac coordinator:
@@ -1748,12 +1744,12 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="GPU-Accelerated GPTQ (AlphaHENG worker)",
+        description="GPU-Accelerated GPTQ Worker",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples (all machines have repo cloned):
+Examples:
     # Start worker on CUDA machine
-    cd ~/AlphaHENG/contrib/metal_marlin
+    cd /path/to/metal_marlin
     uv run python -m metal_marlin.gptq_accelerated server
 
     # Start worker on specific GPU
