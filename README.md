@@ -78,46 +78,86 @@ response = client.chat.completions.create(
 
 Benchmarked on M4 Max with PyTorch MPS backend.
 
-## EXL3 Model Compatibility
+## Trellis Inference
 
-Metal Marlin can load EXL3 quantized models directly from HuggingFace:
+Standalone inference for trellis-quantized models on Apple Silicon via Metal acceleration.
 
 ### Quick Start
 
 ```python
-from metal_marlin import load_exl3_from_hub
+from metal_marlin.trellis_model import TrellisModel
+from metal_marlin.trellis_generate import TrellisGenerator, GenerationConfig
+from transformers import AutoTokenizer
 
-# Load any EXL3 model from HuggingFace
-model = load_exl3_from_hub("turboderp/Llama-3.1-8B-EXL3-4.0bpw")
+# Load model and tokenizer
+model = TrellisModel.from_pretrained("models/GLM-4.7-Flash-3bpw")
+tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
-# Generate text
-output = model.generate("Hello, I am")
+# Generate
+generator = TrellisGenerator(model, tokenizer)
+config = GenerationConfig(max_new_tokens=256, temperature=0.7)
+output = generator.generate("Explain quantum computing:", config)
 print(output)
 ```
 
-### CLI Usage
+### Features
 
-```bash
-# Download model
-metal-marlin download turboderp/Llama-3.1-8B-EXL3-4.0bpw
+- **MLA (Multi-head Latent Attention)**: 8x KV cache memory savings via compression
+- **MoE Support**: GLM-4.7-Flash (64 experts + shared expert per layer)
+- **Metal Acceleration**: On-the-fly dequantization via custom Metal shaders
+- **Streaming Generation**: Token-by-token output with `stream_generate()`
+- **HuggingFace Tokenizers**: Native compatibility
 
-# Generate text
-metal-marlin generate models/Llama-3.1-8B-EXL3 -p "Hello"
+### Architecture
+
+| Module | Purpose |
+|--------|---------|
+| `trellis_model.py` | Complete model with MoE/dense layers |
+| `trellis_attention.py` | MLA with KV compression |
+| `trellis_linear.py` | Quantized linear with Metal dequant |
+| `trellis_loader.py` | Layer-wise model loading |
+| `trellis_generate.py` | Text generation with sampling |
+| `trellis_kv_cache.py` | Compressed KV cache for MLA |
+
+### Loading Quantized Models
+
+Trellis models use a layer-directory format:
+```
+model_dir/
+  config.json           # Model config
+  base_weights.safetensors  # Embeddings, norms, lm_head
+  layer_0000/           # Per-layer quantized weights
+    index.json
+    tensor_*.safetensors
+  layer_0001/
+  ...
 ```
 
-### Supported Formats
+The loader auto-detects weight format and handles MoE routing weights separately.
 
-| Format | Source | Support |
-|--------|--------|---------|
-| EXL3 (trellis) | ExllamaV3 | ✅ Full |
-| EXL2 | ExllamaV2 | ⚠️ Partial |
-| GPTQ | Various | ⚠️ Partial |
+## ASR: Parakeet-TDT-0.6B
 
-### Finding Models
+Speech recognition with hybrid Metal + ANE acceleration.
 
-Search for EXL3 models on HuggingFace:
-- [Filter: EXL3](https://huggingface.co/models?other=exl3)
-- [turboderp](https://huggingface.co/turboderp) - Official ExllamaV3 models
+### Quick Start
+
+```python
+from metal_marlin.asr import build_hybrid_parakeet
+
+model = build_hybrid_parakeet("models/parakeet-tdt-0.6b-fp4", use_ane_conv=True)
+transcript = model.transcribe("audio.wav")
+print(transcript)
+```
+
+### Performance (M4 Max)
+
+| Config | RTF | Memory | WER (test-clean) |
+|--------|-----|--------|------------------|
+| FP16 MPS | 15x | 1.2 GB | 4.2% |
+| 4-bit Metal | 25x | 400 MB | 4.3% |
+| 4-bit Hybrid | 35x | 400 MB | 4.3% |
+
+RTF = Real-Time Factor (higher is better)
 
 ## Documentation
 
@@ -140,3 +180,121 @@ uv run pyright metal_marlin/         # Type checking
 ## License
 
 Apache 2.0
+
+---
+
+## Trellis Inference Usage
+
+Complete guide for running inference with Trellis-quantized models using the simplified `TrellisForCausalLM` API.
+
+### Quick Start
+
+Load and run inference with 5 lines of code:
+
+```python
+from metal_marlin import TrellisForCausalLM
+
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw")
+output = model.generate(tokenizer.encode("Hello, "), max_new_tokens=50)
+print(tokenizer.decode(output))
+```
+
+### Model Loading
+
+Use `TrellisForCausalLM.from_pretrained()` to load quantized models:
+
+```python
+from metal_marlin import TrellisForCausalLM
+from transformers import AutoTokenizer
+
+# Load model and tokenizer
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw")
+tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
+
+# Model is automatically loaded to Metal (MPS) device
+print(f"Model loaded: {model.config.model_type}")
+print(f"Device: {model.device}")
+```
+
+**Supported model formats:**
+- Trellis quantized models (`.trellis` or `EXL3` format)
+- Layer-wise directory structure with `config.json` and per-layer weights
+- MoE and dense architectures
+
+### Generation
+
+Control generation with sampling parameters:
+
+```python
+# Basic generation
+output = model.generate(
+    input_ids,
+    max_new_tokens=100,
+    temperature=0.7,      # Sampling temperature (0.0 = greedy)
+    top_k=50,             # Top-k sampling (0 = disabled)
+    top_p=0.9,            # Nucleus sampling (1.0 = disabled)
+)
+
+# Streaming generation
+for token in model.generate_stream(input_ids, max_new_tokens=50):
+    print(tokenizer.decode(token), end="", flush=True)
+```
+
+**Parameter reference:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `max_new_tokens` | 100 | Maximum tokens to generate |
+| `temperature` | 0.7 | Sampling temperature (0.0 = deterministic) |
+| `top_k` | 50 | Top-k sampling cutoff |
+| `top_p` | 0.9 | Nucleus sampling threshold |
+| `repetition_penalty` | 1.0 | Penalty for repeated tokens |
+
+### Benchmarking
+
+Run evaluation scripts to measure performance:
+
+```bash
+# Perplexity evaluation
+cd contrib/metal_marlin
+python scripts/eval_perplexity.py \
+    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --dataset wikitext \
+    --split test
+
+# Token throughput benchmark
+python scripts/benchmark_throughput.py \
+    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --prompt "Explain quantum computing:" \
+    --max_tokens 256 \
+    --iterations 10
+
+# Memory profiling
+python scripts/profile_memory.py \
+    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --batch_sizes 1,4,8
+```
+
+**Benchmark outputs:**
+- `eval_perplexity.py`: Perplexity score, eval time, tokens/sec
+- `benchmark_throughput.py`: Average tok/s, latency percentiles (P50, P95, P99)
+- `profile_memory.py`: Peak VRAM/RAM usage per batch size
+
+### Memory Usage
+
+Expected VRAM/RAM for different models (Apple Silicon):
+
+| Model | Quantization | Memory | Context (4K) | Context (8K) |
+|-------|-------------|--------|--------------|--------------|
+| GLM-4.7-Flash | 2-bit (EXL3-2bpw) | ~6 GB | ~7 GB | ~9 GB |
+| GLM-4.7-Flash | 3-bit (EXL3-3bpw) | ~8 GB | ~9 GB | ~11 GB |
+| GLM-4.7-Flash | 4-bit (EXL3-4bpw) | ~10 GB | ~11 GB | ~13 GB |
+| Qwen3-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
+| Llama-3.1-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
+| Llama-3.1-70B | FP4 | ~35 GB | ~40 GB | ~50 GB |
+
+**Notes:**
+- Memory includes model weights + KV cache + activations
+- MLA (Multi-head Latent Attention) reduces KV cache by ~8x
+- MoE models use sparse expert activation (2-4 experts per token)
+- Add ~1-2 GB overhead for Metal driver and PyTorch

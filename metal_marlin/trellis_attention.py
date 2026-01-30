@@ -40,6 +40,7 @@ import torch.nn as nn
 
 from .attention import RoPE, scaled_dot_product_attention_metal
 from .kv_cache import KVCache
+from .trellis_kv_cache import TrellisKVCache
 from .trellis_linear import TrellisLinear
 
 if TYPE_CHECKING:
@@ -72,14 +73,16 @@ class TrellisMLAttention(nn.Module):
     def __init__(
         self,
         config: TrellisMLAConfig,
-        q_proj: TrellisLinear | None,
+        q_a_proj: TrellisLinear | None,
+        q_b_proj: TrellisLinear | None,
         kv_a_proj: TrellisLinear,
         kv_b_proj: TrellisLinear,
         o_proj: TrellisLinear,
     ):
         super().__init__()
         self.config = config
-        self.q_proj = q_proj
+        self.q_a_proj = q_a_proj
+        self.q_b_proj = q_b_proj
         self.kv_a_proj = kv_a_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
@@ -123,7 +126,7 @@ class TrellisMLAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
-        kv_cache: KVCache | None = None,
+        kv_cache: KVCache | TrellisKVCache | None = None,
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Forward pass of TrellisMLAttention.
@@ -140,9 +143,11 @@ class TrellisMLAttention(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Query projection (optional if q_proj is None)
-        if self.q_proj is not None:
-            q = self.q_proj(hidden_states)
+        # Query projection (low-rank MLA: q_a_proj compresses, q_b_proj decompresses)
+        if self.q_a_proj is not None and self.q_b_proj is not None:
+            # Low-rank query: hidden_states -> q_compressed -> q
+            q_compressed = self.q_a_proj(hidden_states)
+            q = self.q_b_proj(q_compressed)
         else:
             # Direct use of hidden_states as queries (no compression)
             q = hidden_states
@@ -161,13 +166,8 @@ class TrellisMLAttention(nn.Module):
         # Split last dimension into K and V
         k, v = kv.chunk(2, dim=-1)  # Each: [batch, seq_len, num_kv_heads, head_dim]
 
-        # Reshape queries
-        if self.q_proj is not None:
-            # If q_proj was used, it should output [batch, seq_len, num_heads * head_dim]
-            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        else:
-            # Direct use, reshape from hidden_size
-            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # Reshape queries to [batch, seq_len, num_heads, head_dim]
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
 
         # Transpose to [batch, num_heads, seq_len, head_dim] for attention
         q = q.transpose(1, 2)
@@ -175,13 +175,14 @@ class TrellisMLAttention(nn.Module):
         v = v.transpose(1, 2)
 
         # Apply RoPE
-        offset = kv_cache.get_seq_len() if kv_cache else 0
+        offset = kv_cache.seq_len if kv_cache else 0
         q = self.rope(q, offset=offset)
         k = self.rope(k, offset=offset)
 
         # Update KV cache
         if kv_cache is not None:
             k, v = kv_cache.update(layer_idx, k, v)
+            kv_cache.advance(seq_len)
 
         # Handle GQA by repeating K/V heads if needed
         if self.num_kv_heads < self.num_heads:
@@ -230,17 +231,25 @@ def create_mla_projections(
     """
     projections = {}
 
-    # Optional query compression
+    # Optional query compression (low-rank: q_a_proj + q_b_proj)
     if config.q_lora_rank is not None:
-        projections["q_proj"] = TrellisLinear(
+        projections["q_a_proj"] = TrellisLinear(
             in_features=config.hidden_size,
             out_features=config.q_lora_rank,
             bits=bits,
             bias=bias,
             device=device,
         )
+        projections["q_b_proj"] = TrellisLinear(
+            in_features=config.q_lora_rank,
+            out_features=config.num_attention_heads * config.head_dim,
+            bits=bits,
+            bias=bias,
+            device=device,
+        )
     else:
-        projections["q_proj"] = None
+        projections["q_a_proj"] = None
+        projections["q_b_proj"] = None
 
     # KV compression projection: hidden_size -> kv_lora_rank
     projections["kv_a_proj"] = TrellisLinear(

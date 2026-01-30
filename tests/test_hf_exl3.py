@@ -40,7 +40,7 @@ class TestFormatDetection:
     def test_detect_sharded(self, mock_model_dir):
         """Test detection of sharded EXL3 models."""
         for i in range(4):
-            (mock_model_dir / f"model-{i+1:05d}-of-00004.safetensors").touch()
+            (mock_model_dir / f"model-{i + 1:05d}-of-00004.safetensors").touch()
 
         result = detect_exl3_format(mock_model_dir)
 
@@ -80,7 +80,7 @@ class TestFormatDetection:
 class TestDownloadFunctionality:
     """Test model download functionality."""
 
-    @patch("metal_marlin.hf_exl3_loader.snapshot_download")
+    @patch("huggingface_hub.snapshot_download")
     def test_download_exl3_model(self, mock_snapshot, tmp_path):
         """Test downloading EXL3 model from HuggingFace."""
         mock_snapshot.return_value = str(tmp_path / "downloaded_model")
@@ -89,7 +89,7 @@ class TestDownloadFunctionality:
             model_id="test/model",
             local_dir=str(tmp_path / "custom_dir"),
             revision="main",
-            token="test_token"
+            token="test_token",
         )
 
         mock_snapshot.assert_called_once_with(
@@ -105,7 +105,7 @@ class TestDownloadFunctionality:
 class TestModelListing:
     """Test model listing and discovery functionality."""
 
-    @patch("metal_marlin.hf_exl3_loader.list_models")
+    @patch("huggingface_hub.list_models")
     def test_list_exl3_models(self, mock_list_models):
         """Test listing EXL3 models from HuggingFace."""
         # Mock the HuggingFace model list response
@@ -178,13 +178,13 @@ class TestModelCardParsing:
         assert result["base_model"] is None
 
 
-@pytest.mark.integration
+@pytest.mark.slow
 class TestHuggingFaceIntegration:
     """Integration tests requiring network access."""
 
     @pytest.mark.skipif(
         not os.environ.get("RUN_HF_TESTS"),
-        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests"
+        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests",
     )
     def test_find_exl3_models(self):
         """Test finding EXL3 models on HuggingFace Hub."""
@@ -198,7 +198,7 @@ class TestHuggingFaceIntegration:
 
     @pytest.mark.skipif(
         not os.environ.get("RUN_HF_TESTS"),
-        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests"
+        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests",
     )
     @patch("metal_marlin.hf_exl3_loader.snapshot_download")
     @patch("metal_marlin.hf_exl3_loader.TrellisModelLoader")
@@ -229,7 +229,7 @@ class TestHuggingFaceIntegration:
 
     @pytest.mark.skipif(
         not os.environ.get("RUN_HF_TESTS"),
-        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests"
+        reason="Set RUN_HF_TESTS=1 to run HuggingFace integration tests",
     )
     def test_list_exl3_models_integration(self):
         """Test actual listing of EXL3 models from HuggingFace."""

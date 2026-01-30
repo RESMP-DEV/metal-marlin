@@ -60,29 +60,33 @@ class TestTrellisGenerator:
 
     def test_has_stream_generate(self):
         """Test stream_generate method exists."""
-        assert hasattr(TrellisGenerator, 'stream_generate')
+        assert hasattr(TrellisGenerator, "stream_generate")
 
     def test_has_stream_generate_tokens(self):
         """Test stream_generate_tokens method exists."""
-        assert hasattr(TrellisGenerator, 'stream_generate_tokens')
+        assert hasattr(TrellisGenerator, "stream_generate_tokens")
 
     def test_has_generate(self):
         """Test generate method exists."""
-        assert hasattr(TrellisGenerator, 'generate')
+        assert hasattr(TrellisGenerator, "generate")
 
     def test_stream_generate_is_iterator(self):
         """Test stream_generate returns an Iterator type hint."""
         import inspect
+
         sig = inspect.signature(TrellisGenerator.stream_generate)
-        # Check return annotation
-        assert sig.return_annotation == Iterator[str]
+        # Check return annotation (works with string annotations)
+        annotation = sig.return_annotation
+        assert "Iterator" in str(annotation) and "str" in str(annotation)
 
     def test_stream_generate_tokens_is_iterator(self):
         """Test stream_generate_tokens returns an Iterator type hint."""
         import inspect
+
         sig = inspect.signature(TrellisGenerator.stream_generate_tokens)
-        # Check return annotation is Iterator[tuple[int, str]]
-        assert hasattr(sig.return_annotation, '__origin__')
+        # Check return annotation contains Iterator and tuple
+        annotation = str(sig.return_annotation)
+        assert "Iterator" in annotation and "tuple" in annotation
 
 
 def test_module_exports():
@@ -92,9 +96,9 @@ def test_module_exports():
 
     from metal_marlin import trellis_generate
 
-    assert hasattr(trellis_generate, '__all__')
-    assert 'GenerationConfig' in trellis_generate.__all__
-    assert 'TrellisGenerator' in trellis_generate.__all__
+    assert hasattr(trellis_generate, "__all__")
+    assert "GenerationConfig" in trellis_generate.__all__
+    assert "TrellisGenerator" in trellis_generate.__all__
 
 
 if __name__ == "__main__":

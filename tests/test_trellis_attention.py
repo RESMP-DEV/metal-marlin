@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
+from metal_marlin.dtypes import DTypeConfig
 from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.trellis_attention import TrellisMLAConfig, TrellisMLAttention
 from metal_marlin.trellis_linear import TrellisLinear
@@ -63,7 +64,9 @@ class TestTrellisMLAttention:
         device = _get_device()
 
         # Create mock linear layers
-        q_proj = _create_mock_linear(config.hidden_size, config.hidden_size, device)
+        # Low-rank query projection: q_a_proj compresses, q_b_proj decompresses
+        q_a_proj = _create_mock_linear(config.hidden_size, config.q_lora_rank, device)
+        q_b_proj = _create_mock_linear(config.q_lora_rank, config.hidden_size, device)
         kv_a_proj = _create_mock_linear(config.hidden_size, config.kv_lora_rank, device)
         kv_b_proj = _create_mock_linear(
             config.kv_lora_rank, config.num_kv_heads * config.head_dim * 2, device
@@ -72,7 +75,8 @@ class TestTrellisMLAttention:
 
         return TrellisMLAttention(
             config=config,
-            q_proj=q_proj,
+            q_a_proj=q_a_proj,
+            q_b_proj=q_b_proj,
             kv_a_proj=kv_a_proj,
             kv_b_proj=kv_b_proj,
             o_proj=o_proj,
@@ -90,12 +94,16 @@ class TestTrellisMLAttention:
         """Test forward pass with KV cache."""
         device = _get_device()
         cache_config = CacheConfig(
+            num_layers=1,
+            num_heads=attention.config.num_attention_heads,
             num_kv_heads=attention.config.num_kv_heads,
             head_dim=attention.config.head_dim,
             max_seq_len=1024,
             cache_dtype="fp16",
         )
-        cache = KVCache(config=cache_config, batch_size=1, device=device)
+        # Use fp16 for both activations and cache to avoid dtype mismatch
+        dtype_config = DTypeConfig(activations="fp16", kv_cache="fp16")
+        cache = KVCache(config=cache_config, batch_size=1, dtype_config=dtype_config, device=device)
 
         # First forward (prompt)
         x1 = torch.randn(1, 32, attention.config.hidden_size, dtype=torch.float16, device=device)

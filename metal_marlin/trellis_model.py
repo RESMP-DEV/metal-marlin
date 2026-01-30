@@ -471,3 +471,195 @@ class TrellisModel(nn.Module):
             f"base_weights.safetensors not found in {model_path}. "
             "Run extract_base_weights.py first."
         )
+
+
+class TrellisForCausalLM(nn.Module):
+    """Trellis model with language modeling head for text generation.
+
+    Wraps TrellisModel with an LM head projection for generating logits.
+    Supports autoregressive generation with temperature, top-k, and top-p sampling.
+
+    Attributes:
+        model: The underlying TrellisModel.
+        config: Model configuration.
+        lm_head: Linear projection from hidden_size to vocab_size.
+    """
+
+    def __init__(self, config: TrellisModelConfig):
+        """Initialize TrellisForCausalLM.
+
+        Args:
+            config: Model configuration.
+        """
+        super().__init__()
+        self.config = config
+        self.model = TrellisModel(config)
+
+        # LM head (not quantized, tied to embedding or separate)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        kv_cache: TrellisKVCache | None = None,
+    ) -> torch.Tensor:
+        """Forward pass returning logits.
+
+        Args:
+            input_ids: Input token IDs [batch, seq_len].
+            attention_mask: Optional attention mask [batch, seq_len].
+            position_ids: Optional position IDs [batch, seq_len].
+            kv_cache: Optional KV cache for generation.
+
+        Returns:
+            Logits tensor [batch, seq_len, vocab_size].
+        """
+        hidden_states = self.model(input_ids, attention_mask, position_ids, kv_cache)
+        logits = self.lm_head(hidden_states)
+        return logits
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int = 100,
+        temperature: float = 1.0,
+        top_k: int = 50,
+        top_p: float = 0.9,
+    ) -> torch.Tensor:
+        """Autoregressive generation with KV cache.
+
+        Generates tokens autoregressively using the model with efficient
+        KV caching for improved performance on long sequences.
+
+        Args:
+            input_ids: Initial token IDs [batch, seq_len].
+            max_new_tokens: Maximum number of new tokens to generate.
+            temperature: Sampling temperature (1.0 = greedy, <1.0 = focused, >1.0 = random).
+            top_k: Number of highest probability tokens to keep for top-k sampling.
+            top_p: Cumulative probability threshold for nucleus (top-p) sampling.
+
+        Returns:
+            Generated token IDs [batch, seq_len + max_new_tokens].
+        """
+        batch_size, seq_len = input_ids.shape
+        device = input_ids.device
+
+        # Initialize KV cache for efficient generation
+        kv_cache = TrellisKVCache(
+            num_layers=self.config.num_hidden_layers,
+            batch_size=batch_size,
+            max_seq_len=seq_len + max_new_tokens,
+            kv_lora_rank=self.config.kv_lora_rank,
+            device=str(device),
+        )
+
+        # Track which sequences are finished (for batched generation)
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        # Initial forward pass to fill KV cache with prompt
+        _ = self.forward(input_ids, kv_cache=kv_cache)
+
+        # Get current sequence length from cache
+        current_len = kv_cache.get_seq_len()
+
+        # Generate tokens one at a time
+        for _ in range(max_new_tokens):
+            # Get logits for the last position only
+            logits = self.forward(
+                input_ids[:, -1:],
+                kv_cache=kv_cache,
+            )  # [batch, 1, vocab_size]
+            next_token_logits = logits[:, -1, :]  # [batch, vocab_size]
+
+            # Apply temperature
+            if temperature != 1.0 and temperature > 0:
+                next_token_logits = next_token_logits / temperature
+
+            # Apply top-k filtering
+            if top_k > 0:
+                indices_to_remove = next_token_logits < torch.topk(
+                    next_token_logits, top_k, dim=-1
+                )[0][..., -1, None]
+                next_token_logits = next_token_logits.masked_fill(
+                    indices_to_remove, float("-inf")
+                )
+
+            # Apply top-p (nucleus) filtering
+            if top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(
+                    next_token_logits, descending=True, dim=-1
+                )
+                cumulative_probs = torch.cumsum(
+                    F.softmax(sorted_logits, dim=-1), dim=-1
+                )
+
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep the first token above the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = False
+
+                # Scatter back to original indexing
+                indices_to_remove = sorted_indices_to_remove.scatter(
+                    -1, sorted_indices, sorted_indices_to_remove
+                )
+                next_token_logits = next_token_logits.masked_fill(
+                    indices_to_remove, float("-inf")
+                )
+
+            # Sample from the filtered distribution
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)  # [batch, 1]
+
+            # Mark sequences as finished if EOS token is generated
+            if hasattr(self.config, "eos_token_id") and self.config.eos_token_id is not None:
+                finished = finished | (next_token.squeeze(-1) == self.config.eos_token_id)
+            else:
+                # Default EOS token ID (commonly 2 for many models)
+                finished = finished | (next_token.squeeze(-1) == 2)
+
+            # Append to input_ids
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+
+            # Stop if all sequences are finished
+            if finished.all():
+                break
+
+        return input_ids
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_path: str,
+        device: str = "mps",
+    ) -> TrellisForCausalLM:
+        """Load a TrellisForCausalLM model from path.
+
+        Loads the model configuration, base model weights, and LM head weights
+        from the specified path. Supports both tied and separate LM heads.
+
+        Args:
+            model_path: Path to the model directory containing config.json
+                and base_weights.safetensors.
+            device: Device to load the model on (default: "mps").
+
+        Returns:
+            Loaded TrellisForCausalLM instance.
+        """
+        config = TrellisModelConfig.from_pretrained(model_path)
+        model = cls(config)
+
+        # Load base model
+        model.model = TrellisModel.from_pretrained(model_path, device)
+
+        # Load lm_head weight from base_weights.safetensors (may be tied to embed_tokens)
+        base_weights = TrellisModel._load_base_weights(model_path)
+        if "lm_head.weight" in base_weights:
+            model.lm_head.weight.data = base_weights["lm_head.weight"].to(device)
+        else:
+            # Tied embeddings - share weight with embed_tokens
+            model.lm_head.weight = model.model.embed_tokens.weight
+
+        return model.to(device)

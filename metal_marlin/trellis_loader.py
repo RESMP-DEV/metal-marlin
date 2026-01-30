@@ -150,7 +150,7 @@ class TrellisModelLoader:
         # ExllamaV3 format
         if any(".qweight" in k for k in sample_keys):
             return "exllamav3_gptq"
-        if any(".scale" in k and ".zero_point" in k for k in sample_keys):
+        if any(".scale" in k for k in sample_keys) and any(".zero_point" in k for k in sample_keys):
             return "exllamav3_exl2"
 
         # Check for trellis indices in different naming

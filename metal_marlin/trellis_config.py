@@ -14,16 +14,19 @@ class TrellisModelConfig:
     intermediate_size: int = 10240  # Dense layers
     vocab_size: int = 152064
 
-    # MLA (Multi-head Latent Attention)
+    # MLA (Multi-head Latent Attention) dimensions
+    # q_lora_rank=768: q_a_proj compresses from hidden_size to 768,
+    #                  q_b_proj expands from 768 to (num_heads * head_dim)
+    # kv_lora_rank=512: kv_b_proj compresses KV to 512 (shared latent)
     kv_lora_rank: int = 512
-    q_lora_rank: int | None = None
+    q_lora_rank: int = 768
 
     # MoE configuration
     num_experts: int = 64
     num_shared_experts: int = 1
     num_experts_per_tok: int = 8
     moe_intermediate_size: int = 1536  # Per expert
-    first_moe_layer: int = 2  # Layers 0,1 are dense
+    first_moe_layer: int = 1  # Layer 0 is dense, layers 1+ are MoE
 
     # RoPE configuration
     rope_theta: float = 10000.0
