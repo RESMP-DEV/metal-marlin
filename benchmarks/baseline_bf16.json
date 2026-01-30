@@ -1,0 +1,20 @@
+{
+  "note": "Populate by running bench_bf16_optimized.py --record-baseline on a pre-optimization build.",
+  "gemm": {
+    "old": {"tflops": null},
+    "new": {"tflops": null}
+  },
+  "attention": {
+    "old": {"tokens_per_sec": null},
+    "new": {"tokens_per_sec": null}
+  },
+  "moe": {
+    "old": {"expert_compute_ms": null, "dispatch_overhead_ms": null},
+    "new": {"expert_compute_ms": null, "dispatch_overhead_ms": null}
+  },
+  "inference": {
+    "tokens_per_sec": null,
+    "time_to_first_token_ms": null,
+    "memory_peak_mb": null
+  }
+}

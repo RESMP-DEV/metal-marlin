@@ -1,0 +1,107 @@
+# Metal Marlin Documentation
+
+Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
+
+---
+
+## 🚀 Start Here
+
+| Guide | Description |
+|-------|-------------|
+| [**Getting Started**](guides/getting_started.md) | Install, quantize, run a model in 5 minutes |
+| [**Serving Models**](guides/serving.md) | OpenAI-compatible API server |
+| [**CLI Reference**](guides/cli.md) | Command-line tools and options |
+| [**Troubleshooting**](guides/troubleshooting.md) | Common issues and solutions |
+
+---
+
+## 📚 Documentation Sections
+
+### [User Guides](guides/index.md)
+Step-by-step tutorials and workflows for using Metal Marlin.
+
+- [Getting Started](guides/getting_started.md) — Quick installation and first model
+- [CLI Reference](guides/cli.md) — Command-line tools
+- [Calibration Guide](guides/calibration.md) — Custom calibration for quality
+- [Troubleshooting](guides/troubleshooting.md) — Fix common problems
+
+### [API Reference](reference/index.md)
+Technical reference for APIs, models, and integrations.
+
+- [Python API](reference/api.md) — Full API documentation
+- [Supported Models](reference/supported_models.md) — Model compatibility matrix
+- [Integration Guide](reference/integration.md) — Embedding in your application
+
+### [Core Concepts](concepts/index.md)
+Understand the fundamental ideas behind Metal Marlin.
+
+- [Architecture Overview](concepts/architecture.md) — System design
+- [Inference Architecture](concepts/inference_architecture.md) — End-to-end inference flow
+- [MoE Architecture](concepts/moe_architecture.md) — Mixture of Experts support
+- [Quantization & Dequantization](concepts/dequantization.md) — How weights work
+- [Mixed Precision](concepts/mixed_precision.md) — Per-layer precision strategies
+- [KV Cache](concepts/kv_cache.md) — Quantized key-value cache
+
+### [Quantization Formats](formats/index.md)
+Supported formats and data type configurations.
+
+- [GGUF Support](formats/gguf_quantization.md) — GGUF format
+- [MR-GPTQ](formats/mr_gptq.md) — Metal Marlin GPTQ
+- [Data Type Configuration](formats/dtype_configuration.md) — Choosing optimal types
+
+### [Metal Kernel Internals](internals/index.md)
+Low-level documentation for kernel developers.
+
+- [CUDA to Metal Mapping](internals/cuda_metal_mapping.md) — Translating concepts
+- [Porting Guide](internals/porting_guide.md) — Adding new kernels
+- [Tile Sizing](internals/tile_sizing.md) — Choosing dimensions
+- [Memory Access Patterns](internals/memory_access_patterns.md) — Coalesced access
+
+### [Technical Audits](audits/index.md)
+Investigation reports and bug analyses.
+
+- [Metal Kernel Audit](audits/metal_kernel_audit.md) — Kernel review
+- [Resolved Bugs](audits/resolved_bugs.md) — Fixed issues
+
+### [Comparisons](comparisons/index.md)
+How Metal Marlin compares to alternatives.
+
+- [Why Not MLX?](comparisons/why_not_mlx.md) — PyTorch MPS vs MLX
+- [vLLM Comparison](comparisons/vllm_comparison.md) — Feature comparison
+
+---
+
+## 🧩 Model Architectures
+
+Special architecture support:
+
+- [MLA (Multi-head Latent Attention)](architectures/mla.md) — GLM-4.7-Flash attention
+- [Byte-level Models](architectures/byte_models.md) — Byte tokenization
+
+---
+
+## 🔧 Contributing
+
+If you are adding kernel support:
+
+1. Identify the target operator and data types
+2. Add or extend the Metal shader in `src/`
+3. Wire it into the kernel registry
+4. Verify numerical parity against a reference implementation
+5. Add targeted benchmarks for the new kernel
+6. Document any constraints (alignment, tile sizes, supported layouts)
+
+**Testing requirements:**
+- Run unit tests covering your kernel path
+- Add a focused regression test for edge cases
+- Run relevant performance or integration tests before submitting
+
+---
+
+## 📖 Quick Links
+
+| Resource | Link |
+|----------|------|
+| GitHub Repository | [metal-marlin/metal-marlin](https://github.com/metal-marlin/metal-marlin) |
+| Implementation Status | [STATUS.md](../STATUS.md) |
+| Academic References | [References](comparisons/references.md) |
