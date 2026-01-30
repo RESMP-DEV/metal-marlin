@@ -220,7 +220,8 @@ class TrellisGenerator:
                 config,
                 kv_cache,
             )
-            all_output_ids.append(output_ids)
+            # Squeeze batch dim and convert to list for batch_decode
+            all_output_ids.append(output_ids.squeeze(0).tolist())
 
         # Decode outputs
         outputs = self.tokenizer.batch_decode(all_output_ids, skip_special_tokens=True)

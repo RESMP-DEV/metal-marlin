@@ -27,8 +27,9 @@ _archived/
 *.swo
 .DS_Store
 
-# Benchmark outputs (optional - may want to track some results)
-# benchmarks/results/*.json
+# Benchmark outputs (large model snapshots and results)
+benchmarks/results/
+*.safetensors
 
 # Temporary files
 *.tmp
