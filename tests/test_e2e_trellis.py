@@ -89,7 +89,6 @@ class TestTrellisE2E:
     def test_attention_forward(self, model_available):
         """Test attention forward."""
         from metal_marlin.trellis.attention import TrellisMLAttention
-
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader(MODEL_PATH)

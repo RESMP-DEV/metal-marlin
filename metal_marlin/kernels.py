@@ -89,6 +89,9 @@ if not HAS_METAL or not HAS_MPS:
     # Flash attention
     flash_attention_kv_fp4 = _metal_required
 
+    # Paged attention
+    paged_attention_fp4 = _metal_required
+
     # MoE kernels
     moe_expert_gemm_fp4 = _metal_required
     moe_router_topk = _metal_required
@@ -1777,6 +1780,101 @@ if HAS_METAL and HAS_MPS:
                     out[k_base + bit_pos, n] = dequant * scale
 
         return torch.from_numpy(out).to("mps")
+
+    def paged_attention_fp4(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        scale: float,
+    ) -> torch.Tensor:
+        """Paged attention with Metal kernel dispatch.
+
+        Computes scaled dot-product attention over paged KV cache using
+        Metal kernels when available. Falls back to PyTorch implementation
+        if Metal is not available.
+
+        Args:
+            query: Query tensor [num_seqs, num_heads, seq_len, head_dim].
+            key_cache: Key cache [num_blocks, 2, block_size, num_kv_heads, head_dim]
+                       or shared block_pool with K/V interleaved.
+            value_cache: Value cache (same shape as key_cache, may be same tensor).
+            block_tables: Block indices per sequence [num_seqs, max_blocks_per_seq].
+            context_lens: Context length per sequence [num_seqs].
+            scale: Attention scale factor (typically head_dim ** -0.5).
+
+        Returns:
+            Attention output [num_seqs, num_heads, seq_len, head_dim].
+        """
+        # PyTorch fallback implementation
+        num_seqs, num_heads, seq_len, head_dim = query.shape
+        device = query.device
+
+        # Get cache dimensions from key_cache
+        # key_cache: [num_blocks, 2, block_size, num_kv_heads, head_dim]
+        _, _, block_size, num_kv_heads, _ = key_cache.shape
+        max_blocks = block_tables.shape[1]
+        max_context = max_blocks * block_size
+
+        # Gather K and V from block pool for each sequence
+        flat_indices = block_tables.reshape(-1).long()  # [num_seqs * max_blocks]
+
+        # Gather: [num_seqs * max_blocks, 2, block_size, num_kv_heads, head_dim]
+        gathered = key_cache[flat_indices]
+
+        # Reshape to [num_seqs, max_blocks * block_size, num_kv_heads, head_dim]
+        gathered = gathered.view(num_seqs, max_blocks, 2, block_size, num_kv_heads, head_dim)
+        gathered = gathered.permute(0, 2, 1, 3, 4, 5)  # [num_seqs, 2, max_blocks, block_size, ...]
+        gathered = gathered.reshape(num_seqs, 2, max_context, num_kv_heads, head_dim)
+
+        # Split K and V: each [num_seqs, max_context, num_kv_heads, head_dim]
+        keys = gathered[:, 0]  # [num_seqs, max_context, num_kv_heads, head_dim]
+        values = gathered[:, 1]  # [num_seqs, max_context, num_kv_heads, head_dim]
+
+        # Transpose to [num_seqs, num_kv_heads, max_context, head_dim]
+        keys = keys.permute(0, 2, 1, 3)
+        values = values.permute(0, 2, 1, 3)
+
+        # GQA expansion: repeat KV heads to match query heads
+        if num_kv_heads < num_heads:
+            repeat_factor = num_heads // num_kv_heads
+            keys = keys.repeat_interleave(repeat_factor, dim=1)
+            values = values.repeat_interleave(repeat_factor, dim=1)
+
+        # Compute attention scores: [num_seqs, num_heads, seq_len, max_context]
+        attn_weights = (query @ keys.transpose(-2, -1)) * scale
+
+        # Build validity mask from context_lens
+        kv_positions = torch.arange(max_context, device=device)[None, :]  # [1, max_context]
+        context_lens_2d = context_lens[:, None].long()  # [num_seqs, 1]
+        valid_mask = kv_positions < context_lens_2d  # [num_seqs, max_context]
+
+        # Expand for broadcasting: [num_seqs, 1, 1, max_context]
+        valid_mask = valid_mask[:, None, None, :]
+        attn_weights = torch.where(
+            valid_mask, attn_weights, torch.tensor(float("-inf"), device=device)
+        )
+
+        # Causal mask for prefill (seq_len > 1)
+        if seq_len > 1:
+            q_positions = torch.arange(seq_len, device=device)[
+                None, None, :, None
+            ]  # [1, 1, seq_len, 1]
+            kv_pos_expanded = kv_positions[None, None, None, :]  # [1, 1, 1, max_context]
+
+            offsets = context_lens_2d[:, None, None, :] - seq_len + q_positions
+            causal_mask = kv_pos_expanded <= offsets
+            attn_weights = torch.where(
+                causal_mask, attn_weights, torch.tensor(float("-inf"), device=device)
+            )
+
+        attn_weights = torch.softmax(attn_weights, dim=-1)
+
+        # Compute output: [num_seqs, num_heads, seq_len, head_dim]
+        output = attn_weights @ values
+
+        return output
 
     def flash_attention_kv_fp4(
         Q: torch.Tensor,

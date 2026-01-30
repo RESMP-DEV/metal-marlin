@@ -739,7 +739,7 @@ def mps_tensor_to_metal_buffer(
             raise RuntimeError("Failed to create Metal buffer for output tensor")
         return _CopyBackBuffer(buffer, tensor)
 
-    arr = tensor.detach().cpu().numpy()
+    arr = tensor.detach().cpu().float().numpy()
     buffer = device.newBufferWithBytes_length_options_(
         arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
     )

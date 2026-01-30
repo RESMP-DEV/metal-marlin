@@ -90,9 +90,8 @@ def benchmark_forward(model_path: str, batch_sizes: list = [1, 4, 16, 64]):
 
 def benchmark_moe(model_path: str):
     """Benchmark MoE layer performance."""
-    from metal_marlin.trellis.moe import TrellisMoEConfig, TrellisMoELayer
-
     from metal_marlin.trellis.loader import TrellisModelLoader
+    from metal_marlin.trellis.moe import TrellisMoEConfig, TrellisMoELayer
 
     loader = TrellisModelLoader(model_path)
     config = TrellisMoEConfig()

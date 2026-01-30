@@ -111,25 +111,45 @@ def load_wikitext2(max_samples: int | None = None) -> list[str]:
     try:
         from datasets import load_dataset
 
+        # Primary: use HuggingFace datasets library
         ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
         texts = [t for t in ds["text"] if len(t.strip()) > 50]
         if max_samples is not None:
             texts = texts[:max_samples]
         return texts
-    except ImportError:
-        # Fallback: direct download
-        from huggingface_hub import hf_hub_download
+    except Exception:
+        # Fallback: try alternative dataset sources
+        try:
+            from datasets import load_dataset
 
-        path = hf_hub_download(
-            repo_id="Salesforce/wikitext",
-            filename="wikitext-2-raw-v1/wiki.test.raw",
-            repo_type="dataset",
-        )
-        lines = Path(path).read_text().strip().split("\n")
-        texts = [t for t in lines if len(t.strip()) > 50]
-        if max_samples is not None:
-            texts = texts[:max_samples]
-        return texts
+            # Try the main wikitext dataset ID
+            ds = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
+            texts = [t for t in ds["text"] if len(t.strip()) > 50]
+            if max_samples is not None:
+                texts = texts[:max_samples]
+            return texts
+        except Exception:
+            pass
+
+        # Final fallback: direct file download
+        try:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(
+                repo_id="wikitext",
+                filename="wikitext-2-raw-v1/test.txt",
+                repo_type="dataset",
+            )
+            lines = Path(path).read_text().strip().split("\n")
+            texts = [t for t in lines if len(t.strip()) > 50]
+            if max_samples is not None:
+                texts = texts[:max_samples]
+            return texts
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load WikiText-2 dataset. Install 'datasets' package: "
+                f"pip install datasets. Error: {e}"
+            ) from e
 
 
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:

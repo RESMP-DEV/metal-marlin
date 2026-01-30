@@ -37,6 +37,12 @@ class RequestStatus(Enum):
     FINISHED = auto()  # Completed (EOS, max_tokens, or stop sequence)
 
 
+class RequestTimeoutError(Exception):
+    """Raised when a generation request exceeds the configured timeout."""
+
+    pass
+
+
 @dataclass
 class GenerationRequest:
     """Tracks state of a single generation request in the continuous batch.

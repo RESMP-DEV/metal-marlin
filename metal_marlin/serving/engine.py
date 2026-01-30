@@ -2,13 +2,49 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from ..inference.pipeline import MarlinPipeline
+
+
+def _detect_model_format(model_path: str) -> str:
+    """Detect if model is Marlin or Trellis format.
+
+    Returns:
+        'trellis' if model uses Trellis quantization
+        'marlin' otherwise (default)
+    """
+    path = Path(model_path)
+    if not path.exists():
+        return "marlin"  # Will fail later with proper error
+
+    # Check for Trellis markers
+    config_path = path / "config.json"
+    if config_path.exists():
+        try:
+            config = json.loads(config_path.read_text())
+            # Trellis models have specific markers
+            if config.get("quantization_config", {}).get("quant_method") == "trellis":
+                return "trellis"
+            if config.get("format") == "trellis":
+                return "trellis"
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Check for Trellis directory structure (sharded layers)
+    if (path / "layer_0000").exists():
+        return "trellis"
+
+    return "marlin"
+
+
+from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
 from .openai_schemas import (
     ChatCompletionChunk,
     ChatCompletionRequest,
@@ -17,7 +53,7 @@ from .openai_schemas import (
     CompletionResponse,
     Usage,
 )
-from .request import GenerationRequest, RequestStatus
+from .request import GenerationRequest, RequestStatus, RequestTimeoutError
 
 
 class _MockTokenizer:
@@ -73,6 +109,10 @@ class EngineConfig:
     device: str = "mps"
     max_model_len: int = 4096
     max_batch_size: int = 32
+    request_timeout: float = 60.0
+    enable_batching: bool = False  # Start disabled for compatibility
+    num_kv_blocks: int = 512
+    block_size: int = 16
 
 
 class ServingEngine:
@@ -87,18 +127,62 @@ class ServingEngine:
         use_mock = os.getenv("METAL_MARLIN_MOCK_MODEL") == "1"
         model_name = os.getenv("METAL_MARLIN_MOCK_MODEL_NAME")
         if model_name is None:
-            model_name = str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
+            model_name = (
+                str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
+            )
+
+        model_format = _detect_model_format(config.model_path)
+        self._model_format = model_format
 
         if use_mock:
             self.pipeline = _MockPipeline(model_name)
+        elif model_format == "trellis":
+            self.pipeline = self._load_trellis_pipeline(config)
         else:
-            self.pipeline = MarlinPipeline.from_pretrained(
-                config.model_path, device=config.device
-            )
+            # Default: Marlin format
+            if not Path(config.model_path).exists():
+                raise FileNotFoundError(f"Model not found: {config.model_path}")
+            try:
+                self.pipeline = MarlinPipeline.from_pretrained(
+                    config.model_path, device=config.device
+                )
+            except Exception as e:
+                raise RuntimeError(f"Failed to load model from {config.model_path}: {e}") from e
         self.model_name = model_name
         self._request_queue: asyncio.Queue[GenerationRequest] = asyncio.Queue()
         self._results: dict[str, asyncio.Future] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+        if config.enable_batching:
+            self.kv_manager = KVCacheManager(
+                num_blocks=config.num_kv_blocks,
+                block_size=config.block_size,
+            )
+            self.scheduler = BatchScheduler(
+                SchedulerConfig(max_num_seqs=config.max_batch_size),
+                self.kv_manager,
+            )
+        else:
+            self.scheduler = None
+            self.kv_manager = None
+
+    def _load_trellis_pipeline(self, config: EngineConfig):
+        """Load a Trellis-quantized model.
+
+        Returns a pipeline wrapper with the same interface as MarlinPipeline.
+        """
+        # TODO: Import and use TrellisGenerator when ready
+        # from ..trellis_generate import TrellisGenerator, GenerationConfig
+        # from ..trellis_model import TrellisModel
+        #
+        # model = TrellisModel.from_pretrained(config.model_path)
+        # return TrellisGenerator(model, tokenizer)
+
+        raise NotImplementedError(
+            f"Trellis format detected for {config.model_path}, "
+            "but TrellisGenerator is not yet integrated. "
+            "Use a Marlin-format model or set METAL_MARLIN_MOCK_MODEL=1"
+        )
 
     async def chat_completion(
         self,
@@ -138,12 +222,19 @@ class ServingEngine:
             request.stop or [],
         )
         gen_request.status = RequestStatus.RUNNING
-        result = await self._run_pipeline(
-            prompt,
-            max_tokens=request.max_tokens or 256,
-            temperature=request.temperature,
-            top_p=request.top_p,
-        )
+        try:
+            result = await asyncio.wait_for(
+                self._run_pipeline(
+                    prompt,
+                    max_tokens=request.max_tokens or 256,
+                    temperature=request.temperature,
+                    top_p=request.top_p,
+                ),
+                timeout=self.config.request_timeout,
+            )
+        except TimeoutError:
+            gen_request.status = RequestStatus.FINISHED
+            raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
         gen_request.status = RequestStatus.FINISHED
 
         completion_text, stopped = self._apply_stop_sequences(
@@ -239,6 +330,7 @@ class ServingEngine:
             request.stop or [],
         )
         gen_request.status = RequestStatus.RUNNING
+        start_time = time.time()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -273,6 +365,10 @@ class ServingEngine:
         stop_sequences = request.stop or []
 
         while True:
+            elapsed = time.time() - start_time
+            if elapsed > self.config.request_timeout:
+                gen_request.status = RequestStatus.FINISHED
+                raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
             piece = await queue.get()
             if piece is None:
                 break
@@ -313,6 +409,7 @@ class ServingEngine:
         request: CompletionRequest,
     ) -> AsyncIterator[CompletionResponse]:
         prompt = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
+        start_time = time.time()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
@@ -336,6 +433,9 @@ class ServingEngine:
         created = int(time.time())
 
         while True:
+            elapsed = time.time() - start_time
+            if elapsed > self.config.request_timeout:
+                raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
             piece = await queue.get()
             if piece is None:
                 break
@@ -421,3 +521,117 @@ class ServingEngine:
         )
         req.status = RequestStatus.PENDING
         return req
+
+    def get_model_info(self) -> dict:
+        """Return detailed model information.
+
+        Used by /v1/models/{model_id} endpoint.
+        """
+        vocab_size = 32000
+        hidden_size = 4096
+        num_layers = 32
+
+        if hasattr(self.pipeline, "config"):
+            config = self.pipeline.config
+            vocab_size = getattr(config, "vocab_size", vocab_size)
+            hidden_size = getattr(config, "hidden_size", hidden_size)
+            num_layers = getattr(config, "num_hidden_layers", num_layers)
+
+        quant_type = "fp4" if self._model_format == "trellis" else "int4"
+
+        memory_mb = 0
+        try:
+            import torch
+
+            if torch.backends.mps.is_available():
+                memory_mb = torch.mps.current_allocated_memory() // (1024 * 1024)
+        except Exception:
+            pass
+
+        return {
+            "id": self.model_name,
+            "object": "model",
+            "created": 0,
+            "owned_by": "metal-marlin",
+            "capabilities": {
+                "chat_completions": True,
+                "completions": True,
+                "streaming": True,
+            },
+            "config": {
+                "vocab_size": vocab_size,
+                "hidden_size": hidden_size,
+                "num_layers": num_layers,
+                "quant_type": quant_type,
+                "max_context_length": self.config.max_model_len,
+                "format": self._model_format,
+            },
+            "memory_usage_mb": memory_mb,
+        }
+
+    async def _batched_generate(
+        self,
+        prompt: str,
+        request: ChatCompletionRequest,
+    ) -> ChatCompletionResponse:
+        """Generate using continuous batching scheduler.
+
+        This method integrates with the BatchScheduler for efficient
+        request processing when batching is enabled.
+        """
+        from .continuous_batch import RequestPriority
+
+        gen_request = self._track_request(
+            prompt,
+            request.max_tokens or 256,
+            request.temperature,
+            request.top_p,
+            request.stop or [],
+        )
+
+        # Add request to scheduler
+        assert self.scheduler is not None
+        self.scheduler.add_request(gen_request, priority=RequestPriority.NORMAL)
+
+        # Wait for completion via scheduler
+        start_time = time.time()
+        while gen_request.status != RequestStatus.FINISHED:
+            elapsed = time.time() - start_time
+            if elapsed > self.config.request_timeout:
+                self.scheduler.abort_request(gen_request.request_id)
+                raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
+            await asyncio.sleep(0.01)  # Small delay to prevent busy-waiting
+
+        # Decode output tokens
+        completion_tokens = gen_request.output_tokens
+        completion_text = self.pipeline.tokenizer.decode(completion_tokens)
+
+        completion_text, stopped = self._apply_stop_sequences(
+            completion_text,
+            request.stop or [],
+        )
+
+        prompt_tokens = self._count_tokens(prompt)
+        completion_token_count = len(completion_tokens)
+
+        finish_reason = "stop" if stopped else "length"
+        if completion_token_count < (request.max_tokens or 256):
+            finish_reason = "stop"
+
+        return ChatCompletionResponse(
+            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            created=int(time.time()),
+            model=self.model_name,
+            choices=[
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": completion_text},
+                    "finish_reason": finish_reason,
+                }
+            ],
+            usage=Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_token_count,
+                total_tokens=prompt_tokens + completion_token_count,
+            ),
+        )

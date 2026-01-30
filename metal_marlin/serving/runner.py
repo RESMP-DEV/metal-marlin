@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 import torch.nn as nn
 
+from ..kernels import HAS_METAL, paged_attention_fp4
 from .request import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -98,12 +99,14 @@ class BatchedModelRunner:
         model: nn.Module,
         config: ModelConfig,
         allocator: BlockAllocator,
+        use_metal_kernels: bool = True,
     ):
         self.model = model
         self.config = config
         self.allocator = allocator
         self.device = _get_device()
         self._layer_pools: list[torch.Tensor] | None = None
+        self._use_metal_kernels = use_metal_kernels and HAS_METAL
 
     def execute(self, schedule: SchedulerOutput) -> torch.Tensor:
         """Execute one iteration of batched generation.
@@ -382,6 +385,18 @@ class BatchedModelRunner:
         Returns:
             Attention output [num_seqs, num_heads, seq_len, head_dim].
         """
+        # Try Metal kernel dispatch first if available and enabled
+        if self._use_metal_kernels and HAS_METAL and query.device.type == "mps":
+            return paged_attention_fp4(
+                query=query,
+                key_cache=block_pool,
+                value_cache=block_pool,
+                block_tables=block_tables,
+                context_lens=context_lens,
+                scale=scale,
+            )
+
+        # Fallback to existing PyTorch implementation
         num_seqs = query.shape[0]
         num_heads = query.shape[1]
         seq_len = query.shape[2]

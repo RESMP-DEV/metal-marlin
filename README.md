@@ -85,19 +85,17 @@ Standalone inference for trellis-quantized models on Apple Silicon via Metal acc
 ### Quick Start
 
 ```python
-from metal_marlin.trellis_model import TrellisModel
-from metal_marlin.trellis_generate import TrellisGenerator, GenerationConfig
+from metal_marlin.trellis import TrellisForCausalLM
 from transformers import AutoTokenizer
 
 # Load model and tokenizer
-model = TrellisModel.from_pretrained("models/GLM-4.7-Flash-3bpw")
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-3bpw", device="mps")
 tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
 # Generate
-generator = TrellisGenerator(model, tokenizer)
-config = GenerationConfig(max_new_tokens=256, temperature=0.7)
-output = generator.generate("Explain quantum computing:", config)
-print(output)
+input_ids = tokenizer("Explain quantum computing:", return_tensors="pt").input_ids.to("mps")
+output = model.generate(input_ids, max_new_tokens=256, temperature=0.7)
+print(tokenizer.decode(output[0]))
 ```
 
 ### Features
@@ -192,11 +190,15 @@ Complete guide for running inference with Trellis-quantized models using the sim
 Load and run inference with 5 lines of code:
 
 ```python
-from metal_marlin import TrellisForCausalLM
+from metal_marlin.trellis import TrellisForCausalLM
+from transformers import AutoTokenizer
 
-model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw")
-output = model.generate(tokenizer.encode("Hello, "), max_new_tokens=50)
-print(tokenizer.decode(output))
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw", device="mps")
+tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
+
+input_ids = tokenizer("Hello, ", return_tensors="pt").input_ids.to("mps")
+output = model.generate(input_ids, max_new_tokens=50)
+print(tokenizer.decode(output[0]))
 ```
 
 ### Model Loading

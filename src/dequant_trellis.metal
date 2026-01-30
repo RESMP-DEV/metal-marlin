@@ -583,6 +583,7 @@ kernel void dequant_trellis_packed(
     constant uint& N [[buffer(7)]],
     constant uint& n_levels [[buffer(8)]],
     constant uint& bits [[buffer(9)]],
+    constant uint& group_size [[buffer(10)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     uint n_idx = gid.x;
@@ -613,8 +614,7 @@ kernel void dequant_trellis_packed(
         trellis_idx = 0;
     }
     
-    // Load scale (group size = 128)
-    uint group_size = 128;
+    // Load scale
     uint group_idx = k_idx / group_size;
     float scale = scales[group_idx * N + n_idx];
     

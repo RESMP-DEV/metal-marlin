@@ -210,7 +210,7 @@ class TrellisMLAttention(nn.Module):
         # === Apply RoPE ===
         # Create position_ids if not provided
         if position_ids is None:
-            offset = kv_cache.seq_len if kv_cache else 0
+            offset = kv_cache.get_seq_len() if kv_cache else 0
             position_ids = torch.arange(
                 offset, offset + seq_len, device=hidden_states.device
             ).unsqueeze(0)

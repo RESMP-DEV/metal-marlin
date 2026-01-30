@@ -192,8 +192,17 @@ def chat(
 @click.argument("model_path", type=click.Path())
 @click.option("--host", default="0.0.0.0", help="Bind address")
 @click.option("--port", default=8000, type=int, help="Port number")
-@click.option("--device", default="mps", help="Device (mps/cuda/cpu)")
-def serve(model_path: str, host: str, port: int, device: str):
+@click.option("--device", default="mps", help="Device (mps/cpu)")
+@click.option("--batch-size", default=32, type=int, help="Max concurrent requests")
+@click.option("--enable-batching", is_flag=True, help="Enable continuous batching")
+def serve(
+    model_path: str,
+    host: str,
+    port: int,
+    device: str,
+    batch_size: int,
+    enable_batching: bool,
+):
     """Start OpenAI-compatible API server.
 
     Example:
@@ -204,13 +213,33 @@ def serve(model_path: str, host: str, port: int, device: str):
           -H "Content-Type: application/json" \
           -d '{"model": "qwen3_4b_fp4", "messages": [{"role": "user", "content": "Hello"}]}'
     """
+    import signal
+    import sys
+
     from .serving.server import run_server
 
     if os.getenv("METAL_MARLIN_MOCK_MODEL") != "1":
         if not Path(model_path).exists():
             raise click.ClickException(f"Model path not found: {model_path}")
 
-    run_server(model_path, host=host, port=port, device=device)
+    # Handle Ctrl+C gracefully
+    def signal_handler(sig, frame):
+        click.echo("\nShutting down server...")
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    try:
+        run_server(
+            model_path,
+            host=host,
+            port=port,
+            device=device,
+            batch_size=batch_size,
+            enable_batching=enable_batching,
+        )
+    except KeyboardInterrupt:
+        click.echo("\nServer stopped.")
 
 
 if "serve" not in cli.commands:

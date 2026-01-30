@@ -97,5 +97,8 @@ ignore = [
 testpaths = ["tests"]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
+[project.scripts]
+metal-marlin = "metal_marlin.cli:cli"
+
 [dependency-groups]
 dev = ["pyright>=1.1.408"]

@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .._compat import require_torch, torch
-from .kv_cache import TrellisKVCache
 
 if TYPE_CHECKING:
     import torch as torch_typing
@@ -91,6 +90,46 @@ class TrellisGenerator:
         self.tokenizer = tokenizer
         self.device = next(model.parameters()).device
 
+    def _create_kv_cache(
+        self,
+        batch_size: int,
+        max_seq_len: int,
+    ) -> KVCache:
+        """Create standard KV cache for the model.
+
+        Args:
+            batch_size: Batch size for generation.
+            max_seq_len: Maximum sequence length to support.
+
+        Returns:
+            Configured KVCache instance.
+        """
+        model_config = self._get_model_config()
+
+        # Get required parameters from model config
+        # For GLM-4 MLA, we use the decomposed K/V dimensions
+        num_layers = model_config.get("num_hidden_layers", 32)
+        num_attention_heads = model_config.get("num_attention_heads", 20)
+        num_kv_heads = model_config.get("num_key_value_heads", num_attention_heads)
+
+        # GLM-4 MLA dimensions: K uses qk_head_dim=256, V uses v_head_dim=256
+        # Standard models use head_dim for both K and V
+        head_dim = model_config.get("v_head_dim", model_config.get("head_dim", 256))
+
+        cache_config = CacheConfig(
+            num_layers=num_layers,
+            num_heads=num_attention_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            max_seq_len=max_seq_len,
+        )
+
+        return KVCache(
+            cache_config,
+            batch_size=batch_size,
+            device=self.device,
+        )
+
     @torch.inference_mode()
     def generate(
         self,
@@ -141,18 +180,10 @@ class TrellisGenerator:
         batch_size = input_ids.shape[0]
         prompt_len = input_ids.shape[1]
 
-        # Get model config for KV cache
-        model_config = self._get_model_config()
-        num_layers = model_config.get("num_hidden_layers", 32)
-        kv_lora_rank = model_config.get("kv_lora_rank", 512)
-
         # Initialize KV cache
-        kv_cache = TrellisKVCache(
-            num_layers=num_layers,
+        kv_cache = self._create_kv_cache(
             batch_size=batch_size,
             max_seq_len=prompt_len + config.max_new_tokens,
-            kv_lora_rank=kv_lora_rank,
-            device=self.device,
         )
 
         if stream:
@@ -168,9 +199,7 @@ class TrellisGenerator:
         all_output_ids = []
         for i in range(batch_size):
             seq_input_ids = input_ids[i : i + 1]
-            seq_attention_mask = (
-                attention_mask[i : i + 1] if attention_mask is not None else None
-            )
+            seq_attention_mask = attention_mask[i : i + 1] if attention_mask is not None else None
 
             # Reset cache for each sequence
             kv_cache.reset()
@@ -219,7 +248,7 @@ class TrellisGenerator:
         outputs = []
 
         for i in range(0, len(prompts), batch_size):
-            batch_prompts = prompts[i:i + batch_size]
+            batch_prompts = prompts[i : i + batch_size]
             batch_outputs = self._generate_batch(batch_prompts, config)
             outputs.extend(batch_outputs)
 
@@ -256,19 +285,11 @@ class TrellisGenerator:
         attention_mask = inputs["attention_mask"]
         seq_lens = attention_mask.sum(dim=1)  # Track actual lengths
 
-        # Get model config for KV cache
-        model_config = self._get_model_config()
-        num_layers = model_config.get("num_hidden_layers", 32)
-        kv_lora_rank = model_config.get("kv_lora_rank", 512)
-
         # Initialize KV cache
         max_len = input_ids.shape[1] + config.max_new_tokens
-        kv_cache = TrellisKVCache(
-            num_layers=num_layers,
+        kv_cache = self._create_kv_cache(
             batch_size=batch_size,
             max_seq_len=max_len,
-            kv_lora_rank=kv_lora_rank,
-            device=self.device,
         )
 
         # Track which sequences are done
@@ -436,7 +457,7 @@ class TrellisGenerator:
         input_ids: torch_typing.Tensor,
         attention_mask: torch_typing.Tensor | None,
         config: GenerationConfig,
-        kv_cache: TrellisKVCache,
+        kv_cache: KVCache,
     ) -> torch_typing.Tensor:
         """Generate tokens for a single sequence.
 
@@ -471,9 +492,7 @@ class TrellisGenerator:
                 break
 
             # Forward with new token
-            next_token_tensor = torch.tensor(
-                [[next_token]], device=self.device, dtype=torch.long
-            )
+            next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=torch.long)
             logits = self.model(
                 next_token_tensor,
                 kv_cache=kv_cache,
@@ -482,9 +501,7 @@ class TrellisGenerator:
 
         # Combine prompt and generated tokens
         if generated_tokens:
-            generated = torch.tensor(
-                [generated_tokens], device=self.device, dtype=torch.long
-            )
+            generated = torch.tensor([generated_tokens], device=self.device, dtype=torch.long)
             output_ids = torch.cat([input_ids, generated], dim=1)
         else:
             output_ids = input_ids
@@ -496,7 +513,7 @@ class TrellisGenerator:
         input_ids: torch_typing.Tensor,
         attention_mask: torch_typing.Tensor | None,
         config: GenerationConfig,
-        kv_cache: TrellisKVCache,
+        kv_cache: KVCache,
     ) -> Iterator[str]:
         """Stream generated text tokens.
 
@@ -534,9 +551,7 @@ class TrellisGenerator:
                 break
 
             # Forward with new token
-            next_token_tensor = torch.tensor(
-                [[next_token]], device=self.device, dtype=torch.long
-            )
+            next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=torch.long)
             logits = self.model(
                 next_token_tensor,
                 kv_cache=kv_cache,
@@ -726,9 +741,7 @@ class TrellisGenerator:
                 break
 
             # Forward with new token
-            next_token_tensor = torch.tensor(
-                [[next_token]], device=self.device, dtype=torch.long
-            )
+            next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=torch.long)
             logits = self.model(
                 next_token_tensor,
                 kv_cache=kv_cache,
@@ -806,9 +819,7 @@ class TrellisGenerator:
                 break
 
             # Forward with new token
-            next_token_tensor = torch.tensor(
-                [[next_token]], device=self.device, dtype=torch.long
-            )
+            next_token_tensor = torch.tensor([[next_token]], device=self.device, dtype=torch.long)
             logits = self.model(
                 next_token_tensor,
                 kv_cache=kv_cache,
@@ -855,24 +866,21 @@ class PreTrainedTokenizer:
         padding: bool = False,
         truncation: bool = False,
         **kwargs,
-    ) -> dict:
-        ...
+    ) -> dict: ...
 
     def decode(
         self,
         token_ids: list[int] | torch_typing.Tensor,
         skip_special_tokens: bool = False,
         **kwargs,
-    ) -> str:
-        ...
+    ) -> str: ...
 
     def batch_decode(
         self,
         sequences: list[list[int]] | torch_typing.Tensor,
         skip_special_tokens: bool = False,
         **kwargs,
-    ) -> list[str]:
-        ...
+    ) -> list[str]: ...
 
 
 __all__ = [

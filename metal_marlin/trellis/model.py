@@ -12,12 +12,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..metal_dispatch import MetalKernelLibrary
 from ..transformer import RMSNorm
 from .attention import TrellisMLAConfig, TrellisMLAttention
 from .config import TrellisModelConfig
 from .kv_cache import TrellisKVCache
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
+from .moe_dispatch import dispatch_moe_trellis_swiglu
 
 if TYPE_CHECKING:
     from .loader import TrellisModelLoader
@@ -61,6 +63,144 @@ class TrellisMoEMLP(nn.Module):
         self.shared_expert = shared_expert
         self.num_experts_per_tok = num_experts_per_tok
 
+        # Prepare contiguous expert weights for fast dispatch
+        self._prepare_expert_weights()
+
+        # Lazy Metal library
+        self._lib = None
+        # NOTE: Fast MoE path disabled - gemm_trellis_moe.metal has compilation errors
+        # A proper Trellis MoE kernel needs to be written. Current fallback
+        # uses slow sequential expert iteration (512 calls per token).
+        self._use_fast_moe = False
+
+    def _prepare_expert_weights(self) -> None:
+        """Prepare expert weights in contiguous format for fast MoE dispatch."""
+        num_experts = len(self.experts)
+
+        # Get dimensions from first expert
+        first_expert = self.experts[0]
+        hidden_dim = first_expert.gate_proj.in_features
+        intermediate_dim = first_expert.gate_proj.out_features
+        bits = first_expert.gate_proj.bits
+
+        # Stack expert weights
+        gate_weights_list = []
+        gate_scales_list = []
+        up_weights_list = []
+        up_scales_list = []
+        down_weights_list = []
+        down_scales_list = []
+
+        gate_su_list = []
+        gate_sv_list = []
+        up_su_list = []
+        up_sv_list = []
+        down_su_list = []
+        down_sv_list = []
+
+        for expert in self.experts:
+            gate_weights_list.append(expert.gate_proj.packed_indices)
+            gate_scales_list.append(expert.gate_proj.scales)
+            up_weights_list.append(expert.up_proj.packed_indices)
+            up_scales_list.append(expert.up_proj.scales)
+            down_weights_list.append(expert.down_proj.packed_indices)
+            down_scales_list.append(expert.down_proj.scales)
+
+            gate_su_list.append(expert.gate_proj.su)
+            gate_sv_list.append(expert.gate_proj.sv)
+            up_su_list.append(expert.up_proj.su)
+            up_sv_list.append(expert.up_proj.sv)
+            down_su_list.append(expert.down_proj.su)
+            down_sv_list.append(expert.down_proj.sv)
+
+        # Stack along new dimension 0 (num_experts)
+        self.register_buffer("gate_weights_stacked", torch.stack(gate_weights_list, dim=0))
+        self.register_buffer("gate_scales_stacked", torch.stack(gate_scales_list, dim=0))
+        self.register_buffer("up_weights_stacked", torch.stack(up_weights_list, dim=0))
+        self.register_buffer("up_scales_stacked", torch.stack(up_scales_list, dim=0))
+        self.register_buffer("down_weights_stacked", torch.stack(down_weights_list, dim=0))
+        self.register_buffer("down_scales_stacked", torch.stack(down_scales_list, dim=0))
+
+        self.register_buffer("gate_su_stacked", torch.stack(gate_su_list, dim=0))
+        self.register_buffer("gate_sv_stacked", torch.stack(gate_sv_list, dim=0))
+        self.register_buffer("up_su_stacked", torch.stack(up_su_list, dim=0))
+        self.register_buffer("up_sv_stacked", torch.stack(up_sv_list, dim=0))
+        self.register_buffer("down_su_stacked", torch.stack(down_su_list, dim=0))
+        self.register_buffer("down_sv_stacked", torch.stack(down_sv_list, dim=0))
+
+        self.hidden_dim = hidden_dim
+        self.intermediate_dim = intermediate_dim
+        self.bits = bits
+
+    def _get_lib(self) -> MetalKernelLibrary:
+        """Get or create Metal kernel library."""
+        if self._lib is None:
+            self._lib = MetalKernelLibrary.from_source_dir()
+        return self._lib
+
+    def forward_fast(self, x: torch.Tensor) -> torch.Tensor:
+        """Fast forward pass using fused MoE dispatch.
+
+        Replaces the slow sequential expert iteration (512 calls) with a
+        single batched Metal kernel that processes all experts in parallel.
+        """
+        orig_dtype = x.dtype
+
+        # Flatten for processing
+        batch_shape = x.shape[:-1]
+        x_flat = x.view(-1, self.hidden_dim)
+        num_tokens = x_flat.shape[0]
+
+        # Convert input to router's dtype for routing computation
+        x_router = x_flat.to(self.router.weight.dtype)
+
+        # Get router scores
+        router_logits = self.router(x_router)
+
+        # Select top-k experts
+        routing_weights, selected_experts = torch.topk(
+            F.softmax(router_logits, dim=-1, dtype=torch.float),
+            k=self.num_experts_per_tok,
+            dim=-1,
+        )
+
+        # Normalize weights
+        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+
+        # Fast fused dispatch
+        output = dispatch_moe_trellis_swiglu(
+            lib=self._get_lib(),
+            activations=x_flat,
+            gate_weights=self.gate_weights_stacked,
+            gate_scales=self.gate_scales_stacked,
+            up_weights=self.up_weights_stacked,
+            up_scales=self.up_scales_stacked,
+            down_weights=self.down_weights_stacked,
+            down_scales=self.down_scales_stacked,
+            gate_su=self.gate_su_stacked,
+            gate_sv=self.gate_sv_stacked,
+            up_su=self.up_su_stacked,
+            up_sv=self.up_sv_stacked,
+            down_su=self.down_su_stacked,
+            down_sv=self.down_sv_stacked,
+            grid=self.experts[0].gate_proj.grid,
+            expert_ids=selected_experts,
+            expert_probs=routing_weights,
+            hidden_dim=self.hidden_dim,
+            intermediate_dim=self.intermediate_dim,
+            num_experts=len(self.experts),
+            top_k=self.num_experts_per_tok,
+            bits=self.bits,
+        )
+
+        # Add shared expert (always applied)
+        shared_output = self.shared_expert(x)
+        output = output + shared_output
+
+        # Restore shape
+        output = output.view(*batch_shape, self.hidden_dim)
+        return output.to(orig_dtype)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with MoE routing.
 
@@ -70,6 +210,11 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             Output tensor [..., hidden_size].
         """
+        # Use fast fused dispatch if available
+        if self._use_fast_moe and x.is_mps:
+            return self.forward_fast(x)
+
+        # Fallback: slow sequential execution (12s/tok)
         # Save original dtype for output
         orig_dtype = x.dtype
 

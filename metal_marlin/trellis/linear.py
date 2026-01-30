@@ -27,6 +27,8 @@ from ..metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
 from ..quantization.trellis_codebook import TrellisCodebook
 from .dispatch import (
     dequantize_trellis_weight,
+    dispatch_gemm_trellis_decode,
+    dispatch_gemm_trellis_packed,
     dispatch_trellis_dequant_packed,
 )
 
@@ -38,7 +40,10 @@ class TrellisLinear(nn.Module):
     """Linear layer with EXL3 trellis-quantized weights.
 
     Stores weights in compressed trellis format and dequantizes on-the-fly
-    during forward pass using Metal GPU acceleration.
+    during forward pass using fused Metal GPU kernels.
+
+    The forward() method uses fused Metal kernels for efficient dequantization
+    and matrix multiplication without intermediate allocations.
 
     Attributes:
         in_features: Size of each input sample (K).
@@ -109,7 +114,6 @@ class TrellisLinear(nn.Module):
 
         # Lazy-loaded Metal library
         self._lib: MetalKernelLibrary | None = None
-        self._dequantized_cache: torch.Tensor | None = None
 
     @classmethod
     def from_trellis_weight(
@@ -162,9 +166,8 @@ class TrellisLinear(nn.Module):
         else:
             module.bias = None
 
-        # Initialize cache
+        # Initialize Metal library reference
         module._lib = None
-        module._dequantized_cache = None
 
         return module
 
@@ -174,18 +177,12 @@ class TrellisLinear(nn.Module):
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
-    def dequantize(self, use_cache: bool = True) -> torch.Tensor:
+    def dequantize(self) -> torch.Tensor:
         """Dequantize weights to FP16.
-
-        Args:
-            use_cache: If True, cache the dequantized weights for reuse.
-                      Set to False for memory-constrained scenarios.
 
         Returns:
             Dequantized weights [out_features, in_features] float16.
         """
-        if use_cache and self._dequantized_cache is not None:
-            return self._dequantized_cache
 
         # K = out_features, N = in_features (weight matrix convention)
         K, N = self.out_features, self.in_features
@@ -227,21 +224,22 @@ class TrellisLinear(nn.Module):
             )
             weights = dequantize_trellis_weight(fake_weight, use_metal=False)
 
-        if use_cache:
-            self._dequantized_cache = weights
-
         return weights
 
-    def clear_cache(self) -> None:
-        """Clear dequantized weight cache to free memory."""
-        self._dequantized_cache = None
+    def clear_metal_resources(self) -> None:
+        """Release Metal resources to free GPU memory."""
+        self._lib = None
+        # Metal buffers are managed by PyObjC, should auto-release
 
-    # Class-level setting to control weight caching behavior
-    # Set to False for MoE models to prevent excessive memory usage
-    enable_cache: bool = False
+    def __del__(self) -> None:
+        """Cleanup on deletion."""
+        self.clear_metal_resources()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with on-the-fly dequantization.
+        """Forward pass with fused GEMM kernels.
+
+        Uses fused dequantization+GEMM kernels for efficient computation
+        without materializing the full FP16 weight matrix.
 
         Args:
             x: Input tensor [..., in_features].
@@ -249,18 +247,49 @@ class TrellisLinear(nn.Module):
         Returns:
             Output tensor [..., out_features].
         """
-        # Dequantize weights (use cache setting from class variable)
-        weights = self.dequantize(use_cache=TrellisLinear.enable_cache)
+        batch_shape = x.shape[:-1]
+        x_flat = x.view(-1, self.in_features)
+        M = x_flat.shape[0]
 
-        # Ensure input is on same device and dtype
-        if x.device != weights.device:
-            x = x.to(weights.device)
-        if x.dtype != weights.dtype:
-            x = x.to(weights.dtype)
+        # Get or create Metal library
+        lib = self._get_lib()
 
-        # Linear: y = x @ W^T
-        output = torch.mm(x.view(-1, self.in_features), weights.t())
-        output = output.view(*x.shape[:-1], self.out_features)
+        # Compute group_size from scales shape
+        # scales shape is [n_groups, out_features], groups are along in_features dim
+        n_groups = self.scales.shape[0]
+        group_size = (self.in_features + n_groups - 1) // n_groups
+
+        # Choose kernel based on M (decode vs prefill)
+        if M <= 16:
+            output = dispatch_gemm_trellis_decode(
+                lib,
+                x_flat,
+                self.packed_indices,
+                self.scales,
+                self.grid,
+                self.su,
+                self.sv,
+                self.in_features,
+                self.out_features,
+                self.bits,
+                group_size,
+            )
+        else:
+            output = dispatch_gemm_trellis_packed(
+                lib,
+                x_flat,
+                self.packed_indices,
+                self.scales,
+                self.grid,
+                self.su,
+                self.sv,
+                self.in_features,
+                self.out_features,
+                self.bits,
+                group_size,
+            )
+
+        output = output.view(*batch_shape, self.out_features)
 
         if self.bias is not None:
             output = output + self.bias
