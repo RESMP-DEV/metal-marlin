@@ -57,6 +57,8 @@ class TrellisMLAConfig:
     head_dim: int = 64
     kv_lora_rank: int = 512  # Compression dimension for KV
     q_lora_rank: int | None = None  # Optional query compression
+    kv_rope_dim: int = 0  # Position-dependent component in kv_a (GLM: 64)
+    kv_head_dim: int | None = None  # KV head dim if different from Q
     rope_theta: float = 10000.0
     max_position_embeddings: int = 131072
 
@@ -88,15 +90,29 @@ class TrellisMLAttention(nn.Module):
         self.o_proj = o_proj
 
         # Validate dimensions
-        if kv_a_proj.out_features != config.kv_lora_rank:
+        # kv_a_proj_with_mqa outputs kv_lora_rank + kv_rope_dim (GLM-style MLA)
+        # Allow either exact match or with rope component
+        kv_rope_dim = getattr(config, "kv_rope_dim", 0)
+        expected_kv_a_out = config.kv_lora_rank + kv_rope_dim
+        if (
+            kv_a_proj.out_features != config.kv_lora_rank
+            and kv_a_proj.out_features != expected_kv_a_out
+        ):
             raise ValueError(
                 f"kv_a_proj.out_features ({kv_a_proj.out_features}) must equal "
-                f"config.kv_lora_rank ({config.kv_lora_rank})"
+                f"config.kv_lora_rank ({config.kv_lora_rank}) or "
+                f"kv_lora_rank + kv_rope_dim ({expected_kv_a_out})"
             )
 
-        # kv_b_proj input should match kv_lora_rank, output should match K+V dimensions
+        # Store whether we have the MQA variant (includes rope component)
+        self.has_mqa_rope = kv_a_proj.out_features == expected_kv_a_out and kv_rope_dim > 0
+        self.kv_rope_dim = kv_rope_dim
+
+        # kv_b_proj takes kv_lora_rank (latent only, not rope component)
         expected_kv_b_input = config.kv_lora_rank
-        expected_kv_b_output = config.num_kv_heads * config.head_dim * 2  # K and V concatenated
+        # KV head dim can differ from Q head dim in MLA
+        kv_head_dim = getattr(config, "kv_head_dim", config.head_dim)
+        expected_kv_b_output = config.num_kv_heads * kv_head_dim * 2  # K and V concatenated
 
         if kv_b_proj.in_features != expected_kv_b_input:
             raise ValueError(
@@ -104,11 +120,19 @@ class TrellisMLAttention(nn.Module):
                 f"config.kv_lora_rank ({expected_kv_b_input})"
             )
 
+        # Allow flexible kv_b output since MLA variants differ
         if kv_b_proj.out_features != expected_kv_b_output:
-            raise ValueError(
-                f"kv_b_proj.out_features ({kv_b_proj.out_features}) must equal "
-                f"num_kv_heads * head_dim * 2 ({expected_kv_b_output})"
-            )
+            # Infer kv_head_dim from actual weights
+            kv_head_dim = kv_b_proj.out_features // (config.num_kv_heads * 2)
+            expected_kv_b_output = config.num_kv_heads * kv_head_dim * 2
+            if kv_b_proj.out_features != expected_kv_b_output:
+                raise ValueError(
+                    f"kv_b_proj.out_features ({kv_b_proj.out_features}) must be divisible by "
+                    f"num_kv_heads * 2 ({config.num_kv_heads * 2})"
+                )
+
+        self.kv_head_dim = kv_head_dim
+        self.kv_lora_rank = config.kv_lora_rank
 
         self.rope = RoPE(config.head_dim, base=config.rope_theta)
         self.scale = config.head_dim**-0.5
@@ -154,17 +178,26 @@ class TrellisMLAttention(nn.Module):
 
         # MLA KV compression and decompression
         # Step 1: Compress hidden_states to low-rank representation
-        kv_compressed = self.kv_a_proj(hidden_states)  # [batch, seq_len, kv_lora_rank]
+        kv_compressed_full = self.kv_a_proj(
+            hidden_states
+        )  # [batch, seq_len, kv_lora_rank + kv_rope_dim]
+
+        # Split off rope component if present (GLM MQA variant)
+        if self.has_mqa_rope:
+            kv_compressed = kv_compressed_full[..., : self.kv_lora_rank]
+            # kv_rope = kv_compressed_full[..., self.kv_lora_rank:]  # For RoPE (TODO)
+        else:
+            kv_compressed = kv_compressed_full
 
         # Step 2: Decompress to KV space
-        kv = self.kv_b_proj(kv_compressed)  # [batch, seq_len, num_kv_heads * head_dim * 2]
+        kv = self.kv_b_proj(kv_compressed)  # [batch, seq_len, num_kv_heads * kv_head_dim * 2]
 
         # Step 3: Split into K and V and reshape
-        # First reshape to [batch, seq_len, num_kv_heads, head_dim * 2]
-        kv = kv.view(batch_size, seq_len, self.num_kv_heads, self.head_dim * 2)
+        # First reshape to [batch, seq_len, num_kv_heads, kv_head_dim * 2]
+        kv = kv.view(batch_size, seq_len, self.num_kv_heads, self.kv_head_dim * 2)
 
         # Split last dimension into K and V
-        k, v = kv.chunk(2, dim=-1)  # Each: [batch, seq_len, num_kv_heads, head_dim]
+        k, v = kv.chunk(2, dim=-1)  # Each: [batch, seq_len, num_kv_heads, kv_head_dim]
 
         # Reshape queries to [batch, seq_len, num_heads, head_dim]
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)

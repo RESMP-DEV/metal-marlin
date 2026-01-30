@@ -330,8 +330,9 @@ def _dequantize_trellis_cpu(
     tiles_k = (K + TILE_DIM - 1) // TILE_DIM
     tiles_n = (N + TILE_DIM - 1) // TILE_DIM
 
-    # Allocate output
-    output = torch.zeros(K, N, dtype=torch.float32)
+    # Allocate output as numpy, convert to torch at end
+    import numpy as np
+    output = np.zeros((K, N), dtype=np.float32)
 
     # Dequantize each position
     indices = weight.indices.numpy()
@@ -361,4 +362,4 @@ def _dequantize_trellis_cpu(
 
             output[k, n] = dequant_val
 
-    return output.half()
+    return torch.from_numpy(output).half()

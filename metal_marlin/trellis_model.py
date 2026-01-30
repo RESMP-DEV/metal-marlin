@@ -164,18 +164,18 @@ class TrellisMoEMLP(nn.Module):
             )
             experts.append(expert)
 
-        # Create shared expert
+        # Create shared expert (GLM uses 'shared_experts' plural in weights)
         shared_expert = TrellisDenseMLP(
             gate_proj=TrellisLinear.from_trellis_weight(
-                layer_weights[f"{prefix}.shared_expert.gate_proj.weight"],
+                layer_weights[f"{prefix}.shared_experts.gate_proj.weight"],
                 device=device,
             ),
             up_proj=TrellisLinear.from_trellis_weight(
-                layer_weights[f"{prefix}.shared_expert.up_proj.weight"],
+                layer_weights[f"{prefix}.shared_experts.up_proj.weight"],
                 device=device,
             ),
             down_proj=TrellisLinear.from_trellis_weight(
-                layer_weights[f"{prefix}.shared_expert.down_proj.weight"],
+                layer_weights[f"{prefix}.shared_experts.down_proj.weight"],
                 device=device,
             ),
         )
@@ -315,21 +315,34 @@ class TrellisDecoderLayer(nn.Module):
             head_dim=config.head_dim,
             kv_lora_rank=config.kv_lora_rank,
             q_lora_rank=config.q_lora_rank,
+            kv_rope_dim=getattr(config, "kv_rope_dim", 0),
+            kv_head_dim=getattr(config, "kv_head_dim", None),
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
         )
 
         # Get attention projections
-        q_proj = None
+        # GLM uses low-rank Q: q_a_proj + q_b_proj
+        q_a_proj = None
+        q_b_proj = None
         if mla_config.q_lora_rank:
-            q_key = f"{prefix}.q_proj.weight"
-            if q_key in layer_weights:
-                q_proj = TrellisLinear.from_trellis_weight(
-                    layer_weights[q_key],
+            q_a_key = f"{prefix}.q_a_proj.weight"
+            q_b_key = f"{prefix}.q_b_proj.weight"
+            if q_a_key in layer_weights:
+                q_a_proj = TrellisLinear.from_trellis_weight(
+                    layer_weights[q_a_key],
+                    device=device,
+                )
+            if q_b_key in layer_weights:
+                q_b_proj = TrellisLinear.from_trellis_weight(
+                    layer_weights[q_b_key],
                     device=device,
                 )
 
-        kv_a_key = f"{prefix}.kv_a_proj.weight"
+        # GLM uses kv_a_proj_with_mqa (includes MQA heads)
+        kv_a_key = f"{prefix}.kv_a_proj_with_mqa.weight"
+        if kv_a_key not in layer_weights:
+            kv_a_key = f"{prefix}.kv_a_proj.weight"  # Fallback
         kv_b_key = f"{prefix}.kv_b_proj.weight"
         o_key = f"{prefix}.o_proj.weight"
 
@@ -348,7 +361,8 @@ class TrellisDecoderLayer(nn.Module):
 
         layer.self_attn = TrellisMLAttention(
             config=mla_config,
-            q_proj=q_proj,
+            q_a_proj=q_a_proj,
+            q_b_proj=q_b_proj,
             kv_a_proj=kv_a_proj,
             kv_b_proj=kv_b_proj,
             o_proj=o_proj,
@@ -579,21 +593,18 @@ class TrellisForCausalLM(nn.Module):
 
             # Apply top-k filtering
             if top_k > 0:
-                indices_to_remove = next_token_logits < torch.topk(
-                    next_token_logits, top_k, dim=-1
-                )[0][..., -1, None]
-                next_token_logits = next_token_logits.masked_fill(
-                    indices_to_remove, float("-inf")
+                indices_to_remove = (
+                    next_token_logits
+                    < torch.topk(next_token_logits, top_k, dim=-1)[0][..., -1, None]
                 )
+                next_token_logits = next_token_logits.masked_fill(indices_to_remove, float("-inf"))
 
             # Apply top-p (nucleus) filtering
             if top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(
                     next_token_logits, descending=True, dim=-1
                 )
-                cumulative_probs = torch.cumsum(
-                    F.softmax(sorted_logits, dim=-1), dim=-1
-                )
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
 
                 # Remove tokens with cumulative probability above the threshold
                 sorted_indices_to_remove = cumulative_probs > top_p
@@ -605,9 +616,7 @@ class TrellisForCausalLM(nn.Module):
                 indices_to_remove = sorted_indices_to_remove.scatter(
                     -1, sorted_indices, sorted_indices_to_remove
                 )
-                next_token_logits = next_token_logits.masked_fill(
-                    indices_to_remove, float("-inf")
-                )
+                next_token_logits = next_token_logits.masked_fill(indices_to_remove, float("-inf"))
 
             # Sample from the filtered distribution
             probs = F.softmax(next_token_logits, dim=-1)

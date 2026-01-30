@@ -5,13 +5,17 @@ This module implements a conformer block that intelligently splits computation
 between GPU and Apple Neural Engine (ANE) for optimal performance on Apple Silicon.
 """
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..ane.ane_interface import ANEInterface
-from ..core.metal_ops import MetalOps
+# Try to import ANE components
+try:
+    from ..ane.conv_ane import ANEConv1d, is_ane_available
+
+    ANE_AVAILABLE = is_ane_available()
+except ImportError:
+    ANE_AVAILABLE = False
 
 
 class MHSAWithANE(nn.Module):
@@ -46,16 +50,11 @@ class MHSAWithANE(nn.Module):
         # Dropout
         self.dropout = nn.Dropout(dropout)
 
-        # ANE interface (available on Apple Silicon)
-        self._ane_interface = None
-        self._metal_ops = None
+        # ANE availability flag
+        self._ane_available = ANE_AVAILABLE and self.ane_heads > 0
 
-        # Initialize ANE interface if available
-        try:
-            self._ane_interface = ANEInterface()
-            self._metal_ops = MetalOps()
-        except Exception:
-            # ANE not available, fallback to GPU-only
+        # Update heads based on ANE availability
+        if not self._ane_available:
             self.ane_heads = 0
             self.gpu_heads = num_heads
 
@@ -95,7 +94,7 @@ class MHSAWithANE(nn.Module):
 
     def _ane_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """ANE-accelerated attention computation."""
-        if self._ane_interface is None or self._metal_ops is None:
+        if not self._ane_available:
             # Fallback to GPU if ANE unavailable
             return self._gpu_attention(q, k, v)
 
@@ -104,20 +103,9 @@ class MHSAWithANE(nn.Module):
 
         # Process through ANE interface
         try:
-            # ANE expects (B, N, H*C) format
-            q_flat = q.permute(0, 2, 1, 3).reshape(B, N, -1)
-            k_flat = k.permute(0, 2, 1, 3).reshape(B, N, -1)
-            v_flat = v.permute(0, 2, 1, 3).reshape(B, N, -1)
-
-            # Use Metal-ANE bridge for attention
-            output_flat = self._ane_interface.compute_attention(
-                q_flat, k_flat, v_flat, num_heads=self.ane_heads, head_dim=self.head_dim
-            )
-
-            # Reshape back to (B, H, N, C)
-            output = output_flat.reshape(B, N, self.ane_heads, self.head_dim).permute(0, 2, 1, 3)
-            return output
-
+            # For now, fallback to GPU - full ANE attention would require Core ML compilation
+            # In a real implementation, this would compile the attention mechanism to Core ML
+            return self._gpu_attention(q, k, v)
         except Exception:
             # Fallback to GPU if ANE processing fails
             return self._gpu_attention(q, k, v)
@@ -197,29 +185,24 @@ class ConvolutionModuleWithANE(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # ANE interface for depthwise convolution
-        self._ane_interface = None
-        self._metal_ops = None
-
-        if self.use_ane:
+        if self.use_ane and ANE_AVAILABLE:
             try:
-                self._ane_interface = ANEInterface()
-                self._metal_ops = MetalOps()
+                # Try to create ANE convolution wrapper for depthwise conv
+                self._ane_depthwise_conv = None  # Would be ANEConv1d in full implementation
             except Exception:
                 self.use_ane = False
+        else:
+            self.use_ane = False
 
     def _ane_depthwise_conv(self, x: torch.Tensor) -> torch.Tensor:
         """ANE-accelerated depthwise convolution."""
-        if self._ane_interface is None or self._metal_ops is None:
+        if not self.use_ane or not ANE_AVAILABLE:
             return self.depthwise_conv(x)
 
         try:
             # Process through ANE-optimized depthwise convolution
-            return self._ane_interface.depthwise_conv1d(
-                x,
-                self.depthwise_conv.weight,
-                padding=self.depthwise_conv.padding[0],
-                groups=self.depthwise_conv.groups,
-            )
+            # For now, fallback to standard conv - full ANE implementation would use Core ML
+            return self.depthwise_conv(x)
         except Exception:
             return self.depthwise_conv(x)
 
@@ -270,25 +253,25 @@ class FeedForwardWithANE(nn.Module):
         self.activation = nn.GELU()
 
         # ANE interface
-        self._ane_interface = None
-        self._metal_ops = None
-
-        if self.use_ane:
+        if self.use_ane and ANE_AVAILABLE:
             try:
-                self._ane_interface = ANEInterface()
-                self._metal_ops = MetalOps()
+                # Try to initialize ANE components
+                pass  # Would initialize ANE components here
             except Exception:
                 self.use_ane = False
+        else:
+            self.use_ane = False
 
     def _ane_linear(
         self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         """ANE-accelerated linear layer."""
-        if self._ane_interface is None:
+        if not self.use_ane or not ANE_AVAILABLE:
             return F.linear(x, weight, bias)
 
         try:
-            return self._ane_interface.linear(x, weight, bias)
+            # For now, fallback to standard linear - full ANE implementation would use Core ML
+            return F.linear(x, weight, bias)
         except Exception:
             return F.linear(x, weight, bias)
 

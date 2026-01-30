@@ -36,12 +36,50 @@ class TestTrellisModel:
     def config(self):
         return TrellisModelConfig()
 
-    def test_config_moe_layers(self, config):
-        # GLM-4.7-Flash: layer 0 is dense, layers 1-46 are MoE
+    @pytest.fixture
+    def glm_config(self):
+        """GLM-4.7-Flash style config: MLA, 64 experts, layer 0 dense."""
+        return TrellisModelConfig(
+            hidden_size=2048,
+            num_hidden_layers=47,
+            num_experts=64,
+            num_experts_per_tok=8,
+            first_moe_layer=1,
+            kv_lora_rank=512,
+            q_lora_rank=768,
+        )
+
+    @pytest.fixture
+    def qwen_moe_config(self):
+        """Qwen3-30B-A3B style config: GQA, 128 experts, all MoE."""
+        return TrellisModelConfig(
+            hidden_size=2048,
+            num_hidden_layers=48,
+            num_experts=128,
+            num_experts_per_tok=8,
+            first_moe_layer=0,  # All layers are MoE
+            kv_lora_rank=None,  # Standard GQA, no MLA
+        )
+
+    def test_config_dense_model(self, config):
+        """Default config is a dense model (no MoE)."""
+        assert config.num_experts == 1
         assert not config.is_moe_layer(0)
-        assert config.is_moe_layer(1)  # first_moe_layer=1
-        assert config.is_moe_layer(2)
-        assert config.is_moe_layer(46)
+        assert not config.is_moe_layer(10)
+        assert not config.is_moe_layer(31)
+
+    def test_config_glm_moe_layers(self, glm_config):
+        """GLM-4.7-Flash: layer 0 is dense, layers 1-46 are MoE."""
+        assert not glm_config.is_moe_layer(0)
+        assert glm_config.is_moe_layer(1)
+        assert glm_config.is_moe_layer(46)
+        assert glm_config.is_mla_model()
+
+    def test_config_qwen_moe_layers(self, qwen_moe_config):
+        """Qwen3-30B-A3B: all layers are MoE."""
+        assert qwen_moe_config.is_moe_layer(0)
+        assert qwen_moe_config.is_moe_layer(47)
+        assert not qwen_moe_config.is_mla_model()
 
     @requires_trellis_model
     def test_model_creation(self, config):

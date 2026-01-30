@@ -49,7 +49,7 @@ try:
     import torch
 
     HAS_TORCH = True
-    HAS_MPS = torch.backends.mps.is_available()
+    HAS_MPS = hasattr(torch, "backends") and torch.backends.mps.is_available()
 except ImportError:
     HAS_TORCH = False
     HAS_MPS = False
@@ -74,10 +74,16 @@ def require_mps(feature: str = "KV cache") -> None:
 _DTYPE_TO_TORCH: dict[str, torch.dtype] = {}
 if HAS_TORCH:
     _DTYPE_TO_TORCH = {
-        "fp16": torch.float16,
-        "bf16": torch.bfloat16,
+        "fp16": getattr(
+            torch, "float16", torch.float32
+        ),  # Fallback to float32 if float16 not available
+        "bf16": getattr(
+            torch, "bfloat16", torch.float32
+        ),  # Fallback to float32 if bfloat16 not available
         "fp32": torch.float32,
-        "fp8": torch.float16,  # PyTorch doesn't have native fp8, use fp16 storage
+        "fp8": getattr(
+            torch, "float16", torch.float32
+        ),  # PyTorch doesn't have native fp8, use fp16 storage
     }
 
 
@@ -263,7 +269,9 @@ class KVCache:
             ]
         else:
             # Full precision cache using cache_dtype override or dtype_config.kv_cache
-            storage_dtype_str = getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            storage_dtype_str = (
+                getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            )
             storage_dtype = _get_torch_dtype(storage_dtype_str)
             self.k_cache = [
                 torch.zeros(cache_shape, dtype=storage_dtype, device=device)
@@ -353,10 +361,16 @@ class KVCache:
 
         else:
             # Direct storage using kv_cache dtype
-            storage_dtype_str = getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            storage_dtype_str = (
+                getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+            )
             storage_dtype = _get_torch_dtype(storage_dtype_str)
-            self._slice_update(self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype)
-            self._slice_update(self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype)
+            self._slice_update(
+                self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype
+            )
+            self._slice_update(
+                self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype
+            )
 
             # Return in activations dtype for attention computation
             k_full = self.k_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)

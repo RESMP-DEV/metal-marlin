@@ -5,10 +5,11 @@ This package provides format-agnostic model loading and execution:
 - `onnx_executor`: Execute ONNX models using Metal Marlin kernels
 - `ort_marlin_provider`: ONNX Runtime custom op provider for Metal Marlin
 - `safetensors_loader`: Load HuggingFace config.json, map weight names, quantize
+- `nemo_to_pytorch`: Convert NeMo checkpoints to standard PyTorch format
 - `gguf_to_marlin`: Convert GGUF MXFP4 weights to Marlin format (see metal_marlin.gguf_to_marlin)
 
-The philosophy is to support model formats (ONNX, safetensors, GGUF), not
-model architectures (Llama, Mistral). This way, any standard transformer
+The philosophy is to support model formats (ONNX, safetensors, GGUF, NeMo), not
+model architectures (Llama, Mistral, Conformer). This way, any standard model
 works automatically.
 """
 
@@ -18,6 +19,7 @@ from .calibration import (
     CalibrationStats,
     compute_scales,
 )
+from .nemo_to_pytorch import convert_nemo_to_pytorch
 from .onnx_executor import ONNXExecutor, ONNXGraph, load_onnx_model
 from .ort_marlin_provider import (
     MarlinFlashAttentionOp,
@@ -50,6 +52,7 @@ __all__ = [
     "ONNXGraph",
     "QuantizationReport",
     "compute_scales",
+    "convert_nemo_to_pytorch",
     "create_session",
     "detect_model_type",
     "estimate_memory",

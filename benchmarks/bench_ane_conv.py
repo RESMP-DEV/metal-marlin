@@ -17,9 +17,23 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
-import torch
-import torch.nn as nn
+# Check if torch is available
+try:
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    HAS_TORCH = True
+except ImportError:
+    HAS_TORCH = False
+    torch = None
+    nn = None
+    F = None
+
+# Check if MPS is available
+HAS_MPS = HAS_TORCH and torch.backends.mps.is_available()
 
 # Check if ANE is available
 try:
@@ -117,11 +131,14 @@ class ConformerConv1d(nn.Module):
 
 
 def time_mps_conv(
-    fn: Callable[[], torch.Tensor],
+    fn: Callable[[], Any],
     warmup: int = 10,
     iterations: int = 100,
 ) -> float:
     """Time a convolution function on MPS."""
+
+    if not HAS_TORCH or not HAS_MPS:
+        return float("inf")
 
     # Warmup
     for _ in range(warmup):
@@ -141,14 +158,14 @@ def time_mps_conv(
 
 
 def time_ane_conv(
-    fn: Callable[[], torch.Tensor],
+    fn: Callable[[], Any],
     warmup: int = 10,
     iterations: int = 100,
 ) -> float:
     """Time a convolution function on ANE."""
 
-    if not HAS_ANE:
-        raise RuntimeError("ANE not available. Install torch-neuron.")
+    if not HAS_TORCH or not HAS_ANE:
+        return float("inf")
 
     # Transfer to CPU first (simulating typical workflow)
     def cpu_to_ane_wrapper():
@@ -203,6 +220,16 @@ def benchmark_pointwise_conv(
     iterations: int = 100,
 ) -> ConvBenchmarkResult:
     """Benchmark pointwise convolution."""
+
+    if not HAS_TORCH:
+        return ConvBenchmarkResult(
+            name="pointwise_conv",
+            seq_len=seq_len,
+            hidden=hidden,
+            kernel=1,
+            groups=1,
+            mps_time_ms=float("inf"),
+        )
 
     # Create input
     x_mps = torch.randn(1, seq_len, hidden, device="mps", dtype=torch.float32)
@@ -266,6 +293,16 @@ def benchmark_depthwise_conv(
     iterations: int = 100,
 ) -> ConvBenchmarkResult:
     """Benchmark depthwise convolution."""
+
+    if not HAS_TORCH:
+        return ConvBenchmarkResult(
+            name="depthwise_conv",
+            seq_len=seq_len,
+            hidden=hidden,
+            kernel=kernel,
+            groups=hidden,
+            mps_time_ms=float("inf"),
+        )
 
     # Create input
     x_mps = torch.randn(1, seq_len, hidden, device="mps", dtype=torch.float32)
@@ -334,6 +371,16 @@ def benchmark_conformer_conv(
 ) -> ConvBenchmarkResult:
     """Benchmark full Conformer convolution module."""
 
+    if not HAS_TORCH:
+        return ConvBenchmarkResult(
+            name="conformer_conv",
+            seq_len=seq_len,
+            hidden=hidden,
+            kernel=kernel,
+            groups=hidden // 2,
+            mps_time_ms=float("inf"),
+        )
+
     # Create input
     x_mps = torch.randn(1, seq_len, hidden, device="mps", dtype=torch.float32)
 
@@ -391,8 +438,21 @@ def benchmark_ane_vs_mps_conv():
 
     print("ANE vs MPS Conv1D Benchmark")
     print("=" * 50)
+    print(f"PyTorch Available: {HAS_TORCH}")
     print(f"ANE Available: {HAS_ANE}")
-    print(f"MPS Available: {torch.backends.mps.is_available()}")
+    print(f"MPS Available: {HAS_MPS}")
+
+    if not HAS_TORCH:
+        print("\nERROR: PyTorch is not installed. Install with:")
+        print("  uv sync --extra torch")
+        return []
+
+    if not HAS_MPS:
+        print("\nWARNING: MPS is not available. MPS benchmarks will be skipped.")
+        print(
+            "This may be because you're not on Apple Silicon or PyTorch is not properly configured."
+        )
+
     print()
 
     # Conformer conv params
@@ -411,31 +471,40 @@ def benchmark_ane_vs_mps_conv():
         # Pointwise conv
         result_pointwise = benchmark_pointwise_conv(seq_len, hidden)
         results.append(result_pointwise)
-        print(f"  Pointwise:  MPS={result_pointwise.mps_time_ms:.2f}ms", end="")
-        if result_pointwise.ane_time_ms:
-            print(f", ANE={result_pointwise.ane_time_ms:.2f}ms", end="")
-            print(f", Speedup={result_pointwise.speedup:.2f}x", end="")
-        print()
+        if result_pointwise.mps_time_ms != float("inf"):
+            print(f"  Pointwise:  MPS={result_pointwise.mps_time_ms:.2f}ms", end="")
+            if result_pointwise.ane_time_ms:
+                print(f", ANE={result_pointwise.ane_time_ms:.2f}ms", end="")
+                print(f", Speedup={result_pointwise.speedup:.2f}x", end="")
+            print()
+        else:
+            print("  Pointwise:  Skipped (PyTorch/MPS unavailable)")
 
         # Depthwise conv
         result_depthwise = benchmark_depthwise_conv(seq_len, hidden, kernel)
         results.append(result_depthwise)
-        print(f"  Depthwise:  MPS={result_depthwise.mps_time_ms:.2f}ms", end="")
-        if result_depthwise.ane_time_ms:
-            print(f", ANE={result_depthwise.ane_time_ms:.2f}ms", end="")
-            print(f", Speedup={result_depthwise.speedup:.2f}x", end="")
-        print()
+        if result_depthwise.mps_time_ms != float("inf"):
+            print(f"  Depthwise:  MPS={result_depthwise.mps_time_ms:.2f}ms", end="")
+            if result_depthwise.ane_time_ms:
+                print(f", ANE={result_depthwise.ane_time_ms:.2f}ms", end="")
+                print(f", Speedup={result_depthwise.speedup:.2f}x", end="")
+            print()
+        else:
+            print("  Depthwise:  Skipped (PyTorch/MPS unavailable)")
 
         # Full Conformer conv
         result_conformer = benchmark_conformer_conv(seq_len, hidden, kernel)
         results.append(result_conformer)
-        print(f"  Conformer:  MPS={result_conformer.mps_time_ms:.2f}ms", end="")
-        if result_conformer.ane_time_ms:
-            print(f", ANE={result_conformer.ane_time_ms:.2f}ms", end="")
-            print(f", Speedup={result_conformer.speedup:.2f}x", end="")
-        print()
+        if result_conformer.mps_time_ms != float("inf"):
+            print(f"  Conformer:  MPS={result_conformer.mps_time_ms:.2f}ms", end="")
+            if result_conformer.ane_time_ms:
+                print(f", ANE={result_conformer.ane_time_ms:.2f}ms", end="")
+                print(f", Speedup={result_conformer.speedup:.2f}x", end="")
+            print()
+        else:
+            print("  Conformer:  Skipped (PyTorch/MPS unavailable)")
 
-        if HAS_ANE:
+        if HAS_ANE and result_pointwise.mps_time_ms != float("inf"):
             transfer = result_pointwise.transfer_overhead_ms
             print(f"  Transfer:    {transfer:.2f}ms (CPU<->ANE)")
 

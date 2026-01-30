@@ -1,5 +1,7 @@
 import concurrent.futures
 
+import torch
+
 
 class ANEAsyncExecutor:
     """
