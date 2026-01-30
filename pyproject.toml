@@ -95,7 +95,10 @@ ignore = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "mps: marks tests that require MPS/hardware (deselect with '-m \"not mps\"')",
+]
 
 [project.scripts]
 metal-marlin = "metal_marlin.cli:cli"
