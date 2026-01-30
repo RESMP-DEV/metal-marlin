@@ -17,6 +17,7 @@ def _get_device() -> str:
     return "mps" if HAS_MPS else "cpu"
 
 
+@pytest.mark.mps  # Mark as MPS-dependent - skip in CI, run locally with: pytest -m mps
 class TestTrellisKVCache:
     """Test suite for TrellisKVCache MLA implementation."""
 
