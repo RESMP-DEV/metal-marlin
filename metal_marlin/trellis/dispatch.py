@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
-from .metal_dispatch import (
+from ..metal_dispatch import (
     HAS_METAL,
     HAS_MPS,
     MetalKernelLibrary,
@@ -23,10 +23,10 @@ from .metal_dispatch import (
     mps_tensor_to_metal_buffer,
     require_mps,
 )
-from .quantization.trellis_codebook import TrellisCodebook
+from ..quantization.trellis_codebook import TrellisCodebook
 
 if TYPE_CHECKING:
-    from .trellis_loader import TrellisWeight
+    from .loader import TrellisWeight
 
 if HAS_METAL:
     import Metal

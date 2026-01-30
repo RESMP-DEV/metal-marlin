@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(not MODEL_PATH.exists(), reason="Model not found
 
 def test_weight_stays_packed():
     """Verify weights stay in packed format after loading."""
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     loader = TrellisModelLoader(str(MODEL_PATH))
     layer = loader.load_layer(0)
@@ -37,7 +37,7 @@ def test_model_memory_efficiency():
         torch.mps.empty_cache()
         baseline = torch.mps.current_allocated_memory()
 
-    from metal_marlin.trellis_lm import TrellisForCausalLM
+    from metal_marlin.trellis.lm import TrellisForCausalLM
     model = TrellisForCausalLM.from_pretrained(str(MODEL_PATH), device="mps")
 
     if torch.backends.mps.is_available():
@@ -53,7 +53,7 @@ def test_model_memory_efficiency():
 
 def test_forward_pass_no_memory_explosion():
     """Verify forward pass doesn't cache FP16 weights."""
-    from metal_marlin.trellis_lm import TrellisForCausalLM
+    from metal_marlin.trellis.lm import TrellisForCausalLM
     model = TrellisForCausalLM.from_pretrained(str(MODEL_PATH), device="mps")
 
     if torch.backends.mps.is_available():

@@ -10,8 +10,8 @@ class TestDequantQuality:
 
     def test_output_range(self):
         """Verify dequantized weights are in reasonable range."""
-        from metal_marlin.trellis_linear import TrellisLinear
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.linear import TrellisLinear
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
         weights = loader.load_layer(0)
@@ -30,8 +30,8 @@ class TestDequantQuality:
 
     def test_deterministic(self):
         """Verify dequantization is deterministic."""
-        from metal_marlin.trellis_linear import TrellisLinear
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.linear import TrellisLinear
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
         weights = loader.load_layer(0)
@@ -47,8 +47,8 @@ class TestDequantQuality:
 
     def test_forward_consistency(self):
         """Verify forward pass produces consistent results."""
-        from metal_marlin.trellis_linear import TrellisLinear
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.linear import TrellisLinear
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
         weights = loader.load_layer(0)
@@ -69,9 +69,9 @@ class TestModelQuality:
 
     def test_layer_output_distribution(self):
         """Check layer outputs have reasonable distribution."""
-        from metal_marlin.trellis_config import TrellisModelConfig
-        from metal_marlin.trellis_layer import TrellisDecoderLayer
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.config import TrellisModelConfig
+        from metal_marlin.trellis.layer import TrellisDecoderLayer
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
         config = TrellisModelConfig()

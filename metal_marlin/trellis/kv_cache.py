@@ -11,7 +11,7 @@ This consists of:
 - k_pe: Positional embeddings for MQA [batch, seq_len, num_kv_heads * head_dim_for_mqa]
 
 Usage:
-    from metal_marlin.trellis_kv_cache import TrellisKVCache
+    from metal_marlin.trellis.kv_cache import TrellisKVCache
 
     cache = TrellisKVCache(
         num_layers=32,
@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._compat import require_torch, torch
+from .._compat import require_torch, torch
 
 if TYPE_CHECKING:
     import torch as torch_typing

@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .trellis_linear import TrellisLinear
-from .trellis_loader import TrellisWeight
+from .linear import TrellisLinear
+from .loader import TrellisWeight
 
 __all__ = [
     "TrellisMoEConfig",

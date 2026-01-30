@@ -4,8 +4,8 @@ import time
 
 import torch
 
-from metal_marlin.trellis_generate import GenerationConfig, TrellisGenerator
-from metal_marlin.trellis_lm import TrellisForCausalLM
+from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
+from metal_marlin.trellis.lm import TrellisForCausalLM
 
 
 def benchmark_generation(

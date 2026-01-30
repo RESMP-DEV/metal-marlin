@@ -34,8 +34,8 @@ from tqdm import tqdm
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from metal_marlin.trellis_linear import TrellisLinear
-from metal_marlin.trellis_loader import TrellisModelLoader
+from metal_marlin.trellis.linear import TrellisLinear
+from metal_marlin.trellis.loader import TrellisModelLoader
 
 MODEL_PATH = _ROOT / "models" / "GLM-4.7-Flash-Trellis-3bpw"
 RESULTS_DIR = _ROOT / "benchmarks" / "results"

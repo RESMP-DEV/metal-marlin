@@ -12,7 +12,7 @@ sys.path.insert(0, str(_ROOT))
 
 from metal_marlin.metal_dispatch import MetalKernelLibrary
 from metal_marlin.quantization.trellis_codebook import TrellisCodebook
-from metal_marlin.trellis_dispatch import dispatch_trellis_dequant_fused
+from metal_marlin.trellis.dispatch import dispatch_trellis_dequant_fused
 
 
 def benchmark_dequant_kernel(K: int, N: int, bits: int, iterations: int = 100) -> dict:

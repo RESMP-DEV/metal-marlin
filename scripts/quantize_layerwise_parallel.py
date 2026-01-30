@@ -53,7 +53,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from metal_marlin.calibration import CalibrationDataset
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
-from metal_marlin.trellis_packing import pack_indices_vectorized
+from metal_marlin.trellis.packing import pack_indices_vectorized
 
 # Layers that need higher precision
 SENSITIVE_PATTERNS = {

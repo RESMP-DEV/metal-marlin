@@ -34,7 +34,7 @@ from safetensors.numpy import load_file, save_file
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from metal_marlin.trellis_packing import pack_indices_vectorized
+from metal_marlin.trellis.packing import pack_indices_vectorized
 
 
 def discover_layers(model_path: Path) -> list[int]:

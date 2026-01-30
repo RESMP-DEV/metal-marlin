@@ -48,7 +48,7 @@ def test_metal_matches_cpu(small_indices_weight):
     """Verify Metal output matches CPU reference."""
     from metal_marlin.metal_dispatch import MetalKernelLibrary
     from metal_marlin.quantization.trellis_codebook import TrellisCodebook
-    from metal_marlin.trellis_dispatch import dispatch_trellis_dequant_fused
+    from metal_marlin.trellis.dispatch import dispatch_trellis_dequant_fused
 
     indices, scales, su, sv, K, N, bits = small_indices_weight
     codebook = TrellisCodebook(bits=bits)

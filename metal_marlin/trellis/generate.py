@@ -5,8 +5,8 @@ trellis quantization. It follows the HuggingFace generate() API for interface
 compatibility while leveraging Metal-accelerated inference.
 
 Usage:
-    from metal_marlin.trellis_generate import TrellisGenerator, GenerationConfig
-    from metal_marlin.trellis_linear import TrellisModelWrapper
+    from metal_marlin.trellis.generate import TrellisGenerator, GenerationConfig
+    from metal_marlin.trellis.linear import TrellisModelWrapper
     from transformers import AutoTokenizer
 
     # Load model and tokenizer
@@ -26,8 +26,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ._compat import require_torch, torch
-from .trellis_kv_cache import TrellisKVCache
+from .._compat import require_torch, torch
+from .kv_cache import TrellisKVCache
 
 if TYPE_CHECKING:
     import torch as torch_typing

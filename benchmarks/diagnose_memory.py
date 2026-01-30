@@ -9,8 +9,8 @@ import torch
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT))
 
-from metal_marlin.trellis_linear import TrellisLinear
-from metal_marlin.trellis_lm import TrellisForCausalLM
+from metal_marlin.trellis.linear import TrellisLinear
+from metal_marlin.trellis.lm import TrellisForCausalLM
 
 
 def main():

@@ -1804,7 +1804,7 @@ try:
 except ImportError:
     try:
         # Direct import when running as module
-        from converters.calibration import CalibrationDataset
+        from metal_marlin.converters.calibration import CalibrationDataset
     except ImportError:
         CalibrationDataset = None  # type: ignore[misc,assignment]
 
@@ -2961,7 +2961,7 @@ Examples:
             try:
                 from ..converters.calibration import CalibrationDataset as CalibDS
             except ImportError:
-                from converters.calibration import CalibrationDataset as CalibDS
+                from metal_marlin.converters.calibration import CalibrationDataset as CalibDS
             calib = CalibDS.bartowski_v3(max_samples=args.calibration_samples)
 
         convert_onnx_to_fp4(

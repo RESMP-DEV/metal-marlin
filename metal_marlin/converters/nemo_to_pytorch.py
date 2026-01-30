@@ -10,7 +10,7 @@ state_dict with additional metadata. This converter extracts:
 The converter handles both ASR and TTS models from NeMo's speech collection.
 
 Example:
-    from converters.nemo_to_pytorch import convert_nemo_to_pytorch
+    from metal_marlin.converters.nemo_to_pytorch import convert_nemo_to_pytorch
 
     # Convert .nemo to .pt
     convert_nemo_to_pytorch(

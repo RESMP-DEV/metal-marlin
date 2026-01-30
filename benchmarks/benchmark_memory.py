@@ -28,7 +28,7 @@ def benchmark_quantized_loading(model_path: str) -> dict:
     baseline = get_mps_memory()
     print(f"Baseline memory: {baseline:.2f} GB")
 
-    from metal_marlin.trellis_lm import TrellisForCausalLM
+    from metal_marlin.trellis.lm import TrellisForCausalLM
 
     print("Loading quantized model...")
     model = TrellisForCausalLM.from_pretrained(model_path, device="mps")

@@ -4,8 +4,8 @@ Provides drop-in replacement for nn.Linear with on-the-fly dequantization
 using Metal GPU acceleration.
 
 Usage:
-    from metal_marlin.trellis_loader import TrellisModelLoader
-    from metal_marlin.trellis_linear import TrellisLinear
+    from metal_marlin.trellis.loader import TrellisModelLoader
+    from metal_marlin.trellis.linear import TrellisLinear
 
     loader = TrellisModelLoader("model_dir")
     weight = loader.load_weight("layers.0.mlp.gate_proj")
@@ -23,15 +23,15 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
-from .quantization.trellis_codebook import TrellisCodebook
-from .trellis_dispatch import (
+from ..metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
+from ..quantization.trellis_codebook import TrellisCodebook
+from .dispatch import (
     dequantize_trellis_weight,
     dispatch_trellis_dequant_packed,
 )
 
 if TYPE_CHECKING:
-    from .trellis_loader import TrellisWeight
+    from .loader import TrellisWeight
 
 
 class TrellisLinear(nn.Module):
@@ -303,7 +303,7 @@ class TrellisModelWrapper(nn.Module):
     def _get_loader(self):
         """Get or create TrellisModelLoader."""
         if self._loader is None:
-            from .trellis_loader import TrellisModelLoader
+            from .loader import TrellisModelLoader
 
             self._loader = TrellisModelLoader(self.model_dir)
         return self._loader

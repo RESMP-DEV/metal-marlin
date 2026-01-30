@@ -28,10 +28,10 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import (
     apply_rotary_pos_emb,
 )
 
-from .attention import scaled_dot_product_attention_metal
-from .kv_cache import KVCache
-from .trellis_kv_cache import TrellisKVCache
-from .trellis_linear import TrellisLinear
+from ..attention import scaled_dot_product_attention_metal
+from ..kv_cache import KVCache
+from .kv_cache import TrellisKVCache
+from .linear import TrellisLinear
 
 if TYPE_CHECKING:
     pass

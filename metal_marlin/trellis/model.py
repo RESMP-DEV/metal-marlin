@@ -12,15 +12,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .transformer import RMSNorm
-from .trellis_attention import TrellisMLAConfig, TrellisMLAttention
-from .trellis_config import TrellisModelConfig
-from .trellis_kv_cache import TrellisKVCache
-from .trellis_layer import TrellisDenseMLP
-from .trellis_linear import TrellisLinear
+from ..transformer import RMSNorm
+from .attention import TrellisMLAConfig, TrellisMLAttention
+from .config import TrellisModelConfig
+from .kv_cache import TrellisKVCache
+from .layer import TrellisDenseMLP
+from .linear import TrellisLinear
 
 if TYPE_CHECKING:
-    from .trellis_loader import TrellisModelLoader
+    from .loader import TrellisModelLoader
 
 
 class TrellisMoEMLP(nn.Module):
@@ -475,7 +475,7 @@ class TrellisModel(nn.Module):
         config = TrellisModelConfig.from_pretrained(model_path)
         model = cls(config)
 
-        from .trellis_loader import TrellisModelLoader
+        from .loader import TrellisModelLoader
 
         loader = TrellisModelLoader(model_path)
 

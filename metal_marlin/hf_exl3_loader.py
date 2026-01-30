@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch
 
-    from .trellis_loader import TrellisModelLoader
+    from .trellis.loader import TrellisModelLoader
 
 
 def download_exl3_model(
@@ -236,7 +236,7 @@ def load_exl3_from_hub(
         FileNotFoundError: If config.json is not found in the model
         NotImplementedError: If the model is sharded and needs conversion
     """
-    from .trellis_loader import TrellisModelLoader
+    from .trellis.loader import TrellisModelLoader
 
     # Download model
     model_path = download_exl3_model(

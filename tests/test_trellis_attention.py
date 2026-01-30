@@ -8,8 +8,8 @@ import torch
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
 from metal_marlin.dtypes import DTypeConfig
 from metal_marlin.kv_cache import CacheConfig, KVCache
-from metal_marlin.trellis_attention import TrellisMLAConfig, TrellisMLAttention
-from metal_marlin.trellis_linear import TrellisLinear
+from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
+from metal_marlin.trellis.linear import TrellisLinear
 
 # Skip entire module if PyTorch unavailable
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
@@ -51,11 +51,13 @@ class TestTrellisMLAttention:
         """Create a TrellisMLAConfig for testing."""
         return TrellisMLAConfig(
             hidden_size=2048,
-            num_attention_heads=32,
-            num_kv_heads=8,
-            head_dim=64,
+            num_attention_heads=20,
+            num_kv_heads=20,
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
             kv_lora_rank=512,
-            q_lora_rank=1536,
+            q_lora_rank=768,
         )
 
     @pytest.fixture
@@ -69,7 +71,7 @@ class TestTrellisMLAttention:
         q_b_proj = _create_mock_linear(config.q_lora_rank, config.hidden_size, device)
         kv_a_proj = _create_mock_linear(config.hidden_size, config.kv_lora_rank, device)
         kv_b_proj = _create_mock_linear(
-            config.kv_lora_rank, config.num_kv_heads * config.head_dim * 2, device
+            config.kv_lora_rank, config.num_kv_heads * config.v_head_dim * 2, device
         )
         o_proj = _create_mock_linear(config.hidden_size, config.hidden_size, device)
 
@@ -97,7 +99,7 @@ class TestTrellisMLAttention:
             num_layers=1,
             num_heads=attention.config.num_attention_heads,
             num_kv_heads=attention.config.num_kv_heads,
-            head_dim=attention.config.head_dim,
+            head_dim=attention.config.v_head_dim,
             max_seq_len=1024,
             cache_dtype="fp16",
         )

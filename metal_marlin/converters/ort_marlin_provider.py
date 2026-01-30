@@ -26,7 +26,7 @@ Requirements:
     pip install onnxruntime onnxruntime-extensions torch
 
 Usage:
-    from converters.ort_marlin_provider import create_session
+    from metal_marlin.converters.ort_marlin_provider import create_session
 
     sess = create_session("model.onnx", group_size=32)
     outputs = sess.run(None, {"input": input_array})

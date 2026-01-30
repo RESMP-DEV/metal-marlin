@@ -9,7 +9,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_metal_marlin_format(self):
         """Should detect metal_marlin format with __indices keys."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         # Create a mock loader (we don't need a real path for this test)
         loader = object.__new__(TrellisModelLoader)
@@ -27,7 +27,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_exllamav3_gptq_format(self):
         """Should detect exllamav3_gptq format with .qweight keys."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -42,7 +42,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_exllamav3_exl2_format(self):
         """Should detect exllamav3_exl2 format with .scale and .zero_point."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -57,7 +57,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_exllamav3_trellis_format(self):
         """Should detect exllamav3_trellis format with 'trellis' in key."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -72,7 +72,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_unknown_format(self):
         """Should return 'unknown' for unrecognized format."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -91,7 +91,7 @@ class TestTrellisBaseWeightName:
 
     def test_metal_marlin_base_name(self):
         """Should extract base name from metal_marlin format."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -102,7 +102,7 @@ class TestTrellisBaseWeightName:
 
     def test_exllamav3_base_name(self):
         """Should extract base name from exllamav3 format."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -122,7 +122,7 @@ class TestTrellisComponentName:
 
     def test_metal_marlin_component(self):
         """Should extract component from metal_marlin format."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -133,7 +133,7 @@ class TestTrellisComponentName:
 
     def test_exllamav3_component(self):
         """Should extract component from exllamav3 format."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -152,7 +152,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_from_su_sv(self):
         """Should infer shape from su/sv components."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -166,7 +166,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_from_row_col_scale(self):
         """Should infer shape from row_scale/col_scale components."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -180,7 +180,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_missing_components(self):
         """Should return (0, 0) for missing components."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -195,7 +195,7 @@ class TestConvertExllamaV3Trellis:
 
     def test_convert_simple_exllamav3(self):
         """Should convert simple exllamav3 format to TrellisWeight."""
-        from metal_marlin.trellis_loader import TrellisModelLoader, TrellisWeight
+        from metal_marlin.trellis.loader import TrellisModelLoader, TrellisWeight
 
         loader = object.__new__(TrellisModelLoader)
 
@@ -218,7 +218,7 @@ class TestConvertExllamaV3Trellis:
 
     def test_convert_alternative_naming(self):
         """Should handle alternative exllamav3 naming (scale, row_scale, etc)."""
-        from metal_marlin.trellis_loader import TrellisModelLoader, TrellisWeight
+        from metal_marlin.trellis.loader import TrellisModelLoader, TrellisWeight
 
         loader = object.__new__(TrellisModelLoader)
 

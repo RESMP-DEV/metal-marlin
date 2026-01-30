@@ -1,12 +1,12 @@
 import pytest
 import torch
 
-from metal_marlin.trellis_config import TrellisModelConfig
+from metal_marlin.trellis.config import TrellisModelConfig
 
 # Skip model tests if classes are not available
 try:
-    from metal_marlin.trellis_lm import TrellisForCausalLM
-    from metal_marlin.trellis_model import TrellisModel
+    from metal_marlin.trellis.lm import TrellisForCausalLM
+    from metal_marlin.trellis.model import TrellisModel
 
     HAS_TRELLIS_MODEL = True
 except ImportError:
@@ -14,7 +14,7 @@ except ImportError:
 
 # Skip decoder layer tests if not available
 try:
-    from metal_marlin.trellis_layer import TrellisDecoderLayer
+    from metal_marlin.trellis.layer import TrellisDecoderLayer
 
     HAS_DECODER_LAYER = True
 except ImportError:
@@ -90,7 +90,7 @@ class TestTrellisModel:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_single_layer_forward(self):
         """Test forward through a single loaded layer."""
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         config = TrellisModelConfig()
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
@@ -110,8 +110,8 @@ class TestTrellisModelMoE:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_moe_layer_forward(self):
         """Test forward through an MoE layer."""
-        from metal_marlin.trellis_layer import TrellisDecoderLayer
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.layer import TrellisDecoderLayer
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         config = TrellisModelConfig()
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
@@ -135,8 +135,8 @@ class TestTrellisModelMoE:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_multiple_layers(self):
         """Test forward through multiple layers."""
-        from metal_marlin.trellis_layer import TrellisDecoderLayer
-        from metal_marlin.trellis_loader import TrellisModelLoader
+        from metal_marlin.trellis.layer import TrellisDecoderLayer
+        from metal_marlin.trellis.loader import TrellisModelLoader
 
         config = TrellisModelConfig()
         loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")

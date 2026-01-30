@@ -18,8 +18,8 @@ if TYPE_CHECKING:
 
 # Skip all tests if required classes are not available
 try:
-    from metal_marlin.trellis_loader import TrellisModelLoader
-    from metal_marlin.trellis_moe import TrellisMoEConfig, TrellisMoELayer
+    from metal_marlin.trellis.loader import TrellisModelLoader
+    from metal_marlin.trellis.moe import TrellisMoEConfig, TrellisMoELayer
 
     HAS_TRELLIS_MOE = True
 except ImportError:

@@ -16,7 +16,7 @@ from metal_marlin._compat import HAS_MPS, torch
 
 # Always import config separately since it has fewer dependencies
 try:
-    from metal_marlin.trellis_config import TrellisModelConfig
+    from metal_marlin.trellis.config import TrellisModelConfig
 
     HAS_CONFIG = True
 except ImportError:
@@ -24,8 +24,8 @@ except ImportError:
 
 # Skip all tests if model classes are not available
 try:
-    from metal_marlin.trellis_loader import TrellisModelLoader
-    from metal_marlin.trellis_model import TrellisDenseMLP, TrellisModel, TrellisMoEMLP
+    from metal_marlin.trellis.loader import TrellisModelLoader
+    from metal_marlin.trellis.model import TrellisDenseMLP, TrellisModel, TrellisMoEMLP
 
     HAS_TRELLIS_MODEL = True
 except ImportError:
@@ -321,7 +321,7 @@ def test_model_with_kv_cache(model_path, config):
     if not HAS_MPS:
         pytest.skip("MPS required")
 
-    from metal_marlin.trellis_kv_cache import TrellisKVCache
+    from metal_marlin.trellis.kv_cache import TrellisKVCache
 
     # Load model
     model = TrellisModel.from_pretrained(model_path, device="mps", load_in_layers=True)
@@ -415,4 +415,4 @@ def test_model_deterministic(model_path, config):
 
 # Import TrellisDecoderLayer for tests that need it
 if HAS_TRELLIS_MODEL:
-    from metal_marlin.trellis_model import TrellisDecoderLayer
+    from metal_marlin.trellis.model import TrellisDecoderLayer

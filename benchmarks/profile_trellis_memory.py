@@ -14,7 +14,7 @@ def get_mps_memory() -> dict:
 
 def profile_layer_loading(model_path: str, num_layers: int = 5):
     """Profile memory during layer loading."""
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     gc.collect()
     torch.mps.empty_cache()
@@ -47,8 +47,8 @@ def profile_layer_loading(model_path: str, num_layers: int = 5):
 
 def profile_inference(model_path: str):
     """Profile memory during inference."""
-    from metal_marlin.trellis_linear import TrellisLinear
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.linear import TrellisLinear
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     gc.collect()
     torch.mps.empty_cache()

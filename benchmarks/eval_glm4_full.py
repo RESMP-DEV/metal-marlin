@@ -39,13 +39,13 @@ sys.path.insert(0, str(_ROOT))
 from metal_marlin.calibration import CalibrationDataset
 
 # Disable dequantization caching for memory efficiency
-from metal_marlin.trellis_linear import TrellisLinear
+from metal_marlin.trellis.linear import TrellisLinear
 
 TrellisLinear.enable_cache = False
 from metal_marlin.eval import load_tokenizer
-from metal_marlin.trellis_config import TrellisModelConfig
-from metal_marlin.trellis_kv_cache import TrellisKVCache
-from metal_marlin.trellis_lm import TrellisForCausalLM
+from metal_marlin.trellis.config import TrellisModelConfig
+from metal_marlin.trellis.kv_cache import TrellisKVCache
+from metal_marlin.trellis.lm import TrellisForCausalLM
 
 DEFAULT_MODEL_PATH = _ROOT / "models" / "GLM-4.7-Flash-EXL3-3bpw"
 RESULTS_DIR = _ROOT / "benchmarks" / "results"

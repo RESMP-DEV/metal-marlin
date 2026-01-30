@@ -18,8 +18,8 @@ def timer(name: str):
 
 def benchmark_dequant(model_path: str, iterations: int = 100):
     """Benchmark dequantization performance."""
-    from metal_marlin.trellis_linear import TrellisLinear
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.linear import TrellisLinear
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     loader = TrellisModelLoader(model_path)
     weights = loader.load_layer(0)
@@ -57,8 +57,8 @@ def benchmark_dequant(model_path: str, iterations: int = 100):
 
 def benchmark_forward(model_path: str, batch_sizes: list = [1, 4, 16, 64]):
     """Benchmark forward pass with different batch sizes."""
-    from metal_marlin.trellis_linear import TrellisLinear
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.linear import TrellisLinear
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     loader = TrellisModelLoader(model_path)
     weights = loader.load_layer(0)
@@ -90,9 +90,9 @@ def benchmark_forward(model_path: str, batch_sizes: list = [1, 4, 16, 64]):
 
 def benchmark_moe(model_path: str):
     """Benchmark MoE layer performance."""
-    from metal_marlin.trellis_moe import TrellisMoEConfig, TrellisMoELayer
+    from metal_marlin.trellis.moe import TrellisMoEConfig, TrellisMoELayer
 
-    from metal_marlin.trellis_loader import TrellisModelLoader
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     loader = TrellisModelLoader(model_path)
     config = TrellisMoEConfig()

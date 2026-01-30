@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
-from metal_marlin.trellis_kv_cache import TrellisKVCache
+from metal_marlin.trellis.kv_cache import TrellisKVCache
 
 # Skip entire module if PyTorch unavailable
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")

@@ -4,7 +4,7 @@ Supports config variations across Llama, Mistral, Phi, Qwen, Gemma,
 and other transformer architectures that use the standard HuggingFace format.
 
 Weight name mapping:
-    from converters.safetensors_loader import map_weight_names, load_mapped_safetensors
+    from metal_marlin.converters.safetensors_loader import map_weight_names, load_mapped_safetensors
 
     # Remap a state dict (auto-detects architecture)
     mapped = map_weight_names(hf_state_dict, model_type="auto", config=config)
@@ -13,7 +13,7 @@ Weight name mapping:
     mapped = load_mapped_safetensors(Path("model/"), model_type="auto")
 
 Quantization API:
-    from converters.safetensors_loader import load_and_quantize
+    from metal_marlin.converters.safetensors_loader import load_and_quantize
 
     state_dict, config = load_and_quantize(Path("model/"), quant_type="fp4", group_size=32)
 

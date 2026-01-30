@@ -4,8 +4,8 @@ Provides layer-level modules like MLP that combine TrellisLinear layers
 for use with trellis-quantized models like GLM-4.7-Flash.
 
 Usage:
-    from metal_marlin.trellis_loader import TrellisModelLoader
-    from metal_marlin.trellis_layer import TrellisDenseMLP
+    from metal_marlin.trellis.loader import TrellisModelLoader
+    from metal_marlin.trellis.layer import TrellisDenseMLP
 
     loader = TrellisModelLoader("models/GLM-4.7-Flash-EXL3-3bpw")
     mlp = TrellisDenseMLP.from_loader(loader, layer_idx=0, device="mps")
@@ -20,10 +20,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .trellis_linear import TrellisLinear
+from .linear import TrellisLinear
 
 if TYPE_CHECKING:
-    from .trellis_loader import TrellisModelLoader
+    from .loader import TrellisModelLoader
 
 
 class TrellisDenseMLP(nn.Module):
