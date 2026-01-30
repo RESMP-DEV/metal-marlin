@@ -22,11 +22,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra all
 
-      - name: Run trellis unit tests
+      - name: Run smoke tests (PR interval)
         run: |
-          uv run pytest tests/test_trellis*.py -v --tb=short \
-            --ignore=tests/test_e2e_trellis.py \
-            -m "not slow and not mps"
+          uv run pytest -v --tb=short \
+            tests/test_trellis_loader.py \
+            tests/test_trellis_generate.py
 
       - name: Check imports
         run: |
