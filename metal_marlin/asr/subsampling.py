@@ -48,6 +48,19 @@ class ConvSubsampling(nn.Module):
             padding=1,
         )
 
+        # Calculate the feature dimension after convolutions
+        # After conv1: n_mels//2, after conv2: n_mels//4
+        # So final feature dim is hidden_size * (n_mels//4)
+        self.proj_in_dim = config.hidden_size * (config.n_mels // 4)
+        self.proj_out_dim = config.hidden_size
+
+        # Projection layer to convert conv output to hidden_size
+        # Only needed if the conv output dim differs from hidden_size
+        if self.proj_in_dim != self.proj_out_dim:
+            self.projection = nn.Linear(self.proj_in_dim, self.proj_out_dim)
+        else:
+            self.projection = None
+
         # Layer normalization and dropout
         self.layer_norm = nn.LayerNorm(config.hidden_size)
         self.dropout = nn.Dropout(config.dropout)
@@ -81,10 +94,9 @@ class ConvSubsampling(nn.Module):
         x = x.transpose(1, 2).contiguous()  # (B, T//4, hidden_size, n_mels//4)
         x = x.view(b, t, c * f)  # (B, T//4, hidden_size * (n_mels//4))
 
-        # Project to hidden_size using a linear layer
-        if c * f != c:  # If feature dimension needs projection
-            projection = nn.Linear(c * f, c, device=x.device)
-            x = projection(x)
+        # Project to hidden_size using a linear layer if needed
+        if self.projection is not None:
+            x = self.projection(x)
 
         # Apply layer normalization and dropout
         x = self.layer_norm(x)

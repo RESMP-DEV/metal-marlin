@@ -132,24 +132,51 @@ class ParakeetTDT(nn.Module):
         self.conformer_config = conformer_config
         self.tdt_config = tdt_config
 
-    def forward(
-        self, mel: torch.Tensor, lengths: torch.Tensor, targets: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass for training.
+    def encode(
+        self, mel: torch.Tensor, lengths: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Encode mel spectrogram to encoder representations.
 
         Args:
             mel: Input mel spectrogram [B, T, n_mels]
             lengths: Original sequence lengths [B]
-            targets: Target token indices [B, U]
 
         Returns:
             Tuple containing:
+            - encoder_out: Encoder output [B, T', hidden_size]
+            - enc_lengths: Encoder output lengths after subsampling [B]
+        """
+        return self.encoder(mel, lengths)
+
+    def forward(
+        self,
+        mel: torch.Tensor,
+        lengths: torch.Tensor,
+        targets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        """Forward pass for training or inference.
+
+        Args:
+            mel: Input mel spectrogram [B, T, n_mels]
+            lengths: Original sequence lengths [B]
+            targets: Optional target token indices [B, U] for training.
+                     If None, returns encoder output only (inference mode).
+
+        Returns:
+            If targets provided (training):
             - logits: Vocabulary logits [B, T, U, vocab_size]
             - durations: Duration predictions [B, T, U, max_duration+1]
             - enc_lengths: Encoder output lengths after subsampling [B]
+            If targets not provided (inference):
+            - encoder_out: Encoder output [B, T', hidden_size]
+            - enc_lengths: Encoder output lengths [B]
         """
         # Encode mel spectrogram
         encoder_out, enc_lengths = self.encoder(mel, lengths)
+
+        if targets is None:
+            # Inference mode: return encoder output only
+            return encoder_out, enc_lengths
 
         # Decode with TDT
         logits, durations = self.decoder(encoder_out, targets)

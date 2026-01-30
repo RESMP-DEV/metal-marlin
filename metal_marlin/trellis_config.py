@@ -30,6 +30,11 @@ class TrellisModelConfig:
     kv_head_dim: int | None = None  # KV head dim if different from Q (GLM: 1120)
     kv_rope_dim: int = 0  # Position-dependent component in kv_a_proj (GLM: 64)
 
+    # GLM-4 MLA specific dimensions (used when kv_lora_rank is set)
+    qk_nope_head_dim: int = 192  # Non-positional Q/K dimension
+    qk_rope_head_dim: int = 64  # Rotary Q/K dimension (same as kv_rope_dim)
+    v_head_dim: int = 256  # Value head dimension
+
     # MoE configuration
     num_experts: int = 1  # 1 = dense model (no MoE)
     num_shared_experts: int = 0  # Shared expert count (GLM has 1)
@@ -96,9 +101,12 @@ class TrellisModelConfig:
             "num_experts_per_token": "num_experts_per_tok",
             "moe_layer_freq": None,  # Handle specially
             "first_k_dense_replace": "first_moe_layer",
-            # GLM style
+            # GLM style MLA
             "kv_lora_rank": "kv_lora_rank",
             "q_lora_rank": "q_lora_rank",
+            "qk_nope_head_dim": "qk_nope_head_dim",
+            "qk_rope_head_dim": "qk_rope_head_dim",
+            "v_head_dim": "v_head_dim",
         }
 
         for src_key, dst_key in field_mappings.items():
@@ -155,6 +163,14 @@ class TrellisModelConfig:
             kwargs["kv_lora_rank"] = hf_config.kv_lora_rank
         if hasattr(hf_config, "q_lora_rank"):
             kwargs["q_lora_rank"] = hf_config.q_lora_rank
+
+        # GLM-4 MLA specific dimensions
+        if hasattr(hf_config, "qk_nope_head_dim"):
+            kwargs["qk_nope_head_dim"] = hf_config.qk_nope_head_dim
+        if hasattr(hf_config, "qk_rope_head_dim"):
+            kwargs["qk_rope_head_dim"] = hf_config.qk_rope_head_dim
+        if hasattr(hf_config, "v_head_dim"):
+            kwargs["v_head_dim"] = hf_config.v_head_dim
 
         # RoPE scaling
         if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling:

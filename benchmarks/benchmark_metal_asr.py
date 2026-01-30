@@ -52,6 +52,7 @@ try:
     # Try to import from current directory structure
     sys.path.insert(0, str(Path(__file__).parent.parent))
     from metal_marlin.asr import ParakeetTDT
+    from metal_marlin.asr.conformer_config import ConformerConfig
     from metal_marlin.asr.quant_int8 import quantize_conformer_to_int8
     from metal_marlin.ops.gemm_int8 import GemmInt8, pack_int8_weights
 
@@ -59,6 +60,7 @@ try:
 except ImportError as e:
     print(f"Warning: Metal Marlin not available ({e}), using dummy models")
     HAS_METAL_MARLIN = False
+    ConformerConfig = None  # type: ignore[misc,assignment]
 
 # PyTorch imports - direct import for standalone contrib project
 try:

@@ -495,6 +495,67 @@ class TrellisModelLoader:
             "Expected router_weights.safetensors or in base_weights.safetensors"
         )
 
+    def load_base_weights(self, patterns: list[str] | None = None) -> dict[str, torch.Tensor]:
+        """Load non-quantized base weights (embeddings, layernorms, etc.).
+
+        Args:
+            patterns: Optional list of patterns to filter weights.
+                     If None, returns all base weights.
+
+        Returns:
+            Dictionary mapping weight names to tensors.
+        """
+        base_path = self.model_path / "base_weights.safetensors"
+        if not base_path.exists():
+            raise FileNotFoundError(f"Base weights not found: {base_path}")
+
+        base_weights = load_file(base_path)
+
+        if patterns is None:
+            return base_weights
+
+        filtered = {}
+        for name, tensor in base_weights.items():
+            if any(p in name for p in patterns):
+                filtered[name] = tensor
+        return filtered
+
+    def load_layernorm_weights(self, layer_idx: int) -> dict[str, torch.Tensor]:
+        """Load layernorm weights for a specific layer.
+
+        Args:
+            layer_idx: Layer index.
+
+        Returns:
+            Dictionary with layernorm weights:
+            - input_layernorm.weight
+            - post_attention_layernorm.weight
+            - self_attn.q_a_layernorm.weight (if present)
+            - self_attn.kv_a_layernorm.weight (if present)
+        """
+        prefix = f"model.layers.{layer_idx}."
+        patterns = [
+            "input_layernorm",
+            "post_attention_layernorm",
+            "q_a_layernorm",
+            "kv_a_layernorm",
+        ]
+
+        try:
+            base_weights = self.load_base_weights(patterns)
+        except FileNotFoundError:
+            return {}
+
+        # Filter to this layer
+        layer_weights = {}
+        for name, tensor in base_weights.items():
+            if name.startswith(prefix):
+                # Strip prefix to get relative name
+                rel_name = name[len(prefix) :]
+                layer_weights[rel_name] = tensor
+
+        return layer_weights
+
     def clear_layer_cache(self, layer_idx: int) -> None:
         """Clear cached metadata for a layer to save memory.
 

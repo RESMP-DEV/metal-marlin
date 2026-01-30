@@ -13,6 +13,7 @@ Provides components for TDT (Transducer Dynamic Temperature) speech recognition:
 
 from __future__ import annotations
 
+from .audio_preprocessing import MelSpectrogramExtractor, load_audio
 from .config import TDTConfig
 from .conformer_block import ConformerBlock
 from .conformer_config import ConformerConfig
@@ -31,7 +32,26 @@ from .subsampling import ConvSubsampling
 from .tdt_joint import TDTJoint
 from .tdt_predictor import TDTPredictor
 
+try:
+    from .replace_layers_metal import replace_linear_with_metal, replace_parakeet_encoder_layers
+
+    HAS_METAL_REPLACEMENT = True
+except ImportError:
+    HAS_METAL_REPLACEMENT = False
+    replace_linear_with_metal = None
+    replace_parakeet_encoder_layers = None
+
+try:
+    from .hybrid_parakeet import HybridParakeetTDT
+
+    HAS_HYBRID = True
+except ImportError:
+    HAS_HYBRID = False
+    HybridParakeetTDT = None
+
 __all__ = [
+    "MelSpectrogramExtractor",
+    "load_audio",
     "TDTConfig",
     "TDTJoint",
     "TDTPredictor",
@@ -48,4 +68,7 @@ __all__ = [
     "calibrate_int8_scales",
     "pack_linear_to_int8",
     "quantize_conformer_to_int8",
+    "replace_linear_with_metal",
+    "replace_parakeet_encoder_layers",
+    "HybridParakeetTDT",
 ]

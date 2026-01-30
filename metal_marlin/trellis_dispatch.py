@@ -323,7 +323,8 @@ def _dequantize_trellis_cpu(
     """
     K, N = weight.original_shape
     n_groups = weight.scales.shape[0]
-    group_size = (K + n_groups - 1) // n_groups
+    # Groups are along input dimension (N), scales are per output column (K)
+    group_size = (N + n_groups - 1) // n_groups
 
     # Tile dimensions
     TILE_DIM = 16
@@ -332,6 +333,7 @@ def _dequantize_trellis_cpu(
 
     # Allocate output as numpy, convert to torch at end
     import numpy as np
+
     output = np.zeros((K, N), dtype=np.float32)
 
     # Dequantize each position
@@ -354,11 +356,13 @@ def _dequantize_trellis_cpu(
             idx = indices[tile_k, tile_n, local_offset]
             idx = max(0, min(idx, len(grid_np) - 1))
 
-            group_idx = k // group_size
-            scale = scales[group_idx, n]
+            # Group index along N (input), scale per K (output)
+            group_idx = n // group_size
+            scale = scales[group_idx, k]
 
             dequant_val = grid_np[idx] * scale
-            dequant_val *= su[k] * sv[n]
+            # su is per-input (N), sv is per-output (K)
+            dequant_val *= su[n] * sv[k]
 
             output[k, n] = dequant_val
 

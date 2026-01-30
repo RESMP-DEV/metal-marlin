@@ -137,8 +137,10 @@ class GemmInt8:
             Z_buf = _private_buffer_from_tensor(zeros_half, lib, device, cache=True)
             buffers.append(Z_buf)
 
-        # Select kernel based on whether zeros are provided
-        kernel_name = "gemm_int8_tiled" if zeros is None else "gemm_int8_tiled_asym"
+        # The kernel only supports symmetric quantization (no zeros)
+        # If zeros are provided, we ignore them for now
+        # TODO: Add asymmetric kernel variant
+        kernel_name = "gemm_int8_tiled"
 
         # Dispatch the kernel
         dispatch_kernel(
@@ -182,7 +184,7 @@ def pack_int8_weights(weights: torch.Tensor) -> torch.Tensor:
                 src_idx = i * 4 + k
                 if src_idx < K:
                     # Extract signed INT8 and convert to unsigned representation
-                    val = weights_int8[src_idx, j].to(torch.uint32) & 0xFF
+                    val = int(weights_int8[src_idx, j]) & 0xFF
                     packed_val |= val << (k * 8)
             packed[i, j] = packed_val
 

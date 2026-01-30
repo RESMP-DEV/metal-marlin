@@ -1,33 +1,17 @@
 """
 Multi-head Latent Attention (MLA) with trellis-quantized projections.
 
-MLA compresses KV caches using low-rank decomposition for efficient memory usage.
-This implementation uses trellis-quantized weights for all linear projections.
+GLM-4 MLA Architecture:
+- Q projection with low-rank compression (q_a_proj -> layernorm -> q_b_proj)
+- KV compression with MQA: kv_a outputs latent + rope component
+- KV decompression: kv_b expands latent to k_nope + v
 
-Architecture based on GLM-4 and DeepSeek-V2 MLA:
-- KV compression: hidden_states -> kv_compressed via kv_a_proj
-- KV decompression: kv_compressed -> kv via kv_b_proj
-- Optional query compression via q_lora_rank
+Q/K dimension handling:
+- Q is split into q_nope (192d) + q_rope (64d)
+- K is built from k_nope (from kv_b) + k_rope (from kv_a)
+- Both Q and K end up with qk_head_dim = 256
 
-Usage:
-    from metal_marlin.trellis_attention import TrellisMLAttention, TrellisMLAConfig
-
-    config = TrellisMLAConfig(
-        hidden_size=2048,
-        num_attention_heads=32,
-        num_kv_heads=4,
-        kv_lora_rank=512,
-    )
-
-    attn = TrellisMLAttention(
-        config=config,
-        q_proj=q_linear,
-        kv_a_proj=kv_a_linear,
-        kv_b_proj=kv_b_linear,
-        o_proj=o_linear,
-    )
-
-    output = attn(hidden_states, kv_cache=cache, layer_idx=0)
+Uses GLM's rotary embedding from transformers.
 """
 
 from __future__ import annotations
@@ -38,7 +22,13 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn as nn
 
-from .attention import RoPE, scaled_dot_product_attention_metal
+# Import GLM's RoPE from transformers
+from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import (
+    Glm4MoeLiteRotaryEmbedding,
+    apply_rotary_pos_emb,
+)
+
+from .attention import scaled_dot_product_attention_metal
 from .kv_cache import KVCache
 from .trellis_kv_cache import TrellisKVCache
 from .trellis_linear import TrellisLinear
@@ -49,27 +39,52 @@ if TYPE_CHECKING:
 
 @dataclass
 class TrellisMLAConfig:
-    """Configuration for TrellisMLAttention."""
+    """Configuration for TrellisMLAttention (GLM-4 MLA).
+
+    GLM-4 MLA dimensions:
+    - qk_nope_head_dim: Non-positional part of Q/K (192)
+    - qk_rope_head_dim: Rotary positional part of Q/K (64)
+    - v_head_dim: Value dimension (256)
+    - kv_lora_rank: Latent dimension for KV compression (512)
+    - q_lora_rank: Latent dimension for Q compression (768)
+    """
 
     hidden_size: int = 2048
-    num_attention_heads: int = 32
-    num_kv_heads: int = 4  # MLA uses fewer KV heads
-    head_dim: int = 64
-    kv_lora_rank: int = 512  # Compression dimension for KV
-    q_lora_rank: int | None = None  # Optional query compression
-    kv_rope_dim: int = 0  # Position-dependent component in kv_a (GLM: 64)
-    kv_head_dim: int | None = None  # KV head dim if different from Q
-    rope_theta: float = 10000.0
+    num_attention_heads: int = 20
+    num_kv_heads: int = 20  # Same as attention heads in GLM
+    qk_nope_head_dim: int = 192  # Non-positional Q/K dim
+    qk_rope_head_dim: int = 64  # Rotary Q/K dim
+    v_head_dim: int = 256  # Value dimension
+    kv_lora_rank: int = 512  # KV compression dimension
+    q_lora_rank: int | None = 768  # Query compression dimension
+    rope_theta: float = 1000000.0  # GLM uses 1M
     max_position_embeddings: int = 131072
+
+    @property
+    def qk_head_dim(self) -> int:
+        """Total Q/K head dimension (nope + rope)."""
+        return self.qk_nope_head_dim + self.qk_rope_head_dim
+
+    # Legacy compatibility
+    @property
+    def head_dim(self) -> int:
+        return self.qk_head_dim
+
+    @property
+    def kv_head_dim(self) -> int:
+        return self.qk_nope_head_dim + self.v_head_dim
 
 
 class TrellisMLAttention(nn.Module):
     """Multi-head Latent Attention with trellis-quantized projections.
 
-    MLA compresses KV caches using low-rank decomposition:
-    1. Compression: hidden_states -> kv_compressed [batch, seq, kv_lora_rank]
-    2. Decompression: kv_compressed -> kv [batch, num_kv_heads, seq, head_dim]
-    3. Split into K and V for attention computation
+    GLM-4 MLA architecture:
+    1. Q projection: hidden -> q_a_proj -> layernorm -> q_b_proj -> Q
+       Q is split into q_nope (192d) + q_rope (64d)
+    2. KV compression: hidden -> kv_a_proj -> [latent (512d), k_rope (64d)]
+    3. KV decompression: latent -> layernorm -> kv_b_proj -> [k_nope (192d), V (256d)]
+    4. K is built from k_nope + k_rope (both 192d + 64d = 256d)
+    5. RoPE applied to q_rope and k_rope only
     """
 
     def __init__(
@@ -80,6 +95,8 @@ class TrellisMLAttention(nn.Module):
         kv_a_proj: TrellisLinear,
         kv_b_proj: TrellisLinear,
         o_proj: TrellisLinear,
+        q_a_layernorm: nn.Module | None = None,
+        kv_a_layernorm: nn.Module | None = None,
     ):
         super().__init__()
         self.config = config
@@ -89,60 +106,38 @@ class TrellisMLAttention(nn.Module):
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
 
-        # Validate dimensions
-        # kv_a_proj_with_mqa outputs kv_lora_rank + kv_rope_dim (GLM-style MLA)
-        # Allow either exact match or with rope component
-        kv_rope_dim = getattr(config, "kv_rope_dim", 0)
-        expected_kv_a_out = config.kv_lora_rank + kv_rope_dim
-        if (
-            kv_a_proj.out_features != config.kv_lora_rank
-            and kv_a_proj.out_features != expected_kv_a_out
-        ):
-            raise ValueError(
-                f"kv_a_proj.out_features ({kv_a_proj.out_features}) must equal "
-                f"config.kv_lora_rank ({config.kv_lora_rank}) or "
-                f"kv_lora_rank + kv_rope_dim ({expected_kv_a_out})"
-            )
+        # Layer norms for MLA (GLM uses them before decompression)
+        self.q_a_layernorm = q_a_layernorm
+        self.kv_a_layernorm = kv_a_layernorm
 
-        # Store whether we have the MQA variant (includes rope component)
-        self.has_mqa_rope = kv_a_proj.out_features == expected_kv_a_out and kv_rope_dim > 0
-        self.kv_rope_dim = kv_rope_dim
-
-        # kv_b_proj takes kv_lora_rank (latent only, not rope component)
-        expected_kv_b_input = config.kv_lora_rank
-        # KV head dim can differ from Q head dim in MLA
-        kv_head_dim = getattr(config, "kv_head_dim", config.head_dim)
-        expected_kv_b_output = config.num_kv_heads * kv_head_dim * 2  # K and V concatenated
-
-        if kv_b_proj.in_features != expected_kv_b_input:
-            raise ValueError(
-                f"kv_b_proj.in_features ({kv_b_proj.in_features}) must equal "
-                f"config.kv_lora_rank ({expected_kv_b_input})"
-            )
-
-        # Allow flexible kv_b output since MLA variants differ
-        if kv_b_proj.out_features != expected_kv_b_output:
-            # Infer kv_head_dim from actual weights
-            kv_head_dim = kv_b_proj.out_features // (config.num_kv_heads * 2)
-            expected_kv_b_output = config.num_kv_heads * kv_head_dim * 2
-            if kv_b_proj.out_features != expected_kv_b_output:
-                raise ValueError(
-                    f"kv_b_proj.out_features ({kv_b_proj.out_features}) must be divisible by "
-                    f"num_kv_heads * 2 ({config.num_kv_heads * 2})"
-                )
-
-        self.kv_head_dim = kv_head_dim
+        # Store MLA dimensions
+        self.qk_nope_head_dim = config.qk_nope_head_dim
+        self.qk_rope_head_dim = config.qk_rope_head_dim
+        self.v_head_dim = config.v_head_dim
         self.kv_lora_rank = config.kv_lora_rank
+        self.qk_head_dim = config.qk_head_dim
 
-        self.rope = RoPE(config.head_dim, base=config.rope_theta)
-        self.scale = config.head_dim**-0.5
+        # GLM's rotary embedding - use actual HF config class
+        from transformers.models.glm4_moe_lite.configuration_glm4_moe_lite import Glm4MoeLiteConfig
 
-        # For GQA compatibility
+        rope_config = Glm4MoeLiteConfig(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_kv_heads,
+            head_dim=config.qk_rope_head_dim,  # RoPE only on rope dim
+            qk_rope_head_dim=config.qk_rope_head_dim,
+            max_position_embeddings=config.max_position_embeddings,
+            partial_rotary_factor=1.0,
+        )
+        self.rotary_emb = Glm4MoeLiteRotaryEmbedding(rope_config)
+
+        self.scale = config.qk_head_dim**-0.5
+
+        # Head configuration
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_kv_heads
-        self.head_dim = config.head_dim
 
-        # GQA repeat factor
+        # GQA repeat factor (1 if num_heads == num_kv_heads)
         self.qkv_repeat_factor = self.num_heads // self.num_kv_heads
 
     def forward(
@@ -158,7 +153,7 @@ class TrellisMLAttention(nn.Module):
         Args:
             hidden_states: Input tensor [batch, seq_len, hidden_size]
             attention_mask: Optional attention mask
-            position_ids: Optional position IDs (not used, RoPE uses offset)
+            position_ids: Optional position IDs for RoPE
             kv_cache: Optional KV cache for autoregressive generation
             layer_idx: Layer index for KV cache
 
@@ -167,62 +162,87 @@ class TrellisMLAttention(nn.Module):
         """
         batch_size, seq_len, _ = hidden_states.shape
 
-        # Query projection (low-rank MLA: q_a_proj compresses, q_b_proj decompresses)
+        # === Query Projection (Low-rank MLA) ===
+        # hidden -> q_a_proj -> layernorm -> q_b_proj -> Q
         if self.q_a_proj is not None and self.q_b_proj is not None:
-            # Low-rank query: hidden_states -> q_compressed -> q
             q_compressed = self.q_a_proj(hidden_states)
+            if self.q_a_layernorm is not None:
+                q_compressed = self.q_a_layernorm(q_compressed)
             q = self.q_b_proj(q_compressed)
         else:
-            # Direct use of hidden_states as queries (no compression)
-            q = hidden_states
+            raise ValueError("GLM MLA requires q_a_proj and q_b_proj")
 
-        # MLA KV compression and decompression
-        # Step 1: Compress hidden_states to low-rank representation
-        kv_compressed_full = self.kv_a_proj(
+        # Reshape Q: [batch, seq, num_heads * qk_head_dim] -> [batch, num_heads, seq, qk_head_dim]
+        q = q.view(batch_size, seq_len, self.num_heads, self.qk_head_dim).transpose(1, 2)
+
+        # Split Q into non-positional and rotary parts
+        q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+
+        # === KV Compression (with MQA rope component) ===
+        # hidden -> kv_a_proj -> [latent, k_rope]
+        compressed_kv = self.kv_a_proj(
             hidden_states
-        )  # [batch, seq_len, kv_lora_rank + kv_rope_dim]
+        )  # [batch, seq, kv_lora_rank + qk_rope_head_dim]
 
-        # Split off rope component if present (GLM MQA variant)
-        if self.has_mqa_rope:
-            kv_compressed = kv_compressed_full[..., : self.kv_lora_rank]
-            # kv_rope = kv_compressed_full[..., self.kv_lora_rank:]  # For RoPE (TODO)
-        else:
-            kv_compressed = kv_compressed_full
+        # Split into latent and rope components
+        k_latent, k_rope = torch.split(
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
 
-        # Step 2: Decompress to KV space
-        kv = self.kv_b_proj(kv_compressed)  # [batch, seq_len, num_kv_heads * kv_head_dim * 2]
+        # === KV Decompression ===
+        # latent -> layernorm -> kv_b_proj -> [k_nope, V]
+        if self.kv_a_layernorm is not None:
+            k_latent = self.kv_a_layernorm(k_latent)
+        kv_decompressed = self.kv_b_proj(k_latent)  # [batch, seq, num_kv_heads * (qk_nope + v)]
 
-        # Step 3: Split into K and V and reshape
-        # First reshape to [batch, seq_len, num_kv_heads, kv_head_dim * 2]
-        kv = kv.view(batch_size, seq_len, self.num_kv_heads, self.kv_head_dim * 2)
+        # Reshape: [batch, seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, seq, nope + v]
+        kv_decompressed = kv_decompressed.view(
+            batch_size, seq_len, self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim
+        ).transpose(1, 2)
 
-        # Split last dimension into K and V
-        k, v = kv.chunk(2, dim=-1)  # Each: [batch, seq_len, num_kv_heads, kv_head_dim]
+        # Split into k_nope and V
+        k_nope, v = torch.split(kv_decompressed, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # Reshape queries to [batch, seq_len, num_heads, head_dim]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+        # Reshape k_rope: [batch, seq, rope_dim] -> [batch, 1, seq, rope_dim]
+        # The "1" represents shared rope across all KV heads (MQA style)
+        k_rope = k_rope.view(batch_size, 1, seq_len, self.qk_rope_head_dim)
 
-        # Transpose to [batch, num_heads, seq_len, head_dim] for attention
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
+        # === Apply RoPE ===
+        # Create position_ids if not provided
+        if position_ids is None:
+            offset = kv_cache.seq_len if kv_cache else 0
+            position_ids = torch.arange(
+                offset, offset + seq_len, device=hidden_states.device
+            ).unsqueeze(0)
 
-        # Apply RoPE
-        offset = kv_cache.seq_len if kv_cache else 0
-        q = self.rope(q, offset=offset)
-        k = self.rope(k, offset=offset)
+        # Get cos/sin from GLM rotary embedding
+        cos, sin = self.rotary_emb(k_rope, position_ids)
 
-        # Update KV cache
+        # Apply RoPE to q_rope and k_rope only
+        q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, cos, sin)
+
+        # Expand k_rope to match num_kv_heads: [batch, 1, seq, rope] -> [batch, kv_heads, seq, rope]
+        k_rope = k_rope.expand(batch_size, self.num_kv_heads, seq_len, self.qk_rope_head_dim)
+
+        # === Concatenate Q and K ===
+        # Q: cat(q_nope, q_rope) -> [batch, heads, seq, qk_head_dim]
+        # K: cat(k_nope, k_rope) -> [batch, kv_heads, seq, qk_head_dim]
+        q = torch.cat([q_nope, q_rope], dim=-1)
+        k = torch.cat([k_nope, k_rope], dim=-1)
+
+        # === KV Cache Update ===
         if kv_cache is not None:
             k, v = kv_cache.update(layer_idx, k, v)
             kv_cache.advance(seq_len)
 
-        # Handle GQA by repeating K/V heads if needed
+        # === Handle GQA (repeat K/V heads if needed) ===
         if self.num_kv_heads < self.num_heads:
             k = k.repeat_interleave(self.qkv_repeat_factor, dim=1)
             v = v.repeat_interleave(self.qkv_repeat_factor, dim=1)
 
-        # Scaled dot-product attention
+        # === Scaled Dot-Product Attention ===
+        # Note: Q and K have qk_head_dim, V has v_head_dim
+        # For standard attention this works: score = Q @ K.T, out = score @ V
         attn_output = scaled_dot_product_attention_metal(
             q,
             k,
@@ -232,11 +252,12 @@ class TrellisMLAttention(nn.Module):
             is_causal=attention_mask is None,
         )
 
-        # Reshape output: [batch, num_heads, seq_len, head_dim] -> [batch, seq_len, hidden_size]
+        # Output has v_head_dim, not qk_head_dim
+        # Reshape: [batch, heads, seq, v_head_dim] -> [batch, seq, heads * v_head_dim]
         attn_output = (
             attn_output.transpose(1, 2)
             .contiguous()
-            .view(batch_size, seq_len, self.num_heads * self.head_dim)
+            .view(batch_size, seq_len, self.num_heads * self.v_head_dim)
         )
 
         # Output projection

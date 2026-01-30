@@ -8,7 +8,7 @@ Usage:
 
     model = TrellisForCausalLM.from_pretrained("model_path")
     logits = model(input_ids)
-    
+
     # Generate text
     generated = model.generate(input_ids, max_new_tokens=100, temperature=0.8)
 """

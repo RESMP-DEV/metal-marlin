@@ -251,9 +251,11 @@ class TrellisLinear(nn.Module):
         # Dequantize weights
         weights = self.dequantize()
 
-        # Ensure input is on same device and dtype compatible
+        # Ensure input is on same device and dtype
         if x.device != weights.device:
             x = x.to(weights.device)
+        if x.dtype != weights.dtype:
+            x = x.to(weights.dtype)
 
         # Linear: y = x @ W^T
         output = torch.mm(x.view(-1, self.in_features), weights.t())
@@ -262,7 +264,7 @@ class TrellisLinear(nn.Module):
         if self.bias is not None:
             output = output + self.bias
 
-        return output.half()
+        return output
 
     def extra_repr(self) -> str:
         """String representation for printing."""

@@ -394,11 +394,11 @@ kernel void sample_top_k(
     uint tg_size [[threads_per_threadgroup]]
 ) {
     const uint vocab = params.vocab_size;
-    const uint k = min(params.k, vocab);
+    const uint k = min((uint)params.k, (uint)vocab);
     device const float* row = logits + batch_idx * vocab;
 
     // Initialize RNG
-    PCGState rng = pcg_init(params.seed, batch_idx * 1000 + tid);
+    PCGState rng = pcg_init(params.seed, (ulong)batch_idx * 1000ULL + (ulong)tid);
 
     // Each thread maintains its own top-k heap (min-heap for top-k)
     // Max heap size is 64 per thread
@@ -668,8 +668,8 @@ inline void heap_insert_topk(
 // Bitonic sort for top-k selection when k is large (>= 64)
 // More efficient than heap for larger k values
 inline void bitonic_sort_partial(
-    thread float* vals,
-    thread uint* indices,
+    threadgroup float* vals,
+    threadgroup uint* indices,
     uint size,
     uint k
 ) {
@@ -731,7 +731,7 @@ kernel void topk_values_indices(
     if (batch_idx >= params.batch_size) return;
     
     const uint n = params.n;
-    const uint k = min(params.k, n);
+    const uint k = min((uint)params.k, n);
     
     // Input pointer for this batch
     device const float* row = input + batch_idx * n;
@@ -822,7 +822,7 @@ kernel void topk_values_indices(
         threadgroup uint tg_indices[1024];
         
         // Load elements into threadgroup memory
-        uint load_size = min(n, 1024);
+        uint load_size = min((uint)n, 1024u);
         for (uint i = tid; i < load_size; i += 32) {
             tg_vals[i] = (i < n) ? row[i] : NEG_INF;
             tg_indices[i] = i;

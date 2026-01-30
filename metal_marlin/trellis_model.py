@@ -70,8 +70,14 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             Output tensor [..., hidden_size].
         """
+        # Save original dtype for output
+        orig_dtype = x.dtype
+
+        # Convert input to router's dtype for routing computation
+        x_router = x.to(self.router.weight.dtype)
+
         # Get router scores
-        router_logits = self.router(x)  # [..., num_experts]
+        router_logits = self.router(x_router)  # [..., num_experts]
 
         # Select top-k experts
         routing_weights, selected_experts = torch.topk(
@@ -134,15 +140,18 @@ class TrellisMoEMLP(nn.Module):
         layer_weights = loader.load_layer(layer_idx)
         prefix = f"model.layers.{layer_idx}.mlp"
 
-        # Create router
+        # Get router weight to determine dtype
+        router_weight = router_weights[f"{prefix}.gate.weight"]
+
+        # Create router with same dtype as weights
         router = nn.Linear(
             config.hidden_size,
             config.num_experts,
             bias=False,
             device=device,
-            dtype=torch.float16,
+            dtype=router_weight.dtype,
         )
-        router.weight.data = router_weights[f"{prefix}.gate.weight"].to(device)
+        router.weight.data = router_weight.to(device)
 
         # Create experts
         experts = []
@@ -307,16 +316,19 @@ class TrellisDecoderLayer(nn.Module):
         layer_weights = loader.load_layer(layer_idx)
         prefix = f"model.layers.{layer_idx}.self_attn"
 
-        # Create MLA attention
+        # Load layernorm weights from base_weights.safetensors
+        layernorm_weights = loader.load_layernorm_weights(layer_idx)
+
+        # Create MLA attention config with GLM-4 dimensions
         mla_config = TrellisMLAConfig(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             num_kv_heads=config.num_kv_heads,
-            head_dim=config.head_dim,
+            qk_nope_head_dim=getattr(config, "qk_nope_head_dim", 192),
+            qk_rope_head_dim=getattr(config, "qk_rope_head_dim", 64),
+            v_head_dim=getattr(config, "v_head_dim", 256),
             kv_lora_rank=config.kv_lora_rank,
             q_lora_rank=config.q_lora_rank,
-            kv_rope_dim=getattr(config, "kv_rope_dim", 0),
-            kv_head_dim=getattr(config, "kv_head_dim", None),
             rope_theta=config.rope_theta,
             max_position_embeddings=config.max_position_embeddings,
         )
@@ -359,6 +371,18 @@ class TrellisDecoderLayer(nn.Module):
             device=device,
         )
 
+        # Load MLA layernorms (q_a_layernorm and kv_a_layernorm)
+        q_a_layernorm = None
+        kv_a_layernorm = None
+        if "self_attn.q_a_layernorm.weight" in layernorm_weights:
+            q_a_ln_weight = layernorm_weights["self_attn.q_a_layernorm.weight"]
+            q_a_layernorm = RMSNorm(q_a_ln_weight.shape[0], eps=config.rms_norm_eps)
+            q_a_layernorm.weight.data = q_a_ln_weight.to(device)
+        if "self_attn.kv_a_layernorm.weight" in layernorm_weights:
+            kv_a_ln_weight = layernorm_weights["self_attn.kv_a_layernorm.weight"]
+            kv_a_layernorm = RMSNorm(kv_a_ln_weight.shape[0], eps=config.rms_norm_eps)
+            kv_a_layernorm.weight.data = kv_a_ln_weight.to(device)
+
         layer.self_attn = TrellisMLAttention(
             config=mla_config,
             q_a_proj=q_a_proj,
@@ -366,7 +390,19 @@ class TrellisDecoderLayer(nn.Module):
             kv_a_proj=kv_a_proj,
             kv_b_proj=kv_b_proj,
             o_proj=o_proj,
+            q_a_layernorm=q_a_layernorm,
+            kv_a_layernorm=kv_a_layernorm,
         )
+
+        # Load input/post-attention layernorms
+        if "input_layernorm.weight" in layernorm_weights:
+            layer.input_layernorm.weight.data = layernorm_weights["input_layernorm.weight"].to(
+                device
+            )
+        if "post_attention_layernorm.weight" in layernorm_weights:
+            layer.post_attention_layernorm.weight.data = layernorm_weights[
+                "post_attention_layernorm.weight"
+            ].to(device)
 
         # Create MLP (dense or MoE)
         if config.is_moe_layer(layer_idx):
