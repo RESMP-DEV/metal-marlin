@@ -248,6 +248,9 @@ class TrellisLinear(nn.Module):
             Output tensor [..., out_features].
         """
         batch_shape = x.shape[:-1]
+        # Metal kernels expect float16 input - convert if necessary
+        if x.dtype != torch.float16:
+            x = x.to(torch.float16)
         x_flat = x.view(-1, self.in_features)
         M = x_flat.shape[0]
 

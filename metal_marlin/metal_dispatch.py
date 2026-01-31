@@ -739,7 +739,12 @@ def mps_tensor_to_metal_buffer(
             raise RuntimeError("Failed to create Metal buffer for output tensor")
         return _CopyBackBuffer(buffer, tensor)
 
-    arr = tensor.detach().cpu().float().numpy()
+    # Handle dtype conversion for numpy compatibility
+    # BFloat16 is not supported by numpy, convert to float16
+    cpu_tensor = tensor.detach().cpu()
+    if cpu_tensor.dtype == torch.bfloat16:
+        cpu_tensor = cpu_tensor.to(torch.float16)
+    arr = cpu_tensor.numpy()
     buffer = device.newBufferWithBytes_length_options_(
         arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
     )

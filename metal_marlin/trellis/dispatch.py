@@ -10,10 +10,18 @@ Reference: src/dequant_trellis.metal
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
+
+# Debug logging gated by METAL_DEBUG env var
+_METAL_DEBUG = os.environ.get("METAL_DEBUG", "").lower() in ("1", "true", "yes")
+_logger = logging.getLogger(__name__)
+if _METAL_DEBUG:
+    logging.basicConfig(level=logging.DEBUG)
 
 from ..metal_dispatch import (
     HAS_METAL,
@@ -429,6 +437,56 @@ def dispatch_gemm_trellis_decode(
     grid_x = (N + TILE_N - 1) // TILE_N
     grid_y = (M + TILE_M - 1) // TILE_M
 
+    # Pre-dispatch debug logging
+    if _METAL_DEBUG:
+        A_cpu = A.cpu().float()
+        packed_cpu = packed_indices.cpu()
+        scales_cpu = scales.cpu()
+        grid_cpu = grid.cpu()
+        su_cpu = su.cpu()
+        sv_cpu = sv.cpu()
+
+        _logger.debug("=== gemm_trellis_packed_decode PRE-DISPATCH ===")
+        _logger.debug(
+            "A: min=%.6f, max=%.6f, mean=%.6f, has_nan=%s",
+            A_cpu.min().item(),
+            A_cpu.max().item(),
+            A_cpu.mean().item(),
+            bool(torch.isnan(A_cpu).any()),
+        )
+        _logger.debug(
+            "packed_indices: shape=%s, first_10_bytes=%s",
+            list(packed_cpu.shape),
+            packed_cpu.flatten()[:10].tolist(),
+        )
+        _logger.debug(
+            "scales: min=%.6f, max=%.6f, has_nan=%s",
+            scales_cpu.min().item(),
+            scales_cpu.max().item(),
+            bool(torch.isnan(scales_cpu).any()),
+        )
+        _logger.debug("grid: values=%s", grid_cpu.tolist())
+        _logger.debug(
+            "su: min=%.6f, max=%.6f, unique=%s",
+            su_cpu.min().item(),
+            su_cpu.max().item(),
+            torch.unique(su_cpu).tolist(),
+        )
+        _logger.debug(
+            "sv: min=%.6f, max=%.6f, unique=%s",
+            sv_cpu.min().item(),
+            sv_cpu.max().item(),
+            torch.unique(sv_cpu).tolist(),
+        )
+        _logger.debug(
+            "Dimensions: M=%d, K=%d, N=%d, bits=%d, group_size=%d",
+            M,
+            K,
+            N,
+            bits,
+            group_size,
+        )
+
     dispatch_kernel(
         lib,
         function_name="gemm_trellis_packed_decode",
@@ -451,6 +509,18 @@ def dispatch_gemm_trellis_decode(
         ],
         wait=True,
     )
+
+    # Post-dispatch debug logging
+    if _METAL_DEBUG:
+        output_cpu = output.cpu().float()
+        _logger.debug("=== gemm_trellis_packed_decode POST-DISPATCH ===")
+        _logger.debug(
+            "Output: min=%.6f, max=%.6f, has_nan=%s, first_10=%s",
+            output_cpu.min().item(),
+            output_cpu.max().item(),
+            bool(torch.isnan(output_cpu).any()),
+            output_cpu.flatten()[:10].tolist(),
+        )
 
     return output
 

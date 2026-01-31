@@ -50,12 +50,18 @@ print(tokenizer.decode(output[0]))
 
 ## Serving
 
-OpenAI-compatible API server with streaming, concurrent requests, and Prometheus metrics.
+OpenAI-compatible API server with streaming, concurrent requests, paged attention, and Prometheus metrics.
 
 ```bash
 # Quantize and serve
 metal-marlin quantize Qwen/Qwen3-4B --format fp4 -o qwen3_4b_fp4
 metal-marlin serve qwen3_4b_fp4 --port 8000
+
+# Enable paged attention for higher throughput
+metal-marlin serve qwen3_4b_fp4 --port 8000 --enable-batching
+
+# Tune KV cache (with paged attention)
+metal-marlin serve qwen3_4b_fp4 --enable-batching --num-kv-blocks 1024 --block-size 32
 ```
 
 **Endpoints:**
@@ -63,6 +69,12 @@ metal-marlin serve qwen3_4b_fp4 --port 8000
 - `POST /v1/chat/completions` - Chat completions (streaming supported)
 - `POST /v1/completions` - Text completions
 - `GET /metrics` - Prometheus metrics
+- `GET /health` - Health check
+
+**CLI Options:**
+- `--enable-batching` - Enable paged attention with continuous batching
+- `--num-kv-blocks N` - Number of KV cache blocks (default: 512)
+- `--block-size N` - Tokens per block (default: 16)
 
 Compatible with OpenAI SDK:
 

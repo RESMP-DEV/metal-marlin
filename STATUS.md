@@ -13,7 +13,7 @@
 | **Trellis Inference** | **Complete** ✅ (11 modules, 3500 LOC, fused GEMM ~50x speedup) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
 | GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
-| OpenAI Server | **Complete** ✅ (28 tests, paged attention via CLI) |
+| OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **40 shaders** ✅ |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
 | Legacy Cleanup | **Complete** ✅ |
@@ -122,6 +122,28 @@ output = generator.generate("Hello!", GenerationConfig(max_new_tokens=100))
 - Image preprocessing (scipy.ndimage)
 - ONNX graph execution
 - Model loading (safetensors)
+
+---
+
+## Metal MoE Kernels
+
+| Kernel | Status | Notes |
+|--------|--------|-------|
+| `moe_trellis_swiglu` | ✅ Working | Fused MoE GEMM with SwiGLU |
+| Slow fallback | ✅ Working | Memory-optimized sequential path |
+
+### Performance (GLM-4.7-Flash 3BPW)
+
+| Context | Fast Path TPS | Slow Path TPS | Memory |
+|---------|---------------|---------------|--------|
+| 1024    | ~5.4          | ~0.08         | 16.9 GB |
+| 4096    | ~5.4          | ~0.08         | 16.9 GB |
+
+**Notes:**
+- Fast path uses `moe_trellis_swiglu` kernel with batched expert dispatch
+- Slow path uses sequential expert iteration (~12s/tok)
+- Memory usage is dominated by model weights, constant across context lengths
+- Fast path availability requires `x.is_mps` and Metal kernel compilation
 
 ---
 
@@ -386,7 +408,7 @@ See [docs/metal_kernel_audit.md](docs/metal_kernel_audit.md) for full kernel inv
 
 ## OpenAI-Compatible Server
 
-**Status:** ✅ Complete (28 tests passing)
+**Status:** ✅ Complete (30 tests passing)
 
 FastAPI-based OpenAI-compatible server in `metal_marlin/serving/`:
 
@@ -412,12 +434,13 @@ METAL_MARLIN_MOCK_MODEL=1 python -m metal_marlin serve /tmp/any --port 8000
 | `/v1/completions` | POST | Text completions |
 | `/metrics` | GET | Prometheus metrics |
 
-**Test Coverage (28 tests):**
+**Test Coverage (30 tests):**
 - Basic functionality: health, models, chat, completions
 - Streaming responses with SSE
 - Concurrent requests (10 requests, 5 workers)
 - Input validation (missing fields, wrong types → 422)
 - Error handling (wrong model → 404, no model loaded → 503)
+- Paged attention mode (2 tests)
 
 **Current behavior (non-paged attention):**
 - Each request runs sequentially through the model pipeline

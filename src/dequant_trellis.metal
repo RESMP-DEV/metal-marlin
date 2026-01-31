@@ -598,7 +598,7 @@ kernel void dequant_trellis_packed(
     uint local_n = n_idx % TILE_DIM;
     
     uint tiles_n = (N + TILE_DIM - 1) / TILE_DIM;
-    uint idx_in_tile = local_k * TILE_DIM + local_n;
+    uint idx_in_tile = local_n * TILE_DIM + local_k;  // Transposed weight
     
     // Packed bytes per tile: ceil(256 * bits / 8)
     uint packed_bytes_per_tile = (TILE_SIZE * bits + 7) / 8;

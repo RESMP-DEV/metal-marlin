@@ -413,17 +413,20 @@ class TrellisModelLoader:
                     )
 
                 # Strip header byte and reshape to [tiles_k, tiles_n, packed_bytes_per_tile]
+                # NOTE: shape from safetensor is [out_features, in_features] = [N_gemm, K_gemm]
+                # But we need [tiles_K, tiles_N, bytes] for GEMM kernel where K=in, N=out
+                # So we reshape as [tiles_out, tiles_in, bytes] then transpose to [tiles_in, tiles_out, bytes]
                 packed_indices = indices_raw[1:].reshape(tiles_k, tiles_n, packed_bytes_per_tile)
+                # Transpose from [tiles_out, tiles_in, bytes] to [tiles_in, tiles_out, bytes]
+                packed_indices = packed_indices.permute(1, 0, 2).contiguous()
             elif indices_raw.dtype == torch.int16:
                 # Legacy format: not supported for memory-efficient loading
                 raise ValueError(
-                    f"Legacy int16 format not supported. "
-                    f"Please use packed uint8 format for {name}"
+                    f"Legacy int16 format not supported. Please use packed uint8 format for {name}"
                 )
             else:
                 raise ValueError(
-                    f"Indices must be uint8 (packed), "
-                    f"got {indices_raw.dtype} for {name}"
+                    f"Indices must be uint8 (packed), got {indices_raw.dtype} for {name}"
                 )
 
             # Validate other dtypes

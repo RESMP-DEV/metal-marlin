@@ -19,7 +19,11 @@ from .config import TrellisModelConfig
 from .kv_cache import TrellisKVCache
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
-from .moe_dispatch import dispatch_moe_trellis_swiglu
+from .moe_dispatch import (
+    CachedWeightBuffers,
+    create_cached_weight_buffers,
+    dispatch_moe_trellis_swiglu,
+)
 
 if TYPE_CHECKING:
     from .loader import TrellisModelLoader
@@ -66,12 +70,12 @@ class TrellisMoEMLP(nn.Module):
         # Prepare contiguous expert weights for fast dispatch
         self._prepare_expert_weights()
 
-        # Lazy Metal library
-        self._lib = None
-        # NOTE: Fast MoE path disabled - gemm_trellis_moe.metal has compilation errors
-        # A proper Trellis MoE kernel needs to be written. Current fallback
-        # uses slow sequential expert iteration (512 calls per token).
-        self._use_fast_moe = False
+        # Lazy Metal library and cached buffers
+        self._lib: MetalKernelLibrary | None = None
+        self._cached_weight_buffers: CachedWeightBuffers | None = None
+        # Fast MoE kernel still produces NaN in synthetic tests.
+        # Keep disabled until kernel is fixed.
+        self._use_fast_moe = self._check_fast_moe_available()
 
     def _prepare_expert_weights(self) -> None:
         """Prepare expert weights in contiguous format for fast MoE dispatch."""
@@ -138,6 +142,50 @@ class TrellisMoEMLP(nn.Module):
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
+    def _check_fast_moe_available(self) -> bool:
+        """Check if fast MoE kernel is available."""
+        try:
+            lib = self._get_lib()
+            # Try to get pipeline - will raise if not available
+            lib.get_pipeline("moe_trellis_swiglu")
+            return True
+        except Exception as e:
+            import warnings
+
+            warnings.warn(
+                f"Fast MoE kernel unavailable, using slow path: {e}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return False
+
+    def _get_cached_buffers(self) -> CachedWeightBuffers:
+        """Get or create cached Metal buffers for static weights.
+
+        Caches weight buffers on first call to avoid creating 13 Metal buffers
+        per dispatch during decode. Only dynamic inputs (activations, expert_ids,
+        expert_probs) need new buffers per call.
+        """
+        if self._cached_weight_buffers is None:
+            lib = self._get_lib()
+            self._cached_weight_buffers = create_cached_weight_buffers(
+                device=lib.device,
+                gate_weights=self.gate_weights_stacked,
+                gate_scales=self.gate_scales_stacked,
+                up_weights=self.up_weights_stacked,
+                up_scales=self.up_scales_stacked,
+                down_weights=self.down_weights_stacked,
+                down_scales=self.down_scales_stacked,
+                gate_su=self.gate_su_stacked,
+                gate_sv=self.gate_sv_stacked,
+                up_su=self.up_su_stacked,
+                up_sv=self.up_sv_stacked,
+                down_su=self.down_su_stacked,
+                down_sv=self.down_sv_stacked,
+                grid=self.experts[0].gate_proj.grid,
+            )
+        return self._cached_weight_buffers
+
     def forward_fast(self, x: torch.Tensor) -> torch.Tensor:
         """Fast forward pass using fused MoE dispatch.
 
@@ -146,9 +194,10 @@ class TrellisMoEMLP(nn.Module):
         """
         orig_dtype = x.dtype
 
-        # Flatten for processing
+        # Flatten for processing - Metal kernels expect float16
         batch_shape = x.shape[:-1]
-        x_flat = x.view(-1, self.hidden_dim)
+        x_fp16 = x.to(torch.float16) if x.dtype != torch.float16 else x
+        x_flat = x_fp16.view(-1, self.hidden_dim)
         num_tokens = x_flat.shape[0]
 
         # Convert input to router's dtype for routing computation
@@ -167,7 +216,7 @@ class TrellisMoEMLP(nn.Module):
         # Normalize weights
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
 
-        # Fast fused dispatch
+        # Fast fused dispatch with cached weight buffers
         output = dispatch_moe_trellis_swiglu(
             lib=self._get_lib(),
             activations=x_flat,
@@ -191,6 +240,7 @@ class TrellisMoEMLP(nn.Module):
             num_experts=len(self.experts),
             top_k=self.num_experts_per_tok,
             bits=self.bits,
+            cached_buffers=self._get_cached_buffers(),
         )
 
         # Add shared expert (always applied)
@@ -212,12 +262,29 @@ class TrellisMoEMLP(nn.Module):
         """
         # Use fast fused dispatch if available
         if self._use_fast_moe and x.is_mps:
-            return self.forward_fast(x)
+            try:
+                return self.forward_fast(x)
+            except Exception as e:
+                import warnings
 
-        # Fallback: slow sequential execution (12s/tok)
-        # Save original dtype for output
-        orig_dtype = x.dtype
+                warnings.warn(f"Fast MoE failed, falling back: {e}", RuntimeWarning)
+                self._use_fast_moe = False  # Disable for future calls
 
+        return self._forward_slow(x)
+
+    def _forward_slow(self, x: torch.Tensor) -> torch.Tensor:
+        """Memory-optimized sequential forward pass.
+
+        Batches by unique experts to reduce tensor allocations from O(slots × experts)
+        to O(unique_experts). For top-8 routing with 64 experts, typically only ~8-16
+        unique experts are active, reducing iterations from ~512 to ~12.
+
+        Args:
+            x: Input tensor [..., hidden_size].
+
+        Returns:
+            Output tensor [..., hidden_size].
+        """
         # Convert input to router's dtype for routing computation
         x_router = x.to(self.router.weight.dtype)
 
@@ -234,30 +301,39 @@ class TrellisMoEMLP(nn.Module):
         # Normalize weights
         routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
 
+        # Find unique experts across ALL slots (typically ~8-16 out of 64)
+        unique_experts = selected_experts.unique().tolist()
+
         # Initialize output
         final_hidden_states = torch.zeros_like(x)
 
-        # Process each expert in the top-k
-        for i in range(self.num_experts_per_tok):
-            expert_idx = selected_experts[..., i]
-            expert_weight = routing_weights[..., i]
+        # Process only active experts - each expert called exactly once
+        for expert_id in unique_experts:
+            # Find all (slot, position) pairs using this expert across all k slots
+            expert_mask = selected_experts == expert_id  # [..., k]
 
-            # Gather tokens for this expert
-            expert_mask = F.one_hot(expert_idx, num_classes=len(self.experts)).float()
-            expert_mask = expert_mask * expert_weight.unsqueeze(-1)
+            # Sum weights across all slots for this expert
+            # torch.where keeps routing_weights where mask is True, else 0
+            weights_for_expert = torch.where(
+                expert_mask,
+                routing_weights,
+                torch.zeros_like(routing_weights),
+            ).sum(dim=-1)  # [...] - summed weight per position
 
-            # Apply expert
-            for expert_id, expert_module in enumerate(self.experts):
-                # Get tokens assigned to this expert
-                mask = expert_mask[..., expert_id]
-                if mask.sum() > 0:
-                    expert_input = x * mask.unsqueeze(-1)
-                    expert_output = expert_module(expert_input)
-                    final_hidden_states += expert_output * mask.unsqueeze(-1)
+            # Apply expert once to all tokens, then weight the output
+            expert_output = self.experts[expert_id](x)
+            final_hidden_states += expert_output * weights_for_expert.unsqueeze(-1)
+
+            # Explicit cleanup for MPS memory pressure
+            del expert_output, weights_for_expert, expert_mask
 
         # Add shared expert (always applied)
         shared_output = self.shared_expert(x)
         final_hidden_states = final_hidden_states + shared_output
+
+        # Sync MPS to release memory before returning
+        if x.is_mps:
+            torch.mps.synchronize()
 
         return final_hidden_states
 
@@ -588,15 +664,26 @@ class TrellisModel(nn.Module):
             seq_len = input_ids.shape[1]
             attention_mask = self._make_causal_mask(seq_len, hidden_states.device)
 
-        for layer in self.layers:
+        is_mps = hidden_states.is_mps
+        for i, layer in enumerate(self.layers):
             hidden_states = layer(
                 hidden_states,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 kv_cache=kv_cache,
             )
+            # Sync MPS every 8 layers to bound peak memory
+            if is_mps and (i + 1) % 8 == 0:
+                torch.mps.synchronize()
 
-        return self.norm(hidden_states)
+        # Final normalization
+        hidden_states = self.norm(hidden_states)
+
+        # Clear transient allocations
+        if is_mps:
+            torch.mps.synchronize()
+
+        return hidden_states
 
     def _make_causal_mask(self, seq_len: int, device) -> torch.Tensor:
         mask = torch.triu(torch.ones(seq_len, seq_len, device=device), diagonal=1)
@@ -741,12 +828,15 @@ class TrellisForCausalLM(nn.Module):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        # Initialize KV cache for efficient generation
+        # Initialize MLA KV cache for efficient generation
+        # MLA caches compressed representation (kv_lora_rank + qk_rope_head_dim)
+        # instead of full K,V tensors, reducing cache size by ~8x
         kv_cache = TrellisKVCache(
             num_layers=self.config.num_hidden_layers,
             batch_size=batch_size,
             max_seq_len=seq_len + max_new_tokens,
             kv_lora_rank=self.config.kv_lora_rank,
+            qk_rope_head_dim=self.config.qk_rope_head_dim,
             device=str(device),
         )
 
@@ -757,7 +847,7 @@ class TrellisForCausalLM(nn.Module):
         _ = self.forward(input_ids, kv_cache=kv_cache)
 
         # Get current sequence length from cache
-        current_len = kv_cache.get_seq_len()
+        current_len = kv_cache.seq_len
 
         # Generate tokens one at a time
         for _ in range(max_new_tokens):

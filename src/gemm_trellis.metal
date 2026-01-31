@@ -363,7 +363,7 @@ kernel void gemm_trellis_packed(
                                 // Recalculate tile offset if we crossed tile boundary
                                 uint actual_tile_k = k_idx / TRELLIS_TILE_DIM;
                                 uint actual_tile_offset = (actual_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
-                                uint idx_in_tile = local_k * TRELLIS_TILE_DIM + local_n;
+                                uint idx_in_tile = local_n * TRELLIS_TILE_DIM + local_k;  // Transposed weight
                                 
                                 uint trellis_idx = unpack_trellis_index(
                                     packed_indices + actual_tile_offset, idx_in_tile, bits);
@@ -571,7 +571,7 @@ kernel void gemm_trellis_packed_fp32acc(
                             if (k_idx < K) {
                                 uint actual_tile_k = k_idx / TRELLIS_TILE_DIM;
                                 uint actual_tile_offset = (actual_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
-                                uint idx_in_tile = local_k * TRELLIS_TILE_DIM + local_n;
+                                uint idx_in_tile = local_n * TRELLIS_TILE_DIM + local_k;  // Transposed weight
                                 
                                 uint trellis_idx = unpack_trellis_index(
                                     packed_indices + actual_tile_offset, idx_in_tile, bits);
@@ -786,7 +786,7 @@ kernel void gemm_trellis_packed_decode(
                             if (k_idx < K) {
                                 uint actual_tile_k = k_idx / TRELLIS_TILE_DIM;
                                 uint actual_tile_offset = (actual_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
-                                uint idx_in_tile = local_k * TRELLIS_TILE_DIM + local_n;
+                                uint idx_in_tile = local_n * TRELLIS_TILE_DIM + local_k;  // Transposed weight
                                 
                                 uint trellis_idx = unpack_trellis_index(
                                     packed_indices + actual_tile_offset, idx_in_tile, bits);
