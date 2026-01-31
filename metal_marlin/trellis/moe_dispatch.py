@@ -234,7 +234,8 @@ def dispatch_moe_trellis_swiglu(
     # Dynamic inputs - always create new buffers
     activations = activations.contiguous()
     expert_ids = expert_ids.int().contiguous()
-    expert_probs = expert_probs.contiguous()
+    # CRITICAL: Kernel expects half precision for expert_probs
+    expert_probs = expert_probs.to(torch.float16).contiguous()
 
     activations_buf = mps_tensor_to_metal_buffer(activations, device)
     expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids, device)
@@ -301,9 +302,9 @@ def dispatch_moe_trellis_swiglu(
         down_sv_buf = mps_tensor_to_metal_buffer(down_sv, device)
         grid_buf = mps_tensor_to_metal_buffer(grid, device)
 
-    # Allocate output
-    output = torch.zeros(batch_size, hidden_dim, dtype=torch.float16, device="mps")
-    output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+    # Allocate output - use FP32 for atomic add, convert to FP16 after kernel
+    output_fp32 = torch.zeros(batch_size, hidden_dim, dtype=torch.float32, device="mps")
+    output_buf = mps_tensor_to_metal_buffer(output_fp32, device, copy_back=True)
 
     # Parameters struct
     params_data = np.array(
@@ -370,4 +371,5 @@ def dispatch_moe_trellis_swiglu(
         wait=True,
     )
 
-    return output
+    # Convert FP32 output to FP16
+    return output_fp32.half()

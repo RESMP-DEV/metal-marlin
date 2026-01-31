@@ -412,13 +412,10 @@ class TrellisModelLoader:
                         f"got {indices_raw.numel()}"
                     )
 
-                # Strip header byte and reshape to [tiles_k, tiles_n, packed_bytes_per_tile]
-                # NOTE: shape from safetensor is [out_features, in_features] = [N_gemm, K_gemm]
-                # But we need [tiles_K, tiles_N, bytes] for GEMM kernel where K=in, N=out
-                # So we reshape as [tiles_out, tiles_in, bytes] then transpose to [tiles_in, tiles_out, bytes]
+                # Strip header byte and reshape to [tiles_K, tiles_N, packed_bytes_per_tile]
+                # TrellisWeight convention: K=out_features, N=in_features
+                # This is stored as-is; model.py transposes when stacking for MoE kernel
                 packed_indices = indices_raw[1:].reshape(tiles_k, tiles_n, packed_bytes_per_tile)
-                # Transpose from [tiles_out, tiles_in, bytes] to [tiles_in, tiles_out, bytes]
-                packed_indices = packed_indices.permute(1, 0, 2).contiguous()
             elif indices_raw.dtype == torch.int16:
                 # Legacy format: not supported for memory-efficient loading
                 raise ValueError(

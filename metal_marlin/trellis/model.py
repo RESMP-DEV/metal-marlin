@@ -73,9 +73,8 @@ class TrellisMoEMLP(nn.Module):
         # Lazy Metal library and cached buffers
         self._lib: MetalKernelLibrary | None = None
         self._cached_weight_buffers: CachedWeightBuffers | None = None
-        # Fast MoE kernel still produces NaN in synthetic tests.
-        # Keep disabled until kernel is fixed.
-        self._use_fast_moe = self._check_fast_moe_available()
+        # Fast MoE kernel enabled - fixed NaN issues (probs dtype, weight transpose)
+        self._use_fast_moe = True
 
     def _prepare_expert_weights(self) -> None:
         """Prepare expert weights in contiguous format for fast MoE dispatch."""
@@ -103,11 +102,13 @@ class TrellisMoEMLP(nn.Module):
         down_sv_list = []
 
         for expert in self.experts:
-            gate_weights_list.append(expert.gate_proj.packed_indices)
+            # Transpose packed weights from TrellisWeight [tiles_out, tiles_in, packed]
+            # to GEMM convention [tiles_in, tiles_out, packed] for MoE kernel
+            gate_weights_list.append(expert.gate_proj.packed_indices.permute(1, 0, 2).contiguous())
             gate_scales_list.append(expert.gate_proj.scales)
-            up_weights_list.append(expert.up_proj.packed_indices)
+            up_weights_list.append(expert.up_proj.packed_indices.permute(1, 0, 2).contiguous())
             up_scales_list.append(expert.up_proj.scales)
-            down_weights_list.append(expert.down_proj.packed_indices)
+            down_weights_list.append(expert.down_proj.packed_indices.permute(1, 0, 2).contiguous())
             down_scales_list.append(expert.down_proj.scales)
 
             gate_su_list.append(expert.gate_proj.su)
@@ -241,6 +242,8 @@ class TrellisMoEMLP(nn.Module):
             top_k=self.num_experts_per_tok,
             bits=self.bits,
             cached_buffers=self._get_cached_buffers(),
+            # Use FP32 accumulators for large hidden_dim to avoid overflow
+            use_fp32_acc=self.hidden_dim >= 1024,
         )
 
         # Add shared expert (always applied)

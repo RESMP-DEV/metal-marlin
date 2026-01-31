@@ -62,6 +62,7 @@ def create_mock_trellis_linear(
     """
     TILE_DIM = 16
     # TrellisWeight convention: K = out_features, N = in_features
+    # This matches how TrellisLinear and loader expect weights
     tiles_k = (out_features + TILE_DIM - 1) // TILE_DIM
     tiles_n = (in_features + TILE_DIM - 1) // TILE_DIM
     packed_bytes = {2: 64, 3: 96, 4: 128}[bits]

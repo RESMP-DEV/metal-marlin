@@ -232,7 +232,7 @@ kernel void moe_trellis_swiglu(
     device const half* grid              [[buffer(13)]],  // Codebook grid
     device const uint* expert_ids        [[buffer(14)]],  // [batch, top_k]
     device const half* expert_probs      [[buffer(15)]],  // [batch, top_k]
-    device half* output                  [[buffer(16)]],  // [batch, hidden]
+    device float* output                 [[buffer(16)]],  // [batch, hidden] FP32 for atomic add
     constant TrellisParams& p            [[buffer(17)]],
 #ifdef MOE_DEBUG_NAN
     device half* debug_gate              [[buffer(18)]],  // [batch, intermediate_dim]
@@ -495,54 +495,33 @@ kernel void moe_trellis_swiglu(
 #endif
 
     // =========================================================================
-    // PHASE 4: Write output with probability weighting using atomic operations
+    // PHASE 4: Write output with probability weighting using FP32 atomic CAS
     //
     // CRITICAL FIX: Multiple threadgroups (one per expert slot) write to the
-    // same output locations concurrently. Without atomics, there's a race
-    // condition where one slot's contribution can be lost.
+    // same output locations concurrently. We use FP32 output buffer with
+    // CAS (compare-and-swap) atomic add for proper synchronization.
     //
-    // The output buffer must be pre-initialized to zero before kernel launch.
-    // We use a CAS loop to atomically add our contribution to the shared output.
+    // The output buffer (FP32) must be pre-initialized to zero before kernel launch.
+    // The dispatch code converts FP32 output to FP16 after kernel completes.
     // =========================================================================
 
     for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
         uint global_n = n_block + i;
         if (global_n < hidden_dim) {
-            half weighted = output_tile[i] * prob;
+            float weighted = float(output_tile[i]) * float(prob);
             uint out_idx = token_idx * hidden_dim + global_n;
 
-            // Atomic add for half precision using CAS on aligned uint32
-            // Each uint32 contains two packed half values
-            uint aligned_idx = out_idx / 2;
-            uint lane = out_idx & 1;  // 0 = low half, 1 = high half
-
-            device atomic_uint* atomic_ptr = (device atomic_uint*)(&output[aligned_idx * 2]);
-
-            uint old_val = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
-            uint new_val;
+            // FP32 atomic add using CAS loop
+            device atomic_uint* atomic_ptr = (device atomic_uint*)(&output[out_idx]);
+            uint old_bits = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
+            uint new_bits;
             bool success;
             do {
-                // Extract current half value from the appropriate lane
-                half current_half;
-                if (lane == 0) {
-                    current_half = as_type<half>(ushort(old_val & 0xFFFF));
-                } else {
-                    current_half = as_type<half>(ushort((old_val >> 16) & 0xFFFF));
-                }
-
-                // Add our contribution
-                half updated_half = current_half + weighted;
-                ushort updated_bits = as_type<ushort>(updated_half);
-
-                // Pack back into uint32
-                if (lane == 0) {
-                    new_val = (old_val & 0xFFFF0000) | uint(updated_bits);
-                } else {
-                    new_val = (old_val & 0x0000FFFF) | (uint(updated_bits) << 16);
-                }
-
+                float old_val = as_type<float>(old_bits);
+                float new_val = old_val + weighted;
+                new_bits = as_type<uint>(new_val);
                 success = atomic_compare_exchange_weak_explicit(
-                    atomic_ptr, &old_val, new_val,
+                    atomic_ptr, &old_bits, new_bits,
                     memory_order_relaxed, memory_order_relaxed);
             } while (!success);
         }
@@ -573,7 +552,7 @@ kernel void moe_trellis_swiglu_fp32acc(
     device const half* grid              [[buffer(13)]],
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
-    device half* output                  [[buffer(16)]],
+    device float* output                 [[buffer(16)]],  // FP32 for atomic add
     constant TrellisParams& p            [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
@@ -714,41 +693,23 @@ kernel void moe_trellis_swiglu_fp32acc(
         }
     }
 
-    // Atomic write to output (same fix as FP16 variant for race condition)
+    // FP32 atomic add using CAS loop (same fix as FP16 variant)
     for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
         uint global_n = n_block + i;
         if (global_n < hidden_dim) {
-            half weighted = half(output_tile[i] * prob);
+            float weighted = float(output_tile[i]) * prob;
             uint out_idx = token_idx * hidden_dim + global_n;
 
-            // Atomic add for half precision using CAS on aligned uint32
-            uint aligned_idx = out_idx / 2;
-            uint lane = out_idx & 1;
-
-            device atomic_uint* atomic_ptr = (device atomic_uint*)(&output[aligned_idx * 2]);
-
-            uint old_val = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
-            uint new_val;
+            device atomic_uint* atomic_ptr = (device atomic_uint*)(&output[out_idx]);
+            uint old_bits = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
+            uint new_bits;
             bool success;
             do {
-                half current_half;
-                if (lane == 0) {
-                    current_half = as_type<half>(ushort(old_val & 0xFFFF));
-                } else {
-                    current_half = as_type<half>(ushort((old_val >> 16) & 0xFFFF));
-                }
-
-                half updated_half = current_half + weighted;
-                ushort updated_bits = as_type<ushort>(updated_half);
-
-                if (lane == 0) {
-                    new_val = (old_val & 0xFFFF0000) | uint(updated_bits);
-                } else {
-                    new_val = (old_val & 0x0000FFFF) | (uint(updated_bits) << 16);
-                }
-
+                float old_val = as_type<float>(old_bits);
+                float new_val = old_val + weighted;
+                new_bits = as_type<uint>(new_val);
                 success = atomic_compare_exchange_weak_explicit(
-                    atomic_ptr, &old_val, new_val,
+                    atomic_ptr, &old_bits, new_bits,
                     memory_order_relaxed, memory_order_relaxed);
             } while (!success);
         }
