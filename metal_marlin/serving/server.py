@@ -157,7 +157,14 @@ async def health():
 async def get_metrics():
     from fastapi.responses import PlainTextResponse
 
-    return PlainTextResponse(content=metrics.to_prometheus(), media_type="text/plain")
+    from ..trellis.metrics import moe_metrics
+
+    # Combine serving metrics with MoE metrics
+    serving_metrics = metrics.to_prometheus()
+    moe_metrics_output = moe_metrics.to_prometheus()
+
+    combined = serving_metrics + "\n" + moe_metrics_output
+    return PlainTextResponse(content=combined, media_type="text/plain")
 
 
 def run_server(
