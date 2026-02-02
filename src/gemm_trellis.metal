@@ -332,45 +332,47 @@ kernel void gemm_trellis_packed(
                         // Calculate trellis tile coordinates
                         uint trellis_tile_n = b_col / TRELLIS_TILE_DIM;
                         uint local_n = b_col % TRELLIS_TILE_DIM;
-                        
+
                         // Offset into packed_indices for this trellis tile
                         uint tile_offset = (trellis_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
                         device const uchar* tile_packed = packed_indices + tile_offset;
-                        
+
                         // Load scale for this column
                         uint scale_idx = group_idx * N + b_col;
                         float scale = scales[scale_idx];
-                        
-                        // Load column sign
-                        float sign_n = sv[b_col];
-                        
-                        // Load row signs for 8 consecutive K values
-                        float su_vec[8];
+
+                        // For stored weight W[b_col, k_idx] (row=b_col, col=k_idx):
+                        // - Row sign comes from su[b_col] (su has size [N] = [out_features])
+                        // - Column sign comes from sv[k_idx] (sv has size [K] = [in_features])
+                        float row_sign = su[b_col];
+
+                        // Load column signs for 8 consecutive K values
+                        float col_sign_vec[8];
                         #pragma unroll
                         for (uint row = 0; row < 8; ++row) {
                             uint k_idx = k_sub_base + row;
-                            su_vec[row] = (k_idx < K) ? su[k_idx] : 0.0f;
+                            col_sign_vec[row] = (k_idx < K) ? sv[k_idx] : 0.0f;
                         }
-                        
+
                         // Dequantize 8 elements for this column
                         // We need to handle the case where k_sub_base spans trellis tile boundary
                         #pragma unroll
                         for (uint row = 0; row < 8; ++row) {
                             uint k_idx = k_sub_base + row;
                             uint local_k = (local_k_base + row) % TRELLIS_TILE_DIM;
-                            
+
                             if (k_idx < K) {
                                 // Recalculate tile offset if we crossed tile boundary
                                 uint actual_tile_k = k_idx / TRELLIS_TILE_DIM;
                                 uint actual_tile_offset = (actual_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
                                 uint idx_in_tile = local_n * TRELLIS_TILE_DIM + local_k;  // Transposed weight
-                                
+
                                 uint trellis_idx = unpack_trellis_index(
                                     packed_indices + actual_tile_offset, idx_in_tile, bits);
                                 if (trellis_idx >= n_levels) trellis_idx = 0;
-                                
+
                                 dequant_vals[row] = dequant_trellis_element(
-                                    trellis_idx, scale, su_vec[row], sign_n, grid);
+                                    trellis_idx, scale, row_sign, col_sign_vec[row], grid);
                             } else {
                                 dequant_vals[row] = half(0.0h);
                             }

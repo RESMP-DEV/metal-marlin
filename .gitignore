@@ -38,8 +38,24 @@ benchmarks/results/
 
 # AlphaHENG development artifacts (not for public release)
 agent_workspace/
-tasks/
+tasks/*.yaml
+tasks/*.yml
 scripts/collect_status_facts.py
 scripts/optimize_all_kernels.py
 scripts/optimize_kernel.py
 scripts/optimize_structural_v2.py
+
+# Debug/temporary scripts (created during development, not for release)
+scripts/debug_*.py
+scripts/diagnose_*.py
+scripts/profile_*.py
+scripts/prototype_*.py
+scripts/moe_config.py
+scripts/bench_tps.py
+scripts/quick_bench.py
+scripts/benchmark_e2e.py
+scripts/test_*.py
+scripts/validate_*.py
+
+# Debug tests (temporary, not for CI)
+tests/test_debug_*.py

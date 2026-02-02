@@ -753,6 +753,70 @@ def mps_tensor_to_metal_buffer(
     return buffer
 
 
+def numpy_array_to_metal_buffer(
+    arr: np.ndarray, device: Any
+) -> Any:
+    """Create Metal buffer from numpy array.
+
+    Lowest-level buffer creation - use when you already have numpy data.
+
+    Args:
+        arr: Numpy array (must be contiguous)
+        device: MTLDevice to create buffer on
+
+    Returns:
+        MTLBuffer containing array data
+    """
+    require_mps()
+
+    if not arr.flags['C_CONTIGUOUS']:
+        arr = np.ascontiguousarray(arr)
+
+    buffer = device.newBufferWithBytes_length_options_(
+        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+    )
+    if buffer is None:
+        raise RuntimeError(f"Failed to create Metal buffer from numpy array shape={arr.shape}")
+    return buffer
+
+
+def cpu_tensor_to_metal_buffer(
+    tensor: torch.Tensor, device: Any
+) -> Any:
+    """Create Metal buffer directly from CPU tensor.
+
+    Bypasses MPS entirely to avoid double-copy when MPS zero-copy fails.
+    More memory efficient for large static weights.
+
+    Args:
+        tensor: PyTorch tensor on CPU (NOT MPS)
+        device: MTLDevice to create buffer on
+
+    Returns:
+        MTLBuffer containing tensor data
+    """
+    require_mps()
+
+    if tensor.is_mps or tensor.is_cuda:
+        raise ValueError("Tensor must be on CPU, not GPU")
+
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+
+    # Convert to numpy and create buffer
+    # BFloat16 not supported by numpy, convert to float16
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float16)
+
+    arr = tensor.numpy()
+    buffer = device.newBufferWithBytes_length_options_(
+        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+    )
+    if buffer is None:
+        raise RuntimeError(f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}")
+    return buffer
+
+
 def metal_buffer_to_numpy(buffer: Any, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
     """Read Metal buffer contents to numpy array.
 

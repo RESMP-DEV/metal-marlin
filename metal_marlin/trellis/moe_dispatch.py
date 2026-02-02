@@ -13,7 +13,6 @@ single batched kernel that processes all experts in parallel.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,13 +31,15 @@ if HAS_METAL:
     import Metal
 
 
+class MoEDispatchValidationError(ValueError):
+    """Raised when MoE dispatch input validation fails."""
+
+    pass
+
+
 @dataclass
 class CachedWeightBuffers:
-    """Pre-allocated Metal buffers for static MoE weights.
-
-    These buffers persist across dispatch calls, avoiding expensive
-    buffer creation during the decode phase.
-    """
+    """Pre-allocated Metal buffers for static MoE weights."""
 
     gate_weights: Any
     gate_scales: Any
@@ -75,82 +76,33 @@ def create_cached_weight_buffers(
 
     Call this once during model initialization, then pass the returned
     CachedWeightBuffers to dispatch_moe_trellis_swiglu for each forward pass.
-
-    Args:
-        device: MTLDevice to create buffers on.
-        gate_weights: Packed Trellis gate weights [num_experts, ...] uint8
-        gate_scales: Gate scales [num_experts, n_groups, intermediate] half
-        up_weights: Packed Trellis up weights [num_experts, ...] uint8
-        up_scales: Up scales [num_experts, n_groups, intermediate] half
-        down_weights: Packed Trellis down weights [num_experts, ...] uint8
-        down_scales: Down scales [num_experts, n_groups, hidden] half
-        gate_su: Gate row signs [num_experts, hidden] half
-        gate_sv: Gate column signs [num_experts, intermediate] half
-        up_su: Up row signs [num_experts, hidden] half
-        up_sv: Up column signs [num_experts, intermediate] half
-        down_su: Down row signs [num_experts, intermediate] half
-        down_sv: Down column signs [num_experts, hidden] half
-        grid: Codebook grid [n_levels] half
-
-    Returns:
-        CachedWeightBuffers containing Metal buffers for all static weights.
     """
     require_mps()
 
-    # CRITICAL: Metal MoE kernel expects half (float16) for scales/su/sv/grid.
-    # TrellisLinear stores these as float32, so convert here to avoid
-    # dtype mismatch that causes garbage values (NaN).
-    def to_half(t: torch.Tensor) -> torch.Tensor:
+    def ensure_half(t: torch.Tensor) -> torch.Tensor:
+        if t.dtype == torch.float16:
+            return t.contiguous()
         return t.half().contiguous()
 
     return CachedWeightBuffers(
         gate_weights=mps_tensor_to_metal_buffer(gate_weights.contiguous(), device),
-        gate_scales=mps_tensor_to_metal_buffer(to_half(gate_scales), device),
+        gate_scales=mps_tensor_to_metal_buffer(ensure_half(gate_scales), device),
         up_weights=mps_tensor_to_metal_buffer(up_weights.contiguous(), device),
-        up_scales=mps_tensor_to_metal_buffer(to_half(up_scales), device),
+        up_scales=mps_tensor_to_metal_buffer(ensure_half(up_scales), device),
         down_weights=mps_tensor_to_metal_buffer(down_weights.contiguous(), device),
-        down_scales=mps_tensor_to_metal_buffer(to_half(down_scales), device),
-        gate_su=mps_tensor_to_metal_buffer(to_half(gate_su), device),
-        gate_sv=mps_tensor_to_metal_buffer(to_half(gate_sv), device),
-        up_su=mps_tensor_to_metal_buffer(to_half(up_su), device),
-        up_sv=mps_tensor_to_metal_buffer(to_half(up_sv), device),
-        down_su=mps_tensor_to_metal_buffer(to_half(down_su), device),
-        down_sv=mps_tensor_to_metal_buffer(to_half(down_sv), device),
-        grid=mps_tensor_to_metal_buffer(to_half(grid), device),
+        down_scales=mps_tensor_to_metal_buffer(ensure_half(down_scales), device),
+        gate_su=mps_tensor_to_metal_buffer(ensure_half(gate_su), device),
+        gate_sv=mps_tensor_to_metal_buffer(ensure_half(gate_sv), device),
+        up_su=mps_tensor_to_metal_buffer(ensure_half(up_su), device),
+        up_sv=mps_tensor_to_metal_buffer(ensure_half(up_sv), device),
+        down_su=mps_tensor_to_metal_buffer(ensure_half(down_su), device),
+        down_sv=mps_tensor_to_metal_buffer(ensure_half(down_sv), device),
+        grid=mps_tensor_to_metal_buffer(ensure_half(grid), device),
     )
 
 
-# Debug counters for buffer tracking (module-level mutable state)
-_dispatch_call_count = 0
-_cached_buffer_hit_count = 0
-_cached_buffer_miss_count = 0
-_debug_moe_dispatch = False  # Set True or use env var METAL_DEBUG=1
-
-
-def get_buffer_stats() -> dict[str, int]:
-    """Get buffer caching statistics for debugging.
-
-    Returns:
-        Dictionary with dispatch_calls, cache_hits, cache_misses.
-    """
-    return {
-        "dispatch_calls": _dispatch_call_count,
-        "cache_hits": _cached_buffer_hit_count,
-        "cache_misses": _cached_buffer_miss_count,
-    }
-
-
-def reset_buffer_stats() -> None:
-    """Reset buffer caching statistics."""
-    global _dispatch_call_count, _cached_buffer_hit_count, _cached_buffer_miss_count
-    _dispatch_call_count = 0
-    _cached_buffer_hit_count = 0
-    _cached_buffer_miss_count = 0
-
-
-def dispatch_moe_trellis_swiglu(
-    lib: MetalKernelLibrary,
-    activations: torch.Tensor,
+def create_cached_weight_buffers_from_cpu(
+    device: Any,
     gate_weights: torch.Tensor,
     gate_scales: torch.Tensor,
     up_weights: torch.Tensor,
@@ -164,6 +116,213 @@ def dispatch_moe_trellis_swiglu(
     down_su: torch.Tensor,
     down_sv: torch.Tensor,
     grid: torch.Tensor,
+) -> CachedWeightBuffers:
+    """Create cached Metal buffers from CPU tensors."""
+    from ..metal_dispatch import cpu_tensor_to_metal_buffer
+
+    def ensure_half_cpu(t: torch.Tensor) -> torch.Tensor:
+        if t.is_mps or t.is_cuda:
+            raise ValueError(f"Tensor must be on CPU, got device={t.device}")
+        if t.dtype == torch.float16:
+            return t.contiguous()
+        return t.half().contiguous()
+
+    return CachedWeightBuffers(
+        gate_weights=cpu_tensor_to_metal_buffer(gate_weights.contiguous(), device),
+        gate_scales=cpu_tensor_to_metal_buffer(ensure_half_cpu(gate_scales), device),
+        up_weights=cpu_tensor_to_metal_buffer(up_weights.contiguous(), device),
+        up_scales=cpu_tensor_to_metal_buffer(ensure_half_cpu(up_scales), device),
+        down_weights=cpu_tensor_to_metal_buffer(down_weights.contiguous(), device),
+        down_scales=cpu_tensor_to_metal_buffer(ensure_half_cpu(down_scales), device),
+        gate_su=cpu_tensor_to_metal_buffer(ensure_half_cpu(gate_su), device),
+        gate_sv=cpu_tensor_to_metal_buffer(ensure_half_cpu(gate_sv), device),
+        up_su=cpu_tensor_to_metal_buffer(ensure_half_cpu(up_su), device),
+        up_sv=cpu_tensor_to_metal_buffer(ensure_half_cpu(up_sv), device),
+        down_su=cpu_tensor_to_metal_buffer(ensure_half_cpu(down_su), device),
+        down_sv=cpu_tensor_to_metal_buffer(ensure_half_cpu(down_sv), device),
+        grid=cpu_tensor_to_metal_buffer(ensure_half_cpu(grid), device),
+    )
+
+
+class MoEBufferPool:
+    """Reusable buffer pool for MoE kernel dispatch."""
+
+    def __init__(self, device: Any, hidden_dim: int, max_batch: int = 32):
+        self.device = device
+        self.hidden_dim = hidden_dim
+        self.max_batch = max_batch
+
+        self._activation_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
+        self._expert_ids_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
+        self._expert_probs_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
+        self._output_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
+        self._params_buffers: dict[tuple[int, int, int, int, int, int], Any] = {}  # keyed by params tuple
+
+        for batch in [1, 2, 4, 8, 16, 32]:
+            if batch <= max_batch:
+                self._preallocate(batch)
+
+    def _preallocate(self, batch_size: int) -> None:
+        act_tensor = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float16, device="mps"
+        )
+        act_buf = mps_tensor_to_metal_buffer(act_tensor, self.device)
+        self._activation_buffers[batch_size] = (act_tensor, act_buf)
+
+        out_tensor = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float32, device="mps"
+        )
+        out_buf = mps_tensor_to_metal_buffer(out_tensor, self.device, copy_back=True)
+        self._output_buffers[batch_size] = (out_tensor, out_buf)
+
+    def get_activation_buffer(
+        self, batch_size: int, activations: torch.Tensor
+    ) -> Any:
+        if batch_size in self._activation_buffers:
+            tensor, buf = self._activation_buffers[batch_size]
+            tensor.copy_(activations)
+            return buf
+        return mps_tensor_to_metal_buffer(activations.contiguous(), self.device)
+
+    def get_expert_ids_buffer(
+        self, batch_size: int, top_k: int, expert_ids: torch.Tensor
+    ) -> Any:
+        key = (batch_size, top_k)
+        if key not in self._expert_ids_buffers:
+            tensor = torch.zeros(batch_size, top_k, dtype=torch.int32, device="mps")
+            buf = mps_tensor_to_metal_buffer(tensor, self.device)
+            self._expert_ids_buffers[key] = (tensor, buf)
+        tensor, buf = self._expert_ids_buffers[key]
+        tensor.copy_(expert_ids.int())
+        return buf
+
+    def get_expert_probs_buffer(
+        self, batch_size: int, top_k: int, expert_probs: torch.Tensor
+    ) -> Any:
+        key = (batch_size, top_k)
+        if key not in self._expert_probs_buffers:
+            tensor = torch.zeros(batch_size, top_k, dtype=torch.float16, device="mps")
+            buf = mps_tensor_to_metal_buffer(tensor, self.device)
+            self._expert_probs_buffers[key] = (tensor, buf)
+        tensor, buf = self._expert_probs_buffers[key]
+        tensor.copy_(expert_probs.to(torch.float16))
+        return buf
+
+    def get_output_buffer(self, batch_size: int) -> tuple[torch.Tensor, Any]:
+        if batch_size in self._output_buffers:
+            tensor, buf = self._output_buffers[batch_size]
+            tensor.zero_()
+            return tensor, buf
+        tensor = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float32, device="mps"
+        )
+        buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
+        return tensor, buf
+
+    def preallocate_top_k(self, top_k: int, batch_sizes: list[int] | None = None) -> None:
+        if batch_sizes is None:
+            batch_sizes = [b for b in [1, 2, 4, 8, 16, 32] if b <= self.max_batch]
+        for bs in batch_sizes:
+            key = (bs, top_k)
+            if key not in self._expert_ids_buffers:
+                tensor = torch.zeros(bs, top_k, dtype=torch.int32, device="mps")
+                buf = mps_tensor_to_metal_buffer(tensor, self.device)
+                self._expert_ids_buffers[key] = (tensor, buf)
+            if key not in self._expert_probs_buffers:
+                tensor = torch.zeros(bs, top_k, dtype=torch.float16, device="mps")
+                buf = mps_tensor_to_metal_buffer(tensor, self.device)
+                self._expert_probs_buffers[key] = (tensor, buf)
+
+    def get_params_buffer(
+        self,
+        batch_size: int,
+        hidden_dim: int,
+        intermediate_dim: int,
+        num_experts: int,
+        top_k: int,
+        bits: int,
+    ) -> Any:
+        """Get or create a cached params buffer for the given parameters."""
+        key = (batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits)
+        if key not in self._params_buffers:
+            n_levels = 1 << bits
+            params_data = np.array(
+                [batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits, 128, n_levels],
+                dtype=np.uint32,
+            )
+            self._params_buffers[key] = self.device.newBufferWithBytes_length_options_(
+                params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
+            )
+        return self._params_buffers[key]
+
+    def clear(self) -> None:
+        self._activation_buffers.clear()
+        self._expert_ids_buffers.clear()
+        self._expert_probs_buffers.clear()
+        self._output_buffers.clear()
+        self._params_buffers.clear()
+
+
+def get_buffer_stats() -> dict[str, int]:
+    """Get buffer caching statistics for debugging.
+
+    DEPRECATED: Stats tracking removed from hot path for performance.
+    Returns zeros for backward compatibility.
+    """
+    return {
+        "dispatch_calls": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
+
+
+def reset_buffer_stats() -> None:
+    """Reset buffer caching statistics.
+
+    DEPRECATED: Stats tracking removed from hot path for performance.
+    No-op for backward compatibility.
+    """
+    pass
+
+
+def select_moe_kernel(batch_size: int, use_fp32_acc: bool) -> tuple[str, int]:
+    """Select optimal MoE kernel and tile size for given batch size."""
+    if batch_size == 1:
+        base = "moe_trellis_swiglu_decode"
+        tile_n = 32
+    elif batch_size > 8:
+        base = "moe_trellis_swiglu_large_batch"
+        tile_n = 128
+    elif batch_size >= 2:
+        base = "moe_trellis_swiglu_prefill4"
+        tile_n = 64
+    else:
+        base = "moe_trellis_swiglu"
+        tile_n = 64
+
+    if use_fp32_acc:
+        if base in ("moe_trellis_swiglu_decode", "moe_trellis_swiglu_large_batch"):
+            return base, tile_n
+        return base + "_fp32acc", tile_n
+    return base, tile_n
+
+
+def dispatch_moe_trellis_swiglu(
+    lib: MetalKernelLibrary,
+    activations: torch.Tensor,
+    gate_weights: torch.Tensor | None,
+    gate_scales: torch.Tensor | None,
+    up_weights: torch.Tensor | None,
+    up_scales: torch.Tensor | None,
+    down_weights: torch.Tensor | None,
+    down_scales: torch.Tensor | None,
+    gate_su: torch.Tensor | None,
+    gate_sv: torch.Tensor | None,
+    up_su: torch.Tensor | None,
+    up_sv: torch.Tensor | None,
+    down_su: torch.Tensor | None,
+    down_sv: torch.Tensor | None,
+    grid: torch.Tensor | None,
     expert_ids: torch.Tensor,
     expert_probs: torch.Tensor,
     hidden_dim: int,
@@ -173,82 +332,37 @@ def dispatch_moe_trellis_swiglu(
     bits: int,
     *,
     cached_buffers: CachedWeightBuffers | None = None,
+    buffer_pool: MoEBufferPool | None = None,
     use_fp32_acc: bool = False,
 ) -> torch.Tensor:
     """Fused MoE GEMM with Trellis quantization and SwiGLU activation.
 
-    Computes for each token:
-        output = sum_{i=0}^{top_k-1} prob[i] *
-                 down_proj(silu(gate_proj(x_i)) * up_proj(x_i))
-
-    Where x_i is routed to expert_id[i].
-
-    This is a single-kernel replacement for the slow sequential MoE implementation
-    that iterates through 512 (top_k * num_experts) expert calls.
-
-    Args:
-        lib: MetalKernelLibrary with gemm_trellis_moe compiled
-        activations: Input activations [batch, hidden] half, MPS tensor
-        gate_weights: Packed Trellis gate weights [num_experts, ...] uint8
-        gate_scales: Gate scales [num_experts, n_groups, intermediate] half
-        up_weights: Packed Trellis up weights [num_experts, ...] uint8
-        up_scales: Up scales [num_experts, n_groups, intermediate] half
-        down_weights: Packed Trellis down weights [num_experts, ...] uint8
-        down_scales: Down scales [num_experts, n_groups, hidden] half
-        gate_su: Gate row signs [num_experts, hidden] half
-        gate_sv: Gate column signs [num_experts, intermediate] half
-        up_su: Up row signs [num_experts, hidden] half
-        up_sv: Up column signs [num_experts, intermediate] half
-        down_su: Down row signs [num_experts, intermediate] half
-        down_sv: Down column signs [num_experts, hidden] half
-        grid: Codebook grid [n_levels] half
-        expert_ids: Expert assignments [batch, top_k] uint32
-        expert_probs: Expert probabilities [batch, top_k] half
-        hidden_dim: Model hidden dimension
-        intermediate_dim: FFN intermediate dimension
-        num_experts: Total number of experts
-        top_k: Number of experts per token
-        bits: Quantization bit width (2, 3, or 4)
-        cached_buffers: Optional pre-allocated Metal buffers for static weights.
-            If provided, weight tensor arguments are ignored and cached buffers
-            are used instead. Create with create_cached_weight_buffers().
-        use_fp32_acc: If True, use FP32 accumulators for numerical stability.
-            Recommended for large K dimensions (e.g., K=3584, intermediate=18944)
-            where FP16 accumulation may overflow or lose precision.
-
-    Returns:
-        Output tensor [batch, hidden] half, MPS tensor
+    HOT PATH: This function is called for every forward pass. Keep it minimal.
+    Validation removed from hot path for performance. Use validate_moe_inputs()
+    during model initialization if validation is needed.
     """
     require_mps()
 
-    # Track buffer usage for debugging
-    global _dispatch_call_count, _cached_buffer_hit_count, _cached_buffer_miss_count
-    _dispatch_call_count += 1
-
-    debug_enabled = _debug_moe_dispatch or os.environ.get("METAL_DEBUG") == "1"
-
     device = lib.device
     batch_size = activations.shape[0]
-    n_levels = grid.shape[0]
 
-    # Dynamic inputs - always create new buffers
-    activations = activations.contiguous()
-    expert_ids = expert_ids.int().contiguous()
-    # CRITICAL: Kernel expects half precision for expert_probs
-    expert_probs = expert_probs.to(torch.float16).contiguous()
+    # Get buffers (fast path with pool avoids contiguous/dtype copies)
+    if buffer_pool is not None:
+        # Buffer pool handles the copy internally, avoiding intermediate allocations
+        activations_buf = buffer_pool.get_activation_buffer(batch_size, activations)
+        expert_ids_buf = buffer_pool.get_expert_ids_buffer(batch_size, top_k, expert_ids)
+        expert_probs_buf = buffer_pool.get_expert_probs_buffer(batch_size, top_k, expert_probs)
+    else:
+        # Slow path - need contiguous tensors for buffer creation
+        activations = activations.contiguous()
+        expert_ids = expert_ids.int().contiguous()
+        expert_probs = expert_probs.to(torch.float16).contiguous()
+        activations_buf = mps_tensor_to_metal_buffer(activations, device)
+        expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids, device)
+        expert_probs_buf = mps_tensor_to_metal_buffer(expert_probs, device)
 
-    activations_buf = mps_tensor_to_metal_buffer(activations, device)
-    expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids, device)
-    expert_probs_buf = mps_tensor_to_metal_buffer(expert_probs, device)
-
-    # Static weights - use cached buffers if provided
+    # Get cached weight buffers or create new ones
     if cached_buffers is not None:
-        _cached_buffer_hit_count += 1
-        if debug_enabled and _dispatch_call_count <= 5:
-            print(
-                f"[MoE DISPATCH #{_dispatch_call_count}] CACHED buffers reused "
-                f"(hit #{_cached_buffer_hit_count}, batch={batch_size})"
-            )
         gate_weights_buf = cached_buffers.gate_weights
         gate_scales_buf = cached_buffers.gate_scales
         up_weights_buf = cached_buffers.up_weights
@@ -263,30 +377,20 @@ def dispatch_moe_trellis_swiglu(
         down_sv_buf = cached_buffers.down_sv
         grid_buf = cached_buffers.grid
     else:
-        # No cache - create buffers on the fly (slow path)
-        _cached_buffer_miss_count += 1
-        if debug_enabled:
-            print(
-                f"[MoE DISPATCH #{_dispatch_call_count}] WARNING: Creating 13 new "
-                f"Metal buffers (miss #{_cached_buffer_miss_count}, batch={batch_size})"
-            )
-            import traceback
-
-            traceback.print_stack(limit=10)
-
-        gate_weights = gate_weights.contiguous()
-        gate_scales = gate_scales.contiguous()
-        up_weights = up_weights.contiguous()
-        up_scales = up_scales.contiguous()
-        down_weights = down_weights.contiguous()
-        down_scales = down_scales.contiguous()
-        gate_su = gate_su.contiguous()
-        gate_sv = gate_sv.contiguous()
-        up_su = up_su.contiguous()
-        up_sv = up_sv.contiguous()
-        down_su = down_su.contiguous()
-        down_sv = down_sv.contiguous()
-        grid = grid.contiguous()
+        # Slow path - should rarely happen in production
+        gate_weights = gate_weights.contiguous()  # type: ignore[union-attr]
+        gate_scales = gate_scales.contiguous()  # type: ignore[union-attr]
+        up_weights = up_weights.contiguous()  # type: ignore[union-attr]
+        up_scales = up_scales.contiguous()  # type: ignore[union-attr]
+        down_weights = down_weights.contiguous()  # type: ignore[union-attr]
+        down_scales = down_scales.contiguous()  # type: ignore[union-attr]
+        gate_su = gate_su.contiguous()  # type: ignore[union-attr]
+        gate_sv = gate_sv.contiguous()  # type: ignore[union-attr]
+        up_su = up_su.contiguous()  # type: ignore[union-attr]
+        up_sv = up_sv.contiguous()  # type: ignore[union-attr]
+        down_su = down_su.contiguous()  # type: ignore[union-attr]
+        down_sv = down_sv.contiguous()  # type: ignore[union-attr]
+        grid = grid.contiguous()  # type: ignore[union-attr]
 
         gate_weights_buf = mps_tensor_to_metal_buffer(gate_weights, device)
         gate_scales_buf = mps_tensor_to_metal_buffer(gate_scales, device)
@@ -302,74 +406,76 @@ def dispatch_moe_trellis_swiglu(
         down_sv_buf = mps_tensor_to_metal_buffer(down_sv, device)
         grid_buf = mps_tensor_to_metal_buffer(grid, device)
 
-    # Allocate output - use FP32 for atomic add, convert to FP16 after kernel
-    output_fp32 = torch.zeros(batch_size, hidden_dim, dtype=torch.float32, device="mps")
-    output_buf = mps_tensor_to_metal_buffer(output_fp32, device, copy_back=True)
+    # Allocate output buffer
+    if buffer_pool is not None:
+        output_fp32, output_buf = buffer_pool.get_output_buffer(batch_size)
+        # Get cached params buffer from pool
+        params_buf = buffer_pool.get_params_buffer(
+            batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits
+        )
+    else:
+        output_fp32 = torch.zeros(batch_size, hidden_dim, dtype=torch.float32, device="mps")
+        output_buf = mps_tensor_to_metal_buffer(output_fp32, device, copy_back=True)
+        # Create params buffer (slow path)
+        n_levels = 1 << bits
+        params_data = np.array(
+            [batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits, 128, n_levels],
+            dtype=np.uint32,
+        )
+        params_buf = device.newBufferWithBytes_length_options_(
+            params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
+        )
 
-    # Parameters struct
-    params_data = np.array(
-        [
-            batch_size,
-            hidden_dim,
-            intermediate_dim,
-            num_experts,
-            top_k,
-            bits,
-            128,  # group_size (128 for Trellis scales - must match TrellisLinear.GROUP_SIZE)
-            n_levels,
-        ],
-        dtype=np.uint32,
-    )
-    params_buf = device.newBufferWithBytes_length_options_(
-        params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
-    )
+    # Select kernel and compute grid
+    kernel_name, tile_n = select_moe_kernel(batch_size, use_fp32_acc)
+    is_decode_kernel = kernel_name == "moe_trellis_swiglu_decode"
+    is_prefill4_kernel = "prefill4" in kernel_name
 
-    # Dispatch configuration - must match Metal shader constants
-    # Grid layout: (ceil(hidden_dim / MOE_TILE_N), M, top_k)
-    #   - tgid.x: output column block (into hidden_dim)
-    #   - tgid.y: token index
-    #   - tgid.z: expert slot (0 to top_k-1)
-    #
-    # Each threadgroup handles one (token, slot, n_block) combination to ensure
-    # CORRECT per-token expert routing. This fixes the bug where all tokens in
-    # a tile incorrectly used the first token's expert.
-    TILE_N = 64  # Output column tile (matches MOE_TILE_N in kernel)
-    threads_per_tg = 128  # 4 simdgroups * 32 threads
+    if is_decode_kernel:
+        threads_per_tg = 64
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = top_k
+        grid_z = 1
+    elif is_prefill4_kernel:
+        threads_per_tg = 128
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = (batch_size + 3) // 4
+        grid_z = top_k
+    else:
+        threads_per_tg = 128
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = batch_size
+        grid_z = top_k
 
-    grid_x = (hidden_dim + TILE_N - 1) // TILE_N  # Output column blocks
-    grid_y = batch_size  # One threadgroup per token
-    grid_z = top_k  # One threadgroup per expert slot
-
-    # Select kernel based on FP32 accumulation flag
-    kernel_name = "moe_trellis_swiglu_fp32acc" if use_fp32_acc else "moe_trellis_swiglu"
+    # Dispatch kernel
+    buffer_list = [
+        activations_buf,
+        gate_weights_buf,
+        gate_scales_buf,
+        up_weights_buf,
+        up_scales_buf,
+        down_weights_buf,
+        down_scales_buf,
+        gate_su_buf,
+        gate_sv_buf,
+        up_su_buf,
+        up_sv_buf,
+        down_su_buf,
+        down_sv_buf,
+        grid_buf,
+        expert_ids_buf,
+        expert_probs_buf,
+        output_buf,
+        params_buf,
+    ]
 
     dispatch_kernel(
         lib,
         function_name=kernel_name,
         grid=(grid_x, grid_y, grid_z),
         threadgroup=(threads_per_tg, 1, 1),
-        buffers=[
-            activations_buf,
-            gate_weights_buf,
-            gate_scales_buf,
-            up_weights_buf,
-            up_scales_buf,
-            down_weights_buf,
-            down_scales_buf,
-            gate_su_buf,
-            gate_sv_buf,
-            up_su_buf,
-            up_sv_buf,
-            down_su_buf,
-            down_sv_buf,
-            grid_buf,
-            expert_ids_buf,
-            expert_probs_buf,
-            output_buf,
-            params_buf,
-        ],
+        buffers=buffer_list,
         wait=True,
     )
 
-    # Convert FP32 output to FP16
     return output_fp32.half()

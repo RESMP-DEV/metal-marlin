@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Profile memory allocation during forward pass to identify leak source.
+"""Profile REAL memory allocation during forward pass to identify leak source.
 
-Profiles layer-by-layer memory consumption during a single token forward pass
-through a Trellis model to identify which layers cause memory jumps.
+Uses psutil for actual RSS tracking (not PyTorch's misleading MPS API).
 
 Usage:
     cd contrib/metal_marlin && uv run python scripts/profile_memory.py
 
     # With specific model path
-    uv run python scripts/profile_memory.py --model models/GLM-4.7-Flash-EXL3-3bpw
+    uv run python scripts/profile_memory.py --model models/GLM-4.7-Flash-Trellis-3bpw
 
     # With custom sequence length
     uv run python scripts/profile_memory.py --seq-len 128
@@ -18,15 +17,20 @@ from __future__ import annotations
 
 import argparse
 import gc
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import psutil
 import torch
 
 if TYPE_CHECKING:
     from metal_marlin.trellis.model import TrellisForCausalLM
+
+# Track the current process
+_PROCESS = psutil.Process(os.getpid())
 
 
 @dataclass
@@ -34,16 +38,32 @@ class MemorySnapshot:
     """Memory snapshot at a point in execution."""
 
     stage: str
-    allocated_mb: float
+    allocated_mb: float  # Actual RSS
     delta_mb: float
+    mps_mb: float = 0.0  # PyTorch's reported MPS (for comparison)
+
+
+def get_memory_mb() -> tuple[float, float]:
+    """Get current REAL memory in MB (RSS) and MPS reported.
+
+    Returns:
+        Tuple of (RSS in MB, MPS reported in MB)
+    """
+    # Force sync before measuring
+    if torch.backends.mps.is_available():
+        torch.mps.synchronize()
+
+    rss = _PROCESS.memory_info().rss / (1024 * 1024)
+    mps = 0.0
+    if torch.backends.mps.is_available():
+        mps = torch.mps.current_allocated_memory() / (1024 * 1024)
+    return rss, mps
 
 
 def get_mps_memory_mb() -> float:
-    """Get current MPS allocated memory in MB."""
-    if not torch.backends.mps.is_available():
-        return 0.0
-    torch.mps.synchronize()
-    return torch.mps.current_allocated_memory() / (1024 * 1024)
+    """Get current MPS allocated memory in MB (kept for compatibility)."""
+    rss, _ = get_memory_mb()
+    return rss  # Return RSS instead of MPS
 
 
 def force_gc() -> None:
@@ -66,15 +86,15 @@ def profile_model_load(model_path: str) -> tuple[TrellisForCausalLM, list[Memory
     from metal_marlin.trellis.model import TrellisForCausalLM
 
     snapshots: list[MemorySnapshot] = []
-    prev_mem = get_mps_memory_mb()
+    prev_rss, prev_mps = get_memory_mb()
 
-    snapshots.append(MemorySnapshot("before_load", prev_mem, 0.0))
+    snapshots.append(MemorySnapshot("before_load", prev_rss, 0.0, prev_mps))
 
     model = TrellisForCausalLM.from_pretrained(model_path, device="mps")
 
     force_gc()
-    curr_mem = get_mps_memory_mb()
-    snapshots.append(MemorySnapshot("after_load", curr_mem, curr_mem - prev_mem))
+    curr_rss, curr_mps = get_memory_mb()
+    snapshots.append(MemorySnapshot("after_load", curr_rss, curr_rss - prev_rss, curr_mps))
 
     return model, snapshots
 
@@ -318,9 +338,7 @@ def profile_moe_detailed(
                 curr_mem = get_mps_memory_mb()
                 delta = curr_mem - prev_mem
                 if verbose and abs(delta) > 10:
-                    print(
-                        f"    expert_{j:02d}:     {curr_mem:8.2f} MB (delta: {delta:+8.2f} MB)"
-                    )
+                    print(f"    expert_{j:02d}:     {curr_mem:8.2f} MB (delta: {delta:+8.2f} MB)")
                 prev_mem = curr_mem
 
     force_gc()
@@ -345,11 +363,55 @@ def profile_moe_detailed(
     return snapshots
 
 
-def analyze_snapshots(snapshots: list[MemorySnapshot]) -> None:
+def estimate_metal_buffer_memory(model: TrellisForCausalLM) -> float:
+    """Estimate total Metal buffer memory in MB.
+
+    Counts the size of all cached Metal buffers in MoE layers.
+
+    Args:
+        model: The loaded Trellis model.
+
+    Returns:
+        Total Metal buffer memory in MB.
+    """
+    total_bytes = 0
+
+    for layer in model.model.layers:
+        if hasattr(layer.mlp, "_cached_weight_buffers"):
+            buffers = layer.mlp._cached_weight_buffers
+            if buffers is not None:
+                # Each buffer has a length() method
+                for name in [
+                    "gate_weights",
+                    "gate_scales",
+                    "up_weights",
+                    "up_scales",
+                    "down_weights",
+                    "down_scales",
+                    "gate_su",
+                    "gate_sv",
+                    "up_su",
+                    "up_sv",
+                    "down_su",
+                    "down_sv",
+                    "grid",
+                ]:
+                    buf = getattr(buffers, name, None)
+                    if buf is not None:
+                        total_bytes += buf.length()
+
+    return total_bytes / (1024 * 1024)
+
+
+def analyze_snapshots(
+    snapshots: list[MemorySnapshot],
+    model: TrellisForCausalLM | None = None,
+) -> None:
     """Print analysis of memory snapshots.
 
     Args:
         snapshots: List of memory snapshots from profiling.
+        model: Optional model for Metal buffer memory estimation.
     """
     if not snapshots:
         return
@@ -367,18 +429,36 @@ def analyze_snapshots(snapshots: list[MemorySnapshot]) -> None:
         for stage, delta in jumps[:10]:
             print(f"  {stage:30s}: {delta:+8.2f} MB")
 
-    # Final vs expected
+    # Get current memory stats
+    rss_mb, mps_mb = get_memory_mb()
+    metal_buffer_mb = estimate_metal_buffer_memory(model) if model else 0.0
+
+    # Memory breakdown by type
+    print("\n" + "-" * 40)
+    print("MEMORY BY TYPE")
+    print("-" * 40)
+    print(f"  PyTorch MPS allocated: {mps_mb:8.2f} MB")
+    print(f"  Process RSS:           {rss_mb:8.2f} MB")
+    print(f"  Metal buffer estimate: {metal_buffer_mb:8.2f} MB")
+
+    # Final vs initial from snapshots
     final_mem = snapshots[-1].allocated_mb
     initial_mem = snapshots[0].allocated_mb
 
-    print(f"\nInitial memory:  {initial_mem:8.2f} MB")
-    print(f"Final memory:    {final_mem:8.2f} MB")
-    print(f"Net increase:    {final_mem - initial_mem:+8.2f} MB")
+    print("\n" + "-" * 40)
+    print("SESSION SUMMARY")
+    print("-" * 40)
+    print(f"  Initial RSS:   {initial_mem:8.2f} MB")
+    print(f"  Final RSS:     {final_mem:8.2f} MB")
+    print(f"  Net increase:  {final_mem - initial_mem:+8.2f} MB")
 
     # Check against expectations
-    expected_base = 4000  # ~4GB after load
-    if final_mem > expected_base * 2:
-        print(f"\nWARNING: Final memory ({final_mem:.0f} MB) exceeds 2x expected base ({expected_base} MB)")
+    # For 30B MoE model at 3-bit: ~13GB Metal buffers + 2GB MPS + overhead = ~18GB expected
+    expected_base = metal_buffer_mb + 5000 if metal_buffer_mb > 0 else 4000
+    if final_mem > expected_base * 1.5:
+        print(
+            f"\nWARNING: Final memory ({final_mem:.0f} MB) exceeds 1.5x expected ({expected_base:.0f} MB)"
+        )
         print("This suggests a memory leak or excessive allocation during forward pass.")
 
 
@@ -433,7 +513,9 @@ def main() -> int:
     if verbose:
         print(f"  Model loaded: {load_snapshots[-1].allocated_mb:.2f} MB")
         print(f"  Layers: {len(model.model.layers)}")
-        print(f"  MoE layers: {sum(1 for i in range(len(model.model.layers)) if model.config.is_moe_layer(i))}")
+        print(
+            f"  MoE layers: {sum(1 for i in range(len(model.model.layers)) if model.config.is_moe_layer(i))}"
+        )
 
     # Create input
     input_ids = torch.randint(0, model.config.vocab_size, (1, args.seq_len), device="mps")
@@ -454,7 +536,7 @@ def main() -> int:
 
     # Analysis
     all_snapshots = load_snapshots + forward_snapshots + moe_snapshots
-    analyze_snapshots(all_snapshots)
+    analyze_snapshots(all_snapshots, model=model)
 
     return 0
 

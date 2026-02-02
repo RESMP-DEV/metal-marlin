@@ -66,24 +66,30 @@ def create_mock_trellis_linear(
     tiles_k = (out_features + TILE_DIM - 1) // TILE_DIM
     tiles_n = (in_features + TILE_DIM - 1) // TILE_DIM
     packed_bytes = {2: 64, 3: 96, 4: 128}[bits]
+
+    # Groups are along the N (in_features) dimension
+    # This matches TrellisWeight convention: scales [n_groups, N]
     n_groups = (in_features + 127) // 128
 
-    # Random packed indices (valid 3-bit values 0-7)
+    # Random packed indices (valid values for bit width)
     packed = torch.randint(0, 256, (tiles_k, tiles_n, packed_bytes), dtype=torch.uint8)
 
-    # Reasonable scales (small positive values for stable gradients)
-    scales = torch.rand(n_groups, out_features, dtype=torch.float32) * 0.1 + 0.01
+    # Scales: [n_groups, N] = [n_groups, in_features]
+    # Each group covers elements along the N (in_features) dimension
+    scales = torch.rand(n_groups, in_features, dtype=torch.float32) * 0.1 + 0.01
 
-    # Sign flips (+1 or -1)
+    # Sign flips following TrellisWeight convention:
+    # su: Row signs [K] = [out_features] - one sign per output row
+    # sv: Column signs [N] = [in_features] - one sign per input column
     su = torch.where(
-        torch.rand(in_features) > 0.5,
-        torch.ones(in_features),
-        -torch.ones(in_features),
-    )
-    sv = torch.where(
         torch.rand(out_features) > 0.5,
         torch.ones(out_features),
         -torch.ones(out_features),
+    )
+    sv = torch.where(
+        torch.rand(in_features) > 0.5,
+        torch.ones(in_features),
+        -torch.ones(in_features),
     )
 
     # Use from_trellis_weight to create module with correct buffer shapes
@@ -126,6 +132,7 @@ def create_mock_moe_mlp(
     num_experts_per_tok: int = 2,
     bits: int = 3,
     device: str = "mps",
+    eager_buffers: bool = True,
 ) -> TrellisMoEMLP:
     """Create a mock TrellisMoEMLP for testing fast vs slow path accuracy.
 
@@ -139,6 +146,9 @@ def create_mock_moe_mlp(
         num_experts_per_tok: Top-k experts per token (default 2).
         bits: Quantization bits (default 3).
         device: Target device.
+        eager_buffers: If True, create Metal buffers eagerly and free PyTorch
+            tensors. Set False for validation scripts that need both fast and
+            slow paths to work (slow path uses PyTorch weights directly).
     """
     router = nn.Linear(hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32)
     nn.init.xavier_uniform_(router.weight)
@@ -155,6 +165,7 @@ def create_mock_moe_mlp(
         experts=experts,
         shared_expert=shared_expert,
         num_experts_per_tok=num_experts_per_tok,
+        eager_buffers=eager_buffers,
     )
 
 
@@ -315,10 +326,14 @@ class _MockAttention(nn.Module):
         return self.proj(hidden_states)
 
 
+# Alias for backward compatibility
+create_mock_trellis_moe_mlp = create_mock_moe_mlp
+
 __all__ = [
     "create_mini_config",
     "create_mini_model",
     "create_mock_dense_mlp",
     "create_mock_moe_mlp",
     "create_mock_trellis_linear",
+    "create_mock_trellis_moe_mlp",
 ]
