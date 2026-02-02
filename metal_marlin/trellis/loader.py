@@ -412,18 +412,18 @@ class TrellisModelLoader:
                         f"got {indices_raw.numel()}"
                     )
 
-                # Strip header byte and reshape to [tiles_k, tiles_n, packed_bytes_per_tile]
+                # Strip header byte and reshape to [tiles_K, tiles_N, packed_bytes_per_tile]
+                # TrellisWeight convention: K=out_features, N=in_features
+                # This is stored as-is; model.py transposes when stacking for MoE kernel
                 packed_indices = indices_raw[1:].reshape(tiles_k, tiles_n, packed_bytes_per_tile)
             elif indices_raw.dtype == torch.int16:
                 # Legacy format: not supported for memory-efficient loading
                 raise ValueError(
-                    f"Legacy int16 format not supported. "
-                    f"Please use packed uint8 format for {name}"
+                    f"Legacy int16 format not supported. Please use packed uint8 format for {name}"
                 )
             else:
                 raise ValueError(
-                    f"Indices must be uint8 (packed), "
-                    f"got {indices_raw.dtype} for {name}"
+                    f"Indices must be uint8 (packed), got {indices_raw.dtype} for {name}"
                 )
 
             # Validate other dtypes

@@ -28,8 +28,7 @@ class TestTrellisKVCache:
             "batch_size": 2,
             "max_seq_len": 128,
             "kv_lora_rank": 64,
-            "num_kv_heads": 4,
-            "head_dim": 32,
+            "qk_rope_head_dim": 64,  # MLA uses qk_rope_head_dim, not num_kv_heads * head_dim
         }
 
     @pytest.fixture
@@ -41,8 +40,7 @@ class TestTrellisKVCache:
             batch_size=cache_params["batch_size"],
             max_seq_len=cache_params["max_seq_len"],
             kv_lora_rank=cache_params["kv_lora_rank"],
-            num_kv_heads=cache_params["num_kv_heads"],
-            head_dim=cache_params["head_dim"],
+            qk_rope_head_dim=cache_params["qk_rope_head_dim"],
             device=device,
             dtype=torch.float16,
         )
@@ -53,13 +51,10 @@ class TestTrellisKVCache:
         assert cache.batch_size == cache_params["batch_size"]
         assert cache.max_seq_len == cache_params["max_seq_len"]
         assert cache.kv_lora_rank == cache_params["kv_lora_rank"]
-        assert cache.num_kv_heads == cache_params["num_kv_heads"]
-        assert cache.head_dim == cache_params["head_dim"]
+        assert cache.qk_rope_head_dim == cache_params["qk_rope_head_dim"]
 
-        # Check cache_dim calculation
-        expected_cache_dim = (
-            cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
-        )
+        # Check cache_dim calculation: kv_lora_rank + qk_rope_head_dim
+        expected_cache_dim = cache_params["kv_lora_rank"] + cache_params["qk_rope_head_dim"]
         assert cache.cache_dim == expected_cache_dim
 
         # Check tensor shapes
@@ -73,7 +68,7 @@ class TestTrellisKVCache:
             cache_params["num_layers"],
             cache_params["batch_size"],
             cache_params["max_seq_len"],
-            cache_params["num_kv_heads"] * cache_params["head_dim"],
+            cache_params["qk_rope_head_dim"],
         )
 
         # Check data types
@@ -98,7 +93,7 @@ class TestTrellisKVCache:
     def test_update_single_token(self, cache, cache_params):
         """Test updating cache with a single token."""
         device = _get_device()
-        cache_dim = cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
+        cache_dim = cache_params["kv_lora_rank"] + cache_params["qk_rope_head_dim"]
 
         # Create single token compressed KV
         compressed_kv = torch.randn(
@@ -117,7 +112,7 @@ class TestTrellisKVCache:
     def test_update_incremental_generation(self, cache, cache_params):
         """Test incremental generation with position_ids handling."""
         device = _get_device()
-        cache_dim = cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
+        cache_dim = cache_params["kv_lora_rank"] + cache_params["qk_rope_head_dim"]
 
         # Simulate prefill with 10 tokens
         prefill_len = 10

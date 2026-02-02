@@ -150,11 +150,17 @@ class TrellisMLAttention(nn.Module):
     ) -> torch.Tensor:
         """Forward pass of TrellisMLAttention.
 
+        MLA KV Caching Strategy:
+        - Cache the compressed representation (kv_a_proj output) BEFORE layernorm
+        - This reduces KV cache size by ~8x (512+64 vs 20*256*2 per token)
+        - On decode: retrieve cached, apply layernorm, then kv_b_proj to decompress
+
         Args:
             hidden_states: Input tensor [batch, seq_len, hidden_size]
             attention_mask: Optional attention mask
             position_ids: Optional position IDs for RoPE
-            kv_cache: Optional KV cache for autoregressive generation
+            kv_cache: TrellisKVCache for MLA caching (stores compressed KV)
+                      or KVCache for legacy caching (stores decompressed KV)
             layer_idx: Layer index for KV cache
 
         Returns:
@@ -184,58 +190,123 @@ class TrellisMLAttention(nn.Module):
             hidden_states
         )  # [batch, seq, kv_lora_rank + qk_rope_head_dim]
 
-        # Split into latent and rope components
-        k_latent, k_rope = torch.split(
-            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
+        # === MLA KV Cache: Store compressed representation ===
+        # TrellisKVCache stores [kv_lora_rank + qk_rope_head_dim] per token
+        # This is ~8x smaller than storing full K,V ([num_kv_heads * qk_head_dim] * 2)
+        if isinstance(kv_cache, TrellisKVCache):
+            # Update cache with compressed representation (before layernorm)
+            # Returns full sequence of compressed KV: [batch, total_seq, kv_lora_rank + qk_rope_head_dim]
+            compressed_kv_full = kv_cache.update(layer_idx, compressed_kv)
+            total_seq_len = compressed_kv_full.shape[1]
 
-        # === KV Decompression ===
-        # latent -> layernorm -> kv_b_proj -> [k_nope, V]
-        if self.kv_a_layernorm is not None:
-            k_latent = self.kv_a_layernorm(k_latent)
-        kv_decompressed = self.kv_b_proj(k_latent)  # [batch, seq, num_kv_heads * (qk_nope + v)]
+            # Split full sequence into latent and rope components
+            k_latent_full, k_rope_full = torch.split(
+                compressed_kv_full, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
 
-        # Reshape: [batch, seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, seq, nope + v]
-        kv_decompressed = kv_decompressed.view(
-            batch_size, seq_len, self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim
-        ).transpose(1, 2)
+            # Apply layernorm to latent part (after retrieval from cache)
+            if self.kv_a_layernorm is not None:
+                k_latent_full = self.kv_a_layernorm(k_latent_full)
 
-        # Split into k_nope and V
-        k_nope, v = torch.split(kv_decompressed, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            # Decompress to get k_nope and V
+            kv_decompressed = self.kv_b_proj(
+                k_latent_full
+            )  # [batch, total_seq, num_kv_heads * (qk_nope + v)]
 
-        # Reshape k_rope: [batch, seq, rope_dim] -> [batch, 1, seq, rope_dim]
-        # The "1" represents shared rope across all KV heads (MQA style)
-        k_rope = k_rope.view(batch_size, 1, seq_len, self.qk_rope_head_dim)
+            # Reshape: [batch, total_seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, total_seq, nope + v]
+            kv_decompressed = kv_decompressed.view(
+                batch_size, total_seq_len, self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim
+            ).transpose(1, 2)
 
-        # === Apply RoPE ===
-        # Create position_ids if not provided
-        if position_ids is None:
-            offset = kv_cache.seq_len if kv_cache else 0
-            position_ids = torch.arange(
-                offset, offset + seq_len, device=hidden_states.device
-            ).unsqueeze(0)
+            # Split into k_nope and V
+            k_nope, v = torch.split(
+                kv_decompressed, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
 
-        # Get cos/sin from GLM rotary embedding
-        cos, sin = self.rotary_emb(k_rope, position_ids)
+            # Reshape k_rope: [batch, total_seq, rope_dim] -> [batch, 1, total_seq, rope_dim]
+            k_rope_for_attn = k_rope_full.view(batch_size, 1, total_seq_len, self.qk_rope_head_dim)
 
-        # Apply RoPE to q_rope and k_rope only
-        q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, cos, sin)
+            # Get position IDs for the full cached sequence
+            if position_ids is None:
+                position_ids_full = torch.arange(
+                    total_seq_len, device=hidden_states.device
+                ).unsqueeze(0)
+            else:
+                # position_ids is for current tokens; prepend cached positions
+                cached_len = total_seq_len - seq_len
+                cached_positions = torch.arange(cached_len, device=hidden_states.device).unsqueeze(0)
+                position_ids_full = torch.cat([cached_positions, position_ids], dim=1)
 
-        # Expand k_rope to match num_kv_heads: [batch, 1, seq, rope] -> [batch, kv_heads, seq, rope]
-        k_rope = k_rope.expand(batch_size, self.num_kv_heads, seq_len, self.qk_rope_head_dim)
+            # Apply RoPE to full k_rope sequence
+            cos, sin = self.rotary_emb(k_rope_for_attn, position_ids_full)
+            # For Q, we only need the last seq_len positions
+            cos_q = cos[:, -seq_len:, :, :]
+            sin_q = sin[:, -seq_len:, :, :]
+            q_rope, _ = apply_rotary_pos_emb(q_rope, q_rope, cos_q, sin_q)
+            _, k_rope_for_attn = apply_rotary_pos_emb(k_rope_for_attn, k_rope_for_attn, cos, sin)
 
-        # === Concatenate Q and K ===
-        # Q: cat(q_nope, q_rope) -> [batch, heads, seq, qk_head_dim]
-        # K: cat(k_nope, k_rope) -> [batch, kv_heads, seq, qk_head_dim]
-        q = torch.cat([q_nope, q_rope], dim=-1)
-        k = torch.cat([k_nope, k_rope], dim=-1)
+            # Expand k_rope to match num_kv_heads
+            k_rope_for_attn = k_rope_for_attn.expand(
+                batch_size, self.num_kv_heads, total_seq_len, self.qk_rope_head_dim
+            )
 
-        # === KV Cache Update ===
-        if kv_cache is not None:
-            k, v = kv_cache.update(layer_idx, k, v)
-            # Ensure k, v match query dtype for SDPA
+            # Concatenate to form full K
+            k = torch.cat([k_nope, k_rope_for_attn], dim=-1)
+
+            # Ensure dtypes match for SDPA
             k = k.to(q.dtype)
             v = v.to(q.dtype)
+
+        else:
+            # Legacy path: standard KVCache that stores decompressed K,V
+            # Split current tokens into latent and rope components
+            k_latent, k_rope = torch.split(
+                compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+
+            # === KV Decompression ===
+            # latent -> layernorm -> kv_b_proj -> [k_nope, V]
+            if self.kv_a_layernorm is not None:
+                k_latent = self.kv_a_layernorm(k_latent)
+            kv_decompressed = self.kv_b_proj(k_latent)  # [batch, seq, num_kv_heads * (qk_nope + v)]
+
+            # Reshape: [batch, seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, seq, nope + v]
+            kv_decompressed = kv_decompressed.view(
+                batch_size, seq_len, self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim
+            ).transpose(1, 2)
+
+            # Split into k_nope and V
+            k_nope, v = torch.split(
+                kv_decompressed, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
+
+            # Reshape k_rope: [batch, seq, rope_dim] -> [batch, 1, seq, rope_dim]
+            k_rope = k_rope.view(batch_size, 1, seq_len, self.qk_rope_head_dim)
+
+            # === Apply RoPE ===
+            if position_ids is None:
+                offset = kv_cache.seq_len if kv_cache else 0
+                position_ids = torch.arange(
+                    offset, offset + seq_len, device=hidden_states.device
+                ).unsqueeze(0)
+
+            cos, sin = self.rotary_emb(k_rope, position_ids)
+            q_rope, k_rope = apply_rotary_pos_emb(q_rope, k_rope, cos, sin)
+
+            # Expand k_rope to match num_kv_heads
+            k_rope = k_rope.expand(batch_size, self.num_kv_heads, seq_len, self.qk_rope_head_dim)
+
+            # Concatenate to form K
+            k = torch.cat([k_nope, k_rope], dim=-1)
+
+            # === Legacy KV Cache Update ===
+            if kv_cache is not None:
+                k, v = kv_cache.update(layer_idx, k, v)
+                k = k.to(q.dtype)
+                v = v.to(q.dtype)
+
+        # Concatenate Q
+        q = torch.cat([q_nope, q_rope], dim=-1)
 
         # === Handle GQA (repeat K/V heads if needed) ===
         if self.num_kv_heads < self.num_heads:

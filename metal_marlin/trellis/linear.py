@@ -115,6 +115,9 @@ class TrellisLinear(nn.Module):
         # Lazy-loaded Metal library
         self._lib: MetalKernelLibrary | None = None
 
+        # Metal buffer cache for CPU->GPU transfer
+        self._metal_buffer: dict | None = None
+
     @classmethod
     def from_trellis_weight(
         cls,
@@ -168,6 +171,7 @@ class TrellisLinear(nn.Module):
 
         # Initialize Metal library reference
         module._lib = None
+        module._metal_buffer = None
 
         return module
 
@@ -176,6 +180,38 @@ class TrellisLinear(nn.Module):
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
+
+    def _create_metal_buffer_from_cpu(self) -> None:
+        """Create Metal buffer directly from CPU tensor data.
+
+        Called once to create the buffer. After this, the PyTorch
+        buffer tensors can optionally be deleted to save memory.
+        """
+        if self._metal_buffer is not None:
+            return  # Already created
+
+        from ..metal_dispatch import cpu_tensor_to_metal_buffer
+
+        lib = self._get_lib()
+
+        # Create buffers from CPU copies
+        self._metal_buffer = {
+            "packed_indices": cpu_tensor_to_metal_buffer(
+                self.packed_indices.cpu().contiguous(), lib.device
+            ),
+            "scales": cpu_tensor_to_metal_buffer(
+                self.scales.cpu().half().contiguous(), lib.device
+            ),
+            "su": cpu_tensor_to_metal_buffer(
+                self.su.cpu().half().contiguous(), lib.device
+            ),
+            "sv": cpu_tensor_to_metal_buffer(
+                self.sv.cpu().half().contiguous(), lib.device
+            ),
+            "grid": cpu_tensor_to_metal_buffer(
+                self.grid.cpu().half().contiguous(), lib.device
+            ),
+        }
 
     def dequantize(self) -> torch.Tensor:
         """Dequantize weights to FP16.
@@ -186,6 +222,10 @@ class TrellisLinear(nn.Module):
 
         # K = out_features, N = in_features (weight matrix convention)
         K, N = self.out_features, self.in_features
+
+        # Compute group_size from scales shape (same logic as forward())
+        n_groups = self.scales.shape[0]
+        group_size = (self.in_features + n_groups - 1) // n_groups
 
         if HAS_METAL and HAS_MPS and self.packed_indices.is_mps:
             lib = self._get_lib()
@@ -200,6 +240,7 @@ class TrellisLinear(nn.Module):
                 K,
                 N,
                 self.bits,
+                group_size,
             )
         else:
             # CPU fallback - unpack then dequant
@@ -231,6 +272,33 @@ class TrellisLinear(nn.Module):
         self._lib = None
         # Metal buffers are managed by PyObjC, should auto-release
 
+    def clear_pytorch_tensors(self) -> None:
+        """Clear PyTorch buffer tensors after Metal buffers are created.
+
+        Call this after _create_metal_buffer_from_cpu() to free the
+        PyTorch tensor memory. The Metal buffers will be used for forward.
+
+        Warning: After calling this, dequantize() will not work.
+        """
+        if self._metal_buffer is None:
+            raise RuntimeError(
+                "Cannot clear tensors before Metal buffers are created. "
+                "Call _create_metal_buffer_from_cpu() first."
+            )
+
+        # Replace buffers with tiny placeholders to keep nn.Module happy
+        # but free the memory
+        self.register_buffer("packed_indices", torch.empty(0, dtype=torch.uint8))
+        self.register_buffer("scales", torch.empty(0, dtype=torch.float16))
+        self.register_buffer("su", torch.empty(0, dtype=torch.float16))
+        self.register_buffer("sv", torch.empty(0, dtype=torch.float16))
+        # Keep grid as it's small
+
+        import gc
+        gc.collect()
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+
     def __del__(self) -> None:
         """Cleanup on deletion."""
         self.clear_metal_resources()
@@ -248,6 +316,9 @@ class TrellisLinear(nn.Module):
             Output tensor [..., out_features].
         """
         batch_shape = x.shape[:-1]
+        # Metal kernels expect float16 input - convert if necessary
+        if x.dtype != torch.float16:
+            x = x.to(torch.float16)
         x_flat = x.view(-1, self.in_features)
         M = x_flat.shape[0]
 

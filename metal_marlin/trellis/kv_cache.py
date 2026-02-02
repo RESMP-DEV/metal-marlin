@@ -4,11 +4,11 @@ KV cache for Multi-head Latent Attention (MLA) that stores compressed representa
 MLA caches the compressed KV representation (after kv_a_proj) rather than the full KV,
 reducing cache memory by ~8x for long sequences compared to standard KV caches.
 
-The compressed KV has shape: [batch, seq_len, kv_lora_rank + num_kv_heads * head_dim_for_mqa]
+The compressed KV has shape: [batch, seq_len, kv_lora_rank + qk_rope_head_dim]
 
 This consists of:
 - c_kv: Compressed latent representation [batch, seq_len, kv_lora_rank]
-- k_pe: Positional embeddings for MQA [batch, seq_len, num_kv_heads * head_dim_for_mqa]
+- k_pe: Rotary positional embeddings [batch, seq_len, qk_rope_head_dim]
 
 Usage:
     from metal_marlin.trellis.kv_cache import TrellisKVCache
@@ -18,12 +18,11 @@ Usage:
         batch_size=1,
         max_seq_len=4096,
         kv_lora_rank=512,
-        num_kv_heads=4,
-        head_dim=64,
+        qk_rope_head_dim=64,
     )
 
     # During forward pass with compressed KV from kv_a_proj
-    # compressed_kv shape: [batch, seq, kv_lora_rank + num_kv_heads * head_dim]
+    # compressed_kv shape: [batch, seq, kv_lora_rank + qk_rope_head_dim]
     compressed_kv_full = cache.update(layer_idx=0, compressed_kv=compressed_kv_new)
 """
 
@@ -47,12 +46,12 @@ class TrellisKVCache:
 
     The cache stores:
     - c_kv: Compressed latent vectors of shape [num_layers, batch, max_seq, kv_lora_rank]
-    - k_pe: Positional embeddings of shape [num_layers, batch, max_seq, num_kv_heads * head_dim]
+    - k_pe: Positional embeddings of shape [num_layers, batch, max_seq, qk_rope_head_dim]
 
     Memory Layout:
     - Stored as separate tensors for MPS optimization (contiguous, half precision)
     - c_kv is the main compressed representation (small, e.g., 512 dims)
-    - k_pe is the positional embedding component for multi-query attention
+    - k_pe is the rotary positional embedding component (e.g., 64 dims for GLM-4)
 
     MLA KV Caching Flow:
     1. During prefill: hidden_states -> kv_a_proj -> compressed_kv -> [CACHE STORED]
@@ -66,13 +65,12 @@ class TrellisKVCache:
         batch_size: Batch size for generation.
         max_seq_len: Maximum sequence length to allocate.
         kv_lora_rank: Compressed KV dimension (rank of latent space, e.g., 512).
-        num_kv_heads: Number of KV heads for multi-query attention.
-        head_dim: Dimension per head.
-        cache_dim: Total dimension stored (kv_lora_rank + num_kv_heads * head_dim).
+        qk_rope_head_dim: Dimension of rotary positional embedding (e.g., 64).
+        cache_dim: Total dimension stored (kv_lora_rank + qk_rope_head_dim).
         device: Device to store cache on.
         dtype: Data type for cache tensors (default: float16 for MPS optimization).
         c_kv: Compressed KV cache [num_layers, batch, max_seq, kv_lora_rank].
-        k_pe: Positional embeddings [num_layers, batch, max_seq, num_kv_heads * head_dim].
+        k_pe: Positional embeddings [num_layers, batch, max_seq, qk_rope_head_dim].
         seq_lens: Current sequence lengths per batch item.
     """
 
@@ -82,10 +80,12 @@ class TrellisKVCache:
         batch_size: int,
         max_seq_len: int,
         kv_lora_rank: int,
-        num_kv_heads: int = 4,
-        head_dim: int = 64,
+        qk_rope_head_dim: int = 64,
         device: str = "mps",
         dtype: torch.dtype = torch.float16,
+        # Legacy parameters for backwards compatibility
+        num_kv_heads: int | None = None,
+        head_dim: int | None = None,
     ):
         """Initialize the Trellis KV cache for MLA.
 
@@ -94,10 +94,11 @@ class TrellisKVCache:
             batch_size: Batch size for generation.
             max_seq_len: Maximum sequence length to allocate.
             kv_lora_rank: Compressed KV dimension (rank of latent space).
-            num_kv_heads: Number of KV heads for multi-query attention.
-            head_dim: Dimension per head.
+            qk_rope_head_dim: Dimension of rotary positional embedding (default: 64).
             device: Device to store cache on (default: 'mps' for Metal).
             dtype: Data type for cache tensors (default: float16).
+            num_kv_heads: DEPRECATED - ignored, kept for backwards compatibility.
+            head_dim: DEPRECATED - ignored, kept for backwards compatibility.
         """
         require_torch()
 
@@ -105,9 +106,8 @@ class TrellisKVCache:
         self.batch_size = batch_size
         self.max_seq_len = max_seq_len
         self.kv_lora_rank = kv_lora_rank
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.cache_dim = kv_lora_rank + num_kv_heads * head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.cache_dim = kv_lora_rank + qk_rope_head_dim
         self.device = device
         self.dtype = dtype
 
@@ -122,12 +122,12 @@ class TrellisKVCache:
             device=device,
         )
 
-        # k_pe: positional embeddings for MQA [num_layers, batch, max_seq, num_kv_heads * head_dim]
+        # k_pe: positional embeddings for MLA [num_layers, batch, max_seq, qk_rope_head_dim]
         self.k_pe: torch_typing.Tensor = torch.zeros(
             num_layers,
             batch_size,
             max_seq_len,
-            num_kv_heads * head_dim,
+            qk_rope_head_dim,
             dtype=dtype,
             device=device,
         )
@@ -136,6 +136,11 @@ class TrellisKVCache:
         self.seq_lens: torch_typing.Tensor = torch.zeros(
             batch_size, dtype=torch.long, device=device
         )
+
+    @property
+    def seq_len(self) -> int:
+        """Get the current sequence length (assumes uniform batch)."""
+        return int(self.seq_lens[0].item())
 
     def update(
         self,
@@ -169,7 +174,7 @@ class TrellisKVCache:
             raise ValueError(
                 f"Input dimension {input_dim} does not match expected cache_dim "
                 f"{self.cache_dim} (kv_lora_rank={self.kv_lora_rank} + "
-                f"num_kv_heads*head_dim={self.num_kv_heads * self.head_dim})"
+                f"qk_rope_head_dim={self.qk_rope_head_dim})"
             )
 
         # Get current position (assume same seq_len for batch items during generation)
@@ -177,9 +182,7 @@ class TrellisKVCache:
         end = start + seq_len
 
         if end > self.max_seq_len:
-            raise ValueError(
-                f"Sequence length {end} exceeds max_seq_len {self.max_seq_len}"
-            )
+            raise ValueError(f"Sequence length {end} exceeds max_seq_len {self.max_seq_len}")
 
         # Split compressed_kv into c_kv and k_pe components
         # c_kv: [batch, seq_len, kv_lora_rank]
@@ -278,17 +281,11 @@ class TrellisKVCache:
         bytes_per_element = 2 if self.dtype in (torch.float16, torch.bfloat16) else 4
 
         # c_kv: [num_layers, batch, max_seq, kv_lora_rank]
-        c_kv_elements = (
-            self.num_layers * self.batch_size * self.max_seq_len * self.kv_lora_rank
-        )
+        c_kv_elements = self.num_layers * self.batch_size * self.max_seq_len * self.kv_lora_rank
 
-        # k_pe: [num_layers, batch, max_seq, num_kv_heads * head_dim]
+        # k_pe: [num_layers, batch, max_seq, qk_rope_head_dim]
         k_pe_elements = (
-            self.num_layers
-            * self.batch_size
-            * self.max_seq_len
-            * self.num_kv_heads
-            * self.head_dim
+            self.num_layers * self.batch_size * self.max_seq_len * self.qk_rope_head_dim
         )
 
         total_elements = c_kv_elements + k_pe_elements

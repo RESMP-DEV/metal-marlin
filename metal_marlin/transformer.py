@@ -60,9 +60,12 @@ class RMSNorm(_get_base_class()):
 
     def forward(self, x: Any) -> Any:
         assert torch is not None
-        variance = torch.mean(x**2, dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        return self.weight * x
+        input_dtype = x.dtype
+        # Use FP32 accumulation to prevent overflow when squared values exceed FP16 max (~65504)
+        variance = x.float().pow(2).mean(-1, keepdim=True)
+        x = x * torch.rsqrt(variance + self.eps).to(input_dtype)
+        # Cast weight to input dtype to preserve dtype through multiplication
+        return self.weight.to(input_dtype) * x
 
 
 class MarlinTransformerBlock(_get_base_class()):
