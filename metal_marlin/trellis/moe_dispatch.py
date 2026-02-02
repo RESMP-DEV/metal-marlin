@@ -337,9 +337,13 @@ def dispatch_moe_trellis_swiglu(
 ) -> torch.Tensor:
     """Fused MoE GEMM with Trellis quantization and SwiGLU activation.
 
-    HOT PATH: This function is called for every forward pass. Keep it minimal.
-    Validation removed from hot path for performance. Use validate_moe_inputs()
-    during model initialization if validation is needed.
+    HOT PATH: This function is called for every forward pass. Keep it minimal:
+    1. Get cached buffers (dict lookup)
+    2. Create activation buffer (minimal)
+    3. Dispatch kernel
+    4. Return result
+
+    No validation between steps for maximum performance.
     """
     require_mps()
 
