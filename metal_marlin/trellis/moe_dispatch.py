@@ -156,6 +156,7 @@ class MoEBufferPool:
         self._expert_ids_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
         self._expert_probs_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
         self._output_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
+        self._output_fp16_buffers: dict[int, torch.Tensor] = {}  # Pre-allocated fp16 output
         self._params_buffers: dict[tuple[int, int, int, int, int, int], Any] = {}  # keyed by params tuple
 
         for batch in [1, 2, 4, 8, 16, 32]:
@@ -174,6 +175,11 @@ class MoEBufferPool:
         )
         out_buf = mps_tensor_to_metal_buffer(out_tensor, self.device, copy_back=True)
         self._output_buffers[batch_size] = (out_tensor, out_buf)
+
+        # Pre-allocate fp16 output buffer for fast conversion (avoids allocation on hot path)
+        self._output_fp16_buffers[batch_size] = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float16, device="mps"
+        )
 
     def get_activation_buffer(
         self, batch_size: int, activations: torch.Tensor
@@ -219,6 +225,17 @@ class MoEBufferPool:
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         return tensor, buf
 
+    def get_output_fp16(self, batch_size: int) -> torch.Tensor:
+        """Get pre-allocated fp16 output buffer for fast dtype conversion.
+
+        For batch=1 decode, this avoids allocating a new tensor on every call.
+        The caller should copy fp32 output into this buffer via .copy_().
+        """
+        if batch_size in self._output_fp16_buffers:
+            return self._output_fp16_buffers[batch_size]
+        # Fallback: allocate (should not happen for common batch sizes)
+        return torch.zeros(batch_size, self.hidden_dim, dtype=torch.float16, device="mps")
+
     def preallocate_top_k(self, top_k: int, batch_sizes: list[int] | None = None) -> None:
         if batch_sizes is None:
             batch_sizes = [b for b in [1, 2, 4, 8, 16, 32] if b <= self.max_batch]
@@ -260,6 +277,7 @@ class MoEBufferPool:
         self._expert_ids_buffers.clear()
         self._expert_probs_buffers.clear()
         self._output_buffers.clear()
+        self._output_fp16_buffers.clear()
         self._params_buffers.clear()
 
 
@@ -481,5 +499,11 @@ def dispatch_moe_trellis_swiglu(
         buffers=buffer_list,
         wait=True,
     )
+
+    # Fast path: use pre-allocated fp16 buffer to avoid allocation
+    if buffer_pool is not None:
+        output_fp16 = buffer_pool.get_output_fp16(batch_size)
+        output_fp16.copy_(output_fp32)
+        return output_fp16
 
     return output_fp32.half()

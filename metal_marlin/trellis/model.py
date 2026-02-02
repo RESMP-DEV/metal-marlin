@@ -612,10 +612,14 @@ class TrellisMoEMLP(nn.Module):
             # Most models use fp16 router, so this is typically a no-op
             router_logits = self.router(x.to(self.router.weight.dtype))
 
-            # Top-k selection: softmax -> topk -> normalize
+            # Top-k selection: softmax -> topk -> normalize (in-place where possible)
             # For batch=1, this is [1, num_experts] -> [1, top_k]
-            probs = F.softmax(router_logits, dim=-1, dtype=torch.float)
-            routing_weights, selected_experts = torch.topk(probs, k=self.num_experts_per_tok, dim=-1)
+            routing_weights, selected_experts = torch.topk(
+                F.softmax(router_logits, dim=-1, dtype=torch.float),
+                k=self.num_experts_per_tok,
+                dim=-1,
+            )
+            # In-place normalize to avoid allocation
             routing_weights.div_(routing_weights.sum(dim=-1, keepdim=True))
 
             # Direct dispatch with all cached resources
