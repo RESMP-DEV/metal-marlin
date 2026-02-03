@@ -40,13 +40,12 @@ The C++ extension is now working and provides significantly faster kernel dispat
 
 ```bash
 # Build
-cd contrib/metal_marlin
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j
 
 # Copy to package
-cp _cpp_ext.cpython-312-darwin.so ../metal_marlin/
+cp _cpp_ext.cpython-312-darwin.so ./metal_marlin/
 ```
 
 **Available exports:**
