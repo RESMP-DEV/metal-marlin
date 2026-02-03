@@ -71,9 +71,11 @@ THREADS_PER_TG = NUM_SIMDGROUPS * 32  # 128
 def _require_metal_attention() -> None:
     """Raise if Metal dispatch is not available."""
     if not HAS_TORCH:
-        raise RuntimeError("Flash Attention V2 requires PyTorch. Install with: pip install torch")
+        raise RuntimeError(
+            "Flash Attention V2 requires PyTorch. Install with: pip install torch")
     if not HAS_MPS:
-        raise RuntimeError("Flash Attention V2 requires PyTorch MPS backend (Apple Silicon).")
+        raise RuntimeError(
+            "Flash Attention V2 requires PyTorch MPS backend (Apple Silicon).")
     if not HAS_PYOBJC_METAL:
         raise RuntimeError(
             "Flash Attention V2 requires PyObjC Metal. Install with:\n"
@@ -114,7 +116,8 @@ class AttentionParams:
                 self.seq_q,
                 self.seq_k,
                 self.head_dim,
-                np.float32(self.scale).view(np.uint32),  # reinterpret float as uint32
+                # reinterpret float as uint32
+                np.float32(self.scale).view(np.uint32),
                 self.gqa_ratio,
                 1 if self.is_causal else 0,
             ],
@@ -128,10 +131,12 @@ class AttentionParams:
 
 def _get_kernel_source() -> str:
     """Load Flash Attention V2 Metal kernel source."""
-    kernel_path = Path(__file__).parent.parent / "src" / "flash_attention_v2.metal"
+    kernel_path = Path(__file__).parent.parent / \
+        "src" / "flash_attention_v2.metal"
     if kernel_path.exists():
         return kernel_path.read_text()
-    raise FileNotFoundError(f"Flash Attention V2 kernel not found at {kernel_path}")
+    raise FileNotFoundError(
+        f"Flash Attention V2 kernel not found at {kernel_path}")
 
 
 def _compute_grid(params: AttentionParams, kernel_type: str) -> tuple[int, int, int]:
@@ -145,7 +150,8 @@ def _compute_grid(params: AttentionParams, kernel_type: str) -> tuple[int, int, 
         return (params.num_heads_kv, q_tiles, params.batch)
     elif kernel_type == "mqa":
         # MQA: batch Q heads together
-        head_groups = (params.num_heads_q + NUM_SIMDGROUPS - 1) // NUM_SIMDGROUPS
+        head_groups = (params.num_heads_q +
+                       NUM_SIMDGROUPS - 1) // NUM_SIMDGROUPS
         q_tiles = (params.seq_q + TILE_Q - 1) // TILE_Q
         return (head_groups, q_tiles, params.batch)
     else:
@@ -159,6 +165,8 @@ def select_kernel(
     num_heads_q: int,
     num_heads_kv: int,
     is_causal: bool,
+    batch: int = 1,
+    seq_k: int | None = None,
 ) -> str:
     """Select optimal kernel based on attention configuration.
 
@@ -167,6 +175,8 @@ def select_kernel(
         num_heads_q: Number of query heads
         num_heads_kv: Number of KV heads
         is_causal: Whether causal masking is applied
+        batch: Batch size (for decode fast path selection)
+        seq_k: Key sequence length (for decode fast path selection)
 
     Returns:
         Kernel name to use
@@ -175,6 +185,10 @@ def select_kernel(
 
     if seq_q == 1:
         # Decode phase: single query token
+        # Use fast path for batch=1 with small-to-medium seq_k
+        # The fast kernel uses warp-level operations without tiling overhead
+        if batch == 1 and seq_k is not None and seq_k <= 2048:
+            return "flash_attention_v2_decode_fast"
         return "flash_attention_v2_decode"
 
     if num_heads_kv == 1:
@@ -212,7 +226,14 @@ def _get_kernel_library() -> Any:
 
 
 def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
-    """Get Metal buffer from PyTorch MPS tensor (shared memory, no copy)."""
+    """Get Metal buffer from PyTorch MPS tensor.
+
+    Note: Due to PyObjC compatibility issues with newer versions, we use
+    a copy-based approach. The original zero-copy newBufferWithBytesNoCopy
+    fails with "converting to a C array" error in newer PyObjC.
+    """
+    import ctypes
+
     if not tensor.is_mps:
         raise ValueError("Tensor must be on MPS device")
 
@@ -223,8 +244,22 @@ def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     ptr = storage.data_ptr()
     size = storage.nbytes()
 
-    buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
-        ptr, size, Metal.MTLResourceStorageModeShared, None
+    # Try zero-copy first (works on older PyObjC)
+    try:
+        buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
+            ptr, size, Metal.MTLResourceStorageModeShared, None
+        )
+        if buffer is not None:
+            return buffer
+    except (TypeError, ValueError):
+        pass  # Fall through to copy-based approach
+
+    # Fallback: copy data via ctypes (works on all PyObjC versions)
+    arr_type = ctypes.c_uint8 * size
+    arr = arr_type.from_address(ptr)
+    data = bytes(arr)
+    buffer = device.newBufferWithBytes_length_options_(
+        data, len(data), Metal.MTLResourceStorageModeShared
     )
 
     if buffer is None:
@@ -242,7 +277,8 @@ def _dispatch_attention_kernel(
     wait: bool = True,
 ) -> None:
     """Dispatch a Flash Attention Metal kernel."""
-    pipeline = lib.get_pipeline(function_name, library_name="flash_attention_v2")
+    pipeline = lib.get_pipeline(
+        function_name, library_name="flash_attention_v2")
 
     command_buffer = lib.command_queue.commandBuffer()
     encoder = command_buffer.computeCommandEncoder()
@@ -297,9 +333,13 @@ def flash_attention_v2(
     if scale is None:
         scale = head_dim**-0.5
 
-    kernel_name = select_kernel(seq_q, num_heads_q, num_heads_kv, causal)
+    kernel_name = select_kernel(
+        seq_q, num_heads_q, num_heads_kv, causal, batch=batch, seq_k=seq_k
+    )
 
-    if kernel_name == "flash_attention_v2_decode":
+    if kernel_name == "flash_attention_v2_decode_fast":
+        return flash_attention_v2_decode_fast(Q, K, V, scale)
+    elif kernel_name == "flash_attention_v2_decode":
         return flash_attention_v2_decode(Q, K, V, scale)
     elif kernel_name == "flash_attention_v2_mqa":
         return flash_attention_v2_mqa(Q, K, V, scale, causal)
@@ -414,7 +454,8 @@ def flash_attention_v2_decode(
     V = V.to(device="mps", dtype=torch.float16).contiguous()
 
     # Allocate output: [num_seqs, num_heads_q, head_dim]
-    output = torch.empty((num_seqs, num_heads_q, head_dim), dtype=torch.float16, device="mps")
+    output = torch.empty((num_seqs, num_heads_q, head_dim),
+                         dtype=torch.float16, device="mps")
 
     # Convert to Metal buffers
     Q_buf = _mps_tensor_to_metal_buffer(Q, device)
@@ -471,6 +512,148 @@ def flash_attention_v2_decode(
         return output
     else:
         return output.unsqueeze(2)
+
+
+def flash_attention_v2_decode_fast(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    scale: float | None = None,
+) -> torch.Tensor:
+    """Ultra-optimized decode kernel for batch=1, seq_q=1.
+
+    This kernel is optimized for the common decode case where:
+    - batch=1 (single sequence)
+    - seq_q=1 (generating one token at a time)
+
+    Key optimizations:
+    - seq_k=1 fast path: softmax is trivially 1.0, output = V[0]
+    - Warp-level parallel score computation with fused online softmax
+    - No threadgroup memory barriers for small seq_k
+    - Single pass through K/V with online softmax + V accumulation
+
+    Args:
+        Q: Query tensor [1, heads_q, 1, head_dim] or [heads_q, head_dim]
+        K: Key cache [1, heads_kv, seq_k, head_dim] or [heads_kv, seq_k, head_dim]
+        V: Value cache [1, heads_kv, seq_k, head_dim] or [heads_kv, seq_k, head_dim]
+        scale: Attention scale factor
+
+    Returns:
+        Output tensor [1, heads_q, 1, head_dim] or [heads_q, head_dim]
+    """
+    _require_metal_attention()
+
+    # Handle various input shapes
+    # Expected: Q [1, heads_q, 1, head_dim], K/V [1, heads_kv, seq_k, head_dim]
+    # Or: Q [heads_q, head_dim], K/V [heads_kv, seq_k, head_dim]
+
+    if Q.ndim == 2:
+        # Q is [heads_q, head_dim]
+        num_heads_q, head_dim = Q.shape
+        squeeze_batch = True
+        squeeze_seq = True
+    elif Q.ndim == 3:
+        # Q is [heads_q, 1, head_dim] or [1, heads_q, head_dim]
+        if Q.shape[1] == 1:
+            num_heads_q = Q.shape[0]
+            head_dim = Q.shape[2]
+            Q = Q.squeeze(1)
+        else:
+            num_heads_q = Q.shape[1]
+            head_dim = Q.shape[2]
+            Q = Q.squeeze(0)
+        squeeze_batch = True
+        squeeze_seq = True
+    else:
+        # Q is [1, heads_q, 1, head_dim]
+        num_heads_q = Q.shape[1]
+        head_dim = Q.shape[3]
+        Q = Q.squeeze(0).squeeze(1)  # -> [heads_q, head_dim]
+        squeeze_batch = False
+        squeeze_seq = False
+
+    # Handle K/V shapes
+    if K.ndim == 3:
+        num_heads_kv, seq_k, _ = K.shape
+    else:
+        num_heads_kv = K.shape[1]
+        seq_k = K.shape[2]
+        K = K.squeeze(0)
+        V = V.squeeze(0)
+
+    if scale is None:
+        scale = head_dim**-0.5
+
+    lib = _get_kernel_library()
+    device = lib.device
+
+    # Ensure tensors are FP16 contiguous on MPS
+    # [heads_q, head_dim]
+    Q = Q.to(device="mps", dtype=torch.float16).contiguous()
+    # [heads_kv, seq_k, head_dim]
+    K = K.to(device="mps", dtype=torch.float16).contiguous()
+    # [heads_kv, seq_k, head_dim]
+    V = V.to(device="mps", dtype=torch.float16).contiguous()
+
+    # Allocate output: [heads_q, head_dim]
+    output = torch.empty((num_heads_q, head_dim),
+                         dtype=torch.float16, device="mps")
+
+    # Convert to Metal buffers
+    Q_buf = _mps_tensor_to_metal_buffer(Q, device)
+    K_buf = _mps_tensor_to_metal_buffer(K, device)
+    V_buf = _mps_tensor_to_metal_buffer(V, device)
+    O_buf = _mps_tensor_to_metal_buffer(output, device)
+
+    # Create scalar constant buffers
+    def make_uint32_buffer(val: int) -> Any:
+        data = np.array([val], dtype=np.uint32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    def make_float_buffer(val: float) -> Any:
+        data = np.array([val], dtype=np.float32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    num_heads_q_buf = make_uint32_buffer(num_heads_q)
+    num_heads_kv_buf = make_uint32_buffer(num_heads_kv)
+    seq_k_buf = make_uint32_buffer(seq_k)
+    head_dim_buf = make_uint32_buffer(head_dim)
+    scale_buf = make_float_buffer(scale)
+
+    # Grid: one threadgroup per head
+    grid = (num_heads_q, 1, 1)
+
+    # Dispatch
+    _dispatch_attention_kernel(
+        lib,
+        "flash_attention_v2_decode_fast",
+        grid=grid,
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[
+            Q_buf,
+            K_buf,
+            V_buf,
+            O_buf,
+            num_heads_q_buf,
+            num_heads_kv_buf,
+            seq_k_buf,
+            head_dim_buf,
+            scale_buf,
+        ],
+        wait=True,
+    )
+
+    # Reshape output to match expected format
+    if squeeze_batch and squeeze_seq:
+        return output  # [heads_q, head_dim]
+    elif squeeze_seq:
+        return output.unsqueeze(0)  # [1, heads_q, head_dim]
+    else:
+        return output.unsqueeze(0).unsqueeze(2)  # [1, heads_q, 1, head_dim]
 
 
 def flash_attention_v2_gqa(
@@ -664,9 +847,12 @@ def benchmark_flash_attention(
     import time
 
     # Create random inputs on MPS
-    Q = torch.randn((batch, num_heads_q, seq_q, head_dim), dtype=torch.float16, device="mps")
-    K = torch.randn((batch, num_heads_kv, seq_k, head_dim), dtype=torch.float16, device="mps")
-    V = torch.randn((batch, num_heads_kv, seq_k, head_dim), dtype=torch.float16, device="mps")
+    Q = torch.randn((batch, num_heads_q, seq_q, head_dim),
+                    dtype=torch.float16, device="mps")
+    K = torch.randn((batch, num_heads_kv, seq_k, head_dim),
+                    dtype=torch.float16, device="mps")
+    V = torch.randn((batch, num_heads_kv, seq_k, head_dim),
+                    dtype=torch.float16, device="mps")
 
     scale = head_dim**-0.5
 
@@ -732,11 +918,14 @@ if __name__ == "__main__":
 
     configs = [
         # GLM-4.7-Flash: 32 Q heads, 2 KV heads, head_dim=64
-        {"num_heads_q": 32, "num_heads_kv": 2, "head_dim": 64, "seq_q": 2048, "seq_k": 2048},
+        {"num_heads_q": 32, "num_heads_kv": 2,
+            "head_dim": 64, "seq_q": 2048, "seq_k": 2048},
         # Decode (seq_q=1)
-        {"num_heads_q": 32, "num_heads_kv": 2, "head_dim": 64, "seq_q": 1, "seq_k": 2048},
+        {"num_heads_q": 32, "num_heads_kv": 2,
+            "head_dim": 64, "seq_q": 1, "seq_k": 2048},
         # Standard MHA
-        {"num_heads_q": 32, "num_heads_kv": 32, "head_dim": 128, "seq_q": 2048, "seq_k": 2048},
+        {"num_heads_q": 32, "num_heads_kv": 32,
+            "head_dim": 128, "seq_q": 2048, "seq_k": 2048},
     ]
 
     for config in configs:

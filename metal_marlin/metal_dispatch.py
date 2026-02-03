@@ -29,15 +29,39 @@ Note:
 
 from __future__ import annotations
 
+import _ctypes
+import logging
 import os
 import weakref
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ._padding import pad_to_multiple, unpad
+from .metallib_loader import (
+    get_kernel_from_metallib,
+)
+
+# Logger for kernel loading diagnostics (metallib vs JIT)
+_kernel_logger = logging.getLogger(__name__ + ".kernels")
+
+
+# GIL release context manager for GPU operations
+@contextmanager
+def _release_gil():
+    """Release the GIL during blocking GPU operations.
+
+    Allows Python threads to run while Metal GPU computation is in progress.
+    """
+    thread_state = _ctypes.PyEval_SaveThread()
+    try:
+        yield
+    finally:
+        _ctypes.PyEval_RestoreThread(thread_state)
+
 
 # Check PyObjC Metal availability
 try:
@@ -51,31 +75,367 @@ except ImportError:
     Foundation = None
 
 # Check PyTorch MPS availability
+# Use try/except for backends access since torch may be partially loaded during
+# circular imports (e.g., pytest importing from _compat before full init)
 try:
     import torch
 
     HAS_TORCH = True
-    HAS_MPS = torch.backends.mps.is_available()
+    try:
+        HAS_MPS = torch.backends.mps.is_available()
+    except AttributeError:
+        # torch.backends may not exist during partial imports
+        HAS_MPS = False
 except ImportError:
     HAS_TORCH = False
     HAS_MPS = False
     torch = None
 
+# Check for C++ extension availability (provides 5-10x dispatch speedup)
+from ._compat import HAS_CPP_EXT, _metal_dispatch_ext
+
+# ---------------------------------------------------------------------------
+# FastPath: Low-overhead dispatch using C++ extension when available
+# ---------------------------------------------------------------------------
+
+
+class FastPath:
+    """Low-overhead Metal kernel dispatch using C++ extension.
+
+    When the C++ extension (_cpp_ext) is available, this class provides
+    a fast path that bypasses PyObjC overhead for kernel dispatch. Falls back to
+    the standard PyObjC path when the extension is not available.
+
+    The C++ extension eliminates:
+    - PyObjC bridge overhead (~50μs per call)
+    - Python method dispatch overhead
+    - Object allocation for MTLSize creation
+
+    Usage:
+        fast_path = FastPath(lib)
+        if fast_path.available:
+            fast_path.dispatch(pipeline, grid, threadgroup, buffers, wait=True)
+        else:
+            # Fall back to standard dispatch
+            dispatch_kernel(lib, ...)
+
+    Performance:
+        - PyObjC path: ~80-150μs per dispatch
+        - FastPath: ~5-15μs per dispatch
+    """
+
+    __slots__ = ("_lib", "_ctx", "_pipelines", "_available")
+
+    def __init__(self, lib: MetalKernelLibrary):
+        """Initialize FastPath for a MetalKernelLibrary.
+
+        Args:
+            lib: MetalKernelLibrary to dispatch kernels from.
+        """
+        self._lib = lib
+        self._ctx: Any = None
+        self._pipelines: dict[str, Any] = {}
+        self._available = HAS_CPP_EXT and _metal_dispatch_ext is not None
+
+        # Create MetalContext and load libraries if available
+        if self._available:
+            try:
+                self._ctx = _metal_dispatch_ext.MetalContext()
+                # Load all metallib files that the library knows about
+                self._load_metallibs()
+            except Exception:
+                self._ctx = None
+                self._available = False
+
+    def _load_metallibs(self) -> None:
+        """Load metallib files into the C++ context."""
+        # Get the source directory from the library
+        if hasattr(self._lib, "source_dir"):
+            source_dir = Path(self._lib.source_dir)
+            # Load any .metallib files
+            for metallib_file in source_dir.glob("**/*.metallib"):
+                try:
+                    self._ctx.load_metallib(str(metallib_file))
+                except Exception:
+                    pass
+
+    @property
+    def available(self) -> bool:
+        """Return True if the C++ fast path is available."""
+        return self._available
+
+    def _get_pipeline(self, kernel_name: str) -> Any:
+        """Get or create pipeline from C++ context.
+
+        Args:
+            kernel_name: Name of the kernel function.
+
+        Returns:
+            MTLComputePipelineState from C++ extension.
+        """
+        if kernel_name not in self._pipelines:
+            # Get the pipeline from C++ extension (searches all loaded libraries)
+            self._pipelines[kernel_name] = self._ctx.get_pipeline(kernel_name)
+        return self._pipelines[kernel_name]
+
+    def dispatch(
+        self,
+        kernel_name: str,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        buffers: Sequence[Any],
+        wait: bool = True,
+    ) -> None:
+        """Dispatch a kernel using the fast C++ path.
+
+        Args:
+            kernel_name: Name of the kernel function to dispatch.
+            grid: Grid dimensions (threadgroups in X, Y, Z).
+            threadgroup: Threadgroup dimensions (threads in X, Y, Z).
+            buffers: Sequence of ManagedBuffer objects from C++ extension.
+            wait: If True, wait for kernel completion.
+
+        Raises:
+            RuntimeError: If fast path is not available.
+        """
+        if not self._available:
+            raise RuntimeError("FastPath not available - use standard dispatch")
+
+        pipeline = self._get_pipeline(kernel_name)
+        _metal_dispatch_ext.dispatch_kernel(
+            self._ctx,
+            pipeline,
+            grid,
+            threadgroup,
+            list(buffers),
+            wait,
+        )
+
+    def dispatch_batched(
+        self,
+        dispatches: Sequence[tuple[str, tuple[int, int, int], tuple[int, int, int], Sequence[Any]]],
+        wait: bool = True,
+    ) -> None:
+        """Dispatch multiple kernels in a single command buffer.
+
+        Args:
+            dispatches: Sequence of (kernel_name, grid, threadgroup, buffers) tuples.
+            wait: If True, wait for all kernels to complete.
+
+        Raises:
+            RuntimeError: If fast path is not available.
+        """
+        if not self._available:
+            raise RuntimeError("FastPath not available - use standard dispatch")
+
+        batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
+
+        for kernel_name, grid, threadgroup, buffers in dispatches:
+            pipeline = self._get_pipeline(kernel_name)
+            batch.add_kernel(pipeline, grid, threadgroup, list(buffers))
+
+        batch.commit(wait)
+
+    def create_buffer(self, size: int, use_pool: bool = True) -> Any:
+        """Create a Metal buffer using the C++ extension.
+
+        Args:
+            size: Buffer size in bytes.
+            use_pool: If True, use buffer pool for reuse.
+
+        Returns:
+            ManagedBuffer from C++ extension.
+        """
+        if not self._available:
+            raise RuntimeError("FastPath not available")
+        return _metal_dispatch_ext.create_buffer(self._ctx, size, use_pool)
+
+    def create_buffer_from_ptr(self, ptr: int, size: int) -> Any:
+        """Create a zero-copy Metal buffer from a memory pointer.
+
+        Useful for wrapping MPS tensor memory without copying.
+
+        Args:
+            ptr: Memory pointer as integer (e.g., from tensor.data_ptr()).
+            size: Buffer size in bytes.
+
+        Returns:
+            ManagedBuffer from C++ extension.
+        """
+        if not self._available:
+            raise RuntimeError("FastPath not available")
+        return _metal_dispatch_ext.create_buffer_from_ptr(self._ctx, ptr, size)
+
+
+# Singleton cache for FastPath instances per library
+_fast_path_cache: dict[int, FastPath] = {}
+
+
+def get_fast_path(lib: MetalKernelLibrary) -> FastPath:
+    """Get or create a FastPath instance for a MetalKernelLibrary.
+
+    Args:
+        lib: MetalKernelLibrary to get fast path for.
+
+    Returns:
+        FastPath instance (may or may not be available).
+    """
+    lib_id = id(lib)
+    if lib_id not in _fast_path_cache:
+        _fast_path_cache[lib_id] = FastPath(lib)
+    return _fast_path_cache[lib_id]
+
+
 if HAS_METAL:
-    from ._buffer_pool import MetalBufferPool
+    from ._buffer_pool import MetalBufferPool, _align_buffer_size
 
     _STAGING_POOLS: dict[int, MetalBufferPool] = {}
     # Cache Metal buffers by tensor Python id.
     # Store (weakref, buffer) so we can verify the tensor is still alive.
     # This avoids PyTorch tensor __eq__ issues with WeakKeyDictionary.
     _WEIGHT_BUFFER_CACHE: dict[int, tuple[weakref.ref, Any]] = {}
+    # Threshold for using async blit (1MB)
+    _ASYNC_TRANSFER_THRESHOLD = 1024 * 1024
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
         pool = _STAGING_POOLS.get(id(device))
         if pool is None:
-            pool = MetalBufferPool(device, storage_mode=Metal.MTLResourceStorageModeManaged)
+            pool = MetalBufferPool(device, storage_mode=Metal.MTLResourceStorageModeShared)
             _STAGING_POOLS[id(device)] = pool
         return pool
+
+    _BATCH_THRESHOLD = 4 * 1024
+    _BATCH_BUFFER_SIZE = 256 * 1024
+
+    class SmallTransferBatcher:
+        """Accumulates and batches small transfers to reduce overhead.
+
+        Small transfers (<4KB) are accumulated into a staging buffer and
+        flushed in a single blit operation, reducing transfer count by ~10x.
+        """
+
+        __slots__ = (
+            "_lib",
+            "_device",
+            "_staging_buffer",
+            "_offset",
+            "_pending",
+            "_cmd_buffer",
+            "_blit",
+        )
+
+        def __init__(self, lib: MetalKernelLibrary, device: Any):
+            self._lib = lib
+            self._device = device
+            self._staging_buffer = _get_staging_pool(device).get(_BATCH_BUFFER_SIZE)
+            self._offset = 0
+            self._pending: list[tuple[int, Any, Any, int]] = []
+            self._cmd_buffer: Any = None
+            self._blit: Any = None
+
+            def add(self, data: bytes, private_buf: Any) -> int:
+                """Add a small transfer to the batch.
+
+                Args:
+                    data: Bytes to transfer
+                    private_buf: Destination private buffer
+
+                Returns:
+                    Offset in batch where data was placed
+                """
+                size = len(data)
+
+                if size > _BATCH_THRESHOLD:
+                    raise ValueError(
+                        f"Transfer size {size} exceeds batch threshold {_BATCH_THRESHOLD}"
+                    )
+
+                # Align offset to cache line to prevent false sharing
+                # M3 Max cache line is 128 bytes
+                aligned_offset = _round_up(self._offset, 128)
+
+                if aligned_offset + size > _BATCH_BUFFER_SIZE:
+                    self.flush()
+                    aligned_offset = 0
+
+                contents = self._staging_buffer.contents()
+                view = memoryview(contents.as_buffer(self._staging_buffer.length()))
+                view[aligned_offset : aligned_offset + size] = data
+                self._staging_buffer.didModifyRange_(Foundation.NSMakeRange(aligned_offset, size))
+
+                offset = aligned_offset
+                self._pending.append((offset, self._staging_buffer, private_buf, size))
+                self._offset = offset + size
+                return offset
+
+        def flush(self) -> None:
+            """Flush all pending transfers in a single blit operation."""
+            if not self._pending:
+                return
+
+            self._cmd_buffer = self._lib.command_queue.commandBuffer()
+            self._blit = self._cmd_buffer.blitCommandEncoder()
+
+            for src_offset, staging, dest, size in self._pending:
+                self._blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+                    staging, src_offset, dest, 0, size
+                )
+
+            self._blit.endEncoding()
+            self._cmd_buffer.commit()
+            self._cmd_buffer.waitUntilCompleted()
+
+            self._pending.clear()
+            self._offset = 0
+            self._cmd_buffer = None
+            self._blit = None
+
+        def __del__(self) -> None:
+            self.flush()
+            _get_staging_pool(self._device).release(self._staging_buffer)
+
+    class StagingTransferHandle:
+        """Handle for in-flight staging buffer transfers.
+
+        Allows the CPU to continue while the GPU handles the blit copy
+        from shared/managed staging buffer to private GPU memory.
+        """
+
+        __slots__ = ("_command_buffer", "_staging_buffer", "_private_buffer", "_completed")
+
+        def __init__(self, command_buffer: Any, staging_buffer: Any, private_buffer: Any):
+            self._command_buffer = command_buffer
+            self._staging_buffer = staging_buffer
+            self._private_buffer = private_buffer
+            self._completed = False
+
+        @property
+        def destination_buffer(self) -> Any:
+            """The private GPU buffer being written to."""
+            return self._private_buffer
+
+        @property
+        def staging_buffer(self) -> Any:
+            """The staging buffer (managed/shared)."""
+            return self._staging_buffer
+
+        def is_complete(self) -> bool:
+            """Check if transfer has completed without blocking."""
+            if self._completed:
+                return True
+            # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed,
+            # 3=scheduled, 4=completed, 5=error
+            status = self._command_buffer.status()
+            if status >= 4:
+                self._completed = True
+                return True
+            return False
+
+        def wait(self) -> None:
+            """Block until transfer completes."""
+            if not self._completed:
+                self._command_buffer.waitUntilCompleted()
+                self._completed = True
 
     def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
         command_buffer = lib.command_queue.commandBuffer()
@@ -87,18 +447,87 @@ if HAS_METAL:
         command_buffer.commit()
         command_buffer.waitUntilCompleted()
 
-    def _private_buffer_from_bytes(lib: MetalKernelLibrary, device: Any, data: bytes) -> Any:
-        size = len(data)
-        staging = _get_staging_pool(device).get(size)
-        contents = staging.contents()
-        view = memoryview(contents.as_buffer(staging.length()))
-        view[:size] = data
-        staging.didModifyRange_(Foundation.NSMakeRange(0, size))
+    def _blit_copy_async(
+        lib: MetalKernelLibrary,
+        source: Any,
+        destination: Any,
+        size: int,
+        staging_buffer: Any,
+    ) -> StagingTransferHandle:
+        """Asynchronous blit copy from staging to private buffer.
 
-        private_buf = device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModePrivate)
-        _blit_copy(lib, staging, private_buf, size)
-        _get_staging_pool(device).release(staging)
-        return private_buf
+        Returns a handle that can be waited on later, allowing CPU to continue
+        while GPU handles the transfer.
+
+        Args:
+            lib: MetalKernelLibrary for command queue access
+            source: Source buffer (staging buffer)
+            destination: Destination buffer (private GPU memory)
+            size: Number of bytes to copy
+            staging_buffer: The staging buffer (needed for cleanup)
+
+        Returns:
+            StagingTransferHandle for synchronization
+        """
+        command_buffer = lib.command_queue.commandBuffer()
+        blit = command_buffer.blitCommandEncoder()
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+            source, 0, destination, 0, size
+        )
+        blit.endEncoding()
+        command_buffer.commit()
+        return StagingTransferHandle(command_buffer, staging_buffer, destination)
+
+    def _private_buffer_from_bytes(
+        lib: MetalKernelLibrary,
+        device: Any,
+        data: bytes,
+    ) -> Any | StagingTransferHandle:
+        """Create GPU buffer from CPU bytes with staging for large transfers.
+
+        Small transfers (<1MB): Use shared storage mode for zero-copy access.
+        Large transfers (>=1MB): Write to shared staging buffer, then async blit
+        to private GPU memory. Returns StagingTransferHandle for async transfers.
+
+        Args:
+            lib: MetalKernelLibrary for command queue
+            device: MTLDevice
+            data: Bytes to transfer
+
+        Returns:
+            Shared MTLBuffer (for small transfers) or StagingTransferHandle (for large)
+        """
+        size = len(data)
+
+        if size < _ASYNC_TRANSFER_THRESHOLD:
+            # Align size to 128 bytes
+            aligned_size = _round_up(size, 128)
+            if aligned_size > size:
+                data = data + b"\0" * (aligned_size - size)
+
+            shared_buf = device.newBufferWithBytes_length_options_(
+                data, aligned_size, Metal.MTLResourceStorageModeShared
+            )
+            return shared_buf
+
+        staging_pool = _get_staging_pool(device)
+        # Staging pool buffers are already aligned
+        staging_buffer = staging_pool.get(size)
+        contents = staging_buffer.contents()
+        view = memoryview(contents.as_buffer(staging_buffer.length()))
+        view[:size] = data
+        staging_buffer.didModifyRange_(Foundation.NSMakeRange(0, size))
+
+        # Align shared buffer allocation for zero-copy access
+        aligned_size = _align_buffer_size(size)
+        private_buffer = device.newBufferWithLength_options_(
+            aligned_size, Metal.MTLResourceStorageModeShared
+        )
+        if private_buffer is None:
+            staging_pool.release(staging_buffer)
+            raise RuntimeError(f"Failed to allocate shared buffer of {aligned_size} bytes")
+
+        return _blit_copy_async(lib, staging_buffer, private_buffer, size, staging_buffer)
 
     def _private_buffer_from_tensor(
         tensor: torch.Tensor,
@@ -106,33 +535,66 @@ if HAS_METAL:
         device: Any,
         *,
         cache: bool,
-    ) -> Any:
+        async_transfer: bool = True,
+    ) -> Any | StagingTransferHandle:
+        """Create GPU buffer from PyTorch tensor with staging for large transfers.
+
+        MPS tensors: Always use shared storage (already on GPU).
+        CPU tensors: Small transfers use shared storage, large transfers (>=1MB)
+        use staging buffer + async blit to private GPU memory.
+
+        Args:
+            tensor: PyTorch tensor to convert
+            lib: MetalKernelLibrary for command queue
+            device: MTLDevice
+            cache: Whether to cache the resulting buffer
+            async_transfer: Whether to use async transfers for large CPU tensors
+
+        Returns:
+            Shared MTLBuffer or StagingTransferHandle for async transfers
+        """
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
         tensor_id = id(tensor)
         if cache and tensor_id in _WEIGHT_BUFFER_CACHE:
             ref, buf = _WEIGHT_BUFFER_CACHE[tensor_id]
-            # Verify the tensor is still alive and is the same object
             if ref() is tensor:
                 return buf
-            # Stale entry - remove it
             del _WEIGHT_BUFFER_CACHE[tensor_id]
 
         if tensor.is_mps:
-            staging = mps_tensor_to_metal_buffer(tensor, device)
-            size = staging.length()
-            private_buf = device.newBufferWithLength_options_(
-                size, Metal.MTLResourceStorageModePrivate
-            )
-            _blit_copy(lib, staging, private_buf, size)
+            shared_buf = mps_tensor_to_metal_buffer(tensor, device)
+            result = shared_buf
         else:
             data = tensor.detach().cpu().numpy().tobytes()
-            private_buf = _private_buffer_from_bytes(lib, device, data)
+            size = len(data)
 
-        if cache:
-            _WEIGHT_BUFFER_CACHE[tensor_id] = (weakref.ref(tensor), private_buf)
-        return private_buf
+            if size < _ASYNC_TRANSFER_THRESHOLD or not async_transfer:
+                result = device.newBufferWithBytes_length_options_(
+                    data, size, Metal.MTLResourceStorageModeShared
+                )
+            else:
+                staging_pool = _get_staging_pool(device)
+                staging_buffer = staging_pool.get(size)
+                contents = staging_buffer.contents()
+                view = memoryview(contents.as_buffer(staging_buffer.length()))
+                view[:size] = data
+                staging_buffer.didModifyRange_(Foundation.NSMakeRange(0, size))
+
+                private_buffer = device.newBufferWithLength_options_(
+                    size, Metal.MTLResourceStorageModeShared
+                )
+                if private_buffer is None:
+                    staging_pool.release(staging_buffer)
+                    raise RuntimeError(f"Failed to allocate shared buffer of {size} bytes")
+
+                result = _blit_copy_async(lib, staging_buffer, private_buffer, size, staging_buffer)
+
+        if cache and not isinstance(result, StagingTransferHandle):
+            _WEIGHT_BUFFER_CACHE[tensor_id] = (weakref.ref(tensor), result)
+
+        return result
 
 
 def require_metal() -> None:
@@ -187,6 +649,62 @@ def get_shader_source(name: str) -> str:
     return path.read_text()
 
 
+def load_metallib(metallib_path: str | Path | None = None) -> Any:
+    """Load precompiled Metal library (.metallib) file.
+
+    This is 100-1000x faster than runtime compilation for kernel dispatch.
+
+    Args:
+        metallib_path: Path to .metallib file. If None, uses default location.
+
+    Returns:
+        MTLLibrary object with all precompiled kernels.
+    """
+    require_metal()
+
+    if metallib_path is None:
+        # Default location: metal_marlin/lib/metal_marlin.metallib
+        metallib_path = Path(__file__).parent / "lib" / "metal_marlin.metallib"
+
+    metallib_path = Path(metallib_path)
+    if not metallib_path.exists():
+        raise FileNotFoundError(
+            f"Precompiled metallib not found: {metallib_path}\n"
+            f"Run: ./scripts/build_metallib.sh to generate it."
+        )
+
+    device = Metal.MTLCreateSystemDefaultDevice()
+    if device is None:
+        raise RuntimeError("No Metal device available")
+
+    url = Foundation.NSURL.fileURLWithPath_(str(metallib_path))
+    library, error = device.newLibraryWithURL_error_(url, None)
+
+    if library is None:
+        error_msg = error.localizedDescription() if error else "Unknown error"
+        raise RuntimeError(f"Failed to load metallib: {error_msg}")
+
+    return library
+
+
+# Global cached metallib for load_metallib()
+_loaded_metallib: Any = None
+
+
+def get_loaded_metallib() -> Any:
+    """Get cached metallib loaded via load_metallib(), loading if needed.
+
+    Returns None if metallib file doesn't exist (falls back to runtime compilation).
+    """
+    global _loaded_metallib
+    if _loaded_metallib is None:
+        try:
+            _loaded_metallib = load_metallib()
+        except FileNotFoundError:
+            return None  # Fall back to runtime compilation
+    return _loaded_metallib
+
+
 # ---------------------------------------------------------------------------
 # Metal Kernel Library
 # ---------------------------------------------------------------------------
@@ -219,8 +737,31 @@ class MetalKernelLibrary:
 
         self._device = device
         self._libraries: dict[str, Any] = {}  # source_name -> MTLLibrary
-        self._pipelines: dict[str, Any] = {}  # function_name -> MTLComputePipelineState
+        # function_name -> MTLComputePipelineState
+        self._pipelines: dict[str, Any] = {}
         self._command_queue = device.newCommandQueue()
+
+        # Secondary command queue for pipeline overlap (prefill/decode)
+        # Using separate queues allows GPU to interleave work from both streams
+        self._decode_queue = device.newCommandQueue()
+
+        # Small transfer batcher for batching <4KB transfers
+        self._small_transfer_batcher: SmallTransferBatcher | None = None
+
+        # Batch dispatch state
+        self._batch_mode = False
+        self._batch_encoder: Any = None
+        self._batch_command_buffer: Any = None
+
+        # Pipeline overlap state - tracks in-flight command buffers
+        self._inflight_prefill: Any = None
+        self._inflight_decode: Any = None
+
+        # Pipelined dispatch state - for async prefill/decode overlap
+        self._prefill_encoder: Any = None
+        self._prefill_buffer: Any = None
+        self._decode_encoder: Any = None
+        self._decode_buffer: Any = None
 
     @classmethod
     def from_source_dir(cls, src_dir: Path | None = None) -> MetalKernelLibrary:
@@ -254,8 +795,273 @@ class MetalKernelLibrary:
 
     @property
     def command_queue(self) -> Any:
-        """The MTLCommandQueue for kernel dispatch."""
+        """The MTLCommandQueue for kernel dispatch (primary/prefill)."""
         return self._command_queue
+
+    @property
+    def decode_queue(self) -> Any:
+        """The MTLCommandQueue for decode operations (secondary stream)."""
+        return self._decode_queue
+
+    @contextmanager
+    def batch_dispatch(self) -> Generator[None, None, None]:
+        """Context manager for batching multiple kernel dispatches.
+
+        Usage:
+            with lib.batch_dispatch():
+                dispatch_kernel(lib, ...)  # Encoded but not committed
+                dispatch_kernel(lib, ...)  # Encoded but not committed
+            # All kernels committed and waited on exit
+        """
+        self._batch_mode = True
+        self._batch_command_buffer = self.command_queue.commandBuffer()
+        self._batch_encoder = self._batch_command_buffer.computeCommandEncoder()
+        try:
+            yield
+        finally:
+            self._batch_encoder.endEncoding()
+            self._batch_command_buffer.commit()
+            self._batch_command_buffer.waitUntilCompleted()
+            self._batch_mode = False
+            self._batch_encoder = None
+            self._batch_command_buffer = None
+
+    # -------------------------------------------------------------------------
+    # Pipelined Prefill/Decode Dispatch
+    # -------------------------------------------------------------------------
+    # These methods enable overlapping prefill and decode work on separate
+    # command queues. The GPU can execute decode kernels while encoding
+    # prefill work, improving throughput by ~50%.
+    #
+    # Usage:
+    #     # Start prefill for request A (async)
+    #     lib.begin_prefill()
+    #     lib.dispatch_prefill(kernel, grid, threadgroup, buffers)
+    #     lib.commit_prefill()  # Returns immediately, GPU starts working
+    #
+    #     # Meanwhile, start decode for request B (async)
+    #     lib.begin_decode()
+    #     lib.dispatch_decode(kernel, grid, threadgroup, buffers)
+    #     lib.commit_decode()  # Returns immediately
+    #
+    #     # Wait for both when needed
+    #     lib.wait_prefill()  # Block until prefill done
+    #     lib.wait_decode()   # Block until decode done
+
+    def begin_prefill(self) -> None:
+        """Begin encoding prefill commands on the primary queue.
+
+        Creates a new command buffer and encoder for prefill work. Call
+        dispatch_prefill() to add kernels, then commit_prefill() to submit.
+        """
+        if self._prefill_buffer is not None:
+            raise RuntimeError("Prefill already in progress. Call commit_prefill() first.")
+        self._prefill_buffer = self._command_queue.commandBuffer()
+        self._prefill_encoder = self._prefill_buffer.computeCommandEncoder()
+
+    def dispatch_prefill(
+        self,
+        pipeline: Any,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        buffers: Sequence[Any],
+    ) -> None:
+        """Dispatch a kernel on the prefill stream.
+
+        Args:
+            pipeline: MTLComputePipelineState from get_pipeline().
+            grid: Threadgroup grid dimensions (x, y, z).
+            threadgroup: Threads per threadgroup (x, y, z).
+            buffers: Metal buffers to bind as kernel arguments.
+        """
+        if self._prefill_encoder is None:
+            raise RuntimeError("Must call begin_prefill() first")
+
+        self._prefill_encoder.setComputePipelineState_(pipeline)
+        for i, buf in enumerate(buffers):
+            self._prefill_encoder.setBuffer_offset_atIndex_(buf, 0, i)
+
+        self._prefill_encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            Metal.MTLSizeMake(*grid),
+            Metal.MTLSizeMake(*threadgroup),
+        )
+
+    def commit_prefill(self) -> None:
+        """Submit prefill command buffer for execution (non-blocking).
+
+        The GPU will begin executing prefill work immediately. Call
+        wait_prefill() to block until completion.
+        """
+        if self._prefill_encoder is None:
+            raise RuntimeError("Must call begin_prefill() first")
+
+        self._prefill_encoder.endEncoding()
+        self._prefill_buffer.commit()
+        self._inflight_prefill = self._prefill_buffer
+        self._prefill_encoder = None
+        self._prefill_buffer = None
+
+    def wait_prefill(self) -> None:
+        """Block until in-flight prefill work completes."""
+        if self._inflight_prefill is not None:
+            self._inflight_prefill.waitUntilCompleted()
+            self._inflight_prefill = None
+
+    def begin_decode(self) -> None:
+        """Begin encoding decode commands on the secondary queue.
+
+        Creates a new command buffer and encoder for decode work. Call
+        dispatch_decode() to add kernels, then commit_decode() to submit.
+        """
+        if self._decode_buffer is not None:
+            raise RuntimeError("Decode already in progress. Call commit_decode() first.")
+        self._decode_buffer = self._decode_queue.commandBuffer()
+        self._decode_encoder = self._decode_buffer.computeCommandEncoder()
+
+    def dispatch_decode(
+        self,
+        pipeline: Any,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        buffers: Sequence[Any],
+    ) -> None:
+        """Dispatch a kernel on the decode stream.
+
+        Args:
+            pipeline: MTLComputePipelineState from get_pipeline().
+            grid: Threadgroup grid dimensions (x, y, z).
+            threadgroup: Threads per threadgroup (x, y, z).
+            buffers: Metal buffers to bind as kernel arguments.
+        """
+        if self._decode_encoder is None:
+            raise RuntimeError("Must call begin_decode() first")
+
+        self._decode_encoder.setComputePipelineState_(pipeline)
+        for i, buf in enumerate(buffers):
+            self._decode_encoder.setBuffer_offset_atIndex_(buf, 0, i)
+
+        self._decode_encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            Metal.MTLSizeMake(*grid),
+            Metal.MTLSizeMake(*threadgroup),
+        )
+
+    def commit_decode(self) -> None:
+        """Submit decode command buffer for execution (non-blocking).
+
+        The GPU will begin executing decode work immediately. Call
+        wait_decode() to block until completion.
+        """
+        if self._decode_encoder is None:
+            raise RuntimeError("Must call begin_decode() first")
+
+        self._decode_encoder.endEncoding()
+        self._decode_buffer.commit()
+        self._inflight_decode = self._decode_buffer
+        self._decode_encoder = None
+        self._decode_buffer = None
+
+    def wait_decode(self) -> None:
+        """Block until in-flight decode work completes."""
+        if self._inflight_decode is not None:
+            self._inflight_decode.waitUntilCompleted()
+            self._inflight_decode = None
+
+    def has_inflight_prefill(self) -> bool:
+        """Check if prefill work is currently in flight."""
+        return self._inflight_prefill is not None
+
+    def has_inflight_decode(self) -> bool:
+        """Check if decode work is currently in flight."""
+        return self._inflight_decode is not None
+
+    def wait_all(self) -> None:
+        """Block until all in-flight work completes."""
+        self.wait_prefill()
+        self.wait_decode()
+
+    def _create_compile_options(self) -> Any:
+        """Create MTLCompileOptions with aggressive fast-math flags.
+
+        Environment variables:
+            MM_FAST_MATH: Set to "0" to disable fast-math for correctness testing.
+                Any other value or unset enables fast-math.
+            METAL_MARLIN_DISABLE_FAST_MATH: Set to "1", "true", or "yes" to disable
+                all fast-math optimizations for correctness testing.
+            METAL_MARLIN_SAFE_MATH: Set to "1", "true", or "yes" to enable a safer
+                mode that keeps fast-math but preserves invariance for consistent
+                position calculations.
+
+        Fast-math enables:
+            - Reciprocal approximations (faster division via rcp ops)
+            - Fused multiply-add operations (FMA)
+            - Relaxed NaN/Inf handling (assumes no NaN/Inf in hot paths)
+            - Reassociation of floating-point operations
+            - Denormal flushing to zero (ftz)
+            - No signed zeros (nsz)
+            - Unsafe math optimizations
+
+        Returns:
+            Configured MTLCompileOptions instance.
+        """
+        options = Metal.MTLCompileOptions.new()
+
+        # Check environment for correctness testing modes
+        disable_fast_math = os.getenv("MM_FAST_MATH", "") == "0"
+        if not disable_fast_math:
+            disable_fast_math = os.getenv("METAL_MARLIN_DISABLE_FAST_MATH", "").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+        safe_math = os.getenv("METAL_MARLIN_SAFE_MATH", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+
+        fast_math_enabled = not disable_fast_math
+
+        # Fast math: enables reciprocal approximations, FMA, relaxed NaN/Inf handling
+        options.setFastMathEnabled_(fast_math_enabled)
+
+        # Preserve invariance: when False, allows aggressive optimizations that may
+        # produce different results for the same inputs in different contexts.
+        # Disable for maximum performance in inference (no shadow volumes needed).
+        # Safe mode keeps invariance for debugging position-sensitive issues.
+        if hasattr(options, "setPreserveInvariance_"):
+            options.setPreserveInvariance_(safe_math)
+
+        # Optimization level: prioritize performance over binary size.
+        # MTLLibraryOptimizationLevelDefault = 0 (balanced)
+        # MTLLibraryOptimizationLevelSize = 1 (smaller binaries)
+        # MTLLibraryOptimizationLevelPerformance = 2 (faster execution, added in macOS 14+)
+        if hasattr(Metal, "MTLLibraryOptimizationLevelPerformance"):
+            options.setOptimizationLevel_(Metal.MTLLibraryOptimizationLevelPerformance)
+
+        # Metal 3.0 for simdgroup_matrix support
+        options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
+
+        # Set preprocessor macros for shader-level fast-math hints
+        # These allow shaders to conditionally compile NaN/Inf checks
+        if hasattr(options, "setPreprocessorMacros_"):
+            macros = {}
+            if fast_math_enabled:
+                # Shaders can use #ifdef METAL_FAST_MATH to skip checks
+                macros["METAL_FAST_MATH"] = "1"
+                # Explicitly disable NaN/Inf checks in shader hot paths
+                macros["METAL_DISABLE_NAN_CHECKS"] = "1"
+                macros["METAL_DISABLE_INF_CHECKS"] = "1"
+                # Enable reciprocal approximation hints
+                macros["METAL_USE_RCP_APPROX"] = "1"
+                # Flush denormals to zero
+                macros["METAL_FLUSH_DENORMALS"] = "1"
+            else:
+                # Strict mode: enable all checks for correctness testing
+                macros["METAL_FAST_MATH"] = "0"
+                macros["METAL_STRICT_MATH"] = "1"
+            options.setPreprocessorMacros_(macros)
+
+        return options
 
     def compile_source(self, name: str, source: str) -> Any:
         """Compile Metal source code into a library.
@@ -270,21 +1076,58 @@ class MetalKernelLibrary:
         # Preprocess includes before compilation (PyObjC Metal doesn't resolve #include).
         source = self._preprocess_includes(source)
 
-        options = Metal.MTLCompileOptions.new()
-        # Enable fast math for performance unless explicitly disabled.
-        disable_fast_math = os.getenv("METAL_MARLIN_DISABLE_FAST_MATH", "").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        options.setFastMathEnabled_(not disable_fast_math)
-        # Metal 3.0 for simdgroup_matrix
-        options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
+        options = self._create_compile_options()
 
         library, error = self._device.newLibraryWithSource_options_error_(source, options, None)
 
         if library is None:
             # Try to get error message
+            error_msg = str(error) if error else "Unknown error"
+            raise RuntimeError(f"Failed to compile Metal source '{name}': {error_msg}")
+
+        self._libraries[name] = library
+        return library
+
+    def compile_source_with_defines(
+        self, name: str, source: str, defines: dict[str, int | str]
+    ) -> Any:
+        """Compile Metal source code with preprocessor defines.
+
+        Args:
+            name: Identifier for this source (e.g., 'gemm_trellis_moe_256')
+            source: Metal shader source code
+            defines: Dict of preprocessor macros to define (e.g., {'MOE_SIMDGROUPS_CONFIG': 8})
+
+        Returns:
+            MTLLibrary instance.
+        """
+        # Build preprocessor header from defines
+        define_lines = [f"#define {k} {v}" for k, v in defines.items()]
+        define_header = "\n".join(define_lines) + "\n" if define_lines else ""
+
+        # Preprocess includes before compilation
+        source = self._preprocess_includes(source)
+
+        # Insert defines after metal_stdlib include but before the rest
+        # Find the end of the initial #include block
+        import re
+
+        include_end = 0
+        for match in re.finditer(r"#include\s*<[^>]+>", source):
+            include_end = max(include_end, match.end())
+
+        if include_end > 0:
+            # Insert defines after includes
+            source = source[:include_end] + "\n" + define_header + source[include_end:]
+        else:
+            # No includes found, prepend defines
+            source = define_header + source
+
+        options = self._create_compile_options()
+
+        library, error = self._device.newLibraryWithSource_options_error_(source, options, None)
+
+        if library is None:
             error_msg = str(error) if error else "Unknown error"
             raise RuntimeError(f"Failed to compile Metal source '{name}': {error_msg}")
 
@@ -380,7 +1223,31 @@ class MetalKernelLibrary:
         return list(lib.functionNames())
 
     def get_kernel(self, library_name: str, function_name: str) -> Any:
-        """Get a compute pipeline from a specific library."""
+        """Get Metal kernel function.
+
+        Tries precompiled metallib first for 100x faster dispatch,
+        falling back to JIT compilation if not found.
+        """
+        cache_key = f"precompiled::{function_name}"
+
+        # Check cache first
+        if cache_key in self._pipelines:
+            return self._pipelines[cache_key]
+
+        # Try precompiled library first (100x faster)
+        kernel_fn = get_kernel_from_metallib(function_name)
+        if kernel_fn is not None:
+            # Create pipeline state from precompiled function
+            pipeline, error = self._device.newComputePipelineStateWithFunction_error_(
+                kernel_fn, None
+            )
+            if pipeline is not None:
+                self._pipelines[cache_key] = pipeline
+                _kernel_logger.debug(f"[metallib] {function_name}")
+                return pipeline
+
+        # Fall back to JIT compilation
+        _kernel_logger.debug(f"[jit] {function_name}")
         return self.get_pipeline(function_name, library_name)
 
     def _get_metal_buffer(self, tensor: torch.Tensor) -> Any:
@@ -419,6 +1286,9 @@ class MetalKernelLibrary:
 
         encoder.setComputePipelineState_(kernel)
 
+        buffer_idx = 0
+        texture_idx = 0
+
         buffers: list[Any] = []
         for arg in args:
             if isinstance(arg, (int, np.integer)):
@@ -426,12 +1296,14 @@ class MetalKernelLibrary:
                 buf = self._device.newBufferWithBytes_length_options_(
                     const.tobytes(), const.nbytes, Metal.MTLResourceStorageModeShared
                 )
-                buffers.append(buf)
+                encoder.setBuffer_offset_atIndex_(buf, 0, buffer_idx)
+                buffer_idx += 1
+            elif hasattr(arg, "textureType"):
+                encoder.setTexture_atIndex_(arg, texture_idx)
+                texture_idx += 1
             else:
-                buffers.append(arg)
-
-        for i, buf in enumerate(buffers):
-            encoder.setBuffer_offset_atIndex_(buf, 0, i)
+                encoder.setBuffer_offset_atIndex_(arg, 0, buffer_idx)
+                buffer_idx += 1
 
         grid_size = Metal.MTLSizeMake(*grid)
         tg_size = Metal.MTLSizeMake(*threadgroup)
@@ -650,6 +1522,477 @@ class MetalKernelLibrary:
             output = unpad(output, 1, pad_n)
         return output
 
+    def get_small_transfer_batcher(self) -> SmallTransferBatcher:
+        """Get or create the small transfer batcher.
+
+        Returns:
+            SmallTransferBatcher instance for batching <4KB transfers.
+        """
+        if self._small_transfer_batcher is None:
+            self._small_transfer_batcher = SmallTransferBatcher(self, self._device)
+        return self._small_transfer_batcher
+
+    def flush_small_transfers(self) -> None:
+        """Flush pending small transfers from the batcher."""
+        if self._small_transfer_batcher is not None:
+            self._small_transfer_batcher.flush()
+
+    def create_batched_dispatcher(self) -> BatchedDispatcher:
+        """Create a BatchedDispatcher for batching multiple kernel dispatches.
+
+        Returns:
+            BatchedDispatcher instance bound to this library.
+        """
+        return BatchedDispatcher(self)
+
+
+# ---------------------------------------------------------------------------
+# Batched Command Encoding
+# ---------------------------------------------------------------------------
+
+
+class BatchedDispatcher:
+    """Batches multiple kernel dispatches into a single command buffer.
+
+    Instead of:
+      dispatch(kernel1) -> commit -> wait
+      dispatch(kernel2) -> commit -> wait
+
+    Does:
+      encoder.dispatch(kernel1)
+      encoder.dispatch(kernel2)
+      commit -> wait (once)
+
+    Reduces per-dispatch overhead from ~0.05ms to ~0.001ms.
+
+    Example:
+        lib = MetalKernelLibrary.from_source_dir()
+        bd = lib.create_batched_dispatcher()
+
+        bd.begin()
+        bd.dispatch("kernel_a", (8, 8, 1), (32, 1, 1), [buf_a, buf_b])
+        bd.dispatch("kernel_b", (4, 4, 1), (64, 1, 1), [buf_c, buf_d])
+        count = bd.commit_and_wait()  # Executes both kernels with single commit
+    """
+
+    def __init__(self, lib: MetalKernelLibrary):
+        """Initialize BatchedDispatcher.
+
+        Args:
+            lib: MetalKernelLibrary instance to dispatch kernels from.
+        """
+        self.lib = lib
+        self.queue = lib.command_queue
+        self._cmd_buffer: Any = None
+        self._encoder: Any = None
+        self._dispatches = 0
+
+    def begin(self) -> None:
+        """Start a new batched dispatch session.
+
+        Must be called before dispatch(). Creates a new command buffer
+        and compute encoder.
+        """
+        self._cmd_buffer = self.queue.commandBuffer()
+        self._encoder = self._cmd_buffer.computeCommandEncoder()
+        self._dispatches = 0
+
+    def dispatch(
+        self,
+        function_name: str,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        buffers: Sequence[Any],
+        offsets: Sequence[int] | None = None,
+    ) -> None:
+        """Queue a kernel dispatch (doesn't execute until commit).
+
+        Args:
+            function_name: Name of the kernel function to dispatch.
+            grid: Grid dimensions (x, y, z) for threadgroups.
+            threadgroup: Threadgroup dimensions (x, y, z).
+            buffers: List of Metal buffers to bind to kernel arguments.
+            offsets: Optional sequence of byte offsets for each buffer.
+        """
+        if self._encoder is None:
+            raise RuntimeError("Must call begin() before dispatch()")
+
+        pipeline = self.lib.get_pipeline(function_name)
+        self._encoder.setComputePipelineState_(pipeline)
+
+        for i, buf in enumerate(buffers):
+            offset = offsets[i] if offsets is not None else 0
+            self._encoder.setBuffer_offset_atIndex_(buf, offset, i)
+
+        self._encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+            Metal.MTLSizeMake(*grid),
+            Metal.MTLSizeMake(*threadgroup),
+        )
+        self._dispatches += 1
+
+    def commit_and_wait(self) -> int:
+        """Execute all queued dispatches.
+
+        Returns:
+            Number of dispatches that were executed.
+
+        Raises:
+            RuntimeError: If begin() was not called.
+        """
+        if self._encoder is None:
+            raise RuntimeError("Must call begin() before commit_and_wait()")
+
+        self._encoder.endEncoding()
+        self._cmd_buffer.commit()
+        self._cmd_buffer.waitUntilCompleted()
+
+        count = self._dispatches
+        self._cmd_buffer = None
+        self._encoder = None
+        self._dispatches = 0
+        return count
+
+
+# ---------------------------------------------------------------------------
+# Async Transfer / Compute Overlap
+# ---------------------------------------------------------------------------
+
+
+class AsyncTransferHandle:
+    """Handle for an in-flight async transfer operation.
+
+    Provides synchronization and status checking for transfers running
+    on a secondary command queue while compute runs on the primary queue.
+    """
+
+    __slots__ = ("_command_buffer", "_destination", "_completed")
+
+    def __init__(self, command_buffer: Any, destination: Any):
+        self._command_buffer = command_buffer
+        self._destination = destination
+        self._completed = False
+
+    @property
+    def destination_buffer(self) -> Any:
+        """The destination Metal buffer being written to."""
+        return self._destination
+
+    def is_complete(self) -> bool:
+        """Check if the transfer has completed without blocking."""
+        if self._completed:
+            return True
+        # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed, 3=scheduled, 4=completed, 5=error
+        status = self._command_buffer.status()
+        if status >= 4:  # completed or error
+            self._completed = True
+            return True
+        return False
+
+    def wait(self) -> None:
+        """Block until the transfer completes."""
+        if not self._completed:
+            self._command_buffer.waitUntilCompleted()
+            self._completed = True
+
+
+class AsyncTransferManager:
+    """Manages async data transfers overlapped with GPU compute.
+
+    Uses a secondary command queue for blit (transfer) operations while
+    compute kernels run on the primary queue. This enables the pipeline:
+
+        Layer N:   [Compute] ─────────────────────
+        Layer N+1:            [Transfer weights] ─[Compute]
+
+    Metal allows concurrent command buffers on different queues to execute
+    in parallel when there are no data dependencies.
+
+    Example:
+        manager = AsyncTransferManager(lib)
+
+        # Start async transfer for layer N+1 weights
+        handle = manager.start_transfer_async(source_buf, size)
+
+        # Execute layer N compute on primary queue
+        dispatch_kernel(lib, "layer_n_kernel", ...)
+
+        # Wait for layer N+1 weights to be ready before using them
+        handle.wait()
+        layer_n_plus_1_weights = handle.destination_buffer
+    """
+
+    def __init__(self, lib: MetalKernelLibrary):
+        """Initialize AsyncTransferManager.
+
+        Args:
+            lib: MetalKernelLibrary providing device and queues.
+        """
+        self._lib = lib
+        self._device = lib.device
+        # Use the secondary decode_queue for transfers to overlap with compute
+        self._transfer_queue = lib.decode_queue
+        # Pool of shared GPU buffers for zero-copy access
+        self._buffer_pool: dict[int, list[Any]] = {}
+
+    def _get_private_buffer(self, size: int) -> Any:
+        """Get or create a shared GPU buffer of the given size (zero-copy).
+
+        Uses MTLResourceStorageModeShared for zero-copy access between
+        CPU and GPU. Uses a pool to avoid allocation overhead for common sizes.
+        Aligns to cache line boundary (128 bytes) to prevent false sharing.
+        """
+        # Align to 128-byte cache line for M3 Max optimization
+        aligned_size = _align_buffer_size(size)
+
+        if aligned_size in self._buffer_pool and self._buffer_pool[aligned_size]:
+            return self._buffer_pool[aligned_size].pop()
+
+        buffer = self._device.newBufferWithLength_options_(
+            aligned_size, Metal.MTLResourceStorageModeShared
+        )
+        if buffer is None:
+            raise RuntimeError(f"Failed to allocate shared buffer of size {aligned_size}")
+        return buffer
+
+    def _return_buffer(self, buffer: Any, size: int) -> None:
+        """Return a buffer to the pool for reuse.
+
+        Size is aligned to cache line boundary (128 bytes) to prevent
+        false sharing between adjacent buffers.
+        """
+        aligned_size = _align_buffer_size(size)
+        if aligned_size not in self._buffer_pool:
+            self._buffer_pool[aligned_size] = []
+        # Limit pool size to avoid memory bloat
+        if len(self._buffer_pool[aligned_size]) < 8:
+            self._buffer_pool[aligned_size].append(buffer)
+
+    def start_transfer_async(
+        self,
+        source: Any,
+        size: int,
+        destination: Any | None = None,
+    ) -> AsyncTransferHandle:
+        """Start an async blit copy from source to destination buffer.
+
+        The transfer executes on the secondary queue while the primary
+        queue continues with compute work.
+
+        Args:
+            source: Source MTLBuffer (typically shared/managed storage)
+            size: Number of bytes to copy
+            destination: Optional destination MTLBuffer. If None, allocates
+                        a private buffer from the pool.
+
+        Returns:
+            AsyncTransferHandle for synchronization and buffer access.
+        """
+        if destination is None:
+            destination = self._get_private_buffer(size)
+
+        command_buffer = self._transfer_queue.commandBuffer()
+        blit = command_buffer.blitCommandEncoder()
+        blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
+            source, 0, destination, 0, size
+        )
+        blit.endEncoding()
+        command_buffer.commit()
+
+        return AsyncTransferHandle(command_buffer, destination)
+
+    def transfer_sync(self, source: Any, size: int, destination: Any | None = None) -> Any:
+        """Synchronous transfer (for comparison/fallback).
+
+        Args:
+            source: Source MTLBuffer
+            size: Bytes to copy
+            destination: Optional destination buffer
+
+        Returns:
+            Destination MTLBuffer with copied data.
+        """
+        handle = self.start_transfer_async(source, size, destination)
+        handle.wait()
+        return handle.destination_buffer
+
+
+class PipelinedLayerDispatcher:
+    """Coordinates pipelined execution across transformer layers.
+
+    Overlaps weight transfers for layer N+1 with compute for layer N:
+
+        Layer 0: [Transfer] [Compute]
+        Layer 1:            [Transfer] [Compute]
+        Layer 2:                       [Transfer] [Compute]
+                 ← hidden state dependency →
+
+    For models with weights already in GPU memory (cached), this has minimal
+    benefit. The primary use cases are:
+    1. First forward pass with cold weight cache
+    2. Layer offloading scenarios
+    3. Very large batch prefill where transfer time is significant
+
+    Usage:
+        pipeliner = PipelinedLayerDispatcher(lib, num_layers=60)
+
+        # Prefetch layer 0 weights synchronously (need them immediately)
+        layer_0_buffers = pipeliner.prefetch_layer_weights(layer_0_tensors)
+
+        for i in range(num_layers):
+            # Start async prefetch for next layer while computing current
+            if i + 1 < num_layers:
+                pipeliner.start_prefetch_async(i + 1, layer_tensors[i + 1])
+
+            # Compute current layer
+            output = compute_layer(input, pipeliner.get_layer_buffers(i))
+
+            # Ensure next layer weights are ready before proceeding
+            if i + 1 < num_layers:
+                pipeliner.wait_for_prefetch(i + 1)
+    """
+
+    def __init__(self, lib: MetalKernelLibrary, num_layers: int):
+        """Initialize PipelinedLayerDispatcher.
+
+        Args:
+            lib: MetalKernelLibrary for buffer allocation and transfers.
+            num_layers: Number of transformer layers (for buffer management).
+        """
+        self._lib = lib
+        self._transfer_manager = AsyncTransferManager(lib)
+        self._num_layers = num_layers
+
+        # Track in-flight prefetches: layer_idx -> AsyncTransferHandle
+        self._inflight: dict[int, list[AsyncTransferHandle]] = {}
+
+        # Cached weight buffers per layer (populated on first prefetch)
+        self._layer_buffers: dict[int, dict[str, Any]] = {}
+
+    def prefetch_layer_weights_sync(
+        self,
+        layer_idx: int,
+        weight_tensors: dict[str, torch.Tensor],
+    ) -> dict[str, Any]:
+        """Synchronously transfer layer weights to private GPU buffers.
+
+        Use this for the first layer that needs to execute immediately.
+
+        Args:
+            layer_idx: Layer index for tracking.
+            weight_tensors: Dict of weight name -> tensor to transfer.
+
+        Returns:
+            Dict of weight name -> Metal buffer ready for compute.
+        """
+        if layer_idx in self._layer_buffers:
+            return self._layer_buffers[layer_idx]
+
+        buffers: dict[str, Any] = {}
+        for name, tensor in weight_tensors.items():
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            # Create shared buffer from tensor
+            source_buf = mps_tensor_to_metal_buffer(tensor, self._lib.device)
+            size = tensor.numel() * tensor.element_size()
+            # Transfer to private buffer synchronously
+            dest_buf = self._transfer_manager.transfer_sync(source_buf, size)
+            buffers[name] = dest_buf
+
+        self._layer_buffers[layer_idx] = buffers
+        return buffers
+
+    def start_prefetch_async(
+        self,
+        layer_idx: int,
+        weight_tensors: dict[str, torch.Tensor],
+    ) -> None:
+        """Start async prefetch of layer weights.
+
+        Call this while the previous layer is computing. The transfers
+        run on a secondary queue overlapped with compute.
+
+        Args:
+            layer_idx: Layer index being prefetched.
+            weight_tensors: Dict of weight name -> tensor to transfer.
+        """
+        if layer_idx in self._layer_buffers:
+            # Already cached, nothing to do
+            return
+
+        handles: list[AsyncTransferHandle] = []
+        buffers: dict[str, Any] = {}
+
+        for name, tensor in weight_tensors.items():
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            source_buf = mps_tensor_to_metal_buffer(tensor, self._lib.device)
+            size = tensor.numel() * tensor.element_size()
+            handle = self._transfer_manager.start_transfer_async(source_buf, size)
+            handles.append(handle)
+            buffers[name] = handle.destination_buffer
+
+        self._inflight[layer_idx] = handles
+        self._layer_buffers[layer_idx] = buffers
+
+    def wait_for_prefetch(self, layer_idx: int) -> dict[str, Any]:
+        """Wait for async prefetch to complete and return buffers.
+
+        Call this before using a layer's weights.
+
+        Args:
+            layer_idx: Layer index to wait for.
+
+        Returns:
+            Dict of weight name -> Metal buffer ready for compute.
+        """
+        if layer_idx in self._inflight:
+            for handle in self._inflight[layer_idx]:
+                handle.wait()
+            del self._inflight[layer_idx]
+
+        return self._layer_buffers.get(layer_idx, {})
+
+    def get_layer_buffers(self, layer_idx: int) -> dict[str, Any]:
+        """Get cached buffers for a layer (must be prefetched first).
+
+        Args:
+            layer_idx: Layer index.
+
+        Returns:
+            Dict of weight name -> Metal buffer.
+
+        Raises:
+            KeyError: If layer has not been prefetched.
+        """
+        if layer_idx not in self._layer_buffers:
+            raise KeyError(f"Layer {layer_idx} has not been prefetched")
+        return self._layer_buffers[layer_idx]
+
+    def clear_layer_cache(self, layer_idx: int) -> None:
+        """Clear cached buffers for a layer to free memory.
+
+        Use for layer offloading scenarios where layers are cycled.
+
+        Args:
+            layer_idx: Layer index to clear.
+        """
+        if layer_idx in self._layer_buffers:
+            del self._layer_buffers[layer_idx]
+        if layer_idx in self._inflight:
+            # Wait for any in-flight transfers first
+            for handle in self._inflight[layer_idx]:
+                handle.wait()
+            del self._inflight[layer_idx]
+
+    def clear_all(self) -> None:
+        """Clear all cached buffers and pending transfers."""
+        # Wait for all in-flight transfers
+        for layer_idx in list(self._inflight.keys()):
+            for handle in self._inflight[layer_idx]:
+                handle.wait()
+        self._inflight.clear()
+        self._layer_buffers.clear()
+
 
 # ---------------------------------------------------------------------------
 # PyTorch MPS <-> Metal buffer interop
@@ -734,7 +2077,10 @@ def mps_tensor_to_metal_buffer(
 
     # PyObjC cannot reliably wrap the MPS device pointer. Fall back to a shared buffer.
     if copy_back:
-        buffer = device.newBufferWithLength_options_(size, Metal.MTLResourceStorageModeShared)
+        aligned_size = _align_buffer_size(size)
+        buffer = device.newBufferWithLength_options_(
+            aligned_size, Metal.MTLResourceStorageModeShared
+        )
         if buffer is None:
             raise RuntimeError("Failed to create Metal buffer for output tensor")
         return _CopyBackBuffer(buffer, tensor)
@@ -745,20 +2091,25 @@ def mps_tensor_to_metal_buffer(
     if cpu_tensor.dtype == torch.bfloat16:
         cpu_tensor = cpu_tensor.to(torch.float16)
     arr = cpu_tensor.numpy()
+
+    aligned_size = _align_buffer_size(arr.nbytes)
+    data = arr.tobytes()
+    if aligned_size > len(data):
+        data = data + b"\0" * (aligned_size - len(data))
+
     buffer = device.newBufferWithBytes_length_options_(
-        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+        data, aligned_size, Metal.MTLResourceStorageModeShared
     )
     if buffer is None:
         raise RuntimeError("Failed to create Metal buffer from tensor data")
     return buffer
 
 
-def numpy_array_to_metal_buffer(
-    arr: np.ndarray, device: Any
-) -> Any:
+def numpy_array_to_metal_buffer(arr: np.ndarray, device: Any) -> Any:
     """Create Metal buffer from numpy array.
 
     Lowest-level buffer creation - use when you already have numpy data.
+    Aligns allocation to 128 bytes.
 
     Args:
         arr: Numpy array (must be contiguous)
@@ -769,20 +2120,23 @@ def numpy_array_to_metal_buffer(
     """
     require_mps()
 
-    if not arr.flags['C_CONTIGUOUS']:
+    if not arr.flags["C_CONTIGUOUS"]:
         arr = np.ascontiguousarray(arr)
 
+    aligned_size = _align_buffer_size(arr.nbytes)
+    data = arr.tobytes()
+    if aligned_size > len(data):
+        data = data + b"\0" * (aligned_size - len(data))
+
     buffer = device.newBufferWithBytes_length_options_(
-        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+        data, aligned_size, Metal.MTLResourceStorageModeShared
     )
     if buffer is None:
         raise RuntimeError(f"Failed to create Metal buffer from numpy array shape={arr.shape}")
     return buffer
 
 
-def cpu_tensor_to_metal_buffer(
-    tensor: torch.Tensor, device: Any
-) -> Any:
+def cpu_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     """Create Metal buffer directly from CPU tensor.
 
     Bypasses MPS entirely to avoid double-copy when MPS zero-copy fails.
@@ -803,18 +2157,200 @@ def cpu_tensor_to_metal_buffer(
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
 
-    # Convert to numpy and create buffer
-    # BFloat16 not supported by numpy, convert to float16
+        # Convert to numpy and create buffer
+        # BFloat16 not supported by numpy, convert to float16
+        if tensor.dtype == torch.bfloat16:
+            tensor = tensor.to(torch.float16)
+
+        arr = tensor.numpy()
+        aligned_size = _align_buffer_size(arr.nbytes)
+        data = arr.tobytes()
+        if aligned_size > len(data):
+            data = data + b"\0" * (aligned_size - len(data))
+
+        buffer = device.newBufferWithBytes_length_options_(
+            data, aligned_size, Metal.MTLResourceStorageModeShared
+        )
+        if buffer is None:
+            raise RuntimeError(
+                f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}"
+            )
+        return buffer
+
+
+def cpu_tensor_to_metal_texture(tensor: torch.Tensor, device: Any) -> Any:
+    """Create Metal texture 2D (height=1) directly from CPU tensor.
+
+    Args:
+        tensor: PyTorch tensor on CPU (NOT MPS). Must be float32 or float16.
+        device: MTLDevice to create texture on.
+
+    Returns:
+        MTLTexture containing tensor data.
+    """
+    require_mps()
+
+    if tensor.is_mps or tensor.is_cuda:
+        raise ValueError("Tensor must be on CPU, not GPU")
+
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+
+    # Determine pixel format
+    if tensor.dtype == torch.float32:
+        pixel_format = Metal.MTLPixelFormatR32Float
+    elif tensor.dtype == torch.float16:
+        pixel_format = Metal.MTLPixelFormatR16Float
+    else:
+        raise ValueError(f"Unsupported dtype for texture: {tensor.dtype}")
+
+    width = tensor.numel()
+
+    # Use Texture2D with height 1 as requested
+    descriptor = Metal.MTLTextureDescriptor.texture2DDescriptorWithPixelFormat_width_height_mipmapped_(
+        pixel_format, width, 1, False
+    )
+
+    texture = device.newTextureWithDescriptor_(descriptor)
+    if texture is None:
+        raise RuntimeError(f"Failed to create Metal texture from tensor shape={tensor.shape}")
+
+    # Copy data to texture
+    region = Metal.MTLRegionMake2D(0, 0, width, 1)
+
+    # BFloat16 not supported by numpy
     if tensor.dtype == torch.bfloat16:
         tensor = tensor.to(torch.float16)
 
     arr = tensor.numpy()
-    buffer = device.newBufferWithBytes_length_options_(
-        arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+    data = arr.tobytes()
+
+    # Bytes per row is just total bytes since height is 1
+    bytes_per_row = len(data)
+
+    texture.replaceRegion_mipmapLevel_withBytes_bytesPerRow_(
+        region, 0, data, bytes_per_row
     )
-    if buffer is None:
-        raise RuntimeError(f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}")
-    return buffer
+
+    return texture
+
+
+def mps_tensors_to_metal_buffers(
+    tensors: list[torch.Tensor], device: Any, *, copy_back: bool = False
+) -> list[Any]:
+    """Batch create Metal buffers from multiple PyTorch MPS tensors.
+
+    Reduces Metal API overhead by batching buffer creation operations.
+    Instead of:
+        buf_a = mps_tensor_to_metal_buffer(a, device)
+        buf_b = mps_tensor_to_metal_buffer(b, device)
+        buf_c = mps_tensor_to_metal_buffer(c, device)
+
+    Use:
+        bufs = mps_tensors_to_metal_buffers([a, b, c], device)
+
+    Args:
+        tensors: List of PyTorch tensors on MPS device
+        device: MTLDevice (must match MPS device)
+        copy_back: If True, create buffers that support copy-back for outputs
+
+    Returns:
+        List of MTLBuffer objects corresponding to input tensors
+    """
+    require_mps()
+
+    # Synchronize once for all tensors
+    if tensors:
+        torch.mps.synchronize()
+
+    buffers: list[Any] = []
+    for tensor in tensors:
+        if not tensor.is_mps:
+            raise ValueError("All tensors must be on MPS device")
+
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        size = tensor.numel() * tensor.element_size()
+        buffer: Any = None
+
+        try:
+            ptr = tensor.data_ptr()
+            buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
+                ptr, size, Metal.MTLResourceStorageModeShared, None
+            )
+        except Exception:
+            buffer = None
+
+        if buffer is None:
+            # Fall back to buffer copy
+            if copy_back:
+                aligned_size = _align_buffer_size(size)
+                buffer = device.newBufferWithLength_options_(
+                    aligned_size, Metal.MTLResourceStorageModeShared
+                )
+                if buffer is None:
+                    raise RuntimeError("Failed to create Metal buffer")
+                buffer = _CopyBackBuffer(buffer, tensor)
+            else:
+                cpu_tensor = tensor.detach().cpu()
+                if cpu_tensor.dtype == torch.bfloat16:
+                    cpu_tensor = cpu_tensor.to(torch.float16)
+                arr = cpu_tensor.numpy()
+                aligned_size = _align_buffer_size(arr.nbytes)
+                data = arr.tobytes()
+                if aligned_size > len(data):
+                    data = data + b"\0" * (aligned_size - len(data))
+
+                buffer = device.newBufferWithBytes_length_options_(
+                    data, aligned_size, Metal.MTLResourceStorageModeShared
+                )
+                if buffer is None:
+                    raise RuntimeError("Failed to create Metal buffer from tensor data")
+
+        buffers.append(buffer)
+
+    return buffers
+
+
+def cpu_tensors_to_metal_buffers(tensors: list[torch.Tensor], device: Any) -> list[Any]:
+    """Batch create Metal buffers from multiple CPU tensors.
+
+    Reduces Metal API overhead by batching buffer creation operations.
+    More memory efficient for large static weights.
+
+    Args:
+        tensors: List of PyTorch tensors on CPU (NOT MPS or CUDA)
+        device: MTLDevice to create buffer on
+
+    Returns:
+        List of MTLBuffer objects corresponding to input tensors
+    """
+    require_mps()
+
+    buffers: list[Any] = []
+    for tensor in tensors:
+        if tensor.is_mps or tensor.is_cuda:
+            raise ValueError("All tensors must be on CPU, not GPU")
+
+        if not tensor.is_contiguous():
+            tensor = tensor.contiguous()
+
+        # BFloat16 not supported by numpy, convert to float16
+        if tensor.dtype == torch.bfloat16:
+            tensor = tensor.to(torch.float16)
+
+        arr = tensor.numpy()
+        buffer = device.newBufferWithBytes_length_options_(
+            arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
+        )
+        if buffer is None:
+            raise RuntimeError(
+                f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}"
+            )
+        buffers.append(buffer)
+
+    return buffers
 
 
 def metal_buffer_to_numpy(buffer: Any, dtype: np.dtype, shape: tuple[int, ...]) -> np.ndarray:
@@ -850,9 +2386,13 @@ def dispatch_kernel(
     grid: tuple[int, int, int],
     threadgroup: tuple[int, int, int],
     buffers: Sequence[Any],
-    wait: bool = True,
-) -> None:
+    wait: bool = False,
+    offsets: Sequence[int] | None = None,
+) -> Any:
     """Dispatch a Metal compute kernel.
+
+    Uses FastPath (C++ extension) when available for 5-10x lower dispatch overhead.
+    Falls back to PyObjC path when extension is not available or in batch mode.
 
     Args:
         lib: MetalKernelLibrary with compiled shaders
@@ -861,27 +2401,66 @@ def dispatch_kernel(
         threadgroup: Threadgroup dimensions (threads in X, Y, Z)
         buffers: Sequence of MTLBuffer arguments (in order)
         wait: If True, wait for kernel completion
+        offsets: Optional sequence of byte offsets for each buffer.
+
+    Returns:
+        None if wait=True or in batch mode, otherwise the command buffer.
     """
     pipeline = lib.get_pipeline(function_name)
 
-    command_buffer = lib.command_queue.commandBuffer()
-    encoder = command_buffer.computeCommandEncoder()
+    # Check for _CopyBackBuffer in buffers (requires Python path for copy-back)
+    copy_back: list[_CopyBackBuffer] = []
+    has_copy_back = False
+    for buf in buffers:
+        if isinstance(buf, _CopyBackBuffer):
+            has_copy_back = True
+            copy_back.append(buf)
+
+    # Try FastPath when:
+    # - Not in batch mode (batch mode uses shared encoder)
+    # - No copy-back buffers (requires Python-side copy after wait)
+    # - C++ extension available
+    if not lib._batch_mode and not has_copy_back:
+        fast_path = get_fast_path(lib)
+        if fast_path.available:
+            try:
+                return fast_path.dispatch(
+                    pipeline, grid, threadgroup, buffers, offsets, wait
+                )
+            except Exception:
+                # Fall back to Python path on any error
+                pass
+
+    # Standard PyObjC dispatch path
+
+    # Use batch encoder if in batch mode
+    if lib._batch_mode and lib._batch_encoder is not None:
+        encoder = lib._batch_encoder
+        # Don't create new command buffer - use the batched one
+        in_batch = True
+    else:
+        command_buffer = lib.command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+        in_batch = False
 
     encoder.setComputePipelineState_(pipeline)
 
     # Bind buffers
-    copy_back: list[_CopyBackBuffer] = []
     for i, buf in enumerate(buffers):
+        offset = offsets[i] if offsets is not None else 0
         if isinstance(buf, _CopyBackBuffer):
-            encoder.setBuffer_offset_atIndex_(buf.buffer, 0, i)
-            copy_back.append(buf)
+            encoder.setBuffer_offset_atIndex_(buf.buffer, offset, i)
         else:
-            encoder.setBuffer_offset_atIndex_(buf, 0, i)
+            encoder.setBuffer_offset_atIndex_(buf, offset, i)
 
     # Dispatch
     grid_size = Metal.MTLSizeMake(*grid)
     tg_size = Metal.MTLSizeMake(*threadgroup)
     encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+
+    # If in batch mode, don't end/commit - the context manager handles it
+    if lib._batch_mode:
+        return None
 
     encoder.endEncoding()
     command_buffer.commit()
@@ -890,6 +2469,109 @@ def dispatch_kernel(
         command_buffer.waitUntilCompleted()
         for item in copy_back:
             _copy_buffer_to_tensor(item.buffer, item.tensor)
+        return None
+    return command_buffer
+
+
+def dispatch_kernel_indirect(
+    lib: MetalKernelLibrary,
+    function_name: str,
+    expert_counts: torch.Tensor,
+    threadgroup: tuple[int, int, int],
+    buffers: Sequence[Any],
+    wait: bool = False,
+    offsets: Sequence[int] | None = None,
+) -> Any:
+    """Dispatch Metal kernel with indirect command buffer for dynamic expert selection.
+
+    Instead of CPU deciding grid dimensions, GPU reads expert counts from buffer
+    and determines how many threadgroups to launch per expert dynamically.
+
+    Args:
+        lib: MetalKernelLibrary with compiled shaders
+        function_name: Kernel function to dispatch
+        expert_counts: [num_experts] tensor with token count per expert (int32)
+        threadgroup: Threadgroup dimensions (threads in X, Y, Z)
+        buffers: Sequence of MTLBuffer arguments (in order)
+        wait: If True, wait for kernel completion
+        offsets: Optional sequence of byte offsets for each buffer.
+
+    Returns:
+        None if wait=True or in batch mode, otherwise the command buffer.
+
+    Note:
+        The expert_counts buffer format for MTLDispatchThreadgroupsIndirectArguments:
+        struct {
+            uint32_t threadgroupsPerGrid[3];  // X, Y, Z threadgroups
+        };
+        For MoE: threadgroupsPerGrid[0] = (expert_tokens + threads_per_tg - 1) / threads_per_tg
+    """
+    require_mps()
+    pipeline = lib.get_pipeline(function_name)
+    device = lib.device
+
+    # Convert expert counts to indirect dispatch args
+    # MTLDispatchThreadgroupsIndirectArguments is 3 uint32s (12 bytes per expert)
+    num_experts = expert_counts.shape[0]
+    threads_per_tg = threadgroup[0] * threadgroup[1] * threadgroup[2]
+
+    # Create indirect command buffer: for each expert, compute threadgroup count
+    # Format: [threadgroups_x, threadgroups_y, threadgroups_z] per expert
+    indirect_args = torch.zeros(num_experts, 3, dtype=torch.uint32, device="mps")
+
+    # Calculate threadgroups per expert: ceil(expert_count / threads_per_tg)
+    expert_counts_uint = expert_counts.to(torch.uint32)
+    indirect_args[:, 0] = (expert_counts_uint + threads_per_tg - 1) // threads_per_tg
+    indirect_args[:, 1] = 1
+    indirect_args[:, 2] = 1
+
+    # Convert to Metal buffer
+    indirect_buf = mps_tensor_to_metal_buffer(indirect_args.contiguous(), device)
+
+    # Use batch encoder if in batch mode
+    if lib._batch_mode and lib._batch_encoder is not None:
+        encoder = lib._batch_encoder
+        in_batch = True
+    else:
+        command_buffer = lib.command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+        in_batch = False
+
+    encoder.setComputePipelineState_(pipeline)
+
+    # Bind buffers
+    copy_back: list[_CopyBackBuffer] = []
+    for i, buf in enumerate(buffers):
+        offset = offsets[i] if offsets is not None else 0
+        if isinstance(buf, _CopyBackBuffer):
+            encoder.setBuffer_offset_atIndex_(buf.buffer, offset, i)
+            copy_back.append(buf)
+        else:
+            encoder.setBuffer_offset_atIndex_(buf, offset, i)
+
+    # Dispatch with indirect buffer - GPU reads threadgroup counts
+    tg_size = Metal.MTLSizeMake(*threadgroup)
+
+    # Dispatch each expert with its own threadgroup count
+    for expert_id in range(num_experts):
+        offset_bytes = expert_id * 12  # 3 uint32s per expert
+        encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup_(
+            indirect_buf, offset_bytes, tg_size
+        )
+
+    # If in batch mode, don't end/commit - the context manager handles it
+    if lib._batch_mode:
+        return None
+
+    encoder.endEncoding()
+    command_buffer.commit()
+
+    if wait:
+        command_buffer.waitUntilCompleted()
+        for item in copy_back:
+            _copy_buffer_to_tensor(item.buffer, item.tensor)
+        return None
+    return command_buffer
 
 
 # ---------------------------------------------------------------------------
@@ -1506,7 +3188,8 @@ def dispatch_dequant_fp4_bandwidth_max(
 
 def benchmark_dequant_fp4(
     lib: MetalKernelLibrary,
-    num_packed: int = 1024 * 1024 * 16,  # 16M packed = 128M FP16 values = 256 MB output
+    # 16M packed = 128M FP16 values = 256 MB output
+    num_packed: int = 1024 * 1024 * 16,
     group_size: int = 32,
     warmup_iters: int = 10,
     benchmark_iters: int = 100,
@@ -1983,7 +3666,8 @@ def benchmark_moe_dispatch(
         batch_size * hidden_dim * 2  # activations
         + hidden_dim * num_experts * 2  # router weights
         + active_experts
-        * (k_packed * out_dim * 4 + num_groups * out_dim * 2)  # expert weights + scales
+        # expert weights + scales
+        * (k_packed * out_dim * 4 + num_groups * out_dim * 2)
     )
     write_bytes = batch_size * out_dim * 2  # output
     total_bytes = read_bytes + write_bytes
@@ -2296,6 +3980,21 @@ def get_default_library() -> MetalKernelLibrary:
     if _default_library is None:
         _default_library = MetalKernelLibrary.from_source_dir()
     return _default_library
+
+
+def get_kernel(kernel_name: str) -> Any | None:
+    """Get kernel function from metallib (module-level convenience function).
+
+    This is a thin wrapper around get_kernel_from_metallib() for convenience.
+    Returns None if the kernel is not found in the metallib.
+
+    Args:
+        kernel_name: Name of kernel function.
+
+    Returns:
+        MTLFunction or None if not found.
+    """
+    return get_kernel_from_metallib(kernel_name)
 
 
 # ---------------------------------------------------------------------------

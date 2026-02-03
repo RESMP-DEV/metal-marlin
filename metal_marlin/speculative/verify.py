@@ -632,10 +632,16 @@ def _sample_tree_next_token(
                 else:
                     # Sample from normalized residual using Metal
                     residual_normalized = residual / residual_sum
-                    sampler = _get_sampler(residual_normalized.shape[-1])
-                    next_tokens[b] = sampler.sample_categorical(
-                        torch.log(residual_normalized.unsqueeze(0) + 1e-10), temperature=1.0
-                    )
+                    if device.type == "cpu":
+                        next_tokens[b] = torch.multinomial(
+                            residual_normalized, num_samples=1
+                        ).item()
+                    else:
+                        sampler = _get_sampler(residual_normalized.shape[-1])
+                        next_tokens[b] = sampler.sample_categorical(
+                            torch.log(residual_normalized.unsqueeze(0) + 1e-10),
+                            temperature=1.0,
+                        )
 
     return next_tokens
 
@@ -739,10 +745,15 @@ def _sample_residual_batched(
             # Fall back to sampling from target directly.
             token = _sample(target_logits[b : b + 1, pos, :], temperature, top_p, device)
         else:
-            # Sample from normalized residual using Metal
-            log_residual = torch.log(residual / residual_sum + 1e-10)
-            sampler = _get_sampler(log_residual.shape[-1])
-            token = sampler.sample_categorical(log_residual.unsqueeze(0), temperature=1.0)
+            # Sample from normalized residual using Metal or CPU fallback
+            if device.type == "cpu":
+                token = torch.multinomial(residual / residual_sum, num_samples=1)
+            else:
+                log_residual = torch.log(residual / residual_sum + 1e-10)
+                sampler = _get_sampler(log_residual.shape[-1])
+                token = sampler.sample_categorical(
+                    log_residual.unsqueeze(0), temperature=1.0
+                )
 
         token_val = int(token.reshape(()).item())
         next_token[b] = token_val
@@ -773,6 +784,9 @@ def _sample(logits: Tensor, temperature: float, top_p: float, device: torch.devi
 
     if top_p < 1.0:
         probs = _apply_top_p(probs, top_p)
+
+    if device.type == "cpu":
+        return torch.multinomial(probs, num_samples=1).squeeze(-1)
 
     # Use Metal-accelerated sampling
     sampler = _get_sampler(probs.shape[-1])

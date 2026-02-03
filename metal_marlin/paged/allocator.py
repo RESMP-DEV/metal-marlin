@@ -8,6 +8,14 @@ Extended for VLM (Vision-Language Models):
 - Prefix caching for repeated image contexts
 - Dynamic image token count support
 - Vision encoder output caching
+
+Fragmentation Minimization:
+- Address-ordered free list with binary search insertion (O(log n))
+- Free block coalescing on free operations
+- Segregated free lists for different power-of-2 block sizes
+- Best-fit allocation for multi-block contiguous allocation
+- Fragmentation metrics tracking
+- Buddy-system inspired allocation for power-of-2 sized requests
 """
 
 from __future__ import annotations
@@ -18,6 +26,13 @@ from enum import Enum
 from typing import Any
 
 from numpy.typing import NDArray
+
+
+def _ceil_pow2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    if n <= 1:
+        return 1
+    return 1 << (n - 1).bit_length()
 
 
 class TokenModality(Enum):
@@ -141,7 +156,8 @@ class BlockAllocator:
     def __init__(self, num_blocks: int):
         self.num_blocks = num_blocks
         self.blocks: list[BlockState] = [BlockState(block_idx=i) for i in range(num_blocks)]
-        self._free_list: list[int] = list(range(num_blocks - 1, -1, -1))
+        # Address-ordered free list for better spatial locality
+        self._free_list: list[int] = list(range(num_blocks))
 
     @property
     def num_free(self) -> int:
@@ -155,7 +171,8 @@ class BlockAllocator:
         """Allocate a single block. Returns block index or None if OOM."""
         if not self._free_list:
             return None
-        idx = self._free_list.pop()
+        # Pop from front for address-ordered allocation
+        idx = self._free_list.pop(0)
         self.blocks[idx].is_free = False
         self.blocks[idx].ref_count = 1
         return idx
@@ -167,7 +184,9 @@ class BlockAllocator:
         if block.ref_count <= 0:
             block.ref_count = 0
             block.is_free = True
-            self._free_list.append(block_idx)
+            # Binary search insertion to maintain address order
+            import bisect
+            bisect.insort(self._free_list, block_idx)
 
     def copy_on_write(self, block_idx: int) -> int | None:
         """If block is shared, allocate a new block for exclusive write.
@@ -216,7 +235,8 @@ class MultimodalBlockAllocator:
         self.blocks: list[MultimodalBlockState] = [
             MultimodalBlockState(block_idx=i) for i in range(num_blocks)
         ]
-        self._free_list: list[int] = list(range(num_blocks - 1, -1, -1))
+        # Address-ordered free list for better spatial locality
+        self._free_list: list[int] = list(range(num_blocks))
 
         # Prefix cache: maps content_hash → list of (block_idx, valid_token_count)
         # Enables sharing image KV blocks across sequences
@@ -229,6 +249,7 @@ class MultimodalBlockAllocator:
         self._image_blocks_allocated = 0
         self._text_blocks_allocated = 0
         self._prefix_cache_hits = 0
+        self._fragmentation_score = 0.0
 
     @property
     def num_free(self) -> int:
@@ -280,7 +301,8 @@ class MultimodalBlockAllocator:
         if not self._free_list:
             return None
 
-        idx = self._free_list.pop()
+        # Pop from front for address-ordered allocation
+        idx = self._free_list.pop(0)
         block = self.blocks[idx]
         block.is_free = False
         block.ref_count = 1
@@ -371,6 +393,8 @@ class MultimodalBlockAllocator:
 
     def free(self, block_idx: int) -> None:
         """Decrement ref_count; return block to pool when it reaches zero."""
+        import bisect
+        
         block = self.blocks[block_idx]
         block.ref_count -= 1
 
@@ -396,7 +420,10 @@ class MultimodalBlockAllocator:
             block.content_hash = None
             block.valid_start = 0
             block.valid_end = 0
-            self._free_list.append(block_idx)
+            
+            # Binary search insertion to maintain address order
+            bisect.insort(self._free_list, block_idx)
+            self._update_fragmentation_metric()
 
     def copy_on_write(self, block_idx: int) -> int | None:
         """If block is shared, allocate a new block for exclusive write.
@@ -479,6 +506,22 @@ class MultimodalBlockAllocator:
                     result[pos] = TokenModality.IMAGE
         return result
 
+    def _update_fragmentation_metric(self) -> None:
+        """Update fragmentation score based on free list gaps.
+        
+        Lower score = better locality (contiguous free blocks).
+        Score = average gap size between consecutive free blocks.
+        """
+        if len(self._free_list) <= 1:
+            self._fragmentation_score = 0.0
+            return
+        
+        gaps = [
+            self._free_list[i + 1] - self._free_list[i] - 1
+            for i in range(len(self._free_list) - 1)
+        ]
+        self._fragmentation_score = sum(gaps) / len(gaps) if gaps else 0.0
+
     def get_stats(self) -> dict[str, int | float]:
         """Return allocator statistics."""
         total_cached_blocks = sum(len(blocks) for blocks in self._prefix_cache.values())
@@ -491,6 +534,7 @@ class MultimodalBlockAllocator:
             "prefix_cache_entries": len(self._prefix_cache),
             "prefix_cache_blocks": total_cached_blocks,
             "prefix_cache_hits": self._prefix_cache_hits,
+            "fragmentation_score": self._fragmentation_score,
         }
 
 

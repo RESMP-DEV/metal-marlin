@@ -87,13 +87,13 @@ inline float4 sample_bicubic_texture(
 }
 
 // ----------------------------------------------------------------------------
-// Texture-based resize (bilinear)
+// Texture-based resize (bilinear) - device function implementation
 // ----------------------------------------------------------------------------
-kernel void image_resize_bilinear_texture(
-    texture2d_array<float, access::sample> input [[texture(0)]],
-    device float* output                         [[buffer(0)]],
-    constant ResizeParams& params                [[buffer(1)]],
-    uint3 gid                                    [[thread_position_in_grid]]
+inline void image_resize_bilinear_texture_impl(
+    texture2d_array<float, access::sample> input,
+    device float* output,
+    constant ResizeParams& params,
+    uint3 gid
 ) {
     if (gid.z >= params.batch_size || gid.y >= params.out_h || gid.x >= params.out_w) {
         return;
@@ -126,6 +126,18 @@ kernel void image_resize_bilinear_texture(
             output[out_base + 2 * plane + gid.y * params.out_w + gid.x] = rgb.b;
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Texture-based resize (bilinear) - kernel wrapper
+// ----------------------------------------------------------------------------
+kernel void image_resize_bilinear_texture(
+    texture2d_array<float, access::sample> input [[texture(0)]],
+    device float* output                         [[buffer(0)]],
+    constant ResizeParams& params                [[buffer(1)]],
+    uint3 gid                                    [[thread_position_in_grid]]
+) {
+    image_resize_bilinear_texture_impl(input, output, params, gid);
 }
 
 // ----------------------------------------------------------------------------
@@ -224,13 +236,13 @@ kernel void dynamic_resize_qwen2vl_texture(
     constant ResizeParams& params                [[buffer(1)]],
     uint3 gid                                    [[thread_position_in_grid]]
 ) {
-    image_resize_bilinear_texture(input, output, params, gid);
+    image_resize_bilinear_texture_impl(input, output, params, gid);
 }
 
 // ----------------------------------------------------------------------------
-// ViT patch extraction (NHWC only)
+// ViT patch extraction (NHWC only) - struct-based params variant
 // ----------------------------------------------------------------------------
-kernel void vit_patch_extract(
+kernel void vit_patch_extract_struct(
     device const float* input   [[buffer(0)]],
     device float* output        [[buffer(1)]],
     constant PatchParams& params[[buffer(2)]],

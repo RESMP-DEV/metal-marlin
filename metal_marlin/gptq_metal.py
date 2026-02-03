@@ -29,7 +29,10 @@ try:
     import torch
 
     HAS_TORCH = True
-    HAS_MPS = torch.backends.mps.is_available()
+    try:
+        HAS_MPS = torch.backends.mps.is_available()
+    except AttributeError:
+        HAS_MPS = False
 except ImportError:
     HAS_TORCH = False
     HAS_MPS = False

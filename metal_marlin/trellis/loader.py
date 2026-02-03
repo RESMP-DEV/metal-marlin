@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from safetensors.torch import load_file
+
+from ..mmap_loader import MmapSafetensorsLoader
 
 
 @dataclass
@@ -335,11 +336,12 @@ class TrellisModelLoader:
         if not tensor_files:
             raise FileNotFoundError(f"No tensor files found for layer {layer_idx}")
 
-        # Load all tensors from all files
+        # Load all tensors from all files using mmap
         all_tensors: dict[str, torch.Tensor] = {}
         for tensor_file in tensor_files:
-            file_tensors = load_file(tensor_file)
-            all_tensors.update(file_tensors)
+            with MmapSafetensorsLoader(tensor_file) as loader:
+                for name in loader.keys():
+                    all_tensors[name] = loader.get_tensor(name)
 
         # Detect format and route to appropriate loader
         format_type = self._detect_trellis_format(all_tensors)
@@ -537,22 +539,31 @@ class TrellisModelLoader:
         Router weights are typically stored separately from layer quantized weights
         since they are not quantized (for accuracy in expert selection).
 
+        Uses memory-mapped loading to avoid loading weights into RAM upfront.
+
         Returns:
             Dictionary mapping router weight names to tensors.
         """
         router_path = self.model_path / "router_weights.safetensors"
         if router_path.exists():
-            return load_file(router_path)
+            # Use mmap for lazy loading - weights are paged in by OS on demand
+            loader = MmapSafetensorsLoader(router_path, device="cpu")
+            weights = {name: loader.get_tensor(name) for name in loader.keys()}
+            # Keep loader reference to prevent garbage collection during model load
+            weights["_mmap_loader"] = loader  # type: ignore[dict-item]
+            return weights
 
-        # Fall back to checking in base weights
+        # Fall back to checking in base weights using mmap
         base_path = self.model_path / "base_weights.safetensors"
         if base_path.exists():
-            base_weights = load_file(base_path)
+            loader = MmapSafetensorsLoader(base_path, device="cpu")
             # Filter router weights
             router_weights = {}
-            for name, tensor in base_weights.items():
+            for name in loader.keys():
                 if "mlp.gate.weight" in name:
-                    router_weights[name] = tensor
+                    router_weights[name] = loader.get_tensor(name)
+            # Keep loader reference to prevent garbage collection during model load
+            router_weights["_mmap_loader"] = loader  # type: ignore[dict-item]
             return router_weights
 
         raise FileNotFoundError(
@@ -562,6 +573,8 @@ class TrellisModelLoader:
 
     def load_base_weights(self, patterns: list[str] | None = None) -> dict[str, torch.Tensor]:
         """Load non-quantized base weights (embeddings, layernorms, etc.).
+
+        Uses memory-mapped loading to avoid loading weights into RAM upfront.
 
         Args:
             patterns: Optional list of patterns to filter weights.
@@ -574,15 +587,21 @@ class TrellisModelLoader:
         if not base_path.exists():
             raise FileNotFoundError(f"Base weights not found: {base_path}")
 
-        base_weights = load_file(base_path)
+        # Use mmap for lazy loading - weights are paged in by OS on demand
+        loader = MmapSafetensorsLoader(base_path, device="cpu")
 
         if patterns is None:
-            return base_weights
+            weights = {name: loader.get_tensor(name) for name in loader.keys()}
+            # Keep loader reference to prevent garbage collection during model load
+            weights["_mmap_loader"] = loader  # type: ignore[dict-item]
+            return weights
 
         filtered = {}
-        for name, tensor in base_weights.items():
+        for name in loader.keys():
             if any(p in name for p in patterns):
-                filtered[name] = tensor
+                filtered[name] = loader.get_tensor(name)
+        # Keep loader reference to prevent garbage collection during model load
+        filtered["_mmap_loader"] = loader  # type: ignore[dict-item]
         return filtered
 
     def load_layernorm_weights(self, layer_idx: int) -> dict[str, torch.Tensor]:

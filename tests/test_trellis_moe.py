@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 HAS_MPS = torch.backends.mps.is_available()
@@ -28,7 +29,9 @@ HAS_MPS = torch.backends.mps.is_available()
 MODEL_PATH = "models/GLM-4.7-Flash-Trellis-3bpw"
 
 try:
+    from metal_marlin.trellis.config import TrellisModelConfig
     from metal_marlin.trellis.model import TrellisMoEMLP
+    from metal_marlin.trellis.moe import ExpertCache, TrellisMoELayer
     from metal_marlin.trellis.testing import (
         create_mini_model,
         create_mock_dense_mlp,
@@ -97,6 +100,7 @@ def mock_moe_layer():
         num_experts_per_tok=2,
         bits=3,
         device="mps",
+        eager_buffers=False,  # Keep weights for slow path comparison
     )
 
     yield moe
@@ -247,6 +251,7 @@ class TestMoESwiGLUSingleExpert:
             num_experts_per_tok=num_experts_per_tok,
             bits=3,
             device=device,
+            eager_buffers=False,
         )
 
         x = torch.randn(1, hidden_dim, dtype=torch.float16, device=device)
@@ -770,6 +775,376 @@ class TestMoEDeterminism:
         # Expert indices should be valid
         assert (selected_experts >= 0).all()
         assert (selected_experts < 4).all()
+
+
+@requires_trellis
+class TestExpertCache:
+    """Test 6: Expert caching functionality."""
+
+    def test_cache_initialization(self):
+        """Verify cache initializes correctly."""
+        device = "cpu"
+        num_experts = 16
+        cache_size = 8
+        window_size = 128
+
+        cache = ExpertCache(
+            num_experts=num_experts,
+            cache_size=cache_size,
+            window_size=window_size,
+            device=device,
+        )
+
+        assert cache.num_experts == num_experts
+        assert cache.cache_size == cache_size
+        assert cache.window_size == window_size
+        assert len(cache.cached_experts) == 0
+        assert cache.expert_frequency.shape == (num_experts,)
+        assert cache.expert_frequency.sum() == 0
+
+    def test_cache_records_selections(self):
+        """Verify cache records expert selections correctly."""
+        device = "cpu"
+        num_experts = 8
+
+        cache = ExpertCache(num_experts=num_experts, device=device)
+
+        # Record some selections
+        selections = torch.tensor([0, 1, 0, 2, 1, 0], device=device)
+        cache.record_selection(selections)
+
+        # Check frequencies
+        freq = cache.get_frequency()
+        assert freq[0] == 3, f"Expert 0 frequency: {freq[0]}, expected 3"
+        assert freq[1] == 2, f"Expert 1 frequency: {freq[1]}, expected 2"
+        assert freq[2] == 1, f"Expert 2 frequency: {freq[2]}, expected 1"
+        assert freq[3:].sum() == 0, "Experts 3+ should have frequency 0"
+
+    def test_cache_gets_top_experts(self):
+        """Verify top-K experts are selected correctly."""
+        device = "cpu"
+        num_experts = 16
+        cache_size = 8
+
+        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+
+        # Set specific frequencies
+        cache.expert_frequency[0] = 100
+        cache.expert_frequency[1] = 90
+        cache.expert_frequency[2] = 80
+        cache.expert_frequency[3] = 70
+        cache.expert_frequency[4] = 60
+        cache.expert_frequency[5] = 50
+        cache.expert_frequency[6] = 40
+        cache.expert_frequency[7] = 30
+        cache.expert_frequency[8] = 20
+
+        top_experts = cache.get_top_experts()
+
+        assert len(top_experts) == cache_size
+        assert top_experts == list(range(cache_size)), (
+            f"Top experts should be [0..{cache_size - 1}], got {top_experts}"
+        )
+
+    def test_cache_prefetching(self):
+        """Verify prefetching based on router logits."""
+        device = "cpu"
+        num_experts = 8
+
+        cache = ExpertCache(num_experts=num_experts, device=device)
+
+        # Create router logits favoring experts 0 and 1
+        router_logits = torch.randn(4, num_experts, device=device)
+        router_logits[:, 0] = 5.0
+        router_logits[:, 1] = 4.0
+        router_logits[:, 2:] = -5.0
+
+        # Prefetch with threshold 0.2 (expert 1 has probability ~0.27)
+        prefetch = cache.should_prefetch(router_logits, threshold=0.2)
+
+        # Should prefetch experts 0 and 1 (both above threshold)
+        assert 0 in prefetch, "Expert 0 should be prefetched"
+        assert 1 in prefetch, "Expert 1 should be prefetched"
+        assert len(prefetch) <= 2, f"Should prefetch at most 2 experts, got {len(prefetch)}"
+
+    def test_cache_update(self):
+        """Verify cache updates with top-K experts."""
+        device = "cpu"
+        num_experts = 16
+        cache_size = 4
+
+        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+
+        # Set frequencies
+        cache.expert_frequency[0] = 100
+        cache.expert_frequency[1] = 90
+        cache.expert_frequency[2] = 80
+        cache.expert_frequency[3] = 70
+
+        # Create dummy experts
+        experts = nn.ModuleList([nn.Linear(10, 10) for _ in range(num_experts)])
+
+        # Update cache
+        newly_cached = cache.update_cache(experts)
+
+        assert len(newly_cached) == cache_size
+        assert set(newly_cached) == set(range(cache_size))
+        assert cache.is_cached(0)
+        assert cache.is_cached(1)
+        assert cache.is_cached(2)
+        assert cache.is_cached(3)
+        assert not cache.is_cached(4)
+
+    def test_cache_update_with_prefetch_and_eviction(self):
+        """Verify cache updates with prefetch and eviction."""
+        device = "cpu"
+        num_experts = 16
+        cache_size = 4
+
+        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+
+        # Set frequencies: 0, 1, 2, 3 are top-4
+        cache.expert_frequency[0] = 100
+        cache.expert_frequency[1] = 90
+        cache.expert_frequency[2] = 80
+        cache.expert_frequency[3] = 70
+        cache.expert_frequency[4] = 10  # Low frequency
+
+        # Create dummy experts
+        experts = nn.ModuleList([nn.Linear(10, 10) for _ in range(num_experts)])
+
+        # Initial update - should cache 0, 1, 2, 3
+        cache.update_cache(experts)
+        assert set(cache.cached_experts) == {0, 1, 2, 3}
+
+        # Now prefetch expert 4 (low frequency but predicted)
+        # Should result in {0, 1, 2, 3, 4} if size not strictly enforced,
+        # OR if we just add prefetch.
+        # My implementation: target = top_k | prefetch.
+        # So {0, 1, 2, 3} | {4} -> {0, 1, 2, 3, 4}.
+        cache.update_cache(experts, prefetch_indices=[4])
+        assert 4 in cache.cached_experts
+        assert {0, 1, 2, 3}.issubset(cache.cached_experts)
+
+        # Now assume frequencies change: 5, 6, 7, 8 become top
+        cache.expert_frequency.zero_()
+        cache.expert_frequency[5] = 100
+        cache.expert_frequency[6] = 90
+        cache.expert_frequency[7] = 80
+        cache.expert_frequency[8] = 70
+
+        # Update without prefetch
+        # Should evict 0, 1, 2, 3, 4 and add 5, 6, 7, 8
+        cache.update_cache(experts)
+        assert set(cache.cached_experts) == {5, 6, 7, 8}
+        assert 0 not in cache.cached_experts
+        assert 4 not in cache.cached_experts
+
+    def test_cache_window_size(self):
+        """Verify selection history respects window size."""
+        device = "cpu"
+        num_experts = 8
+        window_size = 3
+
+        cache = ExpertCache(
+            num_experts=num_experts,
+            window_size=window_size,
+            device=device,
+        )
+
+        # Add more selections than window size
+        for i in range(5):
+            cache.record_selection(torch.tensor([i % num_experts], device=device))
+
+        # History should only keep last 3
+        assert len(cache.selection_history) == window_size
+
+    def test_cache_reset(self):
+        """Verify cache reset clears all state."""
+        device = "cpu"
+        num_experts = 8
+
+        cache = ExpertCache(num_experts=num_experts, device=device)
+
+        # Add some state
+        cache.record_selection(torch.tensor([0, 1], device=device))
+        cache.expert_frequency[0] = 10
+        cache.cached_experts.add(0)
+        cache.expert_weights[0] = nn.Linear(10, 10)
+
+        # Reset
+        cache.reset()
+
+        assert len(cache.cached_experts) == 0
+        assert len(cache.expert_weights) == 0
+        assert len(cache.selection_history) == 0
+        assert cache.expert_frequency.sum() == 0
+
+
+@requires_mps
+@requires_trellis
+class TestSpeculation:
+    """Test 7: Speculative prefetching."""
+
+    def test_speculation_trigger(self):
+        """Verify layer 1 triggers prefetch in layer 2."""
+        device = "mps"
+        config = TrellisModelConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_experts=8,
+            num_experts_per_tok=2,
+            num_attention_heads=4,
+            num_kv_heads=4,
+            # Ensure MoE is active for all layers
+            first_moe_layer=0,
+            num_hidden_layers=2,
+        )
+
+        # Create two layers using dummy experts (no layer_weights provided)
+        layer1 = TrellisMoELayer(
+            config=config,
+            layer_weights={},
+            router_weight=torch.randn(config.num_experts, config.hidden_size),
+            layer_idx=0,
+            device=device,
+            enable_cache=True,
+            cache_size=4,
+        )
+        layer2 = TrellisMoELayer(
+            config=config,
+            layer_weights={},
+            router_weight=torch.randn(config.num_experts, config.hidden_size),
+            layer_idx=1,
+            device=device,
+            enable_cache=True,
+            cache_size=4,
+        )
+
+        # Link layers
+        layer1.next_layer = layer2
+
+        # Ensure layer2 has an ExpertCache
+        assert layer2.expert_cache is not None
+
+        # Manually move all experts to CPU in layer2 cache to verify streaming
+        for i in range(config.num_experts):
+            # Create a dummy expert on CPU
+            cpu_expert = layer2.experts[i].cpu()
+            layer2.expert_cache.cpu_experts[i] = cpu_expert
+            # Ensure not in GPU cache
+            if i in layer2.expert_cache.cached_experts:
+                layer2.expert_cache.cached_experts.remove(i)
+            if i in layer2.expert_cache.expert_weights:
+                del layer2.expert_cache.expert_weights[i]
+
+        assert len(layer2.expert_cache.cached_experts) == 0
+        assert len(layer2.expert_cache.cpu_experts) == config.num_experts
+
+        # Run forward on layer 1
+        x = torch.randn(4, 64, device=device)
+        with torch.no_grad():
+            _ = layer1(x)
+
+        # Check if layer 2 cache has speculative entries
+        speculative = layer2.expert_cache.speculative_experts
+
+        # Should have some speculative experts
+        assert len(speculative) > 0, "No speculative experts found"
+
+        # Verify these experts were streamed to GPU (added to cached_experts)
+        cached = layer2.expert_cache.cached_experts
+
+        assert speculative.issubset(cached), "Speculative experts not in cache"
+
+
+@requires_mps
+@requires_trellis
+class TestCapacityFactor:
+    """Test 8: Expert capacity factor."""
+
+    def test_capacity_limit_drops_tokens(self):
+        """Verify tokens are dropped when capacity is exceeded."""
+        device = "mps"
+        config = TrellisModelConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_experts=2,
+            num_experts_per_tok=1,
+            num_hidden_layers=1,
+            # Ensure MoE active
+            first_moe_layer=0,
+        )
+
+        # Capacity factor 1.0 means max tokens = num_tokens / num_experts
+        # If we send all tokens to expert 0, half should be dropped
+        layer = TrellisMoELayer(
+            config=config,
+            layer_weights={}, # Dummy
+            router_weight=torch.randn(config.num_experts, config.hidden_size),
+            layer_idx=0,
+            device=device,
+            capacity_factor=1.0,
+        )
+
+        # Override experts with dummy linear that returns non-zero
+        # _DummyExpert is not exported, we use nn.Linear logic or inspect what layer.experts[i] is.
+        # layer_weights={} creates _DummyExpert.
+
+        # Force router to select expert 0 for ALL tokens
+        # Router: x @ W.T
+        layer.router.weight.data.zero_()
+        layer.router.weight.data[0, :] = 10.0
+        layer.router.weight.data[1, :] = -10.0
+
+        # Input: 10 tokens
+        x = torch.ones(10, 64, device=device)
+
+        # Capacity = 1.0 * 10 / 2 = 5 per expert.
+        # Expert 0 gets 10 tokens. 5 should be dropped.
+
+        with torch.no_grad():
+            output = layer(x)
+
+        # Check how many outputs are non-zero
+        # Dropped tokens have weight 0, so output 0
+        non_zero_count = (output.abs().sum(dim=-1) > 1e-5).sum().item()
+
+        print(f"Non-zero outputs: {non_zero_count} / 10")
+        assert non_zero_count == 5, f"Expected 5 tokens processed, got {non_zero_count}"
+
+    def test_capacity_factor_infinite(self):
+        """Verify no drops with infinite capacity."""
+        device = "mps"
+        config = TrellisModelConfig(
+            hidden_size=64,
+            intermediate_size=128,
+            num_experts=2,
+            num_experts_per_tok=1,
+            num_hidden_layers=1,
+            first_moe_layer=0,
+        )
+
+        layer = TrellisMoELayer(
+            config=config,
+            layer_weights={},
+            router_weight=torch.randn(config.num_experts, config.hidden_size),
+            layer_idx=0,
+            device=device,
+            capacity_factor=float('inf'),
+        )
+
+        # Force router to select expert 0 for ALL tokens
+        layer.router.weight.data.zero_()
+        layer.router.weight.data[0, :] = 10.0
+
+        x = torch.ones(10, 64, device=device)
+
+        with torch.no_grad():
+            output = layer(x)
+
+        non_zero_count = (output.abs().sum(dim=-1) > 1e-5).sum().item()
+        assert non_zero_count == 10, f"Expected 10 tokens (all), got {non_zero_count}"
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ def create_mock_trellis_linear(
 
     # Groups are along the N (in_features) dimension
     # This matches TrellisWeight convention: scales [n_groups, N]
-    n_groups = (in_features + 127) // 128
+    n_groups = max(1, (in_features + 127) // 128)
 
     # Random packed indices (valid values for bit width)
     packed = torch.randint(0, 256, (tiles_k, tiles_n, packed_bytes), dtype=torch.uint8)

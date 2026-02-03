@@ -10,9 +10,14 @@ Step-by-step tutorials for common Metal Marlin workflows.
 ## Workflows
 
 - [**Serving Models**](serving.md) — OpenAI-compatible API server
+- [**Deployment Checklist**](deployment_checklist.md) — Best practices for deployment
 - [**Calibration Guide**](calibration.md) — Custom calibration for higher quality
 - [**Mixed Precision**](../concepts/mixed_precision.md) — Per-layer precision for MoE models
 - [**Migration Guide**](migration_guide.md) — Migrate from other frameworks
+
+## Optimization
+
+- [**Optimization Guide**](optimization.md) — Comprehensive performance tuning guide
 
 ## Troubleshooting
 

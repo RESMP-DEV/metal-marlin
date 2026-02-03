@@ -25,7 +25,7 @@ tasks:
       Look for TestU4GEMMAccuracy class and how it computes expected output.
 
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
       grep -n "def.*dequant\|scale.*zero\|nibble" tests/test_accuracy.py | head -20
       ```
 
@@ -52,7 +52,7 @@ tasks:
       ## STEP 4: Fix and Verify
       After fixing, run this EXACT command:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_accuracy.py::TestU4GEMMAccuracy::test_metal_u4_gemm_vs_reference -v --tb=short -x 2>&1 | tail -30
       ```
 
@@ -105,7 +105,7 @@ tasks:
 
       ## RUN the test:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run python tests/test_u4_nibble.py
       ```
 
@@ -172,7 +172,7 @@ tasks:
 
       ## VERIFY
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_accuracy.py::TestU4GEMMAccuracy::test_metal_u4_gemm_group_sizes -v --tb=short 2>&1 | tail -20
       ```
     priority: P0
@@ -196,7 +196,7 @@ tasks:
 
       ## TEST (should all pass after fix)
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest -k "single_token or M=1 or [1-" tests/test_accuracy.py -v --tb=short 2>&1 | tail -30
       ```
 
@@ -247,7 +247,7 @@ tasks:
 
       ## DIAGNOSTIC
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_accuracy.py -k "non_tile_aligned or [30-" -v --tb=short 2>&1 | tail -20
       ```
 
@@ -312,7 +312,7 @@ tasks:
 
       ## RUN VERIFICATION
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_edge_cases.py -v 2>&1 | tail -20
       ```
     priority: P1
@@ -363,7 +363,7 @@ tasks:
 
       ## VERIFY
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_onnx.py::TestMatmulQuantized::test_quantized_vs_fp16_closeness -v 2>&1 | tail -15
       ```
     priority: P1
@@ -420,7 +420,7 @@ tasks:
 
       ## VERIFY
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest -k "extreme or stability or nan" tests/ -v 2>&1 | tail -20
       ```
     priority: P2
@@ -462,7 +462,7 @@ tasks:
 
       ## VERIFY (will fail if shader still doesn't compile)
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_stripe_partition.py::TestKParallelReduction::test_k_parallel_reduction_large_k -v --tb=short 2>&1 | tail -40
       ```
 
@@ -480,7 +480,7 @@ tasks:
       ## PREREQUISITE
       First verify shader compiles:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run python -c "
       import mlx.core as mx
       from pathlib import Path
@@ -527,7 +527,7 @@ tasks:
 
       ## RUN FULL SUITE (expect 15+ minutes)
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/ -v --tb=no 2>&1 | tee /tmp/test_results.txt | tail -60
       ```
 
@@ -548,7 +548,7 @@ tasks:
 
       ## QUICK SMOKE TEST (run this first, ~2 min)
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin && \
       PYTHONPATH=. uv run pytest tests/test_accuracy.py tests/test_layers.py tests/test_onnx.py -v --tb=no 2>&1 | tail -30
       ```
     priority: P3

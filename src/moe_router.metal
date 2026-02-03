@@ -50,6 +50,25 @@ inline uint div_ceil(uint a, uint b) {
     return (a + b - 1) / b;
 }
 
+// ---------------------------------------------------------------------------
+// Atomic float add using CAS (Metal 2.3 compatible)
+// ---------------------------------------------------------------------------
+
+inline void atomic_add_float(device float* ptr, float value) {
+    device atomic_uint* atomic_ptr = (device atomic_uint*)ptr;
+    uint old_bits = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
+    uint new_bits;
+    bool success;
+    do {
+        float old_val = as_type<float>(old_bits);
+        float new_val = old_val + value;
+        new_bits = as_type<uint>(new_val);
+        success = atomic_compare_exchange_weak_explicit(
+            atomic_ptr, &old_bits, new_bits,
+            memory_order_relaxed, memory_order_relaxed);
+    } while (!success);
+}
+
 // Numerically stable softmax helpers using float32 for accumulation
 inline float safe_exp(float x, float max_val) {
     float shifted = x - max_val;
@@ -592,6 +611,229 @@ kernel void moe_router_fused_small(
 }
 
 // ---------------------------------------------------------------------------
+// Coalesced Router: Transposed weights for coalesced memory access
+// ---------------------------------------------------------------------------
+// This kernel expects weights in [num_experts, hidden_dim] layout (row-major
+// per expert) instead of [hidden_dim, num_experts]. This eliminates the
+// strided access pattern where stride = num_experts (64-256 typically).
+//
+// Performance benefit: Coalesced loads achieve ~10x better bandwidth than
+// strided loads. For hidden_dim=4096, num_experts=64, this reduces memory
+// traffic from ~1 cache line per element to ~1 cache line per 8 elements.
+//
+// Host-side preparation:
+//   router_weights_coalesced = router_weights.T.contiguous()  # [num_experts, hidden_dim]
+// ---------------------------------------------------------------------------
+
+kernel void moe_router_fused_coalesced(
+    device const half* hidden         [[buffer(0)]],   // [batch, hidden_dim]
+    device const half* router_weights [[buffer(1)]],   // [num_experts, hidden_dim] TRANSPOSED
+    device uint* expert_ids           [[buffer(2)]],   // [batch, top_k] output
+    device half* expert_probs         [[buffer(3)]],   // [batch, top_k] output
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& hidden_dim         [[buffer(5)]],
+    constant uint& num_experts        [[buffer(6)]],
+    constant uint& top_k              [[buffer(7)]],
+    uint tgid                         [[threadgroup_position_in_grid]],
+    uint tid                          [[thread_index_in_threadgroup]],
+    uint simd_lane                    [[thread_index_in_simdgroup]],
+    uint simd_id                      [[simdgroup_index_in_threadgroup]]
+) {
+    // Each threadgroup handles one token
+    uint batch_idx = tgid;
+    if (batch_idx >= batch_size) return;
+
+    // Pointer to this token's hidden state
+    device const half* h = hidden + batch_idx * hidden_dim;
+
+    // Threadgroup memory for logits, reduction, and top-k results
+    threadgroup float logits_shared[MAX_EXPERTS];
+    threadgroup float max_shared[4];      // One per simdgroup
+    threadgroup float sum_shared[4];
+
+    const uint num_simdgroups = ROUTER_THREADS / 32;  // 4
+
+    // -------------------------------------------------------------------------
+    // Step 1: Compute logits = hidden @ router_weights.T (GEMM)
+    // -------------------------------------------------------------------------
+    // With transposed weights [num_experts, hidden_dim], each thread loads
+    // a contiguous row of weights for coalesced access.
+
+    uint experts_per_thread = div_ceil(num_experts, ROUTER_THREADS);
+
+    for (uint e_iter = 0; e_iter < experts_per_thread; ++e_iter) {
+        uint expert_idx = tid + e_iter * ROUTER_THREADS;
+        if (expert_idx >= num_experts) break;
+
+        // Compute dot product: h[0:hidden_dim] . router_weights[expert_idx, :]
+        float acc = 0.0f;
+
+        // COALESCED: router_weights is [num_experts, hidden_dim], row-major per expert
+        device const half* w_row = router_weights + expert_idx * hidden_dim;
+
+        // Vectorized loads using half4 (4 elements at a time)
+        uint d = 0;
+        uint hidden_dim_vec = hidden_dim & ~3u;  // Round down to multiple of 4
+
+        for (; d < hidden_dim_vec; d += 4) {
+            // Load 4 hidden values
+            half4 h_vec = *reinterpret_cast<device const half4*>(h + d);
+            // Load 4 weight values (COALESCED!)
+            half4 w_vec = *reinterpret_cast<device const half4*>(w_row + d);
+            // Accumulate dot product
+            acc += float(h_vec.x) * float(w_vec.x);
+            acc += float(h_vec.y) * float(w_vec.y);
+            acc += float(h_vec.z) * float(w_vec.z);
+            acc += float(h_vec.w) * float(w_vec.w);
+        }
+
+        // Handle remainder (hidden_dim not multiple of 4)
+        for (; d < hidden_dim; ++d) {
+            acc += float(h[d]) * float(w_row[d]);
+        }
+
+        logits_shared[expert_idx] = acc;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // -------------------------------------------------------------------------
+    // Steps 2-4: Softmax, Top-k, Renormalize (same as moe_router_fused)
+    // -------------------------------------------------------------------------
+
+    // 2a. Find max logit (for numerical stability)
+    float local_max = -INFINITY;
+    for (uint e = tid; e < num_experts; e += ROUTER_THREADS) {
+        local_max = max(local_max, logits_shared[e]);
+    }
+
+    // Reduce within simdgroup
+    local_max = simd_max(local_max);
+
+    // Store simdgroup max
+    if (simd_lane == 0) {
+        max_shared[simd_id] = local_max;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final max reduction across simdgroups (thread 0)
+    float global_max;
+    if (tid == 0) {
+        global_max = max_shared[0];
+        for (uint s = 1; s < num_simdgroups; ++s) {
+            global_max = max(global_max, max_shared[s]);
+        }
+        max_shared[0] = global_max;  // Broadcast
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_max = max_shared[0];
+
+    // 2b. Compute exp(logit - max) and sum
+    float local_sum = 0.0f;
+    for (uint e = tid; e < num_experts; e += ROUTER_THREADS) {
+        float exp_val = safe_exp(logits_shared[e], global_max);
+        logits_shared[e] = exp_val;  // Store exp values
+        local_sum += exp_val;
+    }
+
+    // Reduce sum within simdgroup
+    local_sum = simd_sum(local_sum);
+
+    if (simd_lane == 0) {
+        sum_shared[simd_id] = local_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final sum reduction
+    float global_sum;
+    if (tid == 0) {
+        global_sum = sum_shared[0];
+        for (uint s = 1; s < num_simdgroups; ++s) {
+            global_sum += sum_shared[s];
+        }
+        sum_shared[0] = global_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    global_sum = sum_shared[0];
+
+    // 2c. Normalize: softmax probs = exp_val / sum
+    float inv_sum = 1.0f / global_sum;
+    for (uint e = tid; e < num_experts; e += ROUTER_THREADS) {
+        logits_shared[e] *= inv_sum;
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // -------------------------------------------------------------------------
+    // Step 3: Top-k selection (single thread, since k is small)
+    // -------------------------------------------------------------------------
+
+    if (tid == 0) {
+        // Use stack arrays for top-k
+        float local_topk_vals[MAX_TOP_K];
+        uint local_topk_ids[MAX_TOP_K];
+
+        // Initialize
+        for (uint i = 0; i < top_k; ++i) {
+            local_topk_vals[i] = -INFINITY;
+            local_topk_ids[i] = 0;
+        }
+
+        // Scan and maintain top-k
+        for (uint e = 0; e < num_experts; ++e) {
+            float prob = logits_shared[e];
+
+            // Check if this should be inserted into top-k
+            if (prob > local_topk_vals[top_k - 1]) {
+                // Find insertion point
+                uint insert_pos = top_k;
+                for (uint i = 0; i < top_k; ++i) {
+                    if (prob > local_topk_vals[i]) {
+                        insert_pos = i;
+                        break;
+                    }
+                }
+
+                // Shift elements down
+                for (uint i = top_k - 1; i > insert_pos; --i) {
+                    local_topk_vals[i] = local_topk_vals[i - 1];
+                    local_topk_ids[i] = local_topk_ids[i - 1];
+                }
+
+                // Insert
+                local_topk_vals[insert_pos] = prob;
+                local_topk_ids[insert_pos] = e;
+            }
+        }
+
+        // -------------------------------------------------------------------------
+        // Step 4: Renormalize selected probabilities
+        // -------------------------------------------------------------------------
+
+        // Compute sum of selected probabilities
+        float selected_sum = 0.0f;
+        for (uint i = 0; i < top_k; ++i) {
+            selected_sum += local_topk_vals[i];
+        }
+
+        // Renormalize and write outputs
+        float inv_selected_sum = 1.0f / max(selected_sum, 1e-8f);
+
+        device uint* out_ids = expert_ids + batch_idx * top_k;
+        device half* out_probs = expert_probs + batch_idx * top_k;
+
+        for (uint i = 0; i < top_k; ++i) {
+            out_ids[i] = local_topk_ids[i];
+            out_probs[i] = half(local_topk_vals[i] * inv_selected_sum);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Router with auxiliary load balancing loss computation
 // ---------------------------------------------------------------------------
 // MoE training requires load balancing loss to prevent expert collapse.
@@ -602,7 +844,7 @@ kernel void moe_router_with_aux_loss(
     device const half* router_weights [[buffer(1)]],   // [hidden_dim, num_experts]
     device uint* expert_ids           [[buffer(2)]],   // [batch, top_k]
     device half* expert_probs         [[buffer(3)]],   // [batch, top_k]
-    device atomic_float* expert_load  [[buffer(4)]],   // [num_experts] accumulates routing probs
+    device float* expert_load         [[buffer(4)]],   // [num_experts] accumulates routing probs (atomic via CAS)
     device atomic_uint* expert_count  [[buffer(5)]],   // [num_experts] counts how many tokens
     constant uint& batch_size         [[buffer(6)]],
     constant uint& hidden_dim         [[buffer(7)]],
@@ -700,7 +942,7 @@ kernel void moe_router_with_aux_loss(
 
             // Accumulate routing probability for load balancing loss
             // This is the "fraction of probability mass" for each expert
-            atomic_fetch_add_explicit(expert_load + e, prob, memory_order_relaxed);
+            atomic_add_float(expert_load + e, prob);
 
             // Top-k selection
             if (prob > local_topk_vals[top_k - 1]) {

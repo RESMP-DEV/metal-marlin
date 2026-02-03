@@ -471,11 +471,11 @@ def _config_to_dict(config: KernelConfig) -> dict[str, object]:
 def _config_from_dict(data: dict[str, object]) -> KernelConfig:
     """Deserialize KernelConfig from dict."""
     return KernelConfig(
-        tile_m=int(data["tile_m"]),
-        tile_n=int(data["tile_n"]),
-        tile_k=int(data["tile_k"]),
-        num_stages=int(data["num_stages"]),
-        threadgroup_size=tuple(data["threadgroup_size"]),
+        tile_m=int(data["tile_m"]),  # type: ignore[arg-type]
+        tile_n=int(data["tile_n"]),  # type: ignore[arg-type]
+        tile_k=int(data["tile_k"]),  # type: ignore[arg-type]
+        num_stages=int(data["num_stages"]),  # type: ignore[arg-type]
+        threadgroup_size=tuple(data["threadgroup_size"]),  # type: ignore[arg-type]
         kernel_name=str(data["kernel_name"]),
     )
 

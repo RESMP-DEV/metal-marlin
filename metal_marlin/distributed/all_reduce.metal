@@ -37,7 +37,7 @@ enum class ReduceOp : uint8_t {
  * specified reduction operation.
  *
  * Template parameters:
- *   T - element type (half or bfloat)
+ *   T - element type (half or float)
  *
  * Arguments:
  *   input: Input tensors stacked along first dimension [num_shards, numel]
@@ -47,7 +47,7 @@ enum class ReduceOp : uint8_t {
  *   op: Reduction operation (0=sum, 1=mean, 2=max, 3=min)
  */
 template <typename T>
-[[kernel]] void all_reduce_kernel(
+void all_reduce_kernel(
     device const T* input [[buffer(0)]],
     device T* output [[buffer(1)]],
     constant uint32_t& num_shards [[buffer(2)]],
@@ -100,37 +100,6 @@ template <typename T>
     output[gid] = T(acc);
 }
 
-// Explicit instantiations
-template [[host_name("all_reduce_half")]]
-[[kernel]] void all_reduce_kernel<half>(
-    device const half*,
-    device half*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint
-);
-
-template [[host_name("all_reduce_bfloat")]]
-[[kernel]] void all_reduce_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint
-);
-
-template [[host_name("all_reduce_float")]]
-[[kernel]] void all_reduce_kernel<float>(
-    device const float*,
-    device float*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint
-);
-
 /**
  * Simdgroup-optimized all-reduce for small reductions.
  *
@@ -140,7 +109,7 @@ template [[host_name("all_reduce_float")]]
  * Best for: Small tensor reductions where num_shards <= 32
  */
 template <typename T>
-[[kernel]] void all_reduce_simd_kernel(
+void all_reduce_simd_kernel(
     device const T* input [[buffer(0)]],
     device T* output [[buffer(1)]],
     constant uint32_t& num_shards [[buffer(2)]],
@@ -197,24 +166,43 @@ template <typename T>
     }
 }
 
-template [[host_name("all_reduce_simd_half")]]
-[[kernel]] void all_reduce_simd_kernel<half>(
-    device const half*,
-    device half*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint,
-    uint
-);
+// Kernel Entry Points
+// ---------------------------------------------------------------------------
 
-template [[host_name("all_reduce_simd_bfloat")]]
-[[kernel]] void all_reduce_simd_kernel<bfloat>(
-    device const bfloat*,
-    device bfloat*,
-    constant uint32_t&,
-    constant uint32_t&,
-    constant uint8_t&,
-    uint,
-    uint
-);
+[[kernel]] void all_reduce_half(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint32_t& num_shards [[buffer(2)]],
+    constant uint32_t& numel [[buffer(3)]],
+    constant uint8_t& op [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    all_reduce_kernel<half>(input, output, num_shards, numel, op, gid);
+}
+
+[[kernel]] void all_reduce_float(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint32_t& num_shards [[buffer(2)]],
+    constant uint32_t& numel [[buffer(3)]],
+    constant uint8_t& op [[buffer(4)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    all_reduce_kernel<float>(input, output, num_shards, numel, op, gid);
+}
+
+[[kernel]] void all_reduce_simd_half(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint32_t& num_shards [[buffer(2)]],
+    constant uint32_t& numel [[buffer(3)]],
+    constant uint8_t& op [[buffer(4)]],
+    uint gid [[thread_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]]
+) {
+    all_reduce_simd_kernel<half>(input, output, num_shards, numel, op, gid, simd_lane);
+}
+
+
+// Note: bfloat16 not supported in Metal 3.0. Using half instead.
+// For bfloat16 support, use Metal 3.1+ (macOS 14+) with bfloat16_t.

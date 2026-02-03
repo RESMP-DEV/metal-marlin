@@ -41,7 +41,10 @@ class QuantizedLinear(nn.Module):
         out = self._dispatch_quantized_gemm(x_flat)
 
         if self.bias is not None:
-            out = out + self.bias
+            # Work around PyTorch MPS Metal validation bug where the
+            # add_dense_scalar kernel binds a read-only buffer with write access.
+            # Using add_ (in-place) avoids allocating output in the kernel.
+            out.add_(self.bias)
 
         return out.view(*batch_shape, self.out_features)
 

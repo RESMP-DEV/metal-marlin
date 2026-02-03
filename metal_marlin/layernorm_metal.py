@@ -93,10 +93,14 @@ def rmsnorm_metal(
     grid = (num_tokens, 1, 1)
     threadgroup = (256, 1, 1)
 
+    # Select kernel based on hidden dimension
+    # Multi-pass version is more efficient for large hidden dims (>= 8192)
+    kernel_name = "rmsnorm_multipass" if hidden_dim >= 8192 else "rmsnorm"
+
     # Dispatch kernel
     dispatch_kernel(
         lib,
-        function_name="rmsnorm",
+        function_name=kernel_name,
         grid=grid,
         threadgroup=threadgroup,
         buffers=[x_buf, weight_buf, output_buf, num_tokens_buf, hidden_dim_buf, eps_buf],
@@ -191,10 +195,14 @@ def layernorm_metal(
     grid = (num_tokens, 1, 1)
     threadgroup = (256, 1, 1)
 
+    # Select kernel based on hidden dimension
+    # Multi-pass version is more efficient for large hidden dims (>= 8192)
+    kernel_name = "layernorm_multipass" if hidden_dim >= 8192 else "layernorm"
+
     # Dispatch kernel
     dispatch_kernel(
         lib,
-        function_name="layernorm",
+        function_name=kernel_name,
         grid=grid,
         threadgroup=threadgroup,
         buffers=[x_buf, weight_buf, bias_buf, output_buf, num_tokens_buf, hidden_dim_buf, eps_buf],
@@ -289,10 +297,14 @@ def rmsnorm_fused_residual_metal(
     grid = (num_tokens, 1, 1)
     threadgroup = (256, 1, 1)
 
+    # Select kernel based on hidden dimension
+    # Multi-pass version is more efficient for large hidden dims (>= 8192)
+    kernel_name = "rmsnorm_fused_residual_multipass" if hidden_dim >= 8192 else "rmsnorm_fused_residual"
+
     # Dispatch kernel
     dispatch_kernel(
         lib,
-        function_name="rmsnorm_fused_residual",
+        function_name=kernel_name,
         grid=grid,
         threadgroup=threadgroup,
         buffers=[

@@ -51,9 +51,11 @@ def paged_server():
         pytest.skip(f"Port {_PORT} is already in use")
 
     log_file = tempfile.NamedTemporaryFile(mode="w+", delete=False)
+    # Model path argument (unused with METAL_MARLIN_MOCK_MODEL=1)
+    mock_model_path = Path(tempfile.gettempdir()) / "mock_model"
     cmd = [
         "uv", "run", "python", "-m", "metal_marlin", "serve",
-        "/tmp/any",
+        str(mock_model_path),
         "--port", str(_PORT),
         "--enable-batching",
         "--num-kv-blocks", "64",

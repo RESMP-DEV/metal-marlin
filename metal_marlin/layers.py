@@ -209,9 +209,9 @@ if HAS_TORCH and torch is not None:
             if self._actual_out != self._padded_out:
                 out = out[..., : self._actual_out]
 
-            # Add bias after slicing
+            # Add bias after slicing - use in-place to avoid MPS validation error
             if bias is not None:
-                out = out + bias
+                out.add_(bias)
 
             # Cast back to input dtype
             return out.to(x.dtype)
@@ -389,4 +389,226 @@ else:
             raise RuntimeError("MarlinLinear requires PyTorch")
 
 
-__all__ = ["MarlinLinear"]
+if HAS_TORCH and torch is not None:
+    class MixedPrecisionLinear(nn.Module):
+        """Linear layer that handles both BF16 and FP4 quantized inputs.
+        
+        This layer automatically detects the input precision and applies the
+        appropriate computation path. For BF16 inputs, it uses standard
+        torch.nn.functional.linear. For FP4 inputs, it dequantizes and
+        processes using the FP4 pipeline.
+        
+        Args:
+            in_features: Size of each input sample.
+            out_features: Size of each output sample.
+            bias: If True, adds a learnable bias. Default: True.
+            fp4_group_size: Group size for FP4 quantization. Default: 128.
+        """
+        
+        def __init__(
+            self,
+            in_features: int,
+            out_features: int,
+            bias: bool = True,
+            fp4_group_size: int = 128,
+        ) -> None:
+            super().__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.fp4_group_size = fp4_group_size
+            
+            # BF16 weights (full precision path)
+            self.weight_bf16 = nn.Parameter(
+                torch.randn(out_features, in_features, dtype=torch.bfloat16) * 0.02
+            )
+            
+            # FP4 quantized weights (quantized path)
+            # Initialize with quantized version of BF16 weights
+            with torch.no_grad():
+                weight_fp16 = self.weight_bf16.to(torch.float16)
+                w_packed, scales = MarlinLinear._pack_fp4_weights(
+                    weight_fp16, fp4_group_size
+                )
+            
+            self.register_buffer("weight_fp4_packed", w_packed)
+            self.register_buffer("scales", scales)
+            
+            # Shared bias
+            if bias:
+                self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float32))
+            else:
+                self.register_parameter("bias", None)
+        
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            """Forward pass with automatic precision detection.
+            
+            Args:
+                x: Input tensor [*, in_features]. Can be BF16, FP16, or FP4-quantized.
+            
+            Returns:
+                Output tensor [*, out_features] in the same dtype as input.
+            """
+            input_dtype = x.dtype
+            
+            # Detect if input is FP4-quantized (stored as uint32)
+            if x.dtype == torch.uint32:
+                return self._forward_fp4(x)
+            elif x.dtype == torch.bfloat16:
+                return self._forward_bf16(x)
+            elif x.dtype == torch.float16:
+                # Treat FP16 as standard precision, but use FP4 weights for efficiency
+                return self._forward_fp16(x)
+            else:
+                # Cast to BF16 for unsupported dtypes
+                return self._forward_bf16(x.to(torch.bfloat16)).to(input_dtype)
+        
+        def _forward_bf16(self, x: torch.Tensor) -> torch.Tensor:
+            """Standard BF16 forward pass."""
+            bias = self.bias.to(x.dtype) if self.bias is not None else None
+            out = torch.nn.functional.linear(x, self.weight_bf16, bias)
+            return out
+        
+        def _forward_fp16(self, x: torch.Tensor) -> torch.Tensor:
+            """FP16 forward pass using dequantized FP4 weights."""
+            # Dequantize FP4 weights to FP16
+            weight_fp16 = self._dequantize_fp4()
+            bias = self.bias.to(x.dtype) if self.bias is not None else None
+            out = torch.nn.functional.linear(x, weight_fp16, bias)
+            return out
+        
+        def _forward_fp4(self, x: torch.Tensor) -> torch.Tensor:
+            """FP4 quantized forward pass.
+            
+            Expects x to be packed uint32 FP4 values. Dequantizes both
+            input and weights, computes matmul, and returns result.
+            """
+            # Dequantize input (assumed to be in same format as weights)
+            x_dequant = self._dequantize_fp4_input(x)
+            
+            # Dequantize weights
+            weight_fp16 = self._dequantize_fp4()
+            
+            # Compute matmul in FP16
+            bias = self.bias.to(torch.float16) if self.bias is not None else None
+            out = torch.nn.functional.linear(x_dequant, weight_fp16, bias)
+            return out
+        
+        def _dequantize_fp4(self) -> torch.Tensor:
+            """Dequantize packed FP4 weights to FP16.
+            
+            Returns:
+                Dequantized weight tensor [out_features, in_features] as FP16.
+            """
+            K = self.in_features
+            N = self.out_features
+            device = self.weight_fp4_packed.device
+            
+            # Ensure dimensions are compatible
+            FP4_PER_U32 = 8
+            padded_K = ((K + self.fp4_group_size - 1) // self.fp4_group_size) * self.fp4_group_size
+            padded_N = ((N + FP4_PER_U32 - 1) // FP4_PER_U32) * FP4_PER_U32
+            
+            weight_fp16 = torch.zeros(padded_K, padded_N, dtype=torch.float16, device=device)
+            
+            # E2M1 FP4 dequantization lookup table
+            e2m1_values = MarlinLinear._get_e2m1_table().to(device)
+            
+            # Unpack and dequantize
+            for k in range(self.weight_fp4_packed.shape[0]):
+                for n_block in range(self.weight_fp4_packed.shape[1]):
+                    word = self.weight_fp4_packed[k, n_block].item()
+                    for i in range(8):
+                        nibble = (word >> (i * 4)) & 0xF
+                        n_idx = n_block * 8 + i
+                        if n_idx >= padded_N:
+                            break
+                        scale_k = k // self.fp4_group_size
+                        scale = self.scales[scale_k, n_idx]
+                        weight_fp16[k, n_idx] = e2m1_values[nibble] * scale
+            
+            # Slice to actual dimensions and transpose
+            weight_fp16 = weight_fp16[:K, :N]
+            return weight_fp16.T  # [N, K] for nn.functional.linear
+        
+        def _dequantize_fp4_input(self, x: torch.Tensor) -> torch.Tensor:
+            """Dequantize FP4 packed input tensor.
+            
+            Args:
+                x: Packed FP4 input [batch, in_features//8] as uint32.
+            
+            Returns:
+                Dequantized FP16 tensor [batch, in_features].
+            """
+            # This is a simplified implementation
+            # Real implementation would need input-specific scales
+            batch_dims = x.shape[:-1]
+            packed_features = x.shape[-1]
+            features = packed_features * 8
+            
+            device = x.device
+            e2m1_values = MarlinLinear._get_e2m1_table().to(device)
+            
+            # Unpack
+            x_fp16 = torch.zeros(*batch_dims, features, dtype=torch.float16, device=device)
+            
+            # Simple unpacking without scales (would need scales in real use)
+            x_flat = x.reshape(-1, packed_features)
+            out_flat = x_fp16.reshape(-1, features)
+            
+            for i in range(x_flat.shape[0]):
+                for j in range(packed_features):
+                    word = x_flat[i, j].item()
+                    for k in range(8):
+                        nibble = (word >> (k * 4)) & 0xF
+                        out_flat[i, j * 8 + k] = e2m1_values[nibble]
+            
+            return x_fp16
+        
+        @staticmethod
+        def from_linear(
+            linear: nn.Linear,
+            fp4_group_size: int = 128,
+        ) -> MixedPrecisionLinear:
+            """Convert a torch.nn.Linear to MixedPrecisionLinear.
+            
+            Args:
+                linear: Source nn.Linear layer.
+                fp4_group_size: Group size for FP4 quantization.
+            
+            Returns:
+                MixedPrecisionLinear with copied weights.
+            """
+            layer = MixedPrecisionLinear(
+                in_features=linear.in_features,
+                out_features=linear.out_features,
+                bias=linear.bias is not None,
+                fp4_group_size=fp4_group_size,
+            )
+            
+            # Copy weights
+            with torch.no_grad():
+                layer.weight_bf16.copy_(linear.weight.data.to(torch.bfloat16))
+                if linear.bias is not None:
+                    layer.bias.copy_(linear.bias.data)
+                
+                # Requantize to FP4
+                weight_fp16 = linear.weight.data.to(torch.float16)
+                w_packed, scales = MarlinLinear._pack_fp4_weights(
+                    weight_fp16, fp4_group_size
+                )
+                layer.weight_fp4_packed.copy_(w_packed)
+                layer.scales.copy_(scales)
+            
+            return layer
+
+else:
+    class MixedPrecisionLinear:  # type: ignore[no-redef]
+        """Stub for MixedPrecisionLinear when PyTorch is not available."""
+        
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError(
+                "MixedPrecisionLinear requires PyTorch. Install PyTorch with: pip install torch"
+            )
+
+
+__all__ = ["MarlinLinear", "MixedPrecisionLinear"]

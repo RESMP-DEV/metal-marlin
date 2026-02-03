@@ -44,6 +44,9 @@ _DEFAULT_DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 # Metal availability flag
 _USE_METAL = torch.backends.mps.is_available()
 
+# Lazy-loaded Metal kernel
+_GPU_SORT_KERNEL = None
+
 
 @dataclass
 class MoEDispatchInfo:
@@ -186,6 +189,171 @@ def group_tokens_by_expert_full(
 
     # Compute which expert slot (0 to top_k-1) each sorted assignment came from
     # expert_slot = flat_pos % top_k
+    sorted_expert_indices = sorted_indices % top_k
+
+    return MoEDispatchInfo(
+        sorted_token_indices=sorted_token_indices,
+        sorted_expert_indices=sorted_expert_indices,
+        expert_offsets=expert_offsets,
+        inverse_indices=inverse_indices,
+        num_tokens=batch_size,
+        top_k=top_k,
+        num_experts=num_experts,
+    )
+
+
+def _get_gpu_sort_kernel():
+    """Lazy-load the moe_gpu_sort Metal kernel."""
+    global _GPU_SORT_KERNEL
+    if _GPU_SORT_KERNEL is None:
+        try:
+            from metal_marlin.metal_dispatch import get_default_library
+            lib = get_default_library()
+            _GPU_SORT_KERNEL = lib.newFunctionWithName_("moe_gpu_sort")
+            if _GPU_SORT_KERNEL is None:
+                raise RuntimeError("moe_gpu_sort kernel not found in Metal library")
+        except ImportError:
+            raise RuntimeError("Metal dispatch module not available")
+    return _GPU_SORT_KERNEL
+
+
+def group_tokens_by_expert_gpu(
+    expert_ids: torch.Tensor,
+    expert_probs: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """GPU-accelerated token grouping using Metal kernel.
+
+    Replaces CPU-based torch.argsort with GPU counting sort, avoiding
+    CPU-GPU synchronization and improving performance for large batches.
+
+    Args:
+        expert_ids: [batch, top_k] int tensor of expert assignments.
+        expert_probs: [batch, top_k] float tensor of expert probabilities.
+        num_experts: Total number of experts.
+
+    Returns:
+        sorted_indices: [batch * top_k] indices that sort by expert.
+        expert_offsets: [num_experts + 1] start index for each expert.
+        inverse_indices: [batch * top_k] indices to unsort back to original order.
+
+    Raises:
+        RuntimeError: If Metal is not available or kernel fails.
+    """
+    if not _USE_METAL:
+        raise RuntimeError("GPU sort requires Metal backend (MPS)")
+
+    import numpy as np
+
+    from metal_marlin.metal_dispatch import (
+        dispatch_kernel,
+        get_default_library,
+        mps_tensor_to_metal_buffer,
+        require_metal,
+    )
+
+    require_metal()
+
+    batch_size, top_k = expert_ids.shape
+    device = expert_ids.device
+    total_assignments = batch_size * top_k
+
+    # Ensure inputs are contiguous and correct dtype
+    # MPS doesn't support uint32, use int32 instead
+    expert_ids_i32 = expert_ids.contiguous().to(torch.int32)
+    expert_probs_f16 = expert_probs.contiguous().to(torch.float16)
+
+    # Allocate output buffers
+    sorted_tokens = torch.empty(total_assignments, dtype=torch.int32, device=device)
+    token_indices = torch.empty(total_assignments, dtype=torch.int32, device=device)
+    expert_bounds = torch.empty(num_experts + 1, dtype=torch.int32, device=device)
+
+    # Get Metal library and device
+    lib = get_default_library()
+    metal_device = lib.device
+
+    # Convert tensors to Metal buffers
+    expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids_i32, metal_device)
+    expert_probs_buf = mps_tensor_to_metal_buffer(expert_probs_f16, metal_device)
+    sorted_tokens_buf = mps_tensor_to_metal_buffer(sorted_tokens, metal_device, copy_back=True)
+    token_indices_buf = mps_tensor_to_metal_buffer(token_indices, metal_device, copy_back=True)
+    expert_bounds_buf = mps_tensor_to_metal_buffer(expert_bounds, metal_device, copy_back=True)
+
+    # Create scalar parameter buffers
+    batch_size_buf = metal_device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(),
+        4,
+        0,  # MTLResourceStorageModeShared
+    )
+    top_k_buf = metal_device.newBufferWithBytes_length_options_(
+        np.array([top_k], dtype=np.uint32).tobytes(),
+        4,
+        0,
+    )
+    num_experts_buf = metal_device.newBufferWithBytes_length_options_(
+        np.array([num_experts], dtype=np.uint32).tobytes(),
+        4,
+        0,
+    )
+
+    # Dispatch kernel (single threadgroup with 256 threads)
+    grid = (1, 1, 1)
+    threadgroup = (256, 1, 1)
+
+    dispatch_kernel(
+        lib,
+        function_name="moe_gpu_sort",
+        grid=grid,
+        threadgroup=threadgroup,
+        buffers=[
+            expert_ids_buf,
+            expert_probs_buf,
+            sorted_tokens_buf,
+            token_indices_buf,
+            expert_bounds_buf,
+            batch_size_buf,
+            top_k_buf,
+            num_experts_buf,
+        ],
+    )
+
+    # Convert token_indices to sorted_indices (already in the right format)
+    sorted_indices = token_indices.long()
+
+    # Compute inverse indices
+    inverse_indices = torch.argsort(sorted_indices)
+
+    # expert_bounds is the expert_offsets
+    expert_offsets = expert_bounds.long()
+
+    return sorted_indices, expert_offsets, inverse_indices
+
+
+def group_tokens_by_expert_full_gpu(
+    expert_ids: torch.Tensor,
+    expert_probs: torch.Tensor,
+    num_experts: int,
+) -> MoEDispatchInfo:
+    """GPU-accelerated full dispatch info using Metal kernel.
+
+    Args:
+        expert_ids: [batch, top_k] int tensor of expert assignments.
+        expert_probs: [batch, top_k] float tensor of expert probabilities.
+        num_experts: Total number of experts.
+
+    Returns:
+        MoEDispatchInfo with all indexing tensors.
+    """
+    batch_size, top_k = expert_ids.shape
+
+    sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert_gpu(
+        expert_ids, expert_probs, num_experts
+    )
+
+    # Compute which original token each sorted assignment came from
+    sorted_token_indices = sorted_indices // top_k
+
+    # Compute which expert slot each sorted assignment came from
     sorted_expert_indices = sorted_indices % top_k
 
     return MoEDispatchInfo(

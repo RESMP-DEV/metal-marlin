@@ -99,9 +99,23 @@ class SmallModelDraft(DraftModel):
     On each call to speculate(), it generates num_tokens autoregressively
     using greedy decoding (argmax) for maximum throughput.
 
+    Implementation:
+    ---------------
+    The core generation loop (in speculate() method) is a standard autoregressive
+    transformer decode loop, optimized for speed:
+      - Uses KV caching to avoid recomputing attention for previous positions
+      - Employs greedy sampling (argmax) rather than stochastic sampling
+      - Generates one token per iteration, feeding it back as input
+      - Maintains probability distributions needed for verification
+
     The draft model's cache is synchronized: after the target model accepts
     n tokens, the caller should advance the draft cache by feeding those
     tokens or simply reset and re-prefill.
+
+    Performance characteristics:
+    - Each draft token costs ~1/10th of a target token (for 10x smaller model)
+    - Typical acceptance rate: 60-80% for well-matched draft/target pairs
+    - Overall speedup: 2-4x depending on acceptance rate and model size ratio
     """
 
     def __init__(
@@ -119,6 +133,38 @@ class SmallModelDraft(DraftModel):
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
+        """Generate K speculative tokens via autoregressive draft model generation loop.
+
+        This implements the core draft model generation loop for speculative decoding.
+        The loop runs the small draft model K times autoregressively (with KV caching),
+        where each iteration:
+          1. Forward pass through draft model to get logits
+          2. Extract last position logits (predicting next token)
+          3. Compute probabilities via softmax
+          4. Sample/select next token (greedy argmax for throughput)
+          5. Advance draft model's KV cache
+          6. Use the new token as input for next iteration
+
+        The K generated tokens are then verified by the target model in a single
+        forward pass, amortizing the expensive computation.
+
+        Greedy decoding is used (argmax) rather than sampling because:
+        - The verifier will correct any mismatches via rejection sampling
+        - Greedy maximizes acceptance rate for well-matched draft/target pairs
+        - Sampling would add variance without improving the final distribution
+
+        Args:
+            input_ids: Current context token IDs, shape [batch, seq_len].
+                Typically [batch, 1] containing the last accepted token in decode phase.
+            kv_cache: Target model's KV cache (unused; draft maintains its own cache).
+            num_tokens: Number of speculative tokens to generate (K in the literature).
+
+        Returns:
+            DraftOutput with:
+              - tokens: K proposed token IDs [batch, K]
+              - probs: K probability distributions [batch, K, vocab_size]
+                Used by the verifier for rejection sampling calculations.
+        """
         num_tokens = min(num_tokens, self.max_speculative)
         batch_size = input_ids.shape[0]
 
@@ -129,22 +175,36 @@ class SmallModelDraft(DraftModel):
         tokens: list[Tensor] = []
         probs: list[Tensor] = []
 
-        # Run the draft model autoregressively
+        # === DRAFT MODEL GENERATION LOOP ===
+        # Autoregressive loop: generate K tokens one at a time using draft model
         current_ids = input_ids
-        for _ in range(num_tokens):
+        for step in range(num_tokens):
+            # Step 1: Forward pass through draft model
+            # Returns logits [batch, current_seq_len, vocab_size]
             logits = self.model(current_ids, kv_cache=self._cache)
-            # Take logits for last position: [batch, vocab]
+            
+            # Step 2: Extract logits for last position (predicting next token)
+            # Shape: [batch, vocab_size]
             last_logits = logits[:, -1, :]
 
+            # Step 3: Convert logits to probability distribution
             next_probs = torch.softmax(last_logits, dim=-1)
-            next_token = torch.argmax(next_probs, dim=-1)  # [batch]
+            
+            # Step 4: Greedy selection for maximum acceptance rate
+            # Shape: [batch]
+            next_token = torch.argmax(next_probs, dim=-1)
 
+            # Store token and its probability distribution for verification
             tokens.append(next_token)
             probs.append(next_probs)
 
-            # Advance draft cache
+            # Step 5: Advance draft model's KV cache to include processed positions
             self._cache.advance(current_ids.shape[1])
+            
+            # Step 6: Prepare input for next iteration (the just-generated token)
+            # Shape: [batch, 1]
             current_ids = next_token.reshape(batch_size, 1)
+        # === END GENERATION LOOP ===
 
         return DraftOutput(
             tokens=torch.stack(tokens, dim=1),  # [batch, num_tokens]

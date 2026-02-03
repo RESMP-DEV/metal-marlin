@@ -385,14 +385,24 @@ def _compile_fp8_shader():
 
 
 def _compile_bf16_shader():
-    """Compile the bf16_compat.metal shader and return (device, library)."""
+    """Compile the bf16_kernels.metal shader and return (device, library)."""
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
     assert device is not None, "No Metal device found"
 
-    shader_path = Path(__file__).parent.parent / "src" / "bf16_compat.metal"
+    shader_path = Path(__file__).parent.parent / "src" / "bf16_kernels.metal"
     source = shader_path.read_text()
+
+    # Handle include
+    include_token = '#include "bf16_compat.metal"'
+    if include_token in source:
+        include_path = shader_path.parent / "bf16_compat.metal"
+        if not include_path.exists():
+            raise FileNotFoundError(f"Missing Metal include: {include_path}")
+        include_source = include_path.read_text()
+        source = source.replace(include_token, include_source)
+
     options = Metal.MTLCompileOptions.new()
     options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
     library, err = device.newLibraryWithSource_options_error_(source, options, None)

@@ -49,25 +49,18 @@ constant constexpr uint NUM_SIMDGROUPS_SW = 4;  // 128 threads total
 constant constexpr uint THREADS_PER_TG_SW = SIMD_SIZE_SW * NUM_SIMDGROUPS_SW;
 
 // ---------------------------------------------------------------------------
-// Fast simd reductions
+// Fast simd reductions using hardware intrinsics
+//
+// Metal's built-in simd_sum/simd_max are hardware-accelerated and significantly
+// faster than manual simd_shuffle_xor chains (single instruction vs 5).
 // ---------------------------------------------------------------------------
 
 inline float simd_max_sw(float val) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
+    return simd_max(val);
 }
 
 inline float simd_sum_sw(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
+    return simd_sum(val);
 }
 
 // ---------------------------------------------------------------------------

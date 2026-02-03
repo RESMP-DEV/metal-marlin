@@ -1,3 +1,5 @@
+#include "reduction_helpers.metal"
+
 // tree_attention.metal - Tree-structured attention for Eagle v3 speculative decoding
 //
 // Eagle v3 uses tree-structured speculative decoding where multiple draft paths
@@ -65,79 +67,57 @@ constant constexpr uint SIMDGROUPS_TREE = 4;
 
 // ---------------------------------------------------------------------------
 // Utility: threadgroup reductions
+//
+// IMPORTANT: threadgroup_barrier must be called uniformly from kernel scope,
+// not from helper functions (Metal spec requirement). These macros inline the
+// reduction logic to ensure barriers execute at kernel scope.
 // ---------------------------------------------------------------------------
 
-inline float simd_max_tree(float val) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
-}
+// THREADGROUP_REDUCE_MAX_TREE: Reduces val across all threads, stores result in result_var
+// Requires: tid (thread index), scratch (threadgroup float* of size >= SIMDGROUPS_TREE)
+// Uses barriers - must be called from kernel scope
+#define THREADGROUP_REDUCE_MAX_TREE(val, tid, scratch, result_var) do { \
+    float _tgrm_sg_max = simd_max(val); \
+    uint _tgrm_sg_id = (tid) / 32; \
+    uint _tgrm_lane = (tid) % 32; \
+    if (_tgrm_lane == 0) { \
+        (scratch)[_tgrm_sg_id] = _tgrm_sg_max; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float _tgrm_result = -INFINITY; \
+    if (_tgrm_sg_id == 0) { \
+        float _tgrm_v = (_tgrm_lane < SIMDGROUPS_TREE) ? (scratch)[_tgrm_lane] : -INFINITY; \
+        _tgrm_result = simd_max(_tgrm_v); \
+        if (_tgrm_lane == 0) { \
+            (scratch)[0] = _tgrm_result; \
+        } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    (result_var) = (scratch)[0]; \
+} while(0)
 
-inline float simd_sum_tree(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
-}
-
-inline float threadgroup_reduce_max_tree(
-    float val,
-    uint tid,
-    threadgroup float* scratch
-) {
-    float sg_max = simd_max_tree(val);
-    uint sg_id = tid / 32;
-    uint lane = tid % 32;
-    if (lane == 0) {
-        scratch[sg_id] = sg_max;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float result;
-    if (sg_id == 0) {
-        float v = (lane < SIMDGROUPS_TREE) ? scratch[lane] : -INFINITY;
-        result = simd_max_tree(v);
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        scratch[0] = result;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return scratch[0];
-}
-
-inline float threadgroup_reduce_sum_tree(
-    float val,
-    uint tid,
-    threadgroup float* scratch
-) {
-    float sg_sum = simd_sum_tree(val);
-    uint sg_id = tid / 32;
-    uint lane = tid % 32;
-    if (lane == 0) {
-        scratch[sg_id] = sg_sum;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    float result;
-    if (sg_id == 0) {
-        float v = (lane < SIMDGROUPS_TREE) ? scratch[lane] : 0.0f;
-        result = simd_sum_tree(v);
-    }
-
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (tid == 0) {
-        scratch[0] = result;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return scratch[0];
-}
+// THREADGROUP_REDUCE_SUM_TREE: Reduces val across all threads, stores result in result_var
+// Requires: tid (thread index), scratch (threadgroup float* of size >= SIMDGROUPS_TREE)
+// Uses barriers - must be called from kernel scope
+#define THREADGROUP_REDUCE_SUM_TREE(val, tid, scratch, result_var) do { \
+    float _tgrs_sg_sum = simd_sum(val); \
+    uint _tgrs_sg_id = (tid) / 32; \
+    uint _tgrs_lane = (tid) % 32; \
+    if (_tgrs_lane == 0) { \
+        (scratch)[_tgrs_sg_id] = _tgrs_sg_sum; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float _tgrs_result = 0.0f; \
+    if (_tgrs_sg_id == 0) { \
+        float _tgrs_v = (_tgrs_lane < SIMDGROUPS_TREE) ? (scratch)[_tgrs_lane] : 0.0f; \
+        _tgrs_result = simd_sum(_tgrs_v); \
+        if (_tgrs_lane == 0) { \
+            (scratch)[0] = _tgrs_result; \
+        } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    (result_var) = (scratch)[0]; \
+} while(0)
 
 // ---------------------------------------------------------------------------
 // Tree Attention Forward Kernel
@@ -282,7 +262,8 @@ kernel void tree_attention_forward(
         }
 
         // Reduce to get tile max
-        float tile_max = threadgroup_reduce_max_tree(thread_max_tile, tid, reduction_scratch);
+        float tile_max;
+        THREADGROUP_REDUCE_MAX_TREE(thread_max_tile, tid, reduction_scratch, tile_max);
 
         // Update global running max and rescale
         float prev_max = running_max;
@@ -454,7 +435,8 @@ kernel void tree_attention_forward_with_prefix_causal(
             thread_max_tile = max(thread_max_tile, score);
         }
 
-        float tile_max = threadgroup_reduce_max_tree(thread_max_tile, tid, reduction_scratch);
+        float tile_max;
+        THREADGROUP_REDUCE_MAX_TREE(thread_max_tile, tid, reduction_scratch, tile_max);
         float prev_max = running_max;
         running_max = max(running_max, tile_max);
 
@@ -607,7 +589,8 @@ kernel void tree_attention_forward_packed_mask(
             thread_max_tile = max(thread_max_tile, score);
         }
 
-        float tile_max = threadgroup_reduce_max_tree(thread_max_tile, tid, reduction_scratch);
+        float tile_max;
+        THREADGROUP_REDUCE_MAX_TREE(thread_max_tile, tid, reduction_scratch, tile_max);
         float prev_max = running_max;
         running_max = max(running_max, tile_max);
 

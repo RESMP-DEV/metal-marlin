@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import click
+import numpy as np
 
 # Quantization methods
 QUANT_METHODS = ["rtn", "gptq", "mr-gptq"]
@@ -21,9 +22,30 @@ CALIBRATION_SOURCES = ["bartowski-v3", "wikitext2", "c4"]
 QUALITY_DATASETS = ["wikitext", "wikitext2", "wikitext-2", "c4", "bartowski-v3"]
 
 
+def _enable_metal_hud() -> None:
+    """Enable Metal Performance HUD for GPU profiling.
+
+    Sets MTL_HUD_ENABLED=1 to display real-time overlay showing:
+    - GPU utilization
+    - Memory bandwidth
+    - Kernel execution time
+    """
+    os.environ["MTL_HUD_ENABLED"] = "1"
+
+
 @click.group()
-def cli():
+@click.option(
+    "--metal-hud",
+    is_flag=True,
+    envvar="MTL_HUD_ENABLED",
+    help="Enable Metal Performance HUD overlay for GPU profiling",
+)
+@click.pass_context
+def cli(ctx: click.Context, metal_hud: bool) -> None:
     """Metal Marlin: FP4-quantized LLM inference on Apple Silicon."""
+    ctx.ensure_object(dict)
+    if metal_hud:
+        _enable_metal_hud()
 
 
 @cli.command()
@@ -199,6 +221,8 @@ def chat(
               help="Number of KV cache blocks (only with --enable-batching)")
 @click.option("--block-size", default=16, type=int,
               help="Tokens per KV cache block (only with --enable-batching)")
+@click.option("--metrics-port", default=None, type=int,
+              help="Dedicated port for Prometheus metrics (default: served on main port at /metrics)")
 def serve(
     model_path: str,
     host: str,
@@ -208,6 +232,7 @@ def serve(
     enable_batching: bool,
     num_kv_blocks: int,
     block_size: int,
+    metrics_port: int | None,
 ):
     """Start OpenAI-compatible API server.
 
@@ -245,6 +270,7 @@ def serve(
             enable_batching=enable_batching,
             num_kv_blocks=num_kv_blocks,
             block_size=block_size,
+            metrics_port=metrics_port,
         )
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")
@@ -1088,7 +1114,9 @@ def _load_quantization_metadata(
 
     if group_size is None:
         try:
-            group_size = int(meta.get("group_size", 0)) or None
+            val = meta.get("group_size", 0)
+            if val and isinstance(val, (int, str, bytes)):
+                group_size = int(val)
         except (TypeError, ValueError):
             group_size = None
 
@@ -1170,11 +1198,17 @@ def _compute_layer_rmse(
                 continue
             if original.ndim != 2:
                 continue
+            gs_val = entry.get("group_size", 128)
+            # Ensure group_size is an int
+            if isinstance(gs_val, np.ndarray):
+                gs = int(gs_val.item())
+            else:
+                gs = int(gs_val)
             err = compute_quantization_error(
                 original,
                 entry["packed"],
                 entry["scales"],
-                group_size=entry.get("group_size", 128),
+                group_size=gs,
             )
             layer_rmse[name] = float(err["rmse"])
             rmse_values.append(float(err["rmse"]))
@@ -1423,15 +1457,16 @@ def quality_layers(
 
     layer_rmse = {}
     mean_rmse = mean_rmse_meta
-    try:
-        layer_rmse, mean_rmse = _compute_layer_rmse(
-            model_path,
-            quantized_path,
-            verbose=verbose,
-        )
-    except Exception as exc:
-        if verbose:
-            click.echo(f"Warning: layer RMSE skipped ({exc})", err=True)
+    if model_path is not None:
+        try:
+            layer_rmse, mean_rmse = _compute_layer_rmse(
+                model_path,
+                quantized_path,
+                verbose=verbose,
+            )
+        except Exception as exc:
+            if verbose:
+                click.echo(f"Warning: layer RMSE skipped ({exc})", err=True)
 
     report = {
         "model_id": model,

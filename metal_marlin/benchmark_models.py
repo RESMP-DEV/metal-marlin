@@ -931,7 +931,8 @@ def _download_gguf_model(
             if verbose:
                 print(f"  Warning: Could not download GGUF ({e})")
             # Return placeholder for testing
-            output_path = Path("/tmp/placeholder.gguf")
+            import tempfile
+            output_path = Path(tempfile.gettempdir()) / "placeholder.gguf"
             return output_path, 5.0
 
     size_gb = output_path.stat().st_size / 1e9 if output_path.exists() else 5.0
@@ -957,12 +958,12 @@ def _run_llama_cpp_perplexity(
     # Try to find llama-perplexity binary
     llama_perplexity = shutil.which("llama-perplexity")
     if not llama_perplexity:
-        # Check common build locations
+        # Check common build locations (user home paths and platform-specific system paths)
         common_paths = [
             Path.home() / "llama.cpp" / "build" / "bin" / "llama-perplexity",
             Path.home() / "llama.cpp" / "llama-perplexity",
-            Path("/usr/local/bin/llama-perplexity"),
-            Path("/opt/homebrew/bin/llama-perplexity"),
+            Path(__file__).parent.parent.parent / "llama.cpp" / "build" / "bin" / "llama-perplexity",
+            Path(__file__).parent.parent.parent / "llama.cpp" / "llama-perplexity",
         ]
         for p in common_paths:
             if p.exists():

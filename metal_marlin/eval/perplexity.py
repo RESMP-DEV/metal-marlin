@@ -500,6 +500,7 @@ def attention_forward(
     # Apply RoPE
     if positions is None:
         positions = np.arange(seq_len)
+    assert positions is not None
 
     for h in range(num_heads):
         q[:, :, h, :] = rope_embed(q[:, :, h, :], positions, rope_theta)

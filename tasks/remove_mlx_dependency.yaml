@@ -71,7 +71,7 @@ tasks:
 
       After creating, verify with:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
       python3 -c "from metal_marlin._compat import HAS_MLX, HAS_TORCH; print(f'MLX: {HAS_MLX}, Torch: {HAS_TORCH}')"
       ```
 
@@ -109,7 +109,7 @@ tasks:
 
       After refactoring, test with:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
       python3 -c "
       import numpy as np
       from metal_marlin.quantize import pack_fp4_weights, unpack_fp4_weights
@@ -296,7 +296,7 @@ tasks:
 
       Run tests after to verify:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
+      cd ~/AlphaHENG/contrib/iq-vs-k-bench/metal_marlin
       python3 -m pytest tests/test_gemm_accuracy.py -v --collect-only
       ```
 

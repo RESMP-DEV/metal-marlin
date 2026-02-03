@@ -33,36 +33,27 @@ from __future__ import annotations
 
 import struct
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import numpy as np
+
+from metal_marlin._compat import HAS_MPS, HAS_PYOBJC_METAL, Metal, torch
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-# Dependency checks
-try:
-    import torch
+    from metal_marlin._compat import Tensor
 
-    HAS_TORCH = True
-    HAS_MPS = torch.backends.mps.is_available()
-except ImportError:
-    HAS_TORCH = False
-    HAS_MPS = False
-    torch = None  # type: ignore[assignment]
-
-try:
-    import Foundation
-    import Metal
-
-    HAS_METAL = True
-except ImportError:
-    HAS_METAL = False
-    Metal = None
-    Foundation = None  # type: ignore[assignment]
+    # Use string forward references for Metal types if needed,
+    # or just use Any if they are hard to type without the framework.
+    MTLDevice = Any
+    MTLCommandQueue = Any
+    MTLComputePipelineState = Any
+    MTLBuffer = Any
 
 _SHADER_DIR = Path(__file__).parent.parent.parent / "src"
 
+T = TypeVar("T", bound="Tensor")
 
 class VisionMetal:
     """Metal-accelerated vision preprocessing operations.
@@ -89,7 +80,7 @@ class VisionMetal:
         torch.Size([1, 3, 224, 224])
     """
 
-    def __init__(self, device: torch.device | None = None):
+    def __init__(self, device: MTLDevice | None = None):
         """Initialize Vision Metal dispatcher.
 
         Args:
@@ -98,30 +89,33 @@ class VisionMetal:
         Raises:
             RuntimeError: If Metal or PyTorch MPS is not available.
         """
-        if not HAS_METAL:
+        if not HAS_PYOBJC_METAL or Metal is None:
             raise RuntimeError(
                 "VisionMetal requires PyObjC Metal. Install with:\n"
                 "  pip install pyobjc-framework-Metal"
             )
-        if not HAS_MPS:
+        if not HAS_MPS or torch is None:
             raise RuntimeError("VisionMetal requires PyTorch MPS backend (Apple Silicon).")
 
-        self._device = device or Metal.MTLCreateSystemDefaultDevice()
-        self._command_queue = self._device.newCommandQueue()
+        self._device: MTLDevice = device or Metal.MTLCreateSystemDefaultDevice()
+        self._command_queue: MTLCommandQueue = self._device.newCommandQueue()
 
         # Load shader source
         shader_path = _SHADER_DIR / "vision_preprocess.metal"
         if not shader_path.exists():
             raise FileNotFoundError(f"Shader not found: {shader_path}")
-        self._shader_source = shader_path.read_text()
+        self._shader_source: str = shader_path.read_text()
 
         # Compile pipelines lazily
-        self._pipelines: dict[str, any] = {}
+        self._pipelines: dict[str, MTLComputePipelineState] = {}
 
-    def _get_pipeline(self, function_name: str):
+    def _get_pipeline(self, function_name: str) -> MTLComputePipelineState:
         """Compile and cache a compute pipeline for the given kernel function."""
         if function_name in self._pipelines:
             return self._pipelines[function_name]
+
+        if Metal is None:
+             raise RuntimeError("Metal is not available")
 
         options = Metal.MTLCompileOptions.new()
         library, error = self._device.newLibraryWithSource_options_error_(
@@ -144,8 +138,8 @@ class VisionMetal:
         return pipeline
 
     def _ensure_mps_tensor(
-        self, tensor: torch.Tensor | NDArray, dtype: torch.dtype = torch.float32
-    ) -> torch.Tensor:
+        self, tensor: Tensor | NDArray[Any], dtype: Any = None
+    ) -> Tensor:
         """Ensure tensor is on MPS device with correct dtype.
 
         Args:
@@ -155,15 +149,25 @@ class VisionMetal:
         Returns:
             Tensor on MPS device
         """
-        if isinstance(tensor, np.ndarray):
-            tensor = torch.from_numpy(tensor)
-        if tensor.device.type != "mps":
-            tensor = tensor.to("mps")
-        if tensor.dtype != dtype:
-            tensor = tensor.to(dtype)
-        return tensor.contiguous()
+        if torch is None:
+            raise RuntimeError("Torch is not available")
 
-    def _create_buffer(self, data: bytes | np.ndarray) -> any:
+        if dtype is None:
+            dtype = torch.float32
+        
+        t: Tensor
+        if isinstance(tensor, np.ndarray):
+            t = torch.from_numpy(tensor)
+        else:
+            t = tensor
+            
+        if t.device.type != "mps":
+            t = t.to("mps")
+        if t.dtype != dtype:
+            t = t.to(dtype)
+        return t.contiguous()
+
+    def _create_buffer(self, data: bytes | NDArray[Any]) -> MTLBuffer:
         """Create a Metal buffer from bytes or numpy array.
 
         Args:
@@ -172,13 +176,16 @@ class VisionMetal:
         Returns:
             Metal buffer object
         """
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
         if isinstance(data, np.ndarray):
             data = data.tobytes()
         return self._device.newBufferWithBytes_length_options_(
             data, len(data), Metal.MTLResourceStorageModeShared
         )
 
-    def _tensor_to_buffer(self, tensor: torch.Tensor) -> any:
+    def _tensor_to_buffer(self, tensor: Tensor) -> MTLBuffer:
         """Convert a PyTorch tensor to a Metal buffer.
 
         Args:
@@ -187,6 +194,9 @@ class VisionMetal:
         Returns:
             Metal buffer containing tensor data
         """
+        if torch is None:
+            raise RuntimeError("Torch is not available")
+
         # Ensure tensor is on CPU for buffer creation
         if tensor.device.type == "mps":
             torch.mps.synchronize()
@@ -194,8 +204,8 @@ class VisionMetal:
         return self._create_buffer(np_array)
 
     def _buffer_to_tensor(
-        self, buffer: any, shape: tuple[int, ...], dtype: type = np.float32
-    ) -> torch.Tensor:
+        self, buffer: MTLBuffer, shape: tuple[int, ...], dtype: Any = np.float32
+    ) -> Tensor:
         """Copy data from Metal buffer back to PyTorch tensor.
 
         Args:
@@ -206,6 +216,9 @@ class VisionMetal:
         Returns:
             PyTorch tensor on MPS device
         """
+        if torch is None:
+            raise RuntimeError("Torch is not available")
+
         nbytes = int(np.prod(shape)) * np.dtype(dtype).itemsize
         result_bytes = buffer.contents().as_buffer(nbytes)
         np_array = np.frombuffer(result_bytes, dtype=dtype).reshape(shape)
@@ -213,10 +226,10 @@ class VisionMetal:
 
     def resize_bilinear(
         self,
-        input: torch.Tensor,
+        input: Tensor | NDArray[Any],
         target_size: tuple[int, int],
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Resize image using bilinear interpolation.
 
         Args:
@@ -233,31 +246,34 @@ class VisionMetal:
             >>> print(resized.shape)
             torch.Size([2, 3, 224, 224])
         """
-        input = self._ensure_mps_tensor(input)
-        batch_size = input.shape[0]
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
 
         if nhwc:
-            H_in, W_in, C = input.shape[1], input.shape[2], input.shape[3]
-            output_shape = (batch_size, target_size[0], target_size[1], C)
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
         else:
-            C, H_in, W_in = input.shape[1], input.shape[2], input.shape[3]
-            output_shape = (batch_size, C, target_size[0], target_size[1])
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
 
-        H_out, W_out = target_size
+        h_out, w_out = target_size
 
         # Create output buffer
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
 
         # Pack parameters: [batch_size, H_in, W_in, H_out, W_out, channels, nhwc]
-        params_bytes = struct.pack("7I", batch_size, H_in, W_in, H_out, W_out, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
 
         # Create input buffer
-        input_buffer = self._tensor_to_buffer(input)
+        input_buffer = self._tensor_to_buffer(input_tensor)
 
         # Get pipeline and dispatch
         pipeline = self._get_pipeline("image_resize_bilinear")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -268,7 +284,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
 
         # Grid: one thread per output pixel
-        grid_size = Metal.MTLSizeMake(W_out, H_out, batch_size)
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -280,10 +296,10 @@ class VisionMetal:
 
     def resize_bicubic(
         self,
-        input: torch.Tensor,
+        input: Tensor | NDArray[Any],
         target_size: tuple[int, int],
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Resize image using bicubic interpolation (higher quality).
 
         Args:
@@ -298,26 +314,29 @@ class VisionMetal:
             >>> image = torch.randn(1, 3, 512, 512, device="mps")
             >>> resized = vision.resize_bicubic(image, (224, 224))
         """
-        input = self._ensure_mps_tensor(input)
-        batch_size = input.shape[0]
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
 
         if nhwc:
-            H_in, W_in, C = input.shape[1], input.shape[2], input.shape[3]
-            output_shape = (batch_size, target_size[0], target_size[1], C)
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
         else:
-            C, H_in, W_in = input.shape[1], input.shape[2], input.shape[3]
-            output_shape = (batch_size, C, target_size[0], target_size[1])
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
 
-        H_out, W_out = target_size
+        h_out, w_out = target_size
 
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
 
-        params_bytes = struct.pack("7I", batch_size, H_in, W_in, H_out, W_out, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
-        input_buffer = self._tensor_to_buffer(input)
+        input_buffer = self._tensor_to_buffer(input_tensor)
 
         pipeline = self._get_pipeline("image_resize_bicubic")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -327,7 +346,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
 
-        grid_size = Metal.MTLSizeMake(W_out, H_out, batch_size)
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -339,11 +358,11 @@ class VisionMetal:
 
     def normalize(
         self,
-        image: torch.Tensor,
-        mean: tuple[float, ...] | list[float] | torch.Tensor,
-        std: tuple[float, ...] | list[float] | torch.Tensor,
+        image: Tensor | NDArray[Any],
+        mean: tuple[float, ...] | list[float] | Tensor,
+        std: tuple[float, ...] | list[float] | Tensor,
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Apply channel-wise normalization: output = (input - mean) / std.
 
         Args:
@@ -361,45 +380,52 @@ class VisionMetal:
             >>> std = (0.229, 0.224, 0.225)
             >>> normalized = vision.normalize(image, mean, std)
         """
-        image = self._ensure_mps_tensor(image)
-        batch_size = image.shape[0]
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
 
         if nhwc:
-            H, W, C = image.shape[1], image.shape[2], image.shape[3]
+            h, w, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
         else:
-            C, H, W = image.shape[1], image.shape[2], image.shape[3]
+            channels, h, w = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
 
         # Convert mean/std to numpy arrays
         if isinstance(mean, (tuple, list)):
             mean_np = np.array(mean, dtype=np.float32)
-        else:
+        elif torch is not None and isinstance(mean, torch.Tensor):
             mean_np = mean.detach().cpu().numpy().astype(np.float32)
+        else:
+            mean_np = np.asarray(mean, dtype=np.float32)
 
         if isinstance(std, (tuple, list)):
             std_np = np.array(std, dtype=np.float32)
-        else:
+        elif torch is not None and isinstance(std, torch.Tensor):
             std_np = std.detach().cpu().numpy().astype(np.float32)
+        else:
+            std_np = np.asarray(std, dtype=np.float32)
 
         # Precompute 1/std for efficiency
         std_inv_np = 1.0 / std_np
 
         # Output buffer
-        output_shape = image.shape
+        output_shape = image_tensor.shape
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
 
         # Input buffer
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_tensor)
 
         # Mean and std_inv buffers
         mean_buffer = self._create_buffer(mean_np)
         std_inv_buffer = self._create_buffer(std_inv_np)
 
         # Params: [batch_size, height, width, channels, nhwc]
-        params_bytes = struct.pack("5I", batch_size, H, W, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("5I", batch_size, h, w, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("image_normalize")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -411,7 +437,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(std_inv_buffer, 0, 3)
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 4)
 
-        grid_size = Metal.MTLSizeMake(W, H, batch_size)
+        grid_size = Metal.MTLSizeMake(w, h, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -423,12 +449,12 @@ class VisionMetal:
 
     def resize_and_normalize(
         self,
-        image: torch.Tensor,
+        image: Tensor | NDArray[Any],
         size: tuple[int, int],
-        mean: tuple[float, ...] | list[float] | torch.Tensor,
-        std: tuple[float, ...] | list[float] | torch.Tensor,
+        mean: tuple[float, ...] | list[float] | Tensor,
+        std: tuple[float, ...] | list[float] | Tensor,
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Fused resize and normalize in a single pass (faster, less memory).
 
         This performs bilinear resize and channel-wise normalization in a single
@@ -450,41 +476,48 @@ class VisionMetal:
             >>> std = (0.229, 0.224, 0.225)
             >>> result = vision.resize_and_normalize(image, (224, 224), mean, std)
         """
-        image = self._ensure_mps_tensor(image)
-        batch_size = image.shape[0]
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
 
         if nhwc:
-            H_in, W_in, C = image.shape[1], image.shape[2], image.shape[3]
-            output_shape = (batch_size, size[0], size[1], C)
+            h_in, w_in, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, size[0], size[1], channels)
         else:
-            C, H_in, W_in = image.shape[1], image.shape[2], image.shape[3]
-            output_shape = (batch_size, C, size[0], size[1])
+            channels, h_in, w_in = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, channels, size[0], size[1])
 
-        H_out, W_out = size
+        h_out, w_out = size
 
         # Convert mean/std to numpy arrays
         if isinstance(mean, (tuple, list)):
             mean_np = np.array(mean, dtype=np.float32)
-        else:
+        elif torch is not None and isinstance(mean, torch.Tensor):
             mean_np = mean.detach().cpu().numpy().astype(np.float32)
+        else:
+            mean_np = np.asarray(mean, dtype=np.float32)
 
         if isinstance(std, (tuple, list)):
             std_np = np.array(std, dtype=np.float32)
-        else:
+        elif torch is not None and isinstance(std, torch.Tensor):
             std_np = std.detach().cpu().numpy().astype(np.float32)
+        else:
+            std_np = np.asarray(std, dtype=np.float32)
 
         std_inv_np = 1.0 / std_np
 
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_tensor)
         mean_buffer = self._create_buffer(mean_np)
         std_inv_buffer = self._create_buffer(std_inv_np)
 
-        params_bytes = struct.pack("7I", batch_size, H_in, W_in, H_out, W_out, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("image_resize_normalize_fused")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -496,7 +529,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(std_inv_buffer, 0, 3)
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 4)
 
-        grid_size = Metal.MTLSizeMake(W_out, H_out, batch_size)
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -508,9 +541,9 @@ class VisionMetal:
 
     def extract_patches(
         self,
-        image: torch.Tensor,
+        image: Tensor | NDArray[Any],
         patch_size: int,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Extract non-overlapping patches for Vision Transformer models.
 
         Converts image [N, H, W, C] -> patches [N, num_patches, patch_dim]
@@ -535,30 +568,33 @@ class VisionMetal:
             >>> print(patches.shape)
             torch.Size([1, 196, 768])
         """
-        image = self._ensure_mps_tensor(image)
-        batch_size = image.shape[0]
-        H, W, C = image.shape[1], image.shape[2], image.shape[3]
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
+        h, w, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
 
-        if H % patch_size != 0 or W % patch_size != 0:
+        if h % patch_size != 0 or w % patch_size != 0:
             raise ValueError(
-                f"Image dimensions (H={H}, W={W}) must be divisible by patch_size={patch_size}"
+                f"Image dimensions (h={h}, w={w}) must be divisible by patch_size={patch_size}"
             )
 
-        patches_h = H // patch_size
-        patches_w = W // patch_size
+        patches_h = h // patch_size
+        patches_w = w // patch_size
         num_patches = patches_h * patches_w
-        patch_dim = patch_size * patch_size * C
+        patch_dim = patch_size * patch_size * channels
 
         output_shape = (batch_size, num_patches, patch_dim)
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_tensor)
 
         # Params: [batch_size, height, width, channels, patch_size]
-        params_bytes = struct.pack("5I", batch_size, H, W, C, patch_size)
+        params_bytes = struct.pack("5I", batch_size, h, w, channels, patch_size)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("vit_patch_extract")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -580,11 +616,11 @@ class VisionMetal:
 
     def preprocess_qwen2vl(
         self,
-        image: torch.Tensor,
+        image: Tensor | NDArray[Any],
         max_pixels: int = 1024 * 1024,
         patch_size: int = 14,
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Dynamic resolution preprocessing for Qwen2-VL style models.
 
         Qwen2-VL approach:
@@ -607,44 +643,46 @@ class VisionMetal:
             >>> image = torch.randn(1, 3, 1080, 1920, device="mps")  # HD image
             >>> processed = vision.preprocess_qwen2vl(image, max_pixels=512*512)
         """
-        image = self._ensure_mps_tensor(image)
-        batch_size = image.shape[0]
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
 
         if nhwc:
-            H_in, W_in, C = image.shape[1], image.shape[2], image.shape[3]
+            h_in, w_in, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
         else:
-            C, H_in, W_in = image.shape[1], image.shape[2], image.shape[3]
+            channels, h_in, w_in = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
 
         # Calculate target size maintaining aspect ratio
-        aspect_ratio = W_in / H_in
-        total_pixels = H_in * W_in
+        total_pixels = h_in * w_in
 
         if total_pixels > max_pixels:
             scale = (max_pixels / total_pixels) ** 0.5
-            H_out = int(H_in * scale)
-            W_out = int(W_in * scale)
+            h_out_raw = int(h_in * scale)
+            w_out_raw = int(w_in * scale)
         else:
-            H_out, W_out = H_in, W_in
+            h_out_raw, w_out_raw = h_in, w_in
 
         # Round to be divisible by patch_size
-        H_out = (H_out // patch_size) * patch_size
-        W_out = (W_out // patch_size) * patch_size
-        H_out = max(H_out, patch_size)
-        W_out = max(W_out, patch_size)
+        h_out = (h_out_raw // patch_size) * patch_size
+        w_out = (w_out_raw // patch_size) * patch_size
+        h_out = max(h_out, patch_size)
+        w_out = max(w_out, patch_size)
 
         if nhwc:
-            output_shape = (batch_size, H_out, W_out, C)
+            output_shape = (batch_size, h_out, w_out, channels)
         else:
-            output_shape = (batch_size, C, H_out, W_out)
+            output_shape = (batch_size, channels, h_out, w_out)
 
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_tensor)
 
-        params_bytes = struct.pack("7I", batch_size, H_in, W_in, H_out, W_out, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("dynamic_resize_qwen2vl")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -654,7 +692,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
 
-        grid_size = Metal.MTLSizeMake(W_out, H_out, batch_size)
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -666,8 +704,8 @@ class VisionMetal:
 
     def uint8_to_float(
         self,
-        image: torch.Tensor,
-    ) -> torch.Tensor:
+        image: Tensor,
+    ) -> Tensor:
         """Convert uint8 [0, 255] to float [0, 1] range.
 
         Common preprocessing step before resize/normalize for images loaded
@@ -685,20 +723,26 @@ class VisionMetal:
             >>> print(float_image.min(), float_image.max())
             tensor(0.) tensor(0.9961)
         """
+        if torch is None:
+            raise RuntimeError("Torch is not available")
+
         if image.dtype != torch.uint8:
             raise ValueError(f"Input must be uint8, got {image.dtype}")
 
-        image = image.contiguous()
-        total_elements = int(np.prod(image.shape))
+        image_contig = image.contiguous()
+        total_elements = int(np.prod(image_contig.shape))
 
-        output_np = np.empty(image.shape, dtype=np.float32)
+        output_np = np.empty(image_contig.shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_contig)
 
         params_bytes = struct.pack("I", total_elements)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("uint8_to_float")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
 
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
@@ -719,14 +763,14 @@ class VisionMetal:
         command_buffer.commit()
         command_buffer.waitUntilCompleted()
 
-        return self._buffer_to_tensor(output_buffer, image.shape)
+        return self._buffer_to_tensor(output_buffer, image_contig.shape)
 
     def center_crop(
         self,
-        image: torch.Tensor,
+        image: Tensor | NDArray[Any],
         size: tuple[int, int],
         nhwc: bool = False,
-    ) -> torch.Tensor:
+    ) -> Tensor:
         """Center crop an image to target size.
 
         Crops from the center, discarding border pixels equally from all sides.
@@ -748,33 +792,36 @@ class VisionMetal:
             >>> print(cropped.shape)
             torch.Size([1, 3, 224, 224])
         """
-        image = self._ensure_mps_tensor(image)
-        batch_size = image.shape[0]
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
 
         if nhwc:
-            H_in, W_in, C = image.shape[1], image.shape[2], image.shape[3]
-            output_shape = (batch_size, size[0], size[1], C)
+            h_in, w_in, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, size[0], size[1], channels)
         else:
-            C, H_in, W_in = image.shape[1], image.shape[2], image.shape[3]
-            output_shape = (batch_size, C, size[0], size[1])
+            channels, h_in, w_in = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, channels, size[0], size[1])
 
-        H_out, W_out = size
+        h_out, w_out = size
 
-        if H_out > H_in or W_out > W_in:
+        if h_out > h_in or w_out > w_in:
             raise ValueError(
-                f"Target size ({H_out}, {W_out}) cannot be larger than input size ({H_in}, {W_in})"
+                f"Target size ({h_out}, {w_out}) cannot be larger than input size ({h_in}, {w_in})"
             )
 
         output_np = np.empty(output_shape, dtype=np.float32)
         output_buffer = self._create_buffer(output_np)
-        input_buffer = self._tensor_to_buffer(image)
+        input_buffer = self._tensor_to_buffer(image_tensor)
 
-        params_bytes = struct.pack("7I", batch_size, H_in, W_in, H_out, W_out, C, 1 if nhwc else 0)
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
         params_buffer = self._create_buffer(params_bytes)
 
         pipeline = self._get_pipeline("center_crop")
 
-        command_buffer = self._command_queue.commandBuffer()
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandQueue().commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
 
         encoder.setComputePipelineState_(pipeline)
@@ -782,7 +829,7 @@ class VisionMetal:
         encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
         encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
 
-        grid_size = Metal.MTLSizeMake(W_out, H_out, batch_size)
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
         tg_size = Metal.MTLSizeMake(16, 16, 1)
 
         encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
@@ -794,11 +841,11 @@ class VisionMetal:
 
 
 def preprocess_for_vit(
-    images: list[torch.Tensor] | torch.Tensor,
+    images: list[Tensor] | Tensor | list[NDArray[Any]] | NDArray[Any],
     target_size: tuple[int, int] = (224, 224),
     mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
     std: tuple[float, float, float] = (0.229, 0.224, 0.225),
-) -> torch.Tensor:
+) -> Tensor:
     """Standard ImageNet preprocessing pipeline on GPU.
 
     Performs the following operations:
@@ -816,57 +863,58 @@ def preprocess_for_vit(
 
     Returns:
         Batched preprocessed tensor [N, C, H, W] on MPS device
-
-    Example:
-        >>> # Single image
-        >>> image = torch.randn(3, 256, 256)
-        >>> batch = preprocess_for_vit([image])
-        >>> print(batch.shape)
-        torch.Size([1, 3, 224, 224])
-
-        >>> # Multiple images
-        >>> images = [torch.randn(3, 512, 512) for _ in range(4)]
-        >>> batch = preprocess_for_vit(images, target_size=(384, 384))
-        >>> print(batch.shape)
-        torch.Size([4, 3, 384, 384])
-
-        >>> # Already batched
-        >>> batch_input = torch.randn(8, 3, 256, 256)
-        >>> batch = preprocess_for_vit(batch_input)
-        >>> print(batch.shape)
-        torch.Size([8, 3, 224, 224])
     """
-    if not HAS_TORCH:
+    if torch is None:
         raise RuntimeError("preprocess_for_vit requires PyTorch")
 
     vision = VisionMetal()
 
-    # Handle already-batched input
-    if isinstance(images, torch.Tensor):
-        if images.ndim == 4:
+    image_list: list[Tensor]
+    
+    if isinstance(images, list):
+        image_list = []
+        for img in images:
+            if isinstance(img, np.ndarray):
+                image_list.append(cast("Tensor", torch.from_numpy(img)))
+            elif isinstance(img, (torch.Tensor, Tensor)):
+                image_list.append(img)
+            else:
+                raise TypeError(f"Unsupported type in list: {type(img)}")
+    elif isinstance(images, (torch.Tensor, Tensor)):
+        img_tensor = cast("Tensor", images)
+        if img_tensor.ndim == 4:
             # Already batched [N, C, H, W]
-            return vision.resize_and_normalize(images, target_size, mean, std)
-        elif images.ndim == 3:
+            return vision.resize_and_normalize(img_tensor, target_size, mean, std)
+        elif img_tensor.ndim == 3:
             # Single image [C, H, W], add batch dim
-            images = [images]
+            image_list = [img_tensor]
         else:
-            raise ValueError(f"Input tensor must be 3D or 4D, got {images.ndim}D")
+            raise ValueError(f"Input tensor must be 3D or 4D, got {img_tensor.ndim}D")
+    elif isinstance(images, np.ndarray):
+        img_np = images
+        if img_np.ndim == 4:
+            return vision.resize_and_normalize(img_np, target_size, mean, std)
+        elif img_np.ndim == 3:
+            image_list = [cast("Tensor", torch.from_numpy(img_np))]
+        else:
+            raise ValueError(f"Input array must be 3D or 4D, got {img_np.ndim}D")
+    else:
+        raise TypeError(f"Unsupported type for images: {type(images)}")
 
     # Stack list of images into batch
     # First ensure all are on MPS and same dtype
-    processed = []
-    for img in images:
-        if isinstance(img, np.ndarray):
-            img = torch.from_numpy(img)
-        if img.device.type != "mps":
-            img = img.to("mps")
-        if img.dtype != torch.float32:
-            img = img.to(torch.float32)
+    processed: list[Tensor] = []
+    for img in image_list:
+        t = img
+        if t.device.type != "mps":
+            t = t.to("mps")
+        if t.dtype != torch.float32:
+            t = t.to(torch.float32)
         # Ensure NCHW format [C, H, W]
-        if img.ndim == 3 and img.shape[-1] in [1, 3, 4] and img.shape[0] not in [1, 3, 4]:
+        if t.ndim == 3 and t.shape[-1] in [1, 3, 4] and t.shape[0] not in [1, 3, 4]:
             # Likely HWC format, convert to CHW
-            img = img.permute(2, 0, 1)
-        processed.append(img)
+            t = t.permute(2, 0, 1)
+        processed.append(t)
 
     # Stack into batch [N, C, H, W]
     batch = torch.stack(processed, dim=0)
