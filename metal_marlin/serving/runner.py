@@ -5,6 +5,12 @@ KV cache. Each scheduler iteration produces a SchedulerOutput with
 prefill and decode requests; the runner flattens these into a single
 forward pass with appropriate masking and position encodings.
 
+The runner supports variable sequence lengths within a batch:
+- Prefill sequences can have different prompt lengths (1 to max_position_embeddings)
+- Decode sequences always contribute a single token
+- All sequences are flattened into a contiguous tensor for efficient execution
+- Per-sequence metadata tracks boundaries and lengths for correct attention masking
+
 The runner does NOT own the model or the block allocator. It receives
 them at construction and operates on the block pool in-place.
 
@@ -16,8 +22,9 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
 import torch.nn as nn
@@ -44,6 +51,32 @@ class RoPEModule(Protocol):
     base: float
 
 
+class AttentionModule(Protocol):
+    """Protocol for attention modules."""
+
+    q_proj: nn.Module
+    k_proj: nn.Module
+    v_proj: nn.Module
+    rope: RoPEModule
+    scale: float
+
+
+class TransformerLayer(Protocol):
+    """Protocol for transformer layers."""
+
+    input_layernorm: nn.Module
+    self_attn: AttentionModule
+
+
+class ServedModel(Protocol):
+    """Protocol for models that can be served by BatchedModelRunner."""
+
+    embed_tokens: nn.Module
+    layers: Iterable[TransformerLayer]
+    norm: nn.Module
+    lm_head: nn.Module
+
+
 @dataclass
 class ModelConfig:
     """Configuration for the causal LM being served."""
@@ -64,7 +97,12 @@ class ModelConfig:
 
 @dataclass
 class _BatchMetadata:
-    """Internal metadata for a flattened batch."""
+    """Internal metadata for a flattened batch with variable sequence lengths.
+    
+    Supports batches where each sequence can have different input lengths.
+    Prefill sequences contribute their full prompt (variable length),
+    while decode sequences contribute a single token.
+    """
 
     input_ids: torch.Tensor  # [total_tokens]
     positions: torch.Tensor  # [total_tokens]
@@ -72,9 +110,11 @@ class _BatchMetadata:
     context_lens: torch.Tensor  # [num_seqs]
     slot_offsets: torch.Tensor  # [num_seqs] - write offset for KV cache
     seq_starts: list[int]  # Start index in flattened input per sequence
-    seq_lengths: list[int]  # Number of input tokens per sequence
+    seq_lengths: list[int]  # Number of input tokens per sequence (variable)
     num_prefill: int  # Number of prefill sequences
     num_decode: int  # Number of decode sequences
+    max_seq_len: int  # Maximum sequence length in this batch
+    total_tokens: int  # Total number of tokens across all sequences
 
 
 class BatchedModelRunner:
@@ -96,7 +136,7 @@ class BatchedModelRunner:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: ServedModel,
         config: ModelConfig,
         allocator: BlockAllocator,
         use_metal_kernels: bool = True,
@@ -130,7 +170,17 @@ class BatchedModelRunner:
         return logits
 
     def _build_batch(self, schedule: SchedulerOutput) -> _BatchMetadata:
-        """Flatten prefill + decode requests into contiguous batch tensors."""
+        """Flatten prefill + decode requests into contiguous batch tensors.
+        
+        Supports variable sequence lengths within a single batch. Each prefill
+        sequence contributes its full prompt (varying from 1 to max_position_embeddings),
+        and each decode sequence contributes a single token.
+        
+        The resulting batch has:
+        - Flattened token arrays (input_ids, positions) with total_tokens elements
+        - Per-sequence metadata (seq_starts, seq_lengths) tracking boundaries
+        - Padded block tables to accommodate varying context sizes
+        """
         input_ids_list: list[int] = []
         positions_list: list[int] = []
         block_tables_list: list[list[int]] = []
@@ -141,7 +191,7 @@ class BatchedModelRunner:
 
         offset = 0
 
-        # Prefill: full prompt as input
+        # Prefill: full prompt as input (variable length per sequence)
         for req in schedule.prefill_requests:
             seq_len = req.num_prompt_tokens
             seq_starts.append(offset)
@@ -155,7 +205,7 @@ class BatchedModelRunner:
 
             offset += seq_len
 
-        # Decode: only the last token as input
+        # Decode: only the last token as input (always length 1)
         for req in schedule.decode_requests:
             seq_starts.append(offset)
             seq_lengths.append(1)
@@ -174,6 +224,10 @@ class BatchedModelRunner:
         max_blocks = max(len(bt) for bt in block_tables_list) if block_tables_list else 0
         block_tables_padded = [bt + [0] * (max_blocks - len(bt)) for bt in block_tables_list]
 
+        # Compute batch statistics
+        max_seq_len = max(seq_lengths) if seq_lengths else 0
+        total_tokens = offset
+
         return _BatchMetadata(
             input_ids=torch.tensor(input_ids_list, dtype=torch.int32, device=self.device),
             positions=torch.tensor(positions_list, dtype=torch.int32, device=self.device),
@@ -184,6 +238,8 @@ class BatchedModelRunner:
             seq_lengths=seq_lengths,
             num_prefill=len(schedule.prefill_requests),
             num_decode=len(schedule.decode_requests),
+            max_seq_len=max_seq_len,
+            total_tokens=total_tokens,
         )
 
     def _forward(self, batch: _BatchMetadata) -> torch.Tensor:
@@ -204,7 +260,8 @@ class BatchedModelRunner:
         hidden = self.model.embed_tokens(batch.input_ids)  # [total_tokens, hidden_size]
 
         # Process each transformer layer
-        for layer_idx, layer in enumerate(self.model.layers):
+        for layer_idx, layer_module in enumerate(self.model.layers):
+            layer = cast(TransformerLayer, layer_module)
             hidden = self._layer_forward(layer, layer_idx, hidden, batch)
 
         # Final norm
@@ -225,7 +282,7 @@ class BatchedModelRunner:
 
     def _layer_forward(
         self,
-        layer: nn.Module,
+        layer: TransformerLayer,
         layer_idx: int,
         hidden: torch.Tensor,
         batch: _BatchMetadata,
@@ -256,8 +313,8 @@ class BatchedModelRunner:
         v = v.view(-1, num_kv_heads, head_dim)
 
         # Apply RoPE using position IDs
-        q = self._apply_rope_flat(layer.self_attn.rope, q, batch.positions)
-        k = self._apply_rope_flat(layer.self_attn.rope, k, batch.positions)
+        q = self._apply_rope_flat(cast(RoPEModule, layer.self_attn.rope), q, batch.positions)
+        k = self._apply_rope_flat(cast(RoPEModule, layer.self_attn.rope), k, batch.positions)
 
         # Write K/V into block pool for this layer
         self._write_kv_to_cache(k, v, batch, layer_idx)
@@ -282,7 +339,7 @@ class BatchedModelRunner:
                 block_pool=self._get_layer_pool(layer_idx),
                 block_tables=seq_block_table,
                 context_lens=seq_context_len,
-                scale=layer.self_attn.scale,
+                scale=float(layer.self_attn.scale),
                 num_kv_heads=num_kv_heads,
                 block_size=block_size,
             )

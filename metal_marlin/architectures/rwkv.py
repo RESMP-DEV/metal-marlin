@@ -461,7 +461,7 @@ class RWKVTimeMixing:
         self.layer_id = layer_id
         self.version = version
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
-        self.state_precision = state_precision
+        self.state_precision: Literal["full", "fp32"] = state_precision
         self.use_wkv_kernel = use_wkv_kernel and HAS_METAL_DISPATCH
 
         if self.head_dim * num_heads != hidden_size:
@@ -925,7 +925,7 @@ class RWKVBlock:
         self.layer_id = layer_id
         self.num_layers = num_layers
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
-        self.state_precision = state_precision
+        self.state_precision: Literal["full", "fp32"] = state_precision
 
         self.ln1 = LayerNorm(hidden_size, eps=layer_norm_eps)
         self.ln2 = LayerNorm(hidden_size, eps=layer_norm_eps)

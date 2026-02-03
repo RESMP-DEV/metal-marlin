@@ -7,9 +7,9 @@ tasks:
     prompt: |
       Generate a STATUS.md file for the metal_marlin project.
 
-      First, run the fact collection script:
+      First, run the fact collection script from the metal_marlin directory:
       ```
-      cd /Users/kearm/AlphaHENG/contrib/metal_marlin
+      cd contrib/metal_marlin
       uv run python scripts/collect_status_facts.py > /tmp/status_facts.xml
       ```
 

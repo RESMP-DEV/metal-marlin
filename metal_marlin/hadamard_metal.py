@@ -217,7 +217,7 @@ def hadamard_transform_metal(
 
     Args:
         x: Input tensor [..., block_size] on MPS device.
-        block_size: Size of each Hadamard block. Must be 32, 64, or 128.
+        block_size: Size of each Hadamard block. Must be 32, 64, 96, 128, 160, or 192.
         normalize: If True, normalize by 1/sqrt(block_size) after transform.
 
     Returns:
@@ -225,7 +225,7 @@ def hadamard_transform_metal(
 
     Raises:
         ImportError: If Metal/MPS is not available.
-        ValueError: If block_size is not 32, 64, or 128.
+        ValueError: If block_size is not 32, 64, 96, 128, 160, or 192.
         ValueError: If last dimension of x doesn't equal block_size.
 
     Example:
@@ -240,8 +240,16 @@ def hadamard_transform_metal(
     require_metal()
     require_mps()
 
-    if block_size not in (32, 64, 128):
-        raise ValueError(f"block_size must be 32, 64, or 128, got {block_size}")
+    if block_size not in (32, 64, 96, 128, 160, 192):
+        raise ValueError(f"block_size must be 32, 64, 96, 128, 160, or 192, got {block_size}")
+    
+    # Non-power-of-2 sizes require precompiled kernels from src/hadamard.metal
+    if block_size in (96, 160, 192):
+        raise NotImplementedError(
+            f"block_size={block_size} requires precompiled library from src/hadamard.metal. "
+            "This feature is available in the full C++ build. "
+            "For pure Python usage, use power-of-2 sizes: 32, 64, or 128."
+        )
 
     if x.shape[-1] != block_size:
         raise ValueError(

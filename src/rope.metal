@@ -63,6 +63,43 @@ inline half2 apply_rope_rotation(half x, half y, half cos_val, half sin_val) {
     );
 }
 
+/// Apply rotation to 2 pairs (4 elements) simultaneously using SIMD
+/// Input: half4(x0, y0, x1, y1) where (x0,y0) and (x1,y1) are rotation pairs
+/// cos_sin: half4(cos0, sin0, cos1, sin1) - packed cos/sin for each pair
+/// Returns: half4(x0', y0', x1', y1') rotated values
+inline half4 apply_rope_rotation_x4(half4 xy, half4 cos_sin) {
+    // Extract pairs: (x0, y0) and (x1, y1)
+    // cos_sin contains: (cos0, sin0, cos1, sin1)
+    //
+    // For pair 0: x0' = x0*cos0 - y0*sin0, y0' = x0*sin0 + y0*cos0
+    // For pair 1: x1' = x1*cos1 - y1*sin1, y1' = x1*sin1 + y1*cos1
+
+    // Shuffle to prepare for FMA operations:
+    // x_vals = (x0, x0, x1, x1)
+    // y_vals = (y0, y0, y1, y1)
+    half4 x_broadcast = half4(xy.x, xy.x, xy.z, xy.z);
+    half4 y_broadcast = half4(xy.y, xy.y, xy.w, xy.w);
+
+    // cos_for_mul = (cos0, sin0, cos1, sin1) - already in correct order for x*cos
+    // sin_for_mul = (sin0, cos0, sin1, cos1) - swapped for y term
+    half4 sin_cos_swapped = half4(cos_sin.y, cos_sin.x, cos_sin.w, cos_sin.z);
+
+    // x*cos - y*sin for x' positions, x*sin + y*cos for y' positions
+    // Result positions: (x0', y0', x1', y1')
+    // x0' = x0*cos0 - y0*sin0  -> x_broadcast.x * cos_sin.x - y_broadcast.x * cos_sin.y
+    // y0' = x0*sin0 + y0*cos0  -> x_broadcast.y * cos_sin.y + y_broadcast.y * cos_sin.x
+    // x1' = x1*cos1 - y1*sin1
+    // y1' = x1*sin1 + y1*cos1
+
+    half4 term1 = x_broadcast * cos_sin;           // (x0*cos0, x0*sin0, x1*cos1, x1*sin1)
+    half4 term2 = y_broadcast * sin_cos_swapped;   // (y0*sin0, y0*cos0, y1*sin1, y1*cos1)
+
+    // For x' positions (indices 0,2): subtract; for y' positions (indices 1,3): add
+    // signs = (-1, +1, -1, +1)
+    half4 signs = half4(-1.0h, 1.0h, -1.0h, 1.0h);
+    return term1 + signs * term2;
+}
+
 /// Apply rotation with rope_ratio scaling (GLM-style)
 /// The rope_ratio adjusts frequency: theta *= rope_ratio
 inline half2 apply_rope_rotation_scaled(half x, half y, half cos_val, half sin_val,
@@ -144,6 +181,247 @@ kernel void rope_forward(
 
     output[idx_x] = rotated.x;
     output[idx_y] = rotated.y;
+}
+
+// ============================================================================
+// RoPE kernel: SIMD-vectorized (4 dimensions at once)
+// ============================================================================
+//
+// Processes 4 dimensions (2 rotation pairs) per thread using half4 vectors.
+// Each thread: load 4 values -> apply 2 rotations -> store 4 values
+//
+// This reduces memory transactions and improves ALU utilization.
+// Requires head_dim % 4 == 0 (standard for most models: 64, 128, 256).
+//
+// Grid: (head_dim/4, num_heads, batch * seq_len)
+//
+// ============================================================================
+
+/// SIMD-vectorized RoPE kernel - processes 4 dimensions per thread.
+///
+/// @param input       Input tensor [batch, seq_len, num_heads, head_dim]
+/// @param cos_cache   Precomputed cos values [max_seq, head_dim/2]
+/// @param sin_cache   Precomputed sin values [max_seq, head_dim/2]
+/// @param output      Output tensor (same shape as input)
+/// @param batch_size  Batch dimension
+/// @param seq_len     Current sequence length
+/// @param num_heads   Number of attention heads
+/// @param head_dim    Dimension per head (must be divisible by 4)
+/// @param position_offset  Offset for KV cache continuation
+kernel void rope_forward_x4(
+    device const half* input       [[buffer(0)]],
+    device const half* cos_cache   [[buffer(1)]],
+    device const half* sin_cache   [[buffer(2)]],
+    device half* output            [[buffer(3)]],
+    constant uint& batch_size      [[buffer(4)]],
+    constant uint& seq_len         [[buffer(5)]],
+    constant uint& num_heads       [[buffer(6)]],
+    constant uint& head_dim        [[buffer(7)]],
+    constant uint& position_offset [[buffer(8)]],
+    uint3 gid                      [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;      // Which group of 4 (0 to head_dim/4 - 1)
+    uint head_idx = gid.y;      // Which head
+    uint batch_seq = gid.z;     // Combined batch * seq index
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    // Compute position with offset
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    // Each quad covers 2 rotation pairs (pair_idx * 2 and pair_idx * 2 + 1)
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+
+    // Load cos/sin for both pairs
+    uint cache_base = position * half_head_dim;
+    half cos0 = cos_cache[cache_base + pair_idx_0];
+    half sin0 = sin_cache[cache_base + pair_idx_0];
+    half cos1 = cos_cache[cache_base + pair_idx_1];
+    half sin1 = sin_cache[cache_base + pair_idx_1];
+
+    // Pack cos/sin: (cos0, sin0, cos1, sin1)
+    half4 cos_sin = half4(cos0, sin0, cos1, sin1);
+
+    // Input index: [batch, seq, heads, head_dim]
+    uint input_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx = input_base + quad_idx * 4;
+
+    // Load 4 values as half4: (x0, y0, x1, y1)
+    half4 xy = *reinterpret_cast<device const half4*>(input + idx);
+
+    // Apply vectorized rotation
+    half4 rotated = apply_rope_rotation_x4(xy, cos_sin);
+
+    // Store 4 values
+    *reinterpret_cast<device half4*>(output + idx) = rotated;
+}
+
+/// SIMD-vectorized in-place RoPE kernel.
+kernel void rope_inplace_x4(
+    device half* data              [[buffer(0)]],
+    device const half* cos_cache   [[buffer(1)]],
+    device const half* sin_cache   [[buffer(2)]],
+    constant uint& batch_size      [[buffer(3)]],
+    constant uint& seq_len         [[buffer(4)]],
+    constant uint& num_heads       [[buffer(5)]],
+    constant uint& head_dim        [[buffer(6)]],
+    constant uint& position_offset [[buffer(7)]],
+    uint3 gid                      [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;
+    uint head_idx = gid.y;
+    uint batch_seq = gid.z;
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+
+    uint cache_base = position * half_head_dim;
+    half4 cos_sin = half4(
+        cos_cache[cache_base + pair_idx_0],
+        sin_cache[cache_base + pair_idx_0],
+        cos_cache[cache_base + pair_idx_1],
+        sin_cache[cache_base + pair_idx_1]
+    );
+
+    uint data_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx = data_base + quad_idx * 4;
+
+    half4 xy = *reinterpret_cast<device half4*>(data + idx);
+    half4 rotated = apply_rope_rotation_x4(xy, cos_sin);
+    *reinterpret_cast<device half4*>(data + idx) = rotated;
+}
+
+/// SIMD-vectorized fused Q/K RoPE kernel.
+///
+/// Processes both Q and K tensors simultaneously, reducing cos/sin cache loads.
+kernel void rope_qk_fused_x4(
+    device const half* q_input     [[buffer(0)]],
+    device const half* k_input     [[buffer(1)]],
+    device const half* cos_cache   [[buffer(2)]],
+    device const half* sin_cache   [[buffer(3)]],
+    device half* q_output          [[buffer(4)]],
+    device half* k_output          [[buffer(5)]],
+    constant uint& batch_size      [[buffer(6)]],
+    constant uint& seq_len         [[buffer(7)]],
+    constant uint& num_heads       [[buffer(8)]],
+    constant uint& num_kv_heads    [[buffer(9)]],
+    constant uint& head_dim        [[buffer(10)]],
+    constant uint& position_offset [[buffer(11)]],
+    uint3 gid                      [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;      // Quad within head_dim
+    uint head_idx = gid.y;      // Head index (max of num_heads, num_kv_heads)
+    uint batch_seq = gid.z;     // Combined batch * seq
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    // Load cos/sin once for both Q and K
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+    uint cache_base = position * half_head_dim;
+
+    half4 cos_sin = half4(
+        cos_cache[cache_base + pair_idx_0],
+        sin_cache[cache_base + pair_idx_0],
+        cos_cache[cache_base + pair_idx_1],
+        sin_cache[cache_base + pair_idx_1]
+    );
+
+    // Process Q if head_idx < num_heads
+    if (head_idx < num_heads) {
+        uint q_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+        uint q_idx = q_base + quad_idx * 4;
+
+        half4 q_xy = *reinterpret_cast<device const half4*>(q_input + q_idx);
+        half4 q_rot = apply_rope_rotation_x4(q_xy, cos_sin);
+        *reinterpret_cast<device half4*>(q_output + q_idx) = q_rot;
+    }
+
+    // Process K if head_idx < num_kv_heads
+    if (head_idx < num_kv_heads) {
+        uint k_base = ((batch_idx * seq_len + seq_idx) * num_kv_heads + head_idx) * head_dim;
+        uint k_idx = k_base + quad_idx * 4;
+
+        half4 k_xy = *reinterpret_cast<device const half4*>(k_input + k_idx);
+        half4 k_rot = apply_rope_rotation_x4(k_xy, cos_sin);
+        *reinterpret_cast<device half4*>(k_output + k_idx) = k_rot;
+    }
+}
+
+/// Simdgroup-optimized vectorized RoPE for small dimensions.
+///
+/// Each simdgroup processes one position, with each lane handling 4 elements.
+/// Optimized for head_dim <= 128 where all data fits in simdgroup registers.
+kernel void rope_small_dim_x4(
+    device const half* input       [[buffer(0)]],
+    device const half* cos_cache   [[buffer(1)]],
+    device const half* sin_cache   [[buffer(2)]],
+    device half* output            [[buffer(3)]],
+    constant uint& batch_size      [[buffer(4)]],
+    constant uint& seq_len         [[buffer(5)]],
+    constant uint& dim             [[buffer(6)]],
+    constant uint& position_offset [[buffer(7)]],
+    uint tg_idx                    [[threadgroup_position_in_grid]],
+    uint lane_id                   [[thread_index_in_simdgroup]]
+) {
+    uint batch_seq = tg_idx;
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_dim = dim / 2;
+    uint quarter_dim = dim / 4;
+
+    // Each lane handles one quad (4 elements = 2 rotation pairs)
+    if (lane_id < quarter_dim) {
+        uint pair_idx_0 = lane_id * 2;
+        uint pair_idx_1 = lane_id * 2 + 1;
+
+        uint cache_base = position * half_dim;
+        half4 cos_sin = half4(
+            cos_cache[cache_base + pair_idx_0],
+            sin_cache[cache_base + pair_idx_0],
+            cos_cache[cache_base + pair_idx_1],
+            sin_cache[cache_base + pair_idx_1]
+        );
+
+        uint input_base = (batch_idx * seq_len + seq_idx) * dim;
+        uint idx = input_base + lane_id * 4;
+
+        half4 xy = *reinterpret_cast<device const half4*>(input + idx);
+        half4 rotated = apply_rope_rotation_x4(xy, cos_sin);
+        *reinterpret_cast<device half4*>(output + idx) = rotated;
+    }
 }
 
 // ============================================================================
@@ -1117,4 +1395,243 @@ kernel void rope_yarn_inplace(
     half scale = half(attention_scale);
     data[idx_x] = rotated.x * scale;
     data[idx_y] = rotated.y * scale;
+}
+
+// ============================================================================
+// SIMD-vectorized YaRN RoPE kernels (4 dimensions at once)
+// ============================================================================
+//
+// Vectorized variants of YaRN kernels using half4 for improved throughput.
+// All kernels process 4 dimensions (2 rotation pairs) per thread.
+//
+// ============================================================================
+
+/// Apply rotation to 2 pairs with YaRN scaling (4 elements).
+inline half4 apply_rope_rotation_x4_scaled(half4 xy, half4 cos_sin, half scale) {
+    half4 rotated = apply_rope_rotation_x4(xy, cos_sin);
+    return rotated * scale;
+}
+
+/// SIMD-vectorized YaRN RoPE forward kernel.
+kernel void rope_yarn_forward_x4(
+    device const half* input          [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    device half* output               [[buffer(3)]],
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& seq_len            [[buffer(5)]],
+    constant uint& num_heads          [[buffer(6)]],
+    constant uint& head_dim           [[buffer(7)]],
+    constant uint& position_offset    [[buffer(8)]],
+    constant float& attention_scale   [[buffer(9)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;      // Which group of 4 (0 to head_dim/4 - 1)
+    uint head_idx = gid.y;      // Which head
+    uint batch_seq = gid.z;     // Combined batch * seq index
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    // Load cos/sin for 2 pairs
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+    uint cache_base = position * half_head_dim;
+
+    half4 cos_sin = half4(
+        cos_cache[cache_base + pair_idx_0],
+        sin_cache[cache_base + pair_idx_0],
+        cos_cache[cache_base + pair_idx_1],
+        sin_cache[cache_base + pair_idx_1]
+    );
+
+    uint input_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx = input_base + quad_idx * 4;
+
+    half4 xy = *reinterpret_cast<device const half4*>(input + idx);
+    half4 rotated = apply_rope_rotation_x4_scaled(xy, cos_sin, half(attention_scale));
+    *reinterpret_cast<device half4*>(output + idx) = rotated;
+}
+
+/// SIMD-vectorized in-place YaRN RoPE kernel.
+kernel void rope_yarn_inplace_x4(
+    device half* data                 [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    constant uint& batch_size         [[buffer(3)]],
+    constant uint& seq_len            [[buffer(4)]],
+    constant uint& num_heads          [[buffer(5)]],
+    constant uint& head_dim           [[buffer(6)]],
+    constant uint& position_offset    [[buffer(7)]],
+    constant float& attention_scale   [[buffer(8)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;
+    uint head_idx = gid.y;
+    uint batch_seq = gid.z;
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+    uint cache_base = position * half_head_dim;
+
+    half4 cos_sin = half4(
+        cos_cache[cache_base + pair_idx_0],
+        sin_cache[cache_base + pair_idx_0],
+        cos_cache[cache_base + pair_idx_1],
+        sin_cache[cache_base + pair_idx_1]
+    );
+
+    uint data_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+    uint idx = data_base + quad_idx * 4;
+
+    half4 xy = *reinterpret_cast<device half4*>(data + idx);
+    half4 rotated = apply_rope_rotation_x4_scaled(xy, cos_sin, half(attention_scale));
+    *reinterpret_cast<device half4*>(data + idx) = rotated;
+}
+
+/// SIMD-vectorized fused Q/K YaRN RoPE kernel.
+kernel void rope_yarn_qk_fused_x4(
+    device const half* q_input        [[buffer(0)]],
+    device const half* k_input        [[buffer(1)]],
+    device const half* cos_cache      [[buffer(2)]],
+    device const half* sin_cache      [[buffer(3)]],
+    device half* q_output             [[buffer(4)]],
+    device half* k_output             [[buffer(5)]],
+    constant uint& batch_size         [[buffer(6)]],
+    constant uint& seq_len            [[buffer(7)]],
+    constant uint& num_heads          [[buffer(8)]],
+    constant uint& num_kv_heads       [[buffer(9)]],
+    constant uint& head_dim           [[buffer(10)]],
+    constant uint& position_offset    [[buffer(11)]],
+    constant float& attention_scale   [[buffer(12)]],
+    uint3 gid                         [[thread_position_in_grid]]
+) {
+    uint quad_idx = gid.x;
+    uint head_idx = gid.y;
+    uint batch_seq = gid.z;
+
+    uint quarter_head_dim = head_dim / 4;
+    if (quad_idx >= quarter_head_dim) return;
+
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint half_head_dim = head_dim / 2;
+
+    uint pair_idx_0 = quad_idx * 2;
+    uint pair_idx_1 = quad_idx * 2 + 1;
+    uint cache_base = position * half_head_dim;
+
+    half4 cos_sin = half4(
+        cos_cache[cache_base + pair_idx_0],
+        sin_cache[cache_base + pair_idx_0],
+        cos_cache[cache_base + pair_idx_1],
+        sin_cache[cache_base + pair_idx_1]
+    );
+
+    half scale = half(attention_scale);
+
+    if (head_idx < num_heads) {
+        uint q_base = ((batch_idx * seq_len + seq_idx) * num_heads + head_idx) * head_dim;
+        uint q_idx = q_base + quad_idx * 4;
+
+        half4 q_xy = *reinterpret_cast<device const half4*>(q_input + q_idx);
+        half4 q_rot = apply_rope_rotation_x4_scaled(q_xy, cos_sin, scale);
+        *reinterpret_cast<device half4*>(q_output + q_idx) = q_rot;
+    }
+
+    if (head_idx < num_kv_heads) {
+        uint k_base = ((batch_idx * seq_len + seq_idx) * num_kv_heads + head_idx) * head_dim;
+        uint k_idx = k_base + quad_idx * 4;
+
+        half4 k_xy = *reinterpret_cast<device const half4*>(k_input + k_idx);
+        half4 k_rot = apply_rope_rotation_x4_scaled(k_xy, cos_sin, scale);
+        *reinterpret_cast<device half4*>(k_output + k_idx) = k_rot;
+    }
+}
+
+/// SIMD-vectorized YaRN RoPE for MLA latent small (simdgroup optimized).
+kernel void rope_yarn_latent_small_x4(
+    device const half* input          [[buffer(0)]],
+    device const half* cos_cache      [[buffer(1)]],
+    device const half* sin_cache      [[buffer(2)]],
+    device half* output               [[buffer(3)]],
+    constant uint& batch_size         [[buffer(4)]],
+    constant uint& seq_len            [[buffer(5)]],
+    constant uint& kv_lora_rank       [[buffer(6)]],
+    constant uint& rope_dim           [[buffer(7)]],
+    constant uint& position_offset    [[buffer(8)]],
+    constant float& attention_scale   [[buffer(9)]],
+    uint tg_idx                       [[threadgroup_position_in_grid]],
+    uint lane_id                      [[thread_index_in_simdgroup]]
+) {
+    uint batch_seq = tg_idx;
+    uint batch_idx = batch_seq / seq_len;
+    uint seq_idx = batch_seq % seq_len;
+
+    if (batch_idx >= batch_size || seq_idx >= seq_len) return;
+
+    uint position = seq_idx + position_offset;
+    uint total_dim = kv_lora_rank + rope_dim;
+    uint input_base = (batch_idx * seq_len + seq_idx) * total_dim;
+
+    half scale = half(attention_scale);
+
+    // Copy latent portion using vectorized loads where possible
+    uint kv_quads = kv_lora_rank / 4;
+    for (uint i = lane_id; i < kv_quads; i += 32) {
+        uint idx = input_base + i * 4;
+        half4 val = *reinterpret_cast<device const half4*>(input + idx);
+        *reinterpret_cast<device half4*>(output + idx) = val;
+    }
+    // Handle remainder (if kv_lora_rank not divisible by 4)
+    uint kv_remainder_start = kv_quads * 4;
+    for (uint i = kv_remainder_start + lane_id; i < kv_lora_rank; i += 32) {
+        output[input_base + i] = input[input_base + i];
+    }
+
+    // Apply YaRN RoPE to positional portion with vectorized ops
+    uint half_rope = rope_dim / 2;
+    uint quarter_rope = rope_dim / 4;
+    uint rope_base = input_base + kv_lora_rank;
+
+    for (uint quad_idx = lane_id; quad_idx < quarter_rope; quad_idx += 32) {
+        uint pair_idx_0 = quad_idx * 2;
+        uint pair_idx_1 = quad_idx * 2 + 1;
+        uint cache_base = position * half_rope;
+
+        half4 cos_sin = half4(
+            cos_cache[cache_base + pair_idx_0],
+            sin_cache[cache_base + pair_idx_0],
+            cos_cache[cache_base + pair_idx_1],
+            sin_cache[cache_base + pair_idx_1]
+        );
+
+        uint idx = rope_base + quad_idx * 4;
+        half4 xy = *reinterpret_cast<device const half4*>(input + idx);
+        half4 rotated = apply_rope_rotation_x4_scaled(xy, cos_sin, scale);
+        *reinterpret_cast<device half4*>(output + idx) = rotated;
+    }
 }

@@ -53,6 +53,10 @@ class TrellisModelConfig:
     # Quantization info (set during quantization)
     quantization_bits: int = 4  # Average bits per weight
 
+    # Layer pruning - layers to skip during inference
+    # Set via prune_layers() or from_importance_analysis()
+    skip_layers: list[int] | None = None
+
     @classmethod
     def from_pretrained(cls, model_path: str) -> "TrellisModelConfig":
         """Load config from model directory or HuggingFace.
@@ -187,3 +191,58 @@ class TrellisModelConfig:
     def is_mla_model(self) -> bool:
         """Check if model uses Multi-head Latent Attention."""
         return self.kv_lora_rank is not None
+
+    def should_skip_layer(self, layer_idx: int) -> bool:
+        """Check if layer should be skipped during inference."""
+        if self.skip_layers is None:
+            return False
+        return layer_idx in self.skip_layers
+
+    def prune_layers(self, layers_to_skip: list[int]) -> "TrellisModelConfig":
+        """Create a new config with specified layers marked for skipping.
+
+        Args:
+            layers_to_skip: Layer indices to skip during inference.
+
+        Returns:
+            New config with skip_layers set.
+        """
+        import copy
+
+        new_config = copy.copy(self)
+        new_config.skip_layers = sorted(layers_to_skip)
+        return new_config
+
+    @classmethod
+    def from_importance_analysis(
+        cls,
+        base_config: "TrellisModelConfig",
+        analysis_path: str,
+        threshold_pct: float | None = None,
+    ) -> "TrellisModelConfig":
+        """Create config with pruned layers from importance analysis.
+
+        Args:
+            base_config: Base model configuration.
+            analysis_path: Path to layer importance analysis JSON.
+            threshold_pct: Override threshold (uses analysis threshold if None).
+
+        Returns:
+            Config with skip_layers set based on importance analysis.
+        """
+        import json
+        from pathlib import Path
+
+        with open(Path(analysis_path)) as f:
+            analysis = json.load(f)
+
+        if threshold_pct is None:
+            threshold_pct = analysis.get("threshold_pct", 0.5)
+
+        # Find prunable layers
+        skip_layers = []
+        for layer_data in analysis.get("layers", []):
+            if layer_data.get("perplexity_delta_pct", float("inf")) < threshold_pct:
+                skip_layers.append(layer_data["layer_idx"])
+
+        return base_config.prune_layers(skip_layers)

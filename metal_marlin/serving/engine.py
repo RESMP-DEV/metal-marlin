@@ -7,7 +7,7 @@ import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..inference.pipeline import MarlinPipeline
@@ -21,6 +21,55 @@ from .openai_schemas import (
     Usage,
 )
 from .request import GenerationRequest, RequestStatus, RequestTimeoutError
+
+
+@dataclass
+class RequestLatencyMetrics:
+    """Per-request latency tracking."""
+
+    request_id: str
+    arrival_time: float = field(default_factory=time.time)
+    prefill_start: float | None = None
+    prefill_end: float | None = None
+    first_token_time: float | None = None
+    completion_time: float | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def time_to_first_token(self) -> float | None:
+        """Time from arrival to first token (TTFT)."""
+        if self.first_token_time:
+            return self.first_token_time - self.arrival_time
+        return None
+
+    @property
+    def prefill_latency(self) -> float | None:
+        """Time spent in prefill phase."""
+        if self.prefill_start and self.prefill_end:
+            return self.prefill_end - self.prefill_start
+        return None
+
+    @property
+    def decode_latency(self) -> float | None:
+        """Time spent generating tokens after prefill."""
+        if self.first_token_time and self.completion_time:
+            return self.completion_time - self.first_token_time
+        return None
+
+    @property
+    def total_latency(self) -> float | None:
+        """Total time from arrival to completion."""
+        if self.completion_time:
+            return self.completion_time - self.arrival_time
+        return None
+
+    @property
+    def tokens_per_second(self) -> float | None:
+        """Average token generation rate."""
+        if self.completion_tokens > 0 and self.decode_latency:
+            return self.completion_tokens / self.decode_latency
+        return None
 
 
 def _detect_model_format(model_path: str) -> str:
@@ -154,6 +203,7 @@ class ServingEngine:
         self._request_queue: asyncio.Queue[GenerationRequest] = asyncio.Queue()
         self._results: dict[str, asyncio.Future] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._latency_metrics: dict[str, RequestLatencyMetrics] = {}
 
         if config.enable_batching:
             self.kv_manager = KVCacheManager(
@@ -192,11 +242,12 @@ class ServingEngine:
     ) -> ChatCompletionResponse | AsyncIterator[ChatCompletionChunk]:
         """Handle /v1/chat/completions endpoint."""
         # Apply chat template
-        prompt = self.pipeline.tokenizer.apply_chat_template(
+        prompt_val = self.pipeline.tokenizer.apply_chat_template(
             [{"role": m.role, "content": m.content} for m in request.messages],
             tokenize=False,
             add_generation_prompt=True,
         )
+        prompt = str(prompt_val)
 
         if request.stream:
             return self._stream_generate(prompt, request)
@@ -223,6 +274,10 @@ class ServingEngine:
         prompt: str,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
+        request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        metrics = RequestLatencyMetrics(request_id=request_id)
+        self._latency_metrics[request_id] = metrics
+
         gen_request = self._track_request(
             prompt,
             request.max_tokens or 256,
@@ -231,6 +286,8 @@ class ServingEngine:
             request.stop or [],
         )
         gen_request.status = RequestStatus.RUNNING
+
+        metrics.prefill_start = time.time()
         try:
             result = await asyncio.wait_for(
                 self._run_pipeline(
@@ -241,8 +298,11 @@ class ServingEngine:
                 ),
                 timeout=self.config.request_timeout,
             )
+            metrics.prefill_end = time.time()
+            metrics.first_token_time = metrics.prefill_end
         except TimeoutError:
             gen_request.status = RequestStatus.FINISHED
+            metrics.completion_time = time.time()
             raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
         gen_request.status = RequestStatus.FINISHED
 
@@ -254,12 +314,16 @@ class ServingEngine:
         prompt_tokens = self._count_tokens(prompt)
         completion_tokens = self._count_tokens(completion_text)
 
+        metrics.prompt_tokens = prompt_tokens
+        metrics.completion_tokens = completion_tokens
+        metrics.completion_time = time.time()
+
         finish_reason = "stop" if stopped else "length"
         if completion_tokens < (request.max_tokens or 256):
             finish_reason = "stop"
 
         return ChatCompletionResponse(
-            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            id=request_id,
             created=int(time.time()),
             model=self.model_name,
             choices=[
@@ -277,8 +341,13 @@ class ServingEngine:
         )
 
     async def _completion(self, request: CompletionRequest) -> CompletionResponse:
+        request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
+        metrics = RequestLatencyMetrics(request_id=request_id)
+        self._latency_metrics[request_id] = metrics
+
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
 
+        metrics.prefill_start = time.time()
         results: list[str] = []
         for prompt in prompts:
             gen_request = self._track_request(
@@ -302,8 +371,15 @@ class ServingEngine:
             )
             results.append(completion_text)
 
+        metrics.prefill_end = time.time()
+        metrics.first_token_time = metrics.prefill_end
+
         prompt_tokens = sum(self._count_tokens(p) for p in prompts)
         completion_tokens = sum(self._count_tokens(r) for r in results)
+
+        metrics.prompt_tokens = prompt_tokens
+        metrics.completion_tokens = completion_tokens
+        metrics.completion_time = time.time()
 
         choices = [
             {
@@ -315,7 +391,7 @@ class ServingEngine:
         ]
 
         return CompletionResponse(
-            id=f"cmpl-{uuid.uuid4().hex[:8]}",
+            id=request_id,
             created=int(time.time()),
             model=self.model_name,
             choices=choices,
@@ -331,6 +407,10 @@ class ServingEngine:
         prompt: str,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionChunk]:
+        request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        metrics = RequestLatencyMetrics(request_id=request_id)
+        self._latency_metrics[request_id] = metrics
+
         gen_request = self._track_request(
             prompt,
             request.max_tokens or 256,
@@ -339,6 +419,10 @@ class ServingEngine:
             request.stop or [],
         )
         gen_request.status = RequestStatus.RUNNING
+
+        metrics.prefill_start = time.time()
+        metrics.prompt_tokens = self._count_tokens(prompt)
+
         start_time = time.time()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
@@ -359,7 +443,6 @@ class ServingEngine:
 
         loop.run_in_executor(self._executor, _run_stream)
 
-        request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
         yield ChatCompletionChunk(
@@ -372,15 +455,22 @@ class ServingEngine:
         accumulated = ""
         emitted_len = 0
         stop_sequences = request.stop or []
+        first_chunk = True
 
         while True:
             elapsed = time.time() - start_time
             if elapsed > self.config.request_timeout:
                 gen_request.status = RequestStatus.FINISHED
+                metrics.completion_time = time.time()
                 raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
             piece = await queue.get()
             if piece is None:
                 break
+
+            if first_chunk:
+                metrics.prefill_end = time.time()
+                metrics.first_token_time = metrics.prefill_end
+                first_chunk = False
 
             accumulated += piece
             emit_text, stopped = self._apply_stop_sequences(accumulated, stop_sequences)
@@ -404,6 +494,9 @@ class ServingEngine:
                 choices=[{"index": 0, "delta": {"content": piece}, "finish_reason": None}],
             )
             emitted_len += len(piece)
+
+        metrics.completion_tokens = self._count_tokens(accumulated)
+        metrics.completion_time = time.time()
 
         yield ChatCompletionChunk(
             id=request_id,
@@ -473,7 +566,7 @@ class ServingEngine:
         top_p: float,
     ) -> str:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
+        result = await loop.run_in_executor(
             self._executor,
             lambda: self.pipeline(
                 prompt,
@@ -482,6 +575,7 @@ class ServingEngine:
                 top_p=top_p,
             ),
         )
+        return str(result)
 
     def _strip_prompt(self, full_text: str, prompt: str) -> str:
         if full_text.startswith(prompt):
@@ -578,6 +672,50 @@ class ServingEngine:
             "memory_usage_mb": memory_mb,
         }
 
+    def get_latency_stats(self) -> dict:
+        """Get aggregated latency statistics across all requests.
+
+        Returns:
+            Dictionary with p50, p95, p99 latencies and throughput metrics.
+        """
+        if not self._latency_metrics:
+            return {
+                "total_requests": 0,
+                "avg_ttft_ms": 0.0,
+                "avg_prefill_ms": 0.0,
+                "avg_decode_ms": 0.0,
+                "avg_total_ms": 0.0,
+                "avg_tokens_per_second": 0.0,
+            }
+
+        ttfts = [m.time_to_first_token for m in self._latency_metrics.values() if m.time_to_first_token]
+        prefills = [m.prefill_latency for m in self._latency_metrics.values() if m.prefill_latency]
+        decodes = [m.decode_latency for m in self._latency_metrics.values() if m.decode_latency]
+        totals = [m.total_latency for m in self._latency_metrics.values() if m.total_latency]
+        tps = [m.tokens_per_second for m in self._latency_metrics.values() if m.tokens_per_second]
+
+        def percentile(data: list[float], p: float) -> float:
+            if not data:
+                return 0.0
+            sorted_data = sorted(data)
+            k = (len(sorted_data) - 1) * p / 100
+            f = int(k)
+            c = f + 1 if f < len(sorted_data) - 1 else f
+            return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
+
+        return {
+            "total_requests": len(self._latency_metrics),
+            "ttft_p50_ms": percentile(ttfts, 50) * 1000 if ttfts else 0.0,
+            "ttft_p95_ms": percentile(ttfts, 95) * 1000 if ttfts else 0.0,
+            "ttft_p99_ms": percentile(ttfts, 99) * 1000 if ttfts else 0.0,
+            "prefill_p50_ms": percentile(prefills, 50) * 1000 if prefills else 0.0,
+            "decode_p50_ms": percentile(decodes, 50) * 1000 if decodes else 0.0,
+            "total_p50_ms": percentile(totals, 50) * 1000 if totals else 0.0,
+            "total_p95_ms": percentile(totals, 95) * 1000 if totals else 0.0,
+            "total_p99_ms": percentile(totals, 99) * 1000 if totals else 0.0,
+            "avg_tokens_per_second": sum(tps) / len(tps) if tps else 0.0,
+        }
+
     async def _batched_generate(
         self,
         prompt: str,
@@ -590,6 +728,10 @@ class ServingEngine:
         """
         from .continuous_batch import RequestPriority
 
+        request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+        metrics = RequestLatencyMetrics(request_id=request_id)
+        self._latency_metrics[request_id] = metrics
+
         gen_request = self._track_request(
             prompt,
             request.max_tokens or 256,
@@ -598,22 +740,33 @@ class ServingEngine:
             request.stop or [],
         )
 
+        metrics.prefill_start = time.time()
+        metrics.prompt_tokens = self._count_tokens(prompt)
+
         # Add request to scheduler
         assert self.scheduler is not None
         self.scheduler.add_request(gen_request, priority=RequestPriority.NORMAL)
 
         # Wait for completion via scheduler
         start_time = time.time()
+        first_token_tracked = False
         while gen_request.status != RequestStatus.FINISHED:
             elapsed = time.time() - start_time
             if elapsed > self.config.request_timeout:
                 self.scheduler.abort_request(gen_request.request_id)
+                metrics.completion_time = time.time()
                 raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
+
+            if not first_token_tracked and gen_request.output_tokens:
+                metrics.prefill_end = time.time()
+                metrics.first_token_time = metrics.prefill_end
+                first_token_tracked = True
+
             await asyncio.sleep(0.01)  # Small delay to prevent busy-waiting
 
         # Decode output tokens
         completion_tokens = gen_request.output_tokens
-        completion_text = self.pipeline.tokenizer.decode(completion_tokens)
+        completion_text = str(self.pipeline.tokenizer.decode(completion_tokens))
 
         completion_text, stopped = self._apply_stop_sequences(
             completion_text,
@@ -623,12 +776,15 @@ class ServingEngine:
         prompt_tokens = self._count_tokens(prompt)
         completion_token_count = len(completion_tokens)
 
+        metrics.completion_tokens = completion_token_count
+        metrics.completion_time = time.time()
+
         finish_reason = "stop" if stopped else "length"
         if completion_token_count < (request.max_tokens or 256):
             finish_reason = "stop"
 
         return ChatCompletionResponse(
-            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            id=request_id,
             created=int(time.time()),
             model=self.model_name,
             choices=[

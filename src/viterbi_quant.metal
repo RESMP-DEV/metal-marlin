@@ -26,7 +26,17 @@ constant constexpr uint MAX_STATES = 16;      // 4-bit = 16 states
 constant constexpr float INF = 1e20f;         // Infinity for Viterbi costs
 
 // ============================================================================
-// Viterbi Path Finding
+// Helper Structures
+// ============================================================================
+
+/// Return type for simd_reduce_min
+struct MinResult {
+    float error;
+    short state;
+};
+
+// ============================================================================
+// Viterbi Path Finding - Optimized with Shared Memory Trellis States
 // ============================================================================
 
 /// Compute squared error between original value and quantized value.
@@ -42,149 +52,189 @@ inline float quant_error(float original, uint state, float scale, float grid_val
     return diff * diff;
 }
 
-/// Viterbi forward pass: compute minimum cost paths through trellis.
+/// SIMD-based parallel min reduction for finding best state.
 ///
-/// For each position in the tile (256 elements), compute the minimum cost
-/// to reach each of the 16 states, considering transitions from all
-/// previous states. Transition cost penalizes state changes to encourage
-/// smooth quantization paths.
+/// Uses quad_shuffle_x4 to reduce across 4-thread groups, then
+/// simd_shuffle across the entire wave to find the global minimum.
 ///
-/// @param tile          256 float values from the input tile
-/// @param scale         Per-tile scale factor
-/// @param grid          Grid values for each state [n_states]
-/// @param n_states      Number of quantization states
-/// @param costs         Threadgroup shared memory for Viterbi costs [2][MAX_STATES]
-/// @param edges         Threadgroup shared memory for backtracking edges [TILE_SIZE][MAX_STATES]
-/// @param lane_id       Thread index within threadgroup [0, 255]
-inline void viterbi_forward(
-    device const float* tile,
+/// @param err       Array of 4 errors (one per thread in quad)
+/// @param state     Array of 4 corresponding states
+/// @param lane_id   Thread index in wave [0-63]
+/// @return          MinResult with (min_error, best_state) across the wave
+inline MinResult simd_reduce_min(
+    float4 err4,
+    short4 state4,
+    uint lane_id
+) {
+    // Step 1: Reduce within each 4-thread quad
+    uint quad_id = lane_id & 0x3;  // lane_id % 4
+    uint quad_base = lane_id & ~0x3;
+
+    // Quad shuffle: get min across 4 threads
+    float err_min = err4.x;
+    short state_min = state4.x;
+    for (uint i = 1; i < 4; i++) {
+        if (err4[i] < err_min) {
+            err_min = err4[i];
+            state_min = state4[i];
+        }
+    }
+
+    // Broadcast the quad minimum to all threads in the quad
+    // Note: In Metal, we'd use simd_broadcast here
+
+    // Step 2: Reduce across the wave using shuffle-based tree
+    // Wave size is 32 or 64 on Apple Silicon
+    // We'll use simd_shuffle for this
+
+    float wave_min = err_min;
+    short wave_state = state_min;
+
+    // Tree reduction: compare with lane ^ 1, ^ 2, ^ 4, ^ 8, ^ 16
+    for (uint offset = 1; offset < 32; offset <<= 1) {
+        float other_min = simd_shuffle(wave_min, lane_id ^ offset);
+        short other_state = simd_shuffle(wave_state, lane_id ^ offset);
+        if (other_min < wave_min) {
+            wave_min = other_min;
+            wave_state = other_state;
+        }
+    }
+
+    MinResult result;
+    result.error = wave_min;
+    result.state = wave_state;
+    return result;
+}
+
+/// Optimized Viterbi forward pass using shared memory trellis states.
+///
+/// This version:
+/// 1. Uses double-buffered shared memory for trellis states [2][MAX_STATES]
+/// 2. Stores backpointers in compact shared memory edges[TILE_SIZE][MAX_STATES]
+/// 3. Parallelizes state computation across threads in each position
+///
+/// @param tile_shared    Shared memory copy of tile data [TILE_SIZE]
+/// @param grid_shared    Shared memory copy of grid values [MAX_STATES]
+/// @param scale          Per-tile scale factor
+/// @param n_states       Number of quantization states
+/// @param costs          Double-buffered trellis costs [2][MAX_STATES]
+/// @param edges          Backtracking edges [TILE_SIZE][MAX_STATES]
+/// @param lane_id        Thread index within threadgroup [0, 255]
+void viterbi_forward_optimized(
+    threadgroup const float* tile_shared,
+    threadgroup const float* grid_shared,
     float scale,
-    device const float* grid,
     uint n_states,
     threadgroup float costs[2][MAX_STATES],
     threadgroup short edges[TILE_SIZE][MAX_STATES],
     uint lane_id
 ) {
-    // Initialize costs for position 0
+    // Lane 0 initializes the first position (pos=0)
     if (lane_id == 0) {
+        float first_val = tile_shared[0];
         for (uint s = 0; s < n_states; s++) {
-            costs[0][s] = quant_error(tile[0], s, scale, grid[s]);
-            edges[0][s] = -1;  // No predecessor for first element
+            float dequant = grid_shared[s] * scale;
+            float diff = first_val - dequant;
+            costs[0][s] = diff * diff;
+            edges[0][s] = -1;  // No predecessor for first position
         }
     }
-    
-    // Synchronize before starting forward pass
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Forward pass: compute costs for each position
-    // Each thread handles one state for all positions
-    uint state = lane_id % n_states;
-    uint pos_offset = lane_id / n_states;
-    
+
+    // Forward pass for positions 1 to TILE_SIZE-1
+    // Use one thread per state (only first n_states lanes are active).
+    uint state = lane_id;
+    float state_dequant = 0.0f;
+    if (state < n_states) {
+        state_dequant = grid_shared[state] * scale;
+    }
+
     for (uint pos = 1; pos < TILE_SIZE; pos++) {
-        uint curr_buf = pos & 1;      // pos % 2
-        uint prev_buf = 1 - curr_buf;  // 1 - (pos % 2)
-        
-        // Only process if this thread's state is valid
-        if (state < n_states && pos_offset == 0) {
+        uint curr_buf = pos & 1;
+        uint prev_buf = 1 - curr_buf;
+
+        if (state < n_states) {
             float min_cost = INF;
             short best_prev = 0;
-            
-            float err = quant_error(tile[pos], state, scale, grid[state]);
-            
-            // Find minimum cost from all previous states
+            float val = tile_shared[pos];
+            float diff = val - state_dequant;
+            float err = diff * diff;
+
+            // Load previous costs from shared memory
+            threadgroup const float* prev_costs = costs[prev_buf];
             for (uint prev_s = 0; prev_s < n_states; prev_s++) {
-                float prev_cost = costs[prev_buf][prev_s];
-                
-                // Transition cost: penalize state changes slightly
-                // This encourages smooth quantization paths
+                float prev_cost = prev_costs[prev_s];
                 float trans_cost = (prev_s == state) ? 0.0f : 0.01f;
-                
-                float total_cost = prev_cost + err + trans_cost;
-                
-                if (total_cost < min_cost) {
-                    min_cost = total_cost;
+                float total = prev_cost + err + trans_cost;
+
+                if (total < min_cost) {
+                    min_cost = total;
                     best_prev = short(prev_s);
                 }
             }
-            
+
             costs[curr_buf][state] = min_cost;
             edges[pos][state] = best_prev;
         }
-        
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 }
 
-/// Viterbi backward pass: backtrack to find optimal path.
+/// Optimized Viterbi backward pass with parallel final state search.
 ///
-/// After the forward pass, backtrack from the minimum-cost final state
-/// to recover the optimal quantization path.
-///
-/// @param edges         Backtracking edges from forward pass
-/// @param n_states      Number of quantization states
-/// @param path          Output: optimal state for each position [TILE_SIZE]
-/// @param lane_id       Thread index within threadgroup [0, 255]
-inline void viterbi_backward(
-    threadgroup short edges[TILE_SIZE][MAX_STATES],
-    uint n_states,
-    threadgroup short path[TILE_SIZE],
-    uint lane_id
-) {
-    // Find best final state (only lane 0 does this)
-    if (lane_id == 0) {
-        // The final state info is in the last row of edges
-        // We use the last state's backpointer chain
-        short best_state = 0;
-        
-        // Start from the last position and backtrack
-        // For simplicity, assume we want the path ending at state with min cost
-        // We'll use edges to trace back
-        short curr_state = best_state;
-        
-        // Store path in reverse order
-        for (int pos = TILE_SIZE - 1; pos >= 0; pos--) {
-            path[pos] = curr_state;
-            if (pos > 0) {
-                curr_state = edges[pos][curr_state];
-            }
-        }
-    }
-    
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-}
-
-/// Parallel Viterbi backward pass using parallel reduction.
-///
-/// More efficient version that uses parallel threads for backtracking.
+/// After the forward pass, backtrack from the minimum-cost final state.
+/// Uses shared memory to find the best final state efficiently.
 ///
 /// @param edges         Backtracking edges from forward pass
 /// @param costs         Final costs from forward pass
 /// @param n_states      Number of quantization states
 /// @param path          Output: optimal state for each position [TILE_SIZE]
+/// @param reduce_costs  Temporary storage for reduction [TILE_SIZE]
+/// @param reduce_states Temporary storage for reduction [TILE_SIZE]
 /// @param lane_id       Thread index within threadgroup [0, 255]
-inline void viterbi_backward_parallel(
+void viterbi_backward_parallel(
     threadgroup short edges[TILE_SIZE][MAX_STATES],
     threadgroup float costs[2][MAX_STATES],
     uint n_states,
     threadgroup short path[TILE_SIZE],
+    threadgroup float reduce_costs[TILE_SIZE],
+    threadgroup short reduce_states[TILE_SIZE],
     uint lane_id
 ) {
-    if (lane_id == 0) {
-        // Find best final state
-        uint final_buf = (TILE_SIZE - 1) & 1;
-        float min_cost = INF;
-        short best_state = 0;
-        
-        for (uint s = 0; s < n_states; s++) {
-            if (costs[final_buf][s] < min_cost) {
-                min_cost = costs[final_buf][s];
-                best_state = short(s);
+    // Use threadgroup reduction to find best final state
+    float local_min = INF;
+    short local_state = 0;
+    uint final_buf = (TILE_SIZE - 1) & 1;
+
+    // Each thread checks some states (load balancing)
+    for (uint s = lane_id; s < n_states; s += TILE_SIZE) {
+        float cost = costs[final_buf][s];
+        if (cost < local_min) {
+            local_min = cost;
+            local_state = short(s);
+        }
+    }
+
+    reduce_costs[lane_id] = local_min;
+    reduce_states[lane_id] = local_state;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    for (uint stride = TILE_SIZE / 2; stride > 0; stride >>= 1) {
+        if (lane_id < stride) {
+            float other_min = reduce_costs[lane_id + stride];
+            short other_state = reduce_states[lane_id + stride];
+            if (other_min < reduce_costs[lane_id]) {
+                reduce_costs[lane_id] = other_min;
+                reduce_states[lane_id] = other_state;
             }
         }
-        
-        // Backtrack to find optimal path
-        short curr_state = best_state;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Lane 0 performs the backtracking
+    if (lane_id == 0) {
+        short curr_state = reduce_states[0];
         for (int pos = TILE_SIZE - 1; pos >= 0; pos--) {
             path[pos] = curr_state;
             if (pos > 0) {
@@ -192,7 +242,7 @@ inline void viterbi_backward_parallel(
             }
         }
     }
-    
+
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
@@ -234,28 +284,45 @@ kernel void quantize_tiles_viterbi(
     uint lane_id [[thread_index_in_threadgroup]]
 ) {
     if (tile_id >= n_tiles) return;
-    
-    // Shared memory for Viterbi algorithm
+
+    // Shared memory: tile data, grid, Viterbi costs, edges, and path
+    threadgroup float tile_shared[TILE_SIZE];
+    threadgroup float grid_shared[MAX_STATES];
     threadgroup float costs[2][MAX_STATES];
     threadgroup short edges[TILE_SIZE][MAX_STATES];
     threadgroup short path[TILE_SIZE];
-    
-    // Load tile data and scale
+    threadgroup float reduce_costs[TILE_SIZE];
+    threadgroup short reduce_states[TILE_SIZE];
+
+    // Load tile data into shared memory (coalesced loads)
+    device const float* tile_device = tiles + tile_id * TILE_SIZE;
+    for (uint i = lane_id; i < TILE_SIZE; i += 256) {
+        tile_shared[i] = tile_device[i];
+    }
+
+    // Load grid into shared memory (each thread loads what it can)
+    for (uint i = lane_id; i < n_states; i += 256) {
+        grid_shared[i] = grid[i];
+    }
+
+    // Synchronize after loading shared data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Load scale
     float scale = scales[tile_id];
-    device const float* tile = tiles + tile_id * TILE_SIZE;
-    
-    // Run Viterbi forward pass
-    viterbi_forward(tile, scale, grid, n_states, costs, edges, lane_id);
-    
+
+    // Run Viterbi forward pass with shared memory data
+    viterbi_forward_optimized(tile_shared, grid_shared, scale, n_states, costs, edges, lane_id);
+
     // Run Viterbi backward pass to find optimal path
-    viterbi_backward_parallel(edges, costs, n_states, path, lane_id);
-    
+    viterbi_backward_parallel(edges, costs, n_states, path, reduce_costs, reduce_states, lane_id);
+
     // Write output: each thread handles its own positions
     // Lane 0-255 each write their corresponding element
     if (lane_id < TILE_SIZE) {
         short best_state = path[lane_id];
         indices[tile_id * TILE_SIZE + lane_id] = best_state;
-        dequantized[tile_id * TILE_SIZE + lane_id] = grid[best_state] * scale;
+        dequantized[tile_id * TILE_SIZE + lane_id] = grid_shared[best_state] * scale;
     }
 }
 
@@ -287,70 +354,94 @@ kernel void quantize_tiles_viterbi_u4(
     uint lane_id [[thread_index_in_threadgroup]]
 ) {
     if (tile_id >= n_tiles) return;
-    
+
     const uint N_STATES = 16;
-    
+
+    // Shared memory for tile, grid, costs, edges, and path
+    threadgroup float tile_shared[TILE_SIZE];
+    threadgroup float grid_shared[N_STATES];
     threadgroup float costs[2][N_STATES];
     threadgroup short edges[TILE_SIZE][N_STATES];
     threadgroup short path[TILE_SIZE];
-    
+
+    // Load tile data into shared memory (coalesced loads)
+    device const float* tile_device = tiles + tile_id * TILE_SIZE;
+    for (uint i = lane_id; i < TILE_SIZE; i += 256) {
+        tile_shared[i] = tile_device[i];
+    }
+
+    // Load grid into shared memory (only first 16 threads needed)
+    if (lane_id < N_STATES) {
+        grid_shared[lane_id] = grid[lane_id];
+    }
+
+    // Synchronize after loading shared data
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     float scale = scales[tile_id];
-    device const float* tile = tiles + tile_id * TILE_SIZE;
-    
-    // Initialize
+
+    // Initialize using shared memory
     if (lane_id == 0) {
+        float first_val = tile_shared[0];
         for (uint s = 0; s < N_STATES; s++) {
-            costs[0][s] = quant_error(tile[0], s, scale, grid[s]);
+            float dequant = grid_shared[s] * scale;
+            float diff = first_val - dequant;
+            costs[0][s] = diff * diff;
             edges[0][s] = -1;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
+
     // Forward pass - each thread handles one state
     uint state = lane_id & 15;  // lane_id % 16
-    
+
+    // Pre-compute this state's dequantized value
+    float state_dequant = grid_shared[state] * scale;
+
     for (uint pos = 1; pos < TILE_SIZE; pos++) {
         uint curr_buf = pos & 1;
         uint prev_buf = 1 - curr_buf;
-        
+
         if (state < N_STATES && lane_id < N_STATES) {
             float min_cost = INF;
             short best_prev = 0;
-            float err = quant_error(tile[pos], state, scale, grid[state]);
-            
-            // Unrolled loop for 16 states
+            float val = tile_shared[pos];
+            float diff = val - state_dequant;
+            float err = diff * diff;
+
+            // Unrolled loop for 16 states using shared memory costs
             #pragma unroll
             for (uint prev_s = 0; prev_s < N_STATES; prev_s++) {
                 float prev_cost = costs[prev_buf][prev_s];
                 float trans_cost = (prev_s == state) ? 0.0f : 0.01f;
                 float total = prev_cost + err + trans_cost;
-                
+
                 if (total < min_cost) {
                     min_cost = total;
                     best_prev = short(prev_s);
                 }
             }
-            
+
             costs[curr_buf][state] = min_cost;
             edges[pos][state] = best_prev;
         }
-        
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
-    
+
     // Backward pass
     if (lane_id == 0) {
         uint final_buf = (TILE_SIZE - 1) & 1;
         float min_cost = INF;
         short best_state = 0;
-        
+
         for (uint s = 0; s < N_STATES; s++) {
             if (costs[final_buf][s] < min_cost) {
                 min_cost = costs[final_buf][s];
                 best_state = short(s);
             }
         }
-        
+
         short curr_state = best_state;
         for (int pos = TILE_SIZE - 1; pos >= 0; pos--) {
             path[pos] = curr_state;
@@ -360,12 +451,12 @@ kernel void quantize_tiles_viterbi_u4(
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Write output
+
+    // Write output using shared grid
     if (lane_id < TILE_SIZE) {
         short s = path[lane_id];
         indices[tile_id * TILE_SIZE + lane_id] = s;
-        dequantized[tile_id * TILE_SIZE + lane_id] = grid[s] * scale;
+        dequantized[tile_id * TILE_SIZE + lane_id] = grid_shared[s] * scale;
     }
 }
 
@@ -399,24 +490,35 @@ kernel void quantize_tiles_naive(
     uint lane_id [[thread_index_in_threadgroup]]
 ) {
     if (tile_id >= n_tiles || lane_id >= TILE_SIZE) return;
-    
+
+    // Shared memory for grid (shared across threads in threadgroup)
+    threadgroup float grid_shared[MAX_STATES];
+
+    // Load grid into shared memory (all threads participate for efficiency)
+    for (uint i = lane_id; i < n_states; i += 256) {
+        grid_shared[i] = grid[i];
+    }
+
+    // Synchronize to ensure grid is fully loaded
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
     float scale = scales[tile_id];
     float val = tiles[tile_id * TILE_SIZE + lane_id] / scale;
-    
-    // Find nearest grid point
+
+    // Find nearest grid point using shared memory
     float min_dist = INF;
     short best_idx = 0;
-    
+
     for (uint s = 0; s < n_states; s++) {
-        float dist = abs(val - grid[s]);
+        float dist = abs(val - grid_shared[s]);
         if (dist < min_dist) {
             min_dist = dist;
             best_idx = short(s);
         }
     }
-    
+
     indices[tile_id * TILE_SIZE + lane_id] = best_idx;
-    dequantized[tile_id * TILE_SIZE + lane_id] = grid[best_idx] * scale;
+    dequantized[tile_id * TILE_SIZE + lane_id] = grid_shared[best_idx] * scale;
 }
 
 /// Compute quantization error for a tile.

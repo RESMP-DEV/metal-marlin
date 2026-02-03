@@ -13,9 +13,9 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+from .config import TDTConfig
 from .conformer_config import ConformerConfig
 from .conformer_encoder import ConformerEncoder
-from .tdt_config import TDTConfig
 from .tdt_joint import TDTJoint
 from .tdt_predictor import TDTPredictor
 
@@ -253,7 +253,7 @@ class ParakeetTDT(nn.Module):
                 t += duration
             else:
                 # Non-blank token: emit and continue at same time step
-                tokens.append(max_id)
+                tokens.append(int(max_id))
 
                 # Limit sequence length to prevent infinite loops
                 if len(tokens) > 1000:  # Arbitrary limit

@@ -11,11 +11,8 @@ from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
 from metal_marlin.trellis.linear import TrellisLinear
 
-# Skip entire module - tests need update for new TrellisMLAConfig API
-# TODO: Update mock linear layers to match new qk_nope_head_dim/qk_rope_head_dim/v_head_dim
 pytestmark = [
     pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch"),
-    pytest.mark.skip(reason="Tests need update for MLA config refactoring"),
 ]
 
 
@@ -72,12 +69,20 @@ class TestTrellisMLAttention:
         # Create mock linear layers
         # Low-rank query projection: q_a_proj compresses, q_b_proj decompresses
         q_a_proj = _create_mock_linear(config.hidden_size, config.q_lora_rank, device)
-        q_b_proj = _create_mock_linear(config.q_lora_rank, config.hidden_size, device)
-        kv_a_proj = _create_mock_linear(config.hidden_size, config.kv_lora_rank, device)
-        kv_b_proj = _create_mock_linear(
-            config.kv_lora_rank, config.num_kv_heads * config.v_head_dim * 2, device
+        q_b_proj = _create_mock_linear(
+            config.q_lora_rank, config.num_attention_heads * config.qk_head_dim, device
         )
-        o_proj = _create_mock_linear(config.hidden_size, config.hidden_size, device)
+        kv_a_proj = _create_mock_linear(
+            config.hidden_size, config.kv_lora_rank + config.qk_rope_head_dim, device
+        )
+        kv_b_proj = _create_mock_linear(
+            config.kv_lora_rank,
+            config.num_kv_heads * (config.qk_nope_head_dim + config.v_head_dim),
+            device,
+        )
+        o_proj = _create_mock_linear(
+            config.num_attention_heads * config.v_head_dim, config.hidden_size, device
+        )
 
         return TrellisMLAttention(
             config=config,

@@ -754,13 +754,15 @@ def compute_model_sensitivity_profile(
 
         # Compute real Hessians by running the model
         try:
-            hessians = _compute_hessians_with_model(
+            hessians_raw = _compute_hessians_with_model(
                 model_path=model_path,
                 calibration_data=calib_samples,
                 batch_size=calibration_batch_size,
                 max_seq_len=2048,
                 verbose=verbose,
             )
+            # Cast from float64 to floating[Any] for type compatibility
+            hessians: dict[str, NDArray[np.floating[Any]]] = {k: v for k, v in hessians_raw.items()}
             if verbose:
                 print(f"  Computed real Hessians for {len(hessians)} layers")
         except Exception as e:

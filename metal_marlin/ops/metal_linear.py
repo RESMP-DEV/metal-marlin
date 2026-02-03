@@ -174,7 +174,7 @@ class MetalQuantizedLinear(nn.Module):
             out = torch.nn.functional.linear(x_2d, self.weight)
 
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
 
         return out.view(*orig_shape[:-1], self.out_features)
 

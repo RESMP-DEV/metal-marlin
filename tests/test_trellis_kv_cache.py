@@ -28,7 +28,9 @@ class TestTrellisKVCache:
             "batch_size": 2,
             "max_seq_len": 128,
             "kv_lora_rank": 64,
-            "qk_rope_head_dim": 64,  # MLA uses qk_rope_head_dim, not num_kv_heads * head_dim
+            "qk_rope_head_dim": 64,
+            "num_kv_heads": 8,
+            "head_dim": 128,
         }
 
     @pytest.fixture
@@ -58,22 +60,15 @@ class TestTrellisKVCache:
         assert cache.cache_dim == expected_cache_dim
 
         # Check tensor shapes
-        assert cache.c_kv.shape == (
+        assert cache.kv_cache.shape == (
             cache_params["num_layers"],
             cache_params["batch_size"],
             cache_params["max_seq_len"],
-            cache_params["kv_lora_rank"],
-        )
-        assert cache.k_pe.shape == (
-            cache_params["num_layers"],
-            cache_params["batch_size"],
-            cache_params["max_seq_len"],
-            cache_params["qk_rope_head_dim"],
+            expected_cache_dim,
         )
 
         # Check data types
-        assert cache.c_kv.dtype == torch.float16
-        assert cache.k_pe.dtype == torch.float16
+        assert cache.kv_cache.dtype == torch.float16
 
         # Check sequence lengths initialized to 0
         assert cache.get_seq_len() == 0
@@ -82,13 +77,11 @@ class TestTrellisKVCache:
     def test_memory_layout_mps_optimal(self, cache):
         """Verify MPS-optimal memory layout (contiguous, half precision)."""
         # Check tensors are contiguous
-        assert cache.c_kv.is_contiguous()
-        assert cache.k_pe.is_contiguous()
+        assert cache.kv_cache.is_contiguous()
 
         # Check half precision for MPS
         if HAS_MPS:
-            assert cache.c_kv.dtype == torch.float16
-            assert cache.k_pe.dtype == torch.float16
+            assert cache.kv_cache.dtype == torch.float16
 
     def test_update_single_token(self, cache, cache_params):
         """Test updating cache with a single token."""
@@ -146,7 +139,7 @@ class TestTrellisKVCache:
     def test_update_returns_correct_format(self, cache, cache_params):
         """Test that update returns cached states in correct format for decompression."""
         device = _get_device()
-        cache_dim = cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
+        cache_dim = cache.cache_dim
 
         # Create compressed KV with known values
         seq_len = 5
@@ -162,7 +155,7 @@ class TestTrellisKVCache:
         k_pe_part = full_kv[..., cache_params["kv_lora_rank"] :]
 
         assert c_kv_part.shape[-1] == cache_params["kv_lora_rank"]
-        assert k_pe_part.shape[-1] == cache_params["num_kv_heads"] * cache_params["head_dim"]
+        assert k_pe_part.shape[-1] == cache_params["qk_rope_head_dim"]
 
         # Verify values match what was stored
         expected_c_kv = compressed_kv[..., : cache_params["kv_lora_rank"]]
@@ -174,7 +167,7 @@ class TestTrellisKVCache:
     def test_get_method(self, cache, cache_params):
         """Test the get method returns cached states correctly."""
         device = _get_device()
-        cache_dim = cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
+        cache_dim = cache.cache_dim
 
         # Initially should return None
         assert cache.get(layer_idx=0) is None
@@ -200,7 +193,7 @@ class TestTrellisKVCache:
     def test_reset(self, cache, cache_params):
         """Test cache reset functionality."""
         device = _get_device()
-        cache_dim = cache_params["kv_lora_rank"] + cache_params["num_kv_heads"] * cache_params["head_dim"]
+        cache_dim = cache.cache_dim
 
         # Store some data
         compressed_kv = torch.randn(
@@ -227,7 +220,7 @@ class TestTrellisKVCache:
         # Calculate expected memory
         bytes_per_element = 2  # float16
 
-        # c_kv elements
+        # c_kv elements: [num_layers, batch, max_seq, kv_lora_rank]
         c_kv_elements = (
             cache_params["num_layers"]
             * cache_params["batch_size"]
@@ -235,13 +228,12 @@ class TestTrellisKVCache:
             * cache_params["kv_lora_rank"]
         )
 
-        # k_pe elements
+        # k_pe elements: [num_layers, batch, max_seq, qk_rope_head_dim]
         k_pe_elements = (
             cache_params["num_layers"]
             * cache_params["batch_size"]
             * cache_params["max_seq_len"]
-            * cache_params["num_kv_heads"]
-            * cache_params["head_dim"]
+            * cache_params["qk_rope_head_dim"]
         )
 
         expected_mb = (c_kv_elements + k_pe_elements) * bytes_per_element / 1024 / 1024
@@ -296,7 +288,9 @@ class TestTrellisKVCache:
         # Verify each batch item has correct values
         cached = cache.get(layer_idx=0)
         for i in range(batch_size):
-            expected = torch.full((seq_len, cache_dim), float(i), dtype=torch.float16, device=device)
+            expected = torch.full(
+                (seq_len, cache_dim), float(i), dtype=torch.float16, device=device
+            )
             torch.testing.assert_close(cached[i], expected, rtol=1e-3, atol=1e-3)
 
     def test_layer_independence(self, cache, cache_params):
@@ -362,3 +356,142 @@ class TestTrellisKVCache:
 
         cached = cache.get(layer_idx=0)
         assert cached.is_contiguous()
+
+
+class TestTrellisKVCacheQuantization:
+    """Test suite for TrellisKVCache int8 quantization."""
+
+    @pytest.fixture
+    def cache_params(self):
+        """Default cache parameters."""
+        return {
+            "num_layers": 2,
+            "batch_size": 2,
+            "max_seq_len": 64,
+            "kv_lora_rank": 64,
+            "qk_rope_head_dim": 64,
+        }
+
+    @pytest.fixture
+    def cache(self, cache_params):
+        """Create a quantized TrellisKVCache instance."""
+        device = _get_device()
+        return TrellisKVCache(
+            num_layers=cache_params["num_layers"],
+            batch_size=cache_params["batch_size"],
+            max_seq_len=cache_params["max_seq_len"],
+            kv_lora_rank=cache_params["kv_lora_rank"],
+            qk_rope_head_dim=cache_params["qk_rope_head_dim"],
+            device=device,
+            dtype=torch.float16,
+            quantize=True,
+        )
+
+    def test_init_quantized(self, cache, cache_params):
+        """Test quantized cache initialization."""
+        assert cache.quantize is True
+        assert cache.c_kv.dtype == torch.int8
+        assert cache.k_pe.dtype == torch.int8
+        assert cache.c_kv_scales is not None
+        assert cache.k_pe_scales is not None
+
+        # Check scale shapes (per-token: [num_layers, batch, max_seq_len, 1])
+        assert cache.c_kv_scales.shape == (
+            cache_params["num_layers"],
+            cache_params["batch_size"],
+            cache_params["max_seq_len"],
+            1,
+        )
+        assert cache.k_pe_scales.shape == (
+            cache_params["num_layers"],
+            cache_params["batch_size"],
+            cache_params["max_seq_len"],
+            1,
+        )
+
+    def test_quantization_accuracy(self, cache, cache_params):
+        """Test that quantization preserves values with reasonable accuracy."""
+        device = _get_device()
+        cache_dim = cache.cache_dim
+
+        # Create random data in [-1, 1] range
+        compressed_kv = torch.randn(
+            cache_params["batch_size"], 5, cache_dim, dtype=torch.float16, device=device
+        )
+
+        # Update cache
+        full_kv = cache.update(layer_idx=0, compressed_kv=compressed_kv)
+
+        # Check that retrieved values are close to original
+        # Int8 quantization error bound roughly 1/127 of max value
+        # We allow a bit more due to float conversions
+        torch.testing.assert_close(full_kv, compressed_kv, rtol=0.05, atol=0.05)
+
+    def test_memory_usage_reduction(self, cache_params):
+        """Test that quantized cache uses less memory."""
+        device = _get_device()
+
+        # Create unquantized cache
+        cache_fp16 = TrellisKVCache(
+            **cache_params, device=device, dtype=torch.float16, quantize=False
+        )
+
+        # Create quantized cache
+        cache_int8 = TrellisKVCache(
+            **cache_params, device=device, dtype=torch.float16, quantize=True
+        )
+
+        mb_fp16 = cache_fp16.memory_usage_mb()
+        mb_int8 = cache_int8.memory_usage_mb()
+
+        # Int8 should be roughly half size of FP16 (plus scales overhead)
+        # 1 byte vs 2 bytes. Scales add negligible overhead.
+        assert mb_int8 < mb_fp16 * 0.6  # Expect significant reduction
+
+    def test_incremental_update_scales(self, cache, cache_params):
+        """Test that scales are updated incrementally for each token."""
+        device = _get_device()
+        cache_dim = cache.cache_dim
+
+        # Token 1: small values
+        t1 = torch.full((cache_params["batch_size"], 1, cache_dim), 0.1, dtype=torch.float16, device=device)
+        cache.update(layer_idx=0, compressed_kv=t1)
+
+        # Check scale for t1 (approx 0.1 / 127 * 127 = 0.1)
+        # Actually scale = max_val / 127. So scale approx 0.1/127.
+        scale_t1 = cache.c_kv_scales[0, :, 0, 0]
+        assert torch.all(scale_t1 > 0)
+        assert torch.all(scale_t1 < 1.0)
+
+        # Token 2: large values
+        t2 = torch.full((cache_params["batch_size"], 1, cache_dim), 10.0, dtype=torch.float16, device=device)
+        cache.update(layer_idx=0, compressed_kv=t2)
+
+        # Check scale for t2 (approx 10.0 / 127)
+        scale_t2 = cache.c_kv_scales[0, :, 1, 0]
+        assert torch.all(scale_t2 > scale_t1)  # Scale should adapt to magnitude
+
+    def test_get_layer_slices_and_attention_quantized(self, cache, cache_params):
+        """Test get_layer_slices and get_layer_for_attention with quantization."""
+        device = _get_device()
+        cache_dim = cache.cache_dim
+
+        compressed_kv = torch.randn(
+            cache_params["batch_size"], 5, cache_dim, dtype=torch.float16, device=device
+        )
+
+        cache.update(layer_idx=0, compressed_kv=compressed_kv)
+
+        # Test get_layer_slices
+        c_kv_slice, k_pe_slice = cache.get_layer_slices(layer_idx=0)
+        assert c_kv_slice.shape == (cache_params["batch_size"], 5, cache_params["kv_lora_rank"])
+        assert k_pe_slice.shape == (cache_params["batch_size"], 5, cache_params["qk_rope_head_dim"])
+
+        # Test get_layer_for_attention (BHSD format)
+        kv_attn = cache.get_layer_for_attention(layer_idx=0)
+        # Expected shape: [batch, cache_dim, seq_len]
+        assert kv_attn.shape == (cache_params["batch_size"], cache_dim, 5)
+
+        # Verify values are reasonable (dequantized)
+        expected_bhsd = compressed_kv.permute(0, 2, 1)
+        torch.testing.assert_close(kv_attn, expected_bhsd, rtol=0.05, atol=0.05)

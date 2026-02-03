@@ -88,10 +88,26 @@ from metal_marlin.quantization.viterbi_quant import (
     quantize_tiles_parallel,
 )
 
+# Streaming quantizer
+try:
+    from metal_marlin.quantization.streaming import (
+        StreamingQuantizer,
+        StreamingQuantResult,
+        quantize_model_streaming,
+    )
+
+    _HAS_STREAMING = True
+except ImportError:
+    _HAS_STREAMING = False
+    StreamingQuantizer = None  # type: ignore[assignment, misc]
+    StreamingQuantResult = None  # type: ignore[assignment, misc]
+    quantize_model_streaming = None  # type: ignore[assignment]
+
 __all__ = [
     # Feature flags
     "_HAS_TRANSFORMERS",
     "_HAS_SAFETENSORS",
+    "_HAS_STREAMING",
     # Calibration
     "BartowskiCalibrationV3",
     "CalibrationBatch",
@@ -139,4 +155,8 @@ __all__ = [
     "quantize_tile_greedy",
     "quantize_tile_viterbi",
     "quantize_tiles_parallel",
+    # Streaming
+    "StreamingQuantizer",
+    "StreamingQuantResult",
+    "quantize_model_streaming",
 ]

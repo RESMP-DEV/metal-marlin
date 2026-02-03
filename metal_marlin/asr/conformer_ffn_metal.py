@@ -93,14 +93,26 @@ class ConformerFFNMetal(nn.Module):
             x_flat = x.view(-1, self.hidden_size)
 
             # fc1: hidden_size -> ffn_intermediate_size
-            x = self.gemm.forward(
-                x_flat,
-                self.fc1_weight,
+            x_scales = (
                 self.fc1_weight.scales
                 if hasattr(self.fc1_weight, "scales")
-                else self.fc1_weight[1],
-                self.group_size,
+                else self.fc1_weight[1]
             )
+            if self.quant_type == "fp4":
+                x = self.gemm.forward(
+                    x_flat,
+                    self.fc1_weight,
+                    x_scales,
+                    group_size=self.group_size,
+                )
+            else:  # int8
+                x = self.gemm.forward(
+                    x_flat,
+                    self.fc1_weight,
+                    x_scales,
+                    zeros=None,
+                    group_size=self.group_size,
+                )
 
             if self.fc1_bias is not None:
                 x = x + self.fc1_bias
@@ -112,14 +124,26 @@ class ConformerFFNMetal(nn.Module):
             x = self.dropout(x)
 
             # fc2: ffn_intermediate_size -> hidden_size
-            x = self.gemm.forward(
-                x,
-                self.fc2_weight,
+            x2_scales = (
                 self.fc2_weight.scales
                 if hasattr(self.fc2_weight, "scales")
-                else self.fc2_weight[1],
-                self.group_size,
+                else self.fc2_weight[1]
             )
+            if self.quant_type == "fp4":
+                x = self.gemm.forward(
+                    x,
+                    self.fc2_weight,
+                    x2_scales,
+                    group_size=self.group_size,
+                )
+            else:  # int8
+                x = self.gemm.forward(
+                    x,
+                    self.fc2_weight,
+                    x2_scales,
+                    zeros=None,
+                    group_size=self.group_size,
+                )
 
             if self.fc2_bias is not None:
                 x = x + self.fc2_bias

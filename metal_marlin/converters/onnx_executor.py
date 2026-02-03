@@ -87,7 +87,7 @@ class ONNXNode:
     name: str
     inputs: list[str]
     outputs: list[str]
-    attrs: dict[str, object] = field(default_factory=dict)
+    attrs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -242,7 +242,7 @@ class ONNXExecutor:
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
-        from ..metal_marlin.attention import MarlinAttention
+        from ..attention import MarlinAttention
 
         hidden_states = values[pattern.input_name]
 
@@ -275,7 +275,7 @@ class ONNXExecutor:
         This handles the case where an ONNX graph has already been fused into
         a single MultiHeadAttention node (e.g., via onnxruntime graph optimization).
         """
-        from ..metal_marlin.attention import MarlinAttention
+        from ..attention import MarlinAttention
 
         hidden_states = inputs[0]
         batch_size, seq_len, hidden_size = hidden_states.shape
@@ -322,7 +322,8 @@ class ONNXExecutor:
 
         # Extract scale from attrs or compute from head_dim
         head_dim = query.shape[-1]
-        scale = node.attrs.get("scale", head_dim**-0.5)
+        scale_val = node.attrs.get("scale", head_dim**-0.5)
+        scale = float(scale_val) if scale_val is not None else None
 
         # Check for causal mask attribute
         causal = bool(node.attrs.get("causal", 0))

@@ -295,7 +295,9 @@ class LLaVAProjector:
         # Linear 1
         h = x_np @ self.weight1.T
         if self.bias1 is not None:
-            h = h + self.bias1
+            # Work around PyTorch MPS Metal validation bug where
+            # add_dense_scalar kernel binds a read-only buffer with write access.
+            h.add_(self.bias1)
 
         # Activation
         h = _apply_activation(h, self.config.activation)
@@ -303,7 +305,9 @@ class LLaVAProjector:
         # Linear 2
         out = h @ self.weight2.T
         if self.bias2 is not None:
-            out = out + self.bias2
+            # Work around PyTorch MPS Metal validation bug where
+            # add_dense_scalar kernel binds a read-only buffer with write access.
+            out.add_(self.bias2)
 
         # Restore shape
         out_shape = list(orig_shape[:-1]) + [self.llm_hidden_size]

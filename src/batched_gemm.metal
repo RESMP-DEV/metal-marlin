@@ -224,10 +224,9 @@ inline void store_results(
             uint col = col_segment * 8;
 
             device half* dst = C + (base_row + row) * N + base_col + col;
-            threadgroup half* src = &sg_staging[simd_id][row][col];
 
             for (uint i = 0; i < 8; ++i) {
-                dst[i] = src[i];
+                dst[i] = sg_staging[simd_id][row][col + i];
             }
         }
         return;
@@ -255,7 +254,7 @@ inline void store_results(
                         C[gr * N + gc] = edge_staging[r][c];
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_none);
             }
         }
     }

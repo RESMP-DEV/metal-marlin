@@ -153,7 +153,7 @@ def decompress_kv(
     v_q: np.ndarray,
     v_scales: np.ndarray,
     scaling: ScalingStrategy = ScalingStrategy.PER_HEAD,
-    output_dtype: np.dtype = np.float16,
+    output_dtype: np.dtype = np.dtype(np.float16),
 ) -> tuple[np.ndarray, np.ndarray]:
     """Dequantize K, V tensors for attention computation.
 
@@ -226,7 +226,7 @@ def _quantize_fp8_e4m3(
 def _dequantize_fp8_e4m3(
     quantized: np.ndarray,
     scale: np.ndarray,
-    output_dtype: np.dtype = np.float16,
+    output_dtype: np.dtype = np.dtype(np.float16),
 ) -> np.ndarray:
     """Dequantize FP8 E4M3 format to floating point.
 
@@ -286,7 +286,7 @@ def _quantize_int8_symmetric(
 def _dequantize_int8_symmetric(
     quantized: np.ndarray,
     scale: np.ndarray,
-    output_dtype: np.dtype = np.float16,
+    output_dtype: np.dtype = np.dtype(np.float16),
 ) -> np.ndarray:
     """Dequantize INT8 symmetric format to floating point.
 
@@ -437,7 +437,7 @@ class QuantizedKVCache:
         v_q = self.v_cache[layer_idx][:, :, : self.seq_len, :]
         v_s = self.v_scales[layer_idx][:, :, : self.seq_len, :]
 
-        output_dtype = np.float16  # numpy doesn't have bf16, use fp16
+        output_dtype = np.dtype(np.float16)  # numpy doesn't have bf16, use fp16
 
         return decompress_kv(k_q, k_s, v_q, v_s, self.scaling, output_dtype)
 
@@ -482,7 +482,7 @@ class QuantizedKVCache:
         v_q_full = self.v_cache[layer_idx][:, :, :end_pos, :]
         v_s_full = self.v_scales[layer_idx][:, :, :end_pos, :]
 
-        output_dtype = np.float16
+        output_dtype = np.dtype(np.float16)
         return decompress_kv(k_q_full, k_s_full, v_q_full, v_s_full, self.scaling, output_dtype)
 
     def advance(self, num_tokens: int = 1) -> None:
