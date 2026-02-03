@@ -70,7 +70,8 @@ class RoPE(nn.Module):
         dtype = x.dtype
 
         # Compute position indices
-        positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=device)
+        positions = torch.arange(
+            offset, offset + seq_len, dtype=torch.float32, device=device)
 
         # Compute inverse frequencies
         inv_freq = 1.0 / (
@@ -202,9 +203,12 @@ class MarlinAttention(nn.Module):
         v = self.v_proj(hidden_states)
 
         # Reshape to [batch, num_heads, seq_len, head_dim]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        q = q.view(batch_size, seq_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_kv_heads,
+                   self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads,
+                   self.head_dim).transpose(1, 2)
 
         # Apply RoPE
         position_offset = kv_cache.seq_len if kv_cache else 0
@@ -221,15 +225,33 @@ class MarlinAttention(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
+        # Optimized causal mask handling
+        # Decode (seq_len == 1): Skip mask computation, hardcode causal constraint
+        # Prefill (seq_len > 1): Use efficient bitmask or standard causal mask
+        if attention_mask is None:
+            if seq_len == 1:
+                # Decode: No mask needed, rely on is_causal=True
+                is_causal = True
+                attn_mask = None
+            else:
+                # Prefill: Create causal mask if none provided
+                kv_seq_len = k.shape[-2]
+                attn_mask = create_causal_mask(
+                    seq_len, kv_seq_len, device=q.device)
+                is_causal = False
+        else:
+            attn_mask = attention_mask
+            is_causal = False
+
         # Use Metal-optimized attention via scaled_dot_product_attention
         # This will use the MPS backend's optimized attention implementation
         attn_output = scaled_dot_product_attention_metal(
             q,
             k,
             v,
-            attn_mask=attention_mask,
+            attn_mask=attn_mask,
             scale=self.scale,
-            is_causal=attention_mask is None,
+            is_causal=is_causal,
         )
 
         # Reshape and project output
@@ -252,10 +274,12 @@ def scaled_dot_product_attention_metal(
     is_causal: bool = False,
 ) -> torch.Tensor:
     """
-    Scaled dot-product attention using PyTorch's native implementation.
+    Scaled dot-product attention with Metal-optimized backends.
 
-    On MPS devices, this uses the Metal-optimized SDPA implementation.
-    Falls back to PyTorch's native implementation on other devices.
+    Dispatches to fused_attention() which tries in order:
+    1. fused_scaled_dot_product_attention (MPSGraph)
+    2. flash_attention_v2 (Metal kernels)
+    3. F.scaled_dot_product_attention (PyTorch fallback)
 
     Args:
         q: Query tensor [batch, num_heads, seq_len, head_dim]
@@ -271,17 +295,28 @@ def scaled_dot_product_attention_metal(
     if scale is None:
         scale = q.shape[-1] ** -0.5
 
-    # Use PyTorch's scaled_dot_product_attention which has MPS optimization
-    # This automatically selects the best implementation for the current device
-    return F.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        attn_mask=attn_mask,
-        dropout_p=0.0,
-        is_causal=is_causal,
-        scale=scale,
-    )
+    # Use fused_attention dispatcher which tries optimized backends
+    try:
+        from .fused_attention_mps import fused_attention
+        return fused_attention(
+            q,
+            k,
+            v,
+            mask=attn_mask,
+            scale=scale,
+            causal=is_causal,
+        )
+    except Exception:
+        # Fallback to PyTorch's SDPA
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+            scale=scale,
+        )
 
 
 def flash_attention_metal(
@@ -385,6 +420,86 @@ def sliding_window_attention_metal(
     )
 
 
+def create_causal_bitmask(
+    seq_len: int,
+    kv_seq_len: int | None = None,
+    device: torch.device | None = None,
+) -> torch.Tensor | None:
+    """
+    Create causal attention mask as bitmask for efficient prefill.
+
+    Uses 64-bit integers (uint64) to pack mask bits, enabling
+    fast bitwise operations in Metal kernels instead of per-element
+    comparisons.
+
+    Args:
+        seq_len: Query sequence length
+        kv_seq_len: Key/value sequence length (defaults to seq_len)
+        device: Device to create the mask on
+
+    Returns:
+        Bitmask tensor [num_words, seq_len] where num_words = ceil(kv_seq_len / 64)
+        Each uint64 contains 64 mask bits: bit k = 0 (unmasked) if k <= q_pos
+        Returns None for single-token decode
+    """
+    kv_seq_len = kv_seq_len or seq_len
+
+    # Single token decode - no masking needed
+    if seq_len == 1:
+        return None
+
+    if device is None:
+        device = _get_device()
+
+    # Compute number of 64-bit words needed
+    num_words = (kv_seq_len + 63) // 64
+
+    # Vectorized bitmask creation
+    # Create query position indices: [seq_len]
+    q_pos = torch.arange(seq_len, device=device)
+
+    # Compute start bit for each query: [seq_len]
+    start_bits = (q_pos + 1) % 64
+
+    # Compute which word each mask starts in: [seq_len]
+    start_words = (q_pos + 1) // 64
+
+    # Initialize bitmask: [num_words, seq_len]
+    bitmask = torch.zeros((num_words, seq_len),
+                          dtype=torch.uint64, device=device)
+
+    # All ones mask (0xFFFFFFFFFFFFFFFF)
+    all_ones = torch.tensor(
+        0xFFFFFFFFFFFFFFFF, dtype=torch.uint64, device=device)
+
+    # For each query position, set the appropriate words
+    # Create a mask of which queries affect which words
+    word_range = torch.arange(
+        num_words, device=device).unsqueeze(1)  # [num_words, 1]
+
+    # Masked positions: words >= start_words
+    mask_mask = word_range >= start_words.unsqueeze(0)  # [num_words, seq_len]
+
+    # Set full words (after the first partial word)
+    full_word_mask = mask_mask & (word_range > start_words.unsqueeze(0))
+    bitmask[full_word_mask] = all_ones
+
+    # Set partial words (first masked word for each query)
+    partial_mask = mask_mask & (word_range == start_words.unsqueeze(0))
+    # Compute partial mask values: all_ones << start_bit
+    partial_values = torch.zeros(
+        (num_words, seq_len), dtype=torch.uint64, device=device)
+    partial_values[partial_mask] = all_ones.unsqueeze(
+        0) << start_bits.unsqueeze(0)[partial_mask]
+    bitmask = bitmask | partial_values
+
+    # Handle cases where mask_start >= kv_seq_len (no masking needed)
+    valid_queries = q_pos < kv_seq_len - 1
+    bitmask = bitmask[:, valid_queries]
+
+    return bitmask.unsqueeze(0)  # [1, num_words, seq_len_valid]
+
+
 def create_causal_mask(
     seq_len: int,
     kv_seq_len: int | None = None,
@@ -392,6 +507,9 @@ def create_causal_mask(
 ) -> torch.Tensor | None:
     """
     Create causal attention mask.
+
+    Optimized for prefill (seq_len > 1) with efficient triangular mask creation.
+    For decode (seq_len == 1), returns None to rely on kernel's built-in causal handling.
 
     Args:
         seq_len: Query sequence length
@@ -404,18 +522,21 @@ def create_causal_mask(
     kv_seq_len = kv_seq_len or seq_len
 
     # Single token decode - no masking needed
+    # The attention kernel will handle causal constraint via is_causal parameter
     if seq_len == 1:
         return None
 
     if device is None:
         device = _get_device()
 
-    # Prefill: standard causal mask
-    # Create upper triangular mask with -inf for positions that should be masked
-    mask = torch.triu(
-        torch.full((seq_len, kv_seq_len), float("-inf"), device=device),
-        diagonal=1,
-    )
+    # Prefill: efficient triangular mask
+    # Use tril with zero filling, then negate to get -inf pattern
+    # This is more efficient than triu with -inf
+    mask = torch.zeros((seq_len, kv_seq_len), device=device)
+    mask = torch.tril(mask, diagonal=0)
+    mask = torch.where(mask == 0, torch.tensor(
+        float("-inf"), device=device), mask)
+
     return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]
 
 

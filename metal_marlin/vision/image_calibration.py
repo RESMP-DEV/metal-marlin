@@ -38,21 +38,38 @@ import random
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
 if TYPE_CHECKING:
-    pass
+    from numpy.typing import NDArray
+    
+    # Use dummy class for Tensor if torch is not fully available/resolved
+    class Tensor:
+        dtype: Any
+        shape: tuple[int, ...]
+        ndim: int
+        device: Any
+        def contiguous(self) -> Tensor: ...
+        def detach(self) -> Tensor: ...
+        def cpu(self) -> Tensor: ...
+        def numpy(self) -> Any: ...
+        def to(self, dtype: Any) -> Tensor: ...
+        def permute(self, *dims: int) -> Tensor: ...
+        def squeeze(self) -> Tensor: ...
+        def unsqueeze(self, dim: int) -> Tensor: ...
+
+from metal_marlin._compat import torch
 
 # VisionMetal import with fallback for non-Apple systems
 try:
     from .vision_metal import VisionMetal
-    _VISION_METAL = VisionMetal()
-    HAS_VISION_METAL = True
+    _vision_metal: VisionMetal | None = VisionMetal()
+    _has_vision_metal = True
 except Exception:
-    _VISION_METAL = None
-    HAS_VISION_METAL = False
+    _vision_metal = None
+    _has_vision_metal = False
 
 
 @dataclass
@@ -83,7 +100,7 @@ class ImageCalibrationDataset:
         source: Dataset source name.
     """
 
-    images: list[np.ndarray] = field(default_factory=list)
+    images: list[NDArray[Any]] = field(default_factory=list)
     image_infos: list[ImageInfo] = field(default_factory=list)
     image_size: tuple[int, int] = (224, 224)
     mean: tuple[float, float, float] = (0.48145466, 0.4578275, 0.40821073)  # CLIP
@@ -93,14 +110,14 @@ class ImageCalibrationDataset:
     def __len__(self) -> int:
         return len(self.images)
 
-    def __getitem__(self, idx: int) -> np.ndarray:
+    def __getitem__(self, idx: int) -> NDArray[Any]:
         return self.images[idx]
 
     def get_batches(
         self,
         batch_size: int = 8,
         shuffle: bool = True,
-    ) -> Iterator[np.ndarray]:
+    ) -> Iterator[NDArray[np.float32]]:
         """Yield batches of preprocessed images.
 
         Args:
@@ -119,7 +136,7 @@ class ImageCalibrationDataset:
             batch = np.stack([self.images[j] for j in batch_indices])
             yield batch.astype(np.float32)
 
-    def get_all(self) -> np.ndarray:
+    def get_all(self) -> NDArray[np.float32]:
         """Return all images as a single array.
 
         Returns:
@@ -427,7 +444,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             ImportError: If datasets library not installed.
         """
         try:
-            from datasets import load_dataset
+            from datasets import load_dataset  # type: ignore
         except ImportError:
             raise ImportError(
                 "HuggingFace datasets library required. Install with: pip install datasets"
@@ -440,11 +457,11 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             std = (0.26862954, 0.26130258, 0.27577711)
 
         # Load dataset
-        ds = load_dataset(dataset_name, split=split, streaming=True)
+        ds = cast(Any, load_dataset(dataset_name, split=split, streaming=True))
 
         # Collect images
-        images = []
-        image_infos = []
+        images: list[NDArray[Any]] = []
+        image_infos: list[ImageInfo] = []
 
         np.random.default_rng(seed)
         count = 0
@@ -492,7 +509,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         image_size: tuple[int, int],
         mean: tuple[float, float, float],
         std: tuple[float, float, float],
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Generate a synthetic calibration image with realistic statistics.
 
         Creates images with statistics similar to natural images:
@@ -516,21 +533,24 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         channels = []
         for c in range(3):
             # Generate noise at lower resolution
-            low_res = rng.standard_normal((H // 8, W // 8))
+            low_res: NDArray[Any] = rng.standard_normal((H // 8, W // 8))
 
             # Upsample with bilinear interpolation for smoothness
-            if HAS_VISION_METAL:
-                import torch
-                low_res_t = torch.from_numpy(low_res).unsqueeze(0).unsqueeze(0).to('mps')
-                smooth_t = _VISION_METAL.resize_bilinear(low_res_t, (H, W))
-                smooth = smooth_t.squeeze().cpu().numpy()
+            if _has_vision_metal and _vision_metal is not None and torch is not None:
+                low_res_t = cast("Tensor", torch.from_numpy(low_res).unsqueeze(0).unsqueeze(0).to('mps'))
+                smooth_t = _vision_metal.resize_bilinear(low_res_t, (H, W))
+                smooth: NDArray[Any] = smooth_t.squeeze().cpu().numpy()
             else:
-                from scipy.ndimage import zoom
-                smooth = zoom(low_res, (8, 8), order=1)
+                try:
+                    from scipy.ndimage import zoom
+                    smooth = cast(NDArray[Any], zoom(low_res, (8, 8), order=1))
+                except ImportError:
+                    # Fallback if scipy is not available
+                    smooth = np.repeat(np.repeat(low_res, 8, axis=0), 8, axis=1)
 
             # Add high-frequency detail
-            detail = rng.standard_normal((H, W)) * 0.3
-            combined = smooth + detail
+            detail: NDArray[Any] = rng.standard_normal((H, W)) * 0.3
+            combined: NDArray[Any] = smooth + detail
 
             # Normalize to target mean/std
             combined = (combined - combined.mean()) / (combined.std() + 1e-8)
@@ -546,8 +566,8 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         image_size: tuple[int, int],
         mean: tuple[float, float, float],
         std: tuple[float, float, float],
-        preprocess_fn: Callable[[np.ndarray], np.ndarray] | None = None,
-    ) -> np.ndarray:
+        preprocess_fn: Callable[[NDArray[Any]], NDArray[Any]] | None = None,
+    ) -> NDArray[np.float32]:
         """Load and preprocess a single image.
 
         Args:
@@ -568,9 +588,9 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             img_array = np.array(pil_img)
         except ImportError:
             try:
-                import imageio.v3 as iio
+                import imageio.v3 as iio  # type: ignore
 
-                img_array = iio.imread(path)
+                img_array = cast(NDArray[Any], iio.imread(path))
             except ImportError:
                 raise ImportError(
                     "Image loading requires PIL or imageio. "
@@ -578,17 +598,17 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
                 )
 
         if preprocess_fn is not None:
-            return preprocess_fn(img_array)
+            return preprocess_fn(img_array).astype(np.float32)
 
         return VisionCalibrationDataset._preprocess_array(img_array, image_size, mean, std)
 
     @staticmethod
     def _preprocess_array(
-        img: np.ndarray,
+        img: NDArray[Any],
         image_size: tuple[int, int],
         mean: tuple[float, float, float],
         std: tuple[float, float, float],
-    ) -> np.ndarray:
+    ) -> NDArray[np.float32]:
         """Preprocess a raw image array.
 
         Applies:
@@ -626,31 +646,41 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             from PIL import Image
 
             pil_img = Image.fromarray(img)
-            pil_img = pil_img.resize((W, H), Image.BILINEAR)
+            # Use Resampling.BILINEAR if available, else BILINEAR
+            try:
+                resample = Image.Resampling.BILINEAR
+            except AttributeError:
+                resample = getattr(Image, "BILINEAR", 2)
+            
+            pil_img = pil_img.resize((W, H), resample)
             img = np.array(pil_img)
         except ImportError:
-            if HAS_VISION_METAL:
-                import torch
-                img_t = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to('mps')
+            if HAS_VISION_METAL and _VISION_METAL is not None and torch is not None:
+                img_t = cast("Tensor", torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to('mps'))
                 img_resized_t = _VISION_METAL.resize_bilinear(img_t, (H, W))
-                img = img_resized_t.squeeze().permute(1, 2, 0).cpu().numpy()
+                img = cast(NDArray[Any], img_resized_t.squeeze().permute(1, 2, 0).cpu().numpy())
                 img = np.clip(img, 0, 255).astype(np.uint8)
             else:
-                from scipy.ndimage import zoom
-                scale_h = H / img.shape[0]
-                scale_w = W / img.shape[1]
-                img = zoom(img, (scale_h, scale_w, 1), order=1)
-                img = np.clip(img, 0, 255).astype(np.uint8)
+                try:
+                    from scipy.ndimage import zoom
+                    scale_h = H / img.shape[0]
+                    scale_w = W / img.shape[1]
+                    img = cast(NDArray[Any], zoom(img, (scale_h, scale_w, 1), order=1))
+                    img = np.clip(img, 0, 255).astype(np.uint8)
+                except ImportError:
+                    # Very basic fallback
+                    img = np.repeat(np.repeat(img, H // img.shape[0] + 1, axis=0), W // img.shape[1] + 1, axis=1)
+                    img = img[:H, :W, :]
 
         # Convert to float and normalize
-        img = img.astype(np.float32) / 255.0
+        img_float: NDArray[np.float32] = img.astype(np.float32) / 255.0
 
         # Apply normalization per channel
         for c in range(3):
-            img[:, :, c] = (img[:, :, c] - mean[c]) / std[c]
+            img_float[:, :, c] = (img_float[:, :, c] - mean[c]) / std[c]
 
         # Transpose to [C, H, W]
-        return img.transpose(2, 0, 1)
+        return img_float.transpose(2, 0, 1)
 
 
 def get_clip_normalization() -> tuple[tuple[float, float, float], tuple[float, float, float]]:

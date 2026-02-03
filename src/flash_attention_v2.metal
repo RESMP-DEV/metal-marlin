@@ -232,25 +232,21 @@ inline void store_half4_safe(device half* ptr, uint offset, half4 val, uint vali
 }
 
 // ---------------------------------------------------------------------------
-// Fast simd reductions
+// Fast simd reductions using hardware intrinsics
+//
+// Metal's built-in simd_sum/simd_max are hardware-accelerated and significantly
+// faster than manual simd_shuffle_xor chains:
+// - Single instruction vs 5 dependent instructions
+// - Dedicated reduction hardware on Apple Silicon
+// - Lower latency and energy consumption
 // ---------------------------------------------------------------------------
 
-inline float simd_max(float val) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
+inline float simd_max_reduce(float val) {
+    return simd_max(val);
 }
 
-inline float simd_sum(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
+inline float simd_sum_reduce(float val) {
+    return simd_sum(val);
 }
 
 // Fused max-reduce returning both max and index
@@ -803,7 +799,14 @@ kernel void flash_attention_v2_decode(
     uint lane_id                    [[thread_index_in_simdgroup]],
     uint sg_id                      [[simdgroup_index_in_threadgroup]]
 ) {
-    // Decode has seq_q = 1, so one threadgroup per (sequence, head) pair
+    // ---------------------------------------------------------------------------
+    // Decode kernel: seq_q = 1, single query attending to full KV cache.
+    //
+    // CAUSAL MASK OPTIMIZATION: For decode, the query is at position seq_k-1
+    // (the newest token), so it can attend to ALL positions 0..seq_k-1.
+    // The causal constraint is trivially satisfied - NO MASK COMPUTATION NEEDED.
+    // This eliminates one comparison per attention score.
+    // ---------------------------------------------------------------------------
     const uint seq_idx = tgid / num_heads_q;
     const uint head_q = tgid % num_heads_q;
 
@@ -908,24 +911,27 @@ kernel void flash_attention_v2_decode(
         }
 
         // Compute (simdgroup 0 only for single Q)
+        // NO CAUSAL MASK: decode query at position seq_k-1 attends to all 0..seq_k-1
         if (sg_id == 0) {
             float scores[TILE_KV];
 
+            // Compute dot products - no causal masking needed for decode
             for (uint ki = 0; ki < tile_len; ++ki) {
                 float dot = 0.0f;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    dot += q_reg[i] * float(K_smem[buf][ki][d]);
+                    dot += q_reg[i] * input_to_float(K_smem[buf][ki][d]);
                 }
                 dot = simd_sum(dot);
                 scores[ki] = dot * scale;
             }
 
+            // Pad invalid tile positions
             for (uint ki = tile_len; ki < TILE_KV; ++ki) {
                 scores[ki] = -INFINITY;
             }
 
-            // Online softmax
+            // Online softmax (no causal mask checks)
             float m_tile = -INFINITY;
             for (uint ki = 0; ki < tile_len; ++ki) {
                 m_tile = max(m_tile, scores[ki]);
@@ -944,7 +950,7 @@ kernel void flash_attention_v2_decode(
                 l_prev += p;
                 for (uint i = 0; i < elems_per_lane; ++i) {
                     uint d = lane_id * elems_per_lane + i;
-                    o_acc[i] += p * float(V_smem[buf][ki][d]);
+                    o_acc[i] += p * input_to_float(V_smem[buf][ki][d]);
                 }
             }
 
@@ -974,6 +980,186 @@ kernel void flash_attention_v2_decode(
         }
 #endif
     }
+}
+
+// ---------------------------------------------------------------------------
+// Flash Attention V2 - Decode Fast Path (batch=1, seq_q=1)
+//
+// Ultra-optimized decode kernel for single-token generation where softmax
+// can be computed with minimal overhead.
+//
+// Key optimizations:
+//   1. Special case for seq_k=1: softmax is trivially 1.0, output = V[0]
+//   2. Warp-level parallel score computation with simd_sum reduction
+//   3. Fused online softmax + V accumulation in single pass
+//   4. No separate kernel launch for softmax normalization
+//
+// For decode, the attention is:
+//   scores[k] = dot(Q, K[k]) * scale  for k in [0, seq_k)
+//   probs = softmax(scores)
+//   output = sum_k(probs[k] * V[k])
+//
+// We fuse this using online softmax: maintain running max and sum,
+// rescale V accumulator as new tiles are processed.
+//
+// Dispatch: [num_heads_q, 1, 1] threadgroups (one TG per head)
+// ---------------------------------------------------------------------------
+
+kernel void flash_attention_v2_decode_fast(
+    device const input_t* Q         [[buffer(0)]],
+    device const input_t* K         [[buffer(1)]],
+    device const input_t* V         [[buffer(2)]],
+    device output_t* O              [[buffer(3)]],
+    constant uint& num_heads_q      [[buffer(4)]],
+    constant uint& num_heads_kv     [[buffer(5)]],
+    constant uint& seq_k            [[buffer(6)]],
+    constant uint& head_dim         [[buffer(7)]],
+    constant float& scale           [[buffer(8)]],
+    uint tgid                       [[threadgroup_position_in_grid]],
+    uint tid                        [[thread_index_in_threadgroup]],
+    uint lane_id                    [[thread_index_in_simdgroup]],
+    uint sg_id                      [[simdgroup_index_in_threadgroup]]
+) {
+    // Single sequence, single query token (batch=1, seq_q=1)
+    const uint head_q = tgid;
+    if (head_q >= num_heads_q) return;
+
+    const uint gqa_ratio = num_heads_q / num_heads_kv;
+    const uint head_kv = head_q / gqa_ratio;
+
+    // Q offset: [heads_q, head_dim] -> single query vector
+    const uint q_offset = head_q * head_dim;
+
+    // K/V offset: [heads_kv, seq_k, head_dim]
+    const uint kv_stride_h = seq_k * head_dim;
+    const uint kv_base = head_kv * kv_stride_h;
+
+    const uint elems_per_lane = head_dim / SIMD_SIZE;
+
+    // =========================================================================
+    // FAST PATH: seq_k == 1 (first token decode)
+    // Softmax of single element is 1.0, output = V[0]
+    // =========================================================================
+    if (seq_k == 1 && sg_id == 0) {
+        const uint o_offset = head_q * head_dim;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                float v_val = input_to_float(V[kv_base + d]);
+                store_output_scalar(O, o_offset + d, v_val);
+            }
+        }
+        return;
+    }
+
+    // =========================================================================
+    // Load Q vector into registers (distributed across lanes of simdgroup 0)
+    // Each lane holds elems_per_lane consecutive elements
+    // =========================================================================
+    float q_reg[HEAD_DIM_128 / SIMD_SIZE];
+
+    if (sg_id == 0) {
+        if (elems_per_lane == 4) {
+            uint d = lane_id * 4;
+            if (d + 3 < head_dim) {
+#ifdef USE_BF16_INPUTS
+                float4 q_vals = bf16_load_as_float4(reinterpret_cast<device const ushort*>(Q + q_offset + d));
+#else
+                float4 q_vals = float4(half4_load(reinterpret_cast<device const half*>(Q + q_offset + d)));
+#endif
+                q_reg[0] = q_vals.x;
+                q_reg[1] = q_vals.y;
+                q_reg[2] = q_vals.z;
+                q_reg[3] = q_vals.w;
+            }
+        } else {
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                uint d = lane_id * elems_per_lane + i;
+                q_reg[i] = (d < head_dim) ? input_to_float(Q[q_offset + d]) : 0.0f;
+            }
+        }
+    }
+
+    // =========================================================================
+    // WARP-LEVEL PATH (simdgroup 0 only): Fused score + softmax + V accumulation
+    //
+    // Strategy: Each lane computes partial dot product (its portion of Q·K),
+    // then simd_sum reduces to full score. Online softmax tracks running
+    // max and sum while accumulating weighted V.
+    // =========================================================================
+
+    if (sg_id != 0) return;  // Only simdgroup 0 computes for decode
+
+    // Online softmax state
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    float o_acc[HEAD_DIM_128 / SIMD_SIZE] = {0.0f};
+
+    // Process K positions one at a time with online softmax
+    // For longer sequences, we could tile, but decode seq_k is usually manageable
+    for (uint k_pos = 0; k_pos < seq_k; ++k_pos) {
+        // Compute dot(Q, K[k_pos]) using distributed Q and parallel K load
+        // Each lane loads its portion of K and computes partial dot
+        float partial_dot = 0.0f;
+
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                float k_val = input_to_float(K[kv_base + k_pos * head_dim + d]);
+                partial_dot += q_reg[i] * k_val;
+            }
+        }
+
+        // Reduce partial dots across lanes to get full score
+        float score = simd_sum(partial_dot) * scale;
+
+        // Online softmax update
+        // If score > running_max, rescale previous accumulator
+        float prev_max = running_max;
+        running_max = max(running_max, score);
+
+        // Rescale factor: exp(prev_max - new_max)
+        // When prev_max == -INFINITY, this is 0 (correct: no prior contribution)
+        float rescale = exp(prev_max - running_max);
+
+        // Rescale running sum and accumulator
+        running_sum *= rescale;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            o_acc[i] *= rescale;
+        }
+
+        // Add current position's contribution
+        float weight = exp(score - running_max);
+        running_sum += weight;
+
+        // Accumulate weighted V
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                float v_val = input_to_float(V[kv_base + k_pos * head_dim + d]);
+                o_acc[i] += weight * v_val;
+            }
+        }
+    }
+
+    // Final normalization and store
+    float inv_sum = (running_sum > 0.0f) ? (1.0f / running_sum) : 0.0f;
+    const uint o_offset = head_q * head_dim;
+
+#ifdef USE_BF16_INPUTS
+    float out_vals[HEAD_DIM_128 / SIMD_SIZE];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        out_vals[i] = o_acc[i] * inv_sum;
+    }
+    store_output_bf16_vectorized(O, o_offset, lane_id, elems_per_lane, out_vals, head_dim);
+#else
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        uint d = lane_id * elems_per_lane + i;
+        if (d < head_dim) {
+            store_output_scalar(O, o_offset + d, o_acc[i] * inv_sum);
+        }
+    }
+#endif
 }
 
 // ---------------------------------------------------------------------------

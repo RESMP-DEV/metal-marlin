@@ -1,0 +1,159 @@
+{
+  "timestamp": "2026-02-02T10:18:56.725672",
+  "duration_seconds": 84.3736310005188,
+  "tasks_completed": 0,
+  "tasks_failed": 0,
+  "total_cost": 0.0,
+  "agents": {
+    "local-000": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-001": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-002": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-003": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-004": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-005": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-006": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-007": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-008": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-009": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-010": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-011": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-012": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-013": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-014": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-015": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-016": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-017": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-018": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-019": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-020": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-021": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-022": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-023": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    },
+    "local-024": {
+      "location": "local",
+      "tasks_completed": 0,
+      "tasks_failed": 0,
+      "cost": 0.0
+    }
+  }
+}

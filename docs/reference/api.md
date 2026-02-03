@@ -670,6 +670,91 @@ Read Metal buffer contents to numpy array (copy).
 
 ---
 
+## Vision Operations
+
+Metal-accelerated vision preprocessing operations. Replaces CPU-bound PIL/torchvision
+resize/normalize pipelines with Metal compute shaders.
+
+### `VisionMetal`
+
+```python
+from metal_marlin.vision.vision_metal import VisionMetal
+
+class VisionMetal:
+    def __init__(self, device: torch.device | None = None)
+
+    def uint8_to_float(self, image: torch.Tensor) -> torch.Tensor
+    
+    def center_crop(
+        self,
+        image: torch.Tensor,
+        size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> torch.Tensor
+
+    def resize_bilinear(
+        self,
+        input: torch.Tensor,
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> torch.Tensor
+
+    def resize_bicubic(
+        self,
+        input: torch.Tensor,
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> torch.Tensor
+
+    def normalize(
+        self,
+        image: torch.Tensor,
+        mean: tuple[float, ...] | list[float] | torch.Tensor,
+        std: tuple[float, ...] | list[float] | torch.Tensor,
+        nhwc: bool = False,
+    ) -> torch.Tensor
+
+    def resize_and_normalize(
+        self,
+        image: torch.Tensor,
+        size: tuple[int, int],
+        mean: tuple[float, ...] | list[float] | torch.Tensor,
+        std: tuple[float, ...] | list[float] | torch.Tensor,
+        nhwc: bool = False,
+    ) -> torch.Tensor
+
+    def extract_patches(
+        self,
+        image: torch.Tensor,
+        patch_size: int,
+    ) -> torch.Tensor
+
+    def preprocess_qwen2vl(
+        self,
+        image: torch.Tensor,
+        max_pixels: int = 1024 * 1024,
+        patch_size: int = 14,
+        nhwc: bool = False,
+    ) -> torch.Tensor
+```
+
+---
+
+### `preprocess_for_vit`
+
+```python
+from metal_marlin.vision.vision_metal import preprocess_for_vit
+
+def preprocess_for_vit(
+    images: list[torch.Tensor] | torch.Tensor,
+    target_size: tuple[int, int] = (224, 224),
+    mean: tuple[float, float, float] = (0.485, 0.456, 0.406),
+    std: tuple[float, float, float] = (0.229, 0.224, 0.225),
+) -> torch.Tensor
+```
+
+---
+
 ## Deprecated Classes (Legacy)
 
 These classes are deprecated and will be removed in a future major release.

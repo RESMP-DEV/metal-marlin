@@ -1,0 +1,2 @@
+all_reduce_kernel
+all_reduce_simd_kernel

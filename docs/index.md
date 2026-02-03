@@ -21,7 +21,11 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 Step-by-step tutorials and workflows for using Metal Marlin.
 
 - [Getting Started](guides/getting_started.md) — Quick installation and first model
+- [Building from Source](building.md) — Compilation and dependencies
 - [CLI Reference](guides/cli.md) — Command-line tools
+- [Optimization Guide](guides/optimization.md) — Comprehensive performance tuning
+- [BF16 Optimization Guide](guides/bf16_optimization.md) — BF16 kernel variants and strategy
+- [Performance Benchmarks](performance.md) — Latest performance results
 - [Calibration Guide](guides/calibration.md) — Custom calibration for quality
 - [Troubleshooting](guides/troubleshooting.md) — Fix common problems
 
@@ -30,6 +34,7 @@ Technical reference for APIs, models, and integrations.
 
 - [Python API](reference/api.md) — Full API documentation
 - [Supported Models](reference/supported_models.md) — Model compatibility matrix
+- [Hardware Compatibility](compatibility.md) — GPU and macOS version support
 - [Integration Guide](reference/integration.md) — Embedding in your application
 
 ### [Core Concepts](concepts/index.md)
@@ -38,6 +43,8 @@ Understand the fundamental ideas behind Metal Marlin.
 - [Architecture Overview](concepts/architecture.md) — System design
 - [Inference Architecture](concepts/inference_architecture.md) — End-to-end inference flow
 - [MoE Architecture](concepts/moe_architecture.md) — Mixture of Experts support
+- [Prompt Sharing (COW)](cow_prompt_sharing.md) — Copy-on-Write prompt sharing
+- [Vision & ViT Support](concepts/vision_1024_implementation.md) — High-res image preprocessing
 - [Quantization & Dequantization](concepts/dequantization.md) — How weights work
 - [Mixed Precision](concepts/mixed_precision.md) — Per-layer precision strategies
 - [KV Cache](concepts/kv_cache.md) — Quantized key-value cache
@@ -48,6 +55,11 @@ Supported formats and data type configurations.
 - [GGUF Support](formats/gguf_quantization.md) — GGUF format
 - [MR-GPTQ](formats/mr_gptq.md) — Metal Marlin GPTQ
 - [Data Type Configuration](formats/dtype_configuration.md) — Choosing optimal types
+
+### [Advanced Features](features/index.md)
+Optional features and extensions.
+
+- [Balance Loss](features/balance_loss.md) — Auxiliary loss for MoE expert balancing
 
 ### [Metal Kernel Internals](internals/index.md)
 Low-level documentation for kernel developers.
@@ -60,14 +72,19 @@ Low-level documentation for kernel developers.
 ### [Technical Audits](audits/index.md)
 Investigation reports and bug analyses.
 
+- [Implementation Summary](implementation_summary.md) — Comprehensive status report
+- [Batch Scheduler Implementation](batch_scheduler_implementation.md) — Dynamic request scheduling
 - [Metal Kernel Audit](audits/metal_kernel_audit.md) — Kernel review
 - [Resolved Bugs](audits/resolved_bugs.md) — Fixed issues
+- [FA3 Architecture](fa3_architecture.md) — FlashAttention-3 implementation notes
+- [Metadata Refactor](mla_proj_refactor.md) — MLA projection changes
 
 ### [Comparisons](comparisons/index.md)
 How Metal Marlin compares to alternatives.
 
 - [Why Not MLX?](comparisons/why_not_mlx.md) — PyTorch MPS vs MLX
 - [vLLM Comparison](comparisons/vllm_comparison.md) — Feature comparison
+- [Throughput Report](glm4_throughput_report.md) — GLM-4.7 throughput analysis
 
 ---
 

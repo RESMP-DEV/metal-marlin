@@ -17,7 +17,27 @@
 //   - For large index arrays, consider sorting indices first for cache efficiency
 
 #include <metal_stdlib>
+#include <metal_atomic>
 using namespace metal;
+
+// ---------------------------------------------------------------------------
+// Atomic float add using CAS (Metal 2.3 compatible)
+// ---------------------------------------------------------------------------
+
+inline void atomic_add_float(device float* ptr, float value) {
+    device atomic_uint* atomic_ptr = (device atomic_uint*)ptr;
+    uint old_bits = atomic_load_explicit(atomic_ptr, memory_order_relaxed);
+    uint new_bits;
+    bool success;
+    do {
+        float old_val = as_type<float>(old_bits);
+        float new_val = old_val + value;
+        new_bits = as_type<uint>(new_val);
+        success = atomic_compare_exchange_weak_explicit(
+            atomic_ptr, &old_bits, new_bits,
+            memory_order_relaxed, memory_order_relaxed);
+    } while (!success);
+}
 
 // ============================================================================
 // gather_rows: Extract rows from a matrix by index
@@ -133,17 +153,17 @@ kernel void gather_rows_vec4_fp16(
 kernel void scatter_add(
     device const float* src [[buffer(0)]],
     device const uint* indices [[buffer(1)]],
-    device atomic_float* dst [[buffer(2)]],
+    device float* dst [[buffer(2)]],  // Uses CAS-based atomic add
     constant uint& count [[buffer(3)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= count) return;
-    
+
     uint dst_idx = indices[tid];
     float value = src[tid];
-    
+
     // Atomic addition for race-condition-free accumulation
-    atomic_fetch_add_explicit(&dst[dst_idx], value, memory_order_relaxed);
+    atomic_add_float(&dst[dst_idx], value);
 }
 
 // ============================================================================
@@ -162,7 +182,7 @@ kernel void scatter_add(
 kernel void scatter_add_2d(
     device const float* src [[buffer(0)]],
     device const uint* indices [[buffer(1)]],
-    device atomic_float* dst [[buffer(2)]],
+    device float* dst [[buffer(2)]],  // Uses CAS-based atomic add
     constant uint& count [[buffer(3)]],
     constant uint& inner_size [[buffer(4)]],
     uint2 gid [[thread_position_in_grid]])
@@ -170,12 +190,12 @@ kernel void scatter_add_2d(
     // gid.x = position within inner dimension
     // gid.y = which source row
     if (gid.y >= count || gid.x >= inner_size) return;
-    
+
     uint dst_row = indices[gid.y];
     float value = src[gid.y * inner_size + gid.x];
-    
+
     // Atomic add to destination
-    atomic_fetch_add_explicit(&dst[dst_row * inner_size + gid.x], value, memory_order_relaxed);
+    atomic_add_float(&dst[dst_row * inner_size + gid.x], value);
 }
 
 // ============================================================================
@@ -372,15 +392,16 @@ kernel void gather_batch(
 // Utility kernels
 // ============================================================================
 
-// Clear atomic float buffer (prepare for scatter_add)
+// Clear float buffer (prepare for scatter_add)
 // Must be called before scatter_add to initialize accumulation targets to 0
+// Note: Since scatter_add now uses CAS-based atomic, this can just be a regular write
 kernel void clear_atomic_float(
-    device atomic_float* buffer [[buffer(0)]],
+    device float* buffer [[buffer(0)]],
     constant uint& count [[buffer(1)]],
     uint tid [[thread_position_in_grid]])
 {
     if (tid >= count) return;
-    atomic_store_explicit(&buffer[tid], 0.0f, memory_order_relaxed);
+    buffer[tid] = 0.0f;
 }
 
 // Clear float buffer (non-atomic version)

@@ -10,7 +10,7 @@ Provides:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 import torch.nn as nn
@@ -169,7 +169,7 @@ class HybridBlock(nn.Module):
             quant_config=config.quant_config,
         )
 
-    def _build_mamba(self, config: HybridLayerConfig) -> nn.Module:
+    def _build_mamba(self, config: HybridLayerConfig) -> MarlinMambaBlock:  # type: ignore[name-defined]
         """Build Mamba block."""
         from .mamba import MarlinMambaBlock
 
@@ -188,11 +188,12 @@ class HybridBlock(nn.Module):
             mlp_activation=config.mlp_activation,
         )
 
-    def _build_mlp_only(self, config: HybridLayerConfig) -> nn.Module:
+    def _build_mlp_only(self, config: HybridLayerConfig) -> MLPOnlyBlock:  # type: ignore[name-defined]
         """Build MLP-only block (no attention/SSM)."""
 
         quant_cfg = config.quant_config or LayerQuantConfig(Precision.FP4_E2M1, 128)
         quant_type = _precision_to_str(quant_cfg.precision)
+        activation = cast(Literal["silu", "gelu", "relu"], config.mlp_activation)
 
         return MLPOnlyBlock(
             hidden_size=self.hidden_size,
@@ -201,16 +202,16 @@ class HybridBlock(nn.Module):
             group_size=quant_cfg.group_size,
             norm_eps=config.norm_eps,
             gated=config.use_gated_mlp,
-            activation=config.mlp_activation,
+            activation=activation,
         )
 
-    def _build_linear_attention(self, config: HybridLayerConfig) -> nn.Module:
+    def _build_linear_attention(self, config: HybridLayerConfig) -> RWKVBlock:  # type: ignore[name-defined]
         """Build RWKV block for linear attention."""
         from .rwkv import RWKVBlock
 
         attn_cfg = config.attention_config or AttentionLayerConfig()
         quant_cfg = config.quant_config or LayerQuantConfig(Precision.FP4_E2M1, 128)
-        quant_type = _precision_to_str(quant_cfg.precision)
+        quant_type = cast(Literal["fp4", "int4"], _precision_to_str(quant_cfg.precision))
 
         return RWKVBlock(
             hidden_size=self.hidden_size,
@@ -382,7 +383,7 @@ class MLPOnlyBlock(nn.Module):
         group_size: int = 128,
         norm_eps: float = 1e-6,
         gated: bool = True,
-        activation: str = "silu",
+        activation: Literal["silu", "gelu", "relu"] = "silu",
     ):
         require_torch("MLPOnlyBlock")
         super().__init__()
@@ -549,7 +550,9 @@ class HybridModel(nn.Module):
 
     def get_layer_types(self) -> list[HybridLayerType]:
         """Get list of layer types in order."""
-        return [layer.layer_type for layer in self.layers]
+        # Use self.layers[i].layer_type which is set in HybridBlock.__init__
+        typed_layers: list[HybridBlock] = list(self.layers)  # type: ignore[arg-type]
+        return [layer.layer_type for layer in typed_layers]
 
 
 class HybridModelBuilder:

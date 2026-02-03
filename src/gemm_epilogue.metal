@@ -142,41 +142,34 @@ inline void epilogue_apply(
 }
 
 // ---------------------------------------------------------------------------
-// Epilogue helpers operating directly on simdgroup accumulators
+// Epilogue application (combined bias + activation)
 //
-// These are convenience wrappers for kernels that want a simple bias or
-// bias+activation fuse without calling store_results_epilogue.
+// Applies bias and activation in a single pass over the staging buffer.
+// Uses simdgroup_barrier instead of threadgroup_barrier since epilogue
+// operations are local to each simdgroup's staging tile.
 // ---------------------------------------------------------------------------
 
-inline void epilogue_bias(
+/// Combined bias + activation epilogue operating on simdgroup accumulator.
+/// Fuses store→apply→load into a single call with minimal synchronization.
+/// Uses simdgroup_barrier since staging is per-simdgroup (no cross-simd sharing).
+inline void epilogue_fused(
     thread simdgroup_matrix<half, 8, 8>& acc,
     device const half* bias,
     uint col_offset,
+    uint mode,
     uint simd_lane,
     threadgroup half (&staging)[8][8]
 ) {
+    // Store accumulator to threadgroup staging
     simdgroup_store(acc, &staging[0][0], 8);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Single simdgroup barrier - staging is not shared across simdgroups here
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    epilogue_apply(staging, bias, col_offset, EPILOGUE_BIAS, simd_lane);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
+    // Apply epilogue in-place (each thread handles 2 elements)
+    epilogue_apply(staging, bias, col_offset, mode, simd_lane);
+    simdgroup_barrier(mem_flags::mem_threadgroup);
 
-    simdgroup_load(acc, &staging[0][0], 8);
-}
-
-inline void epilogue_bias_gelu(
-    thread simdgroup_matrix<half, 8, 8>& acc,
-    device const half* bias,
-    uint col_offset,
-    uint simd_lane,
-    threadgroup half (&staging)[8][8]
-) {
-    simdgroup_store(acc, &staging[0][0], 8);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    epilogue_apply(staging, bias, col_offset, EPILOGUE_BIAS_GELU, simd_lane);
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
+    // Load result back to accumulator
     simdgroup_load(acc, &staging[0][0], 8);
 }
 
@@ -208,10 +201,13 @@ inline void store_results_epilogue(
                 uint out_col = tg_col + sg_col_offset + ni * 8;
 
                 if (out_row + 8 <= M && out_col + 8 <= N) {
+                    // Interior tile: direct store to global memory
                     simdgroup_store(acc[mi][ni], C + out_row * N + out_col, N);
                 } else {
+                    // Boundary tile: stage then scatter with bounds checking
+                    // Uses simdgroup_barrier since staging is per-simdgroup
                     simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
 
                     for (uint elem = simd_lane; elem < 64; elem += 32) {
                         uint r = elem / 8;
@@ -222,7 +218,8 @@ inline void store_results_epilogue(
                             C[gr * N + gc] = staging[r][c];
                         }
                     }
-                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                    // Barrier before next tile reuses staging buffer
+                    simdgroup_barrier(mem_flags::mem_threadgroup);
                 }
             }
         }
@@ -230,17 +227,19 @@ inline void store_results_epilogue(
     }
 
     // Epilogue path: all tiles go through staging for element-wise ops
+    // Uses simdgroup_barrier since epilogue_staging is per-simdgroup
     for (uint mi = 0; mi < EP_SG_M_TILES; ++mi) {
         for (uint ni = 0; ni < EP_SG_N_TILES; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
             uint out_col = tg_col + sg_col_offset + ni * 8;
 
+            // Store accumulator to staging
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
 
-            // Apply epilogue in-place
+            // Apply epilogue in-place (bias + activation)
             epilogue_apply(staging, bias, out_col, mode, simd_lane);
-            threadgroup_barrier(mem_flags::mem_threadgroup);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
 
             // Store to global memory with boundary check
             if (out_row + 8 <= M && out_col + 8 <= N) {
@@ -249,6 +248,7 @@ inline void store_results_epilogue(
                 simdgroup_load(result, &staging[0][0], 8);
                 simdgroup_store(result, C + out_row * N + out_col, N);
             } else {
+                // Boundary tile: scatter with bounds checking
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
                     uint c = elem % 8;
@@ -258,7 +258,8 @@ inline void store_results_epilogue(
                         C[gr * N + gc] = staging[r][c];
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                // Barrier before next tile reuses staging buffer
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }

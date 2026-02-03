@@ -35,8 +35,12 @@ using namespace metal;
 // Constants
 // ============================================================================
 
-// Supported block sizes: 32, 64, 128
-// For larger blocks, adjust threads per threadgroup accordingly
+// Supported block sizes: 32, 64, 96, 128, 160, 192, 256
+// Power-of-2 sizes (32, 64, 128, 256) use optimized O(n log n) butterfly
+// Non-power-of-2 sizes use block-diagonal decomposition for optimal performance:
+//   - 96  = 64 + 32 (two independent transforms executed in parallel)
+//   - 160 = 128 + 32 (maximizes simdgroup utilization)
+//   - 192 = 128 + 64 (balanced subblock sizes)
 
 // ============================================================================
 // Inline butterfly helpers using simd_shuffle
@@ -1207,4 +1211,511 @@ kernel void hadamard_inverse_block_64_float(
     
     W[(k_base + lane_id * 2) * N + n] = val.x;
     W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+}
+
+// ============================================================================
+// Non-power-of-2 Hadamard transforms via block-diagonal decomposition
+// ============================================================================
+//
+// For non-power-of-2 sizes, decompose into independent power-of-2 blocks:
+//   H_96  = diag(H_64, H_32)
+//   H_160 = diag(H_128, H_32)
+//   H_192 = diag(H_128, H_64)
+//
+// Each block is transformed independently in parallel, exploiting the
+// block-diagonal structure for maximum throughput.
+// ============================================================================
+
+/// Hadamard transform for block_size = 96 (64 + 32)
+/// Grid: (N, num_blocks_per_96, 2) where last dimension selects 64-block or 32-block
+kernel void hadamard_forward_fast_96(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_96 = gid.y;
+    uint subblock_type = gid.z;  // 0 = first 64 elements, 1 = next 32 elements
+    
+    if (n >= N) return;
+    
+    uint k_base_96 = block_96 * 96;
+    
+    if (subblock_type == 0) {
+        // Transform first 64 elements using 64-transform
+        if (block_96 >= (K / 96)) return;
+        
+        uint k_base = k_base_96;
+        half2 val;
+        val.x = W[(k_base + lane_id * 2) * N + n];
+        val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+        
+        // Stage 0: intra-lane butterfly
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        // Stages 1-5: inter-lane butterfly
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);  // 1/sqrt(64)
+        
+        W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+        W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+        
+    } else {
+        // Transform next 32 elements using 32-transform
+        if (lane_id >= 32 || block_96 >= (K / 96)) return;
+        
+        uint k_base = k_base_96 + 64;
+        half val = W[(k_base + lane_id) * N + n];
+        
+        // 5 butterfly stages for size 32
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.17677669529663689h);  // 1/sqrt(32)
+        
+        W_rot[(k_base + lane_id) * N + n] = val;
+    }
+}
+
+/// Hadamard transform for block_size = 160 (128 + 32)
+kernel void hadamard_forward_fast_160(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_160 = gid.y;
+    uint subblock_type = gid.z;  // 0 = first 128 elements, 1 = next 32 elements
+    
+    if (n >= N) return;
+    
+    uint k_base_160 = block_160 * 160;
+    
+    if (subblock_type == 0) {
+        // Transform first 128 elements (each thread handles 4 elements)
+        if (block_160 >= (K / 160)) return;
+        
+        uint k_base = k_base_160;
+        half4 val;
+        val.x = W[(k_base + lane_id * 4) * N + n];
+        val.y = W[(k_base + lane_id * 4 + 1) * N + n];
+        val.z = W[(k_base + lane_id * 4 + 2) * N + n];
+        val.w = W[(k_base + lane_id * 4 + 3) * N + n];
+        
+        // Stage 0: intra-register (pairs within half4)
+        {
+            half4 tmp;
+            tmp.x = val.x + val.y;
+            tmp.y = val.x - val.y;
+            tmp.z = val.z + val.w;
+            tmp.w = val.z - val.w;
+            val = tmp;
+        }
+        
+        // Stage 1: inter-pair within half4
+        {
+            half4 tmp;
+            tmp.x = val.x + val.z;
+            tmp.y = val.y + val.w;
+            tmp.z = val.x - val.z;
+            tmp.w = val.y - val.w;
+            val = tmp;
+        }
+        
+        // Stages 2-6: inter-lane butterfly
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half4 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.08838834764831845h);  // 1/sqrt(128)
+        
+        W_rot[(k_base + lane_id * 4) * N + n] = val.x;
+        W_rot[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+        W_rot[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+        W_rot[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+        
+    } else {
+        // Transform next 32 elements
+        if (lane_id >= 32 || block_160 >= (K / 160)) return;
+        
+        uint k_base = k_base_160 + 128;
+        half val = W[(k_base + lane_id) * N + n];
+        
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.17677669529663689h);  // 1/sqrt(32)
+        
+        W_rot[(k_base + lane_id) * N + n] = val;
+    }
+}
+
+/// Hadamard transform for block_size = 192 (128 + 64)
+kernel void hadamard_forward_fast_192(
+    device const half* W        [[buffer(0)]],
+    device half* W_rot          [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_192 = gid.y;
+    uint subblock_type = gid.z;  // 0 = first 128 elements, 1 = next 64 elements
+    
+    if (n >= N) return;
+    
+    uint k_base_192 = block_192 * 192;
+    
+    if (subblock_type == 0) {
+        // Transform first 128 elements
+        if (block_192 >= (K / 192)) return;
+        
+        uint k_base = k_base_192;
+        half4 val;
+        val.x = W[(k_base + lane_id * 4) * N + n];
+        val.y = W[(k_base + lane_id * 4 + 1) * N + n];
+        val.z = W[(k_base + lane_id * 4 + 2) * N + n];
+        val.w = W[(k_base + lane_id * 4 + 3) * N + n];
+        
+        // Intra-register butterflies (stages 0-1)
+        {
+            half4 tmp;
+            tmp.x = val.x + val.y;
+            tmp.y = val.x - val.y;
+            tmp.z = val.z + val.w;
+            tmp.w = val.z - val.w;
+            val = tmp;
+        }
+        {
+            half4 tmp;
+            tmp.x = val.x + val.z;
+            tmp.y = val.y + val.w;
+            tmp.z = val.x - val.z;
+            tmp.w = val.y - val.w;
+            val = tmp;
+        }
+        
+        // Inter-lane butterflies (stages 2-6)
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half4 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.08838834764831845h);  // 1/sqrt(128)
+        
+        W_rot[(k_base + lane_id * 4) * N + n] = val.x;
+        W_rot[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+        W_rot[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+        W_rot[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+        
+    } else {
+        // Transform next 64 elements
+        if (block_192 >= (K / 192)) return;
+        
+        uint k_base = k_base_192 + 128;
+        half2 val;
+        val.x = W[(k_base + lane_id * 2) * N + n];
+        val.y = W[(k_base + lane_id * 2 + 1) * N + n];
+        
+        // Stage 0: intra-lane
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        // Stages 1-5: inter-lane
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);  // 1/sqrt(64)
+        
+        W_rot[(k_base + lane_id * 2) * N + n] = val.x;
+        W_rot[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+    }
+}
+
+// ============================================================================
+// Inverse transforms for non-power-of-2 sizes
+// ============================================================================
+
+/// Inverse Hadamard for block_size = 96
+kernel void hadamard_inverse_block_96(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_96 = gid.y;
+    uint subblock_type = gid.z;
+    
+    if (n >= N) return;
+    
+    uint k_base_96 = block_96 * 96;
+    
+    if (subblock_type == 0) {
+        if (block_96 >= (K / 96)) return;
+        uint k_base = k_base_96;
+        
+        half2 val;
+        val.x = W_rot[(k_base + lane_id * 2) * N + n];
+        val.y = W_rot[(k_base + lane_id * 2 + 1) * N + n];
+        
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);
+        
+        W[(k_base + lane_id * 2) * N + n] = val.x;
+        W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+        
+    } else {
+        if (lane_id >= 32 || block_96 >= (K / 96)) return;
+        uint k_base = k_base_96 + 64;
+        
+        half val = W_rot[(k_base + lane_id) * N + n];
+        
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.17677669529663689h);
+        
+        W[(k_base + lane_id) * N + n] = val;
+    }
+}
+
+/// Inverse Hadamard for block_size = 160
+kernel void hadamard_inverse_block_160(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_160 = gid.y;
+    uint subblock_type = gid.z;
+    
+    if (n >= N) return;
+    
+    uint k_base_160 = block_160 * 160;
+    
+    if (subblock_type == 0) {
+        if (block_160 >= (K / 160)) return;
+        uint k_base = k_base_160;
+        
+        half4 val;
+        val.x = W_rot[(k_base + lane_id * 4) * N + n];
+        val.y = W_rot[(k_base + lane_id * 4 + 1) * N + n];
+        val.z = W_rot[(k_base + lane_id * 4 + 2) * N + n];
+        val.w = W_rot[(k_base + lane_id * 4 + 3) * N + n];
+        
+        {
+            half4 tmp;
+            tmp.x = val.x + val.y;
+            tmp.y = val.x - val.y;
+            tmp.z = val.z + val.w;
+            tmp.w = val.z - val.w;
+            val = tmp;
+        }
+        {
+            half4 tmp;
+            tmp.x = val.x + val.z;
+            tmp.y = val.y + val.w;
+            tmp.z = val.x - val.z;
+            tmp.w = val.y - val.w;
+            val = tmp;
+        }
+        
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half4 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.08838834764831845h);
+        
+        W[(k_base + lane_id * 4) * N + n] = val.x;
+        W[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+        W[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+        W[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+        
+    } else {
+        if (lane_id >= 32 || block_160 >= (K / 160)) return;
+        uint k_base = k_base_160 + 128;
+        
+        half val = W_rot[(k_base + lane_id) * N + n];
+        
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.17677669529663689h);
+        
+        W[(k_base + lane_id) * N + n] = val;
+    }
+}
+
+/// Inverse Hadamard for block_size = 192
+kernel void hadamard_inverse_block_192(
+    device const half* W_rot    [[buffer(0)]],
+    device half* W              [[buffer(1)]],
+    constant uint& K            [[buffer(2)]],
+    constant uint& N            [[buffer(3)]],
+    uint3 gid                   [[thread_position_in_grid]],
+    uint lane_id                [[thread_index_in_simdgroup]]
+)
+{
+    uint n = gid.x;
+    uint block_192 = gid.y;
+    uint subblock_type = gid.z;
+    
+    if (n >= N) return;
+    
+    uint k_base_192 = block_192 * 192;
+    
+    if (subblock_type == 0) {
+        if (block_192 >= (K / 192)) return;
+        uint k_base = k_base_192;
+        
+        half4 val;
+        val.x = W_rot[(k_base + lane_id * 4) * N + n];
+        val.y = W_rot[(k_base + lane_id * 4 + 1) * N + n];
+        val.z = W_rot[(k_base + lane_id * 4 + 2) * N + n];
+        val.w = W_rot[(k_base + lane_id * 4 + 3) * N + n];
+        
+        {
+            half4 tmp;
+            tmp.x = val.x + val.y;
+            tmp.y = val.x - val.y;
+            tmp.z = val.z + val.w;
+            tmp.w = val.z - val.w;
+            val = tmp;
+        }
+        {
+            half4 tmp;
+            tmp.x = val.x + val.z;
+            tmp.y = val.y + val.w;
+            tmp.z = val.x - val.z;
+            tmp.w = val.y - val.w;
+            val = tmp;
+        }
+        
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half4 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.08838834764831845h);
+        
+        W[(k_base + lane_id * 4) * N + n] = val.x;
+        W[(k_base + lane_id * 4 + 1) * N + n] = val.y;
+        W[(k_base + lane_id * 4 + 2) * N + n] = val.z;
+        W[(k_base + lane_id * 4 + 3) * N + n] = val.w;
+        
+    } else {
+        if (block_192 >= (K / 192)) return;
+        uint k_base = k_base_192 + 128;
+        
+        half2 val;
+        val.x = W_rot[(k_base + lane_id * 2) * N + n];
+        val.y = W_rot[(k_base + lane_id * 2 + 1) * N + n];
+        
+        {
+            half sum = val.x + val.y;
+            half diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+        
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            half2 partner_val = simd_shuffle(val, ushort(partner));
+            val = is_upper ? (partner_val - val) : (val + partner_val);
+        }
+        
+        val *= half(0.125h);
+        
+        W[(k_base + lane_id * 2) * N + n] = val.x;
+        W[(k_base + lane_id * 2 + 1) * N + n] = val.y;
+    }
 }

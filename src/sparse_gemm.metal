@@ -283,18 +283,26 @@ inline void sparse_store_results(
                 simdgroup_store(acc[mi][ni],
                                 C + out_row * N + out_col,
                                 N);
-            } else if (out_row < M && out_col < N) {
-                simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+            } else {
+                // Edge case: partial tile - use staging buffer
+                // Only threads with valid output coordinates participate
+                bool needs_partial_store = (out_row < M && out_col < N);
+                if (needs_partial_store) {
+                    simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+                }
+                // Barrier must be hit by all threads in the simdgroup uniformly
+                simdgroup_barrier(mem_flags::mem_threadgroup);
 
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    if (out_row + r < M && out_col + c < N) {
-                        C[(out_row + r) * N + out_col + c] = staging[r][c];
+                if (needs_partial_store) {
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
+                        if (out_row + r < M && out_col + c < N) {
+                            C[(out_row + r) * N + out_col + c] = staging[r][c];
+                        }
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }
@@ -600,18 +608,26 @@ kernel void marlin_gemm_sparse_fp4_fused(
 
             if (out_row + 8 <= M && out_col + 8 <= N) {
                 simdgroup_store(acc[mi][ni], C + out_row * N + out_col, N);
-            } else if (out_row < M && out_col < N) {
+            } else {
+                // Edge case: partial tile - use staging buffer
+                // Only threads with valid output coordinates participate
                 threadgroup half out_staging[8][8];
-                simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    if (out_row + r < M && out_col + c < N) {
-                        C[(out_row + r) * N + out_col + c] = out_staging[r][c];
+                bool needs_partial_store = (out_row < M && out_col < N);
+                if (needs_partial_store) {
+                    simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
+                }
+                // Barrier must be hit by all threads in the simdgroup uniformly
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+                if (needs_partial_store) {
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
+                        if (out_row + r < M && out_col + c < N) {
+                            C[(out_row + r) * N + out_col + c] = out_staging[r][c];
+                        }
                     }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
             }
         }
     }

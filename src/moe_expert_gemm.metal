@@ -47,6 +47,19 @@ constant constexpr uint FP4_PER_UINT = 8;
 constant constexpr uint MOE_NUM_BUFFERS = 2;
 
 // ---------------------------------------------------------------------------
+// 2:4 Sparsity constants (NVIDIA format)
+// Every group of 4 dense K elements has exactly 2 non-zero values.
+// ---------------------------------------------------------------------------
+constant constexpr uint SPARSE_GROUP = 4;       // Dense elements per sparsity group
+constant constexpr uint SPARSE_NNZ = 2;         // Non-zeros per group
+constant constexpr uint SPARSE_RATIO = 2;       // Compression ratio (K_dense / K_sparse)
+
+// Metadata encoding: 4 bits per sparsity group (2x 2-bit indices)
+constant constexpr uint META_BITS_PER_GROUP = 4;
+constant constexpr uint META_GROUPS_PER_UINT = 8;  // 32 bits / 4 bits
+constant constexpr uint META_DENSE_K_PER_UINT = META_GROUPS_PER_UINT * SPARSE_GROUP;  // 32
+
+// ---------------------------------------------------------------------------
 // MoE parameters struct
 // ---------------------------------------------------------------------------
 
@@ -59,6 +72,7 @@ struct MoEParams {
     uint group_size;      // Quantization group size for scales
     uint has_shared;      // Whether shared expert exists (1 = yes)
     uint shared_expert_id; // Index of shared expert (if has_shared)
+    uint use_sparse;      // Whether to use 2:4 sparsity (1 = yes)
 };
 
 // ---------------------------------------------------------------------------
@@ -130,18 +144,124 @@ inline void moe_load_A_tile(
     uint thread_idx
 ) {
     const uint elems_per_thread = (MOE_TILE_M * MOE_TILE_K) / MOE_THREADS;  // 16
+    constexpr uint VECTOR_SIZE = 4;
+    constexpr uint vec_per_thread = elems_per_thread / VECTOR_SIZE;  // 4
+
+    for (uint i = 0; i < vec_per_thread; ++i) {
+        uint vec_flat_idx = thread_idx * vec_per_thread + i;
+        uint row = vec_flat_idx / (MOE_TILE_K / VECTOR_SIZE);
+        uint vec_col = vec_flat_idx % (MOE_TILE_K / VECTOR_SIZE);
+        uint col_base = vec_col * VECTOR_SIZE;
+        uint global_row = tg_row + row;
+        uint global_col_base = k_block + col_base;
+
+        if (row < MOE_TILE_M) {
+            if (global_row < batch_size && global_col_base + VECTOR_SIZE <= hidden_dim) {
+                half4 vals = *((device const half4*)(activations + global_row * hidden_dim + global_col_base));
+                A_buf[row][col_base + 0] = vals.x;
+                A_buf[row][col_base + 1] = vals.y;
+                A_buf[row][col_base + 2] = vals.z;
+                A_buf[row][col_base + 3] = vals.w;
+            } else {
+                for (uint v = 0; v < VECTOR_SIZE; ++v) {
+                    half val = 0.0h;
+                    if (global_row < batch_size) {
+                        uint global_col = global_col_base + v;
+                        if (global_col < hidden_dim) {
+                            val = activations[global_row * hidden_dim + global_col];
+                        }
+                    }
+                    A_buf[row][col_base + v] = val;
+                }
+            }
+        }
+    }
+}
+
+// Load expert weight tile with dequantization
+// B is [K/8, N] packed FP4 for ONE expert (offset already applied)
+// ---------------------------------------------------------------------------
+// Sparse B tile loader with metadata-driven scatter for 2:4 sparsity
+//
+// Reconstructs dense B tile from compressed sparse representation:
+//   - B_sparse[K_sparse/8, N]: packed FP4, only K/2 values stored
+//   - B_meta[K/32, N]: 2-bit metadata indices per 4-group
+//   - scales[K/group_size, N]: per-group scales
+// ---------------------------------------------------------------------------
+inline void moe_load_B_tile_sparse_dequant(
+    device const uint* B_sparse,     // [K_sparse/8, N] compressed FP4
+    device const uint* B_meta,       // [K/32, N] metadata
+    device const half* scales,       // [K/group_size, N]
+    threadgroup half (&B_buf)[MOE_TILE_K][MOE_TILE_N],
+    uint hidden_dim,                  // Dense K dimension
+    uint out_dim,
+    uint tg_col,                     // Starting column of this tile
+    uint k_block,                    // Starting dense K position of this tile
+    uint group_size,
+    uint thread_idx
+) {
+    // Zero the entire B tile first
+    const uint elems_per_thread = (MOE_TILE_K * MOE_TILE_N) / MOE_THREADS;  // 16
     for (uint i = 0; i < elems_per_thread; ++i) {
         uint flat_idx = thread_idx * elems_per_thread + i;
-        uint row = flat_idx / MOE_TILE_K;
-        uint col = flat_idx % MOE_TILE_K;
-        uint global_row = tg_row + row;
-        uint global_col = k_block + col;
+        uint row = flat_idx / MOE_TILE_N;
+        uint col = flat_idx % MOE_TILE_N;
+        B_buf[row][col] = half(0.0h);
+    }
 
-        half val = 0.0h;
-        if (global_row < batch_size && global_col < hidden_dim) {
-            val = activations[global_row * hidden_dim + global_col];
+    const uint groups_in_tile = MOE_TILE_K / SPARSE_GROUP;  // 8
+    const uint total_work = groups_in_tile * MOE_TILE_N;     // 512
+    const uint work_per_thread = total_work / MOE_THREADS;  // 4
+    const uint hidden_dim_sparse = hidden_dim / SPARSE_RATIO;
+
+    for (uint w = 0; w < work_per_thread; ++w) {
+        uint work_idx = thread_idx * work_per_thread + w;
+        uint n_local = work_idx / groups_in_tile;   // Column within tile [0..63]
+        uint g_local = work_idx % groups_in_tile;   // Sparsity group within tile [0..7]
+
+        uint global_n = tg_col + n_local;
+        if (global_n >= out_dim) continue;
+
+        uint dense_k_base = k_block + g_local * SPARSE_GROUP;
+        if (dense_k_base >= hidden_dim) continue;
+
+        // Read metadata: B_meta[K/32, N]
+        uint meta_row = dense_k_base / META_DENSE_K_PER_UINT;
+        uint group_in_meta_word = (dense_k_base % META_DENSE_K_PER_UINT) / SPARSE_GROUP;
+        uint meta_word = B_meta[meta_row * out_dim + global_n];
+        uint meta_bits = (meta_word >> (group_in_meta_word * META_BITS_PER_GROUP)) & 0xF;
+
+        uint idx0 = meta_bits & 0x3;         // First non-zero position [0..3]
+        uint idx1 = (meta_bits >> 2) & 0x3;  // Second non-zero position [0..3]
+
+        // Read compressed FP4 values: B_sparse[K_sparse/8, N]
+        uint sparse_k_base = (dense_k_base / SPARSE_GROUP) * SPARSE_NNZ;
+        uint scale_group = dense_k_base / group_size;
+        half s = scales[scale_group * out_dim + global_n];
+
+        uint pack_idx = sparse_k_base / FP4_PER_UINT;
+        uint nibble_offset = sparse_k_base % FP4_PER_UINT;
+
+        uint packed = 0;
+        if (pack_idx < (hidden_dim_sparse / FP4_PER_UINT)) {
+            packed = B_sparse[pack_idx * out_dim + global_n];
         }
-        A_buf[row][col] = val;
+
+        uint nibble0 = (packed >> (nibble_offset * 4)) & 0xF;
+        uint nibble1 = (packed >> ((nibble_offset + 1) * 4)) & 0xF;
+
+        half val0 = moe_dequant_fp4(nibble0, s);
+        half val1 = moe_dequant_fp4(nibble1, s);
+
+        uint tile_k0 = g_local * SPARSE_GROUP + idx0;
+        uint tile_k1 = g_local * SPARSE_GROUP + idx1;
+
+        if (tile_k0 < MOE_TILE_K) {
+            B_buf[tile_k0][n_local] = val0;
+        }
+        if (tile_k1 < MOE_TILE_K) {
+            B_buf[tile_k1][n_local] = val1;
+        }
     }
 }
 
@@ -518,20 +638,40 @@ kernel void moe_expert_gemm_fp4_grouped(
         // Load activation tile (gather from scattered token positions)
         // A_tiles[0][row][col] = activations[token_batch[row] * hidden + col]
         {
+            constexpr uint VECTOR_SIZE = 4;
             const uint elems_per_thread = (MOE_TILE_M * MOE_TILE_K) / MOE_THREADS;
-            for (uint i = 0; i < elems_per_thread; ++i) {
-                uint flat_idx = thread_idx * elems_per_thread + i;
-                uint row = flat_idx / MOE_TILE_K;
-                uint col = flat_idx % MOE_TILE_K;
+            const uint vec_per_thread = elems_per_thread / VECTOR_SIZE;
 
-                half val = 0.0h;
+            for (uint i = 0; i < vec_per_thread; ++i) {
+                uint vec_flat_idx = thread_idx * vec_per_thread + i;
+                uint row = vec_flat_idx / (MOE_TILE_K / VECTOR_SIZE);
+                uint vec_col = vec_flat_idx % (MOE_TILE_K / VECTOR_SIZE);
+                uint col_base = vec_col * VECTOR_SIZE;
+
+                half vals[VECTOR_SIZE] = {0.0h, 0.0h, 0.0h, 0.0h};
                 if (row < batch_count) {
                     uint token_id = token_batch[row];
-                    if (token_id < params.batch_size && col < params.hidden_dim) {
-                        val = activations[token_id * params.hidden_dim + col];
+                    if (token_id < params.batch_size && col_base + VECTOR_SIZE <= params.hidden_dim) {
+                        half4 loaded = *((device const half4*)(activations + token_id * params.hidden_dim + col_base));
+                        vals[0] = loaded.x;
+                        vals[1] = loaded.y;
+                        vals[2] = loaded.z;
+                        vals[3] = loaded.w;
+                    } else {
+                        for (uint v = 0; v < VECTOR_SIZE; ++v) {
+                            if (token_id < params.batch_size) {
+                                uint col = col_base + v;
+                                if (col < params.hidden_dim) {
+                                    vals[v] = activations[token_id * params.hidden_dim + col];
+                                }
+                            }
+                        }
                     }
                 }
-                A_tiles[0][row][col] = val;
+                A_tiles[0][row][col_base + 0] = vals[0];
+                A_tiles[0][row][col_base + 1] = vals[1];
+                A_tiles[0][row][col_base + 2] = vals[2];
+                A_tiles[0][row][col_base + 3] = vals[3];
             }
         }
 
@@ -547,21 +687,39 @@ kernel void moe_expert_gemm_fp4_grouped(
 
             if (next_k < params.hidden_dim) {
                 // Load next A tile (gathered)
+                constexpr uint VECTOR_SIZE = 4;
                 const uint elems_per_thread = (MOE_TILE_M * MOE_TILE_K) / MOE_THREADS;
-                for (uint i = 0; i < elems_per_thread; ++i) {
-                    uint flat_idx = thread_idx * elems_per_thread + i;
-                    uint row = flat_idx / MOE_TILE_K;
-                    uint col = flat_idx % MOE_TILE_K;
+                const uint vec_per_thread = elems_per_thread / VECTOR_SIZE;
 
-                    half val = 0.0h;
+                for (uint i = 0; i < vec_per_thread; ++i) {
+                    uint vec_flat_idx = thread_idx * vec_per_thread + i;
+                    uint row = vec_flat_idx / (MOE_TILE_K / VECTOR_SIZE);
+                    uint vec_col = vec_flat_idx % (MOE_TILE_K / VECTOR_SIZE);
+                    uint col_base = vec_col * VECTOR_SIZE;
+                    uint global_col_base = next_k + col_base;
+
+                    half vals[VECTOR_SIZE] = {0.0h, 0.0h, 0.0h, 0.0h};
                     if (row < batch_count) {
                         uint token_id = token_batch[row];
-                        uint global_col = next_k + col;
-                        if (token_id < params.batch_size && global_col < params.hidden_dim) {
-                            val = activations[token_id * params.hidden_dim + global_col];
+                        if (token_id < params.batch_size && global_col_base + VECTOR_SIZE <= params.hidden_dim) {
+                            half4 loaded = *((device const half4*)(activations + token_id * params.hidden_dim + global_col_base));
+                            vals[0] = loaded.x;
+                            vals[1] = loaded.y;
+                            vals[2] = loaded.z;
+                            vals[3] = loaded.w;
+                        } else {
+                            for (uint v = 0; v < VECTOR_SIZE; ++v) {
+                                uint global_col = global_col_base + v;
+                                if (token_id < params.batch_size && global_col < params.hidden_dim) {
+                                    vals[v] = activations[token_id * params.hidden_dim + global_col];
+                                }
+                            }
                         }
                     }
-                    A_tiles[buf_load][row][col] = val;
+                    A_tiles[buf_load][row][col_base + 0] = vals[0];
+                    A_tiles[buf_load][row][col_base + 1] = vals[1];
+                    A_tiles[buf_load][row][col_base + 2] = vals[2];
+                    A_tiles[buf_load][row][col_base + 3] = vals[3];
                 }
 
                 moe_load_B_tile_dequant(B, S, B_tiles[buf_load], params.hidden_dim, params.out_dim,

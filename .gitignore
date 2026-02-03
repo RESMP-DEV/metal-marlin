@@ -11,10 +11,23 @@ __pycache__/
 *.egg-info/
 .eggs/
 dist/
+
+# C++ Build artifacts
 build/
+*.o
+*.a
+*.dylib
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cpython-*.so
 
 # Virtual environments
+# Only .venv is used by uv - all others are legacy/mistakes
 .venv/
+.venv_*/
+.venv_*
 venv/
 ENV/
 
@@ -35,6 +48,24 @@ benchmarks/results/
 *.tmp
 *.log
 *.aria2
+
+# Metal compilation artifacts (intermediate .air files)
+metal_marlin/lib/air/
+*.air
+*.metallib
+!metal_marlin/lib/metal_marlin.metallib
+
+# Generated kernel lists (at any level)
+all_kernel_names.txt
+*_kernel_names.txt
+scripts/all_kernel_names.txt
+scripts/*_kernel_names.txt
+
+# metal-cpp (downloaded by CMake)
+metal-cpp/
+
+# Precompiled metallib version tracking (generated)
+metal_marlin/lib/.metallib_version
 
 # AlphaHENG development artifacts (not for public release)
 agent_workspace/
@@ -59,3 +90,7 @@ scripts/validate_*.py
 
 # Debug tests (temporary, not for CI)
 tests/test_debug_*.py
+
+# Documentation artifacts
+docs/api/
+*.html

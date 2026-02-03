@@ -99,6 +99,8 @@ if not HAS_METAL or not HAS_MPS:
     moe_shared_expert_fused_fp4 = _metal_required
     moe_shared_expert_scatter = _metal_required
     moe_shared_expert_fp4 = _metal_required
+    moe_fused_dispatch_shared_fp4 = _metal_required
+    moe_add_shared_expert_fp4 = _metal_required
 
     # Hadamard transform
     hadamard_transform = _metal_required
@@ -2837,3 +2839,234 @@ if HAS_METAL and HAS_MPS:
 
         # M == 1 decode
         return "decode_gemv_fp4"
+
+    def moe_fused_dispatch_shared_fp4(
+        hidden_states: torch.Tensor,
+        shared_gate_up_packed: torch.Tensor,
+        shared_gate_up_scales: torch.Tensor,
+        shared_down_packed: torch.Tensor,
+        shared_down_scales: torch.Tensor,
+        routed_gate_up_packed: torch.Tensor,
+        routed_gate_up_scales: torch.Tensor,
+        routed_down_packed: torch.Tensor,
+        routed_down_scales: torch.Tensor,
+        expert_ids: torch.Tensor,
+        expert_probs: torch.Tensor,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """
+        Fused MoE dispatch + shared expert computation in a single kernel.
+
+        Computes: output = shared_expert(x) + sum_k(prob[k] * routed_expert_k(x))
+
+        This eliminates intermediate memory traffic and kernel launch overhead by:
+        1. Computing shared expert contribution
+        2. Accumulating weighted routed expert contributions
+        3. Writing final result once
+
+        Memory savings per token (hidden_dim=7168, FP16):
+            - Eliminates 2 intermediate writes + 2 reads = 57KB per layer
+
+        Args:
+            hidden_states: [tokens, hidden] or [batch, seq, hidden].
+            shared_gate_up_packed: [hidden/8, 2*intermediate] packed FP4.
+            shared_gate_up_scales: [hidden/group, 2*intermediate] scales.
+            shared_down_packed: [intermediate/8, hidden] packed FP4.
+            shared_down_scales: [intermediate/group, hidden] scales.
+            routed_gate_up_packed: [num_experts, hidden/8, 2*intermediate] packed FP4.
+            routed_gate_up_scales: [num_experts, hidden/group, 2*intermediate] scales.
+            routed_down_packed: [num_experts, intermediate/8, hidden] packed FP4.
+            routed_down_scales: [num_experts, intermediate/group, hidden] scales.
+            expert_ids: [tokens, top_k] expert indices.
+            expert_probs: [tokens, top_k] expert probabilities.
+            group_size: Quantization group size.
+
+        Returns:
+            Output tensor [tokens, hidden] or [batch, seq, hidden].
+        """
+        require_mps()
+
+        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(hidden_states)
+
+        # Validate dimensions
+        if hidden_dim % FP4_PER_UINT != 0:
+            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by {FP4_PER_UINT}")
+        if hidden_dim % group_size != 0:
+            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by group_size ({group_size})")
+
+        # Infer intermediate dim from gate_up shape
+        intermediate_dim = shared_gate_up_packed.shape[1] // 2
+
+        if intermediate_dim % group_size != 0:
+            raise ValueError(f"intermediate ({intermediate_dim}) must be divisible by group_size ({group_size})")
+
+        num_experts = routed_gate_up_packed.shape[0]
+        top_k = expert_ids.shape[1]
+
+        # Prepare tensors
+        def _prepare_tensor(t, dtype=torch.float16):
+            t = t.contiguous()
+            if t.dtype != dtype:
+                t = t.to(dtype)
+            return t
+
+        hidden_contig = _prepare_tensor(hidden_2d)
+        shared_gate_up_p = _prepare_tensor(shared_gate_up_packed, torch.uint32)
+        shared_gate_up_s = _prepare_tensor(shared_gate_up_scales)
+        shared_down_p = _prepare_tensor(shared_down_packed, torch.uint32)
+        shared_down_s = _prepare_tensor(shared_down_scales)
+        routed_gate_up_p = _prepare_tensor(routed_gate_up_packed, torch.uint32)
+        routed_gate_up_s = _prepare_tensor(routed_gate_up_scales)
+        routed_down_p = _prepare_tensor(routed_down_packed, torch.uint32)
+        routed_down_s = _prepare_tensor(routed_down_scales)
+
+        if expert_ids.dtype != torch.int32:
+            expert_ids = expert_ids.to(torch.int32)
+        expert_ids = expert_ids.contiguous()
+
+        if expert_probs.dtype != torch.float16:
+            expert_probs = expert_probs.half()
+        expert_probs = expert_probs.contiguous()
+
+        # Output buffer
+        out = torch.empty((num_tokens, hidden_dim), dtype=torch.float16, device="mps")
+
+        lib = get_default_library()
+        device = lib.device
+
+        # Create Metal buffers
+        A_buf = _private_buffer_from_tensor(hidden_contig, lib, device, cache=False)
+        sg_p_buf = _private_buffer_from_tensor(shared_gate_up_p, lib, device, cache=True)
+        sg_s_buf = _private_buffer_from_tensor(shared_gate_up_s, lib, device, cache=True)
+        sd_p_buf = _private_buffer_from_tensor(shared_down_p, lib, device, cache=True)
+        sd_s_buf = _private_buffer_from_tensor(shared_down_s, lib, device, cache=True)
+        rg_p_buf = _private_buffer_from_tensor(routed_gate_up_p, lib, device, cache=True)
+        rg_s_buf = _private_buffer_from_tensor(routed_gate_up_s, lib, device, cache=True)
+        rd_p_buf = _private_buffer_from_tensor(routed_down_p, lib, device, cache=True)
+        rd_s_buf = _private_buffer_from_tensor(routed_down_s, lib, device, cache=True)
+        ids_buf = _private_buffer_from_tensor(expert_ids, lib, device, cache=False)
+        probs_buf = _private_buffer_from_tensor(expert_probs, lib, device, cache=False)
+        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+        # Params buffer
+        params = np.array([
+            num_tokens,
+            hidden_dim,
+            intermediate_dim,
+            num_experts,
+            top_k,
+            group_size,
+        ], dtype=np.uint32)
+        params_buf = _params_buffer(lib, device, params)
+
+        # Grid dimensions
+        tile_n = 64
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = num_tokens
+
+        dispatch_kernel(
+            lib,
+            function_name="moe_fused_dispatch_shared_decode_fp4",
+            grid=(grid_x, grid_y, 1),
+            threadgroup=(128, 1, 1),
+            buffers=[
+                A_buf,
+                sg_p_buf, sg_s_buf, sd_p_buf, sd_s_buf,
+                rg_p_buf, rg_s_buf, rd_p_buf, rd_s_buf,
+                ids_buf, probs_buf, out_buf, params_buf,
+            ],
+            wait=True,
+        )
+
+        return out.reshape(*orig_shape[:-1], hidden_dim)
+
+    def moe_add_shared_expert_fp4(
+        hidden_states: torch.Tensor,
+        moe_output: torch.Tensor,
+        shared_gate_up_packed: torch.Tensor,
+        shared_gate_up_scales: torch.Tensor,
+        shared_down_packed: torch.Tensor,
+        shared_down_scales: torch.Tensor,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """
+        Add shared expert contribution to existing MoE output.
+
+        This is a lightweight kernel that:
+        1. Computes shared_expert(x)
+        2. Adds it to in_out (which already contains MoE output)
+
+        Use this when MoE output is already computed and you just need to
+        add the shared expert contribution.
+
+        Args:
+            hidden_states: [tokens, hidden] or [batch, seq, hidden].
+            moe_output: [tokens, hidden] or [batch, seq, hidden] - MoE output to add to.
+            shared_gate_up_packed: [hidden/8, 2*intermediate] packed FP4.
+            shared_gate_up_scales: [hidden/group, 2*intermediate] scales.
+            shared_down_packed: [intermediate/8, hidden] packed FP4.
+            shared_down_scales: [intermediate/group, hidden] scales.
+            group_size: Quantization group size.
+
+        Returns:
+            Output tensor [tokens, hidden] with shared expert added.
+        """
+        require_mps()
+
+        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(hidden_states)
+
+        if hidden_dim % FP4_PER_UINT != 0:
+            raise ValueError(f"hidden_dim ({hidden_dim}) must be divisible by {FP4_PER_UINT}")
+
+        intermediate_dim = shared_gate_up_packed.shape[1] // 2
+
+        if intermediate_dim % group_size != 0:
+            raise ValueError(f"intermediate ({intermediate_dim}) must be divisible by group_size ({group_size})")
+
+        # Ensure moe_output is contiguous and correct shape
+        if moe_output.shape != hidden_2d.shape:
+            raise ValueError(f"moe_output shape {moe_output.shape} doesn't match hidden shape {hidden_2d.shape}")
+
+        out = moe_output.half().contiguous()
+
+        lib = get_default_library()
+        device = lib.device
+
+        # Create buffers
+        A_buf = _private_buffer_from_tensor(hidden_2d, lib, device, cache=False)
+        sg_p_buf = _private_buffer_from_tensor(shared_gate_up_packed.contiguous(), lib, device, cache=True)
+        sg_s_buf = _private_buffer_from_tensor(shared_gate_up_scales.half().contiguous(), lib, device, cache=True)
+        sd_p_buf = _private_buffer_from_tensor(shared_down_packed.contiguous(), lib, device, cache=True)
+        sd_s_buf = _private_buffer_from_tensor(shared_down_scales.half().contiguous(), lib, device, cache=True)
+        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+        # Params
+        params = np.array([
+            num_tokens,
+            hidden_dim,
+            intermediate_dim,
+            0,  # num_experts (unused)
+            0,  # top_k (unused)
+            group_size,
+        ], dtype=np.uint32)
+        params_buf = _params_buffer(lib, device, params)
+
+        # Grid
+        tile_n = 64
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = num_tokens
+
+        dispatch_kernel(
+            lib,
+            function_name="moe_add_shared_expert_fp4",
+            grid=(grid_x, grid_y, 1),
+            threadgroup=(128, 1, 1),
+            buffers=[
+                A_buf,
+                sg_p_buf, sg_s_buf, sd_p_buf, sd_s_buf,
+                out_buf, params_buf,
+            ],
+            wait=True,
+        )
+
+        return out.reshape(*orig_shape[:-1], hidden_dim)

@@ -76,10 +76,14 @@ def calibrate_int8_scales(
     hooks = []
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
-            hook = module.register_forward_pre_hook(
-                lambda module, input, name=name: collect_stats(name, module)
-            )
-            hooks.append(hook)
+            # Create a closure that captures the name
+            def make_hook(layer_name: str):
+                def hook(mod: nn.Module, inp: tuple) -> None:
+                    collect_stats(layer_name, mod)
+                return hook
+            
+            hook_fn = module.register_forward_pre_hook(make_hook(name))
+            hooks.append(hook_fn)
 
     # Run calibration data through the model
     with torch.no_grad():

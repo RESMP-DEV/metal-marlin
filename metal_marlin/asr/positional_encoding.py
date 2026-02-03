@@ -66,7 +66,8 @@ class RelativePositionalEncoding(nn.Module):
         """
         seq_len = x.size(1)
         # Skip assertion during tracing for CoreML compatibility
-        if not torch.jit.is_tracing():
+        # Note: is_tracing is a public API despite pyright's reportPrivateImportUsage
+        if not torch.jit.is_tracing():  # pyright: ignore[reportPrivateImportUsage]
             assert seq_len <= self.max_length, (
                 f"Sequence length {seq_len} exceeds max_length {self.max_length}"
             )

@@ -448,7 +448,7 @@ def compute_scales(
         if quant_type == "fp4":
             # FP4 E2M1: representable magnitudes [0, 0.5, 1, 1.5, 2, 3, 4, 6]
             fp4_max = 6.0
-            if use_percentile and s.percentile_high is not None:
+            if use_percentile and s.percentile_high is not None and s.percentile_low is not None:
                 ref = torch.maximum(
                     torch.abs(s.percentile_low), torch.abs(s.percentile_high)
                 )
@@ -459,7 +459,7 @@ def compute_scales(
 
         elif quant_type == "int4_sym":
             # INT4 symmetric: [-8, 7], use 7 as positive max
-            if use_percentile and s.percentile_high is not None:
+            if use_percentile and s.percentile_high is not None and s.percentile_low is not None:
                 ref = torch.maximum(
                     torch.abs(s.percentile_low), torch.abs(s.percentile_high)
                 )
@@ -470,7 +470,7 @@ def compute_scales(
 
         elif quant_type == "int4_asym":
             # INT4 asymmetric: [0, 15] maps to [min_val, max_val]
-            if use_percentile and s.percentile_low is not None:
+            if use_percentile and s.percentile_low is not None and s.percentile_high is not None:
                 low = s.percentile_low
                 high = s.percentile_high
             else:

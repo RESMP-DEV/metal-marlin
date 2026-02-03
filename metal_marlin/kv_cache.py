@@ -6,6 +6,7 @@ decode phase. Supports configurable precision via DTypeConfig:
 - Full precision: BF16 (default) or FP16
 - Quantized: FP8 for 2x memory savings on long context
 - FP4 for maximum compression (4x savings)
+- INT8 for 2x memory savings with symmetric quantization
 
 Uses PyTorch MPS backend with direct Metal kernel dispatch for Apple Silicon
 acceleration. No MLX dependency.
@@ -62,7 +63,8 @@ if TYPE_CHECKING:
 def require_mps(feature: str = "KV cache") -> None:
     """Raise if PyTorch MPS is not available."""
     if not HAS_TORCH:
-        raise RuntimeError(f"{feature} requires PyTorch. Install with: pip install torch")
+        raise RuntimeError(
+            f"{feature} requires PyTorch. Install with: pip install torch")
     if not HAS_MPS:
         raise RuntimeError(
             f"{feature} requires PyTorch MPS backend. "
@@ -71,27 +73,39 @@ def require_mps(feature: str = "KV cache") -> None:
 
 
 # Mapping from dtype config strings to PyTorch dtypes
-_DTYPE_TO_TORCH: dict[str, torch.dtype] = {}
-if HAS_TORCH:
-    _DTYPE_TO_TORCH = {
-        "fp16": getattr(
-            torch, "float16", torch.float32
-        ),  # Fallback to float32 if float16 not available
-        "bf16": getattr(
-            torch, "bfloat16", torch.float32
-        ),  # Fallback to float32 if bfloat16 not available
-        "fp32": torch.float32,
-        "fp8": getattr(
-            torch, "float16", torch.float32
-        ),  # PyTorch doesn't have native fp8, use fp16 storage
-    }
+# Use Any for the value type at runtime to avoid AttributeError when torch isn't fully initialized.
+# The actual type is torch.dtype but we defer that to TYPE_CHECKING.
+if TYPE_CHECKING:
+    _DTYPE_TO_TORCH_CACHE: dict[str, torch.dtype] = {}
+else:
+    _DTYPE_TO_TORCH_CACHE: dict[str, object] = {}
 
 
 def _get_torch_dtype(dtype_str: str) -> torch.dtype:
     """Convert dtype string to PyTorch dtype."""
     if not HAS_TORCH:
         raise RuntimeError("PyTorch not available")
-    return _DTYPE_TO_TORCH[dtype_str]
+
+    if not _DTYPE_TO_TORCH_CACHE:
+        # Lazy initialization to handle any weird import ordering issues
+        _DTYPE_TO_TORCH_CACHE.update(
+            {
+                "fp16": getattr(torch, "float16", torch.float32),
+                "bf16": getattr(torch, "bfloat16", torch.float32),
+                "fp32": getattr(torch, "float32", None),
+                "fp8": getattr(torch, "float16", torch.float32),
+            }
+        )
+
+    if dtype_str not in _DTYPE_TO_TORCH_CACHE:
+        raise ValueError(f"Unknown dtype: {dtype_str}")
+
+    dtype = _DTYPE_TO_TORCH_CACHE[dtype_str]
+    if dtype is None:
+        raise RuntimeError(
+            f"Torch dtype {dtype_str} not available in this environment")
+
+    return dtype
 
 
 @dataclass
@@ -108,14 +122,23 @@ class CacheConfig:
             - "none": Full precision (uses dtype_config.kv_cache)
             - "fp8": 8-bit floating point (2x memory savings)
             - "fp4": 4-bit floating point (4x memory savings)
+            - "int8": 8-bit integer symmetric quantization (2x memory savings)
         cache_dtype: Cache storage dtype (takes precedence over quantize_mode).
             - "fp16": Half precision storage
             - "bf16": BFloat16 storage
             - "fp8": FP8 E4M3 quantized (2x memory savings)
             - "fp4": FP4 E2M1 quantized (4x memory savings)
+            - "int8": INT8 symmetric quantization (2x memory savings)
         fp8_scale_method: Scaling method for FP8 quantization.
             - "tensor": Single scale per tensor (faster, lower memory)
             - "channel": Scale per head dimension (better accuracy for outliers)
+        layout: Memory layout for cache storage.
+            - "BHSD": [batch, num_heads, seq_len, head_dim] (default, standard)
+            - "BSHD": [batch, seq_len, num_heads, head_dim] (faster decode writes)
+            BSHD provides ~3x faster single-token writes at decode time because
+            all heads for a token are contiguous, enabling coalesced memory access.
+            The attention API always returns [B,H,S,D] format; BSHD caches use
+            a zero-copy view transpose internally.
     """
 
     num_layers: int
@@ -123,9 +146,10 @@ class CacheConfig:
     num_kv_heads: int  # For Grouped Query Attention (GQA)
     head_dim: int
     max_seq_len: int
-    quantize_mode: Literal["none", "fp8", "fp4"] = "none"
-    cache_dtype: Literal["fp16", "bf16", "fp8", "fp4"] | None = None
+    quantize_mode: Literal["none", "fp8", "fp4", "int8"] = "none"
+    cache_dtype: Literal["fp16", "bf16", "fp8", "fp4", "int8"] | None = None
     fp8_scale_method: Literal["tensor", "channel"] = "tensor"
+    layout: Literal["BHSD", "BSHD"] = "BHSD"
 
 
 class KVCache:
@@ -163,15 +187,26 @@ class KVCache:
         self._fp8_scale_method = config.fp8_scale_method
         self._update_id = 0
         self._last_eviction_update_id = -1
+        self._layout = config.layout
 
         # Allocate cache for all layers
-        # Shape: [batch, num_kv_heads, max_seq_len, head_dim]
-        cache_shape = (
-            batch_size,
-            config.num_kv_heads,
-            config.max_seq_len,
-            config.head_dim,
-        )
+        # Layout determines memory arrangement:
+        #   BHSD: [batch, num_kv_heads, max_seq_len, head_dim] - standard
+        #   BSHD: [batch, max_seq_len, num_kv_heads, head_dim] - faster decode writes
+        if self._layout == "BSHD":
+            cache_shape = (
+                batch_size,
+                config.max_seq_len,
+                config.num_kv_heads,
+                config.head_dim,
+            )
+        else:  # BHSD (default)
+            cache_shape = (
+                batch_size,
+                config.num_kv_heads,
+                config.max_seq_len,
+                config.head_dim,
+            )
 
         # Determine storage mode: cache_dtype takes precedence over quantize_mode
         if config.cache_dtype is not None:
@@ -180,6 +215,8 @@ class KVCache:
                 self._quantize_mode = "fp8"
             elif config.cache_dtype == "fp4":
                 self._quantize_mode = "fp4"
+            elif config.cache_dtype == "int8":
+                self._quantize_mode = "int8"
             elif config.cache_dtype in ("fp16", "bf16"):
                 self._quantize_mode = "none"
                 # Override dtype_config's kv_cache setting
@@ -194,6 +231,10 @@ class KVCache:
 
         if self._quantize_mode == "fp4":
             # FP4 quantized cache - pack 8 values per int32
+            # Note: FP4 only supports BHSD layout currently
+            if self._layout == "BSHD":
+                raise ValueError(
+                    "FP4 quantization only supports BHSD layout currently")
             packed_shape = (
                 batch_size,
                 config.num_kv_heads,
@@ -227,6 +268,10 @@ class KVCache:
         elif self._quantize_mode == "fp8":
             # FP8 E4M3 quantized cache - store as uint8 with per-tensor or per-channel scales
             # PyTorch doesn't have native fp8 on MPS, so we simulate with uint8 + scales
+            # Note: FP8 only supports BHSD layout currently
+            if self._layout == "BSHD":
+                raise ValueError(
+                    "FP8 quantization only supports BHSD layout currently")
             fp8_shape = (
                 batch_size,
                 config.num_kv_heads,
@@ -267,10 +312,47 @@ class KVCache:
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
             ]
+        elif self._quantize_mode == "int8":
+            # INT8 symmetric quantized cache - store as int8 with per-tensor scales
+            # Note: INT8 only supports BHSD layout currently
+            if self._layout == "BSHD":
+                raise ValueError(
+                    "INT8 quantization only supports BHSD layout currently")
+            int8_shape = (
+                batch_size,
+                config.num_kv_heads,
+                config.max_seq_len,
+                config.head_dim,
+            )
+            self.k_cache = [
+                torch.zeros(int8_shape, dtype=torch.int8, device=device)
+                for _ in range(config.num_layers)
+            ]
+            self.v_cache = [
+                torch.zeros(int8_shape, dtype=torch.int8, device=device)
+                for _ in range(config.num_layers)
+            ]
+            # Scales for INT8 dequantization: per-tensor (per-row) scaling
+            scale_dtype = _get_torch_dtype(self.dtype_config.scales)
+            scale_shape = (
+                batch_size,
+                config.num_kv_heads,
+                config.max_seq_len,
+                1,
+            )
+            self.k_scales = [
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
+            ]
+            self.v_scales = [
+                torch.zeros(scale_shape, dtype=scale_dtype, device=device)
+                for _ in range(config.num_layers)
+            ]
         else:
             # Full precision cache using cache_dtype override or dtype_config.kv_cache
             storage_dtype_str = (
-                getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+                getattr(self, "_storage_dtype_override",
+                        None) or self.dtype_config.kv_cache
             )
             storage_dtype = _get_torch_dtype(storage_dtype_str)
             self.k_cache = [
@@ -305,8 +387,8 @@ class KVCache:
         new_seq_len = k_new.shape[2]
         if new_seq_len > self.config.max_seq_len:
             # Keep the most recent window when a single update exceeds capacity.
-            k_new = k_new[:, :, -self.config.max_seq_len :, :]
-            v_new = v_new[:, :, -self.config.max_seq_len :, :]
+            k_new = k_new[:, :, -self.config.max_seq_len:, :]
+            v_new = v_new[:, :, -self.config.max_seq_len:, :]
             new_seq_len = self.config.max_seq_len
             self._reset_positions()
 
@@ -323,10 +405,14 @@ class KVCache:
             v_packed, v_scale = self._quantize_fp4(v_new)
 
             # Update cache slices in-place (MPS uses sliceUpdateDataTensor under the hood).
-            self._slice_update(self.k_cache[layer_idx], k_packed, start_pos, new_seq_len)
-            self._slice_update(self.v_cache[layer_idx], v_packed, start_pos, new_seq_len)
-            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
-            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_cache[layer_idx], k_packed, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_packed, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp4(
@@ -344,10 +430,14 @@ class KVCache:
             v_quant, v_scale = self._quantize_fp8(v_new)
 
             # Update cache slices (in-place)
-            self._slice_update(self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
-            self._slice_update(self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
-            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
-            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
 
             # Dequantize full cache for attention (output in activations dtype)
             k_full = self._dequant_fp8(
@@ -359,22 +449,70 @@ class KVCache:
                 self.v_scales[layer_idx][:, :, :end_pos, :],
             ).to(act_dtype)
 
+        elif self._quantize_mode == "int8":
+            # Quantize and store as INT8
+            k_quant, k_scale = self._quantize_int8(k_new)
+            v_quant, v_scale = self._quantize_int8(v_new)
+
+            # Update cache slices (in-place)
+            self._slice_update(
+                self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+
+            # Dequantize full cache for attention (output in activations dtype)
+            k_full = self._dequant_int8(
+                self.k_cache[layer_idx][:, :, :end_pos, :],
+                self.k_scales[layer_idx][:, :, :end_pos, :],
+            ).to(act_dtype)
+            v_full = self._dequant_int8(
+                self.v_cache[layer_idx][:, :, :end_pos, :],
+                self.v_scales[layer_idx][:, :, :end_pos, :],
+            ).to(act_dtype)
+
         else:
             # Direct storage using kv_cache dtype
             storage_dtype_str = (
-                getattr(self, "_storage_dtype_override", None) or self.dtype_config.kv_cache
+                getattr(self, "_storage_dtype_override",
+                        None) or self.dtype_config.kv_cache
             )
             storage_dtype = _get_torch_dtype(storage_dtype_str)
-            self._slice_update(
-                self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype
-            )
-            self._slice_update(
-                self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype
-            )
 
-            # Return in activations dtype for attention computation
-            k_full = self.k_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
-            v_full = self.v_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
+            if self._layout == "BSHD":
+                # BSHD layout: [batch, seq, heads, dim]
+                # Transpose input from [B, H, S, D] to [B, S, H, D] for coalesced writes
+                k_transposed = k_new.permute(0, 2, 1, 3)
+                v_transposed = v_new.permute(0, 2, 1, 3)
+                self._slice_update_bshd(
+                    self.k_cache[layer_idx], k_transposed, start_pos, new_seq_len, storage_dtype
+                )
+                self._slice_update_bshd(
+                    self.v_cache[layer_idx], v_transposed, start_pos, new_seq_len, storage_dtype
+                )
+
+                # Return view-transposed back to [B, H, S, D] for attention (zero-copy)
+                k_full = self.k_cache[layer_idx][:, :end_pos, :, :].permute(
+                    0, 2, 1, 3).to(act_dtype)
+                v_full = self.v_cache[layer_idx][:, :end_pos, :, :].permute(
+                    0, 2, 1, 3).to(act_dtype)
+            else:
+                # BHSD layout: [batch, heads, seq, dim] (default)
+                self._slice_update(
+                    self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype
+                )
+                self._slice_update(
+                    self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype
+                )
+
+                # Return in activations dtype for attention computation
+                k_full = self.k_cache[layer_idx][:,
+                                                 :, :end_pos, :].to(act_dtype)
+                v_full = self.v_cache[layer_idx][:,
+                                                 :, :end_pos, :].to(act_dtype)
 
         return k_full, v_full
 
@@ -416,9 +554,27 @@ class KVCache:
                 self.v_cache[layer_idx][:, :, : self.seq_len, :],
                 self.v_scales[layer_idx][:, :, : self.seq_len, :],
             ).to(act_dtype)
+        elif self._quantize_mode == "int8":
+            k = self._dequant_int8(
+                self.k_cache[layer_idx][:, :, : self.seq_len, :],
+                self.k_scales[layer_idx][:, :, : self.seq_len, :],
+            ).to(act_dtype)
+            v = self._dequant_int8(
+                self.v_cache[layer_idx][:, :, : self.seq_len, :],
+                self.v_scales[layer_idx][:, :, : self.seq_len, :],
+            ).to(act_dtype)
         else:
-            k = self.k_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
-            v = self.v_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
+            if self._layout == "BSHD":
+                # BSHD layout: [batch, seq, heads, dim] -> [batch, heads, seq, dim]
+                k = self.k_cache[layer_idx][:, : self.seq_len,
+                                            :, :].permute(0, 2, 1, 3).to(act_dtype)
+                v = self.v_cache[layer_idx][:, : self.seq_len,
+                                            :, :].permute(0, 2, 1, 3).to(act_dtype)
+            else:
+                k = self.k_cache[layer_idx][:, :,
+                                            : self.seq_len, :].to(act_dtype)
+                v = self.v_cache[layer_idx][:, :,
+                                            : self.seq_len, :].to(act_dtype)
 
         return k, v
 
@@ -430,6 +586,10 @@ class KVCache:
             bytes_per_element = 0.5 + scale_bytes / self.config.head_dim
         elif self._quantize_mode == "fp8":
             # FP8 (1 byte) + scales (2 or 4 bytes per row)
+            scale_bytes = 4.0 if self.dtype_config.scales == "fp32" else 2.0
+            bytes_per_element = 1.0 + scale_bytes / self.config.head_dim
+        elif self._quantize_mode == "int8":
+            # INT8 (1 byte) + scales (2 or 4 bytes per row)
             scale_bytes = 4.0 if self.dtype_config.scales == "fp32" else 2.0
             bytes_per_element = 1.0 + scale_bytes / self.config.head_dim
         else:
@@ -469,18 +629,32 @@ class KVCache:
             return
         new_len = max(self.seq_len - shift, 0)
 
-        def _shift_list(tensors: list[torch.Tensor]) -> None:
-            for tensor in tensors:
-                if new_len == 0:
-                    continue
-                tensor[:, :, :new_len, :] = tensor[:, :, shift : shift + new_len, :]
+        if self._layout == "BSHD":
+            # BSHD layout: seq dimension is at index 1
+            def _shift_list_bshd(tensors: list[torch.Tensor]) -> None:
+                for tensor in tensors:
+                    if new_len == 0:
+                        continue
+                    tensor[:, :new_len, :, :] = tensor[:,
+                                                       shift: shift + new_len, :, :]
 
-        _shift_list(self.k_cache)
-        _shift_list(self.v_cache)
-        if self.k_scales is not None:
-            _shift_list(self.k_scales)
-        if self.v_scales is not None:
-            _shift_list(self.v_scales)
+            _shift_list_bshd(self.k_cache)
+            _shift_list_bshd(self.v_cache)
+        else:
+            # BHSD layout: seq dimension is at index 2
+            def _shift_list_bhsd(tensors: list[torch.Tensor]) -> None:
+                for tensor in tensors:
+                    if new_len == 0:
+                        continue
+                    tensor[:, :, :new_len, :] = tensor[:,
+                                                       :, shift: shift + new_len, :]
+
+            _shift_list_bhsd(self.k_cache)
+            _shift_list_bhsd(self.v_cache)
+            if self.k_scales is not None:
+                _shift_list_bhsd(self.k_scales)
+            if self.v_scales is not None:
+                _shift_list_bhsd(self.v_scales)
 
         self.seq_len = new_len
         self.cache_position = new_len
@@ -578,7 +752,8 @@ class KVCache:
             # This preserves outliers better but uses more memory for scales
             # Scale shape: [batch, heads, seq, head_dim]
             abs_val = tensor.abs()
-            abs_max = torch.clamp(abs_val, min=1e-8)  # Per-element, clamped to avoid div by zero
+            # Per-element, clamped to avoid div by zero
+            abs_max = torch.clamp(abs_val, min=1e-8)
             # Use running max smoothed with the tensor's max to handle outliers
             row_max = abs_val.amax(dim=-1, keepdim=True)
             # Scale each channel independently but bounded by row max for stability
@@ -618,4 +793,41 @@ class KVCache:
         signed = quantized.float() - 128.0
         # signed is in range [-128, 127], map to [-448, 448]
         dequant = signed / 127.0 * FP8_E4M3_MAX * scale.float()
+        return dequant
+
+    def _quantize_int8(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize tensor to INT8 format with symmetric quantization.
+
+        Uses symmetric quantization mapping float range to [-127, 127]:
+        - Dynamic range: -127 to 127 (signed 8-bit integer)
+        - Per-tensor (per-row) scaling: single scale per sequence position
+        - Simple and efficient for KV cache compression (2x memory savings)
+        - Zero point at 0 (symmetric around zero)
+        """
+        INT8_MAX = 127.0
+
+        # Per-tensor (per-row) scaling: single scale per sequence position
+        # Scale shape: [batch, heads, seq, 1]
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
+        abs_max = torch.clamp(abs_max, min=1e-8)  # Avoid division by zero
+        scale = abs_max / INT8_MAX
+
+        # Scale to INT8 range
+        scaled = tensor / scale
+
+        # Clamp to INT8 symmetric range and round
+        scaled = torch.clamp(scaled, -INT8_MAX, INT8_MAX)
+        quantized = torch.round(scaled).to(torch.int8)
+
+        scale_dtype = _get_torch_dtype(self.dtype_config.scales)
+        return quantized, scale.to(scale_dtype)
+
+    def _dequant_int8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        """Dequantize INT8 tensor to float.
+
+        Reverses symmetric quantization by converting int8 back to float
+        and applying the per-tensor scale factor.
+        """
+        # Convert int8 to float and apply scale
+        dequant = quantized.float() * scale.float()
         return dequant

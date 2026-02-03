@@ -62,12 +62,12 @@ class TDTDecoder(nn.Module):
             - predictor_state: Updated predictor LSTM state tuple (h, c)
         """
         # Pass targets through predictor (teacher forcing during training)
-        predictor_out, predictor_state = self.predictor(targets, predictor_state)
+        predictor_out, new_predictor_state = self.predictor(targets, predictor_state)
 
         # Combine with encoder output through joint network
         logits, durations = self.joint(encoder_out, predictor_out)
 
-        return logits, durations, predictor_state
+        return logits, durations, new_predictor_state
 
     def infer(
         self,
@@ -117,7 +117,7 @@ class TDTDecoder(nn.Module):
             tokens = torch.cat([tokens, next_token], dim=1)
 
             # Track first batch's tokens for output
-            hypothesis_tokens.append(next_token[0, 0].item())
+            hypothesis_tokens.append(int(next_token[0, 0].item()))
 
             # Stop if blank token was emitted
             if next_token[0, 0].item() == self.blank_id:
@@ -127,4 +127,5 @@ class TDTDecoder(nn.Module):
         predictor_out, predictor_state = self.predictor(tokens, predictor_state)
         logits, durations = self.joint(encoder_out, predictor_out)
 
+        assert predictor_state is not None  # predictor always returns a state
         return logits, durations, hypothesis_tokens, predictor_state

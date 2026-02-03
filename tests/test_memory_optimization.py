@@ -47,27 +47,74 @@ class TestTrellisMoEMLPEagerBuffers:
 
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_eager_buffers_creates_metal_buffers(self, mock_moe_layer):
-        """Test that _get_cached_buffers creates Metal buffers."""
-        # Initially no cached buffers
-        assert mock_moe_layer._cached_weight_buffers is None
-
-        # Force buffer creation via _get_cached_buffers
-        mock_moe_layer._get_cached_buffers()
-
+        """Test that eager buffer creation populates Metal buffers in __init__."""
+        # With eager_buffers=True (default), buffers are created during __init__
         assert mock_moe_layer._cached_weight_buffers is not None
+
+        # Verify it's the correct type with expected fields
+        buffers = mock_moe_layer._cached_weight_buffers
+        assert hasattr(buffers, 'gate_weights')
+        assert hasattr(buffers, 'up_weights')
+        assert hasattr(buffers, 'down_weights')
+
+        # Calling _get_cached_buffers should return the same cached instance
+        same_buffers = mock_moe_layer._get_cached_buffers()
+        assert same_buffers is buffers  # Same object, not recreated
 
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_eager_buffers_frees_stacked_tensors(self, mock_moe_layer):
-        """Test that stacked tensors remain available after buffer creation.
+        """Test that eager mode skips stacked tensor creation for memory efficiency.
 
-        Note: The current implementation keeps stacked tensors for the slow path
-        fallback. This test verifies they exist and are properly formed.
+        In eager_buffers=True mode, the layer creates Metal buffers directly
+        from CPU tensors without creating intermediate stacked MPS tensors.
+        This saves ~2x memory during model loading.
         """
-        mock_moe_layer._get_cached_buffers()
+        # Eager mode should NOT create stacked tensors
+        assert not hasattr(mock_moe_layer, "gate_weights_stacked"), \
+            "Stacked tensors should not exist in eager mode"
+        assert not hasattr(mock_moe_layer, "up_weights_stacked"), \
+            "Stacked tensors should not exist in eager mode"
 
-        # Stacked tensors should still exist (for slow path fallback)
-        assert hasattr(mock_moe_layer, "gate_weights_stacked")
-        assert mock_moe_layer.gate_weights_stacked is not None
+        # But Metal buffers should exist
+        assert mock_moe_layer._cached_weight_buffers is not None
+        assert mock_moe_layer._cached_weight_buffers.gate_weights is not None
+
+    @pytest.fixture
+    def lazy_moe_layer(self):
+        """Create MoE layer with lazy buffer creation (deprecated path)."""
+        import warnings
+
+        from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+        # Suppress the deprecation warning for this test
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            return create_mock_moe_mlp(
+                hidden_dim=256,
+                intermediate_dim=512,
+                num_experts=4,
+                num_experts_per_tok=2,
+                bits=3,
+                device="mps",
+                eager_buffers=False,  # Test legacy path
+            )
+
+    @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
+    def test_lazy_buffers_creates_stacked_tensors(self, lazy_moe_layer):
+        """Test that lazy mode (eager_buffers=False) creates stacked tensors.
+
+        This is the deprecated path but should still work for compatibility.
+        """
+        # Lazy mode should create stacked tensors
+        assert hasattr(lazy_moe_layer, "gate_weights_stacked")
+        assert lazy_moe_layer.gate_weights_stacked is not None
+
+        # But cached buffers should be None until first forward
+        assert lazy_moe_layer._cached_weight_buffers is None
+
+        # After calling _get_cached_buffers, buffers should be created
+        lazy_moe_layer._get_cached_buffers()
+        assert lazy_moe_layer._cached_weight_buffers is not None
 
 
 class TestMemoryBaseline:
@@ -138,16 +185,19 @@ class TestRealModelMemory:
         after_rss = get_rss_mb()
         delta_gb = (after_rss - before_rss) / 1024
 
-        # Should be under 8 GB increase for 3-bit model
-        # (4 GB weights + 2-3 GB buffers + overhead)
-        assert delta_gb < 10, f"Memory increased by {delta_gb:.2f} GB, expected < 10 GB"
+        # GLM-4.7-Flash is ~16 GB on disk (47 layers, 64 experts each)
+        # Memory includes: weights + Metal buffers + activation overhead
+        # Expect ~18-20 GB total after optimization
+        assert delta_gb < 20, f"Memory increased by {delta_gb:.2f} GB, expected < 20 GB"
 
-        # Verify model works
-        x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
+        # Verify model works - use [batch, seq_len, hidden_size]
+        hidden_size = 2048  # From model config
+        x = torch.randn(1, 8, hidden_size, dtype=torch.float16, device="mps")
         with torch.no_grad():
             # Just run first layer as smoke test
             layer = model.model.layers[2]  # First MoE layer
             out = layer(x)
+            assert out.shape == x.shape, f"Output shape mismatch: {out.shape} vs {x.shape}"
             assert not torch.isnan(out).any()
 
 

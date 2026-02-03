@@ -1,0 +1,39 @@
+name: Metal Shader Check
+
+on:
+  push:
+    paths:
+      - 'src/*.metal'
+  pull_request:
+    paths:
+      - 'src/*.metal'
+
+jobs:
+  compile-check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile Metal Shaders
+        run: |
+          for f in src/*.metal; do
+            echo "Compiling $f..."
+            xcrun metal -std=macos-metal2.3 -c "$f" -o /dev/null
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run Kernel Audit
+        run: |
+          output=$(uv run python audit_kernels.py)
+          echo "$output"
+          # Extract critical count and fail if non-zero
+          critical_count=$(echo "$output" | grep -E "^\s*Critical:" | awk '{print $2}')
+          if [ "$critical_count" != "0" ]; then
+            echo "::error::Found $critical_count critical issues in Metal shaders"
+            exit 1
+          fi

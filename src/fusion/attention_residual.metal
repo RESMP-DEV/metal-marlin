@@ -448,12 +448,8 @@ kernel void norm_linear_residual_fp4(
             }
         }
 
-        // Simdgroup reduction
-        sum_sq += simd_shuffle_xor(sum_sq, 16);
-        sum_sq += simd_shuffle_xor(sum_sq, 8);
-        sum_sq += simd_shuffle_xor(sum_sq, 4);
-        sum_sq += simd_shuffle_xor(sum_sq, 2);
-        sum_sq += simd_shuffle_xor(sum_sq, 1);
+        // Simdgroup reduction using hardware intrinsic (faster than manual shuffle)
+        sum_sq = simd_sum(sum_sq);
 
         if (lane_id == 0) {
             float variance = sum_sq / float(K);

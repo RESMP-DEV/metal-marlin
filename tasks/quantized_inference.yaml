@@ -47,7 +47,7 @@ tasks:
 
       After fixing, verify:
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/metal_marlin
+      cd contrib/metal_marlin
       uv run python -c "
       from metal_marlin.metal_dispatch import MetalKernelLibrary
       lib = MetalKernelLibrary.from_source_dir()
@@ -535,7 +535,7 @@ tasks:
       Quantize Qwen/Qwen3-30B-A3B using the sensitivity-aware pipeline.
 
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/metal_marlin
+      cd contrib/metal_marlin
       uv run python benchmarks/bench_glm47_sensitivity_mixed.py \
           --model Qwen/Qwen3-30B-A3B \
           --output benchmarks/results/qwen3_30b_sensitivity \
@@ -561,7 +561,7 @@ tasks:
       - FP4 for attention
 
       ```bash
-      cd /Users/kearm/AlphaHENG/contrib/metal_marlin
+      cd contrib/metal_marlin
       uv run python benchmarks/bench_glm47_sensitivity_mixed.py \
           --model mistralai/Mixtral-8x7B-v0.1 \
           --output benchmarks/results/mixtral_8x7b_sensitivity \

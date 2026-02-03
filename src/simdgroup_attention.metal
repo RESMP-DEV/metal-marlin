@@ -160,11 +160,10 @@ constant constexpr uint K_TILES_HD [[maybe_unused]] = HEAD_DIM_MAX_SG / 8;
 // ---------------------------------------------------------------------------
 
 inline float simd_sum_fast(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
+    #pragma unroll
+    for (uint offset = 16; offset >= 1; offset >>= 1) {
+        val += simd_shuffle_xor(val, offset);
+    }
     return val;
 }
 
@@ -331,6 +330,7 @@ kernel void simdgroup_attention_qk(
         // We'll use a hybrid approach: compute 8 dot products per simdgroup,
         // where each "dot product" uses simd_shuffle to distribute the work.
 
+        #pragma unroll(8)
         for (uint k_block = 0; k_block < k_blocks_in_tile; ++k_block) {
             uint k_local_start = k_block * 8;
             uint k_global_start = k_tile_start + k_local_start;
@@ -346,11 +346,13 @@ kernel void simdgroup_attention_qk(
             threadgroup float score_staging_f[8][8];
 
             // Each query row
+            #pragma unroll(8)
             for (uint qi = 0; qi < Q_ROWS_PER_SG; ++qi) {
                 uint global_q = sg_q_start + qi;
                 if (global_q >= seq_q) continue;
 
                 // Each key in this block
+                #pragma unroll(8)
                 for (uint ki = 0; ki < 8; ++ki) {
                     uint global_k = k_global_start + ki;
 
@@ -358,6 +360,7 @@ kernel void simdgroup_attention_qk(
                     if (global_k < seq_k) {
                         // Compute dot product with work split across lanes
                         const uint elems_per_lane = head_dim / 32;
+                        #pragma unroll
                         for (uint i = 0; i < elems_per_lane; ++i) {
                             uint d = simd_lane * elems_per_lane + i;
                             if (d < head_dim) {
@@ -382,6 +385,7 @@ kernel void simdgroup_attention_qk(
             simdgroup_barrier(mem_flags::mem_threadgroup);
 
             // Write scores to global memory
+            #pragma unroll(2)
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint local_q = elem / 8;
                 uint local_k = elem % 8;
@@ -520,6 +524,7 @@ kernel void simdgroup_attention(
     const uint elems_per_lane = head_dim / 32;
     float q0_reg[HEAD_DIM_MAX_SG / 32];
     float q1_reg[HEAD_DIM_MAX_SG / 32];
+    #pragma unroll
     for (uint i = 0; i < elems_per_lane; ++i) {
         uint d = simd_lane * elems_per_lane + i;
         q0_reg[i] = has_q0 ? input_to_float(Q_tile[my_q0][d]) : 0.0f;
@@ -572,72 +577,129 @@ kernel void simdgroup_attention(
         float scores0[KV_TILE_FA];
         float scores1[KV_TILE_FA];
 
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            // Dot product for q0
-            float dot0 = 0.0f;
-            float dot1 = 0.0f;
+        // ILP OPTIMIZATION: Process 2 keys at a time to interleave independent computations
+        // This allows the GPU to overlap the simd_sum_fast reductions with the next iteration's loads
+        #pragma unroll(12)
+        for (uint ki = 0; ki < tile_len; ki += 2) {
+            // Load K values for two keys early to hide memory latency
+            float k_vals_0[HEAD_DIM_MAX_SG / 32];
+            float k_vals_1[HEAD_DIM_MAX_SG / 32];
+
+            #pragma unroll
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = simd_lane * elems_per_lane + i;
-                float k_val = input_to_float(K_tile[buf_compute][ki][d]);
-                dot0 += q0_reg[i] * k_val;
-                dot1 += q1_reg[i] * k_val;
+                k_vals_0[i] = input_to_float(K_tile[buf_compute][ki][d]);
+                k_vals_1[i] = (ki + 1 < tile_len) ? input_to_float(K_tile[buf_compute][ki + 1][d]) : 0.0f;
             }
-            dot0 = simd_sum_fast(dot0);
-            dot1 = simd_sum_fast(dot1);
 
-            scores0[ki] = has_q0 ? (dot0 * scale) : -INFINITY;
-            scores1[ki] = has_q1 ? (dot1 * scale) : -INFINITY;
+            // Compute dot products for both keys - interleave to avoid dependency stalls
+            float dot0_k0 = 0.0f, dot1_k0 = 0.0f;
+            float dot0_k1 = 0.0f, dot1_k1 = 0.0f;
 
-            // Causal mask
+            #pragma unroll
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                // Interleave computations for k0 and k1
+                dot0_k0 += q0_reg[i] * k_vals_0[i];
+                dot0_k1 += q0_reg[i] * k_vals_1[i];
+                dot1_k0 += q1_reg[i] * k_vals_0[i];
+                dot1_k1 += q1_reg[i] * k_vals_1[i];
+            }
+
+            // Reductions - interleave the two simd_sum_fast calls
+            dot0_k0 = simd_sum_fast(dot0_k0);
+            dot0_k1 = simd_sum_fast(dot0_k1);
+            dot1_k0 = simd_sum_fast(dot1_k0);
+            dot1_k1 = simd_sum_fast(dot1_k1);
+
+            // Store scores for key 0
+            scores0[ki] = has_q0 ? (dot0_k0 * scale) : -INFINITY;
+            scores1[ki] = has_q1 ? (dot1_k0 * scale) : -INFINITY;
+
+            // Store scores for key 1 (if valid)
+            if (ki + 1 < tile_len) {
+                scores0[ki + 1] = has_q0 ? (dot0_k1 * scale) : -INFINITY;
+                scores1[ki + 1] = has_q1 ? (dot1_k1 * scale) : -INFINITY;
+            }
+
+            // Causal mask - batch both keys
             if (causal) {
-                uint k_pos = tile_start + ki;
+                uint k_pos_0 = tile_start + ki;
+                uint k_pos_1 = tile_start + ki + 1;
                 uint q0_pos = q_row_base + my_q0;
                 uint q1_pos = q_row_base + my_q1;
-                if (k_pos > q0_pos) scores0[ki] = -INFINITY;
-                if (k_pos > q1_pos) scores1[ki] = -INFINITY;
+                if (k_pos_0 > q0_pos) scores0[ki] = -INFINITY;
+                if (k_pos_0 > q1_pos) scores1[ki] = -INFINITY;
+                if (ki + 1 < tile_len) {
+                    if (k_pos_1 > q0_pos) scores0[ki + 1] = -INFINITY;
+                    if (k_pos_1 > q1_pos) scores1[ki + 1] = -INFINITY;
+                }
             }
         }
+        #pragma unroll(24)
         for (uint ki = tile_len; ki < KV_TILE_FA; ++ki) {
             scores0[ki] = -INFINITY;
             scores1[ki] = -INFINITY;
         }
 
-        // Online softmax update for row 0
+        // ILP OPTIMIZATION: Interleave online softmax for both query rows
+        // Find max scores for both rows simultaneously
         float m0_tile = -INFINITY;
+        float m1_tile = -INFINITY;
+        #pragma unroll(24)
         for (uint ki = 0; ki < tile_len; ++ki) {
             m0_tile = max(m0_tile, scores0[ki]);
-        }
-        float m0_new = max(m0, m0_tile);
-        float corr0 = exp(m0 - m0_new);
-        l0 *= corr0;
-        for (uint i = 0; i < elems_per_lane; ++i) o0_acc[i] *= corr0;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores0[ki] - m0_new);
-            l0 += p;
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = simd_lane * elems_per_lane + i;
-                o0_acc[i] += p * input_to_float(V_tile[buf_compute][ki][d]);
-            }
-        }
-        m0 = m0_new;
-
-        // Online softmax update for row 1
-        float m1_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
             m1_tile = max(m1_tile, scores1[ki]);
         }
+
+        // Compute new max and correction factors - both rows in parallel
+        float m0_new = max(m0, m0_tile);
         float m1_new = max(m1, m1_tile);
+        float corr0 = exp(m0 - m0_new);
         float corr1 = exp(m1 - m1_new);
+
+        // Apply corrections and reset sums - interleaved
+        l0 *= corr0;
         l1 *= corr1;
-        for (uint i = 0; i < elems_per_lane; ++i) o1_acc[i] *= corr1;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores1[ki] - m1_new);
-            l1 += p;
+        #pragma unroll
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            o0_acc[i] *= corr0;
+            o1_acc[i] *= corr1;
+        }
+
+        // ILP OPTIMIZATION: Prefetch V values and interleave accumulation for both rows
+        // Process 2 V vectors at a time to hide memory latency
+        #pragma unroll(12)
+        for (uint ki = 0; ki < tile_len; ki += 2) {
+            // Prefetch V values for two keys
+            float v_vals_0[HEAD_DIM_MAX_SG / 32];
+            float v_vals_1[HEAD_DIM_MAX_SG / 32];
+
+            #pragma unroll
             for (uint i = 0; i < elems_per_lane; ++i) {
                 uint d = simd_lane * elems_per_lane + i;
-                o1_acc[i] += p * input_to_float(V_tile[buf_compute][ki][d]);
+                v_vals_0[i] = input_to_float(V_tile[buf_compute][ki][d]);
+                v_vals_1[i] = (ki + 1 < tile_len) ? input_to_float(V_tile[buf_compute][ki + 1][d]) : 0.0f;
+            }
+
+            // Compute probabilities for both keys and both queries
+            float p0_k0 = exp(scores0[ki] - m0_new);
+            float p1_k0 = exp(scores1[ki] - m1_new);
+            float p0_k1 = (ki + 1 < tile_len) ? exp(scores0[ki + 1] - m0_new) : 0.0f;
+            float p1_k1 = (ki + 1 < tile_len) ? exp(scores1[ki + 1] - m1_new) : 0.0f;
+
+            // Update sums
+            l0 += p0_k0 + p0_k1;
+            l1 += p1_k0 + p1_k1;
+
+            // Accumulate weighted V values - interleave all 4 computations
+            #pragma unroll
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o0_acc[i] += p0_k0 * v_vals_0[i] + p0_k1 * v_vals_1[i];
+                o1_acc[i] += p1_k0 * v_vals_0[i] + p1_k1 * v_vals_1[i];
             }
         }
+
+        m0 = m0_new;
         m1 = m1_new;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -649,6 +711,7 @@ kernel void simdgroup_attention(
     float inv_l0 = (l0 > 0.0f) ? (1.0f / l0) : 0.0f;
     float inv_l1 = (l1 > 0.0f) ? (1.0f / l1) : 0.0f;
 
+    #pragma unroll
     for (uint i = 0; i < elems_per_lane; ++i) {
         uint d = simd_lane * elems_per_lane + i;
         if (d < head_dim) {
@@ -667,6 +730,7 @@ kernel void simdgroup_attention(
 #ifdef USE_BF16_INPUTS
     if (has_q0) {
         float out_vals0[HEAD_DIM_MAX_SG / 32];
+        #pragma unroll
         for (uint i = 0; i < elems_per_lane; ++i) {
             out_vals0[i] = o0_acc[i] * inv_l0;
         }
@@ -675,6 +739,7 @@ kernel void simdgroup_attention(
     }
     if (has_q1) {
         float out_vals1[HEAD_DIM_MAX_SG / 32];
+        #pragma unroll
         for (uint i = 0; i < elems_per_lane; ++i) {
             out_vals1[i] = o1_acc[i] * inv_l1;
         }
@@ -744,6 +809,7 @@ kernel void simdgroup_attention_pv(
     // We accumulate in 8×8 simdgroup_matrix tiles
     const uint hd_tiles = head_dim / 8;
     simdgroup_matrix_t acc[HEAD_DIM_MAX_SG / 8];
+    #pragma unroll
     for (uint hi = 0; hi < hd_tiles; ++hi) {
 #ifdef USE_BF16_INPUTS
         acc[hi] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
@@ -829,6 +895,7 @@ kernel void simdgroup_attention_pv(
         //
         // Tile in 8×8 blocks along K and head_dim dimensions
         const uint k_blocks = k_len / 8;
+        #pragma unroll(8)
         for (uint kb = 0; kb < k_blocks; ++kb) {
 #ifdef USE_BF16_INPUTS
             // Load P fragment: P[sg_q_offset:sg_q_offset+8, kb*8:(kb+1)*8]
@@ -851,6 +918,7 @@ kernel void simdgroup_attention_pv(
             simdgroup_load(p_frag, &P_frag_smem[simd_id][0][0], 8);
 
             // For each head_dim block, load V fragment and accumulate
+            #pragma unroll
             for (uint hi = 0; hi < hd_tiles; ++hi) {
                 if (simd_lane < 8) {
                     uint row = simd_lane;
@@ -878,6 +946,7 @@ kernel void simdgroup_attention_pv(
             simdgroup_load(p_frag, &P_tile[simd_id * Q_ROWS_PER_SG][kb * 8], TILE_K_SG);
 
             // For each head_dim block, load V fragment and accumulate
+            #pragma unroll
             for (uint hi = 0; hi < hd_tiles; ++hi) {
                 simdgroup_matrix<half, 8, 8> v_frag;
                 simdgroup_load(v_frag, &V_tile[buf_compute][kb * 8][hi * 8], HEAD_DIM_MAX_SG);
@@ -901,6 +970,7 @@ kernel void simdgroup_attention_pv(
     threadgroup half out_staging[8][8];
 #endif
 
+    #pragma unroll
     for (uint hi = 0; hi < hd_tiles; ++hi) {
         // Store accumulator to threadgroup staging buffer
         simdgroup_store(acc[hi], &out_staging[0][0], 8);
@@ -924,6 +994,7 @@ kernel void simdgroup_attention_pv(
                                            global_q * o_stride_q + global_d,
                                        lo, hi_vals);
             } else if (global_q < seq_q) {
+                #pragma unroll(8)
                 for (uint local_d = 0; local_d < 8; ++local_d) {
                     uint g_d = global_d + local_d;
                     if (g_d < head_dim) {
@@ -937,6 +1008,7 @@ kernel void simdgroup_attention_pv(
         }
 #else
         // Write to global memory (each thread writes 2 elements)
+        #pragma unroll(2)
         for (uint elem = simd_lane; elem < 64; elem += 32) {
             uint local_q = elem / 8;
             uint local_d = elem % 8;

@@ -520,7 +520,7 @@ class MarlinLinear:
             x, self.weight_packed, self.scales, self.group_size, self.dtype_config
         )
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
         return out
 
     @staticmethod

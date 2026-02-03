@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .._compat import HAS_TORCH, require_torch, torch
 from ..layers import MarlinLinear
@@ -513,13 +513,14 @@ class _MarlinMambaBlockBase:
         mlp_quant = mlp_quant_config or quant_config
         quant_type = "fp4" if mlp_quant is None else self._get_quant_type_mlp(mlp_quant)
         group_size = 128 if mlp_quant is None else mlp_quant.group_size
+        activation = cast(Literal["silu", "gelu", "relu"], mlp_activation)
 
         self.mlp = MarlinMLP(
             hidden_size=hidden_size,
             intermediate_size=self.intermediate_size,
             quant_type=quant_type,
             group_size=group_size,
-            activation=mlp_activation,
+            activation=activation,
             gated=use_gated_mlp,
         )
 

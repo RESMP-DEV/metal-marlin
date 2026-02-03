@@ -38,7 +38,7 @@ from .loader import TrellisModelLoader, TrellisWeight
 
 # Core model classes
 from .model import TrellisDecoderLayer, TrellisForCausalLM, TrellisModel, TrellisMoEMLP
-from .moe import TrellisExpert, TrellisMoEConfig, TrellisMoELayer
+from .moe import TrellisExpert, TrellisMoELayer
 
 # Packing utilities
 from .packing import (
@@ -70,7 +70,6 @@ __all__ = [
     "TrellisKVCache",
     # Layers
     "TrellisDenseMLP",
-    "TrellisMoEConfig",
     "TrellisMoELayer",
     "TrellisExpert",
     # Generation
@@ -82,6 +81,8 @@ __all__ = [
     "dispatch_trellis_dequant_fused",
     "dispatch_sign_flips",
     "dequantize_trellis_weight",
+    "dispatch_gemm_trellis_auto",
+    "dispatch_gemm_trellis_decode_auto",
     # Packing
     "pack_indices",
     "unpack_indices",

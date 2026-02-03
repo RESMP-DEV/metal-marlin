@@ -287,7 +287,12 @@ class SpeculativeEngine:
         batch_size = input_ids.shape[0]
         num_spec = self._current_num_spec
 
-        # 1. Draft proposes K tokens
+        # 1. Draft model generation loop: proposes K tokens autoregressively
+        # The draft.speculate() method runs an autoregressive generation loop
+        # that produces K candidate tokens using the cheap draft model.
+        # Each iteration: forward(current_token) -> logits -> softmax -> argmax -> next_token
+        # The loop maintains its own KV cache and generates tokens one-by-one.
+        # See draft.py:SmallModelDraft.speculate() for the generation loop implementation.
         draft_out: DraftOutput = self.draft.speculate(
             input_ids, kv_cache=target_cache, num_tokens=num_spec
         )

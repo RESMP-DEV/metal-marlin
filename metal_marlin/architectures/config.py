@@ -212,7 +212,7 @@ class HybridArchitectureConfig:
     hidden_size: int = 4096
     num_layers: int = 32
     vocab_size: int = 32000
-    layer_types: list[str | HybridLayerType] = field(default_factory=list)
+    layer_types: list[HybridLayerType] = field(default_factory=list)
     layer_configs: list[HybridLayerConfig] | None = None
 
     # Default configs for each layer type
@@ -240,13 +240,13 @@ class HybridArchitectureConfig:
 
     def __post_init__(self) -> None:
         """Normalize layer_types to HybridLayerType enum values."""
-        normalized = []
+        normalized: list[HybridLayerType] = []
         for lt in self.layer_types:
             if isinstance(lt, str):
                 normalized.append(_parse_layer_type(lt))
             else:
                 normalized.append(lt)
-        self.layer_types = normalized
+        object.__setattr__(self, 'layer_types', normalized)
 
         # Auto-fill layer_configs if not provided
         if self.layer_configs is None and self.layer_types:

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -213,7 +213,7 @@ class AdaptiveQuantizer:
 
     def compute_sensitivity(
         self,
-        hessian: NDArray[np.float64],
+        hessian: NDArray[np.floating[Any]],
     ) -> float:
         """Compute layer sensitivity score from Hessian.
 

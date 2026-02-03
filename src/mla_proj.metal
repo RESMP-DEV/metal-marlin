@@ -24,6 +24,7 @@
 //   - DeepSeek-V2/V3 uses kv_lora_rank=512-1536
 //   - RoPE can be applied to decoupled rope_head_dim portion of KV cache
 
+#include "dequant_helpers.metal"
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 
@@ -55,30 +56,180 @@ constant constexpr uint SG_N_TILES_MLA = 2;
 constant constexpr uint FP4_PER_UINT = 8;
 
 // ---------------------------------------------------------------------------
-// FP4 E2M1 dequantization (branchless, matches main GEMM kernel)
+// Helper functions for tile loading (tiles declared at kernel scope, passed as pointers)
 // ---------------------------------------------------------------------------
 
-inline half dequant_fp4_scalar(uint nibble) {
-    uint sign_bit = (nibble >> 3) & 1;
-    uint exp_bits = (nibble >> 1) & 0x3;
-    uint man_bit  = nibble & 1;
-
-    half sub_mag = half(man_bit) * half(0.25h);
-    half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
-    half magnitude = select(norm_mag, sub_mag, exp_bits == 0);
-    return select(magnitude, -magnitude, bool(sign_bit));
+// Load A tile from global memory to threadgroup memory
+inline void load_A_tile_k16(
+    device const half* A,
+    threadgroup half (*A_tile)[TILE_K_MLA],
+    uint tg_row,
+    uint k_block,
+    uint M,
+    uint K,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA) / THREADS_PER_TG_MLA;
+    for (uint i = 0; i < elems_per_thread; ++i) {
+        uint flat_idx = thread_idx * elems_per_thread + i;
+        uint row = flat_idx / TILE_K_MLA;
+        uint col = flat_idx % TILE_K_MLA;
+        uint global_row = tg_row + row;
+        uint global_col = k_block + col;
+        half val = (global_row < M && global_col < K)
+                   ? A[global_row * K + global_col]
+                   : half(0.0h);
+        A_tile[row][col] = val;
+    }
 }
 
-inline void dequant_fp4x8(uint32_t packed, half scale, thread half *out) {
-    float fscale = (float)scale;
-    out[0] = (half)((float)dequant_fp4_scalar((packed >>  0) & 0xF) * fscale);
-    out[1] = (half)((float)dequant_fp4_scalar((packed >>  4) & 0xF) * fscale);
-    out[2] = (half)((float)dequant_fp4_scalar((packed >>  8) & 0xF) * fscale);
-    out[3] = (half)((float)dequant_fp4_scalar((packed >> 12) & 0xF) * fscale);
-    out[4] = (half)((float)dequant_fp4_scalar((packed >> 16) & 0xF) * fscale);
-    out[5] = (half)((float)dequant_fp4_scalar((packed >> 20) & 0xF) * fscale);
-    out[6] = (half)((float)dequant_fp4_scalar((packed >> 24) & 0xF) * fscale);
-    out[7] = (half)((float)dequant_fp4_scalar((packed >> 28) & 0xF) * fscale);
+inline void load_A_tile_k32(
+    device const half* A,
+    threadgroup half (*A_tile)[TILE_K_MLA_LARGE],
+    uint tg_row,
+    uint k_block,
+    uint M,
+    uint K,
+    uint thread_idx
+) {
+    const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA_LARGE) / THREADS_PER_TG_MLA;
+    for (uint i = 0; i < elems_per_thread; ++i) {
+        uint flat_idx = thread_idx * elems_per_thread + i;
+        uint row = flat_idx / TILE_K_MLA_LARGE;
+        uint col = flat_idx % TILE_K_MLA_LARGE;
+        uint global_row = tg_row + row;
+        uint global_col = k_block + col;
+        half val = (global_row < M && global_col < K)
+                   ? A[global_row * K + global_col]
+                   : half(0.0h);
+        A_tile[row][col] = val;
+    }
+}
+
+// Load and dequantize B tile from FP4 packed format
+inline void load_B_tile_k16(
+    device const uint* B_packed,
+    device const half* scales,
+    threadgroup half (*B_tile)[TILE_N_MLA],
+    uint tg_col,
+    uint k_block,
+    uint N,
+    uint K,
+    uint k_packs,
+    uint scale_tiles,
+    uint group_size,
+    uint thread_idx
+) {
+    const uint packed_per_thread = (TILE_K_MLA * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (TILE_K_MLA / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA / FP4_PER_UINT);
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+        uint scale_k = global_k_base / group_size;
+        half s = half(1.0h);
+        if (global_n < N && scale_k < scale_tiles) {
+            s = scales[scale_k * N + global_n];
+        }
+        uint32_t packed = 0;
+        uint b_row = global_k_base / FP4_PER_UINT;
+        if (global_n < N && b_row < k_packs && global_k_base < K) {
+            packed = B_packed[b_row * N + global_n];
+        }
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        half vals[8];
+        dequant_fp4x8(packed, s, vals);
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA; ++v) {
+            if (n_idx < TILE_N_MLA) {
+                uint global_k = global_k_base + v;
+                B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
+            }
+        }
+    }
+}
+
+inline void load_B_tile_k32(
+    device const uint* B_packed,
+    device const half* scales,
+    threadgroup half (*B_tile)[TILE_N_MLA],
+    uint tg_col,
+    uint k_block,
+    uint N,
+    uint K,
+    uint k_packs,
+    uint scale_tiles,
+    uint group_size,
+    uint thread_idx
+) {
+    const uint packed_per_thread = (TILE_K_MLA_LARGE * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
+    for (uint i = 0; i < packed_per_thread; ++i) {
+        uint flat_packed_idx = thread_idx * packed_per_thread + i;
+        uint n_idx = flat_packed_idx / (TILE_K_MLA_LARGE / FP4_PER_UINT);
+        uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA_LARGE / FP4_PER_UINT);
+        uint global_n = tg_col + n_idx;
+        uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
+        uint scale_k = global_k_base / group_size;
+        half s = half(1.0h);
+        if (global_n < N && scale_k < scale_tiles) {
+            s = scales[scale_k * N + global_n];
+        }
+        uint32_t packed = 0;
+        uint b_row = global_k_base / FP4_PER_UINT;
+        if (global_n < N && b_row < k_packs && global_k_base < K) {
+            packed = B_packed[b_row * N + global_n];
+        }
+        uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
+        half vals[8];
+        dequant_fp4x8(packed, s, vals);
+        for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA_LARGE; ++v) {
+            if (n_idx < TILE_N_MLA) {
+                uint global_k = global_k_base + v;
+                B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
+            }
+        }
+    }
+}
+
+// Compute GEMM using simdgroup matrix operations (K=16 variant)
+inline void compute_gemm_k16(
+    threadgroup half (*A_tile)[TILE_K_MLA],
+    threadgroup half (*B_tile)[TILE_N_MLA],
+    thread simdgroup_matrix<half, 8, 8> (*acc)[SG_N_TILES_MLA],
+    uint sg_row_offset,
+    uint sg_col_offset
+) {
+    for (uint kt = 0; kt < K_TILES_MLA; ++kt) {
+        for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+            simdgroup_matrix<half, 8, 8> a_frag;
+            simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA);
+            for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+                simdgroup_matrix<half, 8, 8> b_frag;
+                simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
+                simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
+            }
+        }
+    }
+}
+
+inline void compute_gemm_k32(
+    threadgroup half (*A_tile)[TILE_K_MLA_LARGE],
+    threadgroup half (*B_tile)[TILE_N_MLA],
+    thread simdgroup_matrix<half, 8, 8> (*acc)[SG_N_TILES_MLA],
+    uint sg_row_offset,
+    uint sg_col_offset
+) {
+    for (uint kt = 0; kt < K_TILES_MLA_LARGE; ++kt) {
+        for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
+            simdgroup_matrix<half, 8, 8> a_frag;
+            simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA_LARGE);
+            for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
+                simdgroup_matrix<half, 8, 8> b_frag;
+                simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
+                simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,15 +241,15 @@ inline void dequant_fp4x8(uint32_t packed, half scale, thread half *out) {
 
 // Apply RoPE to a pair of values: (x, y) -> (x*cos - y*sin, x*sin + y*cos)
 inline void apply_rope_pair(
-    threadgroup half& x,
-    threadgroup half& y,
+    threadgroup half* x_ptr,
+    threadgroup half* y_ptr,
     half cos_val,
     half sin_val
 ) {
-    half x_new = x * cos_val - y * sin_val;
-    half y_new = x * sin_val + y * cos_val;
-    x = x_new;
-    y = y_new;
+    half x = *x_ptr;
+    half y = *y_ptr;
+    *x_ptr = x * cos_val - y * sin_val;
+    *y_ptr = x * sin_val + y * cos_val;
 }
 
 // Apply RoPE to a vector in threadgroup memory
@@ -117,7 +268,7 @@ inline void apply_rope_tg(
     for (uint p = tid; p < pairs; p += threads_per_tg) {
         half cos_val = cos_cache[position * pairs + p];
         half sin_val = sin_cache[position * pairs + p];
-        apply_rope_pair(vec[p], vec[p + pairs], cos_val, sin_val);
+        apply_rope_pair(&vec[p], &vec[p + pairs], cos_val, sin_val);
     }
 }
 
@@ -146,12 +297,14 @@ inline void apply_rope_tg(
     uint simd_id                    [[simdgroup_index_in_threadgroup]],
     uint thread_idx                 [[thread_index_in_threadgroup]]
 ) {
+    // Threadgroup tiles declared at kernel scope
     threadgroup half A_tile[TILE_M_MLA][TILE_K_MLA];
     threadgroup half B_tile[TILE_K_MLA][TILE_N_MLA];
+    threadgroup half out_staging[8][8];
 
     uint tg_row = tgid.y * TILE_M_MLA;
     uint tg_col = tgid.x * TILE_N_MLA;
-    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_row_offset = 0;
     uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
@@ -163,63 +316,19 @@ inline void apply_rope_tg(
     uint scale_tiles = (K + group_size - 1) / group_size;
 
     for (uint k_block = 0; k_block < K; k_block += TILE_K_MLA) {
-        {
-            const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA) / THREADS_PER_TG_MLA;
-            for (uint i = 0; i < elems_per_thread; ++i) {
-                uint flat_idx = thread_idx * elems_per_thread + i;
-                uint row = flat_idx / TILE_K_MLA;
-                uint col = flat_idx % TILE_K_MLA;
-                uint global_row = tg_row + row;
-                uint global_col = k_block + col;
-                half val = (global_row < M && global_col < K)
-                           ? A[global_row * K + global_col]
-                           : half(0.0h);
-                A_tile[row][col] = val;
-            }
-        }
-        {
-            const uint packed_per_thread = (TILE_K_MLA * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
-            for (uint i = 0; i < packed_per_thread; ++i) {
-                uint flat_packed_idx = thread_idx * packed_per_thread + i;
-                uint n_idx = flat_packed_idx / (TILE_K_MLA / FP4_PER_UINT);
-                uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA / FP4_PER_UINT);
-                uint global_n = tg_col + n_idx;
-                uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
-                uint scale_k = global_k_base / group_size;
-                half s = half(1.0h);
-                if (global_n < N && scale_k < scale_tiles) {
-                    s = scales[scale_k * N + global_n];
-                }
-                uint32_t packed = 0;
-                uint b_row = global_k_base / FP4_PER_UINT;
-                if (global_n < N && b_row < k_packs && global_k_base < K) {
-                    packed = B_packed[b_row * N + global_n];
-                }
-                uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
-                half vals[8];
-                dequant_fp4x8(packed, s, vals);
-                for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA; ++v) {
-                    if (n_idx < TILE_N_MLA) {
-                        uint global_k = global_k_base + v;
-                        B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
-                    }
-                }
-            }
-        }
+        // Load tiles using helper functions (tiles passed as pointers)
+        load_A_tile_k16(A, A_tile, tg_row, k_block, M, K, thread_idx);
+        load_B_tile_k16(B_packed, scales, B_tile, tg_col, k_block, N, K, k_packs, scale_tiles, group_size, thread_idx);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint kt = 0; kt < K_TILES_MLA; ++kt) {
-            for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
-                simdgroup_matrix<half, 8, 8> a_frag;
-                simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA);
-                for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
-                    simdgroup_matrix<half, 8, 8> b_frag;
-                    simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
-                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
-                }
-            }
-        }
+
+        // Compute using helper function
+        compute_gemm_k16(A_tile, B_tile, acc, sg_row_offset, sg_col_offset);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+
+    // Store output (inlined to keep barriers at kernel scope)
     for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
         for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
@@ -227,7 +336,6 @@ inline void apply_rope_tg(
             if (out_row + 8 <= M && out_col + 8 <= N) {
                 simdgroup_store(acc[mi][ni], out + out_row * N + out_col, N);
             } else if (out_row < M && out_col < N) {
-                threadgroup half out_staging[8][8];
                 simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -258,12 +366,14 @@ inline void apply_rope_tg(
     uint simd_id                    [[simdgroup_index_in_threadgroup]],
     uint thread_idx                 [[thread_index_in_threadgroup]]
 ) {
+    // Threadgroup tiles declared at kernel scope
     threadgroup half A_tile[TILE_M_MLA][TILE_K_MLA_LARGE];
     threadgroup half B_tile[TILE_K_MLA_LARGE][TILE_N_MLA];
+    threadgroup half out_staging[8][8];
 
     uint tg_row = tgid.y * TILE_M_MLA;
     uint tg_col = tgid.x * TILE_N_MLA;
-    uint sg_row_offset = 0;  // All simdgroups cover all rows
+    uint sg_row_offset = 0;
     uint sg_col_offset = simd_id * (SG_N_TILES_MLA * 8);
 
     simdgroup_matrix<half, 8, 8> acc[SG_M_TILES_MLA][SG_N_TILES_MLA];
@@ -275,63 +385,19 @@ inline void apply_rope_tg(
     uint scale_tiles = (K + group_size - 1) / group_size;
 
     for (uint k_block = 0; k_block < K; k_block += TILE_K_MLA_LARGE) {
-        {
-            const uint elems_per_thread = (TILE_M_MLA * TILE_K_MLA_LARGE) / THREADS_PER_TG_MLA;
-            for (uint i = 0; i < elems_per_thread; ++i) {
-                uint flat_idx = thread_idx * elems_per_thread + i;
-                uint row = flat_idx / TILE_K_MLA_LARGE;
-                uint col = flat_idx % TILE_K_MLA_LARGE;
-                uint global_row = tg_row + row;
-                uint global_col = k_block + col;
-                half val = (global_row < M && global_col < K)
-                           ? A[global_row * K + global_col]
-                           : half(0.0h);
-                A_tile[row][col] = val;
-            }
-        }
-        {
-            const uint packed_per_thread = (TILE_K_MLA_LARGE * TILE_N_MLA) / (THREADS_PER_TG_MLA * FP4_PER_UINT);
-            for (uint i = 0; i < packed_per_thread; ++i) {
-                uint flat_packed_idx = thread_idx * packed_per_thread + i;
-                uint n_idx = flat_packed_idx / (TILE_K_MLA_LARGE / FP4_PER_UINT);
-                uint k_group_in_tile = flat_packed_idx % (TILE_K_MLA_LARGE / FP4_PER_UINT);
-                uint global_n = tg_col + n_idx;
-                uint global_k_base = k_block + k_group_in_tile * FP4_PER_UINT;
-                uint scale_k = global_k_base / group_size;
-                half s = half(1.0h);
-                if (global_n < N && scale_k < scale_tiles) {
-                    s = scales[scale_k * N + global_n];
-                }
-                uint32_t packed = 0;
-                uint b_row = global_k_base / FP4_PER_UINT;
-                if (global_n < N && b_row < k_packs && global_k_base < K) {
-                    packed = B_packed[b_row * N + global_n];
-                }
-                uint tile_k_base = k_group_in_tile * FP4_PER_UINT;
-                half vals[8];
-                dequant_fp4x8(packed, s, vals);
-                for (uint v = 0; v < FP4_PER_UINT && (tile_k_base + v) < TILE_K_MLA_LARGE; ++v) {
-                    if (n_idx < TILE_N_MLA) {
-                        uint global_k = global_k_base + v;
-                        B_tile[tile_k_base + v][n_idx] = (global_k < K) ? vals[v] : half(0.0h);
-                    }
-                }
-            }
-        }
+        // Load tiles using helper functions (tiles passed as pointers)
+        load_A_tile_k32(A, A_tile, tg_row, k_block, M, K, thread_idx);
+        load_B_tile_k32(B_packed, scales, B_tile, tg_col, k_block, N, K, k_packs, scale_tiles, group_size, thread_idx);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint kt = 0; kt < K_TILES_MLA_LARGE; ++kt) {
-            for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
-                simdgroup_matrix<half, 8, 8> a_frag;
-                simdgroup_load(a_frag, &A_tile[sg_row_offset + mi * 8][kt * 8], TILE_K_MLA_LARGE);
-                for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
-                    simdgroup_matrix<half, 8, 8> b_frag;
-                    simdgroup_load(b_frag, &B_tile[kt * 8][sg_col_offset + ni * 8], TILE_N_MLA);
-                    simdgroup_multiply_accumulate(acc[mi][ni], a_frag, b_frag, acc[mi][ni]);
-                }
-            }
-        }
+
+        // Compute using helper function
+        compute_gemm_k32(A_tile, B_tile, acc, sg_row_offset, sg_col_offset);
+
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
+
+    // Store output (inlined to keep barriers at kernel scope)
     for (uint mi = 0; mi < SG_M_TILES_MLA; ++mi) {
         for (uint ni = 0; ni < SG_N_TILES_MLA; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
@@ -339,7 +405,6 @@ inline void apply_rope_tg(
             if (out_row + 8 <= M && out_col + 8 <= N) {
                 simdgroup_store(acc[mi][ni], out + out_row * N + out_col, N);
             } else if (out_row < M && out_col < N) {
-                threadgroup half out_staging[8][8];
                 simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -403,6 +468,7 @@ inline void apply_rope_tg(
     threadgroup half latent_tile[TILE_M_MLA][TILE_K_MLA_LARGE];  // Max K_latent portion per iteration
     threadgroup half hidden_tile[TILE_M_MLA][TILE_K_MLA_LARGE];
     threadgroup half B_tile[TILE_K_MLA_LARGE][TILE_N_MLA];
+    threadgroup half out_staging[8][8];  // For partial tile output
 
     uint tg_row = tgid.y * TILE_M_MLA;
     uint tg_col = tgid.x * TILE_N_MLA;
@@ -605,7 +671,6 @@ inline void apply_rope_tg(
             if (out_row + 8 <= M && out_col + 8 <= N_out) {
                 simdgroup_store(acc[mi][ni], out + out_row * N_out + out_col, N_out);
             } else if (out_row < M && out_col < N_out) {
-                threadgroup half out_staging[8][8];
                 simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -789,7 +854,7 @@ inline void apply_rope_tg(
                     half cos_val = cos_cache[pos * half_rope + pair_idx];
                     half sin_val = sin_cache[pos * half_rope + pair_idx];
 
-                    apply_rope_pair(out_tile[row][local_c1], out_tile[row][local_c2], cos_val, sin_val);
+                    apply_rope_pair(&out_tile[row][local_c1], &out_tile[row][local_c2], cos_val, sin_val);
                 }
             }
         }
