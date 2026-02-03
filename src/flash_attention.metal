@@ -18,43 +18,35 @@
 //   O: [batch, num_heads_q, seq_q, head_dim]
 //
 // Design notes:
+//   - Tiled attention avoiding O(N^2) memory
 //   - Each threadgroup processes one query row (one position in one head)
-//   - K/V are tiled along seq_k dimension; tiles loaded cooperatively
-//   - Online softmax maintains running (m, l) statistics per query row
+//   - Process in chunks that fit in threadgroup memory (TILE_KV=32)
+//   - Online softmax (no separate max/sum passes)
+//   - For decode (seq_len=1), enables GEMV fast path by loading Q into registers
+//     and streaming K/V tiles.
 //   - Double-buffering of K/V tiles hides load latency on M4 Max
-//   - head_dim is compile-time fixed via function constants for register allocation
 //
-// CUDA -> Metal mapping:
-//   Flash Attention 2 uses warp-level reductions and shared memory for QK^T
-//   Metal equivalent uses simdgroup reductions and threadgroup memory
-//   __shfl_xor_sync -> simd_shuffle_xor
-//   atomicMax        -> simd_max (within simdgroup), threadgroup atomics
+// Memory usage:
+//   HEAD_DIM_MAX=128, TILE_KV=32
+//   K_tile: 2 buffers * 32 rows * 128 cols * 2 bytes = 16KB
+//   V_tile: 2 buffers * 32 rows * 128 cols * 2 bytes = 16KB
+//   Total shared mem: 32KB (Fits in M-series threadgroup memory limit)
 
 #include <metal_stdlib>
 using namespace metal;
 
 // ---------------------------------------------------------------------------
 // Tile dimensions
-//
-// TILE_KV: Number of K/V rows processed per outer loop iteration.
-//   64 balances threadgroup memory usage against loop overhead.
-//   At head_dim=128: K_tile = 64*128*2B = 16KB, V_tile = 16KB, total = 32KB.
-//   For head_dim=64: total = 16KB (fits easily in 32KB budget).
-//
-// HEAD_DIM_MAX: Maximum supported head dimension. Actual dimension passed
-//   at dispatch time; we statically allocate for the max to avoid VLAs.
-//   Common values: 64 (GPT-2), 80 (Llama 3.2), 128 (Llama, Mistral).
 // ---------------------------------------------------------------------------
 
-constant constexpr uint TILE_KV = 64;
+constant constexpr uint TILE_KV = 32;
 constant constexpr uint HEAD_DIM_MAX = 128;
 
 // Threads per threadgroup: one simdgroup (32 threads) handles one query row.
-// Multiple simdgroups can process multiple query rows per threadgroup for
-// better occupancy, but the base case is 1 row = 1 simdgroup = 32 threads.
+// We use 4 query rows per threadgroup (128 threads total) to maximize occupancy.
 constant constexpr uint THREADS_PER_ROW = 32;
-constant constexpr uint ROWS_PER_TG = 4;  // 4 query rows per threadgroup
-constant constexpr uint THREADS_PER_TG = THREADS_PER_ROW * ROWS_PER_TG;  // 128
+constant constexpr uint ROWS_PER_TG = 4;
+constant constexpr uint THREADS_PER_TG = THREADS_PER_ROW * ROWS_PER_TG;
 constant constexpr uint FP4_PER_UINT = 8;
 
 // ---------------------------------------------------------------------------
@@ -62,7 +54,6 @@ constant constexpr uint FP4_PER_UINT = 8;
 // ---------------------------------------------------------------------------
 
 inline float simd_max_f32(float val, uint lane_id [[thread_index_in_simdgroup]]) {
-    // Tree reduction across 32 lanes
     val = max(val, simd_shuffle_xor(val, 16));
     val = max(val, simd_shuffle_xor(val, 8));
     val = max(val, simd_shuffle_xor(val, 4));
@@ -81,7 +72,7 @@ inline float simd_sum_f32(float val) {
 }
 
 // ---------------------------------------------------------------------------
-// FP4/INT4 dequant helpers (per-row scale)
+// FP4/INT4 dequant helpers
 // ---------------------------------------------------------------------------
 
 inline half dequant_fp4_scalar(uint nibble, half scale) {
@@ -203,9 +194,6 @@ inline void load_kv_int4_tile(
 
 // ---------------------------------------------------------------------------
 // Flash Attention kernel - standard (non-causal)
-//
-// Dispatch: [num_heads_q, ceil(seq_q / ROWS_PER_TG), batch] threadgroups
-//           THREADS_PER_TG threads per threadgroup
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention(
@@ -225,57 +213,40 @@ kernel void flash_attention(
     uint lane_id                    [[thread_index_in_simdgroup]],
     uint sg_id                      [[simdgroup_index_in_threadgroup]]
 ) {
-    // Threadgroup mapping:
-    //   tgid.x = head index (0..num_heads_q-1)
-    //   tgid.y = query row block (0..ceil(seq_q/ROWS_PER_TG)-1)
-    //   tgid.z = batch index (0..batch-1)
     const uint head_q = tgid.x;
     const uint q_row_base = tgid.y * ROWS_PER_TG;
     const uint b = tgid.z;
 
-    // For GQA: map Q head to K/V head
     const uint head_k = head_q * num_heads_k / num_heads_q;
-
-    // This simdgroup handles one query row
     const uint q_row = q_row_base + sg_id;
-    if (q_row >= seq_q) return;
+    bool row_valid = (q_row < seq_q);
 
-    // Strides for [batch, heads, seq, head_dim] layout
     const uint q_stride_b = num_heads_q * seq_q * head_dim;
     const uint q_stride_h = seq_q * head_dim;
     const uint q_stride_s = head_dim;
-
     const uint k_stride_b = num_heads_k * seq_k * head_dim;
     const uint k_stride_h = seq_k * head_dim;
     const uint k_stride_s = head_dim;
 
-    // Base pointers for this query row and K/V head
     const uint q_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
     const uint kv_offset = b * k_stride_b + head_k * k_stride_h;
 
-    // ---------------------------------------------------------------------------
-    // Load Q row into registers (each lane loads head_dim/32 elements)
-    // For head_dim=128: 4 elements per lane. For head_dim=64: 2 per lane.
-    // ---------------------------------------------------------------------------
-    float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
+    // Load Q into registers (GEMV fast path for decode)
     const uint elems_per_lane = head_dim / THREADS_PER_ROW;
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+    float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
+    if (row_valid) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
     }
 
-    // ---------------------------------------------------------------------------
-    // Shared memory for K and V tiles (double-buffered)
-    // Layout: [2][TILE_KV][HEAD_DIM_MAX]
-    // ---------------------------------------------------------------------------
+    // Shared memory for K/V tiles (double-buffered)
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_MAX];
     threadgroup half V_tile[2][TILE_KV][HEAD_DIM_MAX];
 
-    // Online softmax state
-    float m_prev = -INFINITY;  // Running max of scores
-    float l_prev = 0.0f;       // Running sum of exp(score - m)
-
-    // Output accumulator (unnormalized)
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
     float o_acc[HEAD_DIM_MAX / THREADS_PER_ROW];
     for (uint i = 0; i < elems_per_lane; ++i) {
         o_acc[i] = 0.0f;
@@ -283,144 +254,124 @@ kernel void flash_attention(
 
     const uint num_kv_tiles = (seq_k + TILE_KV - 1) / TILE_KV;
 
-    // Preload first tile into buffer 0
+    // Preload first tile
     {
-        const uint tile_start = 0;
-        const uint elems_to_load = TILE_KV * head_dim;
-        const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
-        for (uint i = 0; i < loads_per_thread; ++i) {
+        const uint tile_len = min(uint(TILE_KV), seq_k);
+        const uint num_elems = tile_len * head_dim;
+        const uint elems_per_thread = (num_elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        
+        for (uint i = 0; i < elems_per_thread; ++i) {
             uint idx = tid_in_tg + i * THREADS_PER_TG;
-            if (idx < elems_to_load) {
-                uint kv_row = idx / head_dim;
-                uint kv_col = idx % head_dim;
-                uint src_row = tile_start + kv_row;
-                if (src_row < seq_k) {
-                    K_tile[0][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
-                    V_tile[0][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
-                } else {
-                    K_tile[0][kv_row][kv_col] = half(0);
-                    V_tile[0][kv_row][kv_col] = half(0);
-                }
+            if (idx < num_elems) {
+                uint row = idx / head_dim;
+                uint col = idx % head_dim;
+                K_tile[0][row][col] = K[kv_offset + (0 + row) * k_stride_s + col];
+                V_tile[0][row][col] = V[kv_offset + (0 + row) * k_stride_s + col];
+            }
+        }
+        
+        // Zero out padding
+        for (uint row = tile_len; row < TILE_KV; ++row) {
+            for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                K_tile[0][row][col] = half(0);
+                V_tile[0][row][col] = half(0);
             }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // ---------------------------------------------------------------------------
-    // Main loop: stream through K/V tiles with double-buffering
-    // ---------------------------------------------------------------------------
     uint buf_compute = 0;
-
     for (uint tile_idx = 0; tile_idx < num_kv_tiles; ++tile_idx) {
         uint buf_load = 1 - buf_compute;
-
-        // Async load next tile (if exists) into buf_load
         uint next_tile_start = (tile_idx + 1) * TILE_KV;
+
         if (tile_idx + 1 < num_kv_tiles) {
-            const uint elems_to_load = TILE_KV * head_dim;
-            const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
-            for (uint i = 0; i < loads_per_thread; ++i) {
+            const uint tile_len = min(uint(TILE_KV), seq_k - next_tile_start);
+            const uint num_elems = tile_len * head_dim;
+            const uint elems_per_thread = (num_elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+            for (uint i = 0; i < elems_per_thread; ++i) {
                 uint idx = tid_in_tg + i * THREADS_PER_TG;
-                if (idx < elems_to_load) {
-                    uint kv_row = idx / head_dim;
-                    uint kv_col = idx % head_dim;
-                    uint src_row = next_tile_start + kv_row;
-                    if (src_row < seq_k) {
-                        K_tile[buf_load][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
-                        V_tile[buf_load][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
-                    } else {
-                        K_tile[buf_load][kv_row][kv_col] = half(0);
-                        V_tile[buf_load][kv_row][kv_col] = half(0);
-                    }
+                if (idx < num_elems) {
+                    uint row = idx / head_dim;
+                    uint col = idx % head_dim;
+                    K_tile[buf_load][row][col] = K[kv_offset + (next_tile_start + row) * k_stride_s + col];
+                    V_tile[buf_load][row][col] = V[kv_offset + (next_tile_start + row) * k_stride_s + col];
+                }
+            }
+            
+            for (uint row = tile_len; row < TILE_KV; ++row) {
+                for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                    K_tile[buf_load][row][col] = half(0);
+                    V_tile[buf_load][row][col] = half(0);
                 }
             }
         }
 
-        // Compute attention scores for this tile: Q[row] @ K_tile^T
-        // Each lane computes partial dot products, then reduces across simdgroup
-        uint tile_start = tile_idx * TILE_KV;
-        uint tile_end = min(tile_start + TILE_KV, seq_k);
-        uint tile_len = tile_end - tile_start;
+        if (row_valid) {
+            uint tile_start = tile_idx * TILE_KV;
+            uint tile_end = min(tile_start + TILE_KV, seq_k);
+            uint tile_len = tile_end - tile_start;
 
-        // Compute all scores in this tile
-        float scores[TILE_KV];
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            // Partial dot product: each lane handles its slice of head_dim
-            float dot = 0.0f;
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+            float scores[TILE_KV];
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                }
+                dot = simd_sum_f32(dot);
+                scores[ki] = dot * scale;
             }
-            // Reduce across lanes to get full dot product
-            dot = simd_sum_f32(dot);
-            scores[ki] = dot * scale;
-        }
-        // Zero out invalid positions
-        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
-            scores[ki] = -INFINITY;
-        }
-
-        // Online softmax update
-        // Find max of current tile scores
-        float m_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            m_tile = max(m_tile, scores[ki]);
-        }
-
-        float m_new = max(m_prev, m_tile);
-        float correction = exp(m_prev - m_new);
-
-        // Update running sum: rescale previous sum + add new exponentials
-        float l_new = l_prev * correction;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            l_new += exp(scores[ki] - m_new);
-        }
-
-        // Update output accumulator:
-        //   O_acc = O_acc * correction + sum_i(exp(scores[i] - m_new) * V_tile[i])
-        // Rescale previous accumulator
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            o_acc[i] *= correction;
-        }
-
-        // Accumulate weighted V rows
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores[ki] - m_new);
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+                scores[ki] = -INFINITY;
             }
+
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                l_new += exp(scores[ki] - m_new);
+            }
+
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= correction;
+            }
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
         }
 
-        m_prev = m_new;
-        l_prev = l_new;
-
-        // Wait for next tile load to finish before swapping buffers
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
-    // ---------------------------------------------------------------------------
-    // Normalize and store output
-    // ---------------------------------------------------------------------------
-    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
-    float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        if (d < head_dim) {
-            O[o_offset + d] = half(o_acc[i] * inv_l);
+    if (row_valid) {
+        const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Flash Attention kernel - causal masking
-//
-// Identical to flash_attention but applies causal mask:
-//   score[q_pos][k_pos] = -INF if k_pos > q_pos
-//
-// This enables early termination: once tile_start > q_row, all scores are -INF.
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_causal(
@@ -445,7 +396,7 @@ kernel void flash_attention_causal(
     const uint b = tgid.z;
     const uint head_k = head_q * num_heads_k / num_heads_q;
     const uint q_row = q_row_base + sg_id;
-    if (q_row >= seq_q) return;
+    bool row_valid = (q_row < seq_q);
 
     const uint q_stride_b = num_heads_q * seq_q * head_dim;
     const uint q_stride_h = seq_q * head_dim;
@@ -453,15 +404,16 @@ kernel void flash_attention_causal(
     const uint k_stride_b = num_heads_k * seq_k * head_dim;
     const uint k_stride_h = seq_k * head_dim;
     const uint k_stride_s = head_dim;
-
     const uint q_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
     const uint kv_offset = b * k_stride_b + head_k * k_stride_h;
 
     const uint elems_per_lane = head_dim / THREADS_PER_ROW;
     float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+    if (row_valid) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
     }
 
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_MAX];
@@ -474,43 +426,56 @@ kernel void flash_attention_causal(
         o_acc[i] = 0.0f;
     }
 
-    // Causal early termination: only iterate tiles where k_pos <= q_row
-    // For the causal case with seq_q == seq_k, q_row determines the upper bound
-    // For cross-attention (seq_q != seq_k), we use q_row mapped to k-space
-    const uint causal_limit = min(q_row + 1, seq_k);
+    // Optimization: Skip tiles beyond q_row for causal attention?
+    // The loop iterates up to num_kv_tiles.
+    // If we use early exit here, we might run into barrier issues again if threadgroup processes multiple rows.
+    // But causal limit depends on q_row. Each q_row has different causal limit.
+    // However, loading is cooperative.
+    // So we must load tiles as long as ANY q_row in threadgroup needs them.
+    // The max q_row in this threadgroup determines the max tile needed.
+    // ROWS_PER_TG=4. max_q_row = min(q_row_base + 3, seq_q-1).
+    // So we should calculate max causal limit for the group.
+    
+    // For simplicity, just use seq_k limit for loop, and mask in compute.
+    // Or optimized:
+    const uint max_q_row_in_tg = min(q_row_base + ROWS_PER_TG - 1, seq_q - 1);
+    const uint causal_limit = min(max_q_row_in_tg + 1, seq_k);
     const uint num_kv_tiles = (causal_limit + TILE_KV - 1) / TILE_KV;
 
     // Preload first tile
     {
-        const uint elems_to_load = TILE_KV * head_dim;
-        const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
-        for (uint i = 0; i < loads_per_thread; ++i) {
+        const uint tile_len = min(uint(TILE_KV), seq_k);
+        const uint num_elems = tile_len * head_dim;
+        const uint elems_per_thread = (num_elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+
+        for (uint i = 0; i < elems_per_thread; ++i) {
             uint idx = tid_in_tg + i * THREADS_PER_TG;
-            if (idx < elems_to_load) {
-                uint kv_row = idx / head_dim;
-                uint kv_col = idx % head_dim;
-                if (kv_row < seq_k) {
-                    K_tile[0][kv_row][kv_col] = K[kv_offset + kv_row * k_stride_s + kv_col];
-                    V_tile[0][kv_row][kv_col] = V[kv_offset + kv_row * k_stride_s + kv_col];
-                } else {
-                    K_tile[0][kv_row][kv_col] = half(0);
-                    V_tile[0][kv_row][kv_col] = half(0);
-                }
+            if (idx < num_elems) {
+                uint row = idx / head_dim;
+                uint col = idx % head_dim;
+                K_tile[0][row][col] = K[kv_offset + row * k_stride_s + col];
+                V_tile[0][row][col] = V[kv_offset + row * k_stride_s + col];
+            }
+        }
+        
+        for (uint row = tile_len; row < TILE_KV; ++row) {
+            for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                K_tile[0][row][col] = half(0);
+                V_tile[0][row][col] = half(0);
             }
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     uint buf_compute = 0;
-
     for (uint tile_idx = 0; tile_idx < num_kv_tiles; ++tile_idx) {
         uint buf_load = 1 - buf_compute;
         uint tile_start = tile_idx * TILE_KV;
-
-        // Load next tile
         uint next_tile_start = (tile_idx + 1) * TILE_KV;
+
         if (tile_idx + 1 < num_kv_tiles) {
-            const uint elems_to_load = TILE_KV * head_dim;
+            const uint tile_len = min(uint(TILE_KV), seq_k - next_tile_start);
+            const uint elems_to_load = tile_len * head_dim;
             const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
             for (uint i = 0; i < loads_per_thread; ++i) {
                 uint idx = tid_in_tg + i * THREADS_PER_TG;
@@ -518,93 +483,88 @@ kernel void flash_attention_causal(
                     uint kv_row = idx / head_dim;
                     uint kv_col = idx % head_dim;
                     uint src_row = next_tile_start + kv_row;
-                    if (src_row < seq_k) {
-                        K_tile[buf_load][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
-                        V_tile[buf_load][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
-                    } else {
-                        K_tile[buf_load][kv_row][kv_col] = half(0);
-                        V_tile[buf_load][kv_row][kv_col] = half(0);
-                    }
+                    // src_row check implicit by tile_len logic
+                    K_tile[buf_load][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
+                    V_tile[buf_load][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
+                }
+            }
+            
+            for (uint row = tile_len; row < TILE_KV; ++row) {
+                for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                    K_tile[buf_load][row][col] = half(0);
+                    V_tile[buf_load][row][col] = half(0);
                 }
             }
         }
 
-        // Compute scores with causal mask
-        uint tile_end = min(tile_start + TILE_KV, seq_k);
-        uint tile_len = tile_end - tile_start;
+        if (row_valid) {
+            uint tile_end = min(tile_start + TILE_KV, seq_k);
+            uint tile_len = tile_end - tile_start;
 
-        float scores[TILE_KV];
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            uint k_pos = tile_start + ki;
-            if (k_pos > q_row) {
-                // Causal mask: future positions get -INF
+            float scores[TILE_KV];
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                uint k_pos = tile_start + ki;
+                if (k_pos > q_row) {
+                    scores[ki] = -INFINITY;
+                    continue;
+                }
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                }
+                dot = simd_sum_f32(dot);
+                scores[ki] = dot * scale;
+            }
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
                 scores[ki] = -INFINITY;
-                continue;
             }
-            float dot = 0.0f;
+
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                l_new += exp(scores[ki] - m_new);
+            }
+
             for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                o_acc[i] *= correction;
             }
-            dot = simd_sum_f32(dot);
-            scores[ki] = dot * scale;
-        }
-        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
-            scores[ki] = -INFINITY;
-        }
-
-        // Online softmax
-        float m_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            m_tile = max(m_tile, scores[ki]);
-        }
-
-        float m_new = max(m_prev, m_tile);
-        float correction = exp(m_prev - m_new);
-        float l_new = l_prev * correction;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            l_new += exp(scores[ki] - m_new);
-        }
-
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            o_acc[i] *= correction;
-        }
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores[ki] - m_new);
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                }
             }
-        }
 
-        m_prev = m_new;
-        l_prev = l_new;
+            m_prev = m_new;
+            l_prev = l_new;
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
-    // Store
-    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
-    float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        if (d < head_dim) {
-            O[o_offset + d] = half(o_acc[i] * inv_l);
+    if (row_valid) {
+        const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Flash Attention kernel - Grouped-Query Attention (GQA)
-//
-// Identical memory layout but num_heads_k < num_heads_q.
-// Multiple Q heads share the same K/V head. The head mapping is:
-//   head_k = head_q / (num_heads_q / num_heads_k)
-//
-// This kernel is functionally identical to flash_attention (which already
-// handles GQA via the head mapping), but uses an explicit ratio parameter
-// for clarity and avoids the division in the inner loop.
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_gqa(
@@ -619,7 +579,7 @@ kernel void flash_attention_gqa(
     constant uint& seq_k            [[buffer(8)]],
     constant uint& head_dim         [[buffer(9)]],
     constant float& scale           [[buffer(10)]],
-    constant uint& gqa_ratio        [[buffer(11)]],  // num_heads_q / num_heads_k
+    constant uint& gqa_ratio        [[buffer(11)]],
     constant bool& is_causal        [[buffer(12)]],
     uint3 tgid                      [[threadgroup_position_in_grid]],
     uint tid_in_tg                  [[thread_index_in_threadgroup]],
@@ -631,7 +591,7 @@ kernel void flash_attention_gqa(
     const uint b = tgid.z;
     const uint head_k = head_q / gqa_ratio;
     const uint q_row = q_row_base + sg_id;
-    if (q_row >= seq_q) return;
+    bool row_valid = (q_row < seq_q);
 
     const uint q_stride_b = num_heads_q * seq_q * head_dim;
     const uint q_stride_h = seq_q * head_dim;
@@ -645,9 +605,11 @@ kernel void flash_attention_gqa(
 
     const uint elems_per_lane = head_dim / THREADS_PER_ROW;
     float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+    if (row_valid) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
     }
 
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_MAX];
@@ -660,25 +622,29 @@ kernel void flash_attention_gqa(
         o_acc[i] = 0.0f;
     }
 
-    const uint effective_seq = is_causal ? min(q_row + 1, seq_k) : seq_k;
+    // Determine loop limit based on max q_row in TG
+    const uint max_q_row_in_tg = min(q_row_base + ROWS_PER_TG - 1, seq_q - 1);
+    const uint effective_seq = is_causal ? min(max_q_row_in_tg + 1, seq_k) : seq_k;
     const uint num_kv_tiles = (effective_seq + TILE_KV - 1) / TILE_KV;
 
     // Preload first tile
     {
-        const uint elems_to_load = TILE_KV * head_dim;
-        const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
-        for (uint i = 0; i < loads_per_thread; ++i) {
+        const uint tile_len = min(uint(TILE_KV), seq_k);
+        const uint num_elems = tile_len * head_dim;
+        const uint elems_per_thread = (num_elems + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        for (uint i = 0; i < elems_per_thread; ++i) {
             uint idx = tid_in_tg + i * THREADS_PER_TG;
-            if (idx < elems_to_load) {
-                uint kv_row = idx / head_dim;
-                uint kv_col = idx % head_dim;
-                if (kv_row < seq_k) {
-                    K_tile[0][kv_row][kv_col] = K[kv_offset + kv_row * k_stride_s + kv_col];
-                    V_tile[0][kv_row][kv_col] = V[kv_offset + kv_row * k_stride_s + kv_col];
-                } else {
-                    K_tile[0][kv_row][kv_col] = half(0);
-                    V_tile[0][kv_row][kv_col] = half(0);
-                }
+            if (idx < num_elems) {
+                uint row = idx / head_dim;
+                uint col = idx % head_dim;
+                K_tile[0][row][col] = K[kv_offset + row * k_stride_s + col];
+                V_tile[0][row][col] = V[kv_offset + row * k_stride_s + col];
+            }
+        }
+        for (uint row = tile_len; row < TILE_KV; ++row) {
+            for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                K_tile[0][row][col] = half(0);
+                V_tile[0][row][col] = half(0);
             }
         }
     }
@@ -688,12 +654,11 @@ kernel void flash_attention_gqa(
 
     for (uint tile_idx = 0; tile_idx < num_kv_tiles; ++tile_idx) {
         uint buf_load = 1 - buf_compute;
-        uint tile_start = tile_idx * TILE_KV;
-
-        // Load next tile
         uint next_tile_start = (tile_idx + 1) * TILE_KV;
+
         if (tile_idx + 1 < num_kv_tiles) {
-            const uint elems_to_load = TILE_KV * head_dim;
+            const uint tile_len = min(uint(TILE_KV), seq_k - next_tile_start);
+            const uint elems_to_load = tile_len * head_dim;
             const uint loads_per_thread = (elems_to_load + THREADS_PER_TG - 1) / THREADS_PER_TG;
             for (uint i = 0; i < loads_per_thread; ++i) {
                 uint idx = tid_in_tg + i * THREADS_PER_TG;
@@ -701,85 +666,87 @@ kernel void flash_attention_gqa(
                     uint kv_row = idx / head_dim;
                     uint kv_col = idx % head_dim;
                     uint src_row = next_tile_start + kv_row;
-                    if (src_row < seq_k) {
-                        K_tile[buf_load][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
-                        V_tile[buf_load][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
-                    } else {
-                        K_tile[buf_load][kv_row][kv_col] = half(0);
-                        V_tile[buf_load][kv_row][kv_col] = half(0);
-                    }
+                    K_tile[buf_load][kv_row][kv_col] = K[kv_offset + src_row * k_stride_s + kv_col];
+                    V_tile[buf_load][kv_row][kv_col] = V[kv_offset + src_row * k_stride_s + kv_col];
+                }
+            }
+            for (uint row = tile_len; row < TILE_KV; ++row) {
+                for (uint col = tid_in_tg; col < head_dim; col += THREADS_PER_TG) {
+                    K_tile[buf_load][row][col] = half(0);
+                    V_tile[buf_load][row][col] = half(0);
                 }
             }
         }
 
-        uint tile_end = min(tile_start + TILE_KV, seq_k);
-        uint tile_len = tile_end - tile_start;
+        if (row_valid) {
+            uint tile_start = tile_idx * TILE_KV;
+            uint tile_end = min(tile_start + TILE_KV, seq_k);
+            uint tile_len = tile_end - tile_start;
 
-        float scores[TILE_KV];
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            uint k_pos = tile_start + ki;
-            if (is_causal && k_pos > q_row) {
+            float scores[TILE_KV];
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                uint k_pos = tile_start + ki;
+                if (is_causal && k_pos > q_row) {
+                    scores[ki] = -INFINITY;
+                    continue;
+                }
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                }
+                dot = simd_sum_f32(dot);
+                scores[ki] = dot * scale;
+            }
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
                 scores[ki] = -INFINITY;
-                continue;
             }
-            float dot = 0.0f;
+
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                l_new += exp(scores[ki] - m_new);
+            }
+
             for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                o_acc[i] *= correction;
             }
-            dot = simd_sum_f32(dot);
-            scores[ki] = dot * scale;
-        }
-        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
-            scores[ki] = -INFINITY;
-        }
-
-        float m_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            m_tile = max(m_tile, scores[ki]);
-        }
-
-        float m_new = max(m_prev, m_tile);
-        float correction = exp(m_prev - m_new);
-        float l_new = l_prev * correction;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            l_new += exp(scores[ki] - m_new);
-        }
-
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            o_acc[i] *= correction;
-        }
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores[ki] - m_new);
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                }
             }
-        }
 
-        m_prev = m_new;
-        l_prev = l_new;
+            m_prev = m_new;
+            l_prev = l_new;
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
-    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
-    float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        if (d < head_dim) {
-            O[o_offset + d] = half(o_acc[i] * inv_l);
+    if (row_valid) {
+        const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
         }
     }
 }
 
 // ---------------------------------------------------------------------------
 // Flash Attention kernel - FP4 KV cache
-//
-// Layout:
-//   K_packed/V_packed: [batch, num_heads_k, seq_k, head_dim/8] (packed 8 values)
-//   K_scales/V_scales: [batch, num_heads_k, seq_k] (per-row scale)
 // ---------------------------------------------------------------------------
 
 kernel void flash_attention_kv_fp4(
@@ -807,7 +774,7 @@ kernel void flash_attention_kv_fp4(
 
     const uint head_k = head_q * num_heads_k / num_heads_q;
     const uint q_row = q_row_base + sg_id;
-    if (q_row >= seq_q) return;
+    bool row_valid = (q_row < seq_q);
 
     const uint q_stride_b = num_heads_q * seq_q * head_dim;
     const uint q_stride_h = seq_q * head_dim;
@@ -827,9 +794,11 @@ kernel void flash_attention_kv_fp4(
 
     const uint elems_per_lane = head_dim / THREADS_PER_ROW;
     float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+    if (row_valid) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
     }
 
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_MAX];
@@ -865,60 +834,64 @@ kernel void flash_attention_kv_fp4(
                              kv_packed_offset, v_scale_offset, next_tile_start, tid_in_tg);
         }
 
-        uint tile_start = tile_idx * TILE_KV;
-        uint tile_end = min(tile_start + TILE_KV, seq_k);
-        uint tile_len = tile_end - tile_start;
+        if (row_valid) {
+            uint tile_start = tile_idx * TILE_KV;
+            uint tile_end = min(tile_start + TILE_KV, seq_k);
+            uint tile_len = tile_end - tile_start;
 
-        float scores[TILE_KV];
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float dot = 0.0f;
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+            float scores[TILE_KV];
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                }
+                dot = simd_sum_f32(dot);
+                scores[ki] = dot * scale;
             }
-            dot = simd_sum_f32(dot);
-            scores[ki] = dot * scale;
-        }
-        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
-            scores[ki] = -INFINITY;
-        }
-
-        float m_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            m_tile = max(m_tile, scores[ki]);
-        }
-
-        float m_new = max(m_prev, m_tile);
-        float correction = exp(m_prev - m_new);
-        float l_new = l_prev * correction;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            l_new += exp(scores[ki] - m_new);
-        }
-
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            o_acc[i] *= correction;
-        }
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores[ki] - m_new);
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+                scores[ki] = -INFINITY;
             }
-        }
 
-        m_prev = m_new;
-        l_prev = l_new;
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                l_new += exp(scores[ki] - m_new);
+            }
+
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= correction;
+            }
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
-    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
-    float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        if (d < head_dim) {
-            O[o_offset + d] = half(o_acc[i] * inv_l);
+    if (row_valid) {
+        const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
         }
     }
 }
@@ -952,7 +925,7 @@ kernel void flash_attention_kv_int4(
 
     const uint head_k = head_q * num_heads_k / num_heads_q;
     const uint q_row = q_row_base + sg_id;
-    if (q_row >= seq_q) return;
+    bool row_valid = (q_row < seq_q);
 
     const uint q_stride_b = num_heads_q * seq_q * head_dim;
     const uint q_stride_h = seq_q * head_dim;
@@ -972,9 +945,11 @@ kernel void flash_attention_kv_int4(
 
     const uint elems_per_lane = head_dim / THREADS_PER_ROW;
     float q_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+    if (row_valid) {
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            q_reg[i] = (d < head_dim) ? float(Q[q_offset + d]) : 0.0f;
+        }
     }
 
     threadgroup half K_tile[2][TILE_KV][HEAD_DIM_MAX];
@@ -1010,60 +985,64 @@ kernel void flash_attention_kv_int4(
                               kv_packed_offset, v_scale_offset, next_tile_start, tid_in_tg);
         }
 
-        uint tile_start = tile_idx * TILE_KV;
-        uint tile_end = min(tile_start + TILE_KV, seq_k);
-        uint tile_len = tile_end - tile_start;
+        if (row_valid) {
+            uint tile_start = tile_idx * TILE_KV;
+            uint tile_end = min(tile_start + TILE_KV, seq_k);
+            uint tile_len = tile_end - tile_start;
 
-        float scores[TILE_KV];
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float dot = 0.0f;
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+            float scores[TILE_KV];
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float dot = 0.0f;
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    dot += q_reg[i] * float(K_tile[buf_compute][ki][d]);
+                }
+                dot = simd_sum_f32(dot);
+                scores[ki] = dot * scale;
             }
-            dot = simd_sum_f32(dot);
-            scores[ki] = dot * scale;
-        }
-        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
-            scores[ki] = -INFINITY;
-        }
-
-        float m_tile = -INFINITY;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            m_tile = max(m_tile, scores[ki]);
-        }
-
-        float m_new = max(m_prev, m_tile);
-        float correction = exp(m_prev - m_new);
-        float l_new = l_prev * correction;
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            l_new += exp(scores[ki] - m_new);
-        }
-
-        for (uint i = 0; i < elems_per_lane; ++i) {
-            o_acc[i] *= correction;
-        }
-        for (uint ki = 0; ki < tile_len; ++ki) {
-            float p = exp(scores[ki] - m_new);
-            for (uint i = 0; i < elems_per_lane; ++i) {
-                uint d = lane_id * elems_per_lane + i;
-                o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+            for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+                scores[ki] = -INFINITY;
             }
-        }
 
-        m_prev = m_new;
-        l_prev = l_new;
+            float m_tile = -INFINITY;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                m_tile = max(m_tile, scores[ki]);
+            }
+
+            float m_new = max(m_prev, m_tile);
+            float correction = exp(m_prev - m_new);
+            float l_new = l_prev * correction;
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                l_new += exp(scores[ki] - m_new);
+            }
+
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                o_acc[i] *= correction;
+            }
+            for (uint ki = 0; ki < tile_len; ++ki) {
+                float p = exp(scores[ki] - m_new);
+                for (uint i = 0; i < elems_per_lane; ++i) {
+                    uint d = lane_id * elems_per_lane + i;
+                    o_acc[i] += p * float(V_tile[buf_compute][ki][d]);
+                }
+            }
+
+            m_prev = m_new;
+            l_prev = l_new;
+        }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
         buf_compute = buf_load;
     }
 
-    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
-    float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
-    for (uint i = 0; i < elems_per_lane; ++i) {
-        uint d = lane_id * elems_per_lane + i;
-        if (d < head_dim) {
-            O[o_offset + d] = half(o_acc[i] * inv_l);
+    if (row_valid) {
+        const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+        float inv_l = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            uint d = lane_id * elems_per_lane + i;
+            if (d < head_dim) {
+                O[o_offset + d] = half(o_acc[i] * inv_l);
+            }
         }
     }
 }

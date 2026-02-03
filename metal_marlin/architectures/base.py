@@ -11,6 +11,7 @@ backends (PyTorch, NumPy) without hard dependencies.
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -251,7 +252,7 @@ def get_layer_state_size(
 
 
 def estimate_hybrid_state_memory(
-    layer_types: list[HybridLayerType],
+    layer_types: Sequence[HybridLayerType],
     hidden_size: int,
     batch_size: int,
     max_seq_len: int,

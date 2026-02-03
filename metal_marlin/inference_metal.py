@@ -227,9 +227,9 @@ class MetalQuantizedLinear(nn.Module):
         if self._needs_output_slice:
             out = out[..., : self.out_features]
 
-        # Add bias if present
+        # Add bias if present - use in-place to avoid MPS validation error
         if self.bias is not None:
-            out = out + self.bias
+            out.add_(self.bias)
 
         # Reshape back to original batch dims
         out_shape = list(orig_shape[:-1]) + [self.out_features]

@@ -576,6 +576,7 @@ def dispatch_rope_yarn_forward(
     sin_cache: Any,
     attention_scale: float,
     position_offset: int = 0,
+    use_vectorized: bool = True,
 ) -> Any:
     """Dispatch YaRN RoPE forward kernel on Metal.
 
@@ -586,6 +587,7 @@ def dispatch_rope_yarn_forward(
         sin_cache: Precomputed YaRN sin cache [max_seq, dim/2], MPS tensor
         attention_scale: YaRN attention scaling factor (mscale)
         position_offset: Position offset for KV cache continuation
+        use_vectorized: Use SIMD-vectorized kernel (processes 4 dims at once)
 
     Returns:
         Output tensor with YaRN RoPE applied [batch, seq_len, num_heads, head_dim]
@@ -602,6 +604,10 @@ def dispatch_rope_yarn_forward(
 
     batch_size, seq_len, num_heads, head_dim = x.shape
     half_head_dim = head_dim // 2
+    quarter_head_dim = head_dim // 4
+
+    # Use vectorized kernel if head_dim is divisible by 4
+    can_use_vectorized = use_vectorized and (head_dim % 4 == 0)
 
     # Ensure fp16 and contiguous
     x_fp16 = x.half().contiguous()
@@ -641,13 +647,21 @@ def dispatch_rope_yarn_forward(
         Metal.MTLResourceStorageModeShared,
     )
 
-    # Dispatch kernel
-    grid = (half_head_dim, num_heads, batch_size * seq_len)
-    threadgroup = (min(half_head_dim, 32), 1, 1)
+    # Dispatch kernel - use vectorized version for better throughput
+    if can_use_vectorized:
+        # Vectorized: process 4 dims (2 pairs) per thread
+        grid = (quarter_head_dim, num_heads, batch_size * seq_len)
+        threadgroup = (min(quarter_head_dim, 32), 1, 1)
+        kernel_name = "rope_yarn_forward_x4"
+    else:
+        # Scalar: process 2 dims (1 pair) per thread
+        grid = (half_head_dim, num_heads, batch_size * seq_len)
+        threadgroup = (min(half_head_dim, 32), 1, 1)
+        kernel_name = "rope_yarn_forward"
 
     dispatch_kernel(
         lib,
-        function_name="rope_yarn_forward",
+        function_name=kernel_name,
         grid=grid,
         threadgroup=threadgroup,
         buffers=[

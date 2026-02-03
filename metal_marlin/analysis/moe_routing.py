@@ -87,7 +87,7 @@ class ExpertCooccurrence:
     """
 
     num_experts: int
-    cooccurrence_matrix: np.ndarray = field(default=None)
+    cooccurrence_matrix: np.ndarray | None = None
     conditional_probs: np.ndarray | None = None
     top_pairs: list[tuple[int, int, int]] = field(default_factory=list)
 
@@ -152,7 +152,7 @@ class RoutingPredictability:
     """
 
     num_layers: int
-    layer_correlations: np.ndarray = field(default=None)
+    layer_correlations: np.ndarray | None = None
     predictable_from_layer: int = -1
     avg_prediction_accuracy: float = 0.0
     per_layer_accuracy: dict[int, float] = field(default_factory=dict)

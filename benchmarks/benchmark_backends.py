@@ -161,7 +161,8 @@ def benchmark_coreml_ane(
             raise ImportError("coremltools not available")
 
         # Export with INT8 quantization for ANE
-        mlmodel_path = Path("/tmp/parakeet_encoder_int8.mlpackage")
+        import tempfile
+        mlmodel_path = Path(tempfile.gettempdir()) / "parakeet_encoder_int8.mlpackage"
         if not mlmodel_path.exists():
             print("Exporting encoder to CoreML with INT8 quantization...")
             export_encoder_to_coreml(

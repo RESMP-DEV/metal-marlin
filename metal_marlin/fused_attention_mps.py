@@ -7,6 +7,7 @@ Falls back to Flash Attention V2 or PyTorch SDPA when MPSGraph is unavailable.
 
 from __future__ import annotations
 
+import ctypes
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -16,14 +17,16 @@ import numpy as np
 from ._compat import HAS_MPS, HAS_MPSGRAPH, HAS_PYOBJC_METAL, HAS_TORCH, Metal, torch
 from ._compat import MPSGraph as MPSG
 from .flash_attention_v2 import flash_attention_v2
-from .metal_dispatch import metal_buffer_to_numpy, mps_tensor_to_metal_buffer
+from .metal_dispatch import mps_tensor_to_metal_buffer
 
 
 def _require_mpsgraph_attention() -> None:
     if not HAS_TORCH or torch is None:
-        raise RuntimeError("MPSGraph attention requires PyTorch. Install with: pip install torch")
+        raise RuntimeError(
+            "MPSGraph attention requires PyTorch. Install with: pip install torch")
     if not HAS_MPS:
-        raise RuntimeError("MPSGraph attention requires PyTorch MPS backend (Apple Silicon).")
+        raise RuntimeError(
+            "MPSGraph attention requires PyTorch MPS backend (Apple Silicon).")
     if not HAS_PYOBJC_METAL:
         raise RuntimeError(
             "MPSGraph attention requires PyObjC Metal. Install with:\n"
@@ -77,7 +80,8 @@ def _scaled_dot_product_attention_op(
             scale,
             None,
         )
-    raise RuntimeError("MPSGraph scaledDotProductAttention selector not found in PyObjC bindings.")
+    raise RuntimeError(
+        "MPSGraph scaledDotProductAttention selector not found in PyObjC bindings.")
 
 
 @dataclass(frozen=True)
@@ -127,12 +131,16 @@ def _get_graph_entry(
     graph = MPSG.MPSGraph.alloc().init()
     mps_dtype = _torch_dtype_to_mps(q.dtype)
 
-    q_placeholder = graph.placeholderWithShape_dataType_(list(q.shape), mps_dtype)
-    k_placeholder = graph.placeholderWithShape_dataType_(list(k.shape), mps_dtype)
-    v_placeholder = graph.placeholderWithShape_dataType_(list(v.shape), mps_dtype)
+    q_placeholder = graph.placeholderWithShape_dataType_name_(
+        list(q.shape), mps_dtype, None)
+    k_placeholder = graph.placeholderWithShape_dataType_name_(
+        list(k.shape), mps_dtype, None)
+    v_placeholder = graph.placeholderWithShape_dataType_name_(
+        list(v.shape), mps_dtype, None)
     mask_placeholder = None
     if mask is not None:
-        mask_placeholder = graph.placeholderWithShape_dataType_(list(mask.shape), mps_dtype)
+        mask_placeholder = graph.placeholderWithShape_dataType_name_(
+            list(mask.shape), mps_dtype, None)
 
     output_tensor = _scaled_dot_product_attention_op(
         graph,
@@ -144,13 +152,15 @@ def _get_graph_entry(
     )
 
     if Metal is None:
-        raise RuntimeError("Metal framework not available for MPSGraph attention.")
+        raise RuntimeError(
+            "Metal framework not available for MPSGraph attention.")
     device = Metal.MTLCreateSystemDefaultDevice()
     if device is None:
         raise RuntimeError("No Metal device available for MPSGraph attention.")
     command_queue = device.newCommandQueue()
     if command_queue is None:
-        raise RuntimeError("Failed to create Metal command queue for MPSGraph attention.")
+        raise RuntimeError(
+            "Failed to create Metal command queue for MPSGraph attention.")
 
     entry = _GraphCacheEntry(
         graph=graph,
@@ -260,16 +270,45 @@ def fused_scaled_dot_product_attention(
     )
     output_data = result[entry.output_tensor]
 
-    buffer = None
-    if hasattr(output_data, "mtlBuffer"):
-        buffer = output_data.mtlBuffer()
-    elif hasattr(output_data, "MTLBuffer"):
-        buffer = output_data.MTLBuffer()
+    # Extract data via MPSNDArray.readBytes_strideBytes_
+    # MPSGraphTensorData doesn't expose MTLBuffer directly, but mpsndarray() works
+    ndarray = output_data.mpsndarray()
+    if ndarray is None:
+        raise RuntimeError("Failed to get MPSNDArray from MPSGraphTensorData")
 
-    if buffer is None:
-        raise RuntimeError("Unable to access MPSGraph output buffer for SDPA result.")
+    desc = ndarray.descriptor()
+    dims = desc.numberOfDimensions()
 
-    np_out = metal_buffer_to_numpy(buffer, _np_dtype_from_torch(q.dtype), tuple(q.shape))
+    # MPS reports shape in reversed order (column-major convention)
+    mps_shape = [desc.lengthOfDimension_(i) for i in range(dims)]
+
+    # Calculate element size and total data size
+    element_size = q.element_size()
+    total_elements = 1
+    for s in mps_shape:
+        total_elements *= s
+    data_size = total_elements * element_size
+
+    # Create ctypes buffer to receive data
+    output_buf = (ctypes.c_char * data_size)()
+
+    # Calculate row-major strides for MPS shape (in bytes)
+    strides = [element_size]
+    for i in range(dims - 1):
+        strides.append(strides[-1] * mps_shape[i])
+
+    # Read data from MPSNDArray
+    ndarray.readBytes_strideBytes_(output_buf, strides)
+
+    # Convert to numpy, reshape to MPS order, then transpose to original order
+    np_data = np.frombuffer(bytes(output_buf), dtype=_np_dtype_from_torch(q.dtype))
+    np_mps = np_data.reshape(mps_shape)
+
+    # Transpose from MPS order to original order
+    # MPS reverses dimensions, so transpose reverses back
+    transpose_axes = tuple(range(dims - 1, -1, -1))
+    np_out = np_mps.transpose(transpose_axes).copy()
+
     return torch.from_numpy(np_out).to(device="mps", dtype=q.dtype)
 
 
@@ -282,19 +321,37 @@ def fused_attention(
     causal: bool = True,
 ) -> torch.Tensor:
     """Dispatch fused SDPA with MPSGraph, fallback to Flash Attention V2 or PyTorch."""
+    import os
+    debug = os.environ.get("FUSED_ATTN_DEBUG", "0") == "1"
+
     if HAS_MPSGRAPH and HAS_PYOBJC_METAL and HAS_MPS and HAS_TORCH and torch is not None:
         try:
-            return fused_scaled_dot_product_attention(q, k, v, mask=mask, scale=scale, causal=causal)
-        except Exception:
-            # Fall back to Flash Attention V2 if available.
+            result = fused_scaled_dot_product_attention(
+                q, k, v, mask=mask, scale=scale, causal=causal)
+            if debug:
+                print("[FUSED_ATTN] Using fused_scaled_dot_product_attention")
+            return result
+        except Exception as e:
+            if debug:
+                print(
+                    f"[FUSED_ATTN] fused_scaled_dot_product_attention failed: {e}")
             pass
 
     if HAS_TORCH and torch is not None:
         if mask is None:
             try:
-                return flash_attention_v2(q, k, v, scale=scale, causal=causal)
-            except Exception:
+                result = flash_attention_v2(
+                    q, k, v, scale=scale, causal=causal)
+                if debug:
+                    print("[FUSED_ATTN] Using flash_attention_v2")
+                return result
+            except Exception as e:
+                if debug:
+                    print(f"[FUSED_ATTN] flash_attention_v2 failed: {e}")
                 pass
+        if debug:
+            print(
+                f"[FUSED_ATTN] Using F.scaled_dot_product_attention (mask={mask is not None})")
         return torch.nn.functional.scaled_dot_product_attention(
             q,
             k,

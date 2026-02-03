@@ -1,0 +1,18 @@
+# Metal Files Excluded from Main Library Build
+# These files should NOT be compiled into metal_marlin.metallib.
+#
+# Categories:
+# 1. Header-only files (only inline helpers, no kernels) - included by other .metal files
+# 2. Test-only kernels - compiled at runtime by tests, not needed in production metallib
+#
+# To add a file: append its path relative to project root (e.g., src/foo.metal)
+
+# Header-only files (no kernel definitions)
+src/bf16_compat.metal
+src/dequant_helpers.metal
+src/reduction_helpers.metal
+
+# Test/utility kernels (compiled at runtime by tests, not needed in main library)
+# bf16_kernels.metal contains test utilities (bf16_roundtrip_test, etc.)
+# and bulk conversion kernels that are only used for validation
+src/bf16_kernels.metal

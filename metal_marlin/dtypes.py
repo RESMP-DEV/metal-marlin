@@ -54,7 +54,7 @@ WeightDType = Literal["fp16", "bf16"]
 ActivationDType = Literal["fp16", "bf16"]
 AccumulationDType = Literal["fp32"]  # Always FP32 for accuracy
 ScaleDType = Literal["fp16", "fp32"]
-KVCacheDType = Literal["fp16", "bf16", "fp8"]
+KVCacheDType = Literal["fp16", "bf16", "fp8", "fp8_e5m2"]
 
 
 @dataclass
@@ -168,14 +168,16 @@ if HAS_TORCH and torch is not None:
         "bf16": torch.bfloat16,
         "fp32": torch.float32,
         "fp8": torch.float16,  # PyTorch fp8 requires specific hardware, use fp16 fallback
+        "fp8_e5m2": torch.float16,  # Training-compatible FP8-E5M2, fallback to fp16 on Metal
     }
 
 # Mapping from string dtype names to numpy dtypes
-_STR_TO_NUMPY: dict[str, np.dtype] = {
+_STR_TO_NUMPY: dict[str, Any] = {
     "fp16": np.float16,
     "bf16": np.float16,  # numpy doesn't have native bf16, use fp16
     "fp32": np.float32,
     "fp8": np.float16,  # use fp16 as storage format
+    "fp8_e5m2": np.float16,  # training-compatible FP8-E5M2, fallback to fp16 storage
 }
 
 # Mapping from string dtype names to Metal shader type names
@@ -184,13 +186,14 @@ _STR_TO_METAL: dict[str, str] = {
     "bf16": "bfloat",
     "fp32": "float",
     "fp8": "half",  # Metal doesn't have native fp8
+    "fp8_e5m2": "half",  # Training-compatible FP8-E5M2, fallback to half on Metal
 }
 
 # Mapping from PyTorch dtype to numpy dtype
 # Note: numpy doesn't have native bf16, so we use fp16 for storage
 # The actual bf16<->fp32 conversion happens in PyTorch
 # Populated only when PyTorch is available
-_TORCH_TO_NUMPY: dict[Any, np.dtype] = {}
+_TORCH_TO_NUMPY: dict[Any, Any] = {}
 _TORCH_TO_STR: dict[Any, str] = {}
 
 if HAS_TORCH and torch is not None:
@@ -210,7 +213,7 @@ def get_torch_dtype(dtype_str: str) -> Any:
     """Convert dtype string to PyTorch dtype.
 
     Args:
-        dtype_str: One of "fp16", "bf16", "fp32", "fp8"
+        dtype_str: One of "fp16", "bf16", "fp32", "fp8", "fp8_e5m2"
 
     Returns:
         Corresponding PyTorch dtype

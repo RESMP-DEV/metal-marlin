@@ -1,0 +1,68 @@
+# Metal shader include dependencies
+attention.metal: #include <metal_stdlib> reduction_helpers.metal 
+batched_gemm.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+bf16_compat.metal: #include <metal_stdlib> 
+bf16_kernels.metal: bf16_compat.metal 
+cholesky.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> bf16_compat.metal 
+decode_gemv.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+dense_gemm.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> bf16_compat.metal 
+dequant_fp8.metal: #include <metal_stdlib> 
+dequant_gguf.metal: #include <metal_stdlib> 
+dequant_gptq.metal: #include <metal_stdlib> 
+dequant_helpers.metal: #include <metal_stdlib> 
+dequant_int8.metal: #include <metal_stdlib> 
+dequant_sub4bit.metal: #include <metal_stdlib> 
+dequant_trellis.metal: #include <metal_stdlib> 
+dequant.metal: #include <metal_stdlib> 
+diff_attention.metal: #include <metal_stdlib> 
+expert_gather.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+expert_scatter_add.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+flash_attention_v2.metal: #include <metal_stdlib> bf16_compat.metal 
+flash_attention.metal: #include <metal_stdlib> 
+fused_qkv_trellis.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+attention_residual.metal: #include <metal_stdlib> 
+flash_attention_v2_fused.metal: #include <metal_stdlib> bf16_compat.metal 
+gated_mlp.metal: #include <metal_stdlib> 
+norm_linear.metal: #include <metal_stdlib> 
+rope_proj_fused.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+gemm_epilogue.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+gemm_fp4_optimized.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+gemm_int8.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+gemm_trellis_moe.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+gemm_trellis.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+hadamard.metal: #include <metal_stdlib> 
+hessian.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> bf16_compat.metal 
+kernels_autotune.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+layernorm.metal: #include <metal_stdlib> 
+marlin_gemm.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> #include <metal_atomic> bf16_compat.metal 
+mla_proj.metal: dequant_helpers.metal #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+moe_combine.metal: #include <metal_stdlib> 
+moe_dispatch_metal.metal: #include <metal_stdlib> 
+moe_dispatch_optimized.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> #include <metal_simdgroup> bf16_compat.metal 
+moe_dispatch.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> #include <metal_simdgroup> 
+moe_expert_gemm.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+moe_fused_dispatch_shared.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+moe_fused_router.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+moe_fused_shared_expert.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+moe_router_int8.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+moe_router_sparse.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+moe_router.metal: #include <metal_stdlib> #include <metal_simdgroup> #include <metal_atomic> 
+moe_scatter_gather_optimized.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+moe_shared_expert.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+moe_trellis.metal: #include <metal_stdlib> 
+paged_attention.metal: #include <metal_stdlib> 
+parallel_multihead_attention.metal: #include <metal_stdlib> 
+reduction_helpers.metal: #include <metal_stdlib> 
+rope_optimized.metal: #include <metal_stdlib> 
+rope.metal: #include <metal_stdlib> 
+rwkv_wkv.metal: #include <metal_stdlib> 
+sampling.metal: #include <metal_stdlib> 
+scatter_gather.metal: #include <metal_stdlib> #include <metal_atomic> 
+simdgroup_attention.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> bf16_compat.metal 
+sliding_window_attention.metal: #include <metal_stdlib> 
+softmax_topk.metal: #include <metal_stdlib> #include <metal_simdgroup> 
+sparse_gemm.metal: #include <metal_stdlib> #include <metal_simdgroup_matrix> 
+sparse.metal: #include <metal_stdlib> 
+tree_attention.metal: reduction_helpers.metal #include <metal_stdlib> 
+vision_preprocess.metal: #include <metal_stdlib> 
+viterbi_quant.metal: #include <metal_stdlib> 

@@ -70,25 +70,18 @@ constant constexpr uint FP4_PER_UINT = 8;
 constant constexpr uint FP8_PER_UINT = 4;
 
 // ---------------------------------------------------------------------------
-// Utility functions (shared with flash_attention.metal patterns)
+// Utility functions using hardware-accelerated simd reductions
+//
+// Metal's built-in simd_sum/simd_max are significantly faster than manual
+// simd_shuffle_xor chains: single instruction vs 5 dependent instructions.
 // ---------------------------------------------------------------------------
 
 inline float simd_reduce_sum(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
+    return simd_sum(val);
 }
 
 inline float simd_reduce_max(float val) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
+    return simd_max(val);
 }
 
 // ---------------------------------------------------------------------------

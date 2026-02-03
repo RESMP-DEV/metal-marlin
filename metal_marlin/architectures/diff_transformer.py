@@ -229,6 +229,7 @@ class DifferentialAttention(nn.Module):
             # lambda = exp(lambda_log) where lambda_log is initialized to log(lambda_init)
             init_val = math.log(lambda_init) if lambda_init > 0 else -2.0
             self.lambda_log = nn.Parameter(torch.full(lambda_shape, init_val, dtype=torch.float32))
+            self.lambda_fixed: torch.Tensor | None = None
         else:
             # Fixed lambda (register as buffer, not parameter)
             self.register_buffer(
@@ -245,9 +246,10 @@ class DifferentialAttention(nn.Module):
     def get_lambda(self) -> torch.Tensor:
         """Get current lambda value(s)."""
         if self.lambda_learnable and self.lambda_log is not None:
-            return torch.exp(self.lambda_log)
-        else:
-            return self.lambda_fixed
+            lambda_val: torch.Tensor = torch.exp(self.lambda_log)
+            return lambda_val
+        assert self.lambda_fixed is not None
+        return self.lambda_fixed
 
     def forward(
         self,

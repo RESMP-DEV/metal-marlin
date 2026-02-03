@@ -30,7 +30,7 @@ def replace_linear_with_metal(
     skip_patterns = skip_patterns or []
 
     # Collect Linear layers to replace
-    layers_to_replace: list[tuple[str, nn.Module, nn.Linear]] = []
+    layers_to_replace: list[tuple[str, nn.Module, str, nn.Linear]] = []
 
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
@@ -88,9 +88,13 @@ def replace_parakeet_encoder_layers(
     if not hasattr(model, "encoder"):
         raise ValueError("Model must have 'encoder' attribute")
 
+    encoder = model.encoder
+    if not isinstance(encoder, nn.Module):
+        raise ValueError(f"model.encoder must be nn.Module, got {type(encoder)}")
+
     # Only replace encoder layers
     replace_linear_with_metal(
-        model.encoder,
+        encoder,
         quant_type=quant_type,
         group_size=group_size,
         skip_patterns=["output_proj"],  # Keep output projection FP16

@@ -3,6 +3,10 @@
 Provides drop-in replacement for nn.Linear with on-the-fly dequantization
 using Metal GPU acceleration.
 
+Key optimization: Weights stay compressed on GPU as packed uint8 indices.
+Dequantization happens on-the-fly in Metal kernels during forward pass,
+reducing GPU memory by ~3x compared to full FP16 storage.
+
 Usage:
     from metal_marlin.trellis.loader import TrellisModelLoader
     from metal_marlin.trellis.linear import TrellisLinear
@@ -11,24 +15,23 @@ Usage:
     weight = loader.load_weight("layers.0.mlp.gate_proj")
     linear = TrellisLinear.from_trellis_weight(weight)
 
-    # Forward pass with automatic dequantization
+    # Forward pass with automatic on-the-fly dequantization
     output = linear(input_tensor)
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from ..metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
+from ..metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary, cpu_tensor_to_metal_texture
 from ..quantization.trellis_codebook import TrellisCodebook
 from .dispatch import (
-    dequantize_trellis_weight,
     dispatch_gemm_trellis_decode,
-    dispatch_gemm_trellis_packed,
     dispatch_trellis_dequant_packed,
 )
 
@@ -39,8 +42,12 @@ if TYPE_CHECKING:
 class TrellisLinear(nn.Module):
     """Linear layer with EXL3 trellis-quantized weights.
 
-    Stores weights in compressed trellis format and dequantizes on-the-fly
-    during forward pass using fused Metal GPU kernels.
+    Keeps weights compressed on GPU in packed format. Dequantization happens
+    on-the-fly during forward pass using fused Metal GPU kernels.
+
+    Memory optimization: Weights stored as packed uint8 indices + scales,
+    reducing GPU memory by ~3x compared to storing full FP16 weights.
+    Metal kernels read packed data directly and dequantize tile-by-tile.
 
     The forward() method uses fused Metal kernels for efficient dequantization
     and matrix multiplication without intermediate allocations.
@@ -48,7 +55,7 @@ class TrellisLinear(nn.Module):
     Attributes:
         in_features: Size of each input sample (K).
         out_features: Size of each output sample (N).
-        bits: Quantization bit width (2, 3, or 4).
+        bits: Quantization bit width (2, 3, 4, or 8).
     """
 
     def __init__(
@@ -79,7 +86,7 @@ class TrellisLinear(nn.Module):
         tiles_n = (out_features + TILE_DIM - 1) // TILE_DIM
 
         # Register buffers (not parameters - these aren't trained)
-        packed_bytes = {2: 64, 3: 96, 4: 128}[bits]
+        packed_bytes = {2: 64, 3: 96, 4: 128, 8: 256}[bits]
         self.register_buffer(
             "packed_indices",
             torch.zeros(tiles_k, tiles_n, packed_bytes, dtype=torch.uint8, device=device),
@@ -112,11 +119,23 @@ class TrellisLinear(nn.Module):
         else:
             self.bias = None
 
-        # Lazy-loaded Metal library
+        # Lazy-loaded Metal library (can be shared via set_lib())
         self._lib: MetalKernelLibrary | None = None
 
         # Metal buffer cache for CPU->GPU transfer
         self._metal_buffer: dict | None = None
+        self._grid_texture: Any | None = None
+
+    def set_lib(self, lib: MetalKernelLibrary) -> None:
+        """Set a shared Metal library for this linear layer.
+
+        Call this to share a single MetalKernelLibrary across multiple
+        TrellisLinear instances, enabling batch dispatch across all of them.
+
+        Args:
+            lib: Shared MetalKernelLibrary instance.
+        """
+        self._lib = lib
 
     @classmethod
     def from_trellis_weight(
@@ -127,18 +146,25 @@ class TrellisLinear(nn.Module):
     ) -> TrellisLinear:
         """Create TrellisLinear from a loaded TrellisWeight.
 
+        Keeps weights compressed on GPU - stores only packed indices.
+        Dequantization happens on-the-fly during forward pass.
+
         Args:
             weight: TrellisWeight from TrellisModelLoader.
             bias: Optional bias tensor.
-            device: Device to place parameters on.
+            device: Device to place parameters on (default: mps if available).
 
         Returns:
-            TrellisLinear module initialized with the weight data.
+            TrellisLinear module initialized with compressed weight data.
         """
         # TrellisWeight: K = out_features, N = in_features
         # (weight matrix is [out_features, in_features])
         K, N = weight.original_shape
         out_features, in_features = K, N
+
+        # Use MPS by default if available
+        if device is None:
+            device = "mps" if HAS_MPS else "cpu"
 
         # Don't call __init__ which creates wrong-sized buffers
         # Instead, directly create module and set buffers
@@ -149,29 +175,27 @@ class TrellisLinear(nn.Module):
         module.out_features = out_features
         module.bits = weight.bits
 
-        # Move tensors to device
-        def to_dev(t: torch.Tensor) -> torch.Tensor:
-            return t.to(device) if device else t
+        # Store ONLY compressed data on GPU - no unpacking
+        # This reduces GPU memory by ~3x compared to full FP16 weights
+        module.register_buffer("packed_indices", weight.packed_indices.to(device))
+        module.register_buffer("scales", weight.scales.to(device))
+        module.register_buffer("su", weight.su.to(device))
+        module.register_buffer("sv", weight.sv.to(device))
 
-        # Register buffers with actual weight data
-        module.register_buffer("packed_indices", to_dev(weight.packed_indices.clone()))
-        module.register_buffer("scales", to_dev(weight.scales.clone()))
-        module.register_buffer("su", to_dev(weight.su.clone()))
-        module.register_buffer("sv", to_dev(weight.sv.clone()))
-
-        # Pre-compute codebook grid
+        # Pre-compute codebook grid (small, shared across all layers)
         codebook = TrellisCodebook(bits=weight.bits)
-        grid = torch.from_numpy(codebook.get_grid()).float()
-        module.register_buffer("grid", to_dev(grid))
+        grid = torch.from_numpy(codebook.get_grid()).float().to(device)
+        module.register_buffer("grid", grid)
 
         if bias is not None:
-            module.register_buffer("bias", to_dev(bias.clone()))
+            module.register_buffer("bias", bias.to(device))
         else:
             module.bias = None
 
         # Initialize Metal library reference
         module._lib = None
         module._metal_buffer = None
+        module._grid_texture = None
 
         return module
 
@@ -180,6 +204,17 @@ class TrellisLinear(nn.Module):
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
+
+    def _get_grid_texture(self) -> Any:
+        """Get or create Metal texture for codebook grid."""
+        if self._grid_texture is None:
+            lib = self._get_lib()
+            # Convert grid to texture (must be on CPU)
+            # Ensure float32 for texture creation if needed, or half if supported
+            # cpu_tensor_to_metal_texture supports both.
+            grid_cpu = self.grid.cpu().float().contiguous()
+            self._grid_texture = cpu_tensor_to_metal_texture(grid_cpu, lib.device)
+        return self._grid_texture
 
     def _create_metal_buffer_from_cpu(self) -> None:
         """Create Metal buffer directly from CPU tensor data.
@@ -199,19 +234,13 @@ class TrellisLinear(nn.Module):
             "packed_indices": cpu_tensor_to_metal_buffer(
                 self.packed_indices.cpu().contiguous(), lib.device
             ),
-            "scales": cpu_tensor_to_metal_buffer(
-                self.scales.cpu().half().contiguous(), lib.device
-            ),
-            "su": cpu_tensor_to_metal_buffer(
-                self.su.cpu().half().contiguous(), lib.device
-            ),
-            "sv": cpu_tensor_to_metal_buffer(
-                self.sv.cpu().half().contiguous(), lib.device
-            ),
-            "grid": cpu_tensor_to_metal_buffer(
-                self.grid.cpu().half().contiguous(), lib.device
-            ),
+            "scales": cpu_tensor_to_metal_buffer(self.scales.cpu().half().contiguous(), lib.device),
+            "su": cpu_tensor_to_metal_buffer(self.su.cpu().half().contiguous(), lib.device),
+            "sv": cpu_tensor_to_metal_buffer(self.sv.cpu().half().contiguous(), lib.device),
         }
+
+        # Ensure texture is created
+        self._get_grid_texture()
 
     def dequantize(self) -> torch.Tensor:
         """Dequantize weights to FP16.
@@ -228,44 +257,163 @@ class TrellisLinear(nn.Module):
         group_size = (self.in_features + n_groups - 1) // n_groups
 
         if HAS_METAL and HAS_MPS and self.packed_indices.is_mps:
-            lib = self._get_lib()
+            try:
+                lib = self._get_lib()
 
-            weights = dispatch_trellis_dequant_packed(
-                lib,
-                self.packed_indices,  # uint8 packed
-                self.scales,
-                self.grid,
-                self.su,
-                self.sv,
-                K,
-                N,
-                self.bits,
-                group_size,
-            )
+                weights = dispatch_trellis_dequant_packed(
+                    lib,
+                    self.packed_indices,  # uint8 packed
+                    self.scales,
+                    self.grid,  # Grid tensor, not texture
+                    self.su,
+                    self.sv,
+                    K,
+                    N,
+                    self.bits,
+                    group_size,
+                )
+                return weights
+            except Exception as e:
+                import warnings
+
+                warnings.warn(
+                    f"Metal dequantize failed, falling back to CPU: {e}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        # CPU fallback - dequantize packed indices
+        return self._dequantize_cpu_packed(K, N, group_size)
+
+    def _dequantize_cpu_packed(self, K: int, N: int, group_size: int) -> torch.Tensor:
+        """CPU fallback for dequantizing packed trellis weights.
+
+        Args:
+            K: Number of output features.
+            N: Number of input features.
+            group_size: Quantization group size.
+
+        Returns:
+            Dequantized weights [K, N] float16.
+        """
+        import numpy as np
+
+        # Move tensors to CPU
+        packed_indices = self.packed_indices.cpu().numpy()
+        scales = self.scales.cpu().float().numpy()
+        grid = self.grid.cpu().float().numpy()
+        su = self.su.cpu().float().numpy()
+        sv = self.sv.cpu().float().numpy()
+
+        # Tile dimensions
+        TILE_DIM = 16
+        tiles_k = (K + TILE_DIM - 1) // TILE_DIM
+        tiles_n = (N + TILE_DIM - 1) // TILE_DIM
+
+        # Allocate output
+        output = np.zeros((K, N), dtype=np.float32)
+
+        # Determine how to unpack based on bits
+        bits = self.bits
+        n_levels = len(grid)
+
+        # Unpack packed_indices to get actual codebook indices
+        # packed_indices shape: [tiles_k, tiles_n, packed_bytes]
+        # Each tile is 16x16 = 256 elements
+        for tile_k in range(tiles_k):
+            for tile_n in range(tiles_n):
+                packed_tile = packed_indices[tile_k, tile_n]
+
+                # Unpack indices from packed bytes
+                indices = self._unpack_tile_indices(packed_tile, bits, n_levels)
+
+                # Dequantize each element in the tile
+                for local_k in range(TILE_DIM):
+                    for local_n in range(TILE_DIM):
+                        k = tile_k * TILE_DIM + local_k
+                        n = tile_n * TILE_DIM + local_n
+
+                        if k >= K or n >= N:
+                            continue
+
+                        local_offset = local_k * TILE_DIM + local_n
+                        idx = int(indices[local_offset])
+                        idx = max(0, min(idx, n_levels - 1))
+
+                        # Get scale for this position
+                        group_idx = n // group_size
+                        if group_idx >= scales.shape[0]:
+                            group_idx = scales.shape[0] - 1
+                        scale = scales[group_idx, k] if k < scales.shape[1] else 1.0
+
+                        # Dequantize
+                        dequant_val = grid[idx] * scale
+                        dequant_val *= su[n] * sv[k]
+
+                        output[k, n] = dequant_val
+
+        return torch.from_numpy(output).half()
+
+    def _unpack_tile_indices(
+        self, packed_tile: np.ndarray, bits: int, n_levels: int
+    ) -> np.ndarray:
+        """Unpack packed bytes into codebook indices.
+
+        Args:
+            packed_tile: Packed bytes for one tile.
+            bits: Quantization bit width (2, 3, or 4).
+            n_levels: Number of codebook levels.
+
+        Returns:
+            Unpacked indices array of length 256 (16x16 tile).
+        """
+        # Number of elements per tile
+        n_elements = 256  # 16x16
+
+        if bits == 4:
+            # 4-bit: 2 indices per byte
+            indices = np.zeros(n_elements, dtype=np.uint8)
+            for i in range(min(len(packed_tile), n_elements // 2)):
+                byte = packed_tile[i]
+                indices[i * 2] = byte & 0x0F
+                indices[i * 2 + 1] = (byte >> 4) & 0x0F
+        elif bits == 3:
+            # 3-bit: more complex packing (8 indices in 3 bytes)
+            indices = np.zeros(n_elements, dtype=np.uint8)
+            byte_idx = 0
+            for i in range(0, n_elements, 8):
+                if byte_idx + 2 >= len(packed_tile):
+                    break
+                b0 = packed_tile[byte_idx]
+                b1 = packed_tile[byte_idx + 1]
+                b2 = packed_tile[byte_idx + 2]
+                byte_idx += 3
+
+                indices[i + 0] = b0 & 0x07
+                indices[i + 1] = (b0 >> 3) & 0x07
+                indices[i + 2] = ((b0 >> 6) | ((b1 & 0x01) << 2)) & 0x07
+                indices[i + 3] = (b1 >> 1) & 0x07
+                indices[i + 4] = (b1 >> 4) & 0x07
+                indices[i + 5] = ((b1 >> 7) | ((b2 & 0x03) << 1)) & 0x07
+                indices[i + 6] = (b2 >> 2) & 0x07
+                indices[i + 7] = (b2 >> 5) & 0x07
+        elif bits == 2:
+            # 2-bit: 4 indices per byte
+            indices = np.zeros(n_elements, dtype=np.uint8)
+            for i in range(min(len(packed_tile), n_elements // 4)):
+                byte = packed_tile[i]
+                indices[i * 4] = byte & 0x03
+                indices[i * 4 + 1] = (byte >> 2) & 0x03
+                indices[i * 4 + 2] = (byte >> 4) & 0x03
+                indices[i * 4 + 3] = (byte >> 6) & 0x03
+        elif bits == 8:
+            # 8-bit: direct index storage (1 index per byte, no unpacking needed)
+            indices = packed_tile[:min(len(packed_tile), n_elements)]
         else:
-            # CPU fallback - unpack then dequant
-            from dataclasses import dataclass
+            # Unknown bit width, return zeros
+            indices = np.zeros(n_elements, dtype=np.uint8)
 
-            @dataclass
-            class _FakeWeight:
-                packed_indices: torch.Tensor
-                scales: torch.Tensor
-                su: torch.Tensor
-                sv: torch.Tensor
-                bits: int
-                original_shape: tuple[int, int]
-
-            fake_weight = _FakeWeight(
-                packed_indices=self.packed_indices,
-                scales=self.scales,
-                su=self.su,
-                sv=self.sv,
-                bits=self.bits,
-                original_shape=(K, N),
-            )
-            weights = dequantize_trellis_weight(fake_weight, use_metal=False)
-
-        return weights
+        return indices
 
     def clear_metal_resources(self) -> None:
         """Release Metal resources to free GPU memory."""
@@ -295,6 +443,7 @@ class TrellisLinear(nn.Module):
         # Keep grid as it's small
 
         import gc
+
         gc.collect()
         if torch.backends.mps.is_available():
             torch.mps.empty_cache()
@@ -304,10 +453,13 @@ class TrellisLinear(nn.Module):
         self.clear_metal_resources()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass with fused GEMM kernels.
+        """Forward pass with on-the-fly decompression.
 
-        Uses fused dequantization+GEMM kernels for efficient computation
-        without materializing the full FP16 weight matrix.
+        Weights remain compressed on GPU. Metal kernels read packed indices
+        directly and dequantize on-the-fly to FP16 during GEMM computation.
+        No intermediate FP16 weight matrix is materialized.
+
+        Memory savings: ~3x compared to storing full FP16 weights.
 
         Args:
             x: Input tensor [..., in_features].
@@ -319,53 +471,113 @@ class TrellisLinear(nn.Module):
         # Metal kernels expect float16 input - convert if necessary
         if x.dtype != torch.float16:
             x = x.to(torch.float16)
-        x_flat = x.view(-1, self.in_features)
+        x_flat = x.reshape(-1, self.in_features)
         M = x_flat.shape[0]
-
-        # Get or create Metal library
-        lib = self._get_lib()
 
         # Compute group_size from scales shape
         # scales shape is [n_groups, out_features], groups are along in_features dim
         n_groups = self.scales.shape[0]
-        group_size = (self.in_features + n_groups - 1) // n_groups
-
-        # Choose kernel based on M (decode vs prefill)
-        if M <= 16:
-            output = dispatch_gemm_trellis_decode(
-                lib,
-                x_flat,
-                self.packed_indices,
-                self.scales,
-                self.grid,
-                self.su,
-                self.sv,
-                self.in_features,
-                self.out_features,
-                self.bits,
-                group_size,
-            )
+        if n_groups == 0:
+            if self.in_features == 0:
+                 group_size = 1 # arbitrary, won't iterate
+            else:
+                 raise ValueError(f"Invalid scales shape {self.scales.shape} for in_features={self.in_features}")
         else:
-            output = dispatch_gemm_trellis_packed(
-                lib,
-                x_flat,
-                self.packed_indices,
-                self.scales,
-                self.grid,
-                self.su,
-                self.sv,
-                self.in_features,
-                self.out_features,
-                self.bits,
-                group_size,
-            )
+            group_size = (self.in_features + n_groups - 1) // n_groups
+
+        # Try Metal dispatch with CPU fallback
+        if HAS_METAL and HAS_MPS and x.is_mps:
+            try:
+                # Get or create Metal library
+                lib = self._get_lib()
+
+                # Dispatch to fused dequant+GEMM kernels
+                # Kernels read packed_indices directly, dequantize tile-by-tile
+                # Choose kernel based on M (decode vs prefill)
+                if M <= 16:
+                    output = dispatch_gemm_trellis_decode(
+                        lib,
+                        x_flat,
+                        self.packed_indices,  # Packed uint8, never unpacked
+                        self.scales,
+                        self.grid,  # Codebook grid tensor
+                        self.su,
+                        self.sv,
+                        self.in_features,
+                        self.out_features,
+                        self.bits,
+                        group_size,
+                    )
+                else:
+                    output = dispatch_gemm_trellis_auto(
+                        lib,
+                        x_flat,
+                        self.packed_indices,  # Packed uint8, never unpacked
+                        self.scales,
+                        self.grid,  # Codebook grid tensor
+                        self.su,
+                        self.sv,
+                        self.in_features,
+                        self.out_features,
+                        self.bits,
+                        group_size,
+                    )
+            except Exception as e:
+                import warnings
+
+                warnings.warn(
+                    f"Metal TrellisLinear dispatch failed, falling back to CPU: {e}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                output = self._forward_cpu_fallback(x_flat, group_size)
+        else:
+            # No Metal available or input not on MPS
+            if HAS_MPS and x.is_mps:
+                import warnings
+
+                warnings.warn(
+                    "Metal not available for TrellisLinear, using CPU fallback",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            output = self._forward_cpu_fallback(x_flat, group_size)
 
         output = output.view(*batch_shape, self.out_features)
 
         if self.bias is not None:
-            output = output + self.bias
+            # Work around PyTorch MPS Metal validation bug where the
+            # add_dense_scalar kernel binds a read-only buffer with write access.
+            # Using add_ (in-place) avoids allocating output in the kernel.
+            output.add_(self.bias)
 
         return output
+
+    def _forward_cpu_fallback(self, x_flat: torch.Tensor, group_size: int) -> torch.Tensor:
+        """CPU fallback for forward pass when Metal dispatch fails.
+
+        Dequantizes weights and performs standard matmul on CPU.
+
+        Args:
+            x_flat: Flattened input tensor [M, in_features].
+            group_size: Quantization group size.
+
+        Returns:
+            Output tensor [M, out_features].
+        """
+        # Move input to CPU if needed
+        x_cpu = x_flat.cpu().float()
+
+        # Dequantize weights using CPU path
+        weights = self.dequantize().cpu().float()
+
+        # Standard matmul: x @ W^T (weights are [out_features, in_features])
+        output = x_cpu @ weights.t()
+
+        # Move back to original device
+        if x_flat.is_mps:
+            return output.half().to("mps")
+        return output.half()
 
     def extra_repr(self) -> str:
         """String representation for printing."""

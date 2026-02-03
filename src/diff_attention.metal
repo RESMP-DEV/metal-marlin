@@ -42,25 +42,19 @@ constant constexpr uint THREADS_PER_TG = THREADS_PER_ROW * ROWS_PER_TG;
 constant constexpr uint FP4_PER_UINT = 8;
 
 // ---------------------------------------------------------------------------
-// Utility functions
+// Utility functions using hardware-accelerated simd reductions
+//
+// Metal's built-in simd_sum/simd_max are significantly faster than manual
+// simd_shuffle_xor chains: single instruction vs 5 dependent instructions.
 // ---------------------------------------------------------------------------
 
 inline float simd_max_f32(float val, uint lane_id [[thread_index_in_simdgroup]]) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
+    (void)lane_id;  // Unused with hardware intrinsic
+    return simd_max(val);
 }
 
 inline float simd_sum_f32(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
+    return simd_sum(val);
 }
 
 // ---------------------------------------------------------------------------
@@ -743,6 +737,228 @@ kernel void diff_attention_gqa(
         buf_compute = buf_load;
     }
 
+    const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+    float inv_l1 = (l1_prev > 0.0f) ? (1.0f / l1_prev) : 0.0f;
+    float inv_l2 = (l2_prev > 0.0f) ? (1.0f / l2_prev) : 0.0f;
+
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        uint d = lane_id * elems_per_lane + i;
+        if (d < head_dim) {
+            float out1 = o1_acc[i] * inv_l1;
+            float out2 = o2_acc[i] * inv_l2;
+            O[o_offset + d] = half(out1 - lambda_val * out2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Differential Attention kernel - FP4-quantized KV cache
+//
+// For memory-constrained inference with quantized KV cache.
+// K1, K2, V are stored in FP4 E2M1 format with per-group scales.
+// ---------------------------------------------------------------------------
+
+kernel void diff_attention_kv_fp4(
+    device const half* Q1              [[buffer(0)]],
+    device const half* Q2              [[buffer(1)]],
+    device const uint* K1_packed       [[buffer(2)]],  // FP4 packed: 8 nibbles per uint
+    device const uint* K2_packed       [[buffer(3)]],
+    device const uint* V_packed        [[buffer(4)]],
+    device const half* K1_scales       [[buffer(5)]],
+    device const half* K2_scales       [[buffer(6)]],
+    device const half* V_scales        [[buffer(7)]],
+    device half* O                     [[buffer(8)]],
+    device const half* lambda_vals     [[buffer(9)]],
+    constant uint& batch               [[buffer(10)]],
+    constant uint& num_heads_q         [[buffer(11)]],
+    constant uint& num_heads_k         [[buffer(12)]],
+    constant uint& seq_q               [[buffer(13)]],
+    constant uint& seq_k               [[buffer(14)]],
+    constant uint& head_dim            [[buffer(15)]],
+    constant float& scale              [[buffer(16)]],
+    constant bool& lambda_per_head     [[buffer(17)]],
+    constant uint& group_size          [[buffer(18)]],
+    constant bool& is_causal           [[buffer(19)]],
+    uint3 tgid                         [[threadgroup_position_in_grid]],
+    uint tid_in_tg                     [[thread_index_in_threadgroup]],
+    uint lane_id                       [[thread_index_in_simdgroup]],
+    uint sg_id                         [[simdgroup_index_in_threadgroup]]
+) {
+    const uint head_q = tgid.x;
+    const uint q_row_base = tgid.y * ROWS_PER_TG;
+    const uint b = tgid.z;
+    const uint head_k = head_q * num_heads_k / num_heads_q;
+    const uint q_row = q_row_base + sg_id;
+    if (q_row >= seq_q) return;
+
+    const float lambda_val = float(lambda_per_head ? lambda_vals[head_q] : lambda_vals[0]);
+
+    const uint q_stride_b = num_heads_q * seq_q * head_dim;
+    const uint q_stride_h = seq_q * head_dim;
+    const uint q_stride_s = head_dim;
+    
+    // KV cache stride: packed FP4
+    const uint kv_stride_b = num_heads_k * seq_k * head_dim / FP4_PER_UINT;
+    const uint kv_stride_h = seq_k * head_dim / FP4_PER_UINT;
+    
+    // Scale stride: one scale per group
+    const uint scale_stride_b = num_heads_k * seq_k * ((head_dim + group_size - 1) / group_size);
+    const uint scale_stride_h = seq_k * ((head_dim + group_size - 1) / group_size);
+    const uint scales_per_row = (head_dim + group_size - 1) / group_size;
+
+    const uint q1_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
+    const uint q2_offset = q1_offset;
+    const uint kv_packed_offset = b * kv_stride_b + head_k * kv_stride_h;
+    const uint scale_offset = b * scale_stride_b + head_k * scale_stride_h;
+
+    // Load Q1 and Q2 rows
+    const uint elems_per_lane = head_dim / THREADS_PER_ROW;
+    float q1_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
+    float q2_reg[HEAD_DIM_MAX / THREADS_PER_ROW];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        uint d = lane_id * elems_per_lane + i;
+        q1_reg[i] = (d < head_dim) ? float(Q1[q1_offset + d]) : 0.0f;
+        q2_reg[i] = (d < head_dim) ? float(Q2[q2_offset + d]) : 0.0f;
+    }
+
+    // Shared memory for dequantized tiles
+    threadgroup half K1_tile[TILE_KV][HEAD_DIM_MAX];
+    threadgroup half K2_tile[TILE_KV][HEAD_DIM_MAX];
+    threadgroup half V_tile[TILE_KV][HEAD_DIM_MAX];
+
+    float m1_prev = -INFINITY;
+    float l1_prev = 0.0f;
+    float m2_prev = -INFINITY;
+    float l2_prev = 0.0f;
+
+    float o1_acc[HEAD_DIM_MAX / THREADS_PER_ROW];
+    float o2_acc[HEAD_DIM_MAX / THREADS_PER_ROW];
+    for (uint i = 0; i < elems_per_lane; ++i) {
+        o1_acc[i] = 0.0f;
+        o2_acc[i] = 0.0f;
+    }
+
+    const uint effective_seq = is_causal ? min(q_row + 1, seq_k) : seq_k;
+    const uint num_kv_tiles = (effective_seq + TILE_KV - 1) / TILE_KV;
+
+    for (uint tile_idx = 0; tile_idx < num_kv_tiles; ++tile_idx) {
+        uint tile_start = tile_idx * TILE_KV;
+        uint tile_end = min(tile_start + TILE_KV, seq_k);
+        uint tile_len = tile_end - tile_start;
+
+        // Cooperatively dequantize K1, K2, V tiles
+        const uint elems_to_dequant = TILE_KV * head_dim;
+        const uint loads_per_thread = (elems_to_dequant + THREADS_PER_TG - 1) / THREADS_PER_TG;
+        
+        for (uint i = 0; i < loads_per_thread; ++i) {
+            uint idx = tid_in_tg + i * THREADS_PER_TG;
+            if (idx < elems_to_dequant) {
+                uint kv_row = idx / head_dim;
+                uint kv_col = idx % head_dim;
+                uint src_row = tile_start + kv_row;
+                
+                if (src_row < seq_k) {
+                    uint group_idx = kv_col / group_size;
+                    half k1_scale = K1_scales[scale_offset + src_row * scales_per_row + group_idx];
+                    half k2_scale = K2_scales[scale_offset + src_row * scales_per_row + group_idx];
+                    half v_scale = V_scales[scale_offset + src_row * scales_per_row + group_idx];
+                    
+                    // Load packed nibbles
+                    uint packed_idx = src_row * head_dim / FP4_PER_UINT + kv_col / FP4_PER_UINT;
+                    uint shift = (kv_col % FP4_PER_UINT) * 4;
+                    
+                    uint k1_packed = K1_packed[kv_packed_offset + packed_idx];
+                    uint k2_packed = K2_packed[kv_packed_offset + packed_idx];
+                    uint v_packed = V_packed[kv_packed_offset + packed_idx];
+                    
+                    uint8_t k1_nibble = (k1_packed >> shift) & 0xF;
+                    uint8_t k2_nibble = (k2_packed >> shift) & 0xF;
+                    uint8_t v_nibble = (v_packed >> shift) & 0xF;
+                    
+                    K1_tile[kv_row][kv_col] = dequant_fp4_scalar(k1_nibble, k1_scale);
+                    K2_tile[kv_row][kv_col] = dequant_fp4_scalar(k2_nibble, k2_scale);
+                    V_tile[kv_row][kv_col] = dequant_fp4_scalar(v_nibble, v_scale);
+                } else {
+                    K1_tile[kv_row][kv_col] = half(0);
+                    K2_tile[kv_row][kv_col] = half(0);
+                    V_tile[kv_row][kv_col] = half(0);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Compute attention scores
+        float scores1[TILE_KV];
+        float scores2[TILE_KV];
+        for (uint ki = 0; ki < tile_len; ++ki) {
+            uint k_pos = tile_start + ki;
+            if (is_causal && k_pos > q_row) {
+                scores1[ki] = -INFINITY;
+                scores2[ki] = -INFINITY;
+                continue;
+            }
+            
+            float dot1 = 0.0f;
+            float dot2 = 0.0f;
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                uint d = lane_id * elems_per_lane + i;
+                dot1 += q1_reg[i] * float(K1_tile[ki][d]);
+                dot2 += q2_reg[i] * float(K2_tile[ki][d]);
+            }
+            dot1 = simd_sum_f32(dot1);
+            dot2 = simd_sum_f32(dot2);
+            scores1[ki] = dot1 * scale;
+            scores2[ki] = dot2 * scale;
+        }
+        for (uint ki = tile_len; ki < TILE_KV; ++ki) {
+            scores1[ki] = -INFINITY;
+            scores2[ki] = -INFINITY;
+        }
+
+        // Online softmax
+        float m1_tile = -INFINITY;
+        float m2_tile = -INFINITY;
+        for (uint ki = 0; ki < tile_len; ++ki) {
+            m1_tile = max(m1_tile, scores1[ki]);
+            m2_tile = max(m2_tile, scores2[ki]);
+        }
+
+        float m1_new = max(m1_prev, m1_tile);
+        float m2_new = max(m2_prev, m2_tile);
+        float correction1 = exp(m1_prev - m1_new);
+        float correction2 = exp(m2_prev - m2_new);
+
+        float l1_new = l1_prev * correction1;
+        float l2_new = l2_prev * correction2;
+        for (uint ki = 0; ki < tile_len; ++ki) {
+            l1_new += exp(scores1[ki] - m1_new);
+            l2_new += exp(scores2[ki] - m2_new);
+        }
+
+        for (uint i = 0; i < elems_per_lane; ++i) {
+            o1_acc[i] *= correction1;
+            o2_acc[i] *= correction2;
+        }
+        for (uint ki = 0; ki < tile_len; ++ki) {
+            float p1 = exp(scores1[ki] - m1_new);
+            float p2 = exp(scores2[ki] - m2_new);
+            for (uint i = 0; i < elems_per_lane; ++i) {
+                uint d = lane_id * elems_per_lane + i;
+                float v_val = float(V_tile[ki][d]);
+                o1_acc[i] += p1 * v_val;
+                o2_acc[i] += p2 * v_val;
+            }
+        }
+
+        m1_prev = m1_new;
+        m2_prev = m2_new;
+        l1_prev = l1_new;
+        l2_prev = l2_new;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // Store output
     const uint o_offset = b * q_stride_b + head_q * q_stride_h + q_row * q_stride_s;
     float inv_l1 = (l1_prev > 0.0f) ? (1.0f / l1_prev) : 0.0f;
     float inv_l2 = (l2_prev > 0.0f) ? (1.0f / l2_prev) : 0.0f;

@@ -1,0 +1,108 @@
+{
+  "device": "mps",
+  "configs": [
+    {
+      "layout": "BHSD",
+      "num_layers": 32,
+      "num_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "max_seq_len": 4096,
+      "batch_size": 1
+    },
+    {
+      "layout": "BSHD",
+      "num_layers": 32,
+      "num_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "max_seq_len": 4096,
+      "batch_size": 1
+    },
+    {
+      "layout": "HBSD",
+      "num_layers": 32,
+      "num_heads": 32,
+      "num_kv_heads": 8,
+      "head_dim": 128,
+      "max_seq_len": 4096,
+      "batch_size": 1
+    }
+  ],
+  "write_benchmarks": {
+    "BHSD": {
+      "write_time_us": 2.723812489421107,
+      "writes_per_sec": 367132.46740877174
+    },
+    "BSHD": {
+      "write_time_us": 3.406729010748677,
+      "writes_per_sec": 293536.7024629399
+    },
+    "HBSD": {
+      "write_time_us": 3.661082999315113,
+      "writes_per_sec": 273143.2202403148
+    }
+  },
+  "read_benchmarks": {
+    "BHSD_seq512": {
+      "read_time_us": 1.6774999676272273,
+      "reads_per_sec": 596125.197793279,
+      "bandwidth_gbps": 40005.284825682254
+    },
+    "BSHD_seq512": {
+      "read_time_us": 2.7079100254923105,
+      "reads_per_sec": 369288.48838624003,
+      "bandwidth_gbps": 24782.530943877762
+    },
+    "HBSD_seq512": {
+      "read_time_us": 2.766669786069542,
+      "reads_per_sec": 361445.37560467084,
+      "bandwidth_gbps": 24256.188554882774
+    },
+    "BHSD_seq1024": {
+      "read_time_us": 1.6675001825205982,
+      "reads_per_sec": 599700.0842832875,
+      "bandwidth_gbps": 80490.38279391135
+    },
+    "BSHD_seq1024": {
+      "read_time_us": 2.777499903459102,
+      "reads_per_sec": 360036.01611456356,
+      "bandwidth_gbps": 48323.21608106811
+    },
+    "HBSD_seq1024": {
+      "read_time_us": 3.007920167874545,
+      "reads_per_sec": 332455.6318616061,
+      "bandwidth_gbps": 44621.43956926918
+    },
+    "BHSD_seq2048": {
+      "read_time_us": 1.6762499581091106,
+      "reads_per_sec": 596569.7389952793,
+      "bandwidth_gbps": 160140.46992299877
+    },
+    "BSHD_seq2048": {
+      "read_time_us": 2.763330121524632,
+      "reads_per_sec": 361882.20589737676,
+      "bandwidth_gbps": 97142.01495834821
+    },
+    "HBSD_seq2048": {
+      "read_time_us": 2.78333987807855,
+      "reads_per_sec": 359280.5923113995,
+      "bandwidth_gbps": 96443.64962906063
+    },
+    "BHSD_seq4096": {
+      "read_time_us": 1.4241700409911573,
+      "reads_per_sec": 702163.3451185686,
+      "bandwidth_gbps": 376971.0754667767
+    },
+    "BSHD_seq4096": {
+      "read_time_us": 2.4904200108721852,
+      "reads_per_sec": 401538.6945312023,
+      "bandwidth_gbps": 215574.445136256
+    },
+    "HBSD_seq4096": {
+      "read_time_us": 2.456250076647848,
+      "reads_per_sec": 407124.669229423,
+      "bandwidth_gbps": 218573.39246689866
+    }
+  }
+}

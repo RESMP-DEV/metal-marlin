@@ -1228,3 +1228,4 @@ def quantize_to_fp8(
         print(f"  Compression: {stats['compression_ratio']:.2f}x")
 
     return stats
+

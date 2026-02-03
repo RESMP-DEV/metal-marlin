@@ -10,18 +10,41 @@ Key exports:
 - HAS_TORCH: Feature flag for runtime detection
 """
 
+from typing import TYPE_CHECKING, Any
+
 # Always-available imports
 from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 
+if TYPE_CHECKING:
+    import torch
+
 # Attention kernels
-from .attention import (
-    MarlinAttention,
-    RoPE,
-    create_causal_mask,
-    create_sliding_window_mask,
-    flash_attention_metal,
-    scaled_dot_product_attention_metal,
-    sliding_window_attention_metal,
+try:
+    from .attention import (
+        MarlinAttention,
+        RoPE,
+        create_causal_mask,
+        create_sliding_window_mask,
+        flash_attention_metal,
+        scaled_dot_product_attention_metal,
+        sliding_window_attention_metal,
+    )
+except ImportError:
+    MarlinAttention = None
+    RoPE = None
+    create_causal_mask = None
+    create_sliding_window_mask = None
+    flash_attention_metal = None
+    scaled_dot_product_attention_metal = None
+    sliding_window_attention_metal = None
+from .awq import (
+    AWQResult,
+    awq_dequantize,
+    awq_quantize,
+    awq_quantize_model,
+    compute_activation_stats,
+    compute_salient_scaling,
+    find_salient_weights,
 )
 from .calibration import (
     AdaptiveQuantizer,
@@ -33,6 +56,9 @@ from .calibration import (
     compute_moe_expert_sensitivity,
 )
 
+# Expert gather/scatter operations for MoE routing
+from .expert_ops import expert_gather, expert_scatter_add
+
 # Metal-accelerated generation (requires PyTorch MPS + PyObjC Metal)
 from .generate import GenerationConfig, generate, generate_batch, generate_stream
 from .gptq import GPTQQuantizer
@@ -42,6 +68,12 @@ from .hadamard import (
     apply_hadamard_rotation,
     hadamard_matrix,
     inverse_hadamard_rotation,
+)
+from .heap_allocator import (
+    HeapAllocation,
+    HeapAllocatorMetrics,
+    HeapBufferPool,
+    MetalHeapAllocator,
 )
 from .kernels import marlin_gemm_fp4, marlin_gemm_int4
 from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
@@ -91,7 +123,16 @@ from .onnx_loader import (
     list_onnx_tensors,
     normalize_onnx_name,
 )
-from .quantize import (  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization  # FP8 quantization
+
+# Pipelined prefill/decode for improved throughput
+from .pipeline import (
+    AsyncPipelineScheduler,
+    InferenceRequest,
+    PipelineScheduler,
+    RequestState,
+    generate_pipelined,
+)
+from .quantize import (  # FP8 quantization
     FP8_E4M3_MAX,
     FP8_E4M3_VALUES,
     FP8_E5M2_MAX,
@@ -127,28 +168,66 @@ from .vision import (
     detect_projector_type,
 )
 
+# Fast inference path (optional - requires C++ extension)
+try:
+    from .fast_inference import FastInferenceContext, fast_dispatch_available, get_fast_context
+except ImportError:
+    FastInferenceContext = None
+    fast_dispatch_available = False  # type: ignore[assignment]
+    get_fast_context = None  # type: ignore[assignment]
+
+# Async transfer / compute overlap (optional - requires PyObjC Metal)
+try:
+    from .metal_dispatch import (
+        AsyncTransferHandle,
+        AsyncTransferManager,
+        PipelinedLayerDispatcher,
+    )
+except ImportError:
+    AsyncTransferHandle = None
+    AsyncTransferManager = None
+    PipelinedLayerDispatcher = None
+
 # Metal GPU dispatchers (optional - require Apple Silicon + PyObjC)
 try:
     from .fp4_metal import FP4Metal, dequantize_fp4_metal, quantize_fp4_metal
 except ImportError:
-    FP4Metal = None  # type: ignore[misc, assignment]
-    quantize_fp4_metal = None  # type: ignore[misc, assignment]
-    dequantize_fp4_metal = None  # type: ignore[misc, assignment]
+    FP4Metal = None
+    quantize_fp4_metal = None  # type: ignore[assignment]
+    dequantize_fp4_metal = None  # type: ignore[assignment]
 
 try:
     from .gptq_metal import GPTQMetal, compute_hessian_metal
 except ImportError:
-    GPTQMetal = None  # type: ignore[misc, assignment]
-    compute_hessian_metal = None  # type: ignore[misc, assignment]
+    GPTQMetal = None
+    compute_hessian_metal = None  # type: ignore[assignment]
 
 try:
     from .hadamard_metal import HadamardMetal, hadamard_transform_metal
 except ImportError:
-    HadamardMetal = None  # type: ignore[misc, assignment]
-    hadamard_transform_metal = None  # type: ignore[misc, assignment]
+    HadamardMetal = None
+    hadamard_transform_metal = None  # type: ignore[assignment]
 
 # HAS_MLX is deprecated - kept for backwards compatibility
 HAS_MLX = False
+
+
+# Preload metallib at import time for faster first kernel dispatch
+def _preload_metallib() -> None:
+    try:
+        from .metallib_loader import get_precompiled_library
+
+        lib = get_precompiled_library()
+        if lib is not None:
+            import logging
+
+            logging.getLogger(__name__).debug("Preloaded metallib")
+    except Exception:
+        pass  # Silently fall back to JIT
+
+
+# Uncomment to enable preloading:
+# _preload_metallib()
 
 __all__ = [
     # Feature flags
@@ -156,6 +235,14 @@ __all__ = [
     "HAS_MPS",
     "HAS_PYOBJC_METAL",
     "HAS_TORCH",
+    # AWQ quantization
+    "AWQResult",
+    "awq_dequantize",
+    "awq_quantize",
+    "awq_quantize_model",
+    "compute_activation_stats",
+    "compute_salient_scaling",
+    "find_salient_weights",
     # FP8 quantization
     "FP8_E4M3_MAX",
     "FP8_E4M3_VALUES",
@@ -188,7 +275,11 @@ __all__ = [
     "FP4GPTQQuantizer",
     "GPTQQuantizer",
     "HadamardMetadata",
+    "HeapAllocation",
+    "HeapAllocatorMetrics",
+    "HeapBufferPool",
     "MRGPTQQuantizer",
+    "MetalHeapAllocator",
     "QuantizationFormat",
     "QuantizationReport",
     "apply_hadamard_rotation",
@@ -228,6 +319,8 @@ __all__ = [
     "parse_onnx_graph_full",
     "scatter_expert_outputs",
     "fused_moe_forward",
+    "expert_gather",
+    "expert_scatter_add",
     "summarize_graph",
     # Vision projectors
     "VisionProjector",
@@ -241,6 +334,12 @@ __all__ = [
     "generate",
     "generate_batch",
     "generate_stream",
+    # Pipelined prefill/decode
+    "AsyncPipelineScheduler",
+    "InferenceRequest",
+    "PipelineScheduler",
+    "RequestState",
+    "generate_pipelined",
     "CacheConfigTorch",
     "KVCacheTorch",
     "MetalSampler",
@@ -269,4 +368,12 @@ __all__ = [
     "dequantize_fp4_metal",
     "hadamard_transform_metal",
     "quantize_fp4_metal",
+    # Fast inference path
+    "FastInferenceContext",
+    "fast_dispatch_available",
+    "get_fast_context",
+    # Async transfer / compute overlap
+    "AsyncTransferHandle",
+    "AsyncTransferManager",
+    "PipelinedLayerDispatcher",
 ]

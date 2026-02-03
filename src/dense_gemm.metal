@@ -474,38 +474,44 @@ inline void store_small_batch_fp32_bf16(
     uint simd_lane,
     threadgroup float (&staging)[8][8]
 ) {
+    // Store results - all threads participate in barriers unconditionally
     for (uint mi = 0; mi < SMALL_SG_M_TILES; ++mi) {
         for (uint ni = 0; ni < SMALL_SG_N_TILES; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
             uint out_col = tg_col + sg_col_offset + ni * 8;
 
-            if (out_row >= M || out_col >= N) {
-                continue;
-            }
+            bool in_bounds = (out_row < M && out_col < N);
+            bool full_tile = (out_row + 8 <= M && out_col + 8 <= N);
 
+            // Always store to staging for uniform barrier behavior
             simdgroup_store(acc[mi][ni], &staging[0][0], 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            if (out_row + 8 <= M && out_col + 8 <= N) {
-                if (simd_lane < 8) {
-                    float4 lo = float4(staging[simd_lane][0],
-                                       staging[simd_lane][1],
-                                       staging[simd_lane][2],
-                                       staging[simd_lane][3]);
-                    float4 hi = float4(staging[simd_lane][4],
-                                       staging[simd_lane][5],
-                                       staging[simd_lane][6],
-                                       staging[simd_lane][7]);
-                    bf16_store_from_float8(C, (out_row + simd_lane) * N + out_col, lo, hi);
-                }
-            } else {
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    uint gr = out_row + r;
-                    uint gc = out_col + c;
-                    if (gr < M && gc < N) {
-                        C[gr * N + gc] = bf16_from_float_rne(staging[r][c]).bits;
+            // Write to output based on tile bounds
+            if (in_bounds) {
+                if (full_tile) {
+                    // Full tile: vectorized BF16 store
+                    if (simd_lane < 8) {
+                        float4 lo = float4(staging[simd_lane][0],
+                                           staging[simd_lane][1],
+                                           staging[simd_lane][2],
+                                           staging[simd_lane][3]);
+                        float4 hi = float4(staging[simd_lane][4],
+                                           staging[simd_lane][5],
+                                           staging[simd_lane][6],
+                                           staging[simd_lane][7]);
+                        bf16_store_from_float8(C, (out_row + simd_lane) * N + out_col, lo, hi);
+                    }
+                } else {
+                    // Partial tile: bounds-checked BF16 store
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
+                        uint gr = out_row + r;
+                        uint gc = out_col + c;
+                        if (gr < M && gc < N) {
+                            C[gr * N + gc] = bf16_from_float_rne(staging[r][c]).bits;
+                        }
                     }
                 }
             }
@@ -600,26 +606,40 @@ inline void dense_gemm_small_batch_fp4_impl(
         buf_compute = buf_load;
     }
 
-    // Store results
+    // Store results - all threads participate in barriers unconditionally
     for (uint mi = 0; mi < SMALL_SG_M_TILES; ++mi) {
         for (uint ni = 0; ni < SMALL_SG_N_TILES; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
             uint out_col = tg_col + sg_col_offset + ni * 8;
 
-            if (out_row + 8 <= M && out_col + 8 <= N) {
-                simdgroup_store(acc[mi][ni], C + out_row * N + out_col, N);
-            } else if (out_row < M && out_col < N) {
-                simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    if (out_row + r < M && out_col + c < N) {
+            bool in_bounds = (out_row < M && out_col < N);
+            bool full_tile = (out_row + 8 <= M && out_col + 8 <= N);
+
+            // Always store to staging for uniform barrier behavior
+            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Write to output based on tile bounds
+            if (in_bounds) {
+                if (full_tile) {
+                    // Full tile: vectorized store from staging
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
                         C[(out_row + r) * N + out_col + c] = staging[r][c];
                     }
+                } else {
+                    // Partial tile: bounds-checked store
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
+                        if (out_row + r < M && out_col + c < N) {
+                            C[(out_row + r) * N + out_col + c] = staging[r][c];
+                        }
+                    }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }
@@ -934,30 +954,46 @@ kernel void dense_gemm_prefill_splitk_fp4(
         buf_compute = buf_load;
     }
 
-    // Store FP32 partial results
+    // Store FP32 partial results - all threads participate in barriers unconditionally
     const uint partial_stride = M * N;
     device float* partial_base = partial_out + k_slice * partial_stride;
+
+    // Staging buffer declared outside loops for uniform threadgroup memory
+    threadgroup float staging[8][8];
 
     for (uint mi = 0; mi < 8; ++mi) {
         for (uint ni = 0; ni < 4; ++ni) {
             uint out_row = tg_row + sg_row_offset + mi * 8;
             uint out_col = tg_col + sg_col_offset + ni * 8;
 
-            if (out_row + 8 <= M && out_col + 8 <= N) {
-                simdgroup_store(acc[mi][ni], partial_base + out_row * N + out_col, N);
-            } else if (out_row < M && out_col < N) {
-                threadgroup float staging[8][8];
-                simdgroup_store(acc[mi][ni], &staging[0][0], 8);
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-                for (uint elem = simd_lane; elem < 64; elem += 32) {
-                    uint r = elem / 8;
-                    uint c = elem % 8;
-                    if (out_row + r < M && out_col + c < N) {
+            bool in_bounds = (out_row < M && out_col < N);
+            bool full_tile = (out_row + 8 <= M && out_col + 8 <= N);
+
+            // Always store to staging for uniform barrier behavior
+            simdgroup_store(acc[mi][ni], &staging[0][0], 8);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            // Write to output based on tile bounds
+            if (in_bounds) {
+                if (full_tile) {
+                    // Full tile: vectorized store from staging
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
                         partial_base[(out_row + r) * N + out_col + c] = staging[r][c];
                     }
+                } else {
+                    // Partial tile: bounds-checked store
+                    for (uint elem = simd_lane; elem < 64; elem += 32) {
+                        uint r = elem / 8;
+                        uint c = elem % 8;
+                        if (out_row + r < M && out_col + c < N) {
+                            partial_base[(out_row + r) * N + out_col + c] = staging[r][c];
+                        }
+                    }
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
 }

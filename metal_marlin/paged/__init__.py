@@ -30,6 +30,13 @@ from .allocator import (
     VisionEncoderCache,
 )
 from .attention import paged_attention, paged_attention_v1, write_kv_to_blocks
+from .cache_manager import (
+    CacheStats,
+    EvictionPolicy,
+    EvictionStats,
+    PagedKVCache,
+    SequenceEvictionMetadata,
+)
 from .kv_block import KVBlock, KVBlockConfig
 from .mla_cache import (
     MLABlock,
@@ -57,6 +64,12 @@ __all__ = [
     "KVBlockConfig",
     "PageTable",
     "SequenceState",
+    # Cache manager with eviction
+    "CacheStats",
+    "PagedKVCache",
+    "EvictionPolicy",
+    "EvictionStats",
+    "SequenceEvictionMetadata",
     # Attention operations
     "paged_attention",
     "paged_attention_v1",

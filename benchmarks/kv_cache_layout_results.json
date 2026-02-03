@@ -1,0 +1,195 @@
+{
+  "device": "cpu",
+  "device_name": "CPU",
+  "config": {
+    "num_layers": 8,
+    "num_heads": 8,
+    "num_kv_heads": 2,
+    "head_dim": 64,
+    "max_seq_len": 2048,
+    "batch_size": 1,
+    "dtype": "float32"
+  },
+  "write_benchmarks": {
+    "BHSD (per-layer)": {
+      "time_per_write_us": 20.90624999254942,
+      "writes_per_sec": 47832.58596622448
+    },
+    "BSHD (per-layer)": {
+      "time_per_write_us": 21.70249994378537,
+      "writes_per_sec": 46077.64094414181
+    },
+    "LBHSD (stacked)": {
+      "time_per_write_us": 5.350419960450381,
+      "writes_per_sec": 186901.21661325128
+    },
+    "LBSHD (stacked)": {
+      "time_per_write_us": 6.852909864392132,
+      "writes_per_sec": 145923.4135262776
+    }
+  },
+  "read_benchmarks": {
+    "BHSD (per-layer)_seq128": {
+      "time_per_read_us": 39.05457997461781,
+      "reads_per_sec": 25605.191520428994,
+      "bytes_read": 1048576,
+      "bandwidth_gbps": 26.848989303725354
+    },
+    "BSHD (per-layer)_seq128": {
+      "time_per_read_us": 50.54917011875659,
+      "reads_per_sec": 19782.718443263693,
+      "bytes_read": 1048576,
+      "bandwidth_gbps": 20.74368377436367
+    },
+    "LBHSD (stacked)_seq128": {
+      "time_per_read_us": 2.122080186381936,
+      "reads_per_sec": 471235.72729122976,
+      "bytes_read": 1048576,
+      "bandwidth_gbps": 494.12647398012854
+    },
+    "LBSHD (stacked)_seq128": {
+      "time_per_read_us": 3.227909910492599,
+      "reads_per_sec": 309797.9893272157,
+      "bytes_read": 1048576,
+      "bandwidth_gbps": 324.8467364567745
+    },
+    "BHSD (per-layer)_seq512": {
+      "time_per_read_us": 752.9224999598227,
+      "reads_per_sec": 1328.157944613638,
+      "bytes_read": 4194304,
+      "bandwidth_gbps": 5.57069817972476
+    },
+    "BSHD (per-layer)_seq512": {
+      "time_per_read_us": 645.8137498702854,
+      "reads_per_sec": 1548.4340496015368,
+      "bytes_read": 4194304,
+      "bandwidth_gbps": 6.494603127979924
+    },
+    "LBHSD (stacked)_seq512": {
+      "time_per_read_us": 2.0441701053641737,
+      "reads_per_sec": 489196.0788272303,
+      "bytes_read": 4194304,
+      "bandwidth_gbps": 2051.8370702093675
+    },
+    "LBSHD (stacked)_seq512": {
+      "time_per_read_us": 9.375830122735351,
+      "reads_per_sec": 106657.22255089825,
+      "bytes_read": 4194304,
+      "bandwidth_gbps": 447.3528151741227
+    },
+    "BHSD (per-layer)_seq1024": {
+      "time_per_read_us": 856.3454198883846,
+      "reads_per_sec": 1167.753078109928,
+      "bytes_read": 8388608,
+      "bandwidth_gbps": 9.795822813057567
+    },
+    "BSHD (per-layer)_seq1024": {
+      "time_per_read_us": 702.7329099946655,
+      "reads_per_sec": 1423.0157514717662,
+      "bytes_read": 8388608,
+      "bandwidth_gbps": 11.93712131692207
+    },
+    "LBHSD (stacked)_seq1024": {
+      "time_per_read_us": 2.006670110858977,
+      "reads_per_sec": 498338.01509703015,
+      "bytes_read": 8388608,
+      "bandwidth_gbps": 4180.362260147068
+    },
+    "LBSHD (stacked)_seq1024": {
+      "time_per_read_us": 3.3795900526456535,
+      "reads_per_sec": 295893.8760093602,
+      "bytes_read": 8388608,
+      "bandwidth_gbps": 2482.137735443127
+    },
+    "BHSD (per-layer)_seq2048": {
+      "time_per_read_us": 923.9549998892471,
+      "reads_per_sec": 1082.3037919810686,
+      "bytes_read": 16777216,
+      "bandwidth_gbps": 18.158044495685456
+    },
+    "BSHD (per-layer)_seq2048": {
+      "time_per_read_us": 1127.1387501619756,
+      "reads_per_sec": 887.202218765254,
+      "bytes_read": 16777216,
+      "bandwidth_gbps": 14.88478325990392
+    },
+    "LBHSD (stacked)_seq2048": {
+      "time_per_read_us": 1.7833299352787435,
+      "reads_per_sec": 560748.7320307305,
+      "bytes_read": 16777216,
+      "bandwidth_gbps": 9407.802599005683
+    },
+    "LBSHD (stacked)_seq2048": {
+      "time_per_read_us": 22.617079957854003,
+      "reads_per_sec": 44214.372583174256,
+      "bytes_read": 16777216,
+      "bandwidth_gbps": 741.7940791323924
+    },
+    "BHSD (per-layer)_seq4096": {
+      "time_per_read_us": 643.3054100489244,
+      "reads_per_sec": 1554.4716154710225,
+      "bytes_read": 33554432,
+      "bandwidth_gbps": 52.15941211725257
+    },
+    "BSHD (per-layer)_seq4096": {
+      "time_per_read_us": 1893.717919883784,
+      "reads_per_sec": 528.0617506441346,
+      "bytes_read": 33554432,
+      "bandwidth_gbps": 17.71881210378957
+    },
+    "LBHSD (stacked)_seq4096": {
+      "time_per_read_us": 1.7762501374818385,
+      "reads_per_sec": 562983.7706403694,
+      "bytes_read": 33554432,
+      "bandwidth_gbps": 18890.600649055872
+    },
+    "LBSHD (stacked)_seq4096": {
+      "time_per_read_us": 2.9262498719617724,
+      "reads_per_sec": 341734.3165331247,
+      "bytes_read": 33554432,
+      "bandwidth_gbps": 11466.700886177208
+    }
+  },
+  "attention_benchmarks": {
+    "BHSD (per-layer)_seq512": {
+      "time_per_layer_ms": 0.24399062513111858,
+      "total_time_ms": 1.9519250010489486,
+      "layers_per_sec": 4098.518127336279
+    },
+    "BSHD (per-layer)_seq512": {
+      "time_per_layer_ms": 0.3033432249139878,
+      "total_time_ms": 2.4267457993119024,
+      "layers_per_sec": 3296.5957960114238
+    },
+    "LBHSD (stacked)_seq512": {
+      "time_per_layer_ms": 0.1714932250251877,
+      "total_time_ms": 1.3719458002015017,
+      "layers_per_sec": 5831.134144530357
+    },
+    "LBSHD (stacked)_seq512": {
+      "time_per_layer_ms": 0.17024322514771484,
+      "total_time_ms": 1.3619458011817187,
+      "layers_per_sec": 5873.948870108226
+    },
+    "BHSD (per-layer)_seq2048": {
+      "time_per_layer_ms": 0.35403228757786565,
+      "total_time_ms": 2.832258300622925,
+      "layers_per_sec": 2824.601131274109
+    },
+    "BSHD (per-layer)_seq2048": {
+      "time_per_layer_ms": 0.3249481749662664,
+      "total_time_ms": 2.599585399730131,
+      "layers_per_sec": 3077.413806382548
+    },
+    "LBHSD (stacked)_seq2048": {
+      "time_per_layer_ms": 0.24798437516437843,
+      "total_time_ms": 1.9838750013150275,
+      "layers_per_sec": 4032.512126367405
+    },
+    "LBSHD (stacked)_seq2048": {
+      "time_per_layer_ms": 0.27032291873183567,
+      "total_time_ms": 2.1625833498546854,
+      "layers_per_sec": 3699.2793829368748
+    }
+  }
+}

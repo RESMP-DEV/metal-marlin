@@ -168,7 +168,7 @@ def _compute_layer_rmse(ref_model: Any, quant_model: Any) -> tuple[float, list[d
             module.weight_packed,
             module.scales,
             meta,
-            weights_dtype=np.float32,
+            weights_dtype=np.dtype(np.float32),
             output_backend="numpy",
         )
         quant_weight = quant_k_n.T

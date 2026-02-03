@@ -57,6 +57,107 @@ if TYPE_CHECKING:
 # GGUF value type codes (from gguf.md spec)
 # ---------------------------------------------------------------------------
 
+# GGUF metadata keys commonly found in model files
+GGUF_META_ARCHITECTURE = "general.architecture"
+GGUF_META_FILE_TYPE = "general.file_type"
+GGUF_META_NAME = "general.name"
+GGUF_META_QUANTIZATION_VERSION = "general.quantization_version"
+GGUF_META_VOCAB_SIZE = "general.vocab_size"
+GGUF_META_CONTEXT_LENGTH = "general.context_length"
+GGUF_META_EMBEDDING_LENGTH = "general.embedding_length"
+GGUF_META_BLOCK_COUNT = "general.block_count"
+GGUF_META_FEED_FORWARD_LENGTH = "general.feed_forward_length"
+GGUF_META_ATTENTION_HEAD_COUNT = "general.attention.head_count"
+GGUF_META_ATTENTION_HEAD_COUNT_KV = "general.attention.head_count_kv"
+GGUF_META_ROPE_DIMENSION_COUNT = "general.rope.dimension_count"
+GGUF_META_ROPE_FREQ_BASE = "general.rope.freq_base"
+GGUF_META_ROPE_SCALING_TYPE = "general.rope.scaling.type"
+GGUF_META_ROPE_SCALING_FACTOR = "general.rope.scaling.factor"
+GGUF_META_USE_PARALLEL_RESIDUAL = "general.use_parallel_residual"
+GGUF_META_TENSOR_DATA_LAYOUT = "general.tensor_data_layout"
+GGUF_META_MAX_ALIBI_BIAS = "general.max_alibi_bias"
+GGUF_META_CLS_BIAS = "general.cls_bias"
+GGUF_META_LOGIT_SCALE = "general.logit_scale"
+GGUF_META_GQA = "general.gqa"
+GGUF_META_EXPERT_COUNT = "general.expert_count"
+GGUF_META_EXPERT_SHARED_COUNT = "general.expert_shared_count"
+GGUF_META_EXPERT_USED_COUNT = "general.expert_used_count"
+GGUF_META_MOE_TOP_K = "general.moe_top_k"
+GGUF_META_MOE_WEIGHTS = "general.moe_weights"
+GGUF_META_EXPERT_NORM_SCALE = "general.expert_norm_scale"
+GGUF_META_EXPERT_NORM_EPSILON = "general.expert_norm_epsilon"
+GGUF_META_ALIGNMENT = "general.alignment"
+GGUF_META_TOKENIZER_MODEL = "tokenizer.ggml.model"
+GGUF_META_TOKENIZER_LIST = "tokenizer.ggml.tokens"
+GGUF_META_TOKENIZER_MERGES = "tokenizer.ggml.merges"
+GGUF_META_TOKENIZER_BOS_ID = "tokenizer.ggml.bos_token_id"
+GGUF_META_TOKENIZER_EOS_ID = "tokenizer.ggml.eos_token_id"
+GGUF_META_TOKENIZER_UNK_ID = "tokenizer.ggml.unknown_token_id"
+GGUF_META_TOKENIZER_SEP_ID = "tokenizer.ggml.sep_token_id"
+GGUF_META_TOKENIZER_PAD_ID = "tokenizer.ggml.padding_token_id"
+GGUF_META_TOKENIZER_HF_JSON = "tokenizer.huggingface.json"
+GGUF_META_TOKENIZER_RWKV_VOCAB = "tokenizer.rwkv.vocab"
+GGUF_META_TOKENIZER_RWKV_HEAD = "tokenizer.rwkv.head"
+GGUF_META_TOKENIZER_RWKV_EMBEDDINGS = "tokenizer.rwkv.embeddings"
+
+# Architecture names
+ARCH_LLAMA = "llama"
+ARCH_GEMMA = "gemma"
+ARCH_GEMMA2 = "gemma2"
+ARCH_QWEN2 = "qwen2"
+ARCH_MISTRAL = "mistral"
+ARCH_MIXTRAL = "mixtral"
+ARCH_GROK = "grok"
+ARCH_GPT2 = "gpt2"
+ARCH_GPTJ = "gptj"
+ARCH_GPTNEOX = "gptneox"
+ARCH_BERT = "bert"
+ARCH_NOMIC_BERT = "nomic-bert"
+ARCH_STABLELM = "stablelm"
+ARCH_STARCODER = "starcoder"
+ARCH_PERSIMMON = "persimmon"
+ARCH_PHI2 = "phi2"
+ARCH_PLAMO = "plamo"
+ARCH_CODESHELL = "codeshell"
+ARCH_ORION = "orion"
+ARCH_INTERNLM2 = "internlm2"
+ARCH_MINCPM = "minicpm"
+ARCH_GEMMA = "gemma"
+
+# File type constants (quantization level)
+FILE_TYPE_ALL_F32 = 0
+FILE_TYPE_MOSTLY_F16 = 1
+FILE_TYPE_MOSTLY_Q4_0 = 2
+FILE_TYPE_MOSTLY_Q4_1 = 3
+FILE_TYPE_MOSTLY_Q8_0 = 4
+FILE_TYPE_MOSTLY_Q5_0 = 5
+FILE_TYPE_MOSTLY_Q5_1 = 6
+FILE_TYPE_MOSTLY_Q2_K = 7
+FILE_TYPE_MOSTLY_Q3_K_S = 8
+FILE_TYPE_MOSTLY_Q3_K_M = 9
+FILE_TYPE_MOSTLY_Q3_K_L = 10
+FILE_TYPE_MOSTLY_Q4_K_S = 11
+FILE_TYPE_MOSTLY_Q4_K_M = 12
+FILE_TYPE_MOSTLY_Q5_K_S = 13
+FILE_TYPE_MOSTLY_Q5_K_M = 14
+FILE_TYPE_MOSTLY_Q6_K = 15
+FILE_TYPE_MOSTLY_IQ2_XXS = 16
+FILE_TYPE_MOSTLY_IQ2_XS = 17
+FILE_TYPE_MOSTLY_Q2_K_S = 18
+FILE_TYPE_MOSTLY_Q3_K_XS = 19
+FILE_TYPE_MOSTLY_IQ3_XXS = 20
+FILE_TYPE_MOSTLY_IQ3_S = 21
+FILE_TYPE_MOSTLY_IQ3_M = 22
+FILE_TYPE_MOSTLY_IQ2_S = 23
+FILE_TYPE_MOSTLY_IQ3_XS = 24
+FILE_TYPE_MOSTLY_IQ1_S = 25
+FILE_TYPE_MOSTLY_IQ1_M = 26
+FILE_TYPE_MOSTLY_IQ4_NL = 27
+FILE_TYPE_MOSTLY_IQ3_SXXS = 28
+FILE_TYPE_MOSTLY_IQ2_M = 29
+FILE_TYPE_MOSTLY_IQ2_XXS = 30
+FILE_TYPE_MOSTLY_IQ1_S_M = 31
+
 GGUF_TYPE_UINT8 = 0
 GGUF_TYPE_INT8 = 1
 GGUF_TYPE_UINT16 = 2
@@ -1107,6 +1208,434 @@ def _quantize_to_marlin_fp4(
 # ---------------------------------------------------------------------------
 
 
+class GGUFMetadata:
+    """Structured accessor for GGUF metadata.
+
+    Provides typed access to common model configuration fields extracted from
+    GGUF KV metadata. Wraps a raw metadata dict with convenient properties.
+
+    Usage:
+        reader = GGUFReader("model.gguf")
+        meta = reader.gguf_metadata
+        print(f"Architecture: {meta.architecture}")
+        print(f"Hidden size: {meta.hidden_size}")
+        print(f"Num layers: {meta.num_layers}")
+    """
+
+    __slots__ = ("_metadata", "_version", "_tensor_count")
+
+    def __init__(self, metadata: dict[str, Any], version: int = 3, tensor_count: int = 0):
+        """Initialize from raw GGUF metadata dict.
+
+        Args:
+            metadata: Raw GGUF KV metadata dictionary.
+            version: GGUF file format version (2 or 3).
+            tensor_count: Number of tensors in the GGUF file.
+        """
+        self._metadata = metadata
+        self._version = version
+        self._tensor_count = tensor_count
+
+    @property
+    def version(self) -> int:
+        """GGUF file format version (2 or 3)."""
+        return self._version
+
+    @property
+    def tensor_count(self) -> int:
+        """Number of tensors in the GGUF file."""
+        return self._tensor_count
+
+    @property
+    def kv_count(self) -> int:
+        """Number of key-value metadata pairs."""
+        return len(self._metadata)
+
+    @property
+    def architecture(self) -> str | None:
+        """Model architecture identifier (e.g., 'llama', 'gemma', 'qwen2')."""
+        return self._metadata.get(GGUF_META_ARCHITECTURE)
+
+    @property
+    def file_type(self) -> int | None:
+        """Quantization file type (0=F32, 1=F16, 2+=various quants)."""
+        return self._metadata.get(GGUF_META_FILE_TYPE)
+
+    @property
+    def file_type_name(self) -> str | None:
+        """Human-readable file type name."""
+        ft = self.file_type
+        if ft is None:
+            return None
+        names = {
+            FILE_TYPE_ALL_F32: "ALL_F32",
+            FILE_TYPE_MOSTLY_F16: "MOSTLY_F16",
+            FILE_TYPE_MOSTLY_Q4_0: "MOSTLY_Q4_0",
+            FILE_TYPE_MOSTLY_Q4_1: "MOSTLY_Q4_1",
+            FILE_TYPE_MOSTLY_Q8_0: "MOSTLY_Q8_0",
+            FILE_TYPE_MOSTLY_Q5_0: "MOSTLY_Q5_0",
+            FILE_TYPE_MOSTLY_Q5_1: "MOSTLY_Q5_1",
+            FILE_TYPE_MOSTLY_Q2_K: "MOSTLY_Q2_K",
+            FILE_TYPE_MOSTLY_Q3_K_S: "MOSTLY_Q3_K_S",
+            FILE_TYPE_MOSTLY_Q3_K_M: "MOSTLY_Q3_K_M",
+            FILE_TYPE_MOSTLY_Q3_K_L: "MOSTLY_Q3_K_L",
+            FILE_TYPE_MOSTLY_Q4_K_S: "MOSTLY_Q4_K_S",
+            FILE_TYPE_MOSTLY_Q4_K_M: "MOSTLY_Q4_K_M",
+            FILE_TYPE_MOSTLY_Q5_K_S: "MOSTLY_Q5_K_S",
+            FILE_TYPE_MOSTLY_Q5_K_M: "MOSTLY_Q5_K_M",
+            FILE_TYPE_MOSTLY_Q6_K: "MOSTLY_Q6_K",
+            FILE_TYPE_MOSTLY_IQ2_XXS: "MOSTLY_IQ2_XXS",
+            FILE_TYPE_MOSTLY_IQ2_XS: "MOSTLY_IQ2_XS",
+            FILE_TYPE_MOSTLY_Q2_K_S: "MOSTLY_Q2_K_S",
+            FILE_TYPE_MOSTLY_Q3_K_XS: "MOSTLY_Q3_K_XS",
+            FILE_TYPE_MOSTLY_IQ3_XXS: "MOSTLY_IQ3_XXS",
+            FILE_TYPE_MOSTLY_IQ3_S: "MOSTLY_IQ3_S",
+            FILE_TYPE_MOSTLY_IQ3_M: "MOSTLY_IQ3_M",
+            FILE_TYPE_MOSTLY_IQ2_S: "MOSTLY_IQ2_S",
+            FILE_TYPE_MOSTLY_IQ3_XS: "MOSTLY_IQ3_XS",
+            FILE_TYPE_MOSTLY_IQ1_S: "MOSTLY_IQ1_S",
+            FILE_TYPE_MOSTLY_IQ1_M: "MOSTLY_IQ1_M",
+            FILE_TYPE_MOSTLY_IQ4_NL: "MOSTLY_IQ4_NL",
+            FILE_TYPE_MOSTLY_IQ3_SXXS: "MOSTLY_IQ3_SXXS",
+            FILE_TYPE_MOSTLY_IQ2_M: "MOSTLY_IQ2_M",
+            FILE_TYPE_MOSTLY_IQ2_XXS: "MOSTLY_IQ2_XXS",
+            FILE_TYPE_MOSTLY_IQ1_S_M: "MOSTLY_IQ1_S_M",
+        }
+        return names.get(ft, f"UNKNOWN({ft})")
+
+    @property
+    def model_name(self) -> str | None:
+        """Human-readable model name."""
+        return self._metadata.get(GGUF_META_NAME)
+
+    @property
+    def quantization_version(self) -> int | None:
+        """GGUF quantization format version."""
+        return self._metadata.get(GGUF_META_QUANTIZATION_VERSION)
+
+    @property
+    def vocab_size(self) -> int | None:
+        """Vocabulary size (number of tokens)."""
+        return self._metadata.get(GGUF_META_VOCAB_SIZE)
+
+    @property
+    def context_length(self) -> int | None:
+        """Maximum context window length."""
+        return self._metadata.get(GGUF_META_CONTEXT_LENGTH)
+
+    @property
+    def hidden_size(self) -> int | None:
+        """Embedding dimension (hidden size / d_model)."""
+        return self._metadata.get(GGUF_META_EMBEDDING_LENGTH)
+
+    @property
+    def num_layers(self) -> int | None:
+        """Number of transformer layers (block_count)."""
+        return self._metadata.get(GGUF_META_BLOCK_COUNT)
+
+    @property
+    def intermediate_size(self) -> int | None:
+        """Feed-forward network hidden size."""
+        return self._metadata.get(GGUF_META_FEED_FORWARD_LENGTH)
+
+    @property
+    def num_attention_heads(self) -> int | None:
+        """Number of attention heads."""
+        return self._metadata.get(GGUF_META_ATTENTION_HEAD_COUNT)
+
+    @property
+    def num_key_value_heads(self) -> int | None:
+        """Number of key/value heads (for GQA/MQA)."""
+        return self._metadata.get(GGUF_META_ATTENTION_HEAD_COUNT_KV)
+
+    @property
+    def rope_dim(self) -> int | None:
+        """RoPE (rotary position embedding) dimension."""
+        return self._metadata.get(GGUF_META_ROPE_DIMENSION_COUNT)
+
+    @property
+    def rope_freq_base(self) -> int | None:
+        """RoPE frequency base (usually 10000 or 1000000)."""
+        return self._metadata.get(GGUF_META_ROPE_FREQ_BASE)
+
+    @property
+    def rope_scaling_type(self) -> str | None:
+        """RoPE scaling type ('linear', 'yarn', 'ntk', etc.)."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_TYPE)
+
+    @property
+    def rope_scaling_factor(self) -> float | None:
+        """RoPE scaling factor."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_FACTOR)
+
+    @property
+    def use_parallel_residual(self) -> bool | None:
+        """Whether to use parallel residual connections (pre-Norm)."""
+        return self._metadata.get(GGUF_META_USE_PARALLEL_RESIDUAL)
+
+    @property
+    def tensor_data_layout(self) -> str | None:
+        """Tensor data layout ('ggml', 'ggmf', 'ggjt', etc.)."""
+        return self._metadata.get(GGUF_META_TENSOR_DATA_LAYOUT)
+
+    @property
+    def max_alibi_bias(self) -> float | None:
+        """Maximum ALiBi bias value."""
+        return self._metadata.get(GGUF_META_MAX_ALIBI_BIAS)
+
+    @property
+    def cls_bias(self) -> bool | None:
+        """Whether classification head bias is used."""
+        return self._metadata.get(GGUF_META_CLS_BIAS)
+
+    @property
+    def logit_scale(self) -> float | None:
+        """Logit scale factor."""
+        return self._metadata.get(GGUF_META_LOGIT_SCALE)
+
+    @property
+    def gqa(self) -> int | None:
+        """Grouped query attention divisor."""
+        return self._metadata.get(GGUF_META_GQA)
+
+    # MoE-specific properties
+    @property
+    def num_experts(self) -> int | None:
+        """Total number of experts (for MoE models)."""
+        return self._metadata.get(GGUF_META_EXPERT_COUNT)
+
+    @property
+    def num_shared_experts(self) -> int | None:
+        """Number of shared experts (for Mixtral-style MoE)."""
+        return self._metadata.get(GGUF_META_EXPERT_SHARED_COUNT)
+
+    @property
+    def num_active_experts(self) -> int | None:
+        """Number of active experts per token (expert_used_count)."""
+        return self._metadata.get(GGUF_META_EXPERT_USED_COUNT)
+
+    @property
+    def moe_top_k(self) -> int | None:
+        """Top-K routing for MoE (how many experts to activate)."""
+        return self._metadata.get(GGUF_META_MOE_TOP_K)
+
+    @property
+    def moe_weights(self) -> list[float] | None:
+        """MoE expert weights."""
+        return self._metadata.get(GGUF_META_MOE_WEIGHTS)
+
+    @property
+    def expert_norm_scale(self) -> float | None:
+        """Expert normalization scale."""
+        return self._metadata.get(GGUF_META_EXPERT_NORM_SCALE)
+
+    @property
+    def expert_norm_epsilon(self) -> float | None:
+        """Expert normalization epsilon."""
+        return self._metadata.get(GGUF_META_EXPERT_NORM_EPSILON)
+
+    @property
+    def alignment(self) -> int | None:
+        """Byte alignment for tensor data."""
+        return self._metadata.get(GGUF_META_ALIGNMENT)
+
+    # Tokenizer properties
+    @property
+    def tokenizer_model(self) -> str | None:
+        """Tokenizer model type ('llama', 'gpt2', 'bert', etc.)."""
+        return self._metadata.get(GGUF_META_TOKENIZER_MODEL)
+
+    @property
+    def tokenizer_tokens(self) -> list[str] | None:
+        """List of tokenizer vocabulary tokens."""
+        return self._metadata.get(GGUF_META_TOKENIZER_LIST)
+
+    @property
+    def tokenizer_merges(self) -> list[str] | None:
+        """Tokenizer BPE merge rules."""
+        return self._metadata.get(GGUF_META_TOKENIZER_MERGES)
+
+    @property
+    def bos_token_id(self) -> int | None:
+        """Beginning-of-sequence token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_BOS_ID)
+
+    @property
+    def eos_token_id(self) -> int | None:
+        """End-of-sequence token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_EOS_ID)
+
+    @property
+    def unk_token_id(self) -> int | None:
+        """Unknown token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_UNK_ID)
+
+    @property
+    def sep_token_id(self) -> int | None:
+        """Separator token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_SEP_ID)
+
+    @property
+    def pad_token_id(self) -> int | None:
+        """Padding token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_PAD_ID)
+
+    @property
+    def hf_tokenizer_json(self) -> str | None:
+        """HuggingFace tokenizer config (JSON string)."""
+        return self._metadata.get(GGUF_META_TOKENIZER_HF_JSON)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get any metadata value by key.
+
+        Provides fallback to raw metadata for custom keys not exposed
+        as properties.
+
+        Args:
+            key: Metadata key (e.g., 'general.architecture').
+            default: Default value if key not found.
+
+        Returns:
+            The metadata value or default.
+        """
+        return self._metadata.get(key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the underlying raw metadata dict."""
+        return self._metadata.copy()
+
+    def summary(self) -> str:
+        """Return a human-readable summary of key model configuration."""
+        lines = [
+            "GGUF Model Configuration",
+            "=" * 40,
+            f"GGUF version: {self.version}",
+            f"Tensor count: {self.tensor_count}",
+            f"KV metadata pairs: {self.kv_count}",
+            "",
+            "Model information:",
+            f"  Architecture: {self.architecture or 'unknown'}",
+            f"  Model name: {self.model_name or 'unknown'}",
+            f"  File type: {self.file_type_name or 'unknown'}",
+            "",
+            "Model dimensions:",
+            f"  Vocab size: {self.vocab_size or 'unknown'}",
+            f"  Hidden size: {self.hidden_size or 'unknown'}",
+            f"  Intermediate size: {self.intermediate_size or 'unknown'}",
+            f"  Num layers: {self.num_layers or 'unknown'}",
+            f"  Num attention heads: {self.num_attention_heads or 'unknown'}",
+            f"  Num KV heads: {self.num_key_value_heads or 'unknown'}",
+            f"  Context length: {self.context_length or 'unknown'}",
+            "",
+            "Positional encoding:",
+            f"  RoPE dimension: {self.rope_dim or 'unknown'}",
+            f"  RoPE freq base: {self.rope_freq_base or 'unknown'}",
+            f"  RoPE scaling type: {self.rope_scaling_type or 'none'}",
+            "",
+            "MoE configuration:",
+            f"  Num experts: {self.num_experts or 'N/A'}",
+            f"  Num shared experts: {self.num_shared_experts or 'N/A'}",
+            f"  Active experts: {self.num_active_experts or 'N/A'}",
+            f"  MoE top-k: {self.moe_top_k or 'N/A'}",
+            "",
+            "Tokenizer:",
+            f"  Model type: {self.tokenizer_model or 'unknown'}",
+            f"  BOS ID: {self.bos_token_id or 'unknown'}",
+            f"  EOS ID: {self.eos_token_id or 'unknown'}",
+            f"  UNK ID: {self.unk_token_id or 'unknown'}",
+        ]
+        return "\n".join(lines)
+
+    def extract_config(self) -> dict[str, Any]:
+        """Extract model configuration dict for downstream use.
+
+        Returns a standard config dict with keys commonly expected by
+        model loaders and conversion tools. Provides better config parity
+        across different GGUF sources.
+
+        Returns:
+            Dictionary with model configuration fields.
+        """
+        config: dict[str, Any] = {}
+
+        # GGUF format metadata
+        config["GGUF"] = {
+            "version": self._version,
+            "tensor_count": self._tensor_count,
+            "kv_count": len(self._metadata),
+        }
+
+        # Basic metadata
+        if self.architecture is not None:
+            config["architecture"] = self.architecture
+        if self.model_name is not None:
+            config["name"] = self.model_name
+        if self.file_type is not None:
+            config["file_type"] = self.file_type
+        if self.file_type_name is not None:
+            config["file_type_name"] = self.file_type_name
+
+        # Model dimensions
+        if self.vocab_size is not None:
+            config["vocab_size"] = self.vocab_size
+        if self.hidden_size is not None:
+            config["hidden_size"] = self.hidden_size
+            config["embedding_length"] = self.hidden_size
+        if self.num_layers is not None:
+            config["num_layers"] = self.num_layers
+            config["block_count"] = self.num_layers
+        if self.intermediate_size is not None:
+            config["intermediate_size"] = self.intermediate_size
+            config["feed_forward_length"] = self.intermediate_size
+        if self.num_attention_heads is not None:
+            config["num_attention_heads"] = self.num_attention_heads
+            config["attention_head_count"] = self.num_attention_heads
+        if self.num_key_value_heads is not None:
+            config["num_key_value_heads"] = self.num_key_value_heads
+            config["attention_head_count_kv"] = self.num_key_value_heads
+        if self.context_length is not None:
+            config["context_length"] = self.context_length
+            config["max_position_embeddings"] = self.context_length
+
+        # Positional encoding
+        if self.rope_dim is not None:
+            config["rope_dim"] = self.rope_dim
+        if self.rope_freq_base is not None:
+            config["rope_freq_base"] = self.rope_freq_base
+            config["rope_theta"] = self.rope_freq_base
+        if self.rope_scaling_type is not None:
+            config["rope_scaling_type"] = self.rope_scaling_type
+        if self.rope_scaling_factor is not None:
+            config["rope_scaling_factor"] = self.rope_scaling_factor
+
+        # MoE configuration
+        if self.num_experts is not None:
+            config["num_experts"] = self.num_experts
+            config["expert_count"] = self.num_experts
+        if self.num_shared_experts is not None:
+            config["num_shared_experts"] = self.num_shared_experts
+            config["expert_shared_count"] = self.num_shared_experts
+        if self.num_active_experts is not None:
+            config["num_active_experts"] = self.num_active_experts
+            config["expert_used_count"] = self.num_active_experts
+        if self.moe_top_k is not None:
+            config["moe_top_k"] = self.moe_top_k
+
+        # Tokenizer
+        if self.tokenizer_model is not None:
+            config["tokenizer_model"] = self.tokenizer_model
+        if self.bos_token_id is not None:
+            config["bos_token_id"] = self.bos_token_id
+        if self.eos_token_id is not None:
+            config["eos_token_id"] = self.eos_token_id
+        if self.unk_token_id is not None:
+            config["unk_token_id"] = self.unk_token_id
+        if self.pad_token_id is not None:
+            config["pad_token_id"] = self.pad_token_id
+
+        return config
+
+
 class TensorInfo:
     """Metadata for a single tensor in a GGUF file."""
 
@@ -1165,10 +1694,29 @@ class GGUFReader:
         self._version: int = 0
         self._data_offset: int = 0
         self._alignment: int = 32  # default GGUF alignment
+        self._gguf_metadata: GGUFMetadata | None = None
 
         if not self.path.exists():
             raise FileNotFoundError(f"GGUF file not found: {self.path}")
         self._parse_header()
+
+    @property
+    def gguf_metadata(self) -> GGUFMetadata:
+        """Structured access to GGUF model metadata.
+
+        Returns a GGUFMetadata object with typed properties for common
+        configuration fields like architecture, hidden_size, num_layers, etc.
+
+        Returns:
+            GGUFMetadata instance wrapping the parsed metadata.
+        """
+        if self._gguf_metadata is None:
+            self._gguf_metadata = GGUFMetadata(
+                self.metadata,
+                version=self._version,
+                tensor_count=len(self.tensor_infos)
+            )
+        return self._gguf_metadata
 
     def _parse_header(self) -> None:
         """Parse GGUF file header, metadata, and tensor index."""

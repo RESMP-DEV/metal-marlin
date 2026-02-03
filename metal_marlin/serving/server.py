@@ -176,6 +176,7 @@ def run_server(
     enable_batching: bool = False,
     num_kv_blocks: int = 512,
     block_size: int = 16,
+    metrics_port: int | None = None,
 ):
     """Start the OpenAI-compatible API server.
 
@@ -188,9 +189,11 @@ def run_server(
         enable_batching: Enable continuous batching
         num_kv_blocks: Number of KV cache blocks to allocate
         block_size: Number of tokens per KV cache block
+        metrics_port: Dedicated port for Prometheus metrics (default: None, served on main port)
     """
     import signal
     import sys
+    import threading
 
     configure(
         model_path,
@@ -200,6 +203,29 @@ def run_server(
         num_kv_blocks=num_kv_blocks,
         block_size=block_size,
     )
+
+    # Start metrics exporter on separate port if requested
+    metrics_server = None
+    if metrics_port:
+        def run_metrics_server():
+            metrics_app = FastAPI(title="Prometheus Metrics Exporter")
+            
+            @metrics_app.get("/metrics")
+            async def metrics_endpoint():
+                from fastapi.responses import PlainTextResponse
+
+                from ..trellis.metrics import moe_metrics
+                
+                serving_metrics = metrics.to_prometheus()
+                moe_metrics_output = moe_metrics.to_prometheus()
+                combined = serving_metrics + "\n" + moe_metrics_output
+                return PlainTextResponse(content=combined, media_type="text/plain")
+            
+            uvicorn.run(metrics_app, host=host, port=metrics_port, log_level="warning")
+        
+        metrics_thread = threading.Thread(target=run_metrics_server, daemon=True)
+        metrics_thread.start()
+        print(f"Prometheus metrics: http://{host}:{metrics_port}/metrics")
 
     # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
@@ -213,6 +239,8 @@ def run_server(
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print(f"Continuous batching: {'enabled' if enable_batching else 'disabled'}")
+    if not metrics_port:
+        print(f"Metrics: http://{host}:{port}/metrics")
     print("Press Ctrl+C to stop")
 
     uvicorn.run(app, host=host, port=port)
