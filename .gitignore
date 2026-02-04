@@ -69,12 +69,8 @@ metal_marlin/lib/.metallib_version
 
 # AlphaHENG development artifacts (not for public release)
 agent_workspace/
-tasks/*.yaml
-tasks/*.yml
-scripts/collect_status_facts.py
-scripts/optimize_all_kernels.py
-scripts/optimize_kernel.py
-scripts/optimize_structural_v2.py
+tasks/
+config.alphaheng.json
 
 # Debug/temporary scripts (created during development, not for release)
 scripts/debug_*.py
