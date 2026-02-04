@@ -906,7 +906,10 @@ kernel void gemm_trellis_packed(
 
     // Cooperative codebook load: first n_levels threads load the grid
     // This is a one-time cost amortized over all K-tiles
-    if (thread_idx < n_levels) {
+    // BOUNDS CHECK: Clamp to grid_cache[16] size to prevent OOB access
+    // (theoretical edge case for >4-bit quantization where n_levels > 16)
+    const uint safe_n_levels = min(n_levels, 16u);
+    if (thread_idx < safe_n_levels) {
         grid_cache[thread_idx] = grid[thread_idx];
     }
 
@@ -1043,9 +1046,10 @@ kernel void gemm_trellis_packed(
                             uint trellis_idx_1 = (k_idx_1 < K) ? unpack_trellis_index(
                                 packed_indices + actual_tile_offset_1, idx_in_tile_1, bits) : 0;
 
-                            // Bounds check
-                            if (trellis_idx_0 >= n_levels) trellis_idx_0 = 0;
-                            if (trellis_idx_1 >= n_levels) trellis_idx_1 = 0;
+                            // Bounds check (clamp to grid_cache size of 16)
+                            const uint cache_limit = min(n_levels, 16u);
+                            if (trellis_idx_0 >= cache_limit) trellis_idx_0 = 0;
+                            if (trellis_idx_1 >= cache_limit) trellis_idx_1 = 0;
 
                             // Grid lookups from threadgroup cache - interleaved
                             // Using grid_cache avoids repeated device memory accesses
@@ -1567,236 +1571,6 @@ kernel void gemm_trellis_packed_decode(
 }
 
 // ============================================================================
-// Fully-Fused Dequant+GEMM (gemm_trellis_fused_reg)
-// ============================================================================
-//
-// This kernel fully fuses dequantization into GEMM inner loop.
-// Dequantized values are kept in registers only - no staging buffer materialization.
-//
-// Key optimizations:
-//   1. All 32 threads dequant in parallel (each handles 2 elements)
-//   2. Dequantized values NEVER written to threadgroup memory
-//   3. Manual scalar reduction for 8x8 tile multiplication
-//   4. Register-only accumulation (simdgroup_matrix used for final storage)
-//
-// Thread-to-element mapping for 8x8 B tile (64 elements, 32 threads × 2):
-//   Lane i computes partial results for elements [i] and [i+32]
-//   Each element is dot product over K dimension
-//
-// Performance characteristics:
-//   - Dequant throughput: 4x (32 threads vs 8)
-//   - Memory bandwidth: Reduced (no staging buffer reads/writes)
-//   - Register pressure: Higher (full tile in registers per thread)
-//
-// ============================================================================
-
-/// Fully-fused dequant+accumulate: dequant and accumulate in registers.
-/// No staging buffer - values kept in registers throughout.
-inline void dequant_and_accumulate_2x(
-    device const uchar* packed_indices,
-    constant float* scales,
-    constant float* grid,
-    constant float* su,
-    thread const float* sv_cached,
-    uint tiles_n,
-    uint packed_bytes,
-    uint n_levels,
-    uint bits,
-    uint K,
-    uint N,
-    uint group_idx,
-    uint k_sub_base,
-    uint b_col_base,
-    uint simd_lane_id,
-    half a_vals[2][8],  // A[k][0-7] for this thread's rows
-    thread float acc[8]     // Accumulators for 8 output columns
-) {
-    // For each output column, compute C[row][col] += sum_k(A[row][k] * B[k][col])
-    #pragma unroll
-    for (uint col = 0; col < 8; ++col) {
-        uint b_col = b_col_base + col;
-        if (b_col >= N) {
-            acc[col] = 0.0f;
-            continue;
-        }
-
-        float sum0 = 0.0f;
-        float sum1 = 0.0f;
-
-        // Inner K-loop: dequant B[k][col] on-the-fly for each k
-        #pragma unroll
-        for (uint k = 0; k < 8; ++k) {
-            uint k_idx = k_sub_base + k;
-            if (k_idx >= K) continue;
-
-            // Dequantize B[k][col] in registers
-            uint trellis_tile_k = k_idx / TRELLIS_TILE_DIM;
-            uint trellis_tile_n = b_col / TRELLIS_TILE_DIM;
-            uint local_k = k_idx % TRELLIS_TILE_DIM;
-            uint local_n = b_col % TRELLIS_TILE_DIM;
-            uint tile_offset = (trellis_tile_k * tiles_n + trellis_tile_n) * packed_bytes;
-            uint idx_in_tile = local_n * TRELLIS_TILE_DIM + local_k;
-            uint trellis_idx = unpack_trellis_index(packed_indices + tile_offset, idx_in_tile, bits);
-            if (trellis_idx >= n_levels) trellis_idx = 0;
-
-            float scale = scales[group_idx * N + b_col];
-            float row_sign = su[b_col];
-            float col_sign = sv_cached[k];
-            float b_val = grid[trellis_idx] * scale * row_sign * col_sign;
-
-            // Accumulate immediately - B value stays in register only
-            sum0 += float(a_vals[0][k]) * b_val;
-            sum1 += float(a_vals[1][k]) * b_val;
-        }
-
-        acc[col] = sum0 + sum1;
-    }
-}
-
-
-
-kernel void gemm_trellis_fused_reg(
-    device const half* A               [[buffer(0)]],
-    device const uchar* packed_indices [[buffer(1)]],
-    constant float* scales         [[buffer(2)]],
-    constant float* grid           [[buffer(3)]],
-    constant float* su             [[buffer(4)]],
-    constant float* sv             [[buffer(5)]],
-    device half* C                     [[buffer(6)]],
-    constant uint& M                   [[buffer(7)]],
-    constant uint& K                   [[buffer(8)]],
-    constant uint& N                   [[buffer(9)]],
-    constant uint& bits                [[buffer(10)]],
-    constant uint& n_levels            [[buffer(11)]],
-    constant uint& group_size          [[buffer(12)]],
-    uint3 tgid                         [[threadgroup_position_in_grid]],
-    uint3 tid                          [[thread_position_in_threadgroup]],
-    uint simd_lane_id                  [[thread_index_in_simdgroup]],
-    uint simd_group_id                 [[simdgroup_index_in_threadgroup]]
-) {
-    const uint tg_row = tgid.y * TILE_M;
-    const uint tg_col = tgid.x * TILE_N;
-
-    if (tg_row >= M) return;
-
-    const uint sg_row_offset = (simd_group_id / 2) * 32;
-    const uint sg_col_offset = (simd_group_id % 2) * 32;
-
-    const uint num_k_tiles = (K + TILE_K - 1) / TILE_K;
-    const uint tiles_n = (N + TRELLIS_TILE_DIM - 1) / TRELLIS_TILE_DIM;
-    const uint packed_bytes = packed_bytes_per_trellis_tile(bits);
-
-    // -------------------------------------------------------------------------
-    // Initialize accumulators in registers (no simdgroup_matrix yet)
-    // Each thread accumulates for its assigned output tile
-    // -------------------------------------------------------------------------
-    thread float tile_acc[SG_M_TILES][SG_N_TILES][8];
-
-    #pragma unroll
-    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-        #pragma unroll
-        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-            #pragma unroll
-            for (uint col = 0; col < 8; ++col) {
-                tile_acc[mi][ni][col] = 0.0f;
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Main loop: Load A, dequant+accumulate B, all in registers
-    // -------------------------------------------------------------------------
-    for (uint kt = 0; kt < num_k_tiles; ++kt) {
-        uint k_block = kt * TILE_K;
-
-        #pragma unroll
-        for (uint kk = 0; kk < K_TILES; ++kk) {
-            uint k_sub_base = k_block + kk * 8;
-            uint group_idx = k_sub_base / group_size;
-
-            // Preload sv values for this K sub-tile
-            float sv_cached[8];
-            {
-                float my_sv = 0.0f;
-                if (simd_lane_id < 8) {
-                    uint k_idx = k_sub_base + simd_lane_id;
-                    my_sv = (k_idx < K) ? sv[k_idx] : 0.0f;
-                }
-                #pragma unroll
-                for (uint i = 0; i < 8; ++i) {
-                    sv_cached[i] = simd_shuffle(my_sv, i);
-                }
-            }
-
-            // Load A fragments for each M sub-tile
-            #pragma unroll
-            for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-                uint a_row_base = sg_row_offset + mi * 8;
-
-                half a_frag[2][8];
-                #pragma unroll
-                for (uint k = 0; k < 8; ++k) {
-                    uint k_idx = k_sub_base + k;
-                    #pragma unroll
-                    for (uint row = 0; row < 2; ++row) {
-                        uint global_row = tg_row + a_row_base + row;
-                        if (global_row < M && k_idx < K) {
-                            a_frag[row][k] = A[global_row * K + k_idx];
-                        } else {
-                            a_frag[row][k] = half(0.0h);
-                        }
-                    }
-                }
-
-                // Process each N sub-tile with fused dequant+accumulate
-                #pragma unroll
-                for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-                    uint b_col_base = tg_col + sg_col_offset + ni * 8;
-
-                    thread float col_acc[8];
-                    dequant_and_accumulate_2x(
-                        packed_indices, scales, grid, su, sv_cached,
-                        tiles_n, packed_bytes, n_levels, bits, K, N,
-                        group_idx, k_sub_base, b_col_base, simd_lane_id,
-                        a_frag, col_acc
-                    );
-
-                    #pragma unroll
-                    for (uint col = 0; col < 8; ++col) {
-                        tile_acc[mi][ni][col] += col_acc[col];
-                    }
-                }
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
-    // Epilogue: Store accumulated results to global memory
-    // -------------------------------------------------------------------------
-    #pragma unroll
-    for (uint mi = 0; mi < SG_M_TILES; ++mi) {
-        uint out_row_base = tg_row + sg_row_offset + mi * 8;
-
-        #pragma unroll
-        for (uint ni = 0; ni < SG_N_TILES; ++ni) {
-            uint out_col_base = tg_col + sg_col_offset + ni * 8;
-
-            // Write 8x8 output tile
-            for (uint elem = simd_lane_id; elem < 64; elem += 32) {
-                uint r = elem >> 3;
-                uint c = elem & 7;
-                uint global_row = out_row_base + r;
-                uint global_col = out_col_base + c;
-
-                if (global_row < M && global_col < N) {
-                    C[global_row * N + global_col] = half(tile_acc[mi][ni][c]);
-                }
-            }
-        }
-    }
-}
-
-// ============================================================================
 // INT8 Quantization Support for TrellisLinear
 // ============================================================================
 
@@ -1805,8 +1579,7 @@ kernel void gemm_trellis_fused_reg(
 /// Computes C[M,N] = A[M,K] @ dequant_int8(W[K,N]) where W is INT8-quantized.
 /// Weights are dequantized on-the-fly during the GEMM computation.
 ///
-/// This kernel uses the same architecture as gemm_trellis_fused_reg but replaces
-/// trellis codebook lookups with direct INT8 dequantization.
+/// This kernel uses register-only dequantization with direct INT8 lookups.
 ///
 /// @param A           Input activations [M, K] half (row-major)
 /// @param int8_weights  INT8 quantized weights [K, N] int8 (row-major, packed as uchar)
