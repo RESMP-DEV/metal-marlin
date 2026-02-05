@@ -21,13 +21,8 @@ from typing import Any
 import numpy as np
 import torch
 
-from ..metal_dispatch import (
-    HAS_METAL,
-    MetalKernelLibrary,
-    dispatch_kernel,
-    mps_tensor_to_metal_buffer,
-    require_mps,
-)
+from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary, dispatch_kernel,
+                              mps_tensor_to_metal_buffer, require_mps)
 
 if "metal_marlin.moe_dispatch" not in sys.modules:
     from metal_marlin import moe_dispatch as _parent_moe_dispatch
@@ -138,9 +133,12 @@ class BatchedDispatcher:
         batch_size = activations.shape[0]
 
         # Get buffers from pool
-        activations_buf = buffer_pool.get_activation_buffer(batch_size, activations)
-        expert_ids_buf = buffer_pool.get_expert_ids_buffer(batch_size, top_k, expert_ids)
-        expert_probs_buf = buffer_pool.get_expert_probs_buffer(batch_size, top_k, expert_probs)
+        activations_buf = buffer_pool.get_activation_buffer(
+            batch_size, activations)
+        expert_ids_buf = buffer_pool.get_expert_ids_buffer(
+            batch_size, top_k, expert_ids)
+        expert_probs_buf = buffer_pool.get_expert_probs_buffer(
+            batch_size, top_k, expert_probs)
 
         # Get output buffers
         output_fp32, output_buf = buffer_pool.get_output_buffer(batch_size)
@@ -239,7 +237,8 @@ class BatchedDispatcher:
             # Dispatch this expert's GEMM
             grid_size = Metal.MTLSizeMake(*dispatch.grid)
             tg_size = Metal.MTLSizeMake(*dispatch.threadgroup)
-            encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+            encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+                grid_size, tg_size)
 
             encoder.endEncoding()
 
@@ -452,16 +451,20 @@ class MoEBufferPool:
         self.device = device
         self.hidden_dim = hidden_dim
         self.max_batch = max_batch
-        self._top_k_values = top_k_values if top_k_values is not None else (self.DEFAULT_TOP_K,)
+        self._top_k_values = top_k_values if top_k_values is not None else (
+            self.DEFAULT_TOP_K,)
         self.enable_metrics = enable_metrics
 
         # Separate pools for each buffer type
         self._activation_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
-        self._expert_ids_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
-        self._expert_probs_buffers: dict[tuple[int, int], tuple[torch.Tensor, Any]] = {}
+        self._expert_ids_buffers: dict[tuple[int,
+                                             int], tuple[torch.Tensor, Any]] = {}
+        self._expert_probs_buffers: dict[tuple[int,
+                                               int], tuple[torch.Tensor, Any]] = {}
         self._output_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
         self._output_fp16_buffers: dict[int, torch.Tensor] = {}
-        self._params_buffers: dict[tuple[int, int, int, int, int, int], Any] = {}
+        self._params_buffers: dict[tuple[int,
+                                         int, int, int, int, int], Any] = {}
 
         # Metrics tracking (only when enable_metrics=True)
         self._hits = 0
@@ -475,7 +478,8 @@ class MoEBufferPool:
 
     def _preallocate_all(self) -> None:
         """Preallocate buffers for all standard batch sizes and top_k values."""
-        batch_sizes = [b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
+        batch_sizes = [
+            b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
 
         for batch_size in batch_sizes:
             # Preallocate activation buffers
@@ -493,7 +497,8 @@ class MoEBufferPool:
         """Preallocate activation buffer for given batch size."""
         if batch_size in self._activation_buffers:
             return
-        act_tensor = torch.zeros(batch_size, self.hidden_dim, dtype=torch.float16, device="mps")
+        act_tensor = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float16, device="mps")
         act_buf = mps_tensor_to_metal_buffer(act_tensor, self.device)
         self._activation_buffers[batch_size] = (act_tensor, act_buf)
 
@@ -501,8 +506,10 @@ class MoEBufferPool:
         """Preallocate fp32 and fp16 output buffers for given batch size."""
         if batch_size in self._output_buffers:
             return
-        out_tensor = torch.zeros(batch_size, self.hidden_dim, dtype=torch.float32, device="mps")
-        out_buf = mps_tensor_to_metal_buffer(out_tensor, self.device, copy_back=True)
+        out_tensor = torch.zeros(
+            batch_size, self.hidden_dim, dtype=torch.float32, device="mps")
+        out_buf = mps_tensor_to_metal_buffer(
+            out_tensor, self.device, copy_back=True)
         self._output_buffers[batch_size] = (out_tensor, out_buf)
 
         # Pre-allocate fp16 output buffer for fast conversion
@@ -515,7 +522,8 @@ class MoEBufferPool:
         key = (batch_size, top_k)
         if key in self._expert_ids_buffers:
             return
-        tensor = torch.zeros(batch_size, top_k, dtype=torch.int32, device="mps")
+        tensor = torch.zeros(
+            batch_size, top_k, dtype=torch.int32, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device)
         self._expert_ids_buffers[key] = (tensor, buf)
 
@@ -524,7 +532,8 @@ class MoEBufferPool:
         key = (batch_size, top_k)
         if key in self._expert_probs_buffers:
             return
-        tensor = torch.zeros(batch_size, top_k, dtype=torch.float16, device="mps")
+        tensor = torch.zeros(
+            batch_size, top_k, dtype=torch.float16, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device)
         self._expert_probs_buffers[key] = (tensor, buf)
 
@@ -542,7 +551,8 @@ class MoEBufferPool:
     def get_expert_ids_buffer(self, batch_size: int, top_k: int, expert_ids: torch.Tensor) -> Any:
         key = (batch_size, top_k)
         if key not in self._expert_ids_buffers:
-            tensor = torch.zeros(batch_size, top_k, dtype=torch.int32, device="mps")
+            tensor = torch.zeros(
+                batch_size, top_k, dtype=torch.int32, device="mps")
             buf = mps_tensor_to_metal_buffer(tensor, self.device)
             self._expert_ids_buffers[key] = (tensor, buf)
         tensor, buf = self._expert_ids_buffers[key]
@@ -554,7 +564,8 @@ class MoEBufferPool:
     ) -> Any:
         key = (batch_size, top_k)
         if key not in self._expert_probs_buffers:
-            tensor = torch.zeros(batch_size, top_k, dtype=torch.float16, device="mps")
+            tensor = torch.zeros(
+                batch_size, top_k, dtype=torch.float16, device="mps")
             buf = mps_tensor_to_metal_buffer(tensor, self.device)
             self._expert_probs_buffers[key] = (tensor, buf)
         tensor, buf = self._expert_probs_buffers[key]
@@ -570,7 +581,8 @@ class MoEBufferPool:
             tensor, buf = self._output_buffers[batch_size]
             tensor.zero_()
             return tensor, buf
-        tensor = torch.zeros(batch_size, self.hidden_dim, dtype=torch.float32, device="mps")
+        tensor = torch.zeros(batch_size, self.hidden_dim,
+                             dtype=torch.float32, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         return tensor, buf
 
@@ -595,7 +607,8 @@ class MoEBufferPool:
             batch_sizes: Optional list of batch sizes. Defaults to standard sizes.
         """
         if batch_sizes is None:
-            batch_sizes = [b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
+            batch_sizes = [
+                b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
         for bs in batch_sizes:
             self._preallocate_expert_ids(bs, top_k)
             self._preallocate_expert_probs(bs, top_k)
@@ -607,14 +620,29 @@ class MoEBufferPool:
         intermediate_dim: int,
         num_experts: int,
         top_k: int,
-        bits: int,
+        bits: int | tuple[int, int, int],
     ) -> Any:
-        """Get or create a cached params buffer for the given parameters."""
-        key = (batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits)
+        """Get or create a cached params buffer for the given parameters.
+
+        Args:
+            bits: Either uniform bits (int) or per-projection (gate, up, down) tuple.
+        """
+        # Handle per-projection bits
+        if isinstance(bits, tuple):
+            gate_bits, up_bits, down_bits = bits
+        else:
+            gate_bits = up_bits = down_bits = bits
+
+        key = (batch_size, hidden_dim, intermediate_dim,
+               num_experts, top_k, gate_bits, up_bits, down_bits)
         if key not in self._params_buffers:
-            n_levels = 1 << bits
+            # Metal struct: batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
+            #               gate_bits, up_bits, down_bits, tile_size,
+            #               gate_n_levels, up_n_levels, down_n_levels
             params_data = np.array(
-                [batch_size, hidden_dim, intermediate_dim, num_experts, top_k, bits, 128, n_levels],
+                [batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
+                 gate_bits, up_bits, down_bits, 128,
+                 1 << gate_bits, 1 << up_bits, 1 << down_bits],
                 dtype=np.uint32,
             )
             self._params_buffers[key] = self.device.newBufferWithBytes_length_options_(
@@ -629,28 +657,6 @@ class MoEBufferPool:
         self._output_buffers.clear()
         self._output_fp16_buffers.clear()
         self._params_buffers.clear()
-
-
-def get_buffer_stats() -> dict[str, int]:
-    """Get buffer caching statistics for debugging.
-
-    DEPRECATED: Stats tracking removed from hot path for performance.
-    Returns zeros for backward compatibility.
-    """
-    return {
-        "dispatch_calls": 0,
-        "cache_hits": 0,
-        "cache_misses": 0,
-    }
-
-
-def reset_buffer_stats() -> None:
-    """Reset buffer caching statistics.
-
-    DEPRECATED: Stats tracking removed from hot path for performance.
-    No-op for backward compatibility.
-    """
-    pass
 
 
 def select_moe_kernel(batch_size: int, use_fp32_acc: bool) -> tuple[str, int]:
@@ -762,7 +768,8 @@ def dispatch_moe_trellis_swiglu_batched(
         cached_temp = cached_buffers
 
     # Output accumulator for scattering
-    output_accum = torch.zeros(batch_size, hidden_dim, dtype=torch.float16, device="mps")
+    output_accum = torch.zeros(
+        batch_size, hidden_dim, dtype=torch.float16, device="mps")
 
     # OPTIMIZATION: Use single encoder for all expert dispatches
     # Previous: 1 encoder per expert = num_experts encoders (30+ for large models)
@@ -793,7 +800,8 @@ def dispatch_moe_trellis_swiglu_batched(
         expert_output_fp32 = torch.zeros(
             expert_batch_size, hidden_dim, dtype=torch.float32, device="mps"
         )
-        expert_output_buf = mps_tensor_to_metal_buffer(expert_output_fp32, device, copy_back=True)
+        expert_output_buf = mps_tensor_to_metal_buffer(
+            expert_output_fp32, device, copy_back=True)
 
         # Create temp tensors for unused inputs (ids/probs are not used in kernel for batched mode)
         # We set top_k=1 for the kernel dispatch, so we need (N, 1) tensors
@@ -824,7 +832,8 @@ def dispatch_moe_trellis_swiglu_batched(
         )
 
         # Select kernel for this batch size
-        kernel_name, tile_n = select_moe_kernel(expert_batch_size, use_fp32_acc)
+        kernel_name, tile_n = select_moe_kernel(
+            expert_batch_size, use_fp32_acc)
         pipeline = lib.get_pipeline(kernel_name)
 
         # Compute grid
@@ -882,7 +891,8 @@ def dispatch_moe_trellis_swiglu_batched(
             buffer_list.append(b)
 
         # Keep everything alive
-        keep_alive.append((expert_acts, expert_output_fp32, temp_ids, temp_probs, buffer_list, pipeline))
+        keep_alive.append((expert_acts, expert_output_fp32,
+                          temp_ids, temp_probs, buffer_list, pipeline))
 
         # Reuse single encoder - just update pipeline state and buffers for this expert
         encoder.setComputePipelineState_(pipeline)
@@ -911,12 +921,14 @@ def dispatch_moe_trellis_swiglu_batched(
         expert_slot_indices = dispatch_info.sorted_expert_indices[start_idx:end_idx]
 
         # Weight outputs by expert_probs
-        probs_for_expert = expert_probs[expert_token_indices, expert_slot_indices]
+        probs_for_expert = expert_probs[expert_token_indices,
+                                        expert_slot_indices]
         expert_output_fp16 = expert_output_fp32.half()
         weighted_outputs = expert_output_fp16 * probs_for_expert.unsqueeze(1)
 
         # Scatter to accumulator
-        output_accum.index_add_(0, expert_token_indices.long(), weighted_outputs)
+        output_accum.index_add_(
+            0, expert_token_indices.long(), weighted_outputs)
 
     return output_accum
 
@@ -943,7 +955,7 @@ def dispatch_moe_trellis_swiglu(
     intermediate_dim: int,
     num_experts: int,
     top_k: int,
-    bits: int,
+    bits: int | tuple[int, int, int],
     *,
     cached_buffers: CachedWeightBuffers | None = None,
     buffer_pool: MoEBufferPool | None = None,
@@ -956,6 +968,9 @@ def dispatch_moe_trellis_swiglu(
     2. Create activation buffer (minimal)
     3. Dispatch kernel
     4. Return result
+
+    Args:
+        bits: Either uniform bit width (int) or per-projection (gate, up, down) tuple.
 
     No validation between steps for maximum performance.
 
@@ -986,7 +1001,8 @@ def dispatch_moe_trellis_swiglu(
     if buffer_pool is not None:
         # Buffer pool handles the copy internally, avoiding intermediate allocations
         # NOTE: Use n (expanded batch) for activation buffer size
-        activations_buf = buffer_pool.get_activation_buffer(n, activations_sorted)
+        activations_buf = buffer_pool.get_activation_buffer(
+            n, activations_sorted)
 
         # Get expert buffers from pool
         # Reshape to (batch_size, top_k) to match pool's preallocated tensor shape
@@ -1004,9 +1020,11 @@ def dispatch_moe_trellis_swiglu(
         if expert_probs_sorted.dtype != torch.float16:
             expert_probs_sorted = expert_probs_sorted.half()
         expert_probs_sorted = expert_probs_sorted.contiguous()
-        activations_buf = mps_tensor_to_metal_buffer(activations_sorted, device)
+        activations_buf = mps_tensor_to_metal_buffer(
+            activations_sorted, device)
         expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids_sorted, device)
-        expert_probs_buf = mps_tensor_to_metal_buffer(expert_probs_sorted, device)
+        expert_probs_buf = mps_tensor_to_metal_buffer(
+            expert_probs_sorted, device)
 
     # Get cached weight buffers or create new ones
     if cached_buffers is not None:
@@ -1062,13 +1080,23 @@ def dispatch_moe_trellis_swiglu(
             n, hidden_dim, intermediate_dim, num_experts, 1, bits
         )
     else:
-        output_fp32 = torch.zeros(n, hidden_dim, dtype=torch.float32, device="mps")
-        output_buf = mps_tensor_to_metal_buffer(output_fp32, device, copy_back=True)
-        # Create params buffer (slow path)
-        n_levels = 1 << bits
+        output_fp32 = torch.zeros(
+            n, hidden_dim, dtype=torch.float32, device="mps")
+        output_buf = mps_tensor_to_metal_buffer(
+            output_fp32, device, copy_back=True)
+        # Create params buffer (slow path) with per-projection bits support
+        if isinstance(bits, tuple):
+            gate_bits, up_bits, down_bits = bits
+        else:
+            gate_bits = up_bits = down_bits = bits
         # NOTE: Pass n as batch_size and 1 as top_k
+        # Metal struct: batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
+        #               gate_bits, up_bits, down_bits, tile_size,
+        #               gate_n_levels, up_n_levels, down_n_levels
         params_data = np.array(
-            [n, hidden_dim, intermediate_dim, num_experts, 1, bits, 128, n_levels],
+            [n, hidden_dim, intermediate_dim, num_experts, 1,
+             gate_bits, up_bits, down_bits, 128,
+             1 << gate_bits, 1 << up_bits, 1 << down_bits],
             dtype=np.uint32,
         )
         params_buf = device.newBufferWithBytes_length_options_(
@@ -1136,7 +1164,8 @@ def dispatch_moe_trellis_swiglu(
         final_output = buffer_pool.get_output_fp16(batch_size)
         final_output.zero_()
     else:
-        final_output = torch.zeros(batch_size, hidden_dim, dtype=torch.float16, device="mps")
+        final_output = torch.zeros(
+            batch_size, hidden_dim, dtype=torch.float16, device="mps")
 
     # output_fp32 has shape [batch_size * top_k, hidden_dim]
     # We need to add output_fp32[i] to final_output[original_token_indices[i]]
@@ -1204,7 +1233,8 @@ class RouterBufferPool:
         self._preallocate_all()
 
     def _preallocate_all(self) -> None:
-        batch_sizes = [b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
+        batch_sizes = [
+            b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
         for batch_size in batch_sizes:
             self._preallocate_hidden(batch_size)
             self._preallocate_expert_ids(batch_size)
@@ -1213,21 +1243,24 @@ class RouterBufferPool:
     def _preallocate_hidden(self, batch_size: int) -> None:
         if batch_size in self._hidden_buffers:
             return
-        tensor = torch.zeros(batch_size, self.hidden_dim, dtype=torch.float16, device="mps")
+        tensor = torch.zeros(batch_size, self.hidden_dim,
+                             dtype=torch.float16, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device)
         self._hidden_buffers[batch_size] = (tensor, buf)
 
     def _preallocate_expert_ids(self, batch_size: int) -> None:
         if batch_size in self._expert_ids_buffers:
             return
-        tensor = torch.zeros(batch_size, self.top_k, dtype=torch.uint32, device="mps")
+        tensor = torch.zeros(batch_size, self.top_k,
+                             dtype=torch.uint32, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         self._expert_ids_buffers[batch_size] = (tensor, buf)
 
     def _preallocate_expert_probs(self, batch_size: int) -> None:
         if batch_size in self._expert_probs_buffers:
             return
-        tensor = torch.zeros(batch_size, self.top_k, dtype=torch.float16, device="mps")
+        tensor = torch.zeros(batch_size, self.top_k,
+                             dtype=torch.float16, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         self._expert_probs_buffers[batch_size] = (tensor, buf)
 
@@ -1244,7 +1277,8 @@ class RouterBufferPool:
         if batch_size in self._expert_ids_buffers:
             tensor, buf = self._expert_ids_buffers[batch_size]
             return tensor, buf
-        tensor = torch.zeros(batch_size, self.top_k, dtype=torch.uint32, device="mps")
+        tensor = torch.zeros(batch_size, self.top_k,
+                             dtype=torch.uint32, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         return tensor, buf
 
@@ -1253,7 +1287,8 @@ class RouterBufferPool:
         if batch_size in self._expert_probs_buffers:
             tensor, buf = self._expert_probs_buffers[batch_size]
             return tensor, buf
-        tensor = torch.zeros(batch_size, self.top_k, dtype=torch.float16, device="mps")
+        tensor = torch.zeros(batch_size, self.top_k,
+                             dtype=torch.float16, device="mps")
         buf = mps_tensor_to_metal_buffer(tensor, self.device, copy_back=True)
         return tensor, buf
 
@@ -1263,7 +1298,8 @@ class RouterBufferPool:
         """Get or create params buffer."""
         key = (batch_size, hidden_dim, num_experts, top_k)
         if key not in self._params_buffers:
-            params_data = np.array([batch_size, hidden_dim, num_experts, top_k], dtype=np.uint32)
+            params_data = np.array(
+                [batch_size, hidden_dim, num_experts, top_k], dtype=np.uint32)
             self._params_buffers[key] = self.device.newBufferWithBytes_length_options_(
                 params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
             )
@@ -1371,21 +1407,31 @@ def dispatch_moe_router_fused(
             weights_col_major = router_weights.t().half().contiguous()
             router_buf = mps_tensor_to_metal_buffer(weights_col_major, device)
     else:
-        raise ValueError("Either router_weights or cached_router must be provided")
+        raise ValueError(
+            "Either router_weights or cached_router must be provided")
 
     # Get input/output buffers
     if router_pool is not None:
         hidden_buf = router_pool.get_hidden_buffer(batch_size, hidden)
-        expert_ids_tensor, expert_ids_buf = router_pool.get_expert_ids_output(batch_size)
-        expert_probs_tensor, expert_probs_buf = router_pool.get_expert_probs_output(batch_size)
-        params_buf = router_pool.get_params_buffer(batch_size, hidden_dim, num_experts, top_k)
+        expert_ids_tensor, expert_ids_buf = router_pool.get_expert_ids_output(
+            batch_size)
+        expert_probs_tensor, expert_probs_buf = router_pool.get_expert_probs_output(
+            batch_size)
+        params_buf = router_pool.get_params_buffer(
+            batch_size, hidden_dim, num_experts, top_k)
     else:
-        hidden_buf = mps_tensor_to_metal_buffer(hidden.half().contiguous(), device)
-        expert_ids_tensor = torch.zeros(batch_size, top_k, dtype=torch.uint32, device="mps")
-        expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids_tensor, device, copy_back=True)
-        expert_probs_tensor = torch.zeros(batch_size, top_k, dtype=torch.float16, device="mps")
-        expert_probs_buf = mps_tensor_to_metal_buffer(expert_probs_tensor, device, copy_back=True)
-        params_data = np.array([batch_size, hidden_dim, num_experts, top_k], dtype=np.uint32)
+        hidden_buf = mps_tensor_to_metal_buffer(
+            hidden.half().contiguous(), device)
+        expert_ids_tensor = torch.zeros(
+            batch_size, top_k, dtype=torch.uint32, device="mps")
+        expert_ids_buf = mps_tensor_to_metal_buffer(
+            expert_ids_tensor, device, copy_back=True)
+        expert_probs_tensor = torch.zeros(
+            batch_size, top_k, dtype=torch.float16, device="mps")
+        expert_probs_buf = mps_tensor_to_metal_buffer(
+            expert_probs_tensor, device, copy_back=True)
+        params_data = np.array(
+            [batch_size, hidden_dim, num_experts, top_k], dtype=np.uint32)
         params_buf = device.newBufferWithBytes_length_options_(
             params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
         )
@@ -1524,20 +1570,29 @@ def dispatch_moe_fused_router_sorted(
     router_buf = mps_tensor_to_metal_buffer(weights_coalesced, device)
 
     # Prepare output buffers
-    expert_offsets_tensor = torch.zeros(num_experts + 1, dtype=torch.uint32, device="mps")
-    expert_offsets_buf = mps_tensor_to_metal_buffer(expert_offsets_tensor, device, copy_back=True)
+    expert_offsets_tensor = torch.zeros(
+        num_experts + 1, dtype=torch.uint32, device="mps")
+    expert_offsets_buf = mps_tensor_to_metal_buffer(
+        expert_offsets_tensor, device, copy_back=True)
 
-    sorted_indices_tensor = torch.zeros(total_assignments, dtype=torch.uint32, device="mps")
-    sorted_indices_buf = mps_tensor_to_metal_buffer(sorted_indices_tensor, device, copy_back=True)
+    sorted_indices_tensor = torch.zeros(
+        total_assignments, dtype=torch.uint32, device="mps")
+    sorted_indices_buf = mps_tensor_to_metal_buffer(
+        sorted_indices_tensor, device, copy_back=True)
 
-    topk_expert_ids_tensor = torch.zeros(batch_size, top_k, dtype=torch.uint32, device="mps")
-    topk_expert_ids_buf = mps_tensor_to_metal_buffer(topk_expert_ids_tensor, device, copy_back=True)
+    topk_expert_ids_tensor = torch.zeros(
+        batch_size, top_k, dtype=torch.uint32, device="mps")
+    topk_expert_ids_buf = mps_tensor_to_metal_buffer(
+        topk_expert_ids_tensor, device, copy_back=True)
 
-    topk_probs_tensor = torch.zeros(batch_size, top_k, dtype=torch.float16, device="mps")
-    topk_probs_buf = mps_tensor_to_metal_buffer(topk_probs_tensor, device, copy_back=True)
+    topk_probs_tensor = torch.zeros(
+        batch_size, top_k, dtype=torch.float16, device="mps")
+    topk_probs_buf = mps_tensor_to_metal_buffer(
+        topk_probs_tensor, device, copy_back=True)
 
     # Create RouterParams struct
-    RouterParams = struct.Struct('IIII')  # batch_size, hidden_dim, num_experts, top_k (all uint32)
+    # batch_size, hidden_dim, num_experts, top_k (all uint32)
+    RouterParams = struct.Struct('IIII')
     params_data = RouterParams.pack(batch_size, hidden_dim, num_experts, top_k)
     params_buf = device.newBufferWithBytes_length_options_(
         params_data, params_data[1], Metal.MTLResourceStorageModeShared
@@ -1546,10 +1601,13 @@ def dispatch_moe_fused_router_sorted(
     # Dispatch the coalesced variant for best memory access pattern
     buffer_list = [
         hidden_buf,  # buffer(0): hidden [batch, hidden_dim]
-        router_buf,  # buffer(1): router_weights [num_experts, hidden_dim] TRANSPOSED
-        expert_offsets_buf,  # buffer(2): expert_offsets [num_experts + 1] output (atomic counters)
+        # buffer(1): router_weights [num_experts, hidden_dim] TRANSPOSED
+        router_buf,
+        # buffer(2): expert_offsets [num_experts + 1] output (atomic counters)
+        expert_offsets_buf,
         sorted_indices_buf,  # buffer(3): sorted_indices [batch * top_k] output
-        topk_expert_ids_buf,  # buffer(4): topk_expert_ids [batch, top_k] output
+        # buffer(4): topk_expert_ids [batch, top_k] output
+        topk_expert_ids_buf,
         topk_probs_buf,  # buffer(5): topk_probs [batch, top_k] output
         params_buf,  # buffer(6): RouterParams struct
     ]

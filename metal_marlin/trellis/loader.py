@@ -1,19 +1,33 @@
 """Loader for Trellis-quantized models.
 
-The Trellis format stores each layer in a separate directory with:
-- index.json: Metadata about the tensors in the layer
-- tensor_*.safetensors: Safetensors files containing the quantized weights
+Supports two storage formats:
+
+**v3 (HuggingFace-style shards)** - Preferred for CUDA-quantized models:
+    model_path/
+        config.json
+        model.safetensors.index.json  # Weight map
+        quantization_index.json        # Bits/MSE metadata
+        model-00001-of-XXXXX.safetensors
+        base_weights.safetensors       # Optional
+        tokenizer.json, tokenizer_config.json
+
+**v2 (Layer directories)** - Legacy format:
+    model_path/
+        layer_0000/
+            index.json
+            batch_*.safetensors (or tensor_*.safetensors)
+        layer_0001/
+            ...
+        base_weights.safetensors
 
 Each quantized weight is stored as four components:
-- {name}__indices: Packed uint8 (trellis_v2) or int16 (legacy) trellis indices
-- {name}__scales: float32 per-tile scales [n_groups, N]
+- {name}__indices: Packed uint8 trellis indices (with header byte for bits)
+- {name}__scales: float32 per-group scales [n_groups, N]
 - {name}__su: float32 row sign vector [K]
 - {name}__sv: float32 column sign vector [N]
 
-For packed indices (trellis_v2 format):
-- First byte is bits value (2-8)
-- Remaining bytes are bit-packed indices
-- Indices are kept in packed uint8 format for memory efficiency
+Format is auto-detected based on presence of model.safetensors.index.json (v3)
+or layer_*/ directories (v2).
 """
 
 from __future__ import annotations
@@ -65,6 +79,71 @@ class TrellisWeight:
         return self.original_shape[1]
 
 
+def detect_trellis_format(model_path: Path) -> str:
+    """Detect trellis model storage format.
+
+    Args:
+        model_path: Path to model directory
+
+    Returns:
+        "v3_hf_shards": HuggingFace-style sharded safetensors
+        "v2_layers": Layer-based directory structure
+        "unknown": Unrecognized format
+    """
+    model_path = Path(model_path)
+
+    # Check for HF-style shards (v3)
+    if (model_path / "model.safetensors.index.json").exists():
+        return "v3_hf_shards"
+
+    # Check for layer-based format (v2)
+    if any(d.name.startswith("layer_") for d in model_path.iterdir() if d.is_dir()):
+        return "v2_layers"
+
+    return "unknown"
+
+
+def _parse_hf_weight_map(index_path: Path) -> dict[str, str]:
+    """Parse HuggingFace model.safetensors.index.json.
+
+    Args:
+        index_path: Path to model.safetensors.index.json
+
+    Returns:
+        Dict mapping tensor names to shard filenames
+    """
+    with open(index_path) as f:
+        index = json.load(f)
+    return index.get("weight_map", {})
+
+
+def _parse_quantization_index(index_path: Path) -> dict[str, dict]:
+    """Parse CUDA quantizer's quantization_index.json for bits/MSE metadata.
+
+    Args:
+        index_path: Path to quantization_index.json
+
+    Returns:
+        Dict mapping tensor names to {"bits": int, "mse": float, "shape": tuple}
+    """
+    if not index_path.exists():
+        return {}
+
+    with open(index_path) as f:
+        index = json.load(f)
+
+    # Build lookup from layers list
+    tensor_info = {}
+    for layer in index.get("layers", []):
+        name = layer["name"]
+        tensor_info[name] = {
+            "bits": layer["bits"],
+            "mse": layer.get("mse", 0.0),
+            "shape": tuple(layer["shape"]),
+        }
+    return tensor_info
+
+
 class TrellisModelLoader:
     """Loader for Trellis-quantized models.
 
@@ -101,7 +180,56 @@ class TrellisModelLoader:
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
 
-        # Discover available layers
+        # Detect storage format
+        self._format: str = detect_trellis_format(self.model_path)
+
+        if self._format == "v3_hf_shards":
+            self._init_hf_shards()
+        elif self._format == "v2_layers":
+            self._init_layer_dirs()
+        else:
+            raise FileNotFoundError(
+                f"Unrecognized model format in {model_path}. "
+                "Expected model.safetensors.index.json (v3) or layer_*/ directories (v2)."
+            )
+
+    def _init_hf_shards(self) -> None:
+        """Initialize loader for HF-style sharded safetensors (v3 format)."""
+        # Parse weight map
+        index_path = self.model_path / "model.safetensors.index.json"
+        self._hf_weight_map = _parse_hf_weight_map(index_path)
+
+        # Parse quantization metadata
+        quant_index_path = self.model_path / "quantization_index.json"
+        self._quant_info = _parse_quantization_index(quant_index_path)
+
+        # Extract layer indices from tensor names
+        layer_set: set[int] = set()
+        for tensor_name in self._hf_weight_map.keys():
+            # Pattern: model.layers.{N}.* or model__layers__{N}__*
+            if "layers" in tensor_name:
+                parts = tensor_name.replace("__", ".").split(".")
+                for i, part in enumerate(parts):
+                    if part == "layers" and i + 1 < len(parts):
+                        try:
+                            layer_idx = int(parts[i + 1])
+                            layer_set.add(layer_idx)
+                        except ValueError:
+                            pass
+
+        self._layer_indices = sorted(layer_set)
+
+        if not self._layer_indices:
+            raise FileNotFoundError(
+                f"No layer tensors found in {self.model_path}. "
+                "Weight map doesn't contain model.layers.* tensors."
+            )
+
+        # Cache for layer metadata (compatibility with v2 API)
+        self._layer_metadata: dict[int, dict[str, Any]] = {}
+
+    def _init_layer_dirs(self) -> None:
+        """Initialize loader for layer-based directory structure (v2 format)."""
         self._layer_indices: list[int] = []
         for item in self.model_path.iterdir():
             if item.is_dir() and item.name.startswith("layer_"):
@@ -113,10 +241,15 @@ class TrellisModelLoader:
 
         self._layer_indices.sort()
         if not self._layer_indices:
-            raise FileNotFoundError(f"No layer directories found in {model_path}")
+            raise FileNotFoundError(
+                f"No layer directories found in {self.model_path}")
 
         # Cache for layer metadata
         self._layer_metadata: dict[int, dict[str, Any]] = {}
+
+        # v2 doesn't use these
+        self._hf_weight_map: dict[str, str] = {}
+        self._quant_info: dict[str, dict] = {}
 
     def _get_layer_path(self, layer_idx: int) -> Path:
         """Get the path to a layer directory."""
@@ -142,32 +275,6 @@ class TrellisModelLoader:
                  "model__layers__0__mlp__down_proj__weight"
         """
         return tensor_name.replace(".", "__")
-
-    def _detect_trellis_format(self, tensor_dict: dict) -> str:
-        """Detect trellis tensor format.
-
-        Returns:
-            "metal_marlin": Our format with __indices, __scales, __su, __sv
-            "exllamav3": ExllamaV3 format with .scale, .zero_point, etc.
-            "unknown": Unrecognized format
-        """
-        sample_keys = list(tensor_dict.keys())[:20]
-
-        # Our format
-        if any("__indices" in k for k in sample_keys):
-            return "metal_marlin"
-
-        # ExllamaV3 format
-        if any(".qweight" in k for k in sample_keys):
-            return "exllamav3_gptq"
-        if any(".scale" in k for k in sample_keys) and any(".zero_point" in k for k in sample_keys):
-            return "exllamav3_exl2"
-
-        # Check for trellis indices in different naming
-        if any("trellis" in k.lower() for k in sample_keys):
-            return "exllamav3_trellis"
-
-        return "unknown"
 
     def _get_base_weight_name(self, tensor_name: str) -> str:
         """Extract base weight name from tensor component name.
@@ -257,48 +364,86 @@ class TrellisModelLoader:
 
         return (K, N)
 
-    def _convert_exllamav3_trellis(
+    def _tensors_to_weights(
         self,
-        tensor_dict: dict,
+        all_tensors: dict[str, torch.Tensor],
         layer_idx: int,
     ) -> dict[str, TrellisWeight]:
-        """Convert ExllamaV3 trellis format to our format.
+        """Convert loaded tensors to TrellisWeight objects.
 
-        ExllamaV3 may use different naming:
-        - weight.indices instead of weight__indices
-        - Different scale/zero organization
+        Groups __indices, __scales, __su, __sv components into TrellisWeight.
         """
-        weights = {}
+        weights: dict[str, TrellisWeight] = {}
 
         # Group tensors by base weight name
-        weight_groups: dict[str, dict] = {}
-        for name, tensor in tensor_dict.items():
-            base_name = self._get_base_weight_name(name)
-            if base_name not in weight_groups:
-                weight_groups[base_name] = {}
+        weight_components: dict[str, dict[str, torch.Tensor]] = {}
+        for name, tensor in all_tensors.items():
+            # Extract base name and component
+            for suffix in ["__indices", "__scales", "__su", "__sv"]:
+                if name.endswith(suffix):
+                    base_name = name[: -len(suffix)]
+                    component = suffix[2:]  # Remove "__"
+                    weight_components.setdefault(base_name, {})[
+                        component] = tensor
+                    break
 
-            component = self._get_component_name(name)
-            weight_groups[base_name][component] = tensor
+        # Build TrellisWeight for each base weight
+        for base_name, components in weight_components.items():
+            if "indices" not in components:
+                continue
 
-        # Convert each weight
-        for base_name, components in weight_groups.items():
-            if "indices" in components:
-                indices = components["indices"]
-                # Ensure indices are in packed uint8 format
-                if indices.dtype != torch.uint8:
-                    raise ValueError(
-                        f"ExLlamaV3 format must be converted to packed uint8. "
-                        f"Got {indices.dtype} for {base_name}. "
-                        f"Use the metal_marlin packed format instead."
-                    )
-                weights[base_name] = TrellisWeight(
-                    packed_indices=indices,
-                    scales=components.get("scales", components.get("scale")),
-                    su=components.get("su", components.get("row_scale")),
-                    sv=components.get("sv", components.get("col_scale")),
-                    bits=self._infer_bits(indices),
-                    original_shape=self._infer_shape(components),
-                )
+            indices = components["indices"]
+            scales = components.get("scales")
+            su = components.get("su")
+            sv = components.get("sv")
+
+            if scales is None or su is None or sv is None:
+                continue
+
+            # Get metadata from quantization_index.json
+            # Convert underscore format to dot format
+            orig_name = base_name.replace("__", ".")
+            # Only add .weight suffix if not already present
+            if not orig_name.endswith(".weight"):
+                orig_name = orig_name + ".weight"
+            meta = self._quant_info.get(orig_name, {})
+            bits = meta.get("bits", 4)  # Default to 4-bit
+            shape = meta.get("shape", (su.shape[0], sv.shape[0]))
+
+            # Handle packed format (uint8 with header byte)
+            if indices.dtype == torch.uint8:
+                # Extract bits from header if present
+                if indices.numel() > 0:
+                    header_bits = int(indices.flatten()[0].item())
+                    if 2 <= header_bits <= 8:
+                        bits = header_bits
+
+                # Calculate expected shape and reshape
+                K, N = shape
+                tiles_k = (K + 15) // 16
+                tiles_n = (N + 15) // 16
+                packed_bytes_per_tile = (256 * bits + 7) // 8
+
+                # Strip header and reshape
+                packed_data = indices.flatten()[1:]
+                expected_size = tiles_k * tiles_n * packed_bytes_per_tile
+                if packed_data.numel() == expected_size:
+                    packed_indices = packed_data.reshape(
+                        tiles_k, tiles_n, packed_bytes_per_tile)
+                else:
+                    # Already reshaped or different format
+                    packed_indices = indices
+            else:
+                packed_indices = indices
+
+            weights[orig_name] = TrellisWeight(
+                packed_indices=packed_indices,
+                scales=scales,
+                su=su,
+                sv=sv,
+                bits=bits,
+                original_shape=tuple(shape),
+            )
 
         return weights
 
@@ -317,6 +462,37 @@ class TrellisModelLoader:
             tensor_files = sorted(layer_path.glob("batch_*.safetensors"))
         return tensor_files
 
+    def _load_layer_hf_shards(self, layer_idx: int) -> dict[str, TrellisWeight]:
+        """Load layer from HF-style sharded safetensors (v3 format)."""
+        prefix = f"model.layers.{layer_idx}."
+        alt_prefix = f"model__layers__{layer_idx}__"
+
+        # Find all tensors for this layer
+        layer_tensors: dict[str, str] = {}  # tensor_name -> shard_file
+        for name, shard in self._hf_weight_map.items():
+            if name.startswith(prefix) or name.startswith(alt_prefix):
+                layer_tensors[name] = shard
+
+        if not layer_tensors:
+            raise FileNotFoundError(f"No tensors found for layer {layer_idx}")
+
+        # Group by shard file for efficient loading
+        shards_to_load: dict[str, list[str]] = {}
+        for name, shard in layer_tensors.items():
+            shards_to_load.setdefault(shard, []).append(name)
+
+        # Load tensors
+        all_tensors: dict[str, torch.Tensor] = {}
+        for shard_file, tensor_names in shards_to_load.items():
+            shard_path = self.model_path / shard_file
+            with MmapSafetensorsLoader(shard_path) as loader:
+                for name in tensor_names:
+                    if name in loader.keys():
+                        all_tensors[name] = loader.get_tensor(name)
+
+        # Convert to TrellisWeight objects
+        return self._tensors_to_weights(all_tensors, layer_idx)
+
     def load_layer(self, layer_idx: int) -> dict[str, TrellisWeight]:
         """Load all weights for a single layer.
 
@@ -330,11 +506,15 @@ class TrellisModelLoader:
             FileNotFoundError: If the layer doesn't exist.
             ValueError: If a tensor is missing required components.
         """
+        if self._format == "v3_hf_shards":
+            return self._load_layer_hf_shards(layer_idx)
+
         metadata = self._load_layer_metadata(layer_idx)
         tensor_files = self._find_tensor_files(layer_idx)
 
         if not tensor_files:
-            raise FileNotFoundError(f"No tensor files found for layer {layer_idx}")
+            raise FileNotFoundError(
+                f"No tensor files found for layer {layer_idx}")
 
         # Load all tensors from all files using mmap
         all_tensors: dict[str, torch.Tensor] = {}
@@ -343,13 +523,6 @@ class TrellisModelLoader:
                 for name in loader.keys():
                     all_tensors[name] = loader.get_tensor(name)
 
-        # Detect format and route to appropriate loader
-        format_type = self._detect_trellis_format(all_tensors)
-
-        if format_type.startswith("exllamav3"):
-            return self._convert_exllamav3_trellis(all_tensors, layer_idx)
-
-        # metal_marlin format (default)
         return self._load_metal_marlin_format(all_tensors, metadata)
 
     def _load_metal_marlin_format(
@@ -380,13 +553,17 @@ class TrellisModelLoader:
             sv_key = f"{base_key}__sv"
 
             if indices_key not in all_tensors:
-                raise ValueError(f"Missing indices for tensor: {name} (key: {indices_key})")
+                raise ValueError(
+                    f"Missing indices for tensor: {name} (key: {indices_key})")
             if scales_key not in all_tensors:
-                raise ValueError(f"Missing scales for tensor: {name} (key: {scales_key})")
+                raise ValueError(
+                    f"Missing scales for tensor: {name} (key: {scales_key})")
             if su_key not in all_tensors:
-                raise ValueError(f"Missing su for tensor: {name} (key: {su_key})")
+                raise ValueError(
+                    f"Missing su for tensor: {name} (key: {su_key})")
             if sv_key not in all_tensors:
-                raise ValueError(f"Missing sv for tensor: {name} (key: {sv_key})")
+                raise ValueError(
+                    f"Missing sv for tensor: {name} (key: {sv_key})")
 
             indices_raw = all_tensors[indices_key]
             scales = all_tensors[scales_key]
@@ -417,7 +594,8 @@ class TrellisModelLoader:
                 # Strip header byte and reshape to [tiles_K, tiles_N, packed_bytes_per_tile]
                 # TrellisWeight convention: K=out_features, N=in_features
                 # This is stored as-is; model.py transposes when stacking for MoE kernel
-                packed_indices = indices_raw[1:].reshape(tiles_k, tiles_n, packed_bytes_per_tile)
+                packed_indices = indices_raw[1:].reshape(
+                    tiles_k, tiles_n, packed_bytes_per_tile)
             elif indices_raw.dtype == torch.int16:
                 # Legacy format: not supported for memory-efficient loading
                 raise ValueError(
@@ -430,11 +608,14 @@ class TrellisModelLoader:
 
             # Validate other dtypes
             if scales.dtype != torch.float32:
-                raise ValueError(f"Scales must be float32, got {scales.dtype} for {name}")
+                raise ValueError(
+                    f"Scales must be float32, got {scales.dtype} for {name}")
             if su.dtype != torch.float32:
-                raise ValueError(f"su must be float32, got {su.dtype} for {name}")
+                raise ValueError(
+                    f"su must be float32, got {su.dtype} for {name}")
             if sv.dtype != torch.float32:
-                raise ValueError(f"sv must be float32, got {sv.dtype} for {name}")
+                raise ValueError(
+                    f"sv must be float32, got {sv.dtype} for {name}")
 
             weights[name] = TrellisWeight(
                 packed_indices=packed_indices,
@@ -478,7 +659,8 @@ class TrellisModelLoader:
 
         # Try to get more info from first layer
         try:
-            first_layer_meta = self._load_layer_metadata(self._layer_indices[0])
+            first_layer_meta = self._load_layer_metadata(
+                self._layer_indices[0])
             tensors = first_layer_meta.get("tensors", [])
             if tensors:
                 # Infer hidden size from first tensor shape
@@ -583,6 +765,9 @@ class TrellisModelLoader:
         Returns:
             Dictionary mapping weight names to tensors.
         """
+        if self._format == "v3_hf_shards":
+            return self._load_base_weights_hf_shards(patterns)
+
         base_path = self.model_path / "base_weights.safetensors"
         if not base_path.exists():
             raise FileNotFoundError(f"Base weights not found: {base_path}")
@@ -603,6 +788,47 @@ class TrellisModelLoader:
         # Keep loader reference to prevent garbage collection during model load
         filtered["_mmap_loader"] = loader  # type: ignore[dict-item]
         return filtered
+
+    def _load_base_weights_hf_shards(
+        self, patterns: list[str] | None = None
+    ) -> dict[str, torch.Tensor]:
+        """Load base weights from HF-style shards."""
+        # First try dedicated base_weights.safetensors
+        base_path = self.model_path / "base_weights.safetensors"
+        if base_path.exists():
+            loader = MmapSafetensorsLoader(base_path, device="cpu")
+            if patterns is None:
+                return {name: loader.get_tensor(name) for name in loader.keys()}
+            return {
+                name: loader.get_tensor(name)
+                for name in loader.keys()
+                if any(p in name for p in patterns)
+            }
+
+        # Fall back to loading from shards
+        base_patterns = patterns or [
+            "embed_tokens",
+            "norm.weight",
+            "lm_head",
+            "input_layernorm",
+            "post_attention_layernorm",
+        ]
+
+        results: dict[str, torch.Tensor] = {}
+        shards_to_check: set[str] = set()
+
+        for name, shard in self._hf_weight_map.items():
+            if any(p in name for p in base_patterns):
+                shards_to_check.add(shard)
+
+        for shard_file in shards_to_check:
+            shard_path = self.model_path / shard_file
+            with MmapSafetensorsLoader(shard_path) as loader:
+                for name in loader.keys():
+                    if any(p in name for p in base_patterns):
+                        results[name] = loader.get_tensor(name)
+
+        return results
 
     def load_layernorm_weights(self, layer_idx: int) -> dict[str, torch.Tensor]:
         """Load layernorm weights for a specific layer.
@@ -635,7 +861,7 @@ class TrellisModelLoader:
         for name, tensor in base_weights.items():
             if name.startswith(prefix):
                 # Strip prefix to get relative name
-                rel_name = name[len(prefix) :]
+                rel_name = name[len(prefix):]
                 layer_weights[rel_name] = tensor
 
         return layer_weights

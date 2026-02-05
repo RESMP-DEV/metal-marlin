@@ -17,7 +17,10 @@
             "Metal",
             "-lobjc"
         ],
-        "include_dirs": [],
+        "include_dirs": [
+            "/Users/kearm/AlphaHENG/contrib/metal_marlin/metal_marlin",
+            "/Users/kearm/.cache/uv/builds-v0/.tmpatkmVk/lib/python3.12/site-packages/numpy/_core/include"
+        ],
         "language": "c",
         "name": "metal_marlin._metal_buffer_bridge",
         "sources": [

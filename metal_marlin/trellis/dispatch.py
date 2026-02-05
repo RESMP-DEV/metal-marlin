@@ -56,7 +56,7 @@ def dispatch_trellis_dequant(
 
     Args:
         lib: MetalKernelLibrary with dequant_trellis compiled
-        indices: Trellis indices [tiles_k, tiles_n, 256] int16, MPS tensor
+        indices: Trellis indices [tiles_k, tiles_n, 256] uint8, MPS tensor
         scales: Per-group scales [n_groups, N] float32, MPS tensor
         grid: Codebook grid [n_levels] float32, MPS tensor
         K: Number of rows in output
@@ -193,7 +193,7 @@ def dispatch_trellis_dequant_fused(
 
     Args:
         lib: MetalKernelLibrary with dequant_trellis compiled
-        indices: Trellis indices [tiles_k, tiles_n, 256] int16, MPS tensor
+        indices: Trellis indices [tiles_k, tiles_n, 256] uint8, MPS tensor
         scales: Per-group scales [n_groups, N] float32, MPS tensor
         grid: Codebook grid [n_levels] float32, MPS tensor
         su: Row sign vector [K] float32, MPS tensor

@@ -26,10 +26,8 @@ if HAS_TORCH:
     import torch.nn.functional as F
 
     from metal_marlin.inference_metal import (
-        MetalAttention,
         MetalKVCache,
         MetalKVCacheConfig,
-        MetalMLP,
         MetalQuantizedLinear,
         MetalRMSNorm,
         MetalRoPE,
@@ -343,49 +341,6 @@ class TestMetalRoPE:
 
         # Different rope_ratio should produce different outputs
         assert not torch.allclose(out1, out2)
-
-
-# ---------------------------------------------------------------------------
-# MetalMLP Tests
-# ---------------------------------------------------------------------------
-
-
-class TestMetalMLP:
-    """Tests for Metal gated MLP."""
-
-    @pytest.mark.smoke
-    @requires_metal_kernels
-    def test_mlp_shape(self):
-        """Test MLP output shape."""
-        mlp = MetalMLP(
-            hidden_size=256,
-            intermediate_size=512,
-            bits=4,
-            group_size=128,
-        )
-
-        x = torch.randn(4, 8, 256, device="mps", dtype=torch.float16)
-        out = mlp(x)
-
-        assert out.shape == x.shape
-
-    @requires_metal_kernels
-    def test_mlp_activations(self):
-        """Test different activation functions."""
-        for activation in ["silu", "gelu", "relu"]:
-            mlp = MetalMLP(
-                hidden_size=256,
-                intermediate_size=512,
-                bits=4,
-                group_size=128,
-                activation=activation,
-            )
-
-            x = torch.randn(2, 4, 256, device="mps", dtype=torch.float16)
-            out = mlp(x)
-
-            assert out.shape == x.shape
-            assert not torch.isnan(out).any()
 
 
 # ---------------------------------------------------------------------------

@@ -21,13 +21,11 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-
 # Import GLM's RoPE from transformers
 from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb
 
 from ..attention import scaled_dot_product_attention_metal
 from ..fused_attention_mps import fused_attention  # noqa: F401
-from ..kv_cache import KVCache
 from .dispatch import dispatch_fused_qkv_trellis
 from .kv_cache import TrellisKVCache
 from .linear import TrellisLinear
@@ -117,8 +115,10 @@ class TrellisMLAttention(nn.Module):
         self.qk_head_dim = config.qk_head_dim
 
         # GLM's rotary embedding - use actual HF config class
-        from transformers.models.glm4_moe.configuration_glm4_moe import Glm4MoeConfig
-        from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeRotaryEmbedding
+        from transformers.models.glm4_moe.configuration_glm4_moe import \
+            Glm4MoeConfig
+        from transformers.models.glm4_moe.modeling_glm4_moe import \
+            Glm4MoeRotaryEmbedding
 
         rope_config = Glm4MoeConfig(
             hidden_size=config.hidden_size,
@@ -169,7 +169,7 @@ class TrellisMLAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.Tensor | None = None,
-        kv_cache: KVCache | TrellisKVCache | None = None,
+        kv_cache: TrellisKVCache | None = None,
         layer_idx: int = 0,
         rope_cos: torch.Tensor | None = None,
         rope_sin: torch.Tensor | None = None,
@@ -186,7 +186,6 @@ class TrellisMLAttention(nn.Module):
             attention_mask: Optional attention mask
             position_ids: Optional position IDs for RoPE
             kv_cache: TrellisKVCache for MLA caching (stores compressed KV)
-                      or KVCache for legacy caching (stores decompressed KV)
             layer_idx: Layer index for KV cache
             rope_cos: Precomputed RoPE cos values [1, 1, seq_len, rope_dim//2].
                       If provided, skips on-the-fly RoPE computation.
@@ -203,31 +202,53 @@ class TrellisMLAttention(nn.Module):
         can_fuse = (
             is_decode and
             self.q_a_proj is not None and isinstance(self.q_a_proj, TrellisLinear) and
-            isinstance(self.kv_a_proj, TrellisLinear)
+            isinstance(self.kv_a_proj, TrellisLinear) and
+            # Fused kernel requires same bit width for all projections
+            self.q_a_proj.bits == self.kv_a_proj.bits
         )
 
         if can_fuse:
             q_compressed, compressed_kv = self._fused_qkv_forward(
                 hidden_states)
+            # Ensure 3D shape for fused output
+            if q_compressed.dim() == 2:
+                q_compressed = q_compressed.unsqueeze(0)
+            if compressed_kv.dim() == 2:
+                compressed_kv = compressed_kv.unsqueeze(0)
 
             # Finish Q path
             if self.q_a_layernorm is not None:
                 q_compressed = self.q_a_layernorm(q_compressed)
             q = self.q_b_proj(q_compressed)
+            # Ensure 3D shape
+            if q.dim() == 2:
+                q = q.unsqueeze(0)
         else:
             # === Query Projection (Low-rank MLA) ===
             # hidden -> q_a_proj -> layernorm -> q_b_proj -> Q
             if self.q_a_proj is not None and self.q_b_proj is not None:
                 q_compressed = self.q_a_proj(hidden_states)
+                # Ensure 3D shape: [batch, seq, dim]
+                if q_compressed.dim() == 2:
+                    q_compressed = q_compressed.unsqueeze(0)
                 if self.q_a_layernorm is not None:
                     q_compressed = self.q_a_layernorm(q_compressed)
                 q = self.q_b_proj(q_compressed)
+                # Ensure 3D shape: [batch, seq, dim]
+                if q.dim() == 2:
+                    q = q.unsqueeze(0)
             else:
                 raise ValueError("GLM MLA requires q_a_proj and q_b_proj")
 
             # === KV Compression (with MQA rope component) ===
             # hidden -> kv_a_proj -> [latent, k_rope]
             compressed_kv = self.kv_a_proj(hidden_states)
+            # Ensure 3D shape for KV cache: [batch, seq, kv_dim]
+            if compressed_kv.dim() == 2:
+                compressed_kv = compressed_kv.unsqueeze(0)
+            # Debug: verify shape
+            assert compressed_kv.dim(
+            ) == 3, f"compressed_kv must be 3D, got {compressed_kv.shape}"
 
         # Reshape Q: [batch, seq, num_heads * qk_head_dim] -> [batch, num_heads, seq, qk_head_dim]
         q = q.view(batch_size, seq_len, self.num_heads,
@@ -298,15 +319,17 @@ class TrellisMLAttention(nn.Module):
             if rope_cos is not None and rope_sin is not None:
                 # Fast path: slice from precomputed cache
                 # rope_cos/rope_sin shape: [1, 1, max_seq_len, rope_dim]
-                # Extract: [batch, total_seq, rope_dim] - apply_rotary_pos_emb will unsqueeze
+                # After squeeze: [max_seq_len, rope_dim]
+                # Index with position_ids: [batch, total_seq, rope_dim]
                 cos_full = rope_cos.squeeze(0).squeeze(0)[position_ids_full]
                 sin_full = rope_sin.squeeze(0).squeeze(0)[position_ids_full]
                 # Cast cos/sin to q_rope dtype to avoid float16+bfloat16->float32 promotion
                 cos_full = cos_full.to(q_rope.dtype)
                 sin_full = sin_full.to(q_rope.dtype)
                 # For Q, we only need the last seq_len positions
-                cos_q = cos_full[:, -seq_len:, :, :]
-                sin_q = sin_full[:, -seq_len:, :, :]
+                # cos_full is [batch, total_seq, rope_dim] (3D)
+                cos_q = cos_full[:, -seq_len:, :]
+                sin_q = sin_full[:, -seq_len:, :]
                 q_rope, _ = apply_rotary_pos_emb(q_rope, q_rope, cos_q, sin_q)
                 _, k_rope_for_attn = apply_rotary_pos_emb(
                     k_rope_for_attn, k_rope_for_attn, cos_full, sin_full
@@ -334,7 +357,12 @@ class TrellisMLAttention(nn.Module):
             k = torch.cat([k_nope, k_rope_for_attn], dim=-1)
 
         else:
-            # Legacy path: standard KVCache that stores decompressed K,V
+            if kv_cache is not None:
+                raise ValueError(
+                    "TrellisMLAttention requires kv_cache to be TrellisKVCache or None."
+                )
+
+            # No cache path (standard inference)
             # Split current tokens into latent and rope components
             k_latent, k_rope = torch.split(
                 compressed_kv, [self.kv_lora_rank,
@@ -350,7 +378,10 @@ class TrellisMLAttention(nn.Module):
 
             # Reshape: [batch, seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, seq, nope + v]
             kv_decompressed = kv_decompressed.view(
-                batch_size, seq_len, self.num_kv_heads, self.qk_nope_head_dim + self.v_head_dim
+                batch_size,
+                seq_len,
+                self.num_kv_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
             ).transpose(1, 2)
 
             # Split into k_nope and V
@@ -364,7 +395,7 @@ class TrellisMLAttention(nn.Module):
 
             # === Apply RoPE ===
             if position_ids is None:
-                offset = kv_cache.seq_len if kv_cache else 0
+                offset = 0
                 position_ids = torch.arange(
                     offset, offset + seq_len, device=hidden_states.device
                 ).unsqueeze(0)
@@ -390,15 +421,11 @@ class TrellisMLAttention(nn.Module):
 
             # Expand k_rope to match num_kv_heads
             k_rope = k_rope.expand(
-                batch_size, self.num_kv_heads, seq_len, self.qk_rope_head_dim)
+                batch_size, self.num_kv_heads, seq_len, self.qk_rope_head_dim
+            )
 
             # Concatenate to form K
             k = torch.cat([k_nope, k_rope], dim=-1)
-
-            # === Legacy KV Cache Update ===
-            if kv_cache is not None:
-                k, v = kv_cache.update(layer_idx, k, v)
-                kv_cache.advance(seq_len)
 
         # Concatenate Q
         q = torch.cat([q_nope, q_rope], dim=-1)

@@ -6,7 +6,6 @@ PyTorch MPS tensors with custom Metal compute kernels for quantized GEMM operati
 
 Key components:
     - MetalQuantizedLinear: FP4/INT2/FP8 quantized linear with Metal GEMM kernels
-    - MetalAttention: Flash attention using Metal dispatch
     - MetalMoELayer: Mixture of Experts with batched expert dispatch
     - MetalTransformerBlock: Full transformer block with pre-norm architecture
 
@@ -19,7 +18,6 @@ Requirements:
 from __future__ import annotations
 
 import math
-import warnings
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -573,253 +571,6 @@ class MetalKVCache:
 
 
 # ---------------------------------------------------------------------------
-# MetalAttention
-# ---------------------------------------------------------------------------
-
-
-class MetalAttention(nn.Module):
-    """
-    DEPRECATED: Attention implementations should come from Transformers.
-
-    Metal Marlin's value is in MetalQuantizedLinear, not attention patterns.
-    The attention mechanism (how Q, K, V interact) is architecture-specific
-    and already implemented correctly in Transformers.
-
-    What we optimize:
-    - Q/K/V projections: nn.Linear -> MetalQuantizedLinear
-    - Output projection: nn.Linear -> MetalQuantizedLinear
-
-    What Transformers handles:
-    - Attention pattern (standard, sliding window, MLA, etc.)
-    - Position embeddings (RoPE, ALiBi, etc.)
-    - KV cache management
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int | None = None,
-        head_dim: int | None = None,
-        bits: Literal[2, 4, 8] = 4,
-        group_size: int = 128,
-        rope_theta: float = 10000.0,
-        rope_ratio: float = 1.0,
-        max_position_embeddings: int = 4096,
-        bias: bool = False,
-        warn_if_standalone: bool = True,
-    ):
-        if warn_if_standalone:
-            warnings.warn(
-                "MetalAttention is deprecated. Model architecture should come from "
-                "Transformers. Use replace_linear_layers() to quantize projections.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        super().__init__()
-        require_mps()
-
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads or num_heads
-        self.head_dim = head_dim or (hidden_size // num_heads)
-        self.scale = self.head_dim**-0.5
-
-        # Quantized projections
-        self.q_proj = MetalQuantizedLinear(
-            hidden_size,
-            num_heads * self.head_dim,
-            bits=bits,
-            group_size=group_size,
-            bias=bias,
-        )
-        self.k_proj = MetalQuantizedLinear(
-            hidden_size,
-            self.num_kv_heads * self.head_dim,
-            bits=bits,
-            group_size=group_size,
-            bias=bias,
-        )
-        self.v_proj = MetalQuantizedLinear(
-            hidden_size,
-            self.num_kv_heads * self.head_dim,
-            bits=bits,
-            group_size=group_size,
-            bias=bias,
-        )
-        self.o_proj = MetalQuantizedLinear(
-            num_heads * self.head_dim,
-            hidden_size,
-            bits=bits,
-            group_size=group_size,
-            bias=bias,
-        )
-
-        # RoPE
-        self.rope = MetalRoPE(
-            dim=self.head_dim,
-            base=rope_theta,
-            rope_ratio=rope_ratio,
-            max_seq_len=max_position_embeddings,
-        )
-
-        self._lib: MetalKernelLibrary | None = None
-
-    @property
-    def lib(self) -> MetalKernelLibrary:
-        if self._lib is None:
-            self._lib = get_default_library()
-        return self._lib
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        kv_cache: MetalKVCache | None = None,
-        layer_idx: int = 0,
-    ) -> torch.Tensor:
-        """Forward pass.
-
-        Args:
-            hidden_states: [batch, seq_len, hidden_size]
-            attention_mask: Optional causal/padding mask
-            kv_cache: Optional KV cache for autoregressive generation
-            layer_idx: Layer index for KV cache
-
-        Returns:
-            Output [batch, seq_len, hidden_size]
-        """
-        batch_size, seq_len, _ = hidden_states.shape
-
-        # Compute Q, K, V
-        q = self.q_proj(hidden_states)
-        k = self.k_proj(hidden_states)
-        v = self.v_proj(hidden_states)
-
-        # Reshape: [batch, seq, num_heads, head_dim]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-
-        # Transpose: [batch, heads, seq, head_dim]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        # Apply RoPE
-        position_offset = kv_cache.seq_len if kv_cache else 0
-        q = self.rope(q, position_offset)
-        k = self.rope(k, position_offset)
-
-        # Update KV cache
-        if kv_cache is not None:
-            k, v = kv_cache.update(layer_idx, k, v)
-
-        # Expand K, V for GQA
-        if self.num_kv_heads < self.num_heads:
-            repeat_factor = self.num_heads // self.num_kv_heads
-            k = k.repeat_interleave(repeat_factor, dim=1)
-            v = v.repeat_interleave(repeat_factor, dim=1)
-
-        # Scaled dot-product attention
-        # Try to use flash attention if available, fall back to standard
-        attn_output = self._attention(q, k, v, attention_mask)
-
-        # Reshape and project output
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
-        output = self.o_proj(attn_output)
-
-        return output
-
-    def _attention(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        mask: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Compute attention. Uses PyTorch SDPA which dispatches to Metal."""
-        # Ensure consistent dtypes (KV cache may store as float16 while q is float32)
-        if q.dtype != k.dtype:
-            q = q.to(k.dtype)
-
-        # PyTorch 2.0+ scaled_dot_product_attention uses Metal on MPS
-        is_causal = mask is None and q.shape[2] == k.shape[2] and q.shape[2] > 1
-
-        if is_causal:
-            return F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        elif mask is not None:
-            return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        else:
-            return F.scaled_dot_product_attention(q, k, v)
-
-
-# ---------------------------------------------------------------------------
-# MetalMLP
-# ---------------------------------------------------------------------------
-
-
-class MetalMLP(nn.Module):
-    """DEPRECATED: Use Transformers' MLP with MetalQuantizedLinear.
-
-    Gated MLP (SwiGLU) with quantized projections.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        bits: Literal[2, 4, 8] = 4,
-        group_size: int = 128,
-        activation: str = "silu",
-        warn_if_standalone: bool = True,
-    ):
-        if warn_if_standalone:
-            warnings.warn(
-                "MetalMLP is deprecated. Use Transformers' MLP implementation "
-                "and replace_linear_layers() to quantize Linear layers.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        super().__init__()
-
-        self.gate_proj = MetalQuantizedLinear(
-            hidden_size,
-            intermediate_size,
-            bits=bits,
-            group_size=group_size,
-        )
-        self.up_proj = MetalQuantizedLinear(
-            hidden_size,
-            intermediate_size,
-            bits=bits,
-            group_size=group_size,
-        )
-        self.down_proj = MetalQuantizedLinear(
-            intermediate_size,
-            hidden_size,
-            bits=bits,
-            group_size=group_size,
-        )
-
-        self.activation = activation
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate = self.gate_proj(x)
-
-        if self.activation == "silu":
-            gate = F.silu(gate)
-        elif self.activation == "gelu":
-            gate = F.gelu(gate)
-        elif self.activation == "relu":
-            gate = F.relu(gate)
-
-        up = self.up_proj(x)
-        return self.down_proj(gate * up)
-
-
-# ---------------------------------------------------------------------------
 # MetalMoELayer
 # ---------------------------------------------------------------------------
 
@@ -866,7 +617,6 @@ class MetalMoELayer(nn.Module):
                     intermediate_size,
                     bits=bits,
                     group_size=group_size,
-                    warn_if_standalone=False,
                 )
                 for _ in range(num_experts)
             ]
@@ -989,16 +739,43 @@ class MetalTransformerBlock(nn.Module):
         super().__init__()
 
         self.input_layernorm = MetalRMSNorm(hidden_size, eps=rms_norm_eps)
-        self.self_attn = MetalAttention(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads or num_heads
+        self.head_dim = hidden_size // num_heads
+
+        self.attn_q_proj = MetalQuantizedLinear(
+            hidden_size,
+            num_heads * self.head_dim,
             bits=bits,
             group_size=group_size,
-            rope_theta=rope_theta,
+            bias=False,
+        )
+        self.attn_k_proj = MetalQuantizedLinear(
+            hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+        self.attn_v_proj = MetalQuantizedLinear(
+            hidden_size,
+            self.num_kv_heads * self.head_dim,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+        self.attn_o_proj = MetalQuantizedLinear(
+            num_heads * self.head_dim,
+            hidden_size,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+        self.attn_rope = MetalRoPE(
+            dim=self.head_dim,
+            base=rope_theta,
             rope_ratio=rope_ratio,
-            max_position_embeddings=max_position_embeddings,
-            warn_if_standalone=False,
+            max_seq_len=max_position_embeddings,
         )
 
         self.post_attention_layernorm = MetalRMSNorm(hidden_size, eps=rms_norm_eps)
@@ -1007,7 +784,6 @@ class MetalTransformerBlock(nn.Module):
             intermediate_size=intermediate_size,
             bits=bits,
             group_size=group_size,
-            warn_if_standalone=False,
         )
 
     def forward(
@@ -1023,7 +799,7 @@ class MetalTransformerBlock(nn.Module):
         # Self-attention with residual
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        hidden_states = self._self_attention(
             hidden_states,
             attention_mask=attention_mask,
             kv_cache=kv_cache,
@@ -1044,6 +820,50 @@ class MetalTransformerBlock(nn.Module):
         if param is None:
             return False
         return param.device != device
+
+    def _self_attention(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        kv_cache: MetalKVCache | None = None,
+        layer_idx: int = 0,
+    ) -> torch.Tensor:
+        batch_size, seq_len, _ = hidden_states.shape
+
+        q = self.attn_q_proj(hidden_states)
+        k = self.attn_k_proj(hidden_states)
+        v = self.attn_v_proj(hidden_states)
+
+        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
+        position_offset = kv_cache.seq_len if kv_cache else 0
+        q = self.attn_rope(q, position_offset)
+        k = self.attn_rope(k, position_offset)
+
+        if kv_cache is not None:
+            k, v = kv_cache.update(layer_idx, k, v)
+
+        if self.num_kv_heads < self.num_heads:
+            repeat_factor = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(repeat_factor, dim=1)
+            v = v.repeat_interleave(repeat_factor, dim=1)
+
+        if q.dtype != k.dtype:
+            q = q.to(k.dtype)
+
+        is_causal = attention_mask is None and q.shape[2] == k.shape[2] and q.shape[2] > 1
+        if is_causal:
+            attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        elif attention_mask is not None:
+            attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
+        else:
+            attn_output = F.scaled_dot_product_attention(q, k, v)
+
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
+        return self.attn_o_proj(attn_output)
 
 
 # ---------------------------------------------------------------------------
@@ -1075,9 +895,7 @@ class MetalMLAAttention(nn.Module):
         group_size: int = 128,
         o_proj_group_size: int | None = None,
         bias: bool = False,
-        warn_if_standalone: bool = True,
     ):
-        _ = warn_if_standalone  # retained for backward compatibility
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -1234,5 +1052,3 @@ class MetalMLAAttention(nn.Module):
         # Output dimension is num_heads * v_head_dim
         attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.v_head_dim)
         return self.o_proj(attn_output)
-
-

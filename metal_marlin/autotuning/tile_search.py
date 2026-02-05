@@ -412,8 +412,10 @@ class TileSearcher:
     def _config_fits(self, config: TileConfig, M: int, N: int, K: int) -> bool:
         """Check if tile config can handle this problem size.
 
-        Tile configs must evenly divide the problem dimensions for simple
-        boundary handling. Future work: add boundary handling for partial tiles.
+        Tile configurations are validated against GPU hardware limits (threadgroups,
+        shared memory). While kernels support boundary handling for non-divisible
+        problem sizes, configurations that are much larger than the problem size
+        may be inefficient.
         """
         # Respect threadgroup and shared memory limits
         if config.threads_per_tg > 1024:
@@ -421,12 +423,11 @@ class TileSearcher:
         if config.shared_memory_bytes > self.max_shared_memory_bytes:
             return False
 
-        # For now, require exact divisibility
-        # TODO: Add boundary handling for non-divisible sizes
-        if M < config.tile_m or N < config.tile_n:
+        # K must be a multiple of 8 for FP4 packing and match group_size for scales.
+        # These are fundamental Marlin requirements, not tile-specific.
+        if K % 8 != 0 or K % self.group_size != 0:
             return False
-        if K < config.tile_k:
-            return False
+
         return True
 
     def _get_dispatch_fn(

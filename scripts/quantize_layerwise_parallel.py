@@ -25,7 +25,12 @@ Performance notes:
 
 Usage:
     cd contrib/metal_marlin
-    uv run python scripts/quantize_layerwise_parallel.py --model zai-org/GLM-4.7-Flash --expert-workers 24
+    
+    # For GLM-4.7-Flash, use the dedicated script:
+    uv run python scripts/quantize_glm47_flash.py --output models/GLM-4.7-Flash-Trellis-3bpw
+    
+    # For other models:
+    uv run python scripts/quantize_layerwise_parallel.py --model <hf_model_id> --output <output_dir>
 """
 
 from __future__ import annotations
@@ -48,12 +53,13 @@ import torch
 from safetensors.numpy import save_file
 from transformers import AutoConfig, AutoTokenizer
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from metal_marlin.calibration import CalibrationDataset
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
 from metal_marlin.trellis.packing import pack_indices_vectorized
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 
 # Layers that need higher precision
 SENSITIVE_PATTERNS = {
@@ -87,7 +93,7 @@ class QuantizedTensor:
     """Full quantization result including data to save to disk."""
 
     name: str
-    trellis_indices: np.ndarray  # [tiles_n, tiles_k, 256] int16
+    trellis_indices: np.ndarray  # [tiles_n, tiles_k, 256] uint8 (packed)
     scales: np.ndarray  # [n_groups, out_features] float32
     su: np.ndarray  # Input sign flips
     sv: np.ndarray  # Output sign flips
@@ -133,7 +139,8 @@ class WeightPrefetcher:
         self.model_path = model_path
         self.weight_map = weight_map
         self.prefetch_ahead = prefetch_ahead
-        self.queue: Queue[PrefetchedLayer | None] = Queue(maxsize=prefetch_ahead)
+        self.queue: Queue[PrefetchedLayer | None] = Queue(
+            maxsize=prefetch_ahead)
         self.thread: Thread | None = None
         self._stop = False
         # Group tensors by shard file for efficient loading
@@ -145,7 +152,8 @@ class WeightPrefetcher:
 
     def start(self, layer_indices: list[int]):
         self._stop = False
-        self.thread = Thread(target=self._prefetch_loop, args=(layer_indices,), daemon=True)
+        self.thread = Thread(target=self._prefetch_loop,
+                             args=(layer_indices,), daemon=True)
         self.thread.start()
 
     def stop(self):
@@ -199,7 +207,8 @@ class WeightPrefetcher:
                         tensor = f.get_tensor(tensor_name)
                         if tensor.dim() == 2:
                             # .clone() ensures we own the data, not referencing mmap
-                            layer.tensors[tensor_name] = tensor.float().cpu().clone()
+                            layer.tensors[tensor_name] = tensor.float(
+                            ).cpu().clone()
                         del tensor
             # File handle closed here - mmap pages can be reclaimed by OS
 
@@ -290,10 +299,12 @@ class HessianPrefetcher:
                 if self._stop:
                     break
 
-                weight = layer.tensors.pop(name)  # Remove from dict immediately
+                # Remove from dict immediately
+                weight = layer.tensors.pop(name)
 
                 try:
-                    H_np, bits, sensitivity = self.quantizer.compute_hessian(name, weight, X)
+                    H_np, bits, sensitivity = self.quantizer.compute_hessian(
+                        name, weight, X)
                 except Exception:
                     # Fallback on error
                     H_np = np.eye(weight.shape[1], dtype=np.float64) * 0.01
@@ -358,7 +369,8 @@ class ParallelLayerwiseQuantizer:
         self.quantizers: dict[int, list[EXL3Quantizer]] = {}
         for bits in range(min_bits, max_bits + 1):
             self.quantizers[bits] = [
-                EXL3Quantizer(bits=bits, group_size=group_size, max_workers=1, use_metal=False)
+                EXL3Quantizer(bits=bits, group_size=group_size,
+                              max_workers=1, use_metal=False)
                 for _ in range(expert_workers)
             ]
 
@@ -374,8 +386,10 @@ class ParallelLayerwiseQuantizer:
         from huggingface_hub import snapshot_download
 
         print(f"\nInitializing model: {self.model_id}")
-        self.config = AutoConfig.from_pretrained(self.model_id, trust_remote_code=True)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+        self.config = AutoConfig.from_pretrained(
+            self.model_id, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.model_id, trust_remote_code=True)
         self.model_path = Path(snapshot_download(self.model_id))
         print(f"  Model path: {self.model_path}")
 
@@ -400,7 +414,8 @@ class ParallelLayerwiseQuantizer:
         # Load calibration data
         print(f"\nLoading calibration data: {self.calibration_source}")
         if self.calibration_source == "bartowski-v3":
-            self.calibration_data = CalibrationDataset.v3(max_samples=calibration_samples)
+            self.calibration_data = CalibrationDataset.v3(
+                max_samples=calibration_samples)
         elif self.calibration_source == "synthetic":
             # Use synthetic data (for testing/debugging)
             self.calibration_data = None
@@ -408,9 +423,11 @@ class ParallelLayerwiseQuantizer:
         else:
             # Try loading as local file
             try:
-                self.calibration_data = CalibrationDataset.from_local(self.calibration_source)
+                self.calibration_data = CalibrationDataset.from_local(
+                    self.calibration_source)
             except FileNotFoundError:
-                print(f"  Warning: Could not load {self.calibration_source}, using synthetic")
+                print(
+                    f"  Warning: Could not load {self.calibration_source}, using synthetic")
                 self.calibration_data = None
 
         if self.calibration_data is not None:
@@ -443,7 +460,8 @@ class ParallelLayerwiseQuantizer:
 
         sensitivity = self._compute_sensitivity(weight.numpy(), H)
 
-        is_attention = any(p in name_lower for p in ["q_proj", "k_proj", "v_proj", "o_proj"])
+        is_attention = any(p in name_lower for p in [
+                           "q_proj", "k_proj", "v_proj", "o_proj"])
         is_expert = "expert" in name_lower
 
         if sensitivity > 7.5:
@@ -487,9 +505,11 @@ class ParallelLayerwiseQuantizer:
         out_feat, in_feat = weight.shape
 
         if activations.shape[1] != in_feat:
-            activations = torch.randn(activations.shape[0], in_feat, device="mps") * 0.5
+            activations = torch.randn(
+                activations.shape[0], in_feat, device="mps") * 0.5
 
-        H = dispatch_hessian_compute(self.metal_lib, activations, sigma_reg=self.sigma_reg)
+        H = dispatch_hessian_compute(
+            self.metal_lib, activations, sigma_reg=self.sigma_reg)
         torch.mps.synchronize()
         H_np = H.cpu().numpy().astype(np.float64)
 
@@ -516,8 +536,10 @@ class ParallelLayerwiseQuantizer:
         start = time.perf_counter()
 
         try:
-            quantizer = self.quantizers[bits][worker_id % len(self.quantizers[bits])]
-            result = quantizer.quantize_layer(weight.cpu(), H_np, layer_name=short_name)
+            quantizer = self.quantizers[bits][worker_id %
+                                              len(self.quantizers[bits])]
+            result = quantizer.quantize_layer(
+                weight.cpu(), H_np, layer_name=short_name)
             elapsed = time.perf_counter() - start
 
             # Create the quantized tensor data for saving
@@ -586,7 +608,8 @@ class ParallelLayerwiseQuantizer:
             # Main thread computes Hessians, immediately submits to workers
             for idx, (name, weight) in enumerate(all_tensors.items()):
                 try:
-                    H_np, bits, sensitivity = self.compute_hessian(name, weight, activations)
+                    H_np, bits, sensitivity = self.compute_hessian(
+                        name, weight, activations)
                 except Exception as e:
                     print(f"      Warning: Hessian failed for {name}: {e}")
                     H_np = np.eye(weight.shape[1], dtype=np.float64) * 0.01
@@ -603,7 +626,8 @@ class ParallelLayerwiseQuantizer:
 
                 # Progress: show Hessian progress
                 if hessian_count % max(1, total // 5) == 0:
-                    print(f"      Hessians: {hessian_count}/{total}", flush=True)
+                    print(
+                        f"      Hessians: {hessian_count}/{total}", flush=True)
 
                 # Check for completed quantizations while computing Hessians
                 done_futures = [f for f in futures if f.done()]
@@ -632,8 +656,10 @@ class ParallelLayerwiseQuantizer:
 
                 # Report at intervals AND at completion
                 if quant_count % report_interval == 0 or quant_count == total:
-                    bits_str = " ".join(f"{b}b:{c}" for b, c in sorted(bit_counts.items()) if c > 0)
-                    print(f"      Quantized: {quant_count}/{total} [{bits_str}]", flush=True)
+                    bits_str = " ".join(f"{b}b:{c}" for b, c in sorted(
+                        bit_counts.items()) if c > 0)
+                    print(
+                        f"      Quantized: {quant_count}/{total} [{bits_str}]", flush=True)
 
         elapsed = time.perf_counter() - layer_start
         print(f"      Pipelined completion: {elapsed:.1f}s", flush=True)
@@ -715,9 +741,12 @@ class ParallelLayerwiseQuantizer:
                         quant_data.trellis_indices, quant_data.bits
                     )
                     batch_tensors[f"{safe_key}__indices"] = packed_indices
-                    batch_tensors[f"{safe_key}__scales"] = quant_data.scales.astype(np.float32)
-                    batch_tensors[f"{safe_key}__su"] = quant_data.su.astype(np.float32)
-                    batch_tensors[f"{safe_key}__sv"] = quant_data.sv.astype(np.float32)
+                    batch_tensors[f"{safe_key}__scales"] = quant_data.scales.astype(
+                        np.float32)
+                    batch_tensors[f"{safe_key}__su"] = quant_data.su.astype(
+                        np.float32)
+                    batch_tensors[f"{safe_key}__sv"] = quant_data.sv.astype(
+                        np.float32)
 
                     bytes_this = (
                         packed_indices.nbytes
@@ -751,8 +780,10 @@ class ParallelLayerwiseQuantizer:
                 batch_num += 1
 
             # Progress report
-            bits_str = " ".join(f"{b}b:{c}" for b, c in sorted(bit_counts.items()) if c > 0)
-            print(f"      Quantized: {quant_count}/{total} [{bits_str}]", flush=True)
+            bits_str = " ".join(f"{b}b:{c}" for b, c in sorted(
+                bit_counts.items()) if c > 0)
+            print(
+                f"      Quantized: {quant_count}/{total} [{bits_str}]", flush=True)
 
             # Aggressive cleanup
             batch_tensors.clear()
@@ -856,8 +887,10 @@ class ParallelLayerwiseQuantizer:
             safe_key = qt.name.replace(".", "__")
 
             # Pack indices for efficient storage (~5x savings)
-            packed_indices = pack_indices_vectorized(qt.trellis_indices, qt.bits)
-            scales = qt.scales if qt.scales.dtype == np.float32 else qt.scales.astype(np.float32)
+            packed_indices = pack_indices_vectorized(
+                qt.trellis_indices, qt.bits)
+            scales = qt.scales if qt.scales.dtype == np.float32 else qt.scales.astype(
+                np.float32)
             su = qt.su.astype(np.float32)  # Always float64 -> float32
             sv = qt.sv.astype(np.float32)
 
@@ -890,7 +923,8 @@ class ParallelLayerwiseQuantizer:
         # Save metadata for this layer
         meta_file = output_path / f"layer_{layer_idx:04d}.json"
         with open(meta_file, "w") as f:
-            json.dump({"layer_idx": layer_idx, "tensors": metadata_entries}, f, indent=2)
+            json.dump({"layer_idx": layer_idx,
+                      "tensors": metadata_entries}, f, indent=2)
 
         # Report
         print(
@@ -926,7 +960,8 @@ class ParallelLayerwiseQuantizer:
             tokens_collected = []
 
             for i in range(calibration_samples):
-                idx = (layer_idx * calibration_samples + i) % len(self.calibration_tokens)
+                idx = (layer_idx * calibration_samples +
+                       i) % len(self.calibration_tokens)
                 tokens = self.calibration_tokens[idx]
                 tokens_collected.append(tokens[:max_seq_len])
 
@@ -935,7 +970,8 @@ class ParallelLayerwiseQuantizer:
             unique_tokens = set()
             for t in tokens_collected:
                 unique_tokens.update(t.tolist())
-            diversity = len(unique_tokens) / max(1, sum(len(t) for t in tokens_collected))
+            diversity = len(unique_tokens) / max(1, sum(len(t)
+                                                        for t in tokens_collected))
 
             # Layer-dependent activation pattern (deeper = more processed)
             num_layers = getattr(self.config, "num_hidden_layers", 32)
@@ -945,13 +981,15 @@ class ParallelLayerwiseQuantizer:
             variance = 0.5 * diversity + 0.3 * depth_factor
 
             # Generate activations with calibration-informed distribution
-            X = torch.randn(total_tokens, in_features, device="mps") * np.sqrt(variance)
+            X = torch.randn(total_tokens, in_features,
+                            device="mps") * np.sqrt(variance)
 
             # Add some structure based on calibration (not purely random)
             # This helps with expert routing in MoE models
             if layer_idx > 0:
                 structure_factor = 0.1 * (1 - depth_factor)
-                structure = torch.randn(in_features, device="mps") * structure_factor
+                structure = torch.randn(
+                    in_features, device="mps") * structure_factor
                 X = X + structure
 
         else:
@@ -961,7 +999,8 @@ class ParallelLayerwiseQuantizer:
             num_layers = getattr(self.config, "num_hidden_layers", 32)
             progress = layer_idx / max(num_layers - 1, 1)
             variance = 0.5 + 0.5 * np.sin(progress * np.pi)
-            X = torch.randn(total_tokens, in_features, device="mps") * np.sqrt(variance)
+            X = torch.randn(total_tokens, in_features,
+                            device="mps") * np.sqrt(variance)
 
         return X
 
@@ -999,12 +1038,14 @@ class ParallelLayerwiseQuantizer:
             output_path.mkdir(parents=True, exist_ok=True)
             print(f"\nOutput directory: {output_path}")
         else:
-            print("\nWARNING: No output path specified. Running in dry-run mode (no saves).")
+            print(
+                "\nWARNING: No output path specified. Running in dry-run mode (no saves).")
 
         # Start weight prefetcher - only 1 layer ahead to limit memory
         # MoE layers have 201 tensors × ~10MB = ~2GB per layer
         weight_prefetch = 1
-        print(f"\nStarting weight prefetcher ({weight_prefetch} layer ahead)...")
+        print(
+            f"\nStarting weight prefetcher ({weight_prefetch} layer ahead)...")
         self.prefetcher = WeightPrefetcher(
             self.model_path, self.weight_map, prefetch_ahead=weight_prefetch
         )
@@ -1025,7 +1066,8 @@ class ParallelLayerwiseQuantizer:
         total_start = time.perf_counter()
 
         print(f"\n{'=' * 60}")
-        print(f"Quantizing {num_layers} layers (mixed-precision, deep pipeline)")
+        print(
+            f"Quantizing {num_layers} layers (mixed-precision, deep pipeline)")
         print(f"{'=' * 60}")
 
         # Use a single ThreadPoolExecutor for all layers (avoids thread creation overhead)
@@ -1034,7 +1076,8 @@ class ParallelLayerwiseQuantizer:
                 layer_num = 0
                 while True:
                     # Get layer with pre-computed Hessians
-                    prepared = hessian_prefetcher.get_prepared_layer(timeout=180)
+                    prepared = hessian_prefetcher.get_prepared_layer(
+                        timeout=180)
                     if prepared is None:
                         break
 
@@ -1047,7 +1090,8 @@ class ParallelLayerwiseQuantizer:
                     # Quantize using pre-computed Hessians (CPU only - GPU is free for next layer)
                     # Saves each batch to disk immediately to avoid 10GB+ RAM accumulation
                     layer_start = time.perf_counter()
-                    results = self.quantize_prepared_layer(prepared, executor, output_path)
+                    results = self.quantize_prepared_layer(
+                        prepared, executor, output_path)
                     layer_time = time.perf_counter() - layer_start
 
                     all_results.extend(results)
@@ -1074,7 +1118,8 @@ class ParallelLayerwiseQuantizer:
                     torch.mps.empty_cache()
 
                     # Log memory usage every layer during debugging
-                    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+                    mem_mb = resource.getrusage(
+                        resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
                     print(f"  Memory: {mem_mb:.0f} MB (peak RSS)")
 
             finally:
@@ -1102,7 +1147,8 @@ class ParallelLayerwiseQuantizer:
         total_params = sum(r.shape[0] * r.shape[1] for r in successful)
 
         # Calculate effective bits
-        weighted_bits = sum(r.actual_bits * r.shape[0] * r.shape[1] for r in successful)
+        weighted_bits = sum(
+            r.actual_bits * r.shape[0] * r.shape[1] for r in successful)
         effective_bits = weighted_bits / total_params if total_params > 0 else 0
 
         index = {
@@ -1175,7 +1221,8 @@ class ParallelLayerwiseQuantizer:
         for bits in sorted(bit_counts.keys()):
             count = bit_counts[bits]
             tensors_at_bits = [r for r in successful if r.actual_bits == bits]
-            params_at_bits = sum(r.shape[0] * r.shape[1] for r in tensors_at_bits)
+            params_at_bits = sum(r.shape[0] * r.shape[1]
+                                 for r in tensors_at_bits)
             pct = 100 * params_at_bits / total_params
             weighted_bits += bits * params_at_bits
             print(f"  {bits}b     {count:<10} {params_at_bits:>12,}   {pct:>6.1f}%")
@@ -1194,8 +1241,10 @@ class ParallelLayerwiseQuantizer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Parallel mixed-precision EXL3 quantization")
-    parser.add_argument("--model", type=str, default="zai-org/GLM-4.7-Flash")
+    parser = argparse.ArgumentParser(
+        description="Parallel mixed-precision EXL3 quantization")
+    parser.add_argument("--model", type=str, required=True,
+                        help="HuggingFace model ID or local path")
     parser.add_argument("--min-bits", type=int, default=2)
     parser.add_argument("--max-bits", type=int, default=8)
     parser.add_argument("--group-size", type=int, default=128)
@@ -1252,7 +1301,8 @@ def main():
     print(f"  Model: {args.model}")
     print(f"  Bits: {args.min_bits}-{args.max_bits} (mixed)")
     print(f"  CPU workers: {args.expert_workers}")
-    print(f"  Calibration: {args.calibration} ({args.calibration_samples} samples)")
+    print(
+        f"  Calibration: {args.calibration} ({args.calibration_samples} samples)")
     print(f"  Output: {output_path if output_path else '(dry-run, no saves)'}")
     if args.max_layers:
         print(f"  Max layers: {args.max_layers}")

@@ -45,54 +45,6 @@ Example (GQA/MQA attention):
     hooks.register_attention_hooks(model, layer_prefix="model.layers")
 """
 
-# Backwards compatibility imports from the parent module (calibration.py)
-# These must be imported carefully to avoid circular import issues.
-# We use importlib to defer the import until all modules are initialized.
-import importlib as _importlib
-
-
-def _get_legacy_module():
-    """Lazy import of parent calibration module."""
-    # Import the module directly by its full path to avoid circular reference
-    import sys
-    from pathlib import Path
-
-    # Get the parent calibration.py file
-    _parent = Path(__file__).parent.parent / "calibration.py"
-    if _parent.exists():
-        import importlib.util
-
-        spec = _importlib.util.spec_from_file_location(
-            "metal_marlin._calibration_legacy", str(_parent)
-        )
-        if spec and spec.loader:
-            module = _importlib.util.module_from_spec(spec)
-            sys.modules["metal_marlin._calibration_legacy"] = module
-            spec.loader.exec_module(module)
-            return module
-    return None
-
-
-# Re-export from parent module for backwards compatibility
-# These are lazily imported to avoid circular issues
-def __getattr__(name):
-    """Lazy attribute access for backwards compatibility."""
-    _legacy_names = {
-        "BartowskiCalibrationLegacy",
-        "CalibrationDataset",
-        "compute_activation_ranges",
-        "load_ranges",
-        "ranges_to_scales",
-        "save_ranges",
-    }
-    if name in _legacy_names:
-        legacy = _get_legacy_module()
-        if legacy:
-            actual_name = name.replace("Legacy", "") if name.endswith("Legacy") else name
-            return getattr(legacy, actual_name)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 from .adaptive_quant import (
     AdaptiveQuantizer,
     AdaptiveQuantResult,

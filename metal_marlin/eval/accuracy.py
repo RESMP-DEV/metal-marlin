@@ -232,30 +232,100 @@ def evaluate_kl_from_paths(
 
     if verbose:
         print(f"Loading tokenizer from {original_path}...")
-    load_tokenizer(original_path)
+    tokenizer = load_tokenizer(str(original_path), fallback_tokenizer=str(quantized_path))
 
     if texts is None:
         if verbose:
             print(f"Loading WikiText-2 ({num_samples} samples)...")
         texts = load_wikitext2(num_samples)
 
-    # For now, return placeholder - full implementation requires
-    # loading both models which is memory-intensive
+    from .._compat import require_torch, to_numpy, torch
+    from ..inference.pipeline import MetalMarlinModel, get_device
+
+    require_torch()
+    assert torch is not None
+
+    original_path = Path(original_path)
+    quantized_path = Path(quantized_path)
+
+    device = get_device()
+    torch_dtype = torch.float16 if device != "cpu" else torch.float32
+
     if verbose:
-        print("\nNote: Full KL evaluation requires loading both models.")
-        print("For large models, consider using streaming evaluation.")
+        print(f"Loading original model from {original_path} on {device}...")
+    from transformers import AutoModelForCausalLM
 
-    # TODO: Implement model loading and forward pass
-    # This requires careful memory management for large models
+    def _load_transformers_model(path: Path) -> Any:
+        model = AutoModelForCausalLM.from_pretrained(
+            str(path),
+            torch_dtype=torch_dtype,
+            trust_remote_code=True,
+        )
+        model.to(device)
+        model.eval()
+        return model
 
-    return KLResult(
-        kl_mean=0.0,
-        kl_max=0.0,
-        kl_std=0.0,
-        kl_p95=0.0,
-        num_tokens=0,
-        num_samples=0,
+    def _is_marlin_quantized(path: Path) -> bool:
+        config_path = path / "config.json"
+        weights_path = path / "model.safetensors"
+        if not config_path.exists() or not weights_path.exists():
+            return False
+        try:
+            import json
+
+            with open(config_path) as f:
+                config = json.load(f)
+            return str(config.get("quant_type", "")).lower() in {"fp4", "int4"}
+        except Exception:
+            return False
+
+    original_model = _load_transformers_model(original_path)
+
+    if verbose:
+        print(f"Loading quantized model from {quantized_path} on {device}...")
+
+    quantized_is_marlin = False
+    quantized_weights = quantized_path / "quantized_weights.safetensors"
+    if quantized_weights.exists():
+        if device != "mps":
+            raise RuntimeError(
+                "Quantized Metal Marlin models require MPS. "
+                "Run on Apple Silicon or use an unquantized model path."
+            )
+        from ..transformers_loader import load_quantized
+
+        quantized_model = load_quantized(quantized_path, device=device)
+    elif _is_marlin_quantized(quantized_path):
+        quantized_model = MetalMarlinModel.from_quantized(quantized_path, device=device)
+        quantized_is_marlin = True
+    else:
+        quantized_model = _load_transformers_model(quantized_path)
+
+    max_position_embeddings = getattr(original_model.config, "max_position_embeddings", None)
+    if max_position_embeddings is not None:
+        max_length = min(max_length, int(max_position_embeddings))
+
+    def make_logits_fn(model: Any, is_marlin: bool = False) -> Callable[[np.ndarray], np.ndarray]:
+        def _logits_fn(input_ids: np.ndarray) -> np.ndarray:
+            input_tensor = torch.from_numpy(input_ids).to(device)
+            with torch.inference_mode():
+                if is_marlin:
+                    logits = model(input_tensor)
+                else:
+                    outputs = model(input_ids=input_tensor)
+                    logits = outputs.logits
+            return to_numpy(logits)
+
+        return _logits_fn
+
+    return evaluate_kl_divergence(
+        original_logits_fn=make_logits_fn(original_model),
+        quantized_logits_fn=make_logits_fn(quantized_model, is_marlin=quantized_is_marlin),
+        tokenizer=tokenizer,
+        texts=texts,
+        max_length=max_length,
         temperature=temperature,
+        verbose=verbose,
     )
 
 

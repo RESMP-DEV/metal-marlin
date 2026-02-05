@@ -830,13 +830,7 @@ class TestBufferPool:
 
     def test_memory_not_leaked(self, mock_moe_weights, metal_lib):
         """Repeated dispatch calls don't leak memory."""
-        from metal_marlin.trellis.moe_dispatch import (
-            dispatch_moe_trellis_swiglu,
-            get_buffer_stats,
-            reset_buffer_stats,
-        )
-
-        reset_buffer_stats()
+        from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
         intermediate = mock_moe_weights["intermediate_dim"]

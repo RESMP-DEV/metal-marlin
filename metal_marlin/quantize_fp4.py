@@ -158,10 +158,9 @@ def quantize_fp4(
             - packed: [K/8, N] where K=in_features, N=out_features
             - scales: [K/group_size, N]
             This transposes the weight and packs along K (input features).
-            If False, use legacy layout [out_features, in_features/8].
 
     Returns:
-        (packed_weights, scales) where layout depends on marlin_layout flag.
+        (packed_weights, scales) in Marlin-compatible layout.
     """
     # Use Metal for basic quantization (no activation_ranges)
     if _USE_METAL and _fp4_metal is not None and _fp4_metal.available and activation_ranges is None:
@@ -173,15 +172,13 @@ def quantize_fp4(
 
     # For Marlin layout, transpose to [K, N] = [in_feat, out_feat]
     # and quantize/pack along K (axis 0)
-    if marlin_layout:
-        w = w.T  # [in_feat, out_feat] = [K, N]
-        K, N = w.shape
-        pack_axis_size = K
-        other_axis_size = N
-    else:
-        K, N = in_feat, out_feat  # For error messages
-        pack_axis_size = in_feat
-        other_axis_size = out_feat
+    if not marlin_layout:
+        raise ValueError("Legacy layout is not supported. Use marlin_layout=True.")
+
+    w = w.T  # [in_feat, out_feat] = [K, N]
+    K, N = w.shape
+    pack_axis_size = K
+    other_axis_size = N
 
     if pack_axis_size % 8 != 0:
         raise ValueError(f"Pack axis ({pack_axis_size}) must be divisible by 8")
@@ -194,15 +191,8 @@ def quantize_fp4(
 
     # Reshape for per-group processing
     # marlin_layout: w is [K, N], groups along K → [n_groups, group_size, N]
-    # legacy:        w is [out, in], groups along in → [out, n_groups, group_size]
-    if marlin_layout:
-        # [K, N] → [n_groups, group_size, N]
-        w_grouped = w.reshape(n_groups, group_size, other_axis_size)
-        group_axis = 1  # group elements along axis 1
-    else:
-        # [out, in] → [out, n_groups, group_size]
-        w_grouped = w.reshape(other_axis_size, n_groups, group_size)
-        group_axis = 2  # group elements along axis 2
+    w_grouped = w.reshape(n_groups, group_size, other_axis_size)
+    group_axis = 1  # group elements along axis 1
 
     # Compute per-group scales (max abs value → scale to [-6, 6])
     # FP4 E2M1 max representable magnitude is 6.0
@@ -267,33 +257,23 @@ def quantize_fp4(
 
     # Squeeze and compute scales
     # marlin_layout: group_max is [n_groups, 1, N] → scales [n_groups, N]
-    # legacy:        group_max is [out, n_groups, 1] → scales [out, n_groups]
     scales = (group_max / 6.0).astype(np.float16).squeeze(group_axis)
 
     # Scale weights to [-6, 6] range per group
     w_scaled = w_grouped / group_max.astype(np.float32) * 6.0
 
     # Reshape back to 2D for quantization
-    if marlin_layout:
-        w_scaled = w_scaled.reshape(pack_axis_size, other_axis_size)  # [K, N]
-    else:
-        w_scaled = w_scaled.reshape(other_axis_size, pack_axis_size)  # [out, in]
+    w_scaled = w_scaled.reshape(pack_axis_size, other_axis_size)  # [K, N]
 
     # Quantize to FP4 indices
     fp4_indices = quantize_to_fp4(w_scaled)  # same shape as w_scaled
 
     # Pack 8 FP4 values into each uint32
     # Layout: [v0, v1, v2, v3, v4, v5, v6, v7] → bits [3:0, 7:4, 11:8, 15:12, 19:16, 23:20, 27:24, 31:28]
-    if marlin_layout:
-        # Pack along axis 0 (K): [K, N] → [K/8, N]
-        packed = np.zeros((pack_axis_size // 8, other_axis_size), dtype=np.uint32)
-        for i in range(8):
-            packed |= fp4_indices[i::8, :].astype(np.uint32) << (i * 4)
-    else:
-        # Pack along axis 1 (in_feat): [out, in] → [out, in/8]
-        packed = np.zeros((other_axis_size, pack_axis_size // 8), dtype=np.uint32)
-        for i in range(8):
-            packed |= fp4_indices[:, i::8].astype(np.uint32) << (i * 4)
+    # Pack along axis 0 (K): [K, N] → [K/8, N]
+    packed = np.zeros((pack_axis_size // 8, other_axis_size), dtype=np.uint32)
+    for i in range(8):
+        packed |= fp4_indices[i::8, :].astype(np.uint32) << (i * 4)
 
     return packed, scales
 
@@ -307,10 +287,8 @@ def unpack_fp4(
     """
     Unpack and dequantize FP4 weights back to float16.
 
-    Supports two layouts:
-    - Legacy layout: packed [out_feat, in_feat // 8], scales [out_feat, n_groups]
-      Packs along input dimension (axis 1). Returns [out_feat, in_feat].
-    - Marlin layout: packed [K/8, N], scales [K/group_size, N]
+    Supports Marlin layout:
+    - packed [K/8, N], scales [K/group_size, N]
       Packs along K dimension (axis 0). Returns [K, N] which needs transpose
       to get original [out_feat, in_feat].
 
@@ -318,77 +296,44 @@ def unpack_fp4(
         packed: uint32 packed weights
         scales: float16 scales
         group_size: Elements per group
-        marlin_layout: If None, auto-detect from scale shapes.
-            If True, expect Marlin layout [K/8, N].
-            If False, expect legacy layout [out, in/8].
+        marlin_layout: If None, use Marlin layout. If True, expect [K/8, N].
 
     Returns:
         Dequantized float16 weights. Shape depends on layout:
-        - Legacy: [out_feat, in_feat]
         - Marlin: [K, N] (transpose back to get original shape)
     """
+    if marlin_layout is False:
+        raise ValueError("Legacy layout is not supported. Use marlin_layout=True.")
+    if marlin_layout is None:
+        marlin_layout = True
+
     # Use Metal for unpacking when available
     if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
         return _fp4_metal.dequantize(packed, scales, group_size=group_size, marlin_layout=marlin_layout)
 
     # Fall back to NumPy implementation
-    # Auto-detect layout if not specified
-    if marlin_layout is None:
-        # Marlin layout: packed [K/8, N], scales [K/gs, N]
-        # K = packed.shape[0] * 8, N = packed.shape[1]
-        # scales.shape should be [K/gs, N] = [packed.shape[0] * 8 / gs, packed.shape[1]]
-        K_expected = packed.shape[0] * 8
-        N_expected = packed.shape[1]
-        n_groups_K = K_expected // group_size
-        if scales.shape == (n_groups_K, N_expected):
-            marlin_layout = True
-        else:
-            marlin_layout = False
+    # Marlin layout: packed [K/8, N], scales [K/gs, N]
+    # Packing is along K (axis 0)
+    K = packed.shape[0] * 8
+    N = packed.shape[1]
 
-    if marlin_layout:
-        # Marlin layout: packed [K/8, N], scales [K/gs, N]
-        # Packing is along K (axis 0)
-        K = packed.shape[0] * 8
-        N = packed.shape[1]
+    # Unpack 8 FP4 values from each uint32 along K dimension
+    fp4_indices = np.zeros((K, N), dtype=np.uint8)
+    for i in range(8):
+        # Each packed value at [k_group, n] contains 8 consecutive K values
+        fp4_indices[i::8, :] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
 
-        # Unpack 8 FP4 values from each uint32 along K dimension
-        fp4_indices = np.zeros((K, N), dtype=np.uint8)
-        for i in range(8):
-            # Each packed value at [k_group, n] contains 8 consecutive K values
-            fp4_indices[i::8, :] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
+    # Dequantize indices to base values
+    values = dequantize_fp4(fp4_indices)  # [K, N]
 
-        # Dequantize indices to base values
-        values = dequantize_fp4(fp4_indices)  # [K, N]
+    # Apply scales: scales [K/gs, N]
+    n_groups = K // group_size
+    values = values.reshape(n_groups, group_size, N)
+    scales_expanded = scales[:, None, :].astype(np.float32)
+    values = values * scales_expanded
+    values = values.reshape(K, N)
 
-        # Apply scales: scales [K/gs, N]
-        n_groups = K // group_size
-        values = values.reshape(n_groups, group_size, N)
-        scales_expanded = scales[:, None, :].astype(np.float32)
-        values = values * scales_expanded
-        values = values.reshape(K, N)
-
-        return values.astype(np.float16)
-    else:
-        # Legacy layout: packed [out_feat, in_feat // 8], scales [out_feat, n_groups]
-        out_feat = packed.shape[0]
-        in_feat = packed.shape[1] * 8
-
-        # Unpack 8 FP4 values from each uint32 along in_feat dimension
-        fp4_indices = np.zeros((out_feat, in_feat), dtype=np.uint8)
-        for i in range(8):
-            fp4_indices[:, i::8] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
-
-        # Dequantize indices to base values
-        values = dequantize_fp4(fp4_indices)  # [out_feat, in_feat]
-
-        # Apply scales: scales [out_feat, n_groups] where n_groups = in_feat // group_size
-        n_groups = in_feat // group_size
-        values = values.reshape(out_feat, n_groups, group_size)
-        scales_expanded = scales[:, :, None].astype(np.float32)
-        values = values * scales_expanded
-        values = values.reshape(out_feat, in_feat)
-
-        return values.astype(np.float16)
+    return values.astype(np.float16)
 
 
 def compute_quantization_error(
@@ -405,26 +350,21 @@ def compute_quantization_error(
         packed: Packed FP4 weights.
         scales: Per-group scales.
         group_size: Quantization group size.
-        marlin_layout: If None, auto-detect. If True, packed is [K/8, N]
-            where K=in_feat, N=out_feat. If False, packed is [out, in/8].
+        marlin_layout: If None, use Marlin layout. If True, packed is [K/8, N]
+            where K=in_feat, N=out_feat.
 
     Returns:
         Dict with mse, rmse, max_error, mean_relative_error.
     """
+    if marlin_layout is False:
+        raise ValueError("Legacy layout is not supported. Use marlin_layout=True.")
+    if marlin_layout is None:
+        marlin_layout = True
+
     reconstructed = unpack_fp4(packed, scales, group_size, marlin_layout=marlin_layout)
 
     # If Marlin layout, reconstructed is [K, N] = [in_feat, out_feat]
     # Need to transpose back to [out_feat, in_feat] for comparison
-    if marlin_layout is None:
-        # Auto-detect same way as unpack_fp4
-        K_expected = packed.shape[0] * 8
-        N_expected = packed.shape[1]
-        n_groups_K = K_expected // group_size
-        if scales.shape == (n_groups_K, N_expected):
-            marlin_layout = True
-        else:
-            marlin_layout = False
-
     if marlin_layout:
         reconstructed = reconstructed.T  # [K, N] -> [N, K] = [out_feat, in_feat]
 

@@ -571,7 +571,7 @@ class TestMetalDispatchViterbi:
         assert indices.shape == (n_tiles, tile_size), (
             f"Expected shape ({n_tiles}, {tile_size}), got {indices.shape}"
         )
-        assert indices.dtype == torch.int16, f"Expected int16, got {indices.dtype}"
+        assert indices.dtype == torch.uint8, f"Expected uint8, got {indices.dtype}"
         assert dequantized.shape == (n_tiles, tile_size), (
             f"Expected shape ({n_tiles}, {tile_size}), got {dequantized.shape}"
         )
@@ -721,7 +721,7 @@ def test_exl3_quantizer():
     )
 
     # Verify dtypes
-    assert result.trellis_indices.dtype == np.int16
+    assert result.trellis_indices.dtype == np.uint8
     assert result.scales.dtype == np.float32
     assert result.su.dtype == np.float64
     assert result.sv.dtype == np.float64
@@ -774,7 +774,7 @@ class TestExl3ToMarlinConversion:
         # Trellis indices: EXL3 stores as tiles
         tiles_k = in_features // 16
         tiles_n = out_features // 16
-        trellis_indices = np.random.randint(0, 16, (tiles_k, tiles_n, 256), dtype=np.int16)
+        trellis_indices = np.random.randint(0, 16, (tiles_k, tiles_n, 256), dtype=np.uint8)
 
         # Scales: per-group scales
         n_groups = in_features // group_size
@@ -848,7 +848,7 @@ class TestExl3ToMarlinConversion:
         tiles_k = in_features // 16  # 16
         tiles_n = out_features // 16  # 8
 
-        trellis_indices = np.ones((tiles_k, tiles_n, 256), dtype=np.int16) * 8
+        trellis_indices = np.ones((tiles_k, tiles_n, 256), dtype=np.uint8) * 8
         scales = np.ones((out_features, in_features // 128), dtype=np.float32)
         su = np.ones(in_features, dtype=np.float64)
         codebook = TrellisCodebook(bits=4)
@@ -874,7 +874,7 @@ class TestExl3ToMarlinConversion:
             tiles_k = in_feat // 16
             tiles_n = out_feat // 16
 
-            trellis_indices = np.random.randint(0, 16, (tiles_k, tiles_n, 256), dtype=np.int16)
+            trellis_indices = np.random.randint(0, 16, (tiles_k, tiles_n, 256), dtype=np.uint8)
             scales = np.random.randn(out_feat, in_feat // 128).astype(np.float32)
             su = np.sign(np.random.randn(in_feat)).astype(np.float64)
             codebook = TrellisCodebook(bits=4)

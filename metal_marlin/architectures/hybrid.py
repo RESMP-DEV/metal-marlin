@@ -891,8 +891,9 @@ def _precision_to_bits(precision: Precision) -> int:
 def _load_weights(model: HybridModel, model_path: Path) -> HybridModel:
     """Load weights from safetensors files.
 
-    This is a placeholder - actual implementation would map HF weights
-    to the hybrid model structure.
+    Hybrid architectures are experimental in metal_marlin. Pretrained weight
+    mapping is not implemented yet, so models will initialize with random
+    weights when calling from_pretrained.
     """
     import glob
 
@@ -900,14 +901,11 @@ def _load_weights(model: HybridModel, model_path: Path) -> HybridModel:
     if not safetensor_files:
         raise FileNotFoundError(f"No safetensors files found in {model_path}")
 
-    # TODO: Implement weight loading with proper name mapping
-    # This requires understanding the source model's weight naming convention
-    # and mapping to our hybrid model structure
-
     import warnings
 
     warnings.warn(
-        "Weight loading not fully implemented. Model initialized with random weights.",
+        "Hybrid architectures are experimental; pretrained weight loading is "
+        "not implemented yet. Model initialized with random weights.",
         UserWarning,
     )
 

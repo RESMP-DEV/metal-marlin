@@ -459,11 +459,8 @@ def awq_quantize_model(
     if not activations_path.exists():
         raise FileNotFoundError(f"Activation statistics not found at {activations_path}")
 
-    # For now, use dummy activations (user should provide real calibration data)
-    # TODO: Implement proper activation loading
-    if verbose:
-        print("  Warning: Using dummy activation statistics")
-        print("  For production use, provide real calibration activations")
+    activations_file = np.load(str(activations_path), allow_pickle=True)
+    activations_dict = {key: activations_file[key] for key in activations_file.files}
 
     stats = {
         "quantized_count": 0,
@@ -493,12 +490,32 @@ def awq_quantize_model(
                 if not should_skip and is_weight:
                     K, N = tensor.shape
                     if N % FP4_PER_U32 == 0 and K % group_size == 0:
-                        # Generate dummy activations (should be replaced with real data)
-                        dummy_activations = np.random.randn(100, 128, K).astype(np.float32)
+                        activations = activations_dict.get(name)
+                        if activations is None and name.endswith(".weight"):
+                            activations = activations_dict.get(name[: -len(".weight")])
+
+                        if activations is None:
+                            if verbose:
+                                print(f"  Warning: Missing activations for {name}, skipping")
+                            output_tensors[name] = tensor
+                            stats["skipped_count"] += 1
+                            continue
+
+                        if activations.ndim != 3 or activations.shape[2] != K:
+                            if verbose:
+                                print(
+                                    "  Warning: Activation shape mismatch for "
+                                    f"{name} (got {activations.shape}, expected [B, T, {K}])"
+                                )
+                            output_tensors[name] = tensor
+                            stats["skipped_count"] += 1
+                            continue
+
+                        activations = activations.astype(np.float32)
 
                         result = awq_quantize(
                             tensor,
-                            dummy_activations,
+                            activations,
                             group_size=group_size,
                             salient_ratio=salient_ratio,
                             activation_method=activation_method,

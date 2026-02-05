@@ -125,7 +125,7 @@ class ConformerAttentionMetal(nn.Module):
         # Use Metal's Flash Attention kernel for efficient attention computation
         # Flash Attention expects: [batch, heads, seq_q, head_dim]
         # We compute attention manually here to include relative positional bias
-        # In a full implementation, you'd use flash_attention kernel from src/flash_attention.metal
+        # In a full implementation, you'd use flash_attention_v2 kernel from src/flash_attention_v2.metal
 
         # Compute attention scores: (B, H, T, T)
         # Standard scaled dot-product attention
