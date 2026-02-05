@@ -23,7 +23,32 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pytest
 
-from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
+try:
+    from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
+except Exception:  # pragma: no cover - fallback for partial installs
+    import importlib.util
+    import sys
+    from types import ModuleType
+    from pathlib import Path
+
+    _pkg_root = Path(__file__).resolve().parents[1] / "metal_marlin"
+    _pkg_name = "metal_marlin"
+    if _pkg_name not in sys.modules:
+        _pkg = ModuleType(_pkg_name)
+        _pkg.__path__ = [str(_pkg_root)]
+        sys.modules[_pkg_name] = _pkg
+
+    _compat_path = _pkg_root / "_compat.py"
+    _spec = importlib.util.spec_from_file_location(f"{_pkg_name}._compat", _compat_path)
+    if _spec is None or _spec.loader is None:
+        raise
+    _compat = importlib.util.module_from_spec(_spec)
+    sys.modules[_spec.name] = _compat
+    _spec.loader.exec_module(_compat)
+
+    HAS_MPS = _compat.HAS_MPS
+    HAS_TORCH = _compat.HAS_TORCH
+    torch = _compat.torch
 
 if TYPE_CHECKING:
     import torch as torch_types

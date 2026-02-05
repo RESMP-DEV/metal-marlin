@@ -18,6 +18,14 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+# Try fast Cython implementation
+_USE_FAST_LDL = False
+try:
+    from metal_marlin.quantization._ldl_fast import block_ldl_fast
+    _USE_FAST_LDL = True
+except ImportError:
+    pass
+
 
 def block_ldl(
     H: NDArray[np.float64],
@@ -56,6 +64,13 @@ def block_ldl(
         >>> np.allclose(H, L @ D @ L.T)
         True
     """
+    # Fast path: use Cython + Accelerate LAPACK
+    if _USE_FAST_LDL and not verbose:
+        try:
+            return block_ldl_fast(H, block_size)
+        except Exception:
+            pass  # Fall through to pure Python
+
     H = np.asarray(H, dtype=np.float64)
     n = H.shape[0]
 

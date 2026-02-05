@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from .quantize_fp4 import compute_quantization_error, quantize_fp4
+from .trellis.loader import TrellisWeight
 
 
 @dataclass
@@ -501,6 +502,135 @@ def convert_model_to_fp4(
     return stats
 
 
+def detect_trellis_format(model_path: str | Path) -> str:
+    """Detect Trellis format version.
+
+    Returns:
+        "v3" if model.safetensors.index.json exists
+        "v2" if layer_0000/ directory exists
+        "unknown" otherwise
+    """
+    model_path = Path(model_path)
+
+    if (model_path / "model.safetensors.index.json").exists():
+        return "v3"
+    elif (model_path / "layer_0000").is_dir():
+        return "v2"
+    return "unknown"
+
+
+def load_trellis_v3_weights(
+    model_path: str | Path,
+    layer_range: tuple[int, int] | None = None,
+    device: str = "mps",
+) -> dict[str, TrellisWeight]:
+    """Load quantized weights from Trellis v3 flat shard format.
+
+    Args:
+        model_path: Path to quantized model directory
+        layer_range: Optional (start, end) to load subset of layers
+        device: Target device for tensors
+
+    Returns:
+        Dict mapping original weight names to TrellisWeight objects
+    """
+    from safetensors import safe_open
+
+    model_path = Path(model_path)
+
+    # Load weight map
+    index_path = model_path / "model.safetensors.index.json"
+    with open(index_path) as f:
+        index = json.load(f)
+    weight_map = index["weight_map"]
+
+    # Load quantization config
+    quant_config_path = model_path / "quantization_config.json"
+    with open(quant_config_path) as f:
+        quant_config = json.load(f)
+    tensor_bits = {t["name"]: t["bits"] for t in quant_config["tensors"]}
+
+    # Group weights by shard for efficient loading
+    shards_needed: dict[str, set[str]] = {}
+    for full_key, shard_file in weight_map.items():
+        # full_key is like "model.layers.0.mlp.down_proj.weight.indices"
+        # Extract base weight name
+        if full_key.endswith((".indices", ".scales", ".su", ".sv")):
+            base_name = full_key.rsplit(".", 1)[0]
+            if layer_range:
+                # Filter by layer
+                try:
+                    # Extract layer number from names like "model.layers.0.mlp.down_proj.weight"
+                    parts = base_name.split(".")
+                    if "layers" in parts:
+                        layer_idx = parts[parts.index("layers") + 1]
+                        layer_num = int(layer_idx)
+                        if not (layer_range[0] <= layer_num < layer_range[1]):
+                            continue
+                except (ValueError, IndexError):
+                    pass
+            shards_needed.setdefault(shard_file, set()).add(base_name)
+
+    # Load weights
+    weights = {}
+    for shard_file, base_names in shards_needed.items():
+        shard_path = model_path / shard_file
+        with safe_open(str(shard_path), framework="pt") as f:
+            for base_name in base_names:
+                indices = f.get_tensor(f"{base_name}.indices")
+                scales = f.get_tensor(f"{base_name}.scales")
+                su = f.get_tensor(f"{base_name}.su")
+                sv = f.get_tensor(f"{base_name}.sv")
+
+                # Get original shape from quantization config
+                orig_shape = None
+                for t in quant_config["tensors"]:
+                    if t["name"] == base_name:
+                        orig_shape = tuple(t["shape"])
+                        break
+                if orig_shape is None:
+                    # Infer from su/sv dimensions: su is [K], sv is [N]
+                    orig_shape = (su.shape[0], sv.shape[0])
+
+                weights[base_name] = TrellisWeight(
+                    packed_indices=indices.to(device),
+                    scales=scales.to(device),
+                    su=su.to(device),
+                    sv=sv.to(device),
+                    bits=tensor_bits.get(base_name, 4),
+                    original_shape=orig_shape,
+                )
+
+    return weights
+
+
+def _load_trellis_v2_weights(model_path: str | Path) -> dict[str, dict[str, np.ndarray]]:
+    """Load Trellis v2 weights from layer directories."""
+    model_path = Path(model_path)
+    weights = {}
+
+    # Find all layer directories
+    layer_dirs = sorted(model_path.glob("layer_*"))
+
+    for layer_dir in layer_dirs:
+        index_file = layer_dir / "index.json"
+        if not index_file.exists():
+            continue
+
+        with open(index_file) as f:
+            index = json.load(f)
+
+        # Load tensors for this layer
+        for tensor_name, tensor_info in index.get("tensors", {}).items():
+            weights[tensor_name] = {
+                "bits": tensor_info.get("bits", 4),
+                "shape": tensor_info.get("shape"),
+                "file": layer_dir / tensor_info.get("file", ""),
+            }
+
+    return weights
+
+
 def load_quantized_weights(
     model_path: str | Path,
 ) -> dict[str, dict[str, np.ndarray]]:
@@ -517,40 +647,16 @@ def load_quantized_weights(
         ...
     }
     """
-    from safetensors import safe_open
-
-    model_path = Path(model_path)
-    st_file = model_path / "model.safetensors"
-
-    if not st_file.exists():
-        raise FileNotFoundError(f"model.safetensors not found in {model_path}")
-
-    weights = {}
-
-    with safe_open(str(st_file), framework="numpy") as f:
-        for name in f.keys():
-            if name.endswith(".scales") or name.endswith(".group_size"):
-                continue
-
-            tensor = f.get_tensor(name)
-
-            # Check if this is a quantized weight
-            scales_name = f"{name}.scales"
-            gs_name = f"{name}.group_size"
-
-            if scales_name in f.keys():
-                weights[name] = {
-                    "packed": tensor,
-                    "scales": f.get_tensor(scales_name),
-                    "group_size": int(f.get_tensor(gs_name)[0]) if gs_name in f.keys() else 128,
-                }
-            else:
-                weights[name] = {
-                    "data": tensor,
-                    "quantized": False,
-                }
-
-    return weights
+    fmt = detect_trellis_format(model_path)
+    if fmt == "v3":
+        raise ValueError(
+            "Trellis v3 format returns TrellisWeight objects. "
+            "Use load_trellis_v3_weights() directly."
+        )
+    elif fmt == "v2":
+        return _load_trellis_v2_weights(model_path)
+    else:
+        raise ValueError(f"Unknown Trellis format at {model_path}")
 
 
 # ============================================================================
@@ -2588,9 +2694,6 @@ Examples:
   # Layer-wise conversion for large models (memory-efficient)
   python -m metal_marlin.hf_loader convert-layerwise deepseek-ai/DeepSeek-V2-Lite ./dsv2-fp4/ \\
       --mixed-precision moe
-
-  # Simple conversion (legacy, no subcommand)
-  python -m metal_marlin.hf_loader zai-org/GLM-4.7-Flash ./glm4-fp4/
 """,
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -2795,15 +2898,10 @@ Examples:
     if token is None:
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 
-    # Handle no command (backwards compatibility: treat positional args as convert)
+    # Handle no command
     if args.command is None:
-        # Check if positional args were provided without subcommand
-        if len(sys.argv) > 1 and not sys.argv[1].startswith("-"):
-            # Treat as legacy convert command
-            args = parser.parse_args(["convert"] + sys.argv[1:])
-        else:
-            parser.print_help()
-            return
+        parser.print_help()
+        return
 
     # -------------------------------------------------------------------------
     # Handle commands
@@ -2887,8 +2985,7 @@ Examples:
                 verbose=not args.quiet,
                 token=token,
             )
-        # Use advanced convert if mixed-precision or calibration source specified
-        elif args.mixed_precision or cal_source:
+        else:
             convert_model_with_calibration(
                 model_path=args.model_id,
                 output_path=args.output_dir,
@@ -2899,16 +2996,6 @@ Examples:
                 validate=not args.no_validate,
                 verbose=not args.quiet,
                 token=token,
-            )
-        else:
-            # Legacy convert path
-            convert_model_to_fp4(
-                model_path=args.model_id,
-                output_path=args.output_dir,
-                group_size=args.group_size,
-                validate=not args.no_validate,
-                verbose=not args.quiet,
-                calibration=cal_path,
             )
 
     elif args.command == "convert-layerwise":

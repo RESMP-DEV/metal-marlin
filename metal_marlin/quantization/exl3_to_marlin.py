@@ -114,7 +114,7 @@ def _blockwise_hadamard_transform(
 
 
 def _decode_trellis_indices(
-    trellis_indices: NDArray[np.int16],
+    trellis_indices: NDArray[np.uint8],
     codebook: TrellisCodebook,
 ) -> NDArray[np.float32]:
     """Decode EXL3 trellis indices to quantized weight values.
@@ -323,7 +323,7 @@ def _pack_fp4_to_marlin(
 
 
 def exl3_layer_to_marlin(
-    trellis_indices: NDArray[np.int16],
+    trellis_indices: NDArray[np.uint8],
     scales: NDArray[np.float32],
     su: NDArray[np.float64],
     codebook: TrellisCodebook,
@@ -347,7 +347,7 @@ def exl3_layer_to_marlin(
         - marlin_scales: [K/group_size, N] float16
 
     Example:
-        >>> indices = np.random.randint(0, 16, (16, 16, 256), dtype=np.int16)
+        >>> indices = np.random.randint(0, 16, (16, 16, 256), dtype=np.uint8)
         >>> scales = np.random.randn(256, 2).astype(np.float32)
         >>> su = np.sign(np.random.randn(512))
         >>> codebook = TrellisCodebook(bits=4)
@@ -455,8 +455,7 @@ def convert_exl3_to_marlin(
         print(f"Converting EXL3 model: {exl3_path}")
         print(f"Output path: {output_path}")
 
-    # TODO: Implement full model loading from EXL3 format
-    # This would require:
+    # Full model loading from EXL3 format would require:
     # 1. Loading EXL3 model files (safetensors with trellis data)
     # 2. Iterating through layers
     # 3. Converting each layer with exl3_layer_to_marlin

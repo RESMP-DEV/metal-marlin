@@ -41,6 +41,14 @@ except ImportError:
 
 from metal_marlin.quantization.trellis_tile import TrellisTile
 
+# Try fast Cython eigendecomposition
+_USE_FAST_EIGH = False
+try:
+    from metal_marlin.quantization._eigh_fast import eigh_psd_fast
+    _USE_FAST_EIGH = True
+except ImportError:
+    pass
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -116,10 +124,12 @@ class EXL3Quantizer:
         H_rot, su, _ = preprocess_hessian_exl3(hessian, self.had_k)
 
         # Step 2: Ensure positive definiteness via eigendecomposition
-        # Use numpy (releases GIL during LAPACK calls) instead of torch (holds GIL)
-        eigenvalues, eigenvectors = np.linalg.eigh(H_rot)
-        eigenvalues = np.maximum(eigenvalues, self.sigma_reg)
-        H_psd = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
+        if _USE_FAST_EIGH:
+            H_psd, _ = eigh_psd_fast(H_rot, sigma_reg=self.sigma_reg)
+        else:
+            eigenvalues, eigenvectors = np.linalg.eigh(H_rot)
+            eigenvalues = np.maximum(eigenvalues, self.sigma_reg)
+            H_psd = eigenvectors @ np.diag(eigenvalues) @ eigenvectors.T
 
         # Step 3: Block LDL decomposition
         L, D = block_ldl(H_psd, block_size=16)

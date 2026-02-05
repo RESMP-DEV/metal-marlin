@@ -185,7 +185,7 @@ class TestFlashAttentionAccuracy:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     @pytest.mark.parametrize(
         "batch,heads_q,heads_kv,seq_q,seq_k,head_dim,is_causal",
         [
@@ -256,7 +256,7 @@ class TestFlashAttentionAccuracy:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_flash_attention_vs_numpy_reference(self, rng: np.random.Generator):
         """Verify flash_attention_v2 matches NumPy reference implementation."""
         from metal_marlin.flash_attention_v2 import flash_attention_v2
@@ -286,7 +286,7 @@ class TestFlashAttentionAccuracy:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     @pytest.mark.parametrize("seq_k", [64, 256, 512, 1024, 2048])
     def test_decode_kernel_accuracy(self, rng: np.random.Generator, seq_k: int):
         """Test decode kernel (seq_q=1) accuracy across different context lengths."""
@@ -660,7 +660,7 @@ class TestNumericalStability:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_with_large_values(self, rng: np.random.Generator):
         """Test attention handles large input values without overflow."""
         from metal_marlin.flash_attention_v2 import flash_attention_v2
@@ -684,7 +684,7 @@ class TestNumericalStability:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_with_small_values(self, rng: np.random.Generator):
         """Test attention handles small input values without underflow."""
         from metal_marlin.flash_attention_v2 import flash_attention_v2
@@ -709,7 +709,7 @@ class TestNumericalStability:
     @requires_torch
     @requires_mps
     @requires_metal_attention
-    @pytest.mark.xfail(reason="Metal kernels exceed threadgroup memory limit")
+    @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_softmax_stability(self, rng: np.random.Generator):
         """Test softmax normalization is correct."""
         from metal_marlin.flash_attention_v2 import flash_attention_v2

@@ -86,7 +86,7 @@ def quantize_tile_viterbi(
     tile: NDArray[np.float32],
     codebook: TrellisCodebook,
     scale: float,
-) -> tuple[NDArray[np.int16], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
     """Quantize 16x16 tile using Viterbi trellis search.
 
     Viterbi finds the optimal sequence of quantization decisions
@@ -98,7 +98,7 @@ def quantize_tile_viterbi(
         scale: Scale factor for this tile
 
     Returns:
-        indices: [256] quantized indices (int16 for packed storage)
+        indices: [256] quantized indices (uint8 for packed storage)
         dequantized: [16, 16] reconstructed tile
     """
     grid = codebook.get_grid()
@@ -111,7 +111,7 @@ def quantize_tile_viterbi(
     # Viterbi with uniform transitions simplifies to tracking min cost path
     # Since transition costs are uniform, best_prev is independent of current state
     costs = np.zeros((n_elements, n_states), dtype=np.float32)
-    edges = np.zeros(n_elements, dtype=np.int16)  # best_prev is same for all states
+    edges = np.zeros(n_elements, dtype=np.uint8)  # best_prev is same for all states
 
     # Initialize first element (vectorized over all states)
     costs[0] = (tile_flat[0] - grid) ** 2
@@ -124,7 +124,7 @@ def quantize_tile_viterbi(
         costs[i] = min_prev_cost + (tile_flat[i] - grid) ** 2
 
     # Backtrack to find optimal path
-    indices = np.zeros(n_elements, dtype=np.int16)
+    indices = np.zeros(n_elements, dtype=np.uint8)
     indices[-1] = np.argmin(costs[-1])
     for i in range(n_elements - 2, -1, -1):
         indices[i] = edges[i + 1]
@@ -141,7 +141,7 @@ def quantize_tiles_parallel(
     scales: NDArray[np.float32],
     max_workers: int | None = None,
     use_metal: bool = True,
-) -> tuple[NDArray[np.int16], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
     """Quantize multiple tiles in parallel.
 
     Uses Metal GPU acceleration when available (300k+ tiles/sec on M4),
@@ -169,7 +169,7 @@ def quantize_tiles_fast(
     scales: NDArray[np.float32],
     max_workers: int | None = None,
     use_metal: bool = True,
-) -> tuple[NDArray[np.int16], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
     """Quantize tiles from raw ndarray (fast path, no TrellisTile overhead).
 
     Uses Metal GPU acceleration when available (300k+ tiles/sec on M4),
@@ -212,7 +212,7 @@ def quantize_tiles_fast(
             )
 
             # Convert back to numpy
-            all_indices = indices_tensor.cpu().numpy()
+            all_indices = indices_tensor.cpu().numpy().astype(np.uint8)
             all_dequant = dequant_tensor.cpu().numpy().reshape(n_tiles, 16, 16)
 
             return all_indices, all_dequant
@@ -229,7 +229,7 @@ def quantize_tiles_fast(
     costs = (tiles_norm[:, 0:1] - grid[None, :]) ** 2  # [n_tiles, n_states]
 
     # Track edges for backtracking: [n_tiles, 256]
-    edges = np.zeros((n_tiles, 256), dtype=np.int16)
+    edges = np.zeros((n_tiles, 256), dtype=np.uint8)
 
     # Forward pass
     for i in range(1, 256):
@@ -238,7 +238,7 @@ def quantize_tiles_fast(
         costs = min_prev + (tiles_norm[:, i : i + 1] - grid[None, :]) ** 2
 
     # Backtrack: all tiles in parallel
-    all_indices = np.zeros((n_tiles, 256), dtype=np.int16)
+    all_indices = np.zeros((n_tiles, 256), dtype=np.uint8)
     all_indices[:, -1] = costs.argmin(axis=1)
     for i in range(254, -1, -1):
         all_indices[:, i] = edges[:, i + 1]
@@ -253,7 +253,7 @@ def quantize_tile_greedy(
     tile: NDArray[np.float32],
     codebook: TrellisCodebook,
     scale: float,
-) -> tuple[NDArray[np.int16], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32]]:
     """Quantize tile using greedy nearest-neighbor (baseline comparison).
 
     Args:
@@ -272,7 +272,7 @@ def quantize_tile_greedy(
     normalized = tile_flat / scale
 
     # Find nearest grid point for each element independently
-    indices = np.zeros(len(tile_flat), dtype=np.int16)
+    indices = np.zeros(len(tile_flat), dtype=np.uint8)
     for i, val in enumerate(normalized):
         indices[i] = np.argmin(np.abs(grid - val))
 

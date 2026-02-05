@@ -25,7 +25,26 @@ try:
 except ImportError:
     np = None
 
+try:
+    import pybind11
+    PYBIND11_INCLUDE = pybind11.get_include()
+except ImportError:
+    PYBIND11_INCLUDE = None
+
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
+
+
+class BuildExtWithMM(build_ext):
+    """Custom build_ext that handles .mm (Objective-C++) files."""
+
+    def build_extension(self, ext):
+        # Ensure .mm is recognized as a source file
+        if hasattr(self.compiler, 'src_extensions'):
+            if '.mm' not in self.compiler.src_extensions:
+                self.compiler.src_extensions.append('.mm')
+        super().build_extension(ext)
+
 
 # Extension configuration
 HERE = Path(__file__).parent
@@ -49,6 +68,8 @@ extra_link_args = [
 include_dirs = [str(EXT_DIR)]
 if np is not None:
     include_dirs.append(np.get_include())
+if PYBIND11_INCLUDE is not None:
+    include_dirs.append(PYBIND11_INCLUDE)
 
 extensions = [
     Extension(
@@ -58,6 +79,39 @@ extensions = [
         extra_compile_args=extra_compile_args,
         extra_link_args=extra_link_args,
         language="c",
+    ),
+    Extension(
+        "metal_marlin.quantization._ldl_fast",
+        sources=["metal_marlin/quantization/_ldl_fast.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-ffast-math", "-std=c11"],
+        extra_link_args=["-framework", "Accelerate"],
+        language="c",
+    ),
+    Extension(
+        "metal_marlin.quantization._eigh_fast",
+        sources=["metal_marlin/quantization/_eigh_fast.pyx"],
+        include_dirs=include_dirs,
+        extra_compile_args=["-O3", "-ffast-math", "-std=c11"],
+        extra_link_args=["-framework", "Accelerate"],
+        language="c",
+    ),
+    Extension(
+        "metal_marlin._psd_dispatch",
+        sources=["metal_marlin/_psd_dispatch.mm"],
+        include_dirs=include_dirs,
+        extra_compile_args=[
+            "-std=c++17",
+            "-O3",
+            "-fvisibility=hidden",
+            "-fobjc-arc",  # Automatic reference counting
+        ],
+        extra_link_args=[
+            "-framework", "Metal",
+            "-framework", "Foundation",
+            "-lobjc",
+        ],
+        language="objc++",
     ),
 ]
 
@@ -80,4 +134,5 @@ if __name__ == "__main__":
             compiler_directives=cython_directives,
             annotate=os.environ.get("CYTHON_ANNOTATE", "0") == "1",
         ),
+        cmdclass={"build_ext": BuildExtWithMM},
     )

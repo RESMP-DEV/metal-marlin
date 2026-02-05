@@ -380,13 +380,31 @@ class TestNumericalAccuracy:
         x = torch.randn(4, hidden_dim, dtype=torch.float16, device="mps") * 0.01
 
         with torch.no_grad():
-            # Slow path (Python reference)
-            slow_output = moe._forward_slow(x)
+            # Reference implementation (sequential Python path)
+            x_router = x.to(moe.router.weight.dtype)
+            router_logits = moe.router(x_router)
+            routing_weights, selected_experts = torch.topk(
+                F.softmax(router_logits, dim=-1, dtype=torch.float),
+                k=moe.num_experts_per_tok,
+                dim=-1,
+            )
+            routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
 
-            # Fast path (if available)
-            if not moe._use_fast_moe:
-                pytest.skip("Fast MoE kernel not available")
+            slow_output = torch.zeros_like(x)
+            for k_idx in range(moe.num_experts_per_tok):
+                expert_idx = selected_experts[..., k_idx]
+                weight = routing_weights[..., k_idx]
+                unique_experts = expert_idx.unique()
+                for expert_id in unique_experts.tolist():
+                    mask = expert_idx == expert_id
+                    if not mask.any():
+                        continue
+                    w = weight * mask.float()
+                    expert_out = moe.experts[expert_id](x)
+                    slow_output.add_(expert_out * w.unsqueeze(-1))
+            slow_output = slow_output + moe.shared_expert(x)
 
+            # Fast path (Metal kernel) - now always used
             fast_output = moe.forward_fast(x)
 
         # Compare outputs

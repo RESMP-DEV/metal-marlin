@@ -78,10 +78,8 @@ class YaRNConfig:
     def from_hf_config(cls, config: dict[str, Any]) -> YaRNConfig | None:
         """Parse YaRN config from HuggingFace config.json.
 
-        Handles various config formats:
-        - rope_scaling dict with type="yarn"
-        - Top-level rope_scaling_* fields
-        - Model-specific formats (Qwen2, DeepSeek, etc.)
+        Handles rope_scaling dict with type="yarn" and model-specific formats
+        (Qwen2, DeepSeek, etc.).
 
         Args:
             config: Dictionary loaded from config.json.
@@ -91,22 +89,8 @@ class YaRNConfig:
         """
         rope_scaling = config.get("rope_scaling")
 
-        # No rope_scaling - check for legacy fields
+        # No rope_scaling - only modern configuration is supported
         if rope_scaling is None:
-            # Check for top-level fields (some converters flatten the config)
-            if config.get("rope_scaling_type") == "yarn":
-                return cls(
-                    original_max_position=config.get(
-                        "rope_original_max_position",
-                        config.get("original_max_position_embeddings", 4096),
-                    ),
-                    scale_factor=config.get("rope_scaling_factor", 1.0),
-                    beta_fast=config.get("rope_beta_fast", 32.0),
-                    beta_slow=config.get("rope_beta_slow", 1.0),
-                    mscale=config.get("rope_mscale", 1.0),
-                    mscale_all_dim=config.get("rope_mscale_all_dim", 0.0),
-                    rope_type="yarn",
-                )
             return None
 
         # rope_scaling is a dict

@@ -149,7 +149,7 @@ constant constexpr uint N_TILES_PER_MOE = MOE_TILE_N / SIMD_TILE;    // 64/8 = 8
 constant constexpr uint K_TILES_PER_MOE = MOE_TILE_K / SIMD_TILE;    // 16/8 = 2
 
 constant constexpr uint TRELLIS_TILE = 16;
-constant constexpr uint PACKED_BYTES_3BIT = 96;  // 16*16*3/8
+constant constexpr uint PACKED_BYTES_TILE_3B = 96;  // 16*16*3/8
 
 // Scale/sign prefetch cache sizes
 constant constexpr uint SCALE_CACHE_SIZE = MOE_TILE_N;  // 64 scales per N-tile
@@ -171,15 +171,19 @@ constant constexpr uint NAN_STAGE_DOWN   = 3;    // NaN in down accumulator
 // Parameter structure
 // ---------------------------------------------------------------------------
 
-struct TrellisParams {
-    uint M;              // Batch size (tokens)
-    uint K;              // Input hidden dimension
-    uint N;              // Output dimension (intermediate for gate/up, hidden for down)
-    uint num_experts;    // Total experts
-    uint top_k;          // Experts per token
-    uint bits;           // 2, 3, or 4
-    uint group_size;     // Quantization group size
-    uint n_levels;       // Codebook levels (e.g., 8 for 3-bit)
+struct MoEParams {
+    uint batch_size;
+    uint hidden_dim;
+    uint intermediate_dim;
+    uint num_experts;
+    uint top_k;
+    uint gate_bits;
+    uint up_bits;
+    uint down_bits;
+    uint tile_size;
+    uint gate_n_levels;  // 1 << gate_bits
+    uint up_n_levels;    // 1 << up_bits
+    uint down_n_levels;  // 1 << down_bits
 };
 
 // ---------------------------------------------------------------------------
@@ -189,43 +193,45 @@ struct TrellisParams {
 /// Unpack 4 consecutive 3-bit indices from a 32-bit packed value.
 /// Extracts indices at bit offsets [base, base+3, base+6, base+9].
 /// Returns uint4 with 4 indices (values 0-7).
-inline uint4 unpack_3bit_x4(uint packed32, uint bit_offset_base) {
+inline uint4 unpack_bits_x4(uint packed32, uint bit_offset_base, uint bits) {
+    uint mask = (1u << bits) - 1;
     return uint4(
-        (packed32 >> bit_offset_base) & 0x7,
-        (packed32 >> (bit_offset_base + 3)) & 0x7,
-        (packed32 >> (bit_offset_base + 6)) & 0x7,
-        (packed32 >> (bit_offset_base + 9)) & 0x7
+        (packed32 >> bit_offset_base) & mask,
+        (packed32 >> (bit_offset_base + bits)) & mask,
+        (packed32 >> (bit_offset_base + 2 * bits)) & mask,
+        (packed32 >> (bit_offset_base + 3 * bits)) & mask
     );
 }
 
 /// Unpack 8 consecutive 3-bit indices from packed bytes.
 /// Loads 4 bytes starting at byte_ptr to cover the 24-bit span of 8 x 3-bit indices.
 /// Outputs two uint4 vectors (lo: indices 0-3, hi: indices 4-7).
-inline void unpack_3bit_x8(
+inline void unpack_bits_x8(
     device const uint8_t* byte_ptr,
     uint base_bit_in_byte,
+    uint bits,
     thread uint4& indices_lo,
     thread uint4& indices_hi
 ) {
-    // Load 4 bytes to cover 24+ bits
+    // Load enough bytes to cover 8 * bits
+    // For bits up to 4, 8 * 4 = 32 bits = 4 bytes
     uint packed32 = uint(byte_ptr[0]) |
                     (uint(byte_ptr[1]) << 8) |
                     (uint(byte_ptr[2]) << 16) |
                     (uint(byte_ptr[3]) << 24);
 
-    // Extract 8 indices at 3-bit intervals from base offset
-    uint bit = base_bit_in_byte;
+    uint mask = (1u << bits) - 1;
     indices_lo = uint4(
-        (packed32 >> bit) & 0x7,
-        (packed32 >> (bit + 3)) & 0x7,
-        (packed32 >> (bit + 6)) & 0x7,
-        (packed32 >> (bit + 9)) & 0x7
+        (packed32 >> base_bit_in_byte) & mask,
+        (packed32 >> (base_bit_in_byte + bits)) & mask,
+        (packed32 >> (base_bit_in_byte + 2 * bits)) & mask,
+        (packed32 >> (base_bit_in_byte + 3 * bits)) & mask
     );
     indices_hi = uint4(
-        (packed32 >> (bit + 12)) & 0x7,
-        (packed32 >> (bit + 15)) & 0x7,
-        (packed32 >> (bit + 18)) & 0x7,
-        (packed32 >> (bit + 21)) & 0x7
+        (packed32 >> (base_bit_in_byte + 4 * bits)) & mask,
+        (packed32 >> (base_bit_in_byte + 5 * bits)) & mask,
+        (packed32 >> (base_bit_in_byte + 6 * bits)) & mask,
+        (packed32 >> (base_bit_in_byte + 7 * bits)) & mask
     );
 }
 
@@ -439,7 +445,7 @@ inline float fast_silu_scalar_f32(float x) {
 // 3-bit Trellis dequantization
 // ---------------------------------------------------------------------------
 
-inline half trellis_dequant_3bit(
+inline half trellis_dequant(
     device const uint8_t* packed_weights,
     device const half* scales,
     device const half* su,
@@ -451,6 +457,7 @@ inline half trellis_dequant_3bit(
     uint K_dim,
     uint N_dim,
     uint group_size,
+    uint bits,
     uint n_levels
 ) {
     // Compute tile position
@@ -461,21 +468,22 @@ inline half trellis_dequant_3bit(
     uint n_in_tile = global_n % TRELLIS_TILE;
     uint tile_idx = tile_k * num_tiles_n + tile_n;
 
-    device const uint8_t* tile_packed = packed_weights + tile_idx * PACKED_BYTES_3BIT;
+    uint packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * bits) / 8;
+    device const uint8_t* tile_packed = packed_weights + tile_idx * packed_bytes_per_tile;
 
     // Transposed indexing: idx = n * TILE_DIM + k
     uint idx_in_tile = n_in_tile * TRELLIS_TILE + k_in_tile;
 
-    // Unpack 3-bit index
-    uint bit_offset = idx_in_tile * 3;
+    // Unpack bit index
+    uint bit_offset = idx_in_tile * bits;
     uint byte_idx = bit_offset >> 3;
     uint bit_in_byte = bit_offset & 7;
 
     uint packed_val = uint(tile_packed[byte_idx]);
-    if (bit_in_byte + 3 > 8) {
+    if (bit_in_byte + bits > 8) {
         packed_val |= uint(tile_packed[byte_idx + 1]) << 8;
     }
-    uint codebook_idx = (packed_val >> bit_in_byte) & 0x7;
+    uint codebook_idx = (packed_val >> bit_in_byte) & ((1u << bits) - 1);
 
     if (codebook_idx >= n_levels) {
         codebook_idx = 0;
@@ -516,6 +524,7 @@ inline void load_trellis_tile(
     uint K_dim,
     uint N_dim,
     uint group_size,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -531,10 +540,10 @@ inline void load_trellis_tile(
 
         half val = 0.0h;
         if (global_k < K_dim && global_n < N_dim) {
-            val = trellis_dequant_3bit(
+            val = trellis_dequant(
                 packed_weights, scales, su, sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, bits, n_levels
             );
         }
         B_buf[k_local][n_local] = val;
@@ -551,7 +560,7 @@ inline void load_trellis_tile(
 // for su/sv vectors.
 // ---------------------------------------------------------------------------
 
-inline half trellis_dequant_3bit_cached(
+inline half trellis_dequant_cached(
     device const uint8_t* packed_weights,
     threadgroup const half* scale_cache,  // [MOE_TILE_N] prefetched scales for this K-group
     threadgroup const half* su_cache,     // [MOE_TILE_K] prefetched su for this K-tile
@@ -562,6 +571,7 @@ inline half trellis_dequant_3bit_cached(
     uint k_local,                          // Position within current K-tile
     uint n_local,                          // Position within current N-tile
     uint N_dim,
+    uint bits,
     uint n_levels
 ) {
     // Compute tile position
@@ -572,21 +582,22 @@ inline half trellis_dequant_3bit_cached(
     uint n_in_tile = global_n % TRELLIS_TILE;
     uint tile_idx = tile_k * num_tiles_n + tile_n;
 
-    device const uint8_t* tile_packed = packed_weights + tile_idx * PACKED_BYTES_3BIT;
+    uint packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * bits) / 8;
+    device const uint8_t* tile_packed = packed_weights + tile_idx * packed_bytes_per_tile;
 
     // Transposed indexing: idx = n * TILE_DIM + k
     uint idx_in_tile = n_in_tile * TRELLIS_TILE + k_in_tile;
 
-    // Unpack 3-bit index
-    uint bit_offset = idx_in_tile * 3;
+    // Unpack bits index
+    uint bit_offset = idx_in_tile * bits;
     uint byte_idx = bit_offset >> 3;
     uint bit_in_byte = bit_offset & 7;
 
     uint packed_val = uint(tile_packed[byte_idx]);
-    if (bit_in_byte + 3 > 8) {
+    if (bit_in_byte + bits > 8) {
         packed_val |= uint(tile_packed[byte_idx + 1]) << 8;
     }
-    uint codebook_idx = (packed_val >> bit_in_byte) & 0x7;
+    uint codebook_idx = (packed_val >> bit_in_byte) & ((1u << bits) - 1);
 
     if (codebook_idx >= n_levels) {
         codebook_idx = 0;
@@ -719,6 +730,7 @@ inline void load_trellis_tile_cached(
     uint n_block,
     uint K_dim,
     uint N_dim,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -734,10 +746,10 @@ inline void load_trellis_tile_cached(
 
         half val = 0.0h;
         if (global_k < K_dim && global_n < N_dim) {
-            val = trellis_dequant_3bit_cached(
+            val = trellis_dequant_cached(
                 packed_weights, scale_cache, su_cache, sv_cache, grid,
                 global_k, global_n, k_local, n_local,
-                N_dim, n_levels
+                N_dim, bits, n_levels
             );
         }
         B_buf[k_local][n_local] = val;
@@ -772,6 +784,7 @@ inline void load_trellis_tile_vec4(
     uint n_block,
     uint K_dim,
     uint N_dim,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -780,6 +793,8 @@ inline void load_trellis_tile_vec4(
     const uint num_tiles_n = (N_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     const uint tile_k = k_block / TRELLIS_TILE;
     const uint elems_per_thread = (MOE_TILE_K * MOE_TILE_N) / MOE_THREADS;  // 8
+
+    uint packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * bits) / 8;
 
     // ILP OPTIMIZATION: Process 8 elements, 2 at a time with full interleaving
     // This allows memory loads to overlap with arithmetic operations
@@ -814,15 +829,15 @@ inline void load_trellis_tile_vec4(
         uint tile_idx_1 = tile_k * num_tiles_n + tile_n_1;
 
         // ILP: Prefetch packed weight pointers for both
-        device const uint8_t* tile_packed_0 = packed_weights + tile_idx_0 * PACKED_BYTES_3BIT;
-        device const uint8_t* tile_packed_1 = packed_weights + tile_idx_1 * PACKED_BYTES_3BIT;
+        device const uint8_t* tile_packed_0 = packed_weights + tile_idx_0 * packed_bytes_per_tile;
+        device const uint8_t* tile_packed_1 = packed_weights + tile_idx_1 * packed_bytes_per_tile;
 
         // ILP: Compute bit offsets for both elements
         uint idx_in_tile_0 = n_in_tile_0 * TRELLIS_TILE + k_in_tile_0;
         uint idx_in_tile_1 = n_in_tile_1 * TRELLIS_TILE + k_in_tile_1;
 
-        uint bit_offset_0 = idx_in_tile_0 * 3;
-        uint bit_offset_1 = idx_in_tile_1 * 3;
+        uint bit_offset_0 = idx_in_tile_0 * bits;
+        uint bit_offset_1 = idx_in_tile_1 * bits;
         uint byte_idx_0 = bit_offset_0 >> 3;
         uint byte_idx_1 = bit_offset_1 >> 3;
         uint bit_in_byte_0 = bit_offset_0 & 7;
@@ -832,16 +847,17 @@ inline void load_trellis_tile_vec4(
         uint packed_val_0 = valid_0 ? uint(tile_packed_0[byte_idx_0]) : 0;
         uint packed_val_1 = valid_1 ? uint(tile_packed_1[byte_idx_1]) : 0;
 
-        if (valid_0 && bit_in_byte_0 + 3 > 8) {
+        if (valid_0 && bit_in_byte_0 + bits > 8) {
             packed_val_0 |= uint(tile_packed_0[byte_idx_0 + 1]) << 8;
         }
-        if (valid_1 && bit_in_byte_1 + 3 > 8) {
+        if (valid_1 && bit_in_byte_1 + bits > 8) {
             packed_val_1 |= uint(tile_packed_1[byte_idx_1 + 1]) << 8;
         }
 
         // ILP: Extract codebook indices
-        uint codebook_idx_0 = (packed_val_0 >> bit_in_byte_0) & 0x7;
-        uint codebook_idx_1 = (packed_val_1 >> bit_in_byte_1) & 0x7;
+        uint mask = (1u << bits) - 1;
+        uint codebook_idx_0 = (packed_val_0 >> bit_in_byte_0) & mask;
+        uint codebook_idx_1 = (packed_val_1 >> bit_in_byte_1) & mask;
 
         if (codebook_idx_0 >= n_levels) codebook_idx_0 = 0;
         if (codebook_idx_1 >= n_levels) codebook_idx_1 = 0;
@@ -1028,7 +1044,7 @@ kernel void moe_trellis_swiglu(
     device const uint* expert_ids        [[buffer(14)]],  // [batch, top_k]
     device const half* expert_probs      [[buffer(15)]],  // [batch, top_k]
     device float* output                 [[buffer(16)]],  // [batch, hidden] FP32 for atomic add
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
 #ifdef MOE_DEBUG_NAN
     device half* debug_gate              [[buffer(18)]],  // [batch, intermediate_dim]
     device half* debug_up                [[buffer(19)]],  // [batch, intermediate_dim]
@@ -1075,7 +1091,7 @@ kernel void moe_trellis_swiglu(
     const uint slot = tgid.z;                   // Expert slot (0 to top_k-1)
 
     // Early exit for out-of-bounds
-    if (token_idx >= p.M || slot >= p.top_k) {
+    if (token_idx >= p.batch_size || slot >= p.top_k) {
         return;
     }
 
@@ -1089,8 +1105,8 @@ kernel void moe_trellis_swiglu(
     const half prob = expert_probs[token_idx * p.top_k + slot];
 
     // Dimensions
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     // Compute expert weight offsets
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
@@ -1098,12 +1114,13 @@ kernel void moe_trellis_swiglu(
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
     // Pointers to this expert's weights
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     // Initialize output tile to zero (will accumulate partial down projections)
@@ -1144,16 +1161,16 @@ kernel void moe_trellis_swiglu(
             load_activation_tile(activations, A_tile, token_idx, k_block, hidden_dim, thread_idx);
 
             prefetch_scale_sign_caches(gate_scales, gate_su, gate_sv, scale_cache[buf_active], su_cache[buf_active], sv_cache[buf_active],
-                                      expert_id, k_block, n_chunk_offset, hidden_dim, intermediate_dim, p.group_size, thread_idx);
+                                      expert_id, k_block, n_chunk_offset, hidden_dim, intermediate_dim, p.tile_size, thread_idx);
             prefetch_scale_sign_caches(up_scales, up_su, up_sv, scale_cache[buf_active], su_cache[buf_active], sv_cache[buf_active],
-                                      expert_id, k_block, n_chunk_offset, hidden_dim, intermediate_dim, p.group_size, thread_idx);
+                                      expert_id, k_block, n_chunk_offset, hidden_dim, intermediate_dim, p.tile_size, thread_idx);
 
             load_trellis_tile_cached(gate_w, scale_cache[buf_active], su_cache[buf_active], sv_cache[buf_active], grid,
                                     B_gate[buf_active], k_block, n_chunk_offset,
-                                    hidden_dim, intermediate_dim, p.n_levels, thread_idx);
+                                    hidden_dim, intermediate_dim, p.gate_bits, p.gate_n_levels, thread_idx);
             load_trellis_tile_cached(up_w, scale_cache[buf_active], su_cache[buf_active], sv_cache[buf_active], grid,
                                     B_up[buf_active], k_block, n_chunk_offset,
-                                    hidden_dim, intermediate_dim, p.n_levels, thread_idx);
+                                    hidden_dim, intermediate_dim, p.up_bits, p.up_n_levels, thread_idx);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             for (kt++; kt < num_k_tiles_hidden; ++kt) {
@@ -1165,15 +1182,15 @@ kernel void moe_trellis_swiglu(
 
                 if (kt + 1 < num_k_tiles_hidden) {
                     prefetch_scale_sign_caches(gate_scales, gate_su, gate_sv, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next],
-                                              expert_id, k_block_next, n_chunk_offset, hidden_dim, intermediate_dim, p.group_size, thread_idx);
+                                              expert_id, k_block_next, n_chunk_offset, hidden_dim, intermediate_dim, p.tile_size, thread_idx);
                     prefetch_scale_sign_caches(up_scales, up_su, up_sv, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next],
-                                              expert_id, k_block_next, n_chunk_offset, hidden_dim, intermediate_dim, p.group_size, thread_idx);
+                                              expert_id, k_block_next, n_chunk_offset, hidden_dim, intermediate_dim, p.tile_size, thread_idx);
                     load_trellis_tile_cached(gate_w, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next], grid,
                                             B_gate[buf_next], k_block_next, n_chunk_offset,
-                                            hidden_dim, intermediate_dim, p.n_levels, thread_idx);
+                                            hidden_dim, intermediate_dim, p.gate_bits, p.gate_n_levels, thread_idx);
                     load_trellis_tile_cached(up_w, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next], grid,
                                             B_up[buf_next], k_block_next, n_chunk_offset,
-                                            hidden_dim, intermediate_dim, p.n_levels, thread_idx);
+                                            hidden_dim, intermediate_dim, p.up_bits, p.up_n_levels, thread_idx);
                 }
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1315,10 +1332,10 @@ kernel void moe_trellis_swiglu(
             uint k_down_local = kdt * MOE_TILE_K;
             uint k_down_global = n_chunk_offset + k_down_local;
             prefetch_scale_sign_caches(down_scales, down_su, down_sv, scale_cache[buf_active_down], su_cache[buf_active_down], sv_cache[buf_active_down],
-                                      expert_id, k_down_global, n_block, intermediate_dim, hidden_dim, p.group_size, thread_idx);
+                                      expert_id, k_down_global, n_block, intermediate_dim, hidden_dim, p.tile_size, thread_idx);
             load_trellis_tile_cached(down_w, scale_cache[buf_active_down], su_cache[buf_active_down], sv_cache[buf_active_down], grid,
                                     B_down[buf_active_down], k_down_global, n_block,
-                                    intermediate_dim, hidden_dim, p.n_levels, thread_idx);
+                                    intermediate_dim, hidden_dim, p.down_bits, p.down_n_levels, thread_idx);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             for (kdt++; kdt < num_k_tiles_chunk; ++kdt) {
@@ -1329,10 +1346,10 @@ kernel void moe_trellis_swiglu(
 
                 if (kdt + 1 < num_k_tiles_chunk) {
                     prefetch_scale_sign_caches(down_scales, down_su, down_sv, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next],
-                                              expert_id, k_down_global_next, n_block, intermediate_dim, hidden_dim, p.group_size, thread_idx);
+                                              expert_id, k_down_global_next, n_block, intermediate_dim, hidden_dim, p.tile_size, thread_idx);
                     load_trellis_tile_cached(down_w, scale_cache[buf_next], su_cache[buf_next], sv_cache[buf_next], grid,
                                             B_down[buf_next], k_down_global_next, n_block,
-                                            intermediate_dim, hidden_dim, p.n_levels, thread_idx);
+                                            intermediate_dim, hidden_dim, p.down_bits, p.down_n_levels, thread_idx);
                 }
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1453,7 +1470,7 @@ kernel void moe_trellis_swiglu_fp32acc(
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
     device float* output                 [[buffer(16)]],  // FP32 for atomic add
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -1478,7 +1495,7 @@ kernel void moe_trellis_swiglu_fp32acc(
     const uint token_idx = tgid.y;
     const uint slot = tgid.z;
 
-    if (token_idx >= p.M || slot >= p.top_k) {
+    if (token_idx >= p.batch_size || slot >= p.top_k) {
         return;
     }
 
@@ -1489,19 +1506,20 @@ kernel void moe_trellis_swiglu_fp32acc(
 
     const float prob = float(expert_probs[token_idx * p.top_k + slot]);
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_gate = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
@@ -1528,11 +1546,11 @@ kernel void moe_trellis_swiglu_fp32acc(
 
             load_trellis_tile(gate_w, gate_scales, gate_su, gate_sv, grid,
                             B_gate, k_block, n_chunk_offset, expert_id,
-                            hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                            hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels, thread_idx);
 
             load_trellis_tile(up_w, up_scales, up_su, up_sv, grid,
                             B_up, k_block, n_chunk_offset, expert_id,
-                            hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                            hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels, thread_idx);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1599,7 +1617,7 @@ kernel void moe_trellis_swiglu_fp32acc(
 
             load_trellis_tile(down_w, down_scales, down_su, down_sv, grid,
                             B_down, k_down_global, n_block, expert_id,
-                            intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                            intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1695,6 +1713,7 @@ inline void load_trellis_tile_large(
     uint K_dim,
     uint N_dim,
     uint group_size,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -1711,10 +1730,10 @@ inline void load_trellis_tile_large(
 
         half val = 0.0h;
         if (global_k < K_dim && global_n < N_dim) {
-            val = trellis_dequant_3bit(
+            val = trellis_dequant(
                 packed_weights, scales, su, sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, bits, n_levels
             );
         }
         B_buf[k_local][n_local] = val;
@@ -1739,7 +1758,7 @@ kernel void moe_trellis_swiglu_large_batch(
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
     device float* output                 [[buffer(16)]],
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -1758,7 +1777,7 @@ kernel void moe_trellis_swiglu_large_batch(
     const uint token_idx = tgid.y;
     const uint slot = tgid.z;
 
-    if (token_idx >= p.M || slot >= p.top_k) {
+    if (token_idx >= p.batch_size || slot >= p.top_k) {
         return;
     }
 
@@ -1769,19 +1788,20 @@ kernel void moe_trellis_swiglu_large_batch(
 
     const float prob = float(expert_probs[token_idx * p.top_k + slot]);
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_gate = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     // Initialize output tile (128 elements)
@@ -1814,11 +1834,11 @@ kernel void moe_trellis_swiglu_large_batch(
             // Load gate and up weights (128-col tiles)
             load_trellis_tile_large(gate_w, gate_scales, gate_su, gate_sv, grid,
                                     B_gate, k_block_local, n_chunk_offset, expert_id,
-                                    hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                    hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels, thread_idx);
 
             load_trellis_tile_large(up_w, up_scales, up_su, up_sv, grid,
                                     B_up, k_block_local, n_chunk_offset, expert_id,
-                                    hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                    hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels, thread_idx);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1867,7 +1887,7 @@ kernel void moe_trellis_swiglu_large_batch(
             // Load down weights (128-col tile)
             load_trellis_tile_large(down_w, down_scales, down_su, down_sv, grid,
                                     B_down, k_down_global, n_block, expert_id,
-                                    intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                    intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1957,7 +1977,7 @@ kernel void moe_trellis_swiglu_simd(
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
     device float* output                 [[buffer(16)]],
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]],
     uint simd_lane_id                    [[thread_index_in_simdgroup]],
@@ -1989,14 +2009,14 @@ kernel void moe_trellis_swiglu_simd(
     const uint token_idx = tgid.y;
     const uint slot = tgid.z;
 
-    if (token_idx >= p.M || slot >= p.top_k) return;
+    if (token_idx >= p.batch_size || slot >= p.top_k) return;
 
     const uint expert_id = expert_ids[token_idx * p.top_k + slot];
     if (expert_id >= p.num_experts) return;
 
     const half prob = expert_probs[token_idx * p.top_k + slot];
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     // Expert weight offsets
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
@@ -2004,11 +2024,12 @@ kernel void moe_trellis_swiglu_simd(
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     // Initialize output accumulators
@@ -2076,15 +2097,15 @@ kernel void moe_trellis_swiglu_simd(
                 half up_val = 0.0h;
 
                 if (global_k < hidden_dim && global_n < intermediate_dim) {
-                    gate_val = trellis_dequant_3bit(
+                    gate_val = trellis_dequant(
                         gate_w, gate_scales, gate_su, gate_sv, grid,
                         expert_id, global_k, global_n,
-                        hidden_dim, intermediate_dim, p.group_size, p.n_levels);
+                        hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels);
 
-                    up_val = trellis_dequant_3bit(
+                    up_val = trellis_dequant(
                         up_w, up_scales, up_su, up_sv, grid,
                         expert_id, global_k, global_n,
-                        hidden_dim, intermediate_dim, p.group_size, p.n_levels);
+                        hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels);
                 }
 
                 B_gate[k_local][n_local] = gate_val;
@@ -2221,10 +2242,10 @@ kernel void moe_trellis_swiglu_simd(
 
                 half val = 0.0h;
                 if (global_k < intermediate_dim && global_n < hidden_dim) {
-                    val = trellis_dequant_3bit(
+                    val = trellis_dequant(
                         down_w, down_scales, down_su, down_sv, grid,
                         expert_id, global_k, global_n,
-                        intermediate_dim, hidden_dim, p.group_size, p.n_levels);
+                        intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels);
                 }
                 B_down[k_local][n_local] = val;
             }
@@ -2316,7 +2337,7 @@ constant constexpr uint DECODE_THREADS = 128; // 4 simdgroups for throughput
 
 // Packed tile cache size for decode: 16x64 tile spans 4 trellis tiles (4 x 96 = 384 bytes)
 constant constexpr uint DECODE_N_TRELLIS_TILES = (DECODE_TILE_N + TRELLIS_TILE - 1) / TRELLIS_TILE;  // 4
-constant constexpr uint DECODE_PACKED_CACHE_SIZE = DECODE_N_TRELLIS_TILES * PACKED_BYTES_3BIT;  // 384 bytes
+constant constexpr uint DECODE_PACKED_CACHE_SIZE = DECODE_N_TRELLIS_TILES * 128;  // Support up to 4b tiles (4 * 128 = 512 bytes)
 
 // Double-buffering for decode kernel to overlap weight loads with computation
 // This achieves GGUF-style weight streaming: load next tile while computing current
@@ -2336,6 +2357,7 @@ inline void prefetch_packed_tiles_decode(
     uint n_block,
     uint K_dim,
     uint N_dim,
+    uint bits,
     uint thread_idx
 ) {
     // Calculate trellis tile positions
@@ -2343,28 +2365,30 @@ inline void prefetch_packed_tiles_decode(
     const uint tile_k = k_block / TRELLIS_TILE;
     const uint tile_n_base = n_block / TRELLIS_TILE;
 
-    // Total bytes to load: 4 trellis tiles x 96 bytes = 384 bytes
-    // Using uint4 (16-byte) loads: 384 / 16 = 24 loads needed
-    constexpr uint BYTES_PER_VECTOR = 16;
-    constexpr uint VECTORS_NEEDED = DECODE_PACKED_CACHE_SIZE / BYTES_PER_VECTOR;  // 24
+    uint packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * bits) / 8;
 
-    if (thread_idx < VECTORS_NEEDED) {
+    // Total bytes to load: 4 trellis tiles
+    uint total_bytes = DECODE_N_TRELLIS_TILES * packed_bytes_per_tile;
+    constexpr uint BYTES_PER_VECTOR = 16;
+    const uint vectors_needed = (total_bytes + BYTES_PER_VECTOR - 1) / BYTES_PER_VECTOR;
+
+    if (thread_idx < vectors_needed) {
         // Determine which trellis tile this vector belongs to
         uint byte_offset = thread_idx * BYTES_PER_VECTOR;
-        uint tile_local_idx = byte_offset / PACKED_BYTES_3BIT;  // 0, 1, 2, or 3
-        uint byte_in_tile = byte_offset % PACKED_BYTES_3BIT;
+        uint tile_local_idx = byte_offset / packed_bytes_per_tile;
+        uint byte_in_tile = byte_offset % packed_bytes_per_tile;
 
         // Calculate global tile index
         uint tile_n = tile_n_base + tile_local_idx;
         uint tile_idx = tile_k * num_tiles_n + tile_n;
 
         // Check bounds (tile must be valid)
-        bool valid = (tile_k * TRELLIS_TILE < K_dim) && (tile_n * TRELLIS_TILE < N_dim);
+        bool valid = (tile_k * TRELLIS_TILE < K_dim) && (tile_n * TRELLIS_TILE < N_dim) && (byte_offset < DECODE_PACKED_CACHE_SIZE);
 
         if (valid) {
             // Vector load from device memory - coalesced access pattern
             device const uint4* src = reinterpret_cast<device const uint4*>(
-                packed_weights + tile_idx * PACKED_BYTES_3BIT + byte_in_tile
+                packed_weights + tile_idx * packed_bytes_per_tile + byte_in_tile
             );
             uint4 data = *src;
 
@@ -2373,7 +2397,7 @@ inline void prefetch_packed_tiles_decode(
                 &packed_cache[byte_offset]
             );
             *dst = data;
-        } else {
+        } else if (byte_offset < DECODE_PACKED_CACHE_SIZE) {
             // Zero out invalid regions
             threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(
                 &packed_cache[byte_offset]
@@ -2404,6 +2428,7 @@ inline void load_trellis_tile_decode_from_cache(
     uint K_dim,
     uint N_dim,
     uint group_size,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -2414,6 +2439,8 @@ inline void load_trellis_tile_decode_from_cache(
     const uint n_groups = (K_dim + group_size - 1) / group_size;
     const uint group_idx = k_block / group_size;
     const uint scale_base = expert_id * N_dim * n_groups + group_idx * N_dim;
+
+    uint packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * bits) / 8;
 
     for (uint i = 0; i < elems_per_thread; ++i) {
         uint flat_idx = thread_idx * elems_per_thread + i;
@@ -2433,21 +2460,21 @@ inline void load_trellis_tile_decode_from_cache(
             uint n_in_tile = n_local % TRELLIS_TILE;
 
             // Index within the cached packed data
-            uint cache_tile_offset = tile_local * PACKED_BYTES_3BIT;
+            uint cache_tile_offset = tile_local * packed_bytes_per_tile;
 
             // Transposed indexing: idx = n * TILE_DIM + k
             uint idx_in_tile = n_in_tile * TRELLIS_TILE + k_in_tile;
 
-            // Unpack 3-bit index from threadgroup cache (fast access)
-            uint bit_offset = idx_in_tile * 3;
+            // Unpack bit index from threadgroup cache (fast access)
+            uint bit_offset = idx_in_tile * bits;
             uint byte_idx = bit_offset >> 3;
             uint bit_in_byte = bit_offset & 7;
 
             uint packed_val = uint(packed_cache[cache_tile_offset + byte_idx]);
-            if (bit_in_byte + 3 > 8) {
+            if (bit_in_byte + bits > 8) {
                 packed_val |= uint(packed_cache[cache_tile_offset + byte_idx + 1]) << 8;
             }
-            uint codebook_idx = (packed_val >> bit_in_byte) & 0x7;
+            uint codebook_idx = (packed_val >> bit_in_byte) & ((1u << bits) - 1);
 
             if (codebook_idx >= n_levels) {
                 codebook_idx = 0;
@@ -2483,6 +2510,7 @@ inline void load_trellis_tile_decode(
     uint K_dim,
     uint N_dim,
     uint group_size,
+    uint bits,
     uint n_levels,
     uint thread_idx
 ) {
@@ -2501,10 +2529,10 @@ inline void load_trellis_tile_decode(
 
         half val = 0.0h;
         if (global_k < K_dim && global_n < N_dim) {
-            val = trellis_dequant_3bit(
+            val = trellis_dequant(
                 packed_weights, scales, su, sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, bits, n_levels
             );
         }
         B_buf[k_local][n_local] = val;
@@ -2528,6 +2556,8 @@ inline void prefetch_packed_tiles_decode_doublebuf(
     uint n_block,
     uint K_dim,
     uint N_dim,
+    uint gate_bits,
+    uint up_bits,
     uint thread_idx
 ) {
     // Calculate trellis tile positions
@@ -2535,44 +2565,49 @@ inline void prefetch_packed_tiles_decode_doublebuf(
     const uint tile_k = k_block / TRELLIS_TILE;
     const uint tile_n_base = n_block / TRELLIS_TILE;
 
+    uint gate_packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * gate_bits) / 8;
+    uint up_packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * up_bits) / 8;
+
     constexpr uint BYTES_PER_VECTOR = 16;
-    constexpr uint VECTORS_PER_TENSOR = DECODE_PACKED_CACHE_SIZE / BYTES_PER_VECTOR;  // 24
-    constexpr uint TOTAL_VECTORS = VECTORS_PER_TENSOR * 2;  // 48 (gate + up)
+    // We assume both use the same number of vectors for simplicity in this loop,
+    // or we handle them independently.
+    uint gate_total_bytes = DECODE_N_TRELLIS_TILES * gate_packed_bytes_per_tile;
+    uint up_total_bytes = DECODE_N_TRELLIS_TILES * up_packed_bytes_per_tile;
 
-    if (thread_idx < TOTAL_VECTORS) {
-        // Determine if this thread handles gate (0-23) or up (24-47)
-        bool is_up = thread_idx >= VECTORS_PER_TENSOR;
-        uint local_vec_idx = is_up ? (thread_idx - VECTORS_PER_TENSOR) : thread_idx;
+    uint gate_vectors = (gate_total_bytes + BYTES_PER_VECTOR - 1) / BYTES_PER_VECTOR;
+    uint up_vectors = (up_total_bytes + BYTES_PER_VECTOR - 1) / BYTES_PER_VECTOR;
 
-        // Determine which trellis tile this vector belongs to
-        uint byte_offset = local_vec_idx * BYTES_PER_VECTOR;
-        uint tile_local_idx = byte_offset / PACKED_BYTES_3BIT;
-        uint byte_in_tile = byte_offset % PACKED_BYTES_3BIT;
-
-        // Calculate global tile index
+    if (thread_idx < gate_vectors) {
+        uint byte_offset = thread_idx * BYTES_PER_VECTOR;
+        uint tile_local_idx = byte_offset / gate_packed_bytes_per_tile;
+        uint byte_in_tile = byte_offset % gate_packed_bytes_per_tile;
         uint tile_n = tile_n_base + tile_local_idx;
         uint tile_idx = tile_k * num_tiles_n + tile_n;
-
-        // Check bounds
-        bool valid = (tile_k * TRELLIS_TILE < K_dim) && (tile_n * TRELLIS_TILE < N_dim);
-
-        device const uint8_t* src_tensor = is_up ? up_packed : gate_packed;
-        threadgroup uint8_t* dst_cache = is_up ? up_cache : gate_cache;
-
+        bool valid = (tile_k * TRELLIS_TILE < K_dim) && (tile_n * TRELLIS_TILE < N_dim) && (byte_offset < DECODE_PACKED_CACHE_SIZE);
         if (valid) {
-            device const uint4* src = reinterpret_cast<device const uint4*>(
-                src_tensor + tile_idx * PACKED_BYTES_3BIT + byte_in_tile
-            );
-            uint4 data = *src;
+            device const uint4* src = reinterpret_cast<device const uint4*>(gate_packed + tile_idx * gate_packed_bytes_per_tile + byte_in_tile);
+            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(&gate_cache[byte_offset]);
+            *dst = *src;
+        } else if (byte_offset < DECODE_PACKED_CACHE_SIZE) {
+            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(&gate_cache[byte_offset]);
+            *dst = uint4(0);
+        }
+    }
 
-            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(
-                &dst_cache[byte_offset]
-            );
-            *dst = data;
-        } else {
-            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(
-                &dst_cache[byte_offset]
-            );
+    if (thread_idx >= 64 && (thread_idx - 64) < up_vectors) {
+        uint local_tid = thread_idx - 64;
+        uint byte_offset = local_tid * BYTES_PER_VECTOR;
+        uint tile_local_idx = byte_offset / up_packed_bytes_per_tile;
+        uint byte_in_tile = byte_offset % up_packed_bytes_per_tile;
+        uint tile_n = tile_n_base + tile_local_idx;
+        uint tile_idx = tile_k * num_tiles_n + tile_n;
+        bool valid = (tile_k * TRELLIS_TILE < K_dim) && (tile_n * TRELLIS_TILE < N_dim) && (byte_offset < DECODE_PACKED_CACHE_SIZE);
+        if (valid) {
+            device const uint4* src = reinterpret_cast<device const uint4*>(up_packed + tile_idx * up_packed_bytes_per_tile + byte_in_tile);
+            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(&up_cache[byte_offset]);
+            *dst = *src;
+        } else if (byte_offset < DECODE_PACKED_CACHE_SIZE) {
+            threadgroup uint4* dst = reinterpret_cast<threadgroup uint4*>(&up_cache[byte_offset]);
             *dst = uint4(0);
         }
     }
@@ -2603,7 +2638,10 @@ inline void load_trellis_tile_decode_doublebuf_from_cache(
     uint K_dim,
     uint N_dim,
     uint group_size,
-    uint n_levels,
+    uint gate_bits,
+    uint gate_n_levels,
+    uint up_bits,
+    uint up_n_levels,
     uint thread_idx
 ) {
     const uint elems = MOE_TILE_K * DECODE_TILE_N;
@@ -2614,6 +2652,9 @@ inline void load_trellis_tile_decode_doublebuf_from_cache(
     const uint group_idx = k_block / group_size;
     const uint gate_scale_base = expert_id * N_dim * n_groups + group_idx * N_dim;
     const uint up_scale_base = expert_id * N_dim * n_groups + group_idx * N_dim;
+
+    uint gate_packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * gate_bits) / 8;
+    uint up_packed_bytes_per_tile = (TRELLIS_TILE * TRELLIS_TILE * up_bits) / 8;
 
     for (uint i = 0; i < elems_per_thread; ++i) {
         uint flat_idx = thread_idx * elems_per_thread + i;
@@ -2634,31 +2675,34 @@ inline void load_trellis_tile_decode_doublebuf_from_cache(
             uint k_in_tile = k_local;
             uint n_in_tile = n_local % TRELLIS_TILE;
 
-            uint cache_tile_offset = tile_local * PACKED_BYTES_3BIT;
+            uint gate_cache_tile_offset = tile_local * gate_packed_bytes_per_tile;
+            uint up_cache_tile_offset = tile_local * up_packed_bytes_per_tile;
 
             // Transposed indexing: idx = n * TILE_DIM + k
             uint idx_in_tile = n_in_tile * TRELLIS_TILE + k_in_tile;
 
-            // Unpack 3-bit indices from threadgroup caches (fast access)
-            uint bit_offset = idx_in_tile * 3;
-            uint byte_idx = bit_offset >> 3;
-            uint bit_in_byte = bit_offset & 7;
-
+            // Unpack indices from threadgroup caches (fast access)
             // Gate unpacking
-            uint gate_packed_val = uint(gate_cache[cache_tile_offset + byte_idx]);
-            if (bit_in_byte + 3 > 8) {
-                gate_packed_val |= uint(gate_cache[cache_tile_offset + byte_idx + 1]) << 8;
+            uint gate_bit_offset = idx_in_tile * gate_bits;
+            uint gate_byte_idx = gate_bit_offset >> 3;
+            uint gate_bit_in_byte = gate_bit_offset & 7;
+            uint gate_packed_val = uint(gate_cache[gate_cache_tile_offset + gate_byte_idx]);
+            if (gate_bit_in_byte + gate_bits > 8) {
+                gate_packed_val |= uint(gate_cache[gate_cache_tile_offset + gate_byte_idx + 1]) << 8;
             }
-            uint gate_codebook_idx = (gate_packed_val >> bit_in_byte) & 0x7;
-            if (gate_codebook_idx >= n_levels) gate_codebook_idx = 0;
+            uint gate_codebook_idx = (gate_packed_val >> gate_bit_in_byte) & ((1u << gate_bits) - 1);
+            if (gate_codebook_idx >= gate_n_levels) gate_codebook_idx = 0;
 
             // Up unpacking
-            uint up_packed_val = uint(up_cache[cache_tile_offset + byte_idx]);
-            if (bit_in_byte + 3 > 8) {
-                up_packed_val |= uint(up_cache[cache_tile_offset + byte_idx + 1]) << 8;
+            uint up_bit_offset = idx_in_tile * up_bits;
+            uint up_byte_idx = up_bit_offset >> 3;
+            uint up_bit_in_byte = up_bit_offset & 7;
+            uint up_packed_val = uint(up_cache[up_cache_tile_offset + up_byte_idx]);
+            if (up_bit_in_byte + up_bits > 8) {
+                up_packed_val |= uint(up_cache[up_cache_tile_offset + up_byte_idx + 1]) << 8;
             }
-            uint up_codebook_idx = (up_packed_val >> bit_in_byte) & 0x7;
-            if (up_codebook_idx >= n_levels) up_codebook_idx = 0;
+            uint up_codebook_idx = (up_packed_val >> up_bit_in_byte) & ((1u << up_bits) - 1);
+            if (up_codebook_idx >= up_n_levels) up_codebook_idx = 0;
 
             // Grid lookup
             half gate_dequant = grid[gate_codebook_idx];
@@ -2711,7 +2755,10 @@ inline void load_trellis_tile_decode_doublebuf_async(
     uint K_dim,
     uint N_dim,
     uint group_size,
-    uint n_levels,
+    uint gate_bits,
+    uint gate_n_levels,
+    uint up_bits,
+    uint up_n_levels,
     uint thread_idx,
     uint num_k_tiles_total
 ) {
@@ -2757,15 +2804,15 @@ inline void load_trellis_tile_decode_doublebuf_async(
 
             // Load both gate and up weights in same pass
             // This doubles memory bandwidth utilization per thread iteration
-            gate_val = trellis_dequant_3bit(
+            gate_val = trellis_dequant(
                 gate_packed, gate_scales, gate_su, gate_sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, gate_bits, gate_n_levels
             );
-            up_val = trellis_dequant_3bit(
+            up_val = trellis_dequant(
                 up_packed, up_scales, up_su, up_sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, up_bits, up_n_levels
             );
         }
 
@@ -2795,7 +2842,10 @@ inline void load_trellis_tile_decode_doublebuf(
     uint K_dim,
     uint N_dim,
     uint group_size,
-    uint n_levels,
+    uint gate_bits,
+    uint gate_n_levels,
+    uint up_bits,
+    uint up_n_levels,
     uint thread_idx
 ) {
     const uint elems = MOE_TILE_K * DECODE_TILE_N;
@@ -2815,15 +2865,15 @@ inline void load_trellis_tile_decode_doublebuf(
         half up_val = 0.0h;
 
         if (global_k < K_dim && global_n < N_dim) {
-            gate_val = trellis_dequant_3bit(
+            gate_val = trellis_dequant(
                 gate_packed, gate_scales, gate_su, gate_sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, gate_bits, gate_n_levels
             );
-            up_val = trellis_dequant_3bit(
+            up_val = trellis_dequant(
                 up_packed, up_scales, up_su, up_sv, grid,
                 expert_id, global_k, global_n,
-                K_dim, N_dim, group_size, n_levels
+                K_dim, N_dim, group_size, up_bits, up_n_levels
             );
         }
 
@@ -2877,7 +2927,7 @@ kernel void moe_trellis_swiglu_decode(
     device const uint* expert_ids        [[buffer(14)]],  // [1, top_k]
     device const half* expert_probs      [[buffer(15)]],  // [1, top_k]
     device float* output                 [[buffer(16)]],  // [1, hidden] FP32 for atomic
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint2 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -2906,8 +2956,8 @@ kernel void moe_trellis_swiglu_decode(
 
     const float prob = float(expert_probs[slot]);
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     // Expert weight offsets
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
@@ -2915,11 +2965,12 @@ kernel void moe_trellis_swiglu_decode(
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     // Initialize output tile (no barrier needed - each thread owns its indices)
@@ -2960,15 +3011,15 @@ kernel void moe_trellis_swiglu_decode(
                         if (global_k >= hidden_dim) break;
 
                         float act = float(A_tile[k]);
-                        float gate_val = float(trellis_dequant_3bit(
+                        float gate_val = float(trellis_dequant(
                             gate_w, gate_scales, gate_su, gate_sv, grid,
                             expert_id, global_k, global_n,
-                            hidden_dim, intermediate_dim, p.group_size, p.n_levels
+                            hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels
                         ));
-                        float up_val = float(trellis_dequant_3bit(
+                        float up_val = float(trellis_dequant(
                             up_w, up_scales, up_su, up_sv, grid,
                             expert_id, global_k, global_n,
-                            hidden_dim, intermediate_dim, p.group_size, p.n_levels
+                            hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels
                         ));
 
                         my_gate_acc += act * gate_val;
@@ -3013,7 +3064,7 @@ kernel void moe_trellis_swiglu_decode(
 
             load_trellis_tile_decode(down_w, down_scales, down_su, down_sv, grid,
                                      B_down, k_down_global, n_block, expert_id,
-                                     intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                     intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
@@ -3027,8 +3078,8 @@ kernel void moe_trellis_swiglu_decode(
                 uint next_k_down_global = n_chunk_offset + (kdt + 1) * MOE_TILE_K;
 
                 // Prefetch hint: Load scales for next tile early
-                uint n_groups = (intermediate_dim + p.group_size - 1) / p.group_size;
-                uint next_group_idx = next_k_down_global / p.group_size;
+                uint n_groups = (intermediate_dim + p.tile_size - 1) / p.tile_size;
+                uint next_group_idx = next_k_down_global / p.tile_size;
                 if (thread_idx < DECODE_TILE_N) {
                     half next_scale = down_scales[expert_id * hidden_dim * n_groups + next_group_idx * hidden_dim + n_block + thread_idx];
                     (void)next_scale;
@@ -3036,7 +3087,7 @@ kernel void moe_trellis_swiglu_decode(
 
                 load_trellis_tile_decode(down_w, down_scales, down_su, down_sv, grid,
                                          B_down, next_k_down_global, n_block, expert_id,
-                                         intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                         intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
             }
 
             // Compute on current tile
@@ -3148,7 +3199,7 @@ kernel void moe_trellis_swiglu_prefill4(
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
     device float* output                 [[buffer(16)]],  // FP32 for atomic add
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -3166,20 +3217,21 @@ kernel void moe_trellis_swiglu_prefill4(
     const uint base_token = tgid.y * PREFILL_BATCH;
     const uint slot = tgid.z;
 
-    if (base_token >= p.M || slot >= p.top_k) {
+    if (base_token >= p.batch_size || slot >= p.top_k) {
         return;
     }
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_gate = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
     for (uint t = 0; t < PREFILL_BATCH; ++t) {
         for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
@@ -3188,13 +3240,13 @@ kernel void moe_trellis_swiglu_prefill4(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint num_tokens_in_batch = min(PREFILL_BATCH, p.M - base_token);
+    uint num_tokens_in_batch = min(PREFILL_BATCH, p.batch_size - base_token);
 
     uint expert_ids_local[PREFILL_BATCH];
     half probs_local[PREFILL_BATCH];
     for (uint t = 0; t < PREFILL_BATCH; ++t) {
         uint token_idx = base_token + t;
-        if (token_idx < p.M) {
+        if (token_idx < p.batch_size) {
             expert_ids_local[t] = expert_ids[token_idx * p.top_k + slot];
             probs_local[t] = expert_probs[token_idx * p.top_k + slot];
         } else {
@@ -3221,23 +3273,23 @@ kernel void moe_trellis_swiglu_prefill4(
             uint k_block = kt * MOE_TILE_K;
 
             load_activation_tiles_prefill(activations, A_tiles, base_token, k_block,
-                                          hidden_dim, p.M, thread_idx);
+                                          hidden_dim, p.batch_size, thread_idx);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             for (uint t = 0; t < num_tokens_in_batch; ++t) {
                 uint expert_id = expert_ids_local[t];
                 if (expert_id >= p.num_experts) continue;
 
-                device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-                device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+                device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+                device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
 
                 load_trellis_tile(gate_w, gate_scales, gate_su, gate_sv, grid,
                                 B_gate, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels, thread_idx);
 
                 load_trellis_tile(up_w, up_scales, up_su, up_sv, grid,
                                 B_up, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels, thread_idx);
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3291,7 +3343,7 @@ kernel void moe_trellis_swiglu_prefill4(
 
                 load_trellis_tile(down_w, down_scales, down_su, down_sv, grid,
                                 B_down, k_down_global, n_block, expert_id,
-                                intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3364,7 +3416,7 @@ kernel void moe_trellis_swiglu_prefill4_fp32acc(
     device const uint* expert_ids        [[buffer(14)]],
     device const half* expert_probs      [[buffer(15)]],
     device float* output                 [[buffer(16)]],
-    constant TrellisParams& p            [[buffer(17)]],
+    constant MoEParams& p                [[buffer(17)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -3381,18 +3433,19 @@ kernel void moe_trellis_swiglu_prefill4_fp32acc(
     const uint base_token = tgid.y * PREFILL_BATCH;
     const uint slot = tgid.z;
 
-    if (base_token >= p.M || slot >= p.top_k) return;
+    if (base_token >= p.batch_size || slot >= p.top_k) return;
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_gate = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
     for (uint t = 0; t < PREFILL_BATCH; ++t) {
         for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
@@ -3401,13 +3454,13 @@ kernel void moe_trellis_swiglu_prefill4_fp32acc(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    uint num_tokens_in_batch = min(PREFILL_BATCH, p.M - base_token);
+    uint num_tokens_in_batch = min(PREFILL_BATCH, p.batch_size - base_token);
 
     uint expert_ids_local[PREFILL_BATCH];
     float probs_local[PREFILL_BATCH];
     for (uint t = 0; t < PREFILL_BATCH; ++t) {
         uint token_idx = base_token + t;
-        if (token_idx < p.M) {
+        if (token_idx < p.batch_size) {
             expert_ids_local[t] = expert_ids[token_idx * p.top_k + slot];
             probs_local[t] = float(expert_probs[token_idx * p.top_k + slot]);
         } else {
@@ -3434,23 +3487,23 @@ kernel void moe_trellis_swiglu_prefill4_fp32acc(
             uint k_block = kt * MOE_TILE_K;
 
             load_activation_tiles_prefill(activations, A_tiles, base_token, k_block,
-                                          hidden_dim, p.M, thread_idx);
+                                          hidden_dim, p.batch_size, thread_idx);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             for (uint t = 0; t < num_tokens_in_batch; ++t) {
                 uint expert_id = expert_ids_local[t];
                 if (expert_id >= p.num_experts) continue;
 
-                device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-                device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+                device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+                device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
 
                 load_trellis_tile(gate_w, gate_scales, gate_su, gate_sv, grid,
                                 B_gate, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels, thread_idx);
 
                 load_trellis_tile(up_w, up_scales, up_su, up_sv, grid,
                                 B_up, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels, thread_idx);
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3504,7 +3557,7 @@ kernel void moe_trellis_swiglu_prefill4_fp32acc(
 
                 load_trellis_tile(down_w, down_scales, down_su, down_sv, grid,
                                 B_down, k_down_global, n_block, expert_id,
-                                intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3599,7 +3652,7 @@ kernel void moe_trellis_swiglu_grouped(
     device const uint* expert_offsets    [[buffer(15)]],  // [num_experts + 1] start indices
     device const half* sorted_probs      [[buffer(16)]],  // Probabilities in sorted order
     device float* output                 [[buffer(17)]],  // FP32 for atomic add
-    constant TrellisParams& p            [[buffer(18)]],
+    constant MoEParams& p                [[buffer(18)]],
     uint3 tgid                           [[threadgroup_position_in_grid]],
     uint thread_idx                      [[thread_index_in_threadgroup]]
 ) {
@@ -3629,21 +3682,22 @@ kernel void moe_trellis_swiglu_grouped(
 
     if (num_tokens_for_expert == 0) return;
 
-    const uint hidden_dim = p.K;
-    const uint intermediate_dim = p.N;
+    const uint hidden_dim = p.hidden_dim;
+    const uint intermediate_dim = p.intermediate_dim;
 
-    // Compute expert weight sizes (Trellis 3-bit packing)
+    // Compute expert weight sizes (Trellis bit packing)
     uint num_tiles_k_gate = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_gate = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_k_down = (intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
     uint num_tiles_n_down = (hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
 
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * PACKED_BYTES_3BIT;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * PACKED_BYTES_3BIT;
+    uint gate_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.gate_bits);
+    uint up_expert_size = num_tiles_k_gate * num_tiles_n_gate * (32 * p.up_bits);
+    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * (32 * p.down_bits);
 
     // Get pointers to THIS expert's weights (loaded ONCE for all tokens)
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
+    device const uint8_t* gate_w = gate_weights + expert_id * gate_expert_size;
+    device const uint8_t* up_w = up_weights + expert_id * up_expert_size;
     device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
 
     uint num_intermediate_chunks = (intermediate_dim + MOE_TILE_N - 1) / MOE_TILE_N;
@@ -3694,12 +3748,12 @@ kernel void moe_trellis_swiglu_grouped(
                 // Load gate weights (ONCE per K-tile, shared across all tokens)
                 load_trellis_tile(gate_w, gate_scales, gate_su, gate_sv, grid,
                                 B_gate, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.gate_bits, p.gate_n_levels, thread_idx);
 
                 // Load up weights (ONCE per K-tile, shared across all tokens)
                 load_trellis_tile(up_w, up_scales, up_su, up_sv, grid,
                                 B_up, k_block, n_chunk_offset, expert_id,
-                                hidden_dim, intermediate_dim, p.group_size, p.n_levels, thread_idx);
+                                hidden_dim, intermediate_dim, p.tile_size, p.up_bits, p.up_n_levels, thread_idx);
 
                 // Load activations for ALL tokens in this batch
                 for (uint t = thread_idx / MOE_TILE_K; t < batch_count; t += GROUPED_THREADS / MOE_TILE_K) {
@@ -3708,7 +3762,7 @@ kernel void moe_trellis_swiglu_grouped(
                     uint token_id = token_batch[t];
 
                     half val = 0.0h;
-                    if (token_id < p.M && global_k < hidden_dim) {
+                    if (token_id < p.batch_size && global_k < hidden_dim) {
                         val = activations[token_id * hidden_dim + global_k];
                     }
                     A_tiles[t][k] = val;
@@ -3779,7 +3833,7 @@ kernel void moe_trellis_swiglu_grouped(
                 // Load down weights (ONCE per K-tile, shared across all tokens)
                 load_trellis_tile(down_w, down_scales, down_su, down_sv, grid,
                                 B_down, k_down_global, n_block, expert_id,
-                                intermediate_dim, hidden_dim, p.group_size, p.n_levels, thread_idx);
+                                intermediate_dim, hidden_dim, p.tile_size, p.down_bits, p.down_n_levels, thread_idx);
 
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -3811,7 +3865,7 @@ kernel void moe_trellis_swiglu_grouped(
 
             for (uint i = thread_idx; i < MOE_TILE_N; i += GROUPED_THREADS) {
                 uint global_n = n_block + i;
-                if (global_n < hidden_dim && token_id < p.M) {
+                if (global_n < hidden_dim && token_id < p.batch_size) {
                     float weighted = float(output_tile[t][i]) * float(prob);
                     uint out_idx = token_id * hidden_dim + global_n;
 

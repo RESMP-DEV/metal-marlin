@@ -1,5 +1,8 @@
 """Tests for trellis_loader format detection."""
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -24,51 +27,6 @@ class TestTrellisFormatDetection:
 
         result = loader._detect_trellis_format(tensor_dict)
         assert result == "metal_marlin"
-
-    def test_detect_exllamav3_gptq_format(self):
-        """Should detect exllamav3_gptq format with .qweight keys."""
-        from metal_marlin.trellis.loader import TrellisModelLoader
-
-        loader = object.__new__(TrellisModelLoader)
-
-        # ExllamaV3 GPTQ format keys
-        tensor_dict = {
-            "model.layers.0.mlp.down_proj.weight.qweight": torch.tensor([]),
-            "model.layers.0.mlp.down_proj.weight.scale": torch.tensor([]),
-        }
-
-        result = loader._detect_trellis_format(tensor_dict)
-        assert result == "exllamav3_gptq"
-
-    def test_detect_exllamav3_exl2_format(self):
-        """Should detect exllamav3_exl2 format with .scale and .zero_point."""
-        from metal_marlin.trellis.loader import TrellisModelLoader
-
-        loader = object.__new__(TrellisModelLoader)
-
-        # ExllamaV3 EXL2 format keys
-        tensor_dict = {
-            "model.layers.0.mlp.down_proj.weight.scale": torch.tensor([]),
-            "model.layers.0.mlp.down_proj.weight.zero_point": torch.tensor([]),
-        }
-
-        result = loader._detect_trellis_format(tensor_dict)
-        assert result == "exllamav3_exl2"
-
-    def test_detect_exllamav3_trellis_format(self):
-        """Should detect exllamav3_trellis format with 'trellis' in key."""
-        from metal_marlin.trellis.loader import TrellisModelLoader
-
-        loader = object.__new__(TrellisModelLoader)
-
-        # ExllamaV3 trellis format keys
-        tensor_dict = {
-            "model.layers.0.mlp.down_proj.trellis_indices": torch.tensor([]),
-            "model.layers.0.mlp.down_proj.scales": torch.tensor([]),
-        }
-
-        result = loader._detect_trellis_format(tensor_dict)
-        assert result == "exllamav3_trellis"
 
     def test_detect_unknown_format(self):
         """Should return 'unknown' for unrecognized format."""
@@ -190,50 +148,112 @@ class TestTrellisInferShape:
         assert shape == (0, 0)
 
 
-class TestConvertExllamaV3Trellis:
-    """Tests for _convert_exllamav3_trellis method."""
+def test_load_layer_from_hf_shards(tmp_path: Path) -> None:
+    """Test loading a layer from HF-style sharded safetensors."""
+    import numpy as np
+    from metal_marlin.trellis.loader import TrellisModelLoader
+    from safetensors.numpy import save_file
 
-    def test_convert_simple_exllamav3(self):
-        """Should convert simple exllamav3 format to TrellisWeight."""
-        from metal_marlin.trellis.loader import TrellisModelLoader, TrellisWeight
+    # Create mock quantized tensor (4-bit, 64x64 weight)
+    bits = 4
+    K, N = 64, 64
+    tiles_k, tiles_n = 4, 4
+    packed_bytes = 128  # 4-bit: 256 indices * 4 / 8 = 128 bytes
 
-        loader = object.__new__(TrellisModelLoader)
+    # Pack with header byte
+    indices_data = np.zeros(1 + tiles_k * tiles_n *
+                            packed_bytes, dtype=np.uint8)
+    indices_data[0] = bits  # Header
 
-        # Simple exllamav3 format tensors
-        tensor_dict = {
-            "down_proj.indices": torch.randint(0, 16, (10, 10, 256), dtype=torch.int16),
-            "down_proj.scales": torch.randn(10, 4096, dtype=torch.float32),
-            "down_proj.su": torch.randn(1024, dtype=torch.float32),
-            "down_proj.sv": torch.randn(4096, dtype=torch.float32),
-        }
+    tensors = {
+        "model__layers__0__mlp__gate_proj__weight__indices": indices_data,
+        "model__layers__0__mlp__gate_proj__weight__scales": np.ones((1, K), dtype=np.float32),
+        "model__layers__0__mlp__gate_proj__weight__su": np.ones(N, dtype=np.float32),
+        "model__layers__0__mlp__gate_proj__weight__sv": np.ones(K, dtype=np.float32),
+    }
 
-        weights = loader._convert_exllamav3_trellis(tensor_dict, 0)
+    # Save shard
+    shard_path = tmp_path / "model-00001-of-00001.safetensors"
+    save_file(tensors, str(shard_path))
 
-        assert "down_proj" in weights
-        weight = weights["down_proj"]
-        assert isinstance(weight, TrellisWeight)
-        assert weight.indices.shape == (10, 10, 256)
-        assert weight.K == 1024
-        assert weight.N == 4096
+    # Create index
+    weight_map = {
+        name: "model-00001-of-00001.safetensors" for name in tensors.keys()}
+    index = {"metadata": {}, "weight_map": weight_map}
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
 
-    def test_convert_alternative_naming(self):
-        """Should handle alternative exllamav3 naming (scale, row_scale, etc)."""
-        from metal_marlin.trellis.loader import TrellisModelLoader, TrellisWeight
+    # Create quantization index
+    quant_index = {
+        "layers": [{
+            "name": "model.layers.0.mlp.gate_proj.weight",
+            "bits": 4,
+            "shape": [K, N],
+            "mse": 0.001,
+        }]
+    }
+    (tmp_path / "quantization_index.json").write_text(json.dumps(quant_index))
 
-        loader = object.__new__(TrellisModelLoader)
+    # Load and verify
+    loader = TrellisModelLoader(tmp_path)
+    assert loader._format == "v3_hf_shards"
 
-        # Alternative naming
-        tensor_dict = {
-            "up_proj.qweight": torch.randint(0, 16, (5, 8, 256), dtype=torch.int16),
-            "up_proj.scale": torch.randn(5, 2048, dtype=torch.float32),
-            "up_proj.row_scale": torch.randn(512, dtype=torch.float32),
-            "up_proj.col_scale": torch.randn(2048, dtype=torch.float32),
-        }
+    weights = loader.load_layer(0)
+    assert len(weights) == 1
 
-        weights = loader._convert_exllamav3_trellis(tensor_dict, 0)
+    weight = list(weights.values())[0]
+    assert weight.bits == 4
+    assert weight.original_shape == (K, N)
 
-        assert "up_proj" in weights
-        weight = weights["up_proj"]
-        assert isinstance(weight, TrellisWeight)
-        assert weight.K == 512
-        assert weight.N == 2048
+
+def test_detect_hf_shards_format(tmp_path: Path) -> None:
+    """Test format detection for HF-style shards."""
+    from metal_marlin.trellis.loader import detect_trellis_format
+
+    # Create mock HF-style structure
+    index = {
+        "metadata": {"format": "trellis_v3"},
+        "weight_map": {
+            "model__layers__0__mlp__gate_proj__weight__indices": "model-00001-of-00001.safetensors",
+        },
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    assert detect_trellis_format(tmp_path) == "v3_hf_shards"
+
+
+def test_detect_v2_layers_format(tmp_path: Path) -> None:
+    """Test format detection for v2 layer directories."""
+    from metal_marlin.trellis.loader import detect_trellis_format
+
+    # Create mock v2 structure
+    (tmp_path / "layer_0000").mkdir()
+    (tmp_path / "layer_0000" / "index.json").write_text('{"tensors": []}')
+
+    assert detect_trellis_format(tmp_path) == "v2_layers"
+
+
+def test_detect_hf_shards_format(tmp_path: Path) -> None:
+    """Test format detection for HF-style shards."""
+    from metal_marlin.trellis.loader import detect_trellis_format
+
+    # Create mock HF-style structure
+    index = {
+        "metadata": {"format": "trellis_v3"},
+        "weight_map": {
+            "model__layers__0__mlp__gate_proj__weight__indices": "model-00001-of-00001.safetensors",
+        },
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps(index))
+
+    assert detect_trellis_format(tmp_path) == "v3_hf_shards"
+
+
+def test_detect_v2_layers_format(tmp_path: Path) -> None:
+    """Test format detection for v2 layer directories."""
+    from metal_marlin.trellis.loader import detect_trellis_format
+
+    # Create mock v2 structure
+    (tmp_path / "layer_0000").mkdir()
+    (tmp_path / "layer_0000" / "index.json").write_text('{"tensors": []}')
+
+    assert detect_trellis_format(tmp_path) == "v2_layers"

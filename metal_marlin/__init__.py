@@ -77,16 +77,26 @@ from .heap_allocator import (
 )
 from .kernels import marlin_gemm_fp4, marlin_gemm_int4
 from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
-from .layer_replacement import (
-    MetalQuantizedMoE,
-    find_linear_layers,
-    find_moe_layers,
-    get_parent_module,
-    quantize_linear_layer,
-    quantize_moe_experts,
-    replace_linear_layers,
-    replace_moe_layers,
-)
+try:
+    from .layer_replacement import (
+        MetalQuantizedMoE,
+        find_linear_layers,
+        find_moe_layers,
+        get_parent_module,
+        quantize_linear_layer,
+        quantize_moe_experts,
+        replace_linear_layers,
+        replace_moe_layers,
+    )
+except ImportError:
+    MetalQuantizedMoE = None
+    find_linear_layers = None
+    find_moe_layers = None
+    get_parent_module = None
+    quantize_linear_layer = None
+    quantize_moe_experts = None
+    replace_linear_layers = None
+    replace_moe_layers = None
 from .layers import MarlinLinear
 from .mixed_precision import (
     LayerPrecisionSelector,
@@ -208,10 +218,6 @@ except ImportError:
     HadamardMetal = None
     hadamard_transform_metal = None  # type: ignore[assignment]
 
-# HAS_MLX is deprecated - kept for backwards compatibility
-HAS_MLX = False
-
-
 # Preload metallib at import time for faster first kernel dispatch
 def _preload_metallib() -> None:
     try:
@@ -231,7 +237,6 @@ def _preload_metallib() -> None:
 
 __all__ = [
     # Feature flags
-    "HAS_MLX",  # Deprecated, always False
     "HAS_MPS",
     "HAS_PYOBJC_METAL",
     "HAS_TORCH",

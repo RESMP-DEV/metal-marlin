@@ -97,7 +97,7 @@ from transformers import AutoTokenizer
 
 # Load quantized model (~8GB for 3-bit weights)
 model = TrellisForCausalLM.from_pretrained(
-    "models/GLM-4.7-Flash-EXL3-3bpw",
+    "models/GLM-4.7-Flash-trellis-v2-3bpw",
     device="mps"
 )
 tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
@@ -222,6 +222,86 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="")
 ```
 
+## Quantization
+
+Metal Marlin supports 2-8 bit quantization with sensitivity-aware bit allocation for MoE models.
+
+### Quick Quantization
+
+```bash
+# Basic FP4 quantization
+uv run python -m metal_marlin.hf_loader Qwen/Qwen3-4B ./output --bits 4
+
+# Trellis v2 quantization
+uv run python -m metal_marlin.quantization.trellis_v2_pipeline \
+    --model Qwen/Qwen3-4B --output ./qwen3_trellis_v2 --bits 4
+```
+
+### Dynamic Bit Allocation (MoE Models)
+
+For MoE models like GLM-4.7-Flash or Qwen3-30B-A3B, use dynamic bit allocation:
+
+```bash
+# Dynamic 2-8 bit allocation based on expert sensitivity
+uv run python scripts/quantize_qwen3_30b.py \
+    --model Qwen/Qwen3-30B-A3B \
+    --dynamic-experts \
+    --expert-min-bits 2 \
+    --expert-max-bits 8
+```
+
+This maps each expert's sensitivity score to bit precision:
+- **8-bit**: Critical experts (top 10% activation)
+- **5-6 bit**: Average experts
+- **2-3 bit**: Cold/rarely-used experts
+
+**Result**: 40-50% smaller models with <1% quality loss.
+
+### Fast Quantization Mode
+
+For large MoE models (64+ experts), use fast mode for 5-10x speedup:
+
+```python
+from metal_marlin.quantization.pipelined_quant import quantize_moe_experts_fast
+
+results, metadata = quantize_moe_experts_fast(
+    expert_weights,
+    expert_activations,
+    quantizer,
+    hessian_fn,
+    calibration_samples=512,    # 4x fewer samples (was 2048)
+    parallel_experts=4,          # Parallel quantization
+)
+```
+
+**Fast mode optimizations:**
+- Gershgorin PSD fast-check (skip eigendecomp if already PSD)
+- 4x fewer calibration samples (512 vs 2048)
+- Cold expert skipping (bottom 10%)
+- Parallel expert quantization
+
+## Quantized Model Format
+
+Metal Marlin supports **only trellis_v2 (uint8 packed)** weights.
+
+```
+model-name-trellis-v2-3bpw/
+├── model-00001-of-00010.safetensors
+├── model-00002-of-00010.safetensors
+├── ...
+├── model.safetensors.index.json
+├── quantization_config.json
+└── config.json
+```
+
+### Loading Quantized Models
+
+```python
+from metal_marlin import load_quantized_model
+
+model, tokenizer = load_quantized_model("models/Model-Trellis-3bpw")
+```
+
 ## Trellis Inference
 
 Standalone inference for trellis-quantized models on Apple Silicon via Metal acceleration.
@@ -285,7 +365,7 @@ Benchmark results on Apple M4 Max with GLM-4.7-Flash (Trellis 3-bit quantization
 - **Fused GEMM kernels**: `gemm_trellis_packed` combines dequantization and matrix multiplication in a single kernel pass, eliminating intermediate memory traffic
 - **Decode-optimized tiles**: `gemm_trellis_packed_decode` uses 32x128 tiles tuned for single-token generation
 - **MoE batched dispatch**: `moe_trellis_swiglu` processes all active experts in a single batched kernel call (200x faster than sequential dispatch)
-- **Packed weight format**: Maintains uint8 packed weights throughout inference, avoiding 5x memory inflation from unpacking to int16
+- **Packed weight format**: Maintains uint8 packed weights throughout inference
 - **SIMD-aligned memory access**: 128-byte aligned reads/writes for optimal memory bandwidth utilization on Apple Silicon
 
 ### GEMM Kernel Performance
@@ -321,26 +401,10 @@ uv run python benchmarks/glm_flash_benchmark.py
 ```
 
 Options:
-- `--model PATH`: Path to model directory (default: models/GLM-4.7-Flash-Trellis-3bpw)
+- `--model PATH`: Path to model directory (default: models/GLM-4.7-Flash-trellis-v2-3bpw)
 - `--context-length N`: Context length for prefill benchmark (default: 2048)
 - `--num-tokens N`: Number of tokens to decode (default: 100)
 - `--num-runs N`: Number of benchmark iterations (default: 3)
-
-### Loading Quantized Models
-
-Trellis models use a layer-directory format:
-```
-model_dir/
-  config.json           # Model config
-  base_weights.safetensors  # Embeddings, norms, lm_head
-  layer_0000/           # Per-layer quantized weights
-    index.json
-    tensor_*.safetensors
-  layer_0001/
-  ...
-```
-
-The loader auto-detects weight format and handles MoE routing weights separately.
 
 ## ASR: Parakeet-TDT-0.6B
 
@@ -402,7 +466,7 @@ Load and run inference with 5 lines of code:
 from metal_marlin.trellis import TrellisForCausalLM
 from transformers import AutoTokenizer
 
-model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw", device="mps")
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-trellis-v2-3bpw", device="mps")
 tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
 input_ids = tokenizer("Hello, ", return_tensors="pt").input_ids.to("mps")
@@ -419,7 +483,7 @@ from metal_marlin import TrellisForCausalLM
 from transformers import AutoTokenizer
 
 # Load model and tokenizer
-model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-EXL3-3bpw")
+model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-trellis-v2-3bpw")
 tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
 # Model is automatically loaded to Metal (MPS) device
@@ -428,9 +492,8 @@ print(f"Device: {model.device}")
 ```
 
 **Supported model formats:**
-- Trellis quantized models (`.trellis` or `EXL3` format)
-- Layer-wise directory structure with `config.json` and per-layer weights
-- MoE and dense architectures
+- trellis_v2 (uint8 packed) quantized models
+- MoE and dense architectures within trellis_v2
 
 ### Generation
 
@@ -469,20 +532,20 @@ Run evaluation scripts to measure performance:
 # Perplexity evaluation
 cd contrib/metal_marlin
 python scripts/eval_perplexity.py \
-    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
     --dataset wikitext \
     --split test
 
 # Token throughput benchmark
 python scripts/benchmark_throughput.py \
-    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
     --prompt "Explain quantum computing:" \
     --max_tokens 256 \
     --iterations 10
 
 # Memory profiling
 python scripts/profile_memory.py \
-    --model models/GLM-4.7-Flash-EXL3-3bpw \
+    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
     --batch_sizes 1,4,8
 ```
 

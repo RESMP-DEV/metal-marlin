@@ -21,7 +21,7 @@ def test_viterbi_quantizer():
     indices, dequantized = quantize_tile_viterbi(tile, codebook, scale)
 
     # Basic sanity checks
-    assert indices.dtype == np.int16
+    assert indices.dtype == np.uint8
     assert dequantized.shape == (16, 16)
     assert np.all(indices >= 0)
     assert np.all(indices < 16)
@@ -43,7 +43,7 @@ def test_quantize_tile_shape():
     indices, dequantized = quantize_tile_viterbi(tile, codebook, scale)
 
     assert indices.shape == (256,)
-    assert indices.dtype == np.int16
+    assert indices.dtype == np.uint8
     assert dequantized.shape == (16, 16)
     assert dequantized.dtype == np.float32
 

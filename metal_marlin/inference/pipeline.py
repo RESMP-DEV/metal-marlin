@@ -32,6 +32,8 @@ from .._compat import HAS_MPS, require_torch, torch
 if TYPE_CHECKING:
     import torch as torch_typing
 
+    from ..kv_cache_torch import KVCacheTorch
+
 
 def get_device() -> str:
     """Return the best available device for inference.
@@ -75,12 +77,12 @@ class MarlinModel(Protocol):
     def __call__(
         self,
         input_ids: torch_typing.Tensor,
-        kv_cache: Any = None,
+        kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Forward pass returning logits."""
         ...
 
-    def create_kv_cache(self, batch_size: int = 1) -> Any:
+    def create_kv_cache(self, batch_size: int = 1) -> KVCacheTorch:
         """Create KV cache for incremental decoding."""
         ...
 
@@ -443,7 +445,7 @@ class MetalMarlinModel:
     def __call__(
         self,
         input_ids: torch_typing.Tensor,
-        kv_cache: Any = None,
+        kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Forward pass returning logits.
 
@@ -488,7 +490,7 @@ class MetalMarlinModel:
         self,
         hidden: torch_typing.Tensor,
         layer_idx: int,
-        kv_cache: Any = None,
+        kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Forward pass through a single transformer layer."""
         assert torch is not None
@@ -583,7 +585,7 @@ class MetalMarlinModel:
         self,
         hidden: torch_typing.Tensor,
         layer_idx: int,
-        kv_cache: Any = None,
+        kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Compute self-attention with RoPE."""
         assert torch is not None
@@ -733,7 +735,7 @@ class MetalMarlinModel:
 
         return self._quantized_linear(hidden, f"{prefix}.down_proj.weight")
 
-    def create_kv_cache(self, batch_size: int = 1) -> KVCache:
+    def create_kv_cache(self, batch_size: int = 1) -> KVCacheTorch:
         """Create empty KV cache structure."""
         require_torch()
 
@@ -760,53 +762,6 @@ class MetalMarlinModel:
             "vocab_size": self.vocab_size,
             "device": self.device,
         }
-
-
-# Type alias for backward compatibility
-KVCache = Any
-
-
-def _load_safetensors_keys(path: Path) -> set[str]:
-    st_path = path / "model.safetensors"
-    if not st_path.exists():
-        return set()
-    try:
-        from safetensors import safe_open
-    except ImportError:
-        return set()
-    with safe_open(str(st_path), framework="pt") as f:
-        return set(f.keys())
-
-
-def _is_legacy_checkpoint(path: str | Path) -> bool:
-    """Detect legacy Marlin FP4 checkpoints stored in model.safetensors."""
-    model_path = Path(path)
-    if not model_path.exists():
-        return False
-    keys = _load_safetensors_keys(model_path)
-    if not keys:
-        return False
-    if any(key.endswith(".weight_packed") for key in keys):
-        return False
-    return any(key.endswith(".scales") or key.endswith(".group_size") for key in keys)
-
-
-def _load_legacy_checkpoint(
-    path: str | Path,
-    device: str,
-) -> tuple[Any, Any]:
-    """Load legacy Marlin checkpoints via the Transformers-compatible loader."""
-    from .pipeline_v2 import _load_marlin_quantized_model, _require_transformers
-
-    _require_transformers()
-    require_torch()
-
-    from transformers import AutoTokenizer
-
-    model_path = Path(path)
-    model = _load_marlin_quantized_model(model_path, device=device)
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    return model, tokenizer
 
 
 def _load_new_checkpoint(
@@ -883,10 +838,6 @@ class MarlinPipeline:
                 UserWarning,
                 stacklevel=2,
             )
-
-        if _is_legacy_checkpoint(path):
-            model, tokenizer = _load_legacy_checkpoint(path, device)
-            return cls(model, tokenizer, device=device)
 
         model, tokenizer = _load_new_checkpoint(path, device, **kwargs)
         return cls(model, tokenizer, device=device)

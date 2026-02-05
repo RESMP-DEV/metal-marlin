@@ -20,7 +20,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from metal_marlin.calibration import CalibrationDataset, ranges_to_scales
+from metal_marlin.calibration.calibration_dataset import CalibrationDataset
+from metal_marlin.calibration_utils import ranges_to_scales
 from metal_marlin.gptq import (
     GPTQQuantizer,
     compare_gptq_vs_rtn,

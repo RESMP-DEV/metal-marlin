@@ -228,7 +228,7 @@ def profile_kernel(
     Example:
         @profile_kernel("attention_forward")
         def attention(q, k, v):
-            return flash_attention(q, k, v)
+            return flash_attention_v2(q, k, v)
 
         # Or with function name as kernel name
         @profile_kernel()

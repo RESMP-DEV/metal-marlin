@@ -27,7 +27,15 @@ Usage:
     cache = KVCache(config, batch_size=1)
 
     # FP8 cache for long context
-    cache = KVCache(config, batch_size=1, dtype_config=memory_efficient_config())
+    fp8_config = CacheConfig(
+        num_layers=32,
+        num_heads=32,
+        num_kv_heads=8,  # GQA
+        head_dim=128,
+        max_seq_len=4096,
+        cache_dtype="fp8",
+    )
+    cache = KVCache(fp8_config, batch_size=1, dtype_config=memory_efficient_config())
 
     # Mixed: BF16 activations with FP8 KV cache
     mixed_config = DTypeConfig(activations="bf16", kv_cache="fp8")
@@ -118,12 +126,7 @@ class CacheConfig:
         num_kv_heads: Number of key-value heads (for GQA).
         head_dim: Dimension per head.
         max_seq_len: Maximum sequence length to allocate.
-        quantize_mode: Cache quantization mode (legacy, prefer cache_dtype).
-            - "none": Full precision (uses dtype_config.kv_cache)
-            - "fp8": 8-bit floating point (2x memory savings)
-            - "fp4": 4-bit floating point (4x memory savings)
-            - "int8": 8-bit integer symmetric quantization (2x memory savings)
-        cache_dtype: Cache storage dtype (takes precedence over quantize_mode).
+        cache_dtype: Cache storage dtype.
             - "fp16": Half precision storage
             - "bf16": BFloat16 storage
             - "fp8": FP8 E4M3 quantized (2x memory savings)
@@ -146,7 +149,6 @@ class CacheConfig:
     num_kv_heads: int  # For Grouped Query Attention (GQA)
     head_dim: int
     max_seq_len: int
-    quantize_mode: Literal["none", "fp8", "fp4", "int8"] = "none"
     cache_dtype: Literal["fp16", "bf16", "fp8", "fp4", "int8"] | None = None
     fp8_scale_method: Literal["tensor", "channel"] = "tensor"
     layout: Literal["BHSD", "BSHD"] = "BHSD"
@@ -208,26 +210,20 @@ class KVCache:
                 config.head_dim,
             )
 
-        # Determine storage mode: cache_dtype takes precedence over quantize_mode
-        if config.cache_dtype is not None:
-            # New API: use cache_dtype directly
-            if config.cache_dtype == "fp8":
-                self._quantize_mode = "fp8"
-            elif config.cache_dtype == "fp4":
-                self._quantize_mode = "fp4"
-            elif config.cache_dtype == "int8":
-                self._quantize_mode = "int8"
-            elif config.cache_dtype in ("fp16", "bf16"):
-                self._quantize_mode = "none"
-                # Override dtype_config's kv_cache setting
-                self._storage_dtype_override = config.cache_dtype
-            else:
-                self._quantize_mode = "none"
-                self._storage_dtype_override = None
+        # Determine storage mode from cache_dtype.
+        self._storage_dtype_override = None
+        if config.cache_dtype == "fp8":
+            self._quantize_mode = "fp8"
+        elif config.cache_dtype == "fp4":
+            self._quantize_mode = "fp4"
+        elif config.cache_dtype == "int8":
+            self._quantize_mode = "int8"
+        elif config.cache_dtype in ("fp16", "bf16"):
+            self._quantize_mode = "none"
+            # Override dtype_config's kv_cache setting
+            self._storage_dtype_override = config.cache_dtype
         else:
-            # Legacy API: use quantize_mode
-            self._quantize_mode = config.quantize_mode
-            self._storage_dtype_override = None
+            self._quantize_mode = "none"
 
         if self._quantize_mode == "fp4":
             # FP4 quantized cache - pack 8 values per int32

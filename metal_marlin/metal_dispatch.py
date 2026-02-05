@@ -29,7 +29,6 @@ Note:
 
 from __future__ import annotations
 
-import _ctypes
 import logging
 import os
 import weakref
@@ -38,12 +37,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import _ctypes
 import numpy as np
 
+from ._compat import HAS_CPP_EXT, _metal_dispatch_ext
 from ._padding import pad_to_multiple, unpad
-from .metallib_loader import (
-    get_kernel_from_metallib,
-)
+from .metallib_loader import get_kernel_from_metallib
 
 # Logger for kernel loading diagnostics (metallib vs JIT)
 _kernel_logger = logging.getLogger(__name__ + ".kernels")
@@ -92,7 +91,6 @@ except ImportError:
     torch = None
 
 # Check for C++ extension availability (provides 5-10x dispatch speedup)
-from ._compat import HAS_CPP_EXT, _metal_dispatch_ext
 
 # ---------------------------------------------------------------------------
 # FastPath: Low-overhead dispatch using C++ extension when available
@@ -199,7 +197,8 @@ class FastPath:
             RuntimeError: If fast path is not available.
         """
         if not self._available:
-            raise RuntimeError("FastPath not available - use standard dispatch")
+            raise RuntimeError(
+                "FastPath not available - use standard dispatch")
 
         pipeline = self._get_pipeline(kernel_name)
         _metal_dispatch_ext.dispatch_kernel(
@@ -226,7 +225,8 @@ class FastPath:
             RuntimeError: If fast path is not available.
         """
         if not self._available:
-            raise RuntimeError("FastPath not available - use standard dispatch")
+            raise RuntimeError(
+                "FastPath not available - use standard dispatch")
 
         batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
 
@@ -300,7 +300,8 @@ if HAS_METAL:
     def _get_staging_pool(device: Any) -> MetalBufferPool:
         pool = _STAGING_POOLS.get(id(device))
         if pool is None:
-            pool = MetalBufferPool(device, storage_mode=Metal.MTLResourceStorageModeShared)
+            pool = MetalBufferPool(
+                device, storage_mode=Metal.MTLResourceStorageModeShared)
             _STAGING_POOLS[id(device)] = pool
         return pool
 
@@ -327,7 +328,8 @@ if HAS_METAL:
         def __init__(self, lib: MetalKernelLibrary, device: Any):
             self._lib = lib
             self._device = device
-            self._staging_buffer = _get_staging_pool(device).get(_BATCH_BUFFER_SIZE)
+            self._staging_buffer = _get_staging_pool(
+                device).get(_BATCH_BUFFER_SIZE)
             self._offset = 0
             self._pending: list[tuple[int, Any, Any, int]] = []
             self._cmd_buffer: Any = None
@@ -359,12 +361,15 @@ if HAS_METAL:
                     aligned_offset = 0
 
                 contents = self._staging_buffer.contents()
-                view = memoryview(contents.as_buffer(self._staging_buffer.length()))
-                view[aligned_offset : aligned_offset + size] = data
-                self._staging_buffer.didModifyRange_(Foundation.NSMakeRange(aligned_offset, size))
+                view = memoryview(contents.as_buffer(
+                    self._staging_buffer.length()))
+                view[aligned_offset: aligned_offset + size] = data
+                self._staging_buffer.didModifyRange_(
+                    Foundation.NSMakeRange(aligned_offset, size))
 
                 offset = aligned_offset
-                self._pending.append((offset, self._staging_buffer, private_buf, size))
+                self._pending.append(
+                    (offset, self._staging_buffer, private_buf, size))
                 self._offset = offset + size
                 return offset
 
@@ -401,7 +406,8 @@ if HAS_METAL:
         from shared/managed staging buffer to private GPU memory.
         """
 
-        __slots__ = ("_command_buffer", "_staging_buffer", "_private_buffer", "_completed")
+        __slots__ = ("_command_buffer", "_staging_buffer",
+                     "_private_buffer", "_completed")
 
         def __init__(self, command_buffer: Any, staging_buffer: Any, private_buffer: Any):
             self._command_buffer = command_buffer
@@ -525,7 +531,8 @@ if HAS_METAL:
         )
         if private_buffer is None:
             staging_pool.release(staging_buffer)
-            raise RuntimeError(f"Failed to allocate shared buffer of {aligned_size} bytes")
+            raise RuntimeError(
+                f"Failed to allocate shared buffer of {aligned_size} bytes")
 
         return _blit_copy_async(lib, staging_buffer, private_buffer, size, staging_buffer)
 
@@ -587,9 +594,11 @@ if HAS_METAL:
                 )
                 if private_buffer is None:
                     staging_pool.release(staging_buffer)
-                    raise RuntimeError(f"Failed to allocate shared buffer of {size} bytes")
+                    raise RuntimeError(
+                        f"Failed to allocate shared buffer of {size} bytes")
 
-                result = _blit_copy_async(lib, staging_buffer, private_buffer, size, staging_buffer)
+                result = _blit_copy_async(
+                    lib, staging_buffer, private_buffer, size, staging_buffer)
 
         if cache and not isinstance(result, StagingTransferHandle):
             _WEIGHT_BUFFER_CACHE[tensor_id] = (weakref.ref(tensor), result)
@@ -855,7 +864,8 @@ class MetalKernelLibrary:
         dispatch_prefill() to add kernels, then commit_prefill() to submit.
         """
         if self._prefill_buffer is not None:
-            raise RuntimeError("Prefill already in progress. Call commit_prefill() first.")
+            raise RuntimeError(
+                "Prefill already in progress. Call commit_prefill() first.")
         self._prefill_buffer = self._command_queue.commandBuffer()
         self._prefill_encoder = self._prefill_buffer.computeCommandEncoder()
 
@@ -914,7 +924,8 @@ class MetalKernelLibrary:
         dispatch_decode() to add kernels, then commit_decode() to submit.
         """
         if self._decode_buffer is not None:
-            raise RuntimeError("Decode already in progress. Call commit_decode() first.")
+            raise RuntimeError(
+                "Decode already in progress. Call commit_decode() first.")
         self._decode_buffer = self._decode_queue.commandBuffer()
         self._decode_encoder = self._decode_buffer.computeCommandEncoder()
 
@@ -1036,7 +1047,8 @@ class MetalKernelLibrary:
         # MTLLibraryOptimizationLevelSize = 1 (smaller binaries)
         # MTLLibraryOptimizationLevelPerformance = 2 (faster execution, added in macOS 14+)
         if hasattr(Metal, "MTLLibraryOptimizationLevelPerformance"):
-            options.setOptimizationLevel_(Metal.MTLLibraryOptimizationLevelPerformance)
+            options.setOptimizationLevel_(
+                Metal.MTLLibraryOptimizationLevelPerformance)
 
         # Metal 3.0 for simdgroup_matrix support
         options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
@@ -1078,12 +1090,14 @@ class MetalKernelLibrary:
 
         options = self._create_compile_options()
 
-        library, error = self._device.newLibraryWithSource_options_error_(source, options, None)
+        library, error = self._device.newLibraryWithSource_options_error_(
+            source, options, None)
 
         if library is None:
             # Try to get error message
             error_msg = str(error) if error else "Unknown error"
-            raise RuntimeError(f"Failed to compile Metal source '{name}': {error_msg}")
+            raise RuntimeError(
+                f"Failed to compile Metal source '{name}': {error_msg}")
 
         self._libraries[name] = library
         return library
@@ -1118,18 +1132,21 @@ class MetalKernelLibrary:
 
         if include_end > 0:
             # Insert defines after includes
-            source = source[:include_end] + "\n" + define_header + source[include_end:]
+            source = source[:include_end] + "\n" + \
+                define_header + source[include_end:]
         else:
             # No includes found, prepend defines
             source = define_header + source
 
         options = self._create_compile_options()
 
-        library, error = self._device.newLibraryWithSource_options_error_(source, options, None)
+        library, error = self._device.newLibraryWithSource_options_error_(
+            source, options, None)
 
         if library is None:
             error_msg = str(error) if error else "Unknown error"
-            raise RuntimeError(f"Failed to compile Metal source '{name}': {error_msg}")
+            raise RuntimeError(
+                f"Failed to compile Metal source '{name}': {error_msg}")
 
         self._libraries[name] = library
         return library
@@ -1204,13 +1221,16 @@ class MetalKernelLibrary:
                     break
 
         if function is None:
-            raise KeyError(f"Function '{function_name}' not found in any library")
+            raise KeyError(
+                f"Function '{function_name}' not found in any library")
 
         # Create pipeline state
-        pipeline, error = self._device.newComputePipelineStateWithFunction_error_(function, None)
+        pipeline, error = self._device.newComputePipelineStateWithFunction_error_(
+            function, None)
 
         if pipeline is None:
-            raise RuntimeError(f"Failed to create pipeline for '{function_name}'")
+            raise RuntimeError(
+                f"Failed to create pipeline for '{function_name}'")
 
         self._pipelines[cache_key] = pipeline
         return pipeline
@@ -1334,7 +1354,8 @@ class MetalKernelLibrary:
             scales_k = scales.shape[0] * group_size
             scales_n = scales.shape[1]
 
-            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+            k_target = _round_up(max(K, packed_k, scales_k),
+                                 max(_PAD_MULTIPLE, group_size))
             n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
 
             input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
@@ -1404,7 +1425,8 @@ class MetalKernelLibrary:
             scales_k = scales.shape[0] * group_size
             scales_n = scales.shape[1]
 
-            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+            k_target = _round_up(max(K, packed_k, scales_k),
+                                 max(_PAD_MULTIPLE, group_size))
             n_target = _round_up(max(N, packed_n, scales_n), _PAD_MULTIPLE)
 
             input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
@@ -1478,8 +1500,10 @@ class MetalKernelLibrary:
             scales_k = scales.shape[0] * group_size
             scales_n = scales.shape[1]
 
-            k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
-            n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 16))
+            k_target = _round_up(max(K, packed_k, scales_k),
+                                 max(_PAD_MULTIPLE, group_size))
+            n_target = _round_up(max(N, packed_n, scales_n),
+                                 max(_PAD_MULTIPLE, 16))
 
             input, pad_m = pad_to_multiple(input, 0, _PAD_MULTIPLE)
             input, _ = _pad_tensor_to_size(input, 1, k_target)
@@ -1529,7 +1553,8 @@ class MetalKernelLibrary:
             SmallTransferBatcher instance for batching <4KB transfers.
         """
         if self._small_transfer_batcher is None:
-            self._small_transfer_batcher = SmallTransferBatcher(self, self._device)
+            self._small_transfer_batcher = SmallTransferBatcher(
+                self, self._device)
         return self._small_transfer_batcher
 
     def flush_small_transfers(self) -> None:
@@ -1751,7 +1776,8 @@ class AsyncTransferManager:
             aligned_size, Metal.MTLResourceStorageModeShared
         )
         if buffer is None:
-            raise RuntimeError(f"Failed to allocate shared buffer of size {aligned_size}")
+            raise RuntimeError(
+                f"Failed to allocate shared buffer of size {aligned_size}")
         return buffer
 
     def _return_buffer(self, buffer: Any, size: int) -> None:
@@ -1927,7 +1953,8 @@ class PipelinedLayerDispatcher:
                 tensor = tensor.contiguous()
             source_buf = mps_tensor_to_metal_buffer(tensor, self._lib.device)
             size = tensor.numel() * tensor.element_size()
-            handle = self._transfer_manager.start_transfer_async(source_buf, size)
+            handle = self._transfer_manager.start_transfer_async(
+                source_buf, size)
             handles.append(handle)
             buffers[name] = handle.destination_buffer
 
@@ -2015,7 +2042,6 @@ def _torch_dtype_to_numpy(dtype: torch.dtype) -> np.dtype:
         torch.float32: np.float32,
         torch.float64: np.float64,
         torch.int8: np.int8,
-        torch.int16: np.int16,
         torch.int32: np.int32,
         torch.int64: np.int64,
         torch.uint8: np.uint8,
@@ -2033,6 +2059,10 @@ def _copy_buffer_to_tensor(buffer: Any, tensor: torch.Tensor) -> None:
     length = buffer.length()
     np_dtype = _torch_dtype_to_numpy(tensor.dtype)
     arr = np.frombuffer(contents.as_buffer(length), dtype=np_dtype)
+    # Truncate to tensor size (buffer may be page-aligned and larger)
+    expected_size = tensor.numel()
+    if arr.size > expected_size:
+        arr = arr[:expected_size]
     arr = arr.reshape(tuple(tensor.shape)).copy()
     tensor.copy_(torch.from_numpy(arr).to(device=tensor.device))
 
@@ -2082,7 +2112,8 @@ def mps_tensor_to_metal_buffer(
             aligned_size, Metal.MTLResourceStorageModeShared
         )
         if buffer is None:
-            raise RuntimeError("Failed to create Metal buffer for output tensor")
+            raise RuntimeError(
+                "Failed to create Metal buffer for output tensor")
         return _CopyBackBuffer(buffer, tensor)
 
     # Handle dtype conversion for numpy compatibility
@@ -2132,7 +2163,8 @@ def numpy_array_to_metal_buffer(arr: np.ndarray, device: Any) -> Any:
         data, aligned_size, Metal.MTLResourceStorageModeShared
     )
     if buffer is None:
-        raise RuntimeError(f"Failed to create Metal buffer from numpy array shape={arr.shape}")
+        raise RuntimeError(
+            f"Failed to create Metal buffer from numpy array shape={arr.shape}")
     return buffer
 
 
@@ -2213,7 +2245,8 @@ def cpu_tensor_to_metal_texture(tensor: torch.Tensor, device: Any) -> Any:
 
     texture = device.newTextureWithDescriptor_(descriptor)
     if texture is None:
-        raise RuntimeError(f"Failed to create Metal texture from tensor shape={tensor.shape}")
+        raise RuntimeError(
+            f"Failed to create Metal texture from tensor shape={tensor.shape}")
 
     # Copy data to texture
     region = Metal.MTLRegionMake2D(0, 0, width, 1)
@@ -2306,7 +2339,8 @@ def mps_tensors_to_metal_buffers(
                     data, aligned_size, Metal.MTLResourceStorageModeShared
                 )
                 if buffer is None:
-                    raise RuntimeError("Failed to create Metal buffer from tensor data")
+                    raise RuntimeError(
+                        "Failed to create Metal buffer from tensor data")
 
         buffers.append(buffer)
 
@@ -2517,16 +2551,19 @@ def dispatch_kernel_indirect(
 
     # Create indirect command buffer: for each expert, compute threadgroup count
     # Format: [threadgroups_x, threadgroups_y, threadgroups_z] per expert
-    indirect_args = torch.zeros(num_experts, 3, dtype=torch.uint32, device="mps")
+    indirect_args = torch.zeros(
+        num_experts, 3, dtype=torch.uint32, device="mps")
 
     # Calculate threadgroups per expert: ceil(expert_count / threads_per_tg)
     expert_counts_uint = expert_counts.to(torch.uint32)
-    indirect_args[:, 0] = (expert_counts_uint + threads_per_tg - 1) // threads_per_tg
+    indirect_args[:, 0] = (expert_counts_uint +
+                           threads_per_tg - 1) // threads_per_tg
     indirect_args[:, 1] = 1
     indirect_args[:, 2] = 1
 
     # Convert to Metal buffer
-    indirect_buf = mps_tensor_to_metal_buffer(indirect_args.contiguous(), device)
+    indirect_buf = mps_tensor_to_metal_buffer(
+        indirect_args.contiguous(), device)
 
     # Use batch encoder if in batch mode
     if lib._batch_mode and lib._batch_encoder is not None:
@@ -2610,7 +2647,8 @@ def _pad_tensor_to_size(tensor: torch.Tensor, dim: int, size: int) -> tuple[torc
     if current == size:
         return tensor, 0
     if current > size:
-        raise ValueError(f"Cannot pad dim {dim} from {current} to smaller size {size}")
+        raise ValueError(
+            f"Cannot pad dim {dim} from {current} to smaller size {size}")
     pad_size = size - current
     new_shape = list(tensor.shape)
     new_shape[dim] = size
@@ -2741,7 +2779,8 @@ def dispatch_gemm_fp4(
         scales_k = scales.shape[0] * group_size
         scales_n = scales.shape[1]
 
-        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+        k_target = _round_up(max(K, packed_k, scales_k),
+                             max(_PAD_MULTIPLE, group_size))
         n_target = _round_up(max(N, packed_n, scales_n), pad_n_multiple)
 
         A, pad_m = pad_to_multiple(A, 0, pad_m_multiple)
@@ -2761,16 +2800,20 @@ def dispatch_gemm_fp4(
     A_half = A.half().contiguous()
     A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
     B_packed_contig = B_packed.contiguous()
-    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    B_buf = _private_buffer_from_tensor(
+        B_packed_contig, lib, device, cache=True)
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
     C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
     # Create separate param buffers (kernel expects bufffers at indices 4, 5, 6, 7)
-    M_buf = _private_buffer_from_bytes(lib, device, np.array([M], dtype=np.uint32).tobytes())
-    N_buf = _private_buffer_from_bytes(lib, device, np.array([N], dtype=np.uint32).tobytes())
-    K_buf = _private_buffer_from_bytes(lib, device, np.array([K], dtype=np.uint32).tobytes())
+    M_buf = _private_buffer_from_bytes(
+        lib, device, np.array([M], dtype=np.uint32).tobytes())
+    N_buf = _private_buffer_from_bytes(
+        lib, device, np.array([N], dtype=np.uint32).tobytes())
+    K_buf = _private_buffer_from_bytes(
+        lib, device, np.array([K], dtype=np.uint32).tobytes())
     gs_buf = _private_buffer_from_bytes(
         lib, device, np.array([group_size], dtype=np.uint32).tobytes()
     )
@@ -2823,7 +2866,8 @@ def dispatch_gemm_fp8(
         scales_k = scales.shape[0] * group_size
         scales_n = scales.shape[1]
 
-        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
+        k_target = _round_up(max(K, packed_k, scales_k),
+                             max(_PAD_MULTIPLE, group_size))
         n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 4))
 
         A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
@@ -2841,7 +2885,8 @@ def dispatch_gemm_fp8(
     A_half = A.half().contiguous()
     A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
     B_packed_contig = B_packed.contiguous()
-    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    B_buf = _private_buffer_from_tensor(
+        B_packed_contig, lib, device, cache=True)
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
@@ -2894,7 +2939,8 @@ def dispatch_gemm_int2(
     N_full = N_packed * 16  # Each uint32 holds 16 INT2 values
 
     # Unpack INT2 to FP32: [K, N]
-    B_full = torch.empty((K_actual, N_full), device=device, dtype=torch.float32)
+    B_full = torch.empty((K_actual, N_full),
+                         device=device, dtype=torch.float32)
     for j in range(16):  # 16 values per uint32, along N dimension
         nibbles = ((B_packed >> (j * 2)) & 0x3).to(torch.int32)
         # INT2 codebook: 0->-1.5, 1->-0.5, 2->0.5, 3->1.5 (symmetric)
@@ -2943,8 +2989,10 @@ def _dispatch_gemm_int2_metal(
         scales_k = scales.shape[0] * group_size
         scales_n = scales.shape[1]
 
-        k_target = _round_up(max(K, packed_k, scales_k), max(_PAD_MULTIPLE, group_size))
-        n_target = _round_up(max(N, packed_n, scales_n), max(_PAD_MULTIPLE, 16))
+        k_target = _round_up(max(K, packed_k, scales_k),
+                             max(_PAD_MULTIPLE, group_size))
+        n_target = _round_up(max(N, packed_n, scales_n),
+                             max(_PAD_MULTIPLE, 16))
 
         A, pad_m = pad_to_multiple(A, 0, _PAD_MULTIPLE)
         A, _ = _pad_tensor_to_size(A, 1, k_target)
@@ -2961,7 +3009,8 @@ def _dispatch_gemm_int2_metal(
     A_half = A.half().contiguous()
     A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
     B_packed_contig = B_packed.contiguous()
-    B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
+    B_buf = _private_buffer_from_tensor(
+        B_packed_contig, lib, device, cache=True)
     scales_half = scales if scales.dtype == torch.float16 else scales.half()
     scales_half = scales_half.contiguous()
     S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
@@ -3037,13 +3086,16 @@ def dispatch_dequant_fp4(
 
     # Create constant buffers
     K_buf = device.newBufferWithBytes_length_options_(
-        np.array([K], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([K], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
     N_buf = device.newBufferWithBytes_length_options_(
-        np.array([N], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([N], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
     gs_buf = device.newBufferWithBytes_length_options_(
-        np.array([group_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([group_size], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
 
     # Grid dimensions for row-major kernel
@@ -3100,14 +3152,17 @@ def dispatch_dequant_fp4_linear(
 
     # Create constant buffers
     np_buf = device.newBufferWithBytes_length_options_(
-        np.array([num_packed], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([num_packed], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
     gs_buf = device.newBufferWithBytes_length_options_(
-        np.array([group_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([group_size], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
 
     # Grid: 1D, each threadgroup processes DEQUANT_OPT_PACKS_PER_TG packed words
-    num_threadgroups = (num_packed + DEQUANT_OPT_PACKS_PER_TG - 1) // DEQUANT_OPT_PACKS_PER_TG
+    num_threadgroups = (
+        num_packed + DEQUANT_OPT_PACKS_PER_TG - 1) // DEQUANT_OPT_PACKS_PER_TG
 
     dispatch_kernel(
         lib,
@@ -3147,7 +3202,8 @@ def dispatch_dequant_fp4_bandwidth_max(
     require_mps()
 
     if num_packed % 4 != 0:
-        raise ValueError("num_packed must be divisible by 4 for bandwidth_max kernel")
+        raise ValueError(
+            "num_packed must be divisible by 4 for bandwidth_max kernel")
 
     device = lib.device
 
@@ -3168,11 +3224,13 @@ def dispatch_dequant_fp4_bandwidth_max(
         Metal.MTLResourceStorageModeShared,
     )
     gs_buf = device.newBufferWithBytes_length_options_(
-        np.array([group_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([group_size], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
 
     # Grid: 1D, each thread processes one uint4 (4 packed words)
-    num_threadgroups = (num_packed_div4 + DEQUANT_OPT_THREADS - 1) // DEQUANT_OPT_THREADS
+    num_threadgroups = (
+        num_packed_div4 + DEQUANT_OPT_THREADS - 1) // DEQUANT_OPT_THREADS
 
     dispatch_kernel(
         lib,
@@ -3222,17 +3280,20 @@ def benchmark_dequant_fp4(
     packed = torch.randint(0, 2**32, (num_packed,), dtype=torch.int32, device="mps").view(
         torch.uint32
     )
-    scales = torch.randn(num_groups, dtype=torch.float16, device="mps") * 0.1 + 0.5
+    scales = torch.randn(num_groups, dtype=torch.float16,
+                         device="mps") * 0.1 + 0.5
 
     # Warmup
     for _ in range(warmup_iters):
-        _ = dispatch_dequant_fp4_bandwidth_max(lib, packed, scales, num_packed, group_size)
+        _ = dispatch_dequant_fp4_bandwidth_max(
+            lib, packed, scales, num_packed, group_size)
     torch.mps.synchronize()
 
     # Benchmark
     start = time.perf_counter()
     for _ in range(benchmark_iters):
-        _ = dispatch_dequant_fp4_bandwidth_max(lib, packed, scales, num_packed, group_size)
+        _ = dispatch_dequant_fp4_bandwidth_max(
+            lib, packed, scales, num_packed, group_size)
     torch.mps.synchronize()
     elapsed = time.perf_counter() - start
 
@@ -3313,29 +3374,39 @@ def dispatch_moe_optimized(
     device = lib.device
 
     # Allocate output
-    output = torch.empty((batch_size, out_dim), dtype=torch.float16, device="mps")
+    output = torch.empty((batch_size, out_dim),
+                         dtype=torch.float16, device="mps")
 
     # Convert tensors to Metal buffers
-    act_buf = mps_tensor_to_metal_buffer(activations.half().contiguous(), device)
-    router_buf = mps_tensor_to_metal_buffer(router_weights.half().contiguous(), device)
-    expert_w_buf = mps_tensor_to_metal_buffer(expert_weights.contiguous(), device)
-    expert_s_buf = mps_tensor_to_metal_buffer(expert_scales.half().contiguous(), device)
+    act_buf = mps_tensor_to_metal_buffer(
+        activations.half().contiguous(), device)
+    router_buf = mps_tensor_to_metal_buffer(
+        router_weights.half().contiguous(), device)
+    expert_w_buf = mps_tensor_to_metal_buffer(
+        expert_weights.contiguous(), device)
+    expert_s_buf = mps_tensor_to_metal_buffer(
+        expert_scales.half().contiguous(), device)
 
     has_shared = 1 if shared_weights is not None else 0
     if shared_weights is not None:
-        shared_w_buf = mps_tensor_to_metal_buffer(shared_weights.contiguous(), device)
-        shared_s_buf = mps_tensor_to_metal_buffer(shared_scales.half().contiguous(), device)
+        shared_w_buf = mps_tensor_to_metal_buffer(
+            shared_weights.contiguous(), device)
+        shared_s_buf = mps_tensor_to_metal_buffer(
+            shared_scales.half().contiguous(), device)
     else:
         # Create dummy buffers for unused shared expert
-        shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
-        shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
+        shared_w_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
+        shared_s_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
 
     out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create params buffer
     # struct MoEOptParams { batch_size, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared }
     params = np.array(
-        [batch_size, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared],
+        [batch_size, hidden_dim, out_dim, num_experts,
+            top_k, group_size, has_shared],
         dtype=np.uint32,
     )
     params_buf = device.newBufferWithBytes_length_options_(
@@ -3411,26 +3482,36 @@ def dispatch_moe_prerouted(
 
     device = lib.device
 
-    output = torch.empty((batch_size, out_dim), dtype=torch.float16, device="mps")
+    output = torch.empty((batch_size, out_dim),
+                         dtype=torch.float16, device="mps")
 
-    act_buf = mps_tensor_to_metal_buffer(activations.half().contiguous(), device)
-    expert_w_buf = mps_tensor_to_metal_buffer(expert_weights.contiguous(), device)
-    expert_s_buf = mps_tensor_to_metal_buffer(expert_scales.half().contiguous(), device)
+    act_buf = mps_tensor_to_metal_buffer(
+        activations.half().contiguous(), device)
+    expert_w_buf = mps_tensor_to_metal_buffer(
+        expert_weights.contiguous(), device)
+    expert_s_buf = mps_tensor_to_metal_buffer(
+        expert_scales.half().contiguous(), device)
     ids_buf = mps_tensor_to_metal_buffer(expert_ids.int().contiguous(), device)
-    probs_buf = mps_tensor_to_metal_buffer(expert_probs.half().contiguous(), device)
+    probs_buf = mps_tensor_to_metal_buffer(
+        expert_probs.half().contiguous(), device)
 
     has_shared = 1 if shared_weights is not None else 0
     if shared_weights is not None:
-        shared_w_buf = mps_tensor_to_metal_buffer(shared_weights.contiguous(), device)
-        shared_s_buf = mps_tensor_to_metal_buffer(shared_scales.half().contiguous(), device)
+        shared_w_buf = mps_tensor_to_metal_buffer(
+            shared_weights.contiguous(), device)
+        shared_s_buf = mps_tensor_to_metal_buffer(
+            shared_scales.half().contiguous(), device)
     else:
-        shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
-        shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
+        shared_w_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
+        shared_s_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
 
     out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     params = np.array(
-        [batch_size, hidden_dim, out_dim, num_experts, top_k, group_size, has_shared],
+        [batch_size, hidden_dim, out_dim, num_experts,
+            top_k, group_size, has_shared],
         dtype=np.uint32,
     )
     params_buf = device.newBufferWithBytes_length_options_(
@@ -3503,18 +3584,26 @@ def dispatch_moe_decode(
 
     output = torch.empty(out_dim, dtype=torch.float16, device="mps")
 
-    act_buf = mps_tensor_to_metal_buffer(activations.half().contiguous(), device)
-    router_buf = mps_tensor_to_metal_buffer(router_weights.half().contiguous(), device)
-    expert_w_buf = mps_tensor_to_metal_buffer(expert_weights.contiguous(), device)
-    expert_s_buf = mps_tensor_to_metal_buffer(expert_scales.half().contiguous(), device)
+    act_buf = mps_tensor_to_metal_buffer(
+        activations.half().contiguous(), device)
+    router_buf = mps_tensor_to_metal_buffer(
+        router_weights.half().contiguous(), device)
+    expert_w_buf = mps_tensor_to_metal_buffer(
+        expert_weights.contiguous(), device)
+    expert_s_buf = mps_tensor_to_metal_buffer(
+        expert_scales.half().contiguous(), device)
 
     has_shared = 1 if shared_weights is not None else 0
     if shared_weights is not None:
-        shared_w_buf = mps_tensor_to_metal_buffer(shared_weights.contiguous(), device)
-        shared_s_buf = mps_tensor_to_metal_buffer(shared_scales.half().contiguous(), device)
+        shared_w_buf = mps_tensor_to_metal_buffer(
+            shared_weights.contiguous(), device)
+        shared_s_buf = mps_tensor_to_metal_buffer(
+            shared_scales.half().contiguous(), device)
     else:
-        shared_w_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
-        shared_s_buf = device.newBufferWithLength_options_(4, Metal.MTLResourceStorageModeShared)
+        shared_w_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
+        shared_s_buf = device.newBufferWithLength_options_(
+            4, Metal.MTLResourceStorageModeShared)
 
     out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
@@ -3585,13 +3674,16 @@ def benchmark_moe_dispatch(
     num_groups = (hidden_dim + group_size - 1) // group_size
 
     # Create test data
-    activations = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device="mps")
-    router_weights = torch.randn(hidden_dim, num_experts, dtype=torch.float16, device="mps") * 0.01
+    activations = torch.randn(batch_size, hidden_dim,
+                              dtype=torch.float16, device="mps")
+    router_weights = torch.randn(
+        hidden_dim, num_experts, dtype=torch.float16, device="mps") * 0.01
     expert_weights = torch.randint(
         0, 2**32, (num_experts, k_packed, out_dim), dtype=torch.int32, device="mps"
     ).view(torch.uint32)
     expert_scales = (
-        torch.randn(num_experts, num_groups, out_dim, dtype=torch.float16, device="mps") * 0.1 + 0.5
+        torch.randn(num_experts, num_groups, out_dim,
+                    dtype=torch.float16, device="mps") * 0.1 + 0.5
     ).abs()
 
     if has_shared:
@@ -3599,7 +3691,8 @@ def benchmark_moe_dispatch(
             0, 2**32, (k_packed, out_dim), dtype=torch.int32, device="mps"
         ).view(torch.uint32)
         shared_scales = (
-            torch.randn(num_groups, out_dim, dtype=torch.float16, device="mps") * 0.1 + 0.5
+            torch.randn(num_groups, out_dim, dtype=torch.float16,
+                        device="mps") * 0.1 + 0.5
         ).abs()
     else:
         shared_weights = None
@@ -3650,7 +3743,8 @@ def benchmark_moe_dispatch(
     # Compute FLOPs
     # Active params per token: (top_k + has_shared) * (hidden_dim * out_dim)
     active_experts = top_k + (1 if has_shared else 0)
-    flops_per_token = 2 * active_experts * hidden_dim * out_dim  # 2 for multiply-add
+    flops_per_token = 2 * active_experts * \
+        hidden_dim * out_dim  # 2 for multiply-add
     total_flops = flops_per_token * batch_size
 
     # Add routing cost: batch_size * hidden_dim * num_experts
@@ -3734,10 +3828,12 @@ def dispatch_hessian_compute(
 
     # Create parameter buffers
     n_samples_buf = device.newBufferWithBytes_length_options_(
-        np.array([n_samples], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([n_samples], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
     hidden_dim_buf = device.newBufferWithBytes_length_options_(
-        np.array([hidden_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([hidden_dim], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
 
     # Tile dimensions from hessian.metal (HESSIAN_TILE_DIM = 64)
@@ -3762,7 +3858,8 @@ def dispatch_hessian_compute(
 
     # Then apply regularization: H += sigma_reg * mean(diag(H)) * I
     diag_mean = H.diagonal().mean()
-    H += sigma_reg * diag_mean * torch.eye(hidden_dim, device="mps", dtype=torch.float32)
+    H += sigma_reg * diag_mean * \
+        torch.eye(hidden_dim, device="mps", dtype=torch.float32)
 
     return H
 
@@ -3796,10 +3893,12 @@ def dispatch_hessian_accumulate(
     H_buf = mps_tensor_to_metal_buffer(H, device, copy_back=True)
 
     n_samples_buf = device.newBufferWithBytes_length_options_(
-        np.array([n_samples], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([n_samples], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
     hidden_dim_buf = device.newBufferWithBytes_length_options_(
-        np.array([hidden_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+        np.array([hidden_dim], dtype=np.uint32).tobytes(
+        ), 4, Metal.MTLResourceStorageModeShared
     )
 
     TILE_DIM = 64
@@ -3831,7 +3930,8 @@ def dispatch_viterbi_quantize(
     scales: torch.Tensor,
     grid: torch.Tensor,
     use_u4_kernel: bool = True,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    return_dequant: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Dispatch Viterbi trellis quantization on Metal GPU.
 
     Uses the viterbi_quant.metal shader for parallel tile quantization.
@@ -3843,10 +3943,11 @@ def dispatch_viterbi_quantize(
         scales: Per-tile scale factors [n_tiles], float32, MPS tensor
         grid: Quantization grid values [n_states], float32, MPS tensor
         use_u4_kernel: Use optimized 4-bit kernel (16 states) if True
+        return_dequant: If False, skip dequant copy-back (faster)
 
     Returns:
-        indices: Quantized state indices [n_tiles, 256], int16, MPS tensor
-        dequantized: Reconstructed values [n_tiles, 256], float32, MPS tensor
+        indices: Quantized state indices [n_tiles, 256], uint8, MPS tensor
+        dequantized: Reconstructed values [n_tiles, 256], float32, or None
     """
     require_mps()
 
@@ -3860,7 +3961,7 @@ def dispatch_viterbi_quantize(
     grid = grid.float().contiguous()
 
     # Allocate output buffers
-    indices = torch.zeros(n_tiles, 256, dtype=torch.int16, device="mps")
+    indices = torch.zeros(n_tiles, 256, dtype=torch.uint8, device="mps")
     dequantized = torch.zeros(n_tiles, 256, dtype=torch.float32, device="mps")
 
     # Create Metal buffers
@@ -3868,7 +3969,9 @@ def dispatch_viterbi_quantize(
     scales_buf = mps_tensor_to_metal_buffer(scales, device)
     grid_buf = mps_tensor_to_metal_buffer(grid, device)
     indices_buf = mps_tensor_to_metal_buffer(indices, device, copy_back=True)
-    dequant_buf = mps_tensor_to_metal_buffer(dequantized, device, copy_back=True)
+    # Only copy-back dequant if needed (saves 84MB GPU->CPU transfer per dispatch)
+    dequant_buf = mps_tensor_to_metal_buffer(
+        dequantized, device, copy_back=return_dequant)
 
     # Parameters buffer
     params = np.array([n_tiles, n_states], dtype=np.uint32)
@@ -3884,7 +3987,8 @@ def dispatch_viterbi_quantize(
         params_buf = device.newBufferWithBytes_length_options_(
             params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
         )
-        buffers = [tiles_buf, scales_buf, grid_buf, indices_buf, dequant_buf, params_buf]
+        buffers = [tiles_buf, scales_buf, grid_buf,
+                   indices_buf, dequant_buf, params_buf]
     else:
         kernel_name = "quantize_tiles_viterbi"
         buffers = [
@@ -3928,7 +4032,7 @@ def dispatch_viterbi_quantize_naive(
         grid: Quantization grid values [n_states], float32, MPS tensor
 
     Returns:
-        indices: Quantized state indices [n_tiles, 256], int16, MPS tensor
+        indices: Quantized state indices [n_tiles, 256], uint8, MPS tensor
         dequantized: Reconstructed values [n_tiles, 256], float32, MPS tensor
     """
     require_mps()
@@ -3941,14 +4045,15 @@ def dispatch_viterbi_quantize_naive(
     scales = scales.float().contiguous()
     grid = grid.float().contiguous()
 
-    indices = torch.zeros(n_tiles, 256, dtype=torch.int16, device="mps")
+    indices = torch.zeros(n_tiles, 256, dtype=torch.uint8, device="mps")
     dequantized = torch.zeros(n_tiles, 256, dtype=torch.float32, device="mps")
 
     tiles_buf = mps_tensor_to_metal_buffer(tiles, device)
     scales_buf = mps_tensor_to_metal_buffer(scales, device)
     grid_buf = mps_tensor_to_metal_buffer(grid, device)
     indices_buf = mps_tensor_to_metal_buffer(indices, device, copy_back=True)
-    dequant_buf = mps_tensor_to_metal_buffer(dequantized, device, copy_back=True)
+    dequant_buf = mps_tensor_to_metal_buffer(
+        dequantized, device, copy_back=True)
 
     params = np.array([n_tiles, n_states], dtype=np.uint32)
     params_buf = device.newBufferWithBytes_length_options_(
@@ -3960,7 +4065,8 @@ def dispatch_viterbi_quantize_naive(
         function_name="quantize_tiles_naive",
         grid=(n_tiles, 1, 1),
         threadgroup=(256, 1, 1),
-        buffers=[tiles_buf, scales_buf, grid_buf, indices_buf, dequant_buf, params_buf, params_buf],
+        buffers=[tiles_buf, scales_buf, grid_buf,
+                 indices_buf, dequant_buf, params_buf, params_buf],
         wait=True,
     )
 
@@ -4020,6 +4126,8 @@ if __name__ == "__main__":
             print("\n--- FP4 Dequant Bandwidth Benchmark ---")
             results = benchmark_dequant_fp4(lib)
             print(f"  Time per iteration: {results['time_ms']:.3f} ms")
-            print(f"  Effective bandwidth: {results['bandwidth_gb_s']:.1f} GB/s")
-            print(f"  Dequant throughput: {results['throughput_gop_s']:.1f} GOP/s")
+            print(
+                f"  Effective bandwidth: {results['bandwidth_gb_s']:.1f} GB/s")
+            print(
+                f"  Dequant throughput: {results['throughput_gop_s']:.1f} GOP/s")
             print(f"  Output size: {results['output_mb']:.1f} MB")

@@ -201,28 +201,25 @@ class TestTrellisMoEAccuracy:
         with torch.no_grad():
             slow_output = moe_forward_slow(mlp, x)
 
-        # Run fast path if available
-        if mlp._use_fast_moe:
-            with torch.no_grad():
-                fast_output = mlp.forward_fast(x)
+        # Run fast path (always available)
+        with torch.no_grad():
+            fast_output = mlp.forward_fast(x)
 
-            # Check numerical accuracy
-            max_diff = (slow_output - fast_output).abs().max().item()
-            mean_diff = (slow_output - fast_output).abs().mean().item()
-            rel_error = max_diff / (slow_output.abs().max().item() + 1e-8)
+        # Check numerical accuracy
+        max_diff = (slow_output - fast_output).abs().max().item()
+        mean_diff = (slow_output - fast_output).abs().mean().item()
+        rel_error = max_diff / (slow_output.abs().max().item() + 1e-8)
 
-            # 3-bit quantization introduces significant error, so tolerance is higher
-            # than FP16 precision. Max diff < 0.1 is reasonable for 3bpw.
-            assert max_diff < 0.1, (
-                f"Output mismatch: max diff = {max_diff:.6f}, "
-                f"mean diff = {mean_diff:.6f}, rel error = {rel_error:.4%}"
-            )
+        # 3-bit quantization introduces significant error, so tolerance is higher
+        # than FP16 precision. Max diff < 0.1 is reasonable for 3bpw.
+        assert max_diff < 0.1, (
+            f"Output mismatch: max diff = {max_diff:.6f}, "
+            f"mean diff = {mean_diff:.6f}, rel error = {rel_error:.4%}"
+        )
 
-            # Also check that outputs are not NaN/Inf
-            assert torch.isfinite(fast_output).all(), "Fast output contains NaN/Inf"
-            assert torch.isfinite(slow_output).all(), "Slow output contains NaN/Inf"
-        else:
-            pytest.skip("Fast MoE kernel not available")
+        # Also check that outputs are not NaN/Inf
+        assert torch.isfinite(fast_output).all(), "Fast output contains NaN/Inf"
+        assert torch.isfinite(slow_output).all(), "Slow output contains NaN/Inf"
 
     def test_moe_output_correlation(self):
         """Check that fast and slow outputs are highly correlated."""
@@ -242,11 +239,6 @@ class TestTrellisMoEAccuracy:
 
         with torch.no_grad():
             slow_output = moe_forward_slow(mlp, x)
-
-        if not mlp._use_fast_moe:
-            pytest.skip("Fast MoE kernel not available")
-
-        with torch.no_grad():
             fast_output = mlp.forward_fast(x)
 
         # Flatten and compute Pearson correlation
@@ -317,9 +309,6 @@ class TestTrellisMoEAccuracy:
             bits=3,
             device=device,
         )
-
-        if not mlp._use_fast_moe:
-            pytest.skip("Fast MoE kernel not available")
 
         for batch_size in [1, 4, 8, 16]:
             x = torch.randn(batch_size, 64, dtype=torch.float16, device=device)

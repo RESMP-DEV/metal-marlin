@@ -211,7 +211,12 @@ def chat(
 
 
 @click.command()
-@click.argument("model_path", type=click.Path())
+@click.option(
+    "--model-path",
+    type=click.Path(exists=True),
+    required=True,
+    help="Path to quantized model (auto-detects Trellis v2 or v3 format)",
+)
 @click.option("--host", default="0.0.0.0", help="Bind address")
 @click.option("--port", default=8000, type=int, help="Port number")
 @click.option("--device", default="mps", help="Device (mps/cpu)")

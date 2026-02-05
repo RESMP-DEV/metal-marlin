@@ -424,7 +424,7 @@ def is_metallib_stale(path: str | Path | None = None) -> bool:
     """Check if metallib is stale by comparing source file checksums.
 
     This is more reliable than mtime-based checks across different filesystems
-    and git operations. Falls back to mtime if no checksum manifest exists.
+    and git operations.
 
     Args:
         path: Path to .metallib file. If None, uses default.
@@ -464,29 +464,8 @@ def is_metallib_stale(path: str | Path | None = None) -> bool:
 
         return False
 
-    # Fall back to mtime-based check if no manifest
-    logger.debug("No checksum manifest found, falling back to mtime check")
-    return _is_metallib_stale_mtime(path)
-
-
-def _is_metallib_stale_mtime(path: Path) -> bool:
-    """Check if metallib is stale using mtime (legacy fallback).
-
-    Args:
-        path: Path to .metallib file.
-
-    Returns:
-        True if metallib should be rebuilt, False otherwise.
-    """
-    metallib_mtime = path.stat().st_mtime
-
-    source_dirs = _get_metal_source_dirs(path)
-    for src_dir in source_dirs:
-        for metal_file in src_dir.glob("**/*.metal"):
-            if metal_file.stat().st_mtime > metallib_mtime:
-                return True
-
-    return False
+    logger.debug("No checksum manifest found; treating metallib as stale")
+    return True
 
 
 def get_staleness_details(path: str | Path | None = None) -> dict[str, Any]:
@@ -520,8 +499,8 @@ def get_staleness_details(path: str | Path | None = None) -> dict[str, Any]:
 
     stored_checksums = load_checksum_manifest(path)
     if stored_checksums is None:
-        result["reason"] = "no checksum manifest (using mtime fallback)"
-        result["is_stale"] = _is_metallib_stale_mtime(path)
+        result["reason"] = "no checksum manifest"
+        result["is_stale"] = True
         return result
 
     result["has_manifest"] = True

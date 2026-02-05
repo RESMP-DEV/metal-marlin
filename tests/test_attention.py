@@ -1,7 +1,6 @@
 """Flash Attention accuracy tests for Metal kernels.
 
-Tests both v1 and v2 flash attention implementations against NumPy/PyTorch reference:
-  - flash_attention / flash_attention_causal / flash_attention_gqa
+Tests flash attention v2 implementations against NumPy/PyTorch reference:
   - flash_attention_v2 / flash_attention_v2_causal / flash_attention_v2_decode
   - flash_attention_v2_gqa / flash_attention_v2_mqa
 
@@ -32,13 +31,10 @@ import numpy as np
 import pytest
 
 # Paths to Metal shaders
-_SHADER_V1_PATH = Path(__file__).parent.parent / "src" / "flash_attention.metal"
 _SHADER_V2_PATH = Path(__file__).parent.parent / "src" / "flash_attention_v2.metal"
 
 # Kernel configuration constants (must match Metal shader)
 _TILE_Q = 16
-_TILE_KV = 64
-_ROWS_PER_TG = 4
 _THREADS_PER_TG = 128
 _SIMD_SIZE = 32
 _NUM_SIMDGROUPS = 4
@@ -261,160 +257,6 @@ def _create_constant_buffer(device, value, dtype=np.uint32):
     return device.newBufferWithBytes_length_options_(
         data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
     )
-
-
-# ==============================================================================
-# Flash Attention V1 kernel runners
-# ==============================================================================
-
-
-def run_flash_attention_v1(
-    Q: np.ndarray,
-    K: np.ndarray,
-    V: np.ndarray,
-    scale: float,
-    is_causal: bool = False,
-) -> np.ndarray:
-    """Run flash_attention or flash_attention_causal kernel."""
-    import Metal
-
-    batch, heads_q, seq_q, head_dim = Q.shape
-    _, heads_k, seq_k, _ = K.shape
-
-    device, library = _compile_shader(_SHADER_V1_PATH)
-
-    kernel_name = "flash_attention_causal" if is_causal else "flash_attention"
-    pipeline = _create_pipeline(device, library, kernel_name)
-
-    # Prepare buffers
-    Q_fp16 = Q.astype(np.float16)
-    K_fp16 = K.astype(np.float16)
-    V_fp16 = V.astype(np.float16)
-
-    buf_Q = _create_buffer(device, Q_fp16)
-    buf_K = _create_buffer(device, K_fp16)
-    buf_V = _create_buffer(device, V_fp16)
-
-    output_shape = (batch, heads_q, seq_q, head_dim)
-    output_size = int(np.prod(output_shape)) * 2  # FP16
-    buf_O = device.newBufferWithLength_options_(output_size, Metal.MTLResourceStorageModeShared)
-
-    buf_batch = _create_constant_buffer(device, batch)
-    buf_heads_q = _create_constant_buffer(device, heads_q)
-    buf_heads_k = _create_constant_buffer(device, heads_k)
-    buf_seq_q = _create_constant_buffer(device, seq_q)
-    buf_seq_k = _create_constant_buffer(device, seq_k)
-    buf_head_dim = _create_constant_buffer(device, head_dim)
-    buf_scale = _create_constant_buffer(device, scale, dtype=np.float32)
-
-    # Dispatch
-    queue = device.newCommandQueue()
-    cmd_buf = queue.commandBuffer()
-    encoder = cmd_buf.computeCommandEncoder()
-    encoder.setComputePipelineState_(pipeline)
-
-    encoder.setBuffer_offset_atIndex_(buf_Q, 0, 0)
-    encoder.setBuffer_offset_atIndex_(buf_K, 0, 1)
-    encoder.setBuffer_offset_atIndex_(buf_V, 0, 2)
-    encoder.setBuffer_offset_atIndex_(buf_O, 0, 3)
-    encoder.setBuffer_offset_atIndex_(buf_batch, 0, 4)
-    encoder.setBuffer_offset_atIndex_(buf_heads_q, 0, 5)
-    encoder.setBuffer_offset_atIndex_(buf_heads_k, 0, 6)
-    encoder.setBuffer_offset_atIndex_(buf_seq_q, 0, 7)
-    encoder.setBuffer_offset_atIndex_(buf_seq_k, 0, 8)
-    encoder.setBuffer_offset_atIndex_(buf_head_dim, 0, 9)
-    encoder.setBuffer_offset_atIndex_(buf_scale, 0, 10)
-
-    # Grid: [heads_q, ceil(seq_q/ROWS_PER_TG), batch]
-    grid_x = heads_q
-    grid_y = (seq_q + _ROWS_PER_TG - 1) // _ROWS_PER_TG
-    grid_z = batch
-
-    encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-        Metal.MTLSizeMake(grid_x, grid_y, grid_z),
-        Metal.MTLSizeMake(_THREADS_PER_TG, 1, 1),
-    )
-    encoder.endEncoding()
-    cmd_buf.commit()
-    cmd_buf.waitUntilCompleted()
-
-    # Read output
-    raw = _read_metal_buffer(buf_O, output_size)
-    return np.frombuffer(raw, dtype=np.float16).reshape(output_shape).copy()
-
-
-def run_flash_attention_v1_gqa(
-    Q: np.ndarray,
-    K: np.ndarray,
-    V: np.ndarray,
-    scale: float,
-    is_causal: bool = False,
-) -> np.ndarray:
-    """Run flash_attention_gqa kernel."""
-    import Metal
-
-    batch, heads_q, seq_q, head_dim = Q.shape
-    _, heads_k, seq_k, _ = K.shape
-    gqa_ratio = heads_q // heads_k
-
-    device, library = _compile_shader(_SHADER_V1_PATH)
-    pipeline = _create_pipeline(device, library, "flash_attention_gqa")
-
-    Q_fp16 = Q.astype(np.float16)
-    K_fp16 = K.astype(np.float16)
-    V_fp16 = V.astype(np.float16)
-
-    buf_Q = _create_buffer(device, Q_fp16)
-    buf_K = _create_buffer(device, K_fp16)
-    buf_V = _create_buffer(device, V_fp16)
-
-    output_shape = (batch, heads_q, seq_q, head_dim)
-    output_size = int(np.prod(output_shape)) * 2
-    buf_O = device.newBufferWithLength_options_(output_size, Metal.MTLResourceStorageModeShared)
-
-    buf_batch = _create_constant_buffer(device, batch)
-    buf_heads_q = _create_constant_buffer(device, heads_q)
-    buf_heads_k = _create_constant_buffer(device, heads_k)
-    buf_seq_q = _create_constant_buffer(device, seq_q)
-    buf_seq_k = _create_constant_buffer(device, seq_k)
-    buf_head_dim = _create_constant_buffer(device, head_dim)
-    buf_scale = _create_constant_buffer(device, scale, dtype=np.float32)
-    buf_gqa_ratio = _create_constant_buffer(device, gqa_ratio)
-    buf_is_causal = _create_constant_buffer(device, 1 if is_causal else 0)
-
-    queue = device.newCommandQueue()
-    cmd_buf = queue.commandBuffer()
-    encoder = cmd_buf.computeCommandEncoder()
-    encoder.setComputePipelineState_(pipeline)
-
-    encoder.setBuffer_offset_atIndex_(buf_Q, 0, 0)
-    encoder.setBuffer_offset_atIndex_(buf_K, 0, 1)
-    encoder.setBuffer_offset_atIndex_(buf_V, 0, 2)
-    encoder.setBuffer_offset_atIndex_(buf_O, 0, 3)
-    encoder.setBuffer_offset_atIndex_(buf_batch, 0, 4)
-    encoder.setBuffer_offset_atIndex_(buf_heads_q, 0, 5)
-    encoder.setBuffer_offset_atIndex_(buf_heads_k, 0, 6)
-    encoder.setBuffer_offset_atIndex_(buf_seq_q, 0, 7)
-    encoder.setBuffer_offset_atIndex_(buf_seq_k, 0, 8)
-    encoder.setBuffer_offset_atIndex_(buf_head_dim, 0, 9)
-    encoder.setBuffer_offset_atIndex_(buf_scale, 0, 10)
-    encoder.setBuffer_offset_atIndex_(buf_gqa_ratio, 0, 11)
-    encoder.setBuffer_offset_atIndex_(buf_is_causal, 0, 12)
-
-    grid_x = heads_q
-    grid_y = (seq_q + _ROWS_PER_TG - 1) // _ROWS_PER_TG
-    grid_z = batch
-
-    encoder.dispatchThreadgroups_threadsPerThreadgroup_(
-        Metal.MTLSizeMake(grid_x, grid_y, grid_z),
-        Metal.MTLSizeMake(_THREADS_PER_TG, 1, 1),
-    )
-    encoder.endEncoding()
-    cmd_buf.commit()
-    cmd_buf.waitUntilCompleted()
-
-    raw = _read_metal_buffer(buf_O, output_size)
-    return np.frombuffer(raw, dtype=np.float16).reshape(output_shape).copy()
 
 
 # ==============================================================================
