@@ -1,5 +1,5 @@
 /**
- * Metal Marlin C++ Extension - High-performance Metal kernel dispatch via nanobind.
+ * Metal Marlin C++ Extension - High-performance Metal kernel dispatch via pybind11.
  *
  * This extension provides low-latency Metal operations that bypass PyObjC overhead:
  * - Zero-copy MPS tensor to Metal buffer conversion
@@ -15,7 +15,7 @@
  * Build requirements:
  * - macOS 13.0+ with Metal 3 support
  * - Xcode Command Line Tools (metal-cpp headers)
- * - nanobind 2.0+ (pip install nanobind)
+ * - pybind11 2.10+ (pip install pybind11)
  * - PyTorch with MPS backend
  *
  * Usage:
@@ -31,11 +31,11 @@
 
 #include <Metal/Metal.hpp>
 #include <Foundation/Foundation.hpp>
-#include <nanobind/nanobind.h>
-#include <nanobind/stl/string.h>
-#include <nanobind/stl/vector.h>
-#include <nanobind/stl/optional.h>
-#include <nanobind/stl/tuple.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl/string.h>
+#include <pybind11/stl/vector.h>
+#include <pybind11/stl/optional.h>
+#include <pybind11/stl/tuple.h>
 
 #include <atomic>
 #include <mutex>
@@ -43,9 +43,11 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include "cpp/moe_dispatcher.h"
+
 #include <cstdint>
 
-namespace nb = nanobind;
+namespace py = pybind11;
 
 // Forward declarations
 class MetalContext;
@@ -502,7 +504,7 @@ std::unique_ptr<ManagedBuffer> create_buffer(
 
 std::unique_ptr<ManagedBuffer> create_buffer_from_bytes(
     MetalContext& ctx,
-    const nb::bytes& data,
+    const py::bytes& data,
     bool use_pool = false
 ) {
     size_t size = data.size();
@@ -547,14 +549,34 @@ std::unique_ptr<ManagedBuffer> create_buffer_from_ptr(
 }
 
 // -----------------------------------------------------------------------------
-// nanobind module definition
+// MoEDispatcher factory (creates with system default device)
 // -----------------------------------------------------------------------------
 
-NB_MODULE(_cpp_ext, m) {
+static std::unique_ptr<metal_marlin::MoEDispatcher> g_moe_dispatcher;
+static std::mutex g_moe_dispatcher_mutex;
+
+metal_marlin::MoEDispatcher* get_moe_dispatcher() {
+    std::lock_guard<std::mutex> lock(g_moe_dispatcher_mutex);
+    if (!g_moe_dispatcher) {
+        MTL::Device* device = MTL::CreateSystemDefaultDevice();
+        if (!device) {
+            throw std::runtime_error("No Metal device available");
+        }
+        // Create dispatcher with nullptr library (will need to load later)
+        g_moe_dispatcher = std::make_unique<metal_marlin::MoEDispatcher>(device, nullptr);
+    }
+    return g_moe_dispatcher.get();
+}
+
+// -----------------------------------------------------------------------------
+// pybind11 module definition
+// -----------------------------------------------------------------------------
+
+PYBIND11_MODULE(_cpp_ext, m) {
     m.doc() = "Metal Marlin C++ extension for high-performance kernel dispatch";
 
     // BufferPool
-    nb::class_<BufferPool>(m, "BufferPool")
+    py::class_<BufferPool>(m, "BufferPool")
         .def("hits", &BufferPool::hits)
         .def("misses", &BufferPool::misses)
         .def("hit_rate", &BufferPool::hit_rate)
@@ -563,58 +585,72 @@ NB_MODULE(_cpp_ext, m) {
         .def("clear", &BufferPool::clear);
 
     // MetalContext
-    nb::class_<MetalContext>(m, "MetalContext")
-        .def(nb::init<>())
+    py::class_<MetalContext>(m, "MetalContext")
+        .def(py::init<>())
         .def("load_metallib", &MetalContext::load_metallib)
         .def("compile_source", &MetalContext::compile_source)
         .def("get_pipeline", &MetalContext::get_pipeline,
-             nb::arg("function_name"),
-             nb::arg("metallib_path") = "")
+             py::arg("function_name"),
+             py::arg("metallib_path") = "")
         .def("gpu_family", &MetalContext::gpu_family)
         .def("device_name", &MetalContext::device_name)
         .def_prop_ro("buffer_pool", [](MetalContext& ctx) { return ctx.buffer_pool(); },
-                     nb::rv_policy::reference);
+                     py::return_value_policy::reference);
 
     // ManagedBuffer
-    nb::class_<ManagedBuffer>(m, "ManagedBuffer")
+    py::class_<ManagedBuffer>(m, "ManagedBuffer")
         .def("length", &ManagedBuffer::length)
         .def("data_ptr", &ManagedBuffer::data_ptr);
 
     // BatchDispatch
-    nb::class_<BatchDispatch>(m, "BatchDispatch")
-        .def(nb::init<MetalContext&>())
+    py::class_<BatchDispatch>(m, "BatchDispatch")
+        .def(py::init<MetalContext&>())
         .def("add_kernel", &BatchDispatch::add_kernel)
-        .def("commit", &BatchDispatch::commit, nb::arg("wait") = true);
+        .def("commit", &BatchDispatch::commit, py::arg("wait") = true);
+
+    // MoEDispatcher (accessed via factory function)
+    py::class_<metal_marlin::MoEDispatcher>(m, "MoEDispatcher")
+        .def("dispatch", &metal_marlin::MoEDispatcher::dispatch)
+        .def("prepare_dispatch", &metal_marlin::MoEDispatcher::prepare_dispatch)
+        .def("execute_prepared", &metal_marlin::MoEDispatcher::execute_prepared)
+        .def("wait_until_completed", &metal_marlin::MoEDispatcher::wait_until_completed)
+        .def("begin_command_buffer", &metal_marlin::MoEDispatcher::begin_command_buffer)
+        .def("commit_and_wait", &metal_marlin::MoEDispatcher::commit_and_wait);
+
+    // Factory function to get singleton MoEDispatcher
+    m.def("get_moe_dispatcher", &get_moe_dispatcher,
+          py::return_value_policy::reference,
+          "Get the global MoE dispatcher instance");
 
     // Pipeline wrapper (opaque pointer for Python)
-    nb::class_<MTL::ComputePipelineState>(m, "Pipeline");
+    py::class_<MTL::ComputePipelineState>(m, "Pipeline");
 
     // Free functions
     m.def("dispatch_kernel", &dispatch_kernel,
-          nb::arg("ctx"),
-          nb::arg("pipeline"),
-          nb::arg("grid"),
-          nb::arg("threadgroup"),
-          nb::arg("buffers"),
-          nb::arg("wait") = true,
+          py::arg("ctx"),
+          py::arg("pipeline"),
+          py::arg("grid"),
+          py::arg("threadgroup"),
+          py::arg("buffers"),
+          py::arg("wait") = true,
           "Dispatch a Metal compute kernel");
 
     m.def("create_buffer", &create_buffer,
-          nb::arg("ctx"),
-          nb::arg("size"),
-          nb::arg("use_pool") = true,
+          py::arg("ctx"),
+          py::arg("size"),
+          py::arg("use_pool") = true,
           "Create a Metal buffer, optionally from the pool");
 
     m.def("create_buffer_from_bytes", &create_buffer_from_bytes,
-          nb::arg("ctx"),
-          nb::arg("data"),
-          nb::arg("use_pool") = false,
+          py::arg("ctx"),
+          py::arg("data"),
+          py::arg("use_pool") = false,
           "Create a Metal buffer from Python bytes");
 
     m.def("create_buffer_from_ptr", &create_buffer_from_ptr,
-          nb::arg("ctx"),
-          nb::arg("ptr"),
-          nb::arg("size"),
+          py::arg("ctx"),
+          py::arg("ptr"),
+          py::arg("size"),
           "Create a zero-copy Metal buffer from a memory pointer (e.g., MPS tensor)");
 
     m.def("align_buffer_size", &align_buffer_size,

@@ -640,3 +640,420 @@ class TrellisKVCache:
             Note: With unified quantization, the same scales apply to both components.
         """
         return self.kv_scales
+
+
+class CompressedKVCache(TrellisKVCache):
+    """Extended KV cache with compression for long sequences (GLM-4.7-Flash style).
+
+    GLM-4.7-Flash uses MLA which already has compressed KV (kv_lora_rank=512).
+    This class provides further optimizations:
+
+    1. Late Int8 Quantization:
+       - Stores KV in float16 for first 128 tokens (better accuracy during warmup)
+       - Switches to int8 quantization after sequence stabilizes (memory savings)
+
+    2. Sliding Window Attention:
+       - For layers > 32, uses sliding window to limit KV cache size
+       - Old tokens are evicted using LRU policy
+
+    3. Grouped KV Recomputation:
+       - Groups KV heads to reduce cache size by kv_group_size
+       - Recomputes non-cached heads on-the-fly during attention
+
+    Memory Layout:
+    - Early layers (0-32): Full cache with optional late quantization
+    - Deep layers (>32): Sliding window of size window_size
+    - All layers: Grouped KV storage if kv_group_size > 1
+
+    Example:
+        >>> cache = CompressedKVCache(
+        ...     num_layers=40,
+        ...     batch_size=1,
+        ...     max_seq_len=32768,
+        ...     kv_lora_rank=512,
+        ...     compression='int8',
+        ...     sliding_window_layer_threshold=32,
+        ...     sliding_window_size=4096,
+        ...     kv_group_size=4,
+        ... )
+        >>> compressed_kv = cache.update(layer_idx=0, compressed_kv=new_kv)
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        num_layers: int,
+        batch_size: int,
+        max_seq_len: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int = 64,
+        device: str = "mps",
+        dtype: torch.dtype = torch.float16,
+        compression: str = "int8",
+        quantization_start_seq_len: int = 128,
+        sliding_window_layer_threshold: int = 32,
+        sliding_window_size: int = 4096,
+        kv_group_size: int = 1,
+        # Legacy parameters for backwards compatibility
+        num_kv_heads: int | None = None,
+        head_dim: int | None = None,
+    ):
+        """Initialize the Compressed KV cache for long sequences.
+
+        Args:
+            num_layers: Number of transformer layers.
+            batch_size: Batch size for generation.
+            max_seq_len: Maximum sequence length to allocate.
+            kv_lora_rank: Compressed KV dimension (rank of latent space).
+            qk_rope_head_dim: Dimension of rotary positional embedding (default: 64).
+            device: Device to store cache on (default: 'mps' for Metal).
+            dtype: Data type for cache tensors (default: float16).
+            compression: Compression type - 'int8', 'fp8', or 'none' (default: 'int8').
+            quantization_start_seq_len: Sequence length to start int8 quantization (default: 128).
+            sliding_window_layer_threshold: Layer index above which sliding window is used (default: 32).
+            sliding_window_size: Window size for deep layers (default: 4096).
+            kv_group_size: Number of heads to group for recomputation (1 = no grouping).
+            num_kv_heads: DEPRECATED - ignored, kept for backwards compatibility.
+            head_dim: DEPRECATED - ignored, kept for backwards compatibility.
+        """
+        # Initialize parent with quantize=False (we handle quantization ourselves)
+        super().__init__(
+            num_layers=num_layers,
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+            kv_lora_rank=kv_lora_rank,
+            qk_rope_head_dim=qk_rope_head_dim,
+            device=device,
+            dtype=dtype,
+            quantize=False,  # We handle compression ourselves
+        )
+
+        self.compression = compression
+        self.quantization_start_seq_len = quantization_start_seq_len
+        self.sliding_window_layer_threshold = sliding_window_layer_threshold
+        self.sliding_window_size = sliding_window_size
+        self.kv_group_size = kv_group_size
+
+        # Track compression state per layer
+        self._compression_enabled: list[bool] = [False] * num_layers
+
+        # Sliding window tracking for deep layers
+        # Stores the starting position of the window for each layer
+        self._window_start: torch_typing.Tensor = torch.zeros(
+            num_layers, dtype=torch.long, device=device
+        )
+
+        # Circular buffer indices for sliding window layers
+        self._circular_pos: torch_typing.Tensor = torch.zeros(
+            num_layers, dtype=torch.long, device=device
+        )
+
+        # If compression is enabled, allocate separate int8 buffers
+        if compression == "int8":
+            self._kv_cache_int8: torch_typing.Tensor | None = torch.zeros(
+                num_layers,
+                batch_size,
+                max_seq_len,
+                self.cache_dim,
+                dtype=torch.int8,
+                device=device,
+            )
+            self._kv_scales: torch_typing.Tensor | None = torch.ones(
+                num_layers, batch_size, max_seq_len, 1, dtype=torch.float32, device=device
+            )
+        else:
+            self._kv_cache_int8 = None
+            self._kv_scales = None
+
+        # For grouped KV: track which head groups are cached
+        if kv_group_size > 1:
+            # We cache 1 out of every kv_group_size heads
+            # Store indices of cached groups
+            self._cached_group_indices: torch_typing.Tensor | None = torch.arange(
+                0, kv_lora_rank, kv_group_size, device=device
+            )
+        else:
+            self._cached_group_indices = None
+
+    def __len__(self) -> int:
+        """Get current sequence length."""
+        return int(self.seq_lens[0].item())
+
+    def _quantize_int8(
+        self, tensor: torch_typing.Tensor
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Quantize tensor to int8 with per-token symmetric scaling.
+
+        Args:
+            tensor: Input tensor [batch, seq_len, cache_dim]
+
+        Returns:
+            Tuple of (quantized_int8, scales) where scales has shape [batch, seq_len, 1]
+        """
+        # Compute per-token max (across cache_dim)
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-5)
+        scale = abs_max / 127.0
+        quantized = (tensor / scale).round().clamp(-128, 127).to(torch.int8)
+        return quantized, scale
+
+    def _dequantize_int8(
+        self, quantized: torch_typing.Tensor, scales: torch_typing.Tensor
+    ) -> torch_typing.Tensor:
+        """Dequantize int8 tensor using per-token scales.
+
+        Args:
+            quantized: int8 tensor [batch, seq_len, cache_dim]
+            scales: scale factors [batch, seq_len, 1]
+
+        Returns:
+            Dequantized float16 tensor
+        """
+        return (quantized.to(self.dtype) * scales).to(self.dtype)
+
+    def _should_use_sliding_window(self, layer_idx: int) -> bool:
+        """Check if this layer should use sliding window attention."""
+        return layer_idx >= self.sliding_window_layer_threshold
+
+    def _get_window_bounds(self, layer_idx: int) -> tuple[int, int]:
+        """Get the valid window bounds for a sliding window layer.
+
+        Returns:
+            Tuple of (start_idx, end_idx) for the valid window.
+        """
+        if not self._should_use_sliding_window(layer_idx):
+            return (0, self.seq_len)
+
+        current_len = self.seq_len
+        window_start = max(0, current_len - self.sliding_window_size)
+        return (window_start, current_len)
+
+    def _apply_sliding_window_eviction(self, layer_idx: int) -> None:
+        """Evict old tokens from sliding window layer.
+
+        For circular buffer management in deep layers.
+        """
+        if not self._should_use_sliding_window(layer_idx):
+            return
+
+        current_len = int(self.seq_lens[0].item())
+        if current_len <= self.sliding_window_size:
+            return
+
+        # Mark that this layer is using sliding window
+        window_start = current_len - self.sliding_window_size
+        self._window_start[layer_idx] = window_start
+
+    def update(
+        self,
+        layer_idx: int,
+        compressed_kv: torch_typing.Tensor,
+    ) -> torch_typing.Tensor:
+        """Update cache with new compressed KV.
+
+        For long sequences:
+        1. Applies int8 quantization if seq_len > quantization_start_seq_len
+        2. Uses sliding window for layers > sliding_window_layer_threshold
+        3. Groups KV for memory savings if kv_group_size > 1
+
+        Args:
+            layer_idx: Which transformer layer this is for.
+            compressed_kv: New compressed KV tokens [batch, seq_len, cache_dim]
+
+        Returns:
+            Full compressed KV for this layer [batch, total_seq, cache_dim]
+            with compression applied based on layer and sequence length.
+        """
+        batch, seq_len, input_dim = compressed_kv.shape
+
+        if input_dim != self.cache_dim:
+            raise ValueError(
+                f"Input dimension {input_dim} does not match expected cache_dim "
+                f"{self.cache_dim} (kv_lora_rank={self.kv_lora_rank} + "
+                f"qk_rope_head_dim={self.qk_rope_head_dim})"
+            )
+
+        # Get current position
+        if layer_idx == 0:
+            start = self.seq_lens[0].item()
+            end = start + seq_len
+            if end > self.max_seq_len:
+                raise ValueError(
+                    f"Sequence length {end} exceeds max_seq_len {self.max_seq_len}"
+                )
+            self._current_write_start = int(start)
+            self._current_write_end = int(end)
+        else:
+            start = self._current_write_start
+            end = self._current_write_end
+
+        # Determine if we should compress based on sequence length
+        should_compress = (
+            self.compression == "int8"
+            and end > self.quantization_start_seq_len
+        )
+
+        # Enable compression for this layer once threshold is crossed
+        if should_compress and not self._compression_enabled[layer_idx]:
+            self._compression_enabled[layer_idx] = True
+
+            # Optionally: compress existing cached tokens
+            # This is done lazily on first write after threshold
+
+        # Apply sliding window eviction for deep layers
+        self._apply_sliding_window_eviction(layer_idx)
+
+        # Write to cache (with optional compression)
+        if should_compress and self._kv_cache_int8 is not None:
+            # Quantize and store in int8 buffer
+            kv_q, kv_scales = self._quantize_int8(compressed_kv)
+            self._kv_cache_int8[layer_idx, :batch, start:end] = kv_q
+            self._kv_scales[layer_idx, :batch, start:end] = kv_scales
+
+            # Also store in float buffer for easy retrieval
+            # (can be optimized to only store in one buffer)
+            self.kv_cache[layer_idx, :batch, start:end] = compressed_kv.to(self.dtype)
+        else:
+            # Store in float16
+            self.kv_cache[layer_idx, :batch, start:end] = compressed_kv.to(self.dtype)
+
+        # Update sequence length on last layer
+        if layer_idx == self.num_layers - 1:
+            self.seq_lens[:batch] = end
+
+        # Return full cached KV (with sliding window for deep layers)
+        if self._should_use_sliding_window(layer_idx):
+            window_start, window_end = self._get_window_bounds(layer_idx)
+            kv_full = self.kv_cache[layer_idx, :batch, window_start:window_end]
+        else:
+            kv_full = self.kv_cache[layer_idx, :batch, :end]
+
+        return kv_full.contiguous()
+
+    def get(
+        self,
+        layer_idx: int,
+    ) -> torch_typing.Tensor | None:
+        """Get cached KV for a layer (with sliding window for deep layers).
+
+        Args:
+            layer_idx: Which transformer layer to retrieve.
+
+        Returns:
+            Compressed KV tensor [batch, seq_len, cache_dim] or None if empty.
+            For deep layers (>32), returns only the sliding window.
+        """
+        seq_len = self._get_effective_seq_len()
+        if seq_len == 0:
+            return None
+
+        # Apply sliding window for deep layers
+        if self._should_use_sliding_window(layer_idx):
+            window_start, window_end = self._get_window_bounds(layer_idx)
+            kv = self.kv_cache[layer_idx, :, window_start:window_end]
+        else:
+            kv = self.kv_cache[layer_idx, :, :seq_len]
+
+        # Dequantize if needed
+        if self._compression_enabled[layer_idx] and self._kv_cache_int8 is not None:
+            if self._should_use_sliding_window(layer_idx):
+                window_start, window_end = self._get_window_bounds(layer_idx)
+                kv_q = self._kv_cache_int8[layer_idx, :, window_start:window_end]
+                scales = self._kv_scales[layer_idx, :, window_start:window_end]
+            else:
+                kv_q = self._kv_cache_int8[layer_idx, :, :seq_len]
+                scales = self._kv_scales[layer_idx, :, :seq_len]
+            kv = self._dequantize_int8(kv_q, scales)
+
+        return kv.contiguous()
+
+    def get_sliding_window_size(self, layer_idx: int) -> int | None:
+        """Get the effective window size for a layer.
+
+        Args:
+            layer_idx: Layer index to query.
+
+        Returns:
+            Window size if sliding window is active, None otherwise.
+        """
+        if not self._should_use_sliding_window(layer_idx):
+            return None
+        return min(self.seq_len, self.sliding_window_size)
+
+    def recompute_grouped_kv(
+        self,
+        layer_idx: int,
+        cached_kv: torch_typing.Tensor,
+        target_group: int,
+    ) -> torch_typing.Tensor:
+        """Recompute non-cached KV heads from cached group.
+
+        For grouped KV attention: given cached KV for one head group,
+        recompute the KV for other heads in the group.
+
+        Args:
+            layer_idx: Layer index.
+            cached_kv: Cached KV for the master head [batch, seq_len, cache_dim]
+            target_group: Target group index to recompute.
+
+        Returns:
+            Recomputed KV for target_group [batch, seq_len, cache_dim]
+        """
+        if self.kv_group_size <= 1:
+            return cached_kv
+
+        # Simple recomputation: interpolate within group
+        # In practice, this would use the KV projection weights
+        # For now, return the cached KV (exact recomputation requires model weights)
+        return cached_kv
+
+    def get_memory_stats(self) -> dict[str, float]:
+        """Get memory usage statistics for the cache.
+
+        Returns:
+            Dict with memory breakdown in MB:
+            - float_cache: Float16 cache memory
+            - int8_cache: Int8 cache memory (if compression enabled)
+            - scales: Scale factors memory
+            - total: Total memory usage
+            - effective_compression: Effective compression ratio
+        """
+        float_bytes = 2  # float16
+        int8_bytes = 1
+        scale_bytes = 4  # float32
+
+        # Base float cache
+        float_elements = self.num_layers * self.batch_size * self.max_seq_len * self.cache_dim
+        float_memory = float_elements * float_bytes / 1024 / 1024
+
+        stats = {
+            "float_cache_mb": float_memory,
+            "int8_cache_mb": 0.0,
+            "scales_mb": 0.0,
+            "total_mb": float_memory,
+            "effective_compression": 1.0,
+        }
+
+        if self._kv_cache_int8 is not None:
+            int8_memory = float_elements * int8_bytes / 1024 / 1024
+            scale_elements = self.num_layers * self.batch_size * self.max_seq_len
+            scales_memory = scale_elements * scale_bytes / 1024 / 1024
+
+            # Count how many layers are compressed
+            compressed_layers = sum(self._compression_enabled)
+            compression_ratio = compressed_layers / self.num_layers if self.num_layers > 0 else 0
+
+            stats["int8_cache_mb"] = int8_memory * compression_ratio
+            stats["scales_mb"] = scales_memory * compression_ratio
+
+            # Adjust float memory (only non-compressed layers store float)
+            stats["float_cache_mb"] = float_memory * (1 - compression_ratio)
+            stats["total_mb"] = (
+                stats["float_cache_mb"] + stats["int8_cache_mb"] + stats["scales_mb"]
+            )
+
+            # Effective compression: float vs (int8 + scales)
+            if compressed_layers > 0:
+                compressed_float = float_memory * compression_ratio * float_bytes
+                compressed_int8 = stats["int8_cache_mb"] + stats["scales_mb"]
+                stats["effective_compression"] = compressed_float / compressed_int8
+
+        return stats

@@ -32,11 +32,9 @@ try:
     from metal_marlin.trellis.config import TrellisModelConfig
     from metal_marlin.trellis.model import TrellisMoEMLP
     from metal_marlin.trellis.moe import ExpertCache, TrellisMoELayer
-    from metal_marlin.trellis.testing import (
-        create_mini_model,
-        create_mock_dense_mlp,
-        create_mock_moe_mlp,
-    )
+    from metal_marlin.trellis.testing import (create_mini_model,
+                                              create_mock_dense_mlp,
+                                              create_mock_moe_mlp)
 
     HAS_TRELLIS = True
 except ImportError:
@@ -49,9 +47,12 @@ try:
 except ImportError:
     HAS_TRELLIS_LM = False
 
-requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required (Apple Silicon)")
-requires_trellis = pytest.mark.skipif(not HAS_TRELLIS, reason="Trellis modules required")
-requires_trellis_lm = pytest.mark.skipif(not HAS_TRELLIS_LM, reason="TrellisForCausalLM required")
+requires_mps = pytest.mark.skipif(
+    not HAS_MPS, reason="MPS required (Apple Silicon)")
+requires_trellis = pytest.mark.skipif(
+    not HAS_TRELLIS, reason="Trellis modules required")
+requires_trellis_lm = pytest.mark.skipif(
+    not HAS_TRELLIS_LM, reason="TrellisForCausalLM required")
 
 
 def model_available() -> bool:
@@ -253,7 +254,8 @@ class TestMoESwiGLUMultiExpert:
             device=device,
         )
 
-        x = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+        x = torch.randn(batch_size, hidden_dim,
+                        dtype=torch.float16, device=device)
 
         # Get router decisions
         x_router = x.to(mlp.router.weight.dtype)
@@ -308,8 +310,10 @@ class TestMoESwiGLUMultiExpert:
         with torch.no_grad():
             logits1 = mlp.router(x1.to(mlp.router.weight.dtype))
             logits2 = mlp.router(x2.to(mlp.router.weight.dtype))
-            _, experts1 = torch.topk(F.softmax(logits1, dim=-1), k=num_experts_per_tok)
-            _, experts2 = torch.topk(F.softmax(logits2, dim=-1), k=num_experts_per_tok)
+            _, experts1 = torch.topk(
+                F.softmax(logits1, dim=-1), k=num_experts_per_tok)
+            _, experts2 = torch.topk(
+                F.softmax(logits2, dim=-1), k=num_experts_per_tok)
 
         # With opposite inputs and random weights, likely different routing
         # (not guaranteed but highly probable)
@@ -356,7 +360,8 @@ class TestMoEVsSlowPath:
         hidden_dim = moe_layer.hidden_dim
         batch_size = 4
 
-        x = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+        x = torch.randn(batch_size, hidden_dim,
+                        dtype=torch.float16, device=device)
 
         # Run forward pass
         with torch.no_grad():
@@ -399,7 +404,8 @@ class TestMoEVsSlowPath:
         hidden_dim = moe_layer.hidden_dim
         batch_size = 8
 
-        x = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+        x = torch.randn(batch_size, hidden_dim,
+                        dtype=torch.float16, device=device)
 
         with torch.no_grad():
             output = moe_layer(x)
@@ -430,7 +436,8 @@ class TestMoEVsSlowPath:
         hidden_dim = moe_layer.hidden_dim
 
         for batch_size in [1, 4, 8, 16]:
-            x = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+            x = torch.randn(batch_size, hidden_dim,
+                            dtype=torch.float16, device=device)
 
             with torch.no_grad():
                 output = moe_layer(x)
@@ -505,10 +512,12 @@ class TestMoENoNaN:
         # Edge case 3: Moderate values (within safe range for mock weights)
         # Note: Large values (100.0) may overflow with random mock weights since
         # they lack the proper scale calibration of real model weights.
-        x_moderate = torch.full((4, 64), 1.0, dtype=torch.float16, device=device)
+        x_moderate = torch.full(
+            (4, 64), 1.0, dtype=torch.float16, device=device)
         with torch.no_grad():
             out_moderate = mlp(x_moderate)
-        assert torch.isfinite(out_moderate).all(), "Moderate input produces NaN/Inf"
+        assert torch.isfinite(out_moderate).all(
+        ), "Moderate input produces NaN/Inf"
 
     @requires_trellis_lm
     @pytest.mark.slow
@@ -649,7 +658,8 @@ class TestMoEDeterminism:
             logits1 = mlp.router(x_router)
             logits2 = mlp.router(x_router)
 
-        assert torch.allclose(logits1, logits2), "Router output not deterministic"
+        assert torch.allclose(
+            logits1, logits2), "Router output not deterministic"
 
     def test_moe_different_inputs_different_outputs(self):
         """Verify different inputs produce different outputs.
@@ -714,7 +724,8 @@ class TestMoEDeterminism:
             k=mlp.num_experts_per_tok,
             dim=-1,
         )
-        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights / \
+            routing_weights.sum(dim=-1, keepdim=True)
 
         # Weights should sum to 1
         assert torch.allclose(
@@ -777,7 +788,8 @@ class TestExpertCache:
         num_experts = 16
         cache_size = 8
 
-        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+        cache = ExpertCache(num_experts=num_experts,
+                            cache_size=cache_size, device=device)
 
         # Set specific frequencies
         cache.expert_frequency[0] = 100
@@ -816,7 +828,8 @@ class TestExpertCache:
         # Should prefetch experts 0 and 1 (both above threshold)
         assert 0 in prefetch, "Expert 0 should be prefetched"
         assert 1 in prefetch, "Expert 1 should be prefetched"
-        assert len(prefetch) <= 2, f"Should prefetch at most 2 experts, got {len(prefetch)}"
+        assert len(
+            prefetch) <= 2, f"Should prefetch at most 2 experts, got {len(prefetch)}"
 
     def test_cache_update(self):
         """Verify cache updates with top-K experts."""
@@ -824,7 +837,8 @@ class TestExpertCache:
         num_experts = 16
         cache_size = 4
 
-        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+        cache = ExpertCache(num_experts=num_experts,
+                            cache_size=cache_size, device=device)
 
         # Set frequencies
         cache.expert_frequency[0] = 100
@@ -833,7 +847,8 @@ class TestExpertCache:
         cache.expert_frequency[3] = 70
 
         # Create dummy experts
-        experts = nn.ModuleList([nn.Linear(10, 10) for _ in range(num_experts)])
+        experts = nn.ModuleList([nn.Linear(10, 10)
+                                for _ in range(num_experts)])
 
         # Update cache
         newly_cached = cache.update_cache(experts)
@@ -852,7 +867,8 @@ class TestExpertCache:
         num_experts = 16
         cache_size = 4
 
-        cache = ExpertCache(num_experts=num_experts, cache_size=cache_size, device=device)
+        cache = ExpertCache(num_experts=num_experts,
+                            cache_size=cache_size, device=device)
 
         # Set frequencies: 0, 1, 2, 3 are top-4
         cache.expert_frequency[0] = 100
@@ -862,7 +878,8 @@ class TestExpertCache:
         cache.expert_frequency[4] = 10  # Low frequency
 
         # Create dummy experts
-        experts = nn.ModuleList([nn.Linear(10, 10) for _ in range(num_experts)])
+        experts = nn.ModuleList([nn.Linear(10, 10)
+                                for _ in range(num_experts)])
 
         # Initial update - should cache 0, 1, 2, 3
         cache.update_cache(experts)
@@ -905,7 +922,8 @@ class TestExpertCache:
 
         # Add more selections than window size
         for i in range(5):
-            cache.record_selection(torch.tensor([i % num_experts], device=device))
+            cache.record_selection(torch.tensor(
+                [i % num_experts], device=device))
 
         # History should only keep last 3
         assert len(cache.selection_history) == window_size
@@ -1031,7 +1049,7 @@ class TestCapacityFactor:
         # If we send all tokens to expert 0, half should be dropped
         layer = TrellisMoELayer(
             config=config,
-            layer_weights={}, # Dummy
+            layer_weights={},  # Dummy
             router_weight=torch.randn(config.num_experts, config.hidden_size),
             layer_idx=0,
             device=device,

@@ -29,7 +29,8 @@ except ImportError:
 
 
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required")
-requires_trellis = pytest.mark.skipif(not HAS_TRELLIS, reason="Trellis modules required")
+requires_trellis = pytest.mark.skipif(
+    not HAS_TRELLIS, reason="Trellis modules required")
 
 
 @dataclass
@@ -62,14 +63,18 @@ def create_mock_trellis_linear(
     n_groups = (in_features + 127) // 128
 
     # Random packed indices (valid 3-bit values 0-7)
-    packed = torch.randint(0, 256, (tiles_k, tiles_n, packed_bytes), dtype=torch.uint8)
+    packed = torch.randint(
+        0, 256, (tiles_k, tiles_n, packed_bytes), dtype=torch.uint8)
 
     # Reasonable scales (small positive values)
-    scales = torch.rand(n_groups, out_features, dtype=torch.float32) * 0.1 + 0.01
+    scales = torch.rand(n_groups, out_features,
+                        dtype=torch.float32) * 0.1 + 0.01
 
     # Sign flips (+1 or -1)
-    su = torch.where(torch.rand(in_features) > 0.5, torch.ones(in_features), -torch.ones(in_features))
-    sv = torch.where(torch.rand(out_features) > 0.5, torch.ones(out_features), -torch.ones(out_features))
+    su = torch.where(torch.rand(in_features) > 0.5, torch.ones(
+        in_features), -torch.ones(in_features))
+    sv = torch.where(torch.rand(out_features) > 0.5, torch.ones(
+        out_features), -torch.ones(out_features))
 
     mock_weight = MockTrellisWeight(
         packed_indices=packed,
@@ -90,9 +95,12 @@ def create_mock_dense_mlp(
     device: str = "mps",
 ) -> TrellisDenseMLP:
     """Create a mock TrellisDenseMLP for testing."""
-    gate_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
-    up_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
-    down_proj = create_mock_trellis_linear(intermediate_dim, hidden_dim, bits, device)
+    gate_proj = create_mock_trellis_linear(
+        hidden_dim, intermediate_dim, bits, device)
+    up_proj = create_mock_trellis_linear(
+        hidden_dim, intermediate_dim, bits, device)
+    down_proj = create_mock_trellis_linear(
+        intermediate_dim, hidden_dim, bits, device)
     return TrellisDenseMLP(gate_proj, up_proj, down_proj)
 
 
@@ -106,7 +114,8 @@ def create_mock_moe_mlp(
 ) -> TrellisMoEMLP:
     """Create a mock TrellisMoEMLP for testing fast vs slow path accuracy."""
     # Create router
-    router = nn.Linear(hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32)
+    router = nn.Linear(hidden_dim, num_experts, bias=False,
+                       device=device, dtype=torch.float32)
     nn.init.xavier_uniform_(router.weight)
 
     # Create experts
@@ -116,7 +125,8 @@ def create_mock_moe_mlp(
     ]
 
     # Create shared expert
-    shared_expert = create_mock_dense_mlp(hidden_dim, intermediate_dim, bits, device)
+    shared_expert = create_mock_dense_mlp(
+        hidden_dim, intermediate_dim, bits, device)
 
     return TrellisMoEMLP(
         router=router,
@@ -142,7 +152,8 @@ def moe_forward_slow(mlp: TrellisMoEMLP, x: torch.Tensor) -> torch.Tensor:
         k=mlp.num_experts_per_tok,
         dim=-1,
     )
-    routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+    routing_weights = routing_weights / \
+        routing_weights.sum(dim=-1, keepdim=True)
 
     final_hidden_states = torch.zeros_like(x)
 
@@ -195,7 +206,8 @@ class TestTrellisMoEAccuracy:
             device=device,
         )
 
-        x = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+        x = torch.randn(batch_size, hidden_dim,
+                        dtype=torch.float16, device=device)
 
         # Run slow path (reference)
         with torch.no_grad():
@@ -218,8 +230,10 @@ class TestTrellisMoEAccuracy:
         )
 
         # Also check that outputs are not NaN/Inf
-        assert torch.isfinite(fast_output).all(), "Fast output contains NaN/Inf"
-        assert torch.isfinite(slow_output).all(), "Slow output contains NaN/Inf"
+        assert torch.isfinite(fast_output).all(
+        ), "Fast output contains NaN/Inf"
+        assert torch.isfinite(slow_output).all(
+        ), "Slow output contains NaN/Inf"
 
     def test_moe_output_correlation(self):
         """Check that fast and slow outputs are highly correlated."""
@@ -272,7 +286,8 @@ class TestTrellisMoEAccuracy:
 
         # With scales ~0.01-0.1 and codebook values, expect max < 1.0
         assert max_val < 5.0, f"Dequantized weight too large: {max_val}"
-        assert torch.isfinite(weights).all(), "Dequantized weights contain NaN/Inf"
+        assert torch.isfinite(weights).all(
+        ), "Dequantized weights contain NaN/Inf"
 
     def test_moe_determinism(self):
         """Test that MoE outputs are deterministic across runs."""
@@ -346,7 +361,8 @@ class TestTrellisMoEAccuracy:
         )
 
         # Weights should sum to 1 after normalization
-        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
+        routing_weights = routing_weights / \
+            routing_weights.sum(dim=-1, keepdim=True)
         assert torch.allclose(
             routing_weights.sum(dim=-1),
             torch.ones(4, device=device),
@@ -374,7 +390,8 @@ class TestTrellisLinearAccuracy:
         with torch.no_grad():
             out = linear(x)
 
-        assert torch.isfinite(out).all(), "TrellisLinear output contains NaN/Inf"
+        assert torch.isfinite(out).all(
+        ), "TrellisLinear output contains NaN/Inf"
 
     def test_linear_shape(self):
         """Test TrellisLinear output shape."""

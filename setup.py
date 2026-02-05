@@ -31,6 +31,17 @@ try:
 except ImportError:
     PYBIND11_INCLUDE = None
 
+try:
+    import torch
+    TORCH_INCLUDE = torch.utils.cpp_extension.include_paths()
+    TORCH_LIB_PATH = [torch.utils.cpp_extension.library_paths(
+    )[0]] if torch.utils.cpp_extension.library_paths() else []
+    HAS_TORCH = True
+except ImportError:
+    TORCH_INCLUDE = []
+    TORCH_LIB_PATH = []
+    HAS_TORCH = False
+
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
@@ -43,6 +54,10 @@ class BuildExtWithMM(build_ext):
         if hasattr(self.compiler, 'src_extensions'):
             if '.mm' not in self.compiler.src_extensions:
                 self.compiler.src_extensions.append('.mm')
+        if any(str(src).endswith(".mm") for src in ext.sources):
+            ext.extra_compile_args = ext.extra_compile_args or []
+            if "-fobjc-arc" not in ext.extra_compile_args:
+                ext.extra_compile_args.append("-fobjc-arc")
         super().build_extension(ext)
 
 
@@ -65,11 +80,13 @@ extra_link_args = [
 ]
 
 # Include paths
-include_dirs = [str(EXT_DIR)]
+include_dirs = [str(EXT_DIR), str(HERE / "include")]
 if np is not None:
     include_dirs.append(np.get_include())
 if PYBIND11_INCLUDE is not None:
     include_dirs.append(PYBIND11_INCLUDE)
+if TORCH_INCLUDE:
+    include_dirs.extend(TORCH_INCLUDE)
 
 extensions = [
     Extension(
@@ -114,6 +131,50 @@ extensions = [
         language="objc++",
     ),
 ]
+
+# Add torch-dependent extensions only if torch is available at build time
+if HAS_TORCH:
+    extensions.extend([
+        Extension(
+            "metal_marlin._moe_dispatcher",
+            sources=["metal_marlin/cpp/moe_dispatcher.mm"],
+            include_dirs=include_dirs,
+            extra_compile_args=[
+                "-std=c++17",
+                "-O3",
+                "-fvisibility=hidden",
+                "-fobjc-arc",
+            ],
+            extra_link_args=[
+                "-framework", "Metal",
+                "-framework", "Foundation",
+                "-lobjc",
+            ],
+            language="objc++",
+        ),
+        Extension(
+            "metal_marlin._cpp_ext",
+            sources=[
+                "metal_marlin/cpp_extension.cpp",
+                "metal_marlin/cpp/moe_dispatcher.mm",
+            ],
+            include_dirs=include_dirs,
+            extra_compile_args=[
+                "-std=c++17",
+                "-O3",
+                "-fvisibility=hidden",
+                "-fobjc-arc",
+            ],
+            extra_link_args=[
+                "-framework", "Metal",
+                "-framework", "Foundation",
+                "-lobjc",
+            ],
+            language="objc++",
+        ),
+    ])
+else:
+    print("Note: torch not found at build time, skipping C++ MoE dispatcher extensions", file=sys.stderr)
 
 # Cythonize with optimization settings
 cython_directives = {

@@ -1534,10 +1534,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-
-    # Update global batch size
-    global EXPERT_BATCH_SIZE
-    EXPERT_BATCH_SIZE = args.expert_batch
+    expert_batch_size = args.expert_batch
 
     # Download/locate model
     print(f"\nDownloading model: {MODEL_ID}")

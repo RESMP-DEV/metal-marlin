@@ -15,14 +15,21 @@ from __future__ import annotations
 
 import struct
 import sys
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 
-from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary, dispatch_kernel,
-                              mps_tensor_to_metal_buffer, require_mps)
+from ..metal_dispatch import (
+    HAS_METAL,
+    MetalKernelLibrary,
+    dispatch_kernel,
+    mps_tensor_to_metal_buffer,
+    require_mps,
+)
 
 if "metal_marlin.moe_dispatch" not in sys.modules:
     from metal_marlin import moe_dispatch as _parent_moe_dispatch
@@ -413,7 +420,7 @@ def create_cached_weight_buffers_from_cpu(
 
 
 class MoEBufferPool:
-    """Reusable buffer pool for MoE kernel dispatch.
+    """Reusable buffer pool for MoE kernel dispatch with memory optimization.
 
     Preallocates buffers for common batch sizes (1, 2, 4, 8, 16, 32) and top_k
     values to eliminate allocation during forward pass. Separate pools are
@@ -422,6 +429,11 @@ class MoEBufferPool:
     - Expert IDs: [batch_size, top_k] int32 routing buffers
     - Expert probs: [batch_size, top_k] fp16 weight buffers
     - Outputs: [batch_size, hidden_dim] fp32 and fp16 output buffers
+
+    Memory Optimization Features:
+    1. Power-of-2 bucket sizes for buffer allocation to reduce fragmentation
+    2. Buffer coalescing for small allocations to improve cache locality
+    3. Memory pressure callback to release unused buffers
     """
 
     # Standard batch sizes to preallocate
@@ -430,6 +442,12 @@ class MoEBufferPool:
     # Default top_k value (Qwen3-235B uses top_k=8)
     DEFAULT_TOP_K: int = 8
 
+    # Power-of-2 bucket sizes for memory optimization (reduces fragmentation)
+    BUCKET_SIZES: list[int] = [64, 128, 256, 512, 1024, 2048, 4096]
+
+    # Threshold for coalescing small allocations (bytes)
+    COALESCE_THRESHOLD: int = 256
+
     def __init__(
         self,
         device: Any,
@@ -437,6 +455,8 @@ class MoEBufferPool:
         max_batch: int = 32,
         top_k_values: tuple[int, ...] | None = None,
         enable_metrics: bool = False,
+        memory_pressure_threshold: float = 5.0,
+        enable_coalescing: bool = True,
     ):
         """Initialize MoEBufferPool with preallocated buffers.
 
@@ -447,6 +467,8 @@ class MoEBufferPool:
             top_k_values: Tuple of top_k values to preallocate for.
                           Defaults to (8,) which covers Qwen3-235B.
             enable_metrics: Whether to track buffer pool efficiency metrics.
+            memory_pressure_threshold: Seconds of inactivity before releasing buffers.
+            enable_coalescing: Whether to enable buffer coalescing for small allocations.
         """
         self.device = device
         self.hidden_dim = hidden_dim
@@ -454,6 +476,8 @@ class MoEBufferPool:
         self._top_k_values = top_k_values if top_k_values is not None else (
             self.DEFAULT_TOP_K,)
         self.enable_metrics = enable_metrics
+        self.memory_pressure_threshold = memory_pressure_threshold
+        self.enable_coalescing = enable_coalescing
 
         # Separate pools for each buffer type
         self._activation_buffers: dict[int, tuple[torch.Tensor, Any]] = {}
@@ -466,15 +490,221 @@ class MoEBufferPool:
         self._params_buffers: dict[tuple[int,
                                          int, int, int, int, int], Any] = {}
 
+        # Coalesced buffer pools for small allocations
+        # Maps bucket_size -> (tensor, metal_buffer, used_bytes)
+        self._coalesced_buffers: dict[int, tuple[torch.Tensor, Any, int]] = {}
+        self._coalesced_allocations: dict[
+            int, list[tuple[int, int]]
+        ] = {}  # bucket_size -> [(offset, size), ...]
+
+        # Last used timestamps for memory pressure management
+        self._last_used: dict[str, float] = {}
+        self._access_count: dict[str, int] = {}
+        self._total_accesses: int = 0
+
+        # Memory pressure callback
+        self._memory_pressure_callback: Callable[[], None] | None = None
+
         # Metrics tracking (only when enable_metrics=True)
         self._hits = 0
         self._misses = 0
         self._peak_buffers = 0
         self._buffer_lifetimes: list[int] = []
         self._forward_calls = 0
+        self._coalesced_hits = 0
+        self._released_buffers = 0
 
         # Preallocate all buffers for common sizes
         self._preallocate_all()
+
+    def _get_bucket_size(self, size: int) -> int:
+        """Get the power-of-2 bucket size for a given allocation size.
+
+        Args:
+            size: Required buffer size in bytes.
+
+        Returns:
+            Power-of-2 bucket size that can accommodate the allocation.
+            Returns the exact size if larger than max bucket.
+        """
+        for bucket in self.BUCKET_SIZES:
+            if size <= bucket:
+                return bucket
+        # For large sizes, round up to next power of 2
+        return 1 << (size - 1).bit_length()
+
+    def _should_coalesce(self, size: int) -> bool:
+        """Check if a buffer size should use coalesced allocation.
+
+        Args:
+            size: Buffer size in bytes.
+
+        Returns:
+            True if coalescing should be used for this size.
+        """
+        return self.enable_coalescing and size <= self.COALESCE_THRESHOLD
+
+    def _allocate_coalesced(
+        self, size: int, dtype: torch.dtype
+    ) -> tuple[torch.Tensor, Any, int] | None:
+        """Allocate space from a coalesced buffer.
+
+        Args:
+            size: Required size in bytes.
+            dtype: Data type for the tensor view.
+
+        Returns:
+            Tuple of (tensor_view, metal_buffer, offset) or None if allocation fails.
+        """
+        bucket_size = self._get_bucket_size(size)
+
+        if bucket_size not in self._coalesced_buffers:
+            # Create new coalesced buffer
+            num_bytes = bucket_size * 16  # 16 allocations per bucket
+            tensor = torch.zeros(num_bytes // 2, dtype=torch.float16, device="mps")
+            buf = mps_tensor_to_metal_buffer(tensor, self.device)
+            self._coalesced_buffers[bucket_size] = (tensor, buf, 0)
+            self._coalesced_allocations[bucket_size] = []
+
+        tensor, buf, used_bytes = self._coalesced_buffers[bucket_size]
+        allocations = self._coalesced_allocations[bucket_size]
+
+        # Simple first-fit allocation
+        offset = 0
+        for alloc_offset, alloc_size in sorted(allocations):
+            if offset + size <= alloc_offset:
+                # Found gap
+                break
+            offset = alloc_offset + alloc_size
+
+        if offset + size > tensor.numel() * 2:  # 2 bytes per float16
+            return None  # No space in coalesced buffer
+
+        allocations.append((offset, size))
+        self._coalesced_buffers[bucket_size] = (tensor, buf, used_bytes + size)
+
+        # Create a view into the coalesced buffer
+        num_elements = size // 2  # float16 = 2 bytes
+        tensor_view = tensor[offset // 2:offset // 2 + num_elements]
+
+        if self.enable_metrics:
+            self._coalesced_hits += 1
+
+        return tensor_view, buf, offset
+
+    def _free_coalesced(self, offset: int, size: int) -> None:
+        """Free space from a coalesced buffer.
+
+        Args:
+            offset: Offset in the coalesced buffer.
+            size: Size of the allocation.
+        """
+        for bucket_size, allocations in self._coalesced_allocations.items():
+            for i, (alloc_offset, alloc_size) in enumerate(allocations):
+                if alloc_offset == offset and alloc_size == size:
+                    allocations.pop(i)
+                    _, buf, used_bytes = self._coalesced_buffers[bucket_size]
+                    self._coalesced_buffers[bucket_size] = (
+                        self._coalesced_buffers[bucket_size][0],
+                        buf,
+                        used_bytes - size,
+                    )
+                    return
+
+    def on_memory_pressure(self) -> int:
+        """Release buffers not used in the last N seconds.
+
+        This method should be called when system memory pressure is detected
+        or periodically to prevent unbounded memory growth.
+
+        Returns:
+            Number of buffers released.
+        """
+        current_time = time.monotonic()
+        released = 0
+
+        # Release old activation buffers
+        for key in list(self._activation_buffers.keys()):
+            key_str = f"act_{key}"
+            last_used = self._last_used.get(key_str, current_time)
+            if current_time - last_used > self.memory_pressure_threshold:
+                del self._activation_buffers[key]
+                self._last_used.pop(key_str, None)
+                self._access_count.pop(key_str, None)
+                released += 1
+
+        # Release old expert_ids buffers
+        for key in list(self._expert_ids_buffers.keys()):
+            key_str = f"ids_{key}"
+            last_used = self._last_used.get(key_str, current_time)
+            if current_time - last_used > self.memory_pressure_threshold:
+                del self._expert_ids_buffers[key]
+                self._last_used.pop(key_str, None)
+                self._access_count.pop(key_str, None)
+                released += 1
+
+        # Release old expert_probs buffers
+        for key in list(self._expert_probs_buffers.keys()):
+            key_str = f"probs_{key}"
+            last_used = self._last_used.get(key_str, current_time)
+            if current_time - last_used > self.memory_pressure_threshold:
+                del self._expert_probs_buffers[key]
+                self._last_used.pop(key_str, None)
+                self._access_count.pop(key_str, None)
+                released += 1
+
+        # Release old output buffers
+        for key in list(self._output_buffers.keys()):
+            key_str = f"out_{key}"
+            last_used = self._last_used.get(key_str, current_time)
+            if current_time - last_used > self.memory_pressure_threshold:
+                del self._output_buffers[key]
+                del self._output_fp16_buffers[key]
+                self._last_used.pop(key_str, None)
+                self._access_count.pop(key_str, None)
+                released += 1
+
+        # Release old params buffers
+        for key in list(self._params_buffers.keys()):
+            key_str = f"params_{key}"
+            last_used = self._last_used.get(key_str, current_time)
+            if current_time - last_used > self.memory_pressure_threshold:
+                del self._params_buffers[key]
+                self._last_used.pop(key_str, None)
+                self._access_count.pop(key_str, None)
+                released += 1
+
+        # Clean up empty coalesced buffers
+        for bucket_size in list(self._coalesced_buffers.keys()):
+            allocations = self._coalesced_allocations.get(bucket_size, [])
+            if not allocations:
+                del self._coalesced_buffers[bucket_size]
+                self._coalesced_allocations.pop(bucket_size, None)
+                released += 1
+
+        if self.enable_metrics:
+            self._released_buffers += released
+
+        return released
+
+    def set_memory_pressure_callback(self, callback: Callable[[], None]) -> None:
+        """Set a callback to be invoked when memory pressure is detected.
+
+        Args:
+            callback: Function to call when memory pressure is detected.
+        """
+        self._memory_pressure_callback = callback
+
+    def _update_access_time(self, key: str) -> None:
+        """Update the last access time and count for a buffer.
+
+        Args:
+            key: Buffer identifier string.
+        """
+        current_time = time.monotonic()
+        self._last_used[key] = current_time
+        self._access_count[key] = self._access_count.get(key, 0) + 1
+        self._total_accesses += 1
 
     def _preallocate_all(self) -> None:
         """Preallocate buffers for all standard batch sizes and top_k values."""
@@ -538,6 +768,9 @@ class MoEBufferPool:
         self._expert_probs_buffers[key] = (tensor, buf)
 
     def get_activation_buffer(self, batch_size: int, activations: torch.Tensor) -> Any:
+        key_str = f"act_{batch_size}"
+        self._update_access_time(key_str)
+
         if batch_size in self._activation_buffers:
             if self.enable_metrics:
                 self._hits += 1
@@ -550,6 +783,9 @@ class MoEBufferPool:
 
     def get_expert_ids_buffer(self, batch_size: int, top_k: int, expert_ids: torch.Tensor) -> Any:
         key = (batch_size, top_k)
+        key_str = f"ids_{key}"
+        self._update_access_time(key_str)
+
         if key not in self._expert_ids_buffers:
             tensor = torch.zeros(
                 batch_size, top_k, dtype=torch.int32, device="mps")
@@ -563,6 +799,9 @@ class MoEBufferPool:
         self, batch_size: int, top_k: int, expert_probs: torch.Tensor
     ) -> Any:
         key = (batch_size, top_k)
+        key_str = f"probs_{key}"
+        self._update_access_time(key_str)
+
         if key not in self._expert_probs_buffers:
             tensor = torch.zeros(
                 batch_size, top_k, dtype=torch.float16, device="mps")
@@ -577,6 +816,9 @@ class MoEBufferPool:
         return buf
 
     def get_output_buffer(self, batch_size: int) -> tuple[torch.Tensor, Any]:
+        key_str = f"out_{batch_size}"
+        self._update_access_time(key_str)
+
         if batch_size in self._output_buffers:
             tensor, buf = self._output_buffers[batch_size]
             tensor.zero_()
@@ -624,6 +866,8 @@ class MoEBufferPool:
     ) -> Any:
         """Get or create a cached params buffer for the given parameters.
 
+        Uses power-of-2 bucket sizing to reduce memory fragmentation.
+
         Args:
             bits: Either uniform bits (int) or per-projection (gate, up, down) tuple.
         """
@@ -633,8 +877,17 @@ class MoEBufferPool:
         else:
             gate_bits = up_bits = down_bits = bits
 
-        key = (batch_size, hidden_dim, intermediate_dim,
+        # Use power-of-2 bucketing for params to reduce fragmentation
+        # Bucket the dimensions to reduce unique buffer sizes
+        bucketed_batch = self._get_bucket_size(batch_size)
+        bucketed_hidden = self._get_bucket_size(hidden_dim)
+        bucketed_intermediate = self._get_bucket_size(intermediate_dim)
+
+        key = (bucketed_batch, bucketed_hidden, bucketed_intermediate,
                num_experts, top_k, gate_bits, up_bits, down_bits)
+        key_str = f"params_{key}"
+        self._update_access_time(key_str)
+
         if key not in self._params_buffers:
             # Metal struct: batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
             #               gate_bits, up_bits, down_bits, tile_size,
@@ -651,34 +904,100 @@ class MoEBufferPool:
         return self._params_buffers[key]
 
     def clear(self) -> None:
+        """Clear all buffers and reset the pool state."""
         self._activation_buffers.clear()
         self._expert_ids_buffers.clear()
         self._expert_probs_buffers.clear()
         self._output_buffers.clear()
         self._output_fp16_buffers.clear()
         self._params_buffers.clear()
+        self._coalesced_buffers.clear()
+        self._coalesced_allocations.clear()
+        self._last_used.clear()
+        self._access_count.clear()
+        self._total_accesses = 0
 
 
-def select_moe_kernel(batch_size: int, use_fp32_acc: bool) -> tuple[str, int]:
-    """Select optimal MoE kernel and tile size for given batch size."""
+def select_moe_kernel(
+    batch_size: int,
+    use_fp32_acc: bool,
+    gate_bits: int | None = None,
+    up_bits: int | None = None,
+    down_bits: int | None = None,
+) -> tuple[str, int]:
+    """Select optimal MoE kernel and tile size for given batch size.
+
+    Args:
+        batch_size: Number of tokens in the batch
+        use_fp32_acc: Whether to use FP32 accumulation
+        gate_bits: Bit width for gate projection weights (optional)
+        up_bits: Bit width for up projection weights (optional)
+        down_bits: Bit width for down projection weights (optional)
+
+    Returns:
+        Tuple of (kernel_name, tile_n)
+    """
+    # Check for specialized kernels for common bit-width combinations
+    # These kernels have compile-time known dequant parameters for better performance
+    if batch_size == 1 and not use_fp32_acc:
+        # GLM-4.7-Flash dominant tuple: gate=6, up=2, down=3
+        if gate_bits == 6 and up_bits == 2 and down_bits == 3:
+            return "moe_trellis_swiglu_decode_6_2_3", 64
+        # Alternative: gate=6, up=3, down=4
+        if gate_bits == 6 and up_bits == 3 and down_bits == 4:
+            return "moe_trellis_swiglu_decode_6_3_4", 64
+        # Alternative: gate=6, up=2, down=4
+        if gate_bits == 6 and up_bits == 2 and down_bits == 4:
+            return "moe_trellis_swiglu_decode_6_2_4", 64
+
     if batch_size == 1:
-        base = "moe_trellis_swiglu_decode"
-        tile_n = 64  # Matches DECODE_TILE_N in gemm_trellis_moe.metal
-    elif batch_size > 8:
-        base = "moe_trellis_swiglu_large_batch"
-        tile_n = 128
+        # Decode kernel for batch_size == 1 (no _fp32acc variant exists)
+        return "moe_trellis_swiglu_decode", 64
     elif batch_size >= 2:
-        base = "moe_trellis_swiglu_prefill4"
-        tile_n = 64
+        # Prefill4 kernel for batch_size >= 2 (supports _fp32acc variant)
+        if use_fp32_acc:
+            return "moe_trellis_swiglu_prefill4_fp32acc", 64
+        return "moe_trellis_swiglu_prefill4", 64
     else:
-        base = "moe_trellis_swiglu"
-        tile_n = 64
+        # Fallback to base kernel (supports _fp32acc variant)
+        if use_fp32_acc:
+            return "moe_trellis_swiglu_fp32acc", 64
+        return "moe_trellis_swiglu", 64
 
-    if use_fp32_acc:
-        if base in ("moe_trellis_swiglu_decode", "moe_trellis_swiglu_large_batch"):
-            return base, tile_n
-        return base + "_fp32acc", tile_n
-    return base, tile_n
+
+def get_moe_kernel(
+    batch_size: int,
+    use_fp32_acc: bool = False,
+    gate_bits: int | None = None,
+    up_bits: int | None = None,
+    down_bits: int | None = None,
+) -> tuple[str, int]:
+    """Get MoE kernel name and tile size for given parameters.
+
+    This is a convenience wrapper around select_moe_kernel that provides
+    a clear API for kernel dispatch selection.
+
+    Args:
+        batch_size: Number of tokens in the batch
+        use_fp32_acc: Whether to use FP32 accumulation
+        gate_bits: Bit width for gate projection weights (optional)
+        up_bits: Bit width for up projection weights (optional)
+        down_bits: Bit width for down projection weights (optional)
+
+    Returns:
+        Tuple of (kernel_name, tile_n)
+
+    Specialized kernels:
+        - moe_trellis_swiglu_decode_6_2_3: gate=6-bit, up=2-bit, down=3-bit (dominant)
+        - moe_trellis_swiglu_decode_6_3_4: gate=6-bit, up=3-bit, down=4-bit
+        - moe_trellis_swiglu_decode_6_2_4: gate=6-bit, up=2-bit, down=4-bit
+
+    Specialization benefits:
+        - Compile-time known dequant parameters (bit shifts/masks)
+        - Better instruction scheduling
+        - Reduced register pressure
+    """
+    return select_moe_kernel(batch_size, use_fp32_acc, gate_bits, up_bits, down_bits)
 
 
 def dispatch_moe_trellis_swiglu_batched(
@@ -1630,3 +1949,125 @@ def dispatch_moe_fused_router_sorted(
     expert_offsets = expert_offsets_tensor.to(torch.int64)
 
     return expert_ids, expert_probs, sorted_indices, expert_offsets
+
+
+def dispatch_moe_per_bit_tuple(
+    lib: MetalKernelLibrary,
+    activations: torch.Tensor,        # [batch, hidden]
+    expert_ids: torch.Tensor,         # [batch, top_k]
+    expert_probs: torch.Tensor,       # [batch, top_k]
+    bit_group_buffers: dict[tuple[int,int,int], tuple[CachedWeightBuffers, list[int]]],
+    hidden_dim: int,
+    intermediate_dim: int,
+    num_experts: int,
+    top_k: int,
+    buffer_pool: MoEBufferPool,
+    use_fp32_acc: bool = True,
+    output_accum: torch.Tensor | None = None,
+    output_fp16: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Dispatch MoE by grouping experts with same bit-width tuple.
+
+    Reduces dispatch calls from O(selected_experts) to O(unique_bit_tuples) ~6.
+    Each unique (gate_bits, up_bits, down_bits) tuple is processed once with
+    all tokens that selected experts using that bit configuration.
+
+    Args:
+        lib: MetalKernelLibrary with compiled MoE kernels.
+        activations: Input activations [batch, hidden_dim].
+        expert_ids: Selected expert IDs [batch, top_k].
+        expert_probs: Expert routing weights [batch, top_k].
+        bit_group_buffers: Dict mapping bit tuple to (cached_buffers, expert_list).
+            Each tuple is (gate_bits, up_bits, down_bits).
+        hidden_dim: Hidden dimension.
+        intermediate_dim: Intermediate (FFN) dimension.
+        num_experts: Total number of experts.
+        top_k: Number of experts per token.
+        buffer_pool: Buffer pool for dynamic allocations.
+        use_fp32_acc: Use FP32 accumulation (default True).
+
+    Returns:
+        Output tensor [batch, hidden_dim] in fp16.
+    """
+    device = lib.device
+    batch_size = activations.shape[0]
+
+    # Create or reuse output accumulator in fp32
+    if output_accum is None:
+        output_accum = torch.zeros(
+            batch_size, hidden_dim, dtype=torch.float32, device="mps"
+        )
+    else:
+        output_accum.zero_()
+
+    # Process each unique bit tuple group
+    for bit_tuple, (expert_list, cached_buffers) in bit_group_buffers.items():
+        # Skip if cached_buffers is a dict (CPU tensors not yet converted)
+        if isinstance(cached_buffers, dict):
+            continue
+        # Create mask for (batch, slot) pairs that selected experts in this group
+        # expert_list contains expert IDs that use this bit tuple
+        expert_set = set(expert_list)
+
+        # Build mask: True where expert_ids is in expert_set
+        mask = torch.zeros_like(expert_ids, dtype=torch.bool)
+        for expert_id in expert_list:
+            mask |= (expert_ids == expert_id)
+
+        # If no hits, skip this group
+        if not mask.any():
+            continue
+
+        # Get indices of matching (batch, slot) pairs
+        batch_indices, slot_indices = mask.nonzero(as_tuple=True)
+
+        if len(batch_indices) == 0:
+            continue
+
+        # Gather inputs for this group
+        group_activations = activations[batch_indices]
+        group_expert_ids = expert_ids[batch_indices, slot_indices].unsqueeze(1)
+        group_expert_probs = expert_probs[batch_indices, slot_indices].unsqueeze(1)
+
+        # Call dispatch_moe_trellis_swiglu with this group's cached_buffers and bits
+        # Set top_k=1 since we've flattened the slots
+        group_output = dispatch_moe_trellis_swiglu(
+            lib,
+            activations=group_activations,
+            gate_weights=None,
+            gate_scales=None,
+            up_weights=None,
+            up_scales=None,
+            down_weights=None,
+            down_scales=None,
+            gate_su=None,
+            gate_sv=None,
+            up_su=None,
+            up_sv=None,
+            down_su=None,
+            down_sv=None,
+            grid=None,
+            expert_ids=group_expert_ids,
+            expert_probs=group_expert_probs,
+            hidden_dim=hidden_dim,
+            intermediate_dim=intermediate_dim,
+            num_experts=num_experts,
+            top_k=1,  # Each token has 1 expert in this group
+            bits=bit_tuple,
+            cached_buffers=cached_buffers,
+            buffer_pool=buffer_pool,
+            use_fp32_acc=use_fp32_acc,
+        )
+
+        # Accumulate weighted outputs in fp32
+        # group_output is [num_matches, hidden_dim] in fp16
+        # We need to accumulate back to the original batch positions
+        for i, batch_idx in enumerate(batch_indices):
+            # Weight is already applied in the kernel via expert_probs
+            output_accum[batch_idx] += group_output[i].float()
+
+    # Return final output in fp16
+    if output_fp16 is None:
+        return output_accum.half()
+    output_fp16.copy_(output_accum)
+    return output_fp16

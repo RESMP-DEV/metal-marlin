@@ -5,6 +5,7 @@ This module provides EXL3-style Trellis quantization for inference:
 - TrellisForCausalLM: Full causal language model with Trellis quantization
 - TrellisModelLoader: Load Trellis-quantized models from safetensors
 - TrellisKVCache: KV cache optimized for Trellis models
+- CompressedKVCache: Extended KV cache with int8 quantization and sliding window
 
 Example:
     >>> from metal_marlin.trellis import TrellisForCausalLM
@@ -29,7 +30,7 @@ from .dispatch import (
 
 # Generation
 from .generate import GenerationConfig, TrellisGenerator
-from .kv_cache import TrellisKVCache
+from .kv_cache import CompressedKVCache, TrellisKVCache
 
 # MLP layers
 from .layer import TrellisDenseMLP
@@ -68,6 +69,7 @@ __all__ = [
     "TrellisMLAttention",
     "create_mla_projections",
     "TrellisKVCache",
+    "CompressedKVCache",
     # Layers
     "TrellisDenseMLP",
     "TrellisMoELayer",
