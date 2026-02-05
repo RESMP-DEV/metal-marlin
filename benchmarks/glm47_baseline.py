@@ -4,7 +4,7 @@ GLM-4.7-Flash Comprehensive Baseline Benchmark
 
 Establishes baseline metrics for:
 1. Decode throughput (tokens/second)
-2. Prefill throughput (tokens/second) 
+2. Prefill throughput (tokens/second)
 3. Perplexity on WikiText-2 (llama.cpp compatible)
 4. Memory usage
 
@@ -35,7 +35,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from metal_marlin.eval.perplexity import load_tokenizer, load_wikitext2, log_softmax
+from metal_marlin.eval.perplexity import (load_tokenizer, load_wikitext2,
+                                          log_softmax)
 from metal_marlin.trellis.lm import TrellisForCausalLM
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
