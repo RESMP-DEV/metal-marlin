@@ -1,0 +1,63 @@
+{
+  "model_name": "GLM-4.7-Flash-Trellis-MM",
+  "model_path": "contrib/metal_marlin/models/GLM-4.7-Flash-Trellis-MM",
+  "timestamp": "2026-02-05T07:30:00Z",
+  "notes": "Pre-optimization baseline. Per-expert dispatch (no batched/grouped dispatch). Extremely slow due to mixed-precision MoE using serial per-expert Metal dispatch.",
+  "hardware": {
+    "platform": "darwin",
+    "mps_available": true,
+    "gpu_name": "Apple M4 Max",
+    "gpu_cores": 40,
+    "memory_bandwidth_gbs": 546
+  },
+  "memory": {
+    "model_size_gb": 15.2,
+    "peak_gb": 16.5,
+    "allocated_gb": 15.8
+  },
+  "model_config": {
+    "num_layers": 47,
+    "hidden_dim": 2048,
+    "intermediate_dim": 5632,
+    "num_experts": 64,
+    "num_shared_experts": 1,
+    "top_k": 4,
+    "vocab_size": 154820,
+    "mla_q_lora_rank": 768,
+    "mla_kv_lora_rank": 512
+  },
+  "quantization": {
+    "format": "trellis_mixed",
+    "bit_widths": [2, 3, 4, 5, 6],
+    "per_projection": true,
+    "sensitivity_aware": true
+  },
+  "throughput": {
+    "decode_tok_s": 0.1,
+    "decode_ms_per_token": 10000,
+    "prefill_128_tok_s": null,
+    "prefill_512_tok_s": null,
+    "notes": "Per-expert dispatch. Each MoE layer dispatches 4 expert calls sequentially. Target: 10-30 tok/s with grouped dispatch."
+  },
+  "perplexity": {
+    "ppl": null,
+    "n_tokens": null,
+    "context_length": 512,
+    "n_samples": null,
+    "notes": "Perplexity measurement deferred until throughput is improved. At 0.1 tok/s, a 50-sample WikiText-2 eval would take hours."
+  },
+  "optimization_targets": {
+    "decode_tok_s_target": 15,
+    "decode_tok_s_stretch": 30,
+    "perplexity_delta_max_pct": 1.0,
+    "memory_overhead_max_pct": 10
+  },
+  "bottleneck_analysis": {
+    "primary": "Mixed-precision MoE dispatch",
+    "details": "Model has per-projection bit widths (gate=6, up=2-4, down=2-4). Current implementation dispatches each expert individually. Need grouped dispatch by bit-tuple to enable Metal kernel batching.",
+    "bit_tuple_distribution": {
+      "(6,2,3)": "dominant",
+      "unique_tuples_per_layer": 6
+    }
+  }
+}
