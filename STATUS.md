@@ -1,6 +1,6 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-02-05
+**Last Updated:** 2026-02-06
 
 ## Summary
 
@@ -17,6 +17,8 @@
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
 | Phase 80 Cleanup | **Complete** ✅ (int16→uint8, dead code removal) |
+| ASR/ANE Modules | **Removed** ✅ (cleanup complete; legacy ASR benchmarks fail-fast) |
+| Top-level API Compatibility | **Patched** ✅ (`MetalQuantizedLinear` export restored) |
 | Ruff Linting | **101 warnings** ⚠️ |
 | Pyright Errors | **0 errors, 215 warnings** ✅ |
 | **C++ Extension** | ✅ **Working** (needs HeapAllocator bindings) |
@@ -108,7 +110,7 @@ Standalone inference for trellis-quantized models with Metal acceleration.
 |--------|-------|---------|--------|
 | `trellis_config.py` | 71 | Model configuration (GLM-4.7-Flash defaults) | ✅ |
 | `trellis_attention.py` | 275 | MLA with KV compression | ✅ |
-| `trellis_kv_cache.py` | 158 | Compressed KV cache (8x memory savings) | ✅ |
+| `kv_cache.py` (`TrellisKVCache`) | - | Compressed KV cache (8x memory savings) | ✅ |
 | `trellis_layer.py` | 125 | Dense MLP with SwiGLU | ✅ |
 | `trellis_linear.py` | 356 | Quantized linear with Metal dequant | ✅ |
 | `trellis_loader.py` | 505 | Layer-wise model loading | ✅ |
@@ -256,14 +258,14 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 
 ## Test Results
 
-**Last verified:** 2026-01-29
-**Test files:** 53
+**Last verified:** 2026-02-06
+**Test files:** 126
 
 | Category | Count |
 |----------|-------|
-| Collected | 1565 |
+| Collected | 5427 |
 | Collection Errors | 0 |
-| Skipped | 48 |
+| Collection Warnings | 2 (`benchmark`, `vision` unknown marks) |
 
 **Optional dependency tests:** (skipped when dependencies missing)
 - `test_all_models.py` - requires `transformers`
@@ -284,8 +286,8 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 
 ## Test Suite Structure
 
-**Test files:** 53
-**Tests collected:** 1562
+**Test files:** 126
+**Tests collected:** 5427
 
 ### Recent Additions
 
