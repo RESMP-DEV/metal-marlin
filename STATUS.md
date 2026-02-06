@@ -1,12 +1,12 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-02-04
+**Last Updated:** 2026-02-05
 
 ## Summary
 
 | Component | Status |
 |-----------|--------|
-| Test Suite | **1565 tests collected** ✅ |
+| Test Suite | **5427 tests collected** ✅ |
 | GEMM Kernel | **Working + Optimized** ✅ (2.4x speedup) |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
@@ -16,7 +16,7 @@
 | OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
-| Legacy Cleanup | **Complete** ✅ |
+| Phase 80 Cleanup | **Complete** ✅ (int16→uint8, dead code removal) |
 | Ruff Linting | **101 warnings** ⚠️ |
 | Pyright Errors | **0 errors, 215 warnings** ✅ |
 | **C++ Extension** | ✅ **Working** (needs HeapAllocator bindings) |

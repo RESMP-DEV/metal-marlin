@@ -421,7 +421,7 @@ class EXL3Quantizer:
 
                 w_dequant = torch.zeros(out_features, group_size_actual, dtype=torch.float32)
                 for i in range(0, group_size_actual, 2):
-                    byte_val = packed[:, i // 2].to(torch.int16)
+                    byte_val = packed[:, i // 2].to(torch.uint8)
                     low = (byte_val & 0xF).float() - 8
                     w_dequant[:, i] = low * scales[g]
                     if i + 1 < group_size_actual:

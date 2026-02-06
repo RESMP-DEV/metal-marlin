@@ -22,7 +22,7 @@ import torch.nn.functional as F
 TORCH_DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 
 from metal_marlin.analysis.moe_routing import MoERoutingProfiler
-from metal_marlin.moe.moe_dispatch import (
+from metal_marlin.moe_dispatch import (
     gather_for_experts,
     group_tokens_by_expert_full,
     scatter_expert_outputs,

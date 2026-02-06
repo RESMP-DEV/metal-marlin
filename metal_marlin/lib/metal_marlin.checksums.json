@@ -42,7 +42,6 @@
     "src/gemm_trellis_w2.metal": "9ae6686bdc31cbc76f963146f76be4f88b761763dd0959d53f0cc76675da3998",
     "src/hadamard.metal": "e025255cee76dc3d5a06d478701c0e047c82b28d7f6cd5e7c31be8d95ef66569",
     "src/hessian.metal": "9140bd03b6efd032add2a1482806c059c3305b9f69f0922bdb8b006a268ae036",
-    "src/kernels_autotune.metal": "449d2eefab981ac8fa6e67963e05376c896b00d2e71551d0da53ab3e7ebc1eda",
     "src/layernorm.metal": "722863d02fc56f98afd56035feb4bd353323c5c06ef6f4268a71b34a5bdb2ae2",
     "src/mamba_ssm.metal": "07fda4c3a1b921246b7bdd6a12be3768b63a4b76f36889706c7b66e9c23314dd",
     "src/marlin_gemm.metal": "d95a623b372ce6f32bc67b34433897be1ea056ace710468d44c0f520ba35e23b",

@@ -58,7 +58,7 @@ class EXL3QuantResult:
     """Result of EXL3 quantization for a single layer."""
 
     name: str
-    trellis_indices: NDArray[np.int16]  # [tiles_k, tiles_n, 256]
+    trellis_indices: NDArray[np.uint8]  # [tiles_k, tiles_n, 256]
     scales: NDArray[np.float32]  # [n_groups, out_features]
     su: NDArray[np.float64]  # Input sign flips
     sv: NDArray[np.float64]  # Output sign flips (optional)
@@ -173,7 +173,7 @@ def ldlq_quantize_layer(
     group_size: int = 128,
     max_workers: int | None = None,
     use_metal: bool = True,
-) -> tuple[NDArray[np.int16], NDArray[np.float32], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.float32]]:
     """Quantize layer using LDLQ (Layer-wise Dynamic Low-precision Quantization).
 
     Implements the LDLQ algorithm which uses the LDL decomposition of the

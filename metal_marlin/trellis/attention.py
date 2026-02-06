@@ -27,7 +27,7 @@ from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb
 from ..attention import scaled_dot_product_attention_metal
 from ..fused_attention_mps import fused_attention  # noqa: F401
 from .dispatch import dispatch_fused_qkv_trellis
-from .kv_cache import TrellisKVCache
+from ..kv_cache import TrellisKVCache
 from .linear import TrellisLinear
 
 if TYPE_CHECKING:

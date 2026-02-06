@@ -220,7 +220,7 @@ class TestMLAKVCache:
 
     def test_cache_initialization(self, device):
         """Test MLA KV cache initializes correctly."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,
@@ -240,7 +240,7 @@ class TestMLAKVCache:
 
     def test_cache_update(self, device):
         """Test MLA KV cache update operation."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,
@@ -274,7 +274,7 @@ class TestMLAKVCache:
 
     def test_cache_seq_len_property(self, device):
         """Test seq_len property returns correct value."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,
@@ -295,7 +295,7 @@ class TestMLAKVCache:
 
     def test_cache_multi_layer(self, device):
         """Test cache updates work correctly across multiple layers."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=4,
@@ -318,7 +318,7 @@ class TestMLAKVCache:
 
     def test_cache_reset(self, device):
         """Test cache reset functionality."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,
@@ -342,7 +342,7 @@ class TestMLAKVCache:
 
     def test_cache_memory_usage(self, device):
         """Test memory usage calculation."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=4,
@@ -426,7 +426,8 @@ class TestMLAAttention:
 
     def test_attention_with_cache(self, mla_config, device):
         """Test MLA attention with KV cache."""
-        from metal_marlin.mla_attention import MLAAttention, MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
+        from metal_marlin.mla_attention import MLAAttention
 
         attn = MLAAttention(**mla_config).to(device)
 
@@ -627,7 +628,7 @@ class TestPyTorchMPSIntegration:
 
     def test_kv_cache_on_mps(self):
         """Test MLA KV cache works correctly on MPS device."""
-        from metal_marlin.mla_attention import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,

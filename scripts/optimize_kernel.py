@@ -28,7 +28,7 @@ Usage:
     # More entropy for thorough search
     cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py src/marlin_gemm.metal --num-random 50
 
-    # Run local autotuning without AlphaHENG
+    # Run local benchmark without AlphaHENG
     cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune
 
     # Collect results after swarm completes
@@ -66,7 +66,7 @@ ALPHAHENG_ROOT = (
 # These are designed to match kernel configuration options in src/*.metal
 # Metal uses `constant constexpr uint` syntax for compile-time constants
 OPTIMIZATION_PATTERNS: list[dict[str, Any]] = [
-    # Tile size variants - aligned with autotune.py KernelConfig options
+    # Tile size variants - aligned with KernelConfig options
     {
         "name": "tile_m_32",
         "description": "Set TILE_M=32 (small batches)",
@@ -567,7 +567,7 @@ def run_local_benchmark(
     iters: int = 20,
     group_size: int = 32,
 ) -> dict[str, Any]:
-    """Run local autotuning benchmark using existing autotune module.
+    """Run local benchmarking using Metal dispatch.
 
     This provides a standalone way to optimize kernels without AlphaHENG.
     """
@@ -1767,7 +1767,7 @@ Examples:
   # Higher entropy for thorough search (50 random variants)
   cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py src/marlin_gemm.metal --num-random 50
 
-  # Local autotuning without AlphaHENG swarm
+  # Local benchmarking without AlphaHENG swarm
   cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune
 
   # Collect results after swarm completes

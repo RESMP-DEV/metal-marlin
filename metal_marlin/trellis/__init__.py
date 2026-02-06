@@ -30,7 +30,7 @@ from .dispatch import (
 
 # Generation
 from .generate import GenerationConfig, TrellisGenerator
-from .kv_cache import CompressedKVCache, TrellisKVCache
+from ..kv_cache import CompressedKVCache, TrellisKVCache
 
 # MLP layers
 from .layer import TrellisDenseMLP

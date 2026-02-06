@@ -70,7 +70,7 @@ def benchmark_single_request(
     """Benchmark single-request processing (batch=1)."""
     import torch
 
-    from metal_marlin.trellis.kv_cache import TrellisKVCache
+    from metal_marlin.kv_cache import TrellisKVCache
 
     device = next(model.parameters()).device
     total_tokens = 0
@@ -268,7 +268,7 @@ def benchmark_context_lengths(
         BatchScheduler,
         SchedulerConfig,
     )
-    from metal_marlin.trellis.kv_cache import TrellisKVCache
+    from metal_marlin.kv_cache import TrellisKVCache
 
     device = next(model.parameters()).device
     results: list[BenchmarkResult] = []

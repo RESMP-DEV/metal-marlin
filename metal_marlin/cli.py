@@ -396,7 +396,7 @@ def convert(
                 verbose=verbose,
             )
         else:
-            from .safetensors_loader import convert_model_to_marlin
+            from .converters.safetensors_loader import convert_model_to_marlin
 
             stats = convert_model_to_marlin(
                 input_path,

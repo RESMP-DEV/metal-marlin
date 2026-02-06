@@ -219,7 +219,7 @@ def quantize_model_pipelined(
             if layer_info.sensitivity < sensitivity_threshold:
                 yield EXL3QuantResult(
                     name=layer_info.name,
-                    trellis_indices=np.zeros((1,), dtype=np.int16),
+                    trellis_indices=np.zeros((1,), dtype=np.uint8),
                     scales=np.ones((1,), dtype=np.float32),
                     su=np.eye(1),
                     sv=np.ones(1),
@@ -417,7 +417,7 @@ def quantize_moe_experts_fast(
             results[name] = EXL3QuantResult(
                 name=name,
                 trellis_indices=np.zeros(
-                    (weight.numel() // 8,), dtype=np.int16),
+                    (weight.numel() // 8,), dtype=np.uint8),
                 scales=np.ones(
                     (weight.numel() // quantizer.group_size,), dtype=np.float32),
                 su=np.eye(min(weight.shape)),

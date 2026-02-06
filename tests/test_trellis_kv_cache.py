@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
-from metal_marlin.trellis.kv_cache import TrellisKVCache
+from metal_marlin.kv_cache import TrellisKVCache
 
 # Skip entire module if PyTorch unavailable
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
@@ -45,6 +45,7 @@ class TestTrellisKVCache:
             qk_rope_head_dim=cache_params["qk_rope_head_dim"],
             device=device,
             dtype=torch.float16,
+            auto_grow=False,
         )
 
     def test_init(self, cache, cache_params):
@@ -384,25 +385,17 @@ class TestTrellisKVCacheQuantization:
             qk_rope_head_dim=cache_params["qk_rope_head_dim"],
             device=device,
             dtype=torch.float16,
-            quantize=True,
+            quantize_mode="int8",
         )
 
     def test_init_quantized(self, cache, cache_params):
         """Test quantized cache initialization."""
-        assert cache.quantize is True
-        assert cache.c_kv.dtype == torch.int8
-        assert cache.k_pe.dtype == torch.int8
-        assert cache.c_kv_scales is not None
-        assert cache.k_pe_scales is not None
+        assert cache.quantize_mode == "int8"
+        assert cache.kv_cache.dtype == torch.int8
+        assert cache.kv_scales is not None
 
         # Check scale shapes (per-token: [num_layers, batch, max_seq_len, 1])
-        assert cache.c_kv_scales.shape == (
-            cache_params["num_layers"],
-            cache_params["batch_size"],
-            cache_params["max_seq_len"],
-            1,
-        )
-        assert cache.k_pe_scales.shape == (
+        assert cache.kv_scales.shape == (
             cache_params["num_layers"],
             cache_params["batch_size"],
             cache_params["max_seq_len"],
@@ -420,7 +413,8 @@ class TestTrellisKVCacheQuantization:
         )
 
         # Update cache
-        full_kv = cache.update(layer_idx=0, compressed_kv=compressed_kv)
+        for i in range(cache_params["num_layers"]):
+            full_kv = cache.update_compressed(layer_idx=i, compressed_kv=compressed_kv)
 
         # Check that retrieved values are close to original
         # Int8 quantization error bound roughly 1/127 of max value
@@ -433,12 +427,12 @@ class TestTrellisKVCacheQuantization:
 
         # Create unquantized cache
         cache_fp16 = TrellisKVCache(
-            **cache_params, device=device, dtype=torch.float16, quantize=False
+            **cache_params, device=device, dtype=torch.float16, quantize_mode="none"
         )
 
         # Create quantized cache
         cache_int8 = TrellisKVCache(
-            **cache_params, device=device, dtype=torch.float16, quantize=True
+            **cache_params, device=device, dtype=torch.float16, quantize_mode="int8"
         )
 
         mb_fp16 = cache_fp16.memory_usage_mb()
@@ -455,20 +449,22 @@ class TestTrellisKVCacheQuantization:
 
         # Token 1: small values
         t1 = torch.full((cache_params["batch_size"], 1, cache_dim), 0.1, dtype=torch.float16, device=device)
-        cache.update(layer_idx=0, compressed_kv=t1)
+        for i in range(cache_params["num_layers"]):
+            cache.update_compressed(layer_idx=i, compressed_kv=t1)
 
         # Check scale for t1 (approx 0.1 / 127 * 127 = 0.1)
         # Actually scale = max_val / 127. So scale approx 0.1/127.
-        scale_t1 = cache.c_kv_scales[0, :, 0, 0]
+        scale_t1 = cache.kv_scales[0, :, 0, 0]
         assert torch.all(scale_t1 > 0)
         assert torch.all(scale_t1 < 1.0)
 
         # Token 2: large values
         t2 = torch.full((cache_params["batch_size"], 1, cache_dim), 10.0, dtype=torch.float16, device=device)
-        cache.update(layer_idx=0, compressed_kv=t2)
+        for i in range(cache_params["num_layers"]):
+            cache.update_compressed(layer_idx=i, compressed_kv=t2)
 
         # Check scale for t2 (approx 10.0 / 127)
-        scale_t2 = cache.c_kv_scales[0, :, 1, 0]
+        scale_t2 = cache.kv_scales[0, :, 1, 0]
         assert torch.all(scale_t2 > scale_t1)  # Scale should adapt to magnitude
 
     def test_get_layer_slices_and_attention_quantized(self, cache, cache_params):
@@ -480,7 +476,8 @@ class TestTrellisKVCacheQuantization:
             cache_params["batch_size"], 5, cache_dim, dtype=torch.float16, device=device
         )
 
-        cache.update(layer_idx=0, compressed_kv=compressed_kv)
+        for i in range(cache_params["num_layers"]):
+            cache.update_compressed(layer_idx=i, compressed_kv=compressed_kv)
 
         # Test get_layer_slices
         c_kv_slice, k_pe_slice = cache.get_layer_slices(layer_idx=0)
