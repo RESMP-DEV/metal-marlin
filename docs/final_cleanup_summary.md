@@ -111,16 +111,16 @@ Run these commands to verify the cleanup:
 
 ```bash
 # Verify no ASR/ANE references remain
-! grep -r "from metal_marlin.asr\|from metal_marlin.ane" --include="*.py"
+! rg -n "from metal_marlin\.(asr|ane)|import metal_marlin\.(asr|ane)" metal_marlin tests scripts
 
 # Verify test collection
 uv run pytest tests/ --collect-only
 
 # Verify core imports work
-python -c "from metal_marlin import MarlinLinear, MetalQuantizedLinear"
+uv run python -c "from metal_marlin import MarlinLinear, MetalQuantizedLinear"
 
 # Verify int16 migration complete
-! grep -rn "np.int16\|torch.int16" metal_marlin/quantization/*.py
+! rg -n "np.int16|torch.int16" metal_marlin/quantization/*.py
 ```
 
 ---

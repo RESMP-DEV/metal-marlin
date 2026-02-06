@@ -406,29 +406,10 @@ Options:
 - `--num-tokens N`: Number of tokens to decode (default: 100)
 - `--num-runs N`: Number of benchmark iterations (default: 3)
 
-## ASR: Parakeet-TDT-0.6B
+## ASR/ANE Status
 
-Speech recognition with hybrid Metal + ANE acceleration.
-
-### Quick Start
-
-```python
-from metal_marlin.asr import build_hybrid_parakeet
-
-model = build_hybrid_parakeet("models/parakeet-tdt-0.6b-fp4", use_ane_conv=True)
-transcript = model.transcribe("audio.wav")
-print(transcript)
-```
-
-### Performance (M4 Max)
-
-| Config | RTF | Memory | WER (test-clean) |
-|--------|-----|--------|------------------|
-| FP16 MPS | 15x | 1.2 GB | 4.2% |
-| 4-bit Metal | 25x | 400 MB | 4.3% |
-| 4-bit Hybrid | 35x | 400 MB | 4.3% |
-
-RTF = Real-Time Factor (higher is better)
+ASR and ANE modules were removed in the Phase 80 cleanup and are no longer supported in this repository.
+Legacy ASR benchmark scripts remain for historical reference, but they now exit with a clear message.
 
 ## Documentation
 
