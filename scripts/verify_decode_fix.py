@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
-from metal_marlin.trellis.kv_cache import TrellisKVCache
+from metal_marlin.kv_cache import TrellisKVCache
 from metal_marlin.trellis.linear import TrellisLinear
 
 

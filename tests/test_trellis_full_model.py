@@ -321,7 +321,7 @@ def test_model_with_kv_cache(model_path, config):
     if not HAS_MPS:
         pytest.skip("MPS required")
 
-    from metal_marlin.trellis.kv_cache import TrellisKVCache
+    from metal_marlin.kv_cache import TrellisKVCache
 
     # Load model
     model = TrellisModel.from_pretrained(model_path, device="mps", load_in_layers=True)

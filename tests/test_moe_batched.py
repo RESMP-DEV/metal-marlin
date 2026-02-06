@@ -449,7 +449,7 @@ class TestMoEDispatcher:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE dispatcher produces correct output shape."""
-        from metal_marlin.moe.moe_dispatch import MoEDispatcher
+        from metal_marlin.moe_dispatch import MoEDispatcher
 
         torch.manual_seed(42)
 
@@ -479,7 +479,7 @@ class TestMoEDispatcher:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE dispatcher handles 3D [batch, seq, hidden] input."""
-        from metal_marlin.moe.moe_dispatch import MoEDispatcher
+        from metal_marlin.moe_dispatch import MoEDispatcher
 
         seq_len = 16
         torch.manual_seed(42)

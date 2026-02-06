@@ -24,7 +24,7 @@ from .sampler import MetalSampler
 if TYPE_CHECKING:
     import torch as torch_typing
 
-    from .kv_cache_torch import KVCacheTorch
+    from .kv_cache import KVCache as KVCacheTorch
 
 
 class CausalLM(Protocol):

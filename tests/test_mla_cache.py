@@ -629,7 +629,7 @@ class TestMLAKVCacheTorch:
         return "mps" if torch.backends.mps.is_available() else "cpu"
 
     def test_cache_growth(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
         cache = MLAKVCache(
@@ -655,7 +655,7 @@ class TestMLAKVCacheTorch:
         assert k_full.shape == (1, 7, 4)
 
     def test_fp8_quantization_round_trip(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
         cache = MLAKVCache(
@@ -681,7 +681,7 @@ class TestMLAKVCacheTorch:
         assert torch.mean(rel_error).item() < 0.05
 
     def test_layer_independent_lengths(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
         cache = MLAKVCache(
@@ -714,7 +714,7 @@ class TestMLAKVCacheCore:
     """Test MLAKVCache growth and FP8 latent storage."""
 
     def test_init_shapes(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=2,
@@ -730,7 +730,7 @@ class TestMLAKVCacheCore:
         assert cache.seq_lens == [0, 0]
 
     def test_append_and_growth(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=1,
@@ -751,7 +751,7 @@ class TestMLAKVCacheCore:
         assert k_pe_full.shape == (1, 6, 4)
 
     def test_fp8_quantized_storage(self):
-        from metal_marlin.mla_kv_cache import MLAKVCache
+        from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
             num_layers=1,

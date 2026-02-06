@@ -95,7 +95,7 @@ def compute_tile_scales(
     return tile_scales
 
 
-def pack_indices(indices: NDArray[np.int16]) -> NDArray[np.int16]:
+def pack_indices(indices: NDArray[np.uint8]) -> NDArray[np.uint8]:
     """Pack tile indices into encoded format.
 
     The encoded format stores indices as [tiles_k, tiles_n, 256]
@@ -163,7 +163,7 @@ def ldlq_quantize_layer(
     group_size: int = 128,
     buf_size_k: int = 128,
     max_workers: int | None = None,
-) -> tuple[NDArray[np.int16], NDArray[np.float32], NDArray[np.float32]]:
+) -> tuple[NDArray[np.uint8], NDArray[np.float32], NDArray[np.float32]]:
     """LDLQ: LDL-based quantization with block error compensation.
 
     Processes weight rows in reverse order (bottom-up) for proper
@@ -191,7 +191,7 @@ def ldlq_quantize_layer(
     tiles_n = out_feat // 16
 
     # Initialize outputs
-    encoded = np.zeros((tiles_k, tiles_n, 256), dtype=np.int16)
+    encoded = np.zeros((tiles_k, tiles_n, 256), dtype=np.uint8)
     weight_q = np.zeros_like(weight)
     prod_cache = np.zeros_like(weight, dtype=np.float64)
 

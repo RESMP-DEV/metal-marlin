@@ -579,7 +579,7 @@ class ContinuousBatchingEngine:
 
     def _ensure_kv_cache(self, batch_size: int) -> None:
         """Ensure KV cache is allocated for the given batch size."""
-        from ..trellis.kv_cache import TrellisKVCache
+        from ..kv_cache import TrellisKVCache
 
         if self._kv_cache is None or self._kv_batch_size < batch_size:
             # Need to create/resize cache

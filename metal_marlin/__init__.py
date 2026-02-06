@@ -56,7 +56,7 @@ from .calibration import (
     compute_moe_expert_sensitivity,
 )
 
-# Expert gather/scatter operations for MoE routing
+# Expert gather/scatter operations for MoE routing (MPS-Updated).
 from .expert_ops import expert_gather, expert_scatter_add
 
 # Metal-accelerated generation (requires PyTorch MPS + PyObjC Metal)
@@ -76,7 +76,14 @@ from .heap_allocator import (
     MetalHeapAllocator,
 )
 from .kernels import marlin_gemm_fp4, marlin_gemm_int4
-from .kv_cache_torch import CacheConfigTorch, KVCacheTorch
+# KV Cache (consolidated in kv_cache)
+from .kv_cache import (
+    CacheConfig,
+    CacheConfigTorch,
+    KVCache,
+    KVCacheTorch,
+    MLAKVCache,
+)
 try:
     from .layer_replacement import (
         MetalQuantizedMoE,
@@ -169,14 +176,22 @@ from .rope import (
     get_yarn_mscale,
 )
 from .sampler import MetalSampler, SamplingConfig, sample_next_token
-from .vision import (
-    InternVLProjector,
-    LLaVAProjector,
-    Qwen2VLProjector,
-    VisionProjector,
-    VisionProjectorConfig,
-    detect_projector_type,
-)
+try:
+    from .vision import (
+        InternVLProjector,
+        LLaVAProjector,
+        Qwen2VLProjector,
+        VisionProjector,
+        VisionProjectorConfig,
+        detect_projector_type,
+    )
+except ImportError:
+    InternVLProjector = None
+    LLaVAProjector = None
+    Qwen2VLProjector = None
+    VisionProjector = None
+    VisionProjectorConfig = None
+    detect_projector_type = None
 
 # Fast inference path (optional - requires C++ extension)
 try:
@@ -345,6 +360,10 @@ __all__ = [
     "PipelineScheduler",
     "RequestState",
     "generate_pipelined",
+    "CacheConfig",
+    "KVCache",
+    "MLAKVCache",
+    # Backward compatibility aliases
     "CacheConfigTorch",
     "KVCacheTorch",
     "MetalSampler",
@@ -382,3 +401,7 @@ __all__ = [
     "AsyncTransferManager",
     "PipelinedLayerDispatcher",
 ]
+
+# Backward compatibility aliases - these are deprecated, use CacheConfig/KVCache instead
+CacheConfigTorch = CacheConfig
+KVCacheTorch = KVCache

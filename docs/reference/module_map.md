@@ -20,7 +20,6 @@
 | `metal_marlin/utils/` | Utility functions and helpers | Common utilities used across modules |
 | `metal_marlin/cache/` | Caching mechanisms | Model weight and computation caching |
 | `metal_marlin/analysis/` | Performance analysis tools | Profiling and analysis utilities |
-| `metal_marlin/guided/` | Guided generation mechanisms | Constraint-based generation |
 | `metal_marlin/hybrid/` | Hybrid execution modes | CPU/GPU/ANE hybrid inference |
 | `metal_marlin/inference/` | Core inference engines | Main inference execution logic |
 | `metal_marlin/architectures/` | Model architecture definitions | Layer architectures and configurations |

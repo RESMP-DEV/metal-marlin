@@ -37,7 +37,7 @@ from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary,
 from ..transformer import RMSNorm
 from .attention import TrellisMLAConfig, TrellisMLAttention
 from .config import TrellisModelConfig
-from .kv_cache import TrellisKVCache
+from ..kv_cache import TrellisKVCache
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
 from .moe_dispatch import (BatchedDispatcher, CachedRouterBuffers,

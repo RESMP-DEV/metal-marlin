@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     import torch as torch_typing
 
     from .generate import GenerationConfig
-    from .kv_cache_torch import KVCacheTorch
+    from .kv_cache import KVCache as KVCacheTorch
     from .metal_dispatch import MetalKernelLibrary
 
 

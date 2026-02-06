@@ -63,9 +63,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .fused_attention_mps import fused_attention
-from .kv_cache import KVCache
+from .kv_cache import KVCache, MLAKVCache, TrellisKVCache
 from .layers import MarlinLinear
-from .mla_kv_cache import MLAKVCache
 
 if TYPE_CHECKING:
     pass
@@ -423,7 +422,7 @@ class MLAAttention(nn.Module):
 
         # Determine position offset from cache
         if isinstance(kv_cache, MLAKVCache):
-            position_offset = kv_cache.seq_lens[layer_idx]
+            position_offset = kv_cache.seq_len
         elif kv_cache is not None:
             position_offset = kv_cache.seq_len
         else:
@@ -442,7 +441,7 @@ class MLAAttention(nn.Module):
 
         # Update MLA cache if provided
         if isinstance(kv_cache, MLAKVCache):
-            c_kv, k_pe = kv_cache.update(layer_idx, c_kv, k_pe)
+            c_kv, k_pe = kv_cache.update_components(layer_idx, c_kv, k_pe)
 
         # Get current cache/sequence length after potential cache update
         cache_len = c_kv.shape[1]

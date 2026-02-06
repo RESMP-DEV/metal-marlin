@@ -32,7 +32,7 @@ from .._compat import HAS_MPS, require_torch, torch
 if TYPE_CHECKING:
     import torch as torch_typing
 
-    from ..kv_cache_torch import KVCacheTorch
+    from ..kv_cache import KVCache as KVCacheTorch
 
 
 def get_device() -> str:
@@ -739,7 +739,7 @@ class MetalMarlinModel:
         """Create empty KV cache structure."""
         require_torch()
 
-        from ..kv_cache_torch import CacheConfigTorch, KVCacheTorch
+        from ..kv_cache import CacheConfig as CacheConfigTorch, KVCache as KVCacheTorch
 
         config = CacheConfigTorch(
             num_layers=self.num_layers,
