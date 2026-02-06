@@ -15,17 +15,32 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 
-from metal_marlin.asr import ConformerConfig, ParakeetTDT
-from metal_marlin.asr.tdt_config import TDTConfig
+ASR_IMPORT_ERROR: Exception | None = None
+try:
+    from metal_marlin.asr import ConformerConfig, ParakeetTDT
+    from metal_marlin.asr.tdt_config import TDTConfig
+
+    HAS_ASR_BENCH = True
+except Exception as exc:
+    # ASR stack was removed during cleanup; keep this benchmark script import-safe.
+    HAS_ASR_BENCH = False
+    ASR_IMPORT_ERROR = exc
 
 
-def create_model() -> ParakeetTDT:
+def create_model() -> Any:
     """Create Parakeet 0.6B v3 model (108M params)."""
+    if not HAS_ASR_BENCH:
+        raise RuntimeError(
+            "ASR benchmark dependencies are unavailable. "
+            "The ASR modules were removed from this repository cleanup."
+        ) from ASR_IMPORT_ERROR
+
     conformer_cfg = ConformerConfig(
         num_layers=17,
         hidden_size=512,
@@ -115,6 +130,15 @@ def benchmark_encoder(
 
 
 def main():
+    if not HAS_ASR_BENCH:
+        msg = (
+            "This benchmark targets removed ASR modules and can no longer run in this repo. "
+            "Use active LLM benchmarks under benchmarks/ (e.g. glm_flash_benchmark.py)."
+        )
+        if ASR_IMPORT_ERROR is not None:
+            msg = f"{msg}\nOriginal import error: {ASR_IMPORT_ERROR}"
+        raise SystemExit(msg)
+
     print("=== Parakeet Encoder Inference Benchmark ===\n")
 
     model = create_model()

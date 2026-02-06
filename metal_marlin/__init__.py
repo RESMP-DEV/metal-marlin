@@ -105,6 +105,10 @@ except ImportError:
     replace_linear_layers = None
     replace_moe_layers = None
 from .layers import MarlinLinear
+try:
+    from .inference_metal import MetalQuantizedLinear
+except ImportError:
+    MetalQuantizedLinear = None
 from .mixed_precision import (
     LayerPrecisionSelector,
     LayerQuantConfig,
@@ -314,6 +318,7 @@ __all__ = [
     "Precision",
     # Core modules
     "MarlinLinear",
+    "MetalQuantizedLinear",
     "find_linear_layers",
     "find_moe_layers",
     "get_parent_module",
