@@ -108,9 +108,19 @@ SIGMA_REG = 0.025
 # So layers 0,1,2 are DeltaNet, layer 3 is Attention, etc.
 FULL_ATTENTION_INTERVAL = 4  # Every 4th layer is full attention
 
-# Memory management - conservative for 20GB VRAM
+# Memory management - dynamic based on available VRAM
 EXPERT_BATCH_SIZE = 32  # Process 32 experts at a time (512/32 = 16 batches)
-MAX_VRAM_GB = 18.0  # Leave 2GB for OS/CUDA overhead
+
+# Dynamic VRAM thresholds (computed at runtime) - CONSERVATIVE for 20GB budget
+_TOTAL_VRAM_GB = torch.cuda.get_device_properties(0).total_memory / 1e9
+# 35% (~8GB) - safe to prefetch next layer
+VRAM_SAFE_GB = _TOTAL_VRAM_GB * 0.35
+VRAM_HIGH_GB = _TOTAL_VRAM_GB * 0.50  # 50% (~12GB) - slow down prefetch
+VRAM_CRITICAL_GB = _TOTAL_VRAM_GB * 0.65  # 65% (~15GB) - stop and wait
+MAX_VRAM_GB = _TOTAL_VRAM_GB * 0.75  # 75% (~18GB) - absolute max
+
+print(
+    f"VRAM thresholds: safe={VRAM_SAFE_GB:.1f}GB, high={VRAM_HIGH_GB:.1f}GB, critical={VRAM_CRITICAL_GB:.1f}GB")
 
 # Sensitivity-based bit allocation
 SENSITIVE_PATTERNS = {
@@ -291,6 +301,38 @@ def cuda_memory_gb() -> tuple[float, float]:
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
     return allocated, reserved
+
+
+def wait_for_vram(threshold_gb: float, timeout: float = 60.0) -> bool:
+    """Wait until VRAM drops below threshold. Returns True if successful."""
+    start = time.perf_counter()
+    while True:
+        torch.cuda.empty_cache()
+        gc.collect()
+        allocated, _ = cuda_memory_gb()
+        if allocated < threshold_gb:
+            return True
+        if time.perf_counter() - start > timeout:
+            return False
+        time.sleep(0.1)
+
+
+def get_adaptive_batch_size(base_batch: int = EXPERT_BATCH_SIZE) -> int:
+    """Return adaptive batch size based on available VRAM (conservative)."""
+    allocated, _ = cuda_memory_gb()
+    available = _TOTAL_VRAM_GB - allocated
+
+    # More conservative thresholds
+    if available > 15.0:
+        return base_batch  # Full batch only when lots of headroom
+    elif available > 10.0:
+        return max(16, base_batch // 2)  # Half batch
+    elif available > 6.0:
+        return max(8, base_batch // 4)  # Quarter batch
+    elif available > 3.0:
+        return 4  # Minimum batch
+    else:
+        return 2  # Emergency: process just 2 experts at a time
 
 
 def get_memory_mb() -> float:
@@ -573,7 +615,8 @@ class GPULayerPrefetcher:
         self.min_bits = min_bits
         self.max_bits = max_bits
         self.expert_batch_size = expert_batch_size
-        self.queue: Queue[PreparedLayer | None] = Queue(maxsize=2)
+        # Reduce queue to 1 to prevent VRAM buildup from multiple prefetched layers
+        self.queue: Queue[PreparedLayer | None] = Queue(maxsize=1)
         self.thread: Thread | None = None
         self._stop = False
 
@@ -606,6 +649,15 @@ class GPULayerPrefetcher:
     def _prefetch_loop(self) -> None:
         """Load weights to GPU with memory-aware batching."""
         while not self._stop:
+            # Wait for VRAM to be available before starting next layer
+            allocated, _ = cuda_memory_gb()
+            if allocated > VRAM_HIGH_GB:
+                print(
+                    f"      [Prefetch] VRAM {allocated:.1f}GB > {VRAM_HIGH_GB:.1f}GB, waiting...", flush=True)
+                if not wait_for_vram(VRAM_SAFE_GB, timeout=120.0):
+                    print(
+                        "      [Prefetch] Timeout waiting for VRAM, continuing cautiously", flush=True)
+
             layer = self.weight_prefetcher.get_layer(timeout=300)
             if layer is None:
                 self.queue.put(None)
@@ -651,19 +703,36 @@ class GPULayerPrefetcher:
             expert_indices = sorted(expert_tensors.keys())
             total_experts = len(expert_indices)
 
-            for batch_start in range(0, total_experts, self.expert_batch_size):
+            # Use adaptive batch size based on current VRAM
+            current_batch_size = get_adaptive_batch_size(
+                self.expert_batch_size)
+
+            batch_start = 0
+            while batch_start < total_experts:
                 if self._stop:
                     break
 
-                batch_end = min(
-                    batch_start + self.expert_batch_size, total_experts)
-                batch_indices = expert_indices[batch_start:batch_end]
-
-                # Check VRAM before loading batch
+                # Dynamically adjust batch size based on VRAM pressure
                 allocated, _ = cuda_memory_gb()
-                if allocated > MAX_VRAM_GB:
+                if allocated > VRAM_CRITICAL_GB:
+                    # Critical: wait for VRAM to drop
+                    print(
+                        f"      [VRAM Critical] {allocated:.1f}GB, waiting...", flush=True)
+                    wait_for_vram(VRAM_HIGH_GB, timeout=60.0)
+                    current_batch_size = get_adaptive_batch_size(
+                        self.expert_batch_size)
+                elif allocated > VRAM_HIGH_GB:
+                    # High: reduce batch size
+                    current_batch_size = max(4, current_batch_size // 2)
                     torch.cuda.empty_cache()
-                    gc.collect()
+                else:
+                    # Normal: use adaptive batch size
+                    current_batch_size = get_adaptive_batch_size(
+                        self.expert_batch_size)
+
+                batch_end = min(
+                    batch_start + current_batch_size, total_experts)
+                batch_indices = expert_indices[batch_start:batch_end]
 
                 stream_idx = (
                     batch_start // self.expert_batch_size) % len(self._streams)
@@ -685,16 +754,21 @@ class GPULayerPrefetcher:
                             ))
                             del W_gpu
 
-                # Sync between batches
-                if batch_start % (self.expert_batch_size * 4) == 0 and batch_start > 0:
-                    torch.cuda.synchronize()
+                # Sync between batches and clear cache
+                torch.cuda.synchronize()
+                if batch_start % (self.expert_batch_size * 2) == 0 and batch_start > 0:
+                    torch.cuda.empty_cache()  # Clear cache more frequently
                     allocated, _ = cuda_memory_gb()
                     print(
                         f"      Experts {batch_start}/{total_experts} loaded ({allocated:.1f}GB)",
                         flush=True
                     )
 
+                # Advance to next batch
+                batch_start = batch_end
+
             torch.cuda.synchronize()
+            torch.cuda.empty_cache()  # Clear cache after all experts
             prep_time = time.perf_counter() - start
 
             allocated, reserved = cuda_memory_gb()
@@ -745,7 +819,7 @@ class GPULayerPrefetcher:
             if pattern in name_lower:
                 return bits, 10.0
 
-        # Compute sensitivity from GPU stats
+        # Compute sensitivity from GPU stats (memory-safe sampling)
         with torch.no_grad():
             w_flat = W.flatten()
             w_abs = w_flat.abs()
@@ -753,10 +827,15 @@ class GPULayerPrefetcher:
             w_mean = w_abs.mean().item()
 
             n_elem = w_flat.numel()
-            if n_elem > 1_000_000:
-                perm = torch.randperm(n_elem, device=W.device)[:1_000_000]
-                sample = w_abs[perm]
+            if n_elem > 500_000:
+                # Use CPU-based random sampling to avoid GPU OOM
+                # Sample indices on CPU, gather on GPU
+                sample_size = min(500_000, n_elem)
+                indices = torch.randint(
+                    0, n_elem, (sample_size,), device='cpu')
+                sample = w_abs[indices.to(W.device)]
                 p99 = torch.quantile(sample, 0.99).item()
+                del sample, indices
             else:
                 p99 = torch.quantile(w_abs, 0.99).item()
 
@@ -814,6 +893,7 @@ class CUDAQuantizer:
         max_bits: int = 8,
         expert_workers: int = 8,
         group_size: int = GROUP_SIZE,
+        expert_batch_size: int = EXPERT_BATCH_SIZE,
     ):
         self.model_path = Path(model_path)
         self.weight_map = weight_map
@@ -822,6 +902,7 @@ class CUDAQuantizer:
         self.max_bits = max_bits
         self.expert_workers = expert_workers
         self.group_size = group_size
+        self.expert_batch_size = expert_batch_size
 
         # Pre-compute Hadamard matrix
         self._hadamard = hadamard_matrix_cuda(HADAMARD_K, CUDA_DEVICE)
@@ -832,14 +913,20 @@ class CUDAQuantizer:
     def initialize(self, calibration_samples: int = 64) -> None:
         """Initialize quantizer (no calibration needed for sensitivity-based)."""
         print(f"\n{'=' * 60}")
-        print(f"CUDA TRELLIS QUANTIZATION FOR QWEN3-CODER-NEXT")
+        print("CUDA TRELLIS QUANTIZATION FOR QWEN3-CODER-NEXT")
         print(f"{'=' * 60}")
-        print(f"\nConfiguration:")
+        print("\nConfiguration:")
         print(f"  Output: {DEFAULT_OUTPUT}")
         print(f"  Bits: {self.min_bits}-{self.max_bits} (layer-sensitive)")
         print(f"  Group size: {self.group_size}")
-        print(f"  Expert batch: {EXPERT_BATCH_SIZE}")
+        print(f"  Expert batch: {self.expert_batch_size} (adaptive)")
         print(f"  CPU workers: {self.expert_workers}")
+        print("\nVRAM Management (dynamic thresholds):")
+        print(f"  Total VRAM: {_TOTAL_VRAM_GB:.1f}GB")
+        print(f"  Safe (<{VRAM_SAFE_GB:.1f}GB): Full speed prefetch")
+        print(
+            f"  High ({VRAM_SAFE_GB:.1f}-{VRAM_CRITICAL_GB:.1f}GB): Reduce batch size")
+        print(f"  Critical (>{VRAM_CRITICAL_GB:.1f}GB): Wait for memory")
 
     def quantize_tensor(
         self, hd: HessianData, idx: int
@@ -1198,14 +1285,14 @@ class CUDAQuantizer:
         weight_prefetcher.start(layer_indices)
 
         print(
-            f"Starting GPU layer prefetcher (expert batch={EXPERT_BATCH_SIZE})..."
+            f"Starting GPU layer prefetcher (expert batch={self.expert_batch_size})..."
         )
         gpu_prefetcher = GPULayerPrefetcher(
             weight_prefetcher=weight_prefetcher,
             config=self.config,
             min_bits=self.min_bits,
             max_bits=self.max_bits,
-            expert_batch_size=EXPERT_BATCH_SIZE,
+            expert_batch_size=self.expert_batch_size,
         )
         gpu_prefetcher.start()
 
@@ -1550,7 +1637,7 @@ def main() -> None:
     num_layers = getattr(config, "num_hidden_layers", NUM_LAYERS)
     num_experts = getattr(config, "num_experts", NUM_EXPERTS)
 
-    print(f"  Weight map: loading...")
+    print("  Weight map: loading...")
 
     # Load weight map
     index_path = model_path / "model.safetensors.index.json"
@@ -1570,6 +1657,7 @@ def main() -> None:
         min_bits=args.min_bits,
         max_bits=args.max_bits,
         expert_workers=args.workers,
+        expert_batch_size=expert_batch_size,
     )
 
     # Run quantization
