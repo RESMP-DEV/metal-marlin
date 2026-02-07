@@ -1,0 +1,132 @@
+{
+  "layers": [
+    {
+      "name": "model.layers.0.self_attn.q_a_proj.weight",
+      "bits": 4,
+      "shape": [
+        16,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.0.self_attn.q_b_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        16
+      ]
+    },
+    {
+      "name": "model.layers.0.self_attn.kv_a_proj_with_mqa.weight",
+      "bits": 4,
+      "shape": [
+        24,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.0.self_attn.kv_b_proj.weight",
+      "bits": 4,
+      "shape": [
+        48,
+        16
+      ]
+    },
+    {
+      "name": "model.layers.0.self_attn.o_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.0.mlp.gate_proj.weight",
+      "bits": 4,
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.0.mlp.up_proj.weight",
+      "bits": 4,
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.0.mlp.down_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        128
+      ]
+    },
+    {
+      "name": "model.layers.1.self_attn.q_a_proj.weight",
+      "bits": 4,
+      "shape": [
+        16,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.1.self_attn.q_b_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        16
+      ]
+    },
+    {
+      "name": "model.layers.1.self_attn.kv_a_proj_with_mqa.weight",
+      "bits": 4,
+      "shape": [
+        24,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.1.self_attn.kv_b_proj.weight",
+      "bits": 4,
+      "shape": [
+        48,
+        16
+      ]
+    },
+    {
+      "name": "model.layers.1.self_attn.o_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.1.mlp.gate_proj.weight",
+      "bits": 4,
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.1.mlp.up_proj.weight",
+      "bits": 4,
+      "shape": [
+        128,
+        64
+      ]
+    },
+    {
+      "name": "model.layers.1.mlp.down_proj.weight",
+      "bits": 4,
+      "shape": [
+        64,
+        128
+      ]
+    }
+  ]
+}

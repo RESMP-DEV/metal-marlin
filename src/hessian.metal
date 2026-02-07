@@ -610,6 +610,9 @@ kernel void hessian_normalize(
     
     const float inv_n = 1.0f / float(n_samples);
     
+    // Per-simdgroup staging to avoid race conditions (4 simdgroups)
+    threadgroup float staging[4][8][8];
+    
     // Each simdgroup processes its sub-tile
     for (uint mi = 0; mi < SG_TILES_PER_DIM; ++mi) {
         uint out_row = d_i + sg_row_offset + mi * 8;
@@ -626,22 +629,20 @@ kernel void hessian_normalize(
                 
                 // Multiply by inv_n: tile * inv_n
                 // We need to scale each element - use staging
-                threadgroup float staging_local[8][8];
-                simdgroup_store(tile, &staging_local[0][0], 8);
+                simdgroup_store(tile, &staging[simd_id][0][0], 8);
                 simdgroup_barrier(mem_flags::mem_threadgroup);
                 
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
                     uint c = elem % 8;
-                    staging_local[r][c] *= inv_n;
+                    staging[simd_id][r][c] *= inv_n;
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);
                 
-                simdgroup_load(tile, &staging_local[0][0], 8);
+                simdgroup_load(tile, &staging[simd_id][0][0], 8);
                 simdgroup_store(tile, H + out_row * hidden_dim + out_col, hidden_dim);
             } else {
                 // Slow path: bounds checking
-                threadgroup float staging[8][8];
                 
                 // Load
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
@@ -649,7 +650,7 @@ kernel void hessian_normalize(
                     uint c = elem % 8;
                     uint gr = out_row + r;
                     uint gc = out_col + c;
-                    staging[r][c] = (gr < hidden_dim && gc < hidden_dim) ? 
+                    staging[simd_id][r][c] = (gr < hidden_dim && gc < hidden_dim) ? 
                                     H[gr * hidden_dim + gc] : 0.0f;
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);
@@ -658,7 +659,7 @@ kernel void hessian_normalize(
                 for (uint elem = simd_lane; elem < 64; elem += 32) {
                     uint r = elem / 8;
                     uint c = elem % 8;
-                    staging[r][c] *= inv_n;
+                    staging[simd_id][r][c] *= inv_n;
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);
                 
@@ -669,7 +670,7 @@ kernel void hessian_normalize(
                     uint gr = out_row + r;
                     uint gc = out_col + c;
                     if (gr < hidden_dim && gc < hidden_dim) {
-                        H[gr * hidden_dim + gc] = staging[r][c];
+                        H[gr * hidden_dim + gc] = staging[simd_id][r][c];
                     }
                 }
                 simdgroup_barrier(mem_flags::mem_threadgroup);

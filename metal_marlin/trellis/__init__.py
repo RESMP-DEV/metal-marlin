@@ -15,6 +15,8 @@ Example:
 
 from __future__ import annotations
 
+from ..kv_cache import CompressedKVCache, TrellisKVCache
+
 # Attention and KV cache
 from .attention import TrellisMLAConfig, TrellisMLAttention, create_mla_projections
 from .config import TrellisModelConfig
@@ -22,6 +24,8 @@ from .config import TrellisModelConfig
 # Dispatch functions
 from .dispatch import (
     dequantize_trellis_weight,
+    dispatch_gemm_trellis_auto,
+    dispatch_gemm_trellis_decode_auto,
     dispatch_sign_flips,
     dispatch_trellis_dequant,
     dispatch_trellis_dequant_fused,
@@ -30,15 +34,31 @@ from .dispatch import (
 
 # Generation
 from .generate import GenerationConfig, TrellisGenerator
-from ..kv_cache import CompressedKVCache, TrellisKVCache
 
 # MLP layers
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear, TrellisModelWrapper
-from .loader import TrellisModelLoader, TrellisWeight
 
-# Core model classes
-from .model import TrellisDecoderLayer, TrellisForCausalLM, TrellisModel, TrellisMoEMLP
+# Core model classes.
+# NOTE: These names are part of the long-standing public API used by call sites
+# importing from `metal_marlin.trellis`, `metal_marlin.trellis.model`, and
+# `metal_marlin.trellis.lm`.
+from .loader import TrellisModelLoader, TrellisWeight
+from .model import (
+    CausalLMOutput as _CausalLMOutput,
+)
+from .model import (
+    TrellisDecoderLayer as _TrellisDecoderLayer,
+)
+from .model import (
+    TrellisForCausalLM as _TrellisForCausalLM,
+)
+from .model import (
+    TrellisModel as _TrellisModel,
+)
+from .model import (
+    TrellisMoEMLP as _TrellisMoEMLP,
+)
 from .moe import TrellisExpert, TrellisMoELayer
 
 # Packing utilities
@@ -53,12 +73,20 @@ from .packing import (
     unpack_trellis_indices,
 )
 
+# Public compatibility aliases.
+CausalLMOutput = _CausalLMOutput
+TrellisForCausalLM = _TrellisForCausalLM
+TrellisModel = _TrellisModel
+TrellisMoEMLP = _TrellisMoEMLP
+TrellisDecoderLayer = _TrellisDecoderLayer
+
 __all__ = [
     # Models
     "TrellisForCausalLM",
     "TrellisModel",
     "TrellisMoEMLP",
     "TrellisDecoderLayer",
+    "CausalLMOutput",
     "TrellisLinear",
     "TrellisModelWrapper",
     "TrellisWeight",
