@@ -2,6 +2,7 @@
 
 Provides Python wrappers for gemm_trellis_moe.metal kernels:
 - dispatch_moe_trellis_swiglu: Fused MoE GEMM with SwiGLU activation
+- dispatch_moe_trellis_swiglu_grouped_fairway: Grouped fairway dispatch path
 
 CRITICAL: The kernel uses per-token expert routing. Each token uses its OWN
 assigned expert from expert_ids[token * top_k + slot], NOT a shared expert
@@ -13,6 +14,7 @@ single batched kernel that processes all experts in parallel.
 
 from __future__ import annotations
 
+import logging
 import struct
 import sys
 import time
@@ -30,6 +32,7 @@ from ..metal_dispatch import (
     mps_tensor_to_metal_buffer,
     require_mps,
 )
+from .kernel_selection import get_kernel_for_batch_size
 
 if "metal_marlin.moe_dispatch" not in sys.modules:
     from metal_marlin import moe_dispatch as _parent_moe_dispatch
@@ -38,9 +41,295 @@ else:
 
 gather_for_experts = _parent_moe_dispatch.gather_for_experts
 group_tokens_by_expert_full = _parent_moe_dispatch.group_tokens_by_expert_full
+group_tokens_by_expert_full_gpu = getattr(
+    _parent_moe_dispatch, "group_tokens_by_expert_full_gpu", None
+)
 
 if HAS_METAL:
     import Metal
+
+
+logger = logging.getLogger(__name__)
+
+_MOE_PARAMS_CACHE_MAX_ENTRIES = 512
+_moe_params_buffer_cache: dict[
+    tuple[int, tuple[int, int, int], tuple[int, int, int, int, int]],
+    Any,
+] = {}
+
+# Lightweight diagnostics/counters for mixed-BPW token grouping.
+_MIXED_BPW_GROUPING_BASE_COUNTERS: dict[str, int] = {
+    "grouping_calls_total": 0,
+    "grouping_gpu_primary_success_total": 0,
+    "grouping_cpu_fallback_total": 0,
+}
+_mixed_bpw_grouping_counters: dict[str, int] = _MIXED_BPW_GROUPING_BASE_COUNTERS.copy()
+_mixed_bpw_last_fallback: dict[str, Any] | None = None
+
+
+def get_mixed_bpw_grouping_fallback_counters() -> dict[str, int]:
+    """Return mixed-BPW token-grouping fallback counters."""
+    return _mixed_bpw_grouping_counters.copy()
+
+
+def get_mixed_bpw_grouping_fallback_diagnostics() -> dict[str, Any]:
+    """Return counters plus the last reason-coded CPU fallback event."""
+    diagnostics: dict[str, Any] = {"counters": get_mixed_bpw_grouping_fallback_counters()}
+    if _mixed_bpw_last_fallback is not None:
+        diagnostics["last_fallback"] = _mixed_bpw_last_fallback.copy()
+    return diagnostics
+
+
+def reset_mixed_bpw_grouping_fallback_counters() -> None:
+    """Reset mixed-BPW token-grouping fallback counters and last event."""
+    global _mixed_bpw_grouping_counters
+    global _mixed_bpw_last_fallback
+    _mixed_bpw_grouping_counters = _MIXED_BPW_GROUPING_BASE_COUNTERS.copy()
+    _mixed_bpw_last_fallback = None
+
+
+def _bump_mixed_bpw_grouping_counter(key: str, amount: int = 1) -> None:
+    _mixed_bpw_grouping_counters[key] = _mixed_bpw_grouping_counters.get(key, 0) + amount
+
+
+def _record_mixed_bpw_grouping_fallback(
+    *,
+    reason_code: str,
+    detail: str,
+    batch_size: int,
+    top_k: int,
+    num_experts: int,
+) -> None:
+    """Record reason-coded diagnostics when grouping falls back from GPU to CPU."""
+    global _mixed_bpw_last_fallback
+    _bump_mixed_bpw_grouping_counter("grouping_cpu_fallback_total")
+    _bump_mixed_bpw_grouping_counter(f"grouping_cpu_fallback_reason_{reason_code}")
+    _mixed_bpw_last_fallback = {
+        "reason_code": reason_code,
+        "detail": detail,
+        "batch_size": batch_size,
+        "top_k": top_k,
+        "num_experts": num_experts,
+    }
+    logger.debug(
+        "Mixed-BPW grouping CPU fallback reason=%s detail=%s batch=%d top_k=%d num_experts=%d",
+        reason_code,
+        detail,
+        batch_size,
+        top_k,
+        num_experts,
+    )
+
+
+def _group_tokens_mixed_bpw_primary_gpu(
+    *,
+    expert_ids: torch.Tensor,
+    expert_probs: torch.Tensor,
+    num_experts: int,
+):
+    """Use GPU token grouping when available, otherwise CPU fallback with diagnostics."""
+    batch_size, top_k = expert_ids.shape
+    _bump_mixed_bpw_grouping_counter("grouping_calls_total")
+
+    if group_tokens_by_expert_full_gpu is None:
+        _record_mixed_bpw_grouping_fallback(
+            reason_code="gpu_grouping_unavailable",
+            detail="group_tokens_by_expert_full_gpu missing",
+            batch_size=batch_size,
+            top_k=top_k,
+            num_experts=num_experts,
+        )
+        return group_tokens_by_expert_full(expert_ids, num_experts)
+
+    if expert_ids.device.type != "mps" or expert_probs.device.type != "mps":
+        _record_mixed_bpw_grouping_fallback(
+            reason_code="non_mps_inputs",
+            detail=f"expert_ids={expert_ids.device.type} expert_probs={expert_probs.device.type}",
+            batch_size=batch_size,
+            top_k=top_k,
+            num_experts=num_experts,
+        )
+        return group_tokens_by_expert_full(expert_ids, num_experts)
+
+    try:
+        dispatch_info = group_tokens_by_expert_full_gpu(
+            expert_ids, expert_probs, num_experts
+        )
+
+        # Validate shape invariants to guard against malformed kernel output.
+        total_assignments = expert_ids.numel()
+        if dispatch_info.expert_offsets.numel() != (num_experts + 1):
+            raise RuntimeError(
+                f"invalid expert_offsets size={dispatch_info.expert_offsets.numel()} "
+                f"expected={num_experts + 1}"
+            )
+        if dispatch_info.sorted_token_indices.numel() != total_assignments:
+            raise RuntimeError(
+                f"invalid sorted_token_indices size={dispatch_info.sorted_token_indices.numel()} "
+                f"expected={total_assignments}"
+            )
+        if dispatch_info.sorted_expert_indices.numel() != total_assignments:
+            raise RuntimeError(
+                f"invalid sorted_expert_indices size={dispatch_info.sorted_expert_indices.numel()} "
+                f"expected={total_assignments}"
+            )
+
+        _bump_mixed_bpw_grouping_counter("grouping_gpu_primary_success_total")
+        return dispatch_info
+    except Exception as exc:
+        _record_mixed_bpw_grouping_fallback(
+            reason_code="gpu_grouping_exception",
+            detail=f"{type(exc).__name__}: {exc}",
+            batch_size=batch_size,
+            top_k=top_k,
+            num_experts=num_experts,
+        )
+        return group_tokens_by_expert_full(expert_ids, num_experts)
+
+
+def prepare_fairway_grouped_inputs(
+    *,
+    expert_ids: torch.Tensor,
+    expert_probs: torch.Tensor,
+    num_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare grouped tensors for mixed-bit fairway grouped-kernel dispatch.
+
+    Uses GPU token grouping as the primary path and falls back to CPU grouping
+    via the existing mixed-BPW fallback diagnostics/counters when needed.
+
+    Args:
+        expert_ids: [batch, top_k] selected expert IDs.
+        expert_probs: [batch, top_k] routing probabilities.
+        num_experts: Total number of experts.
+
+    Returns:
+        Tuple of:
+        - sorted_token_ids: [batch * top_k] int32 token indices grouped by expert.
+        - expert_offsets: [num_experts + 1] int32 cumulative expert offsets.
+        - sorted_probs: [batch * top_k] float16 probabilities aligned to sorted_token_ids.
+    """
+    if expert_ids.dim() != 2 or expert_probs.dim() != 2:
+        raise ValueError(
+            "expert_ids and expert_probs must be rank-2 tensors with shape [batch, top_k]"
+        )
+    if expert_ids.shape != expert_probs.shape:
+        raise ValueError(
+            f"expert_ids shape {tuple(expert_ids.shape)} must match "
+            f"expert_probs shape {tuple(expert_probs.shape)}"
+        )
+
+    dispatch_info = _group_tokens_mixed_bpw_primary_gpu(
+        expert_ids=expert_ids,
+        expert_probs=expert_probs,
+        num_experts=num_experts,
+    )
+
+    sorted_token_ids = dispatch_info.sorted_token_indices.to(torch.int32).contiguous()
+    expert_offsets = dispatch_info.expert_offsets.to(torch.int32).contiguous()
+    sorted_probs = expert_probs[
+        dispatch_info.sorted_token_indices, dispatch_info.sorted_expert_indices
+    ].to(torch.float16).contiguous()
+
+    total_assignments = expert_ids.numel()
+    if sorted_token_ids.numel() != total_assignments:
+        raise RuntimeError(
+            f"invalid sorted_token_ids size={sorted_token_ids.numel()} "
+            f"expected={total_assignments}"
+        )
+    if expert_offsets.numel() != (num_experts + 1):
+        raise RuntimeError(
+            f"invalid expert_offsets size={expert_offsets.numel()} "
+            f"expected={num_experts + 1}"
+        )
+    if sorted_probs.numel() != total_assignments:
+        raise RuntimeError(
+            f"invalid sorted_probs size={sorted_probs.numel()} "
+            f"expected={total_assignments}"
+        )
+
+    return sorted_token_ids, expert_offsets, sorted_probs
+
+
+def _normalize_bit_group_entry(
+    *,
+    bit_tuple: tuple[int, int, int],
+    entry: tuple[Any, Any],
+) -> tuple[list[int], Any]:
+    """Normalize both supported tuple layouts to (expert_list, cached_buffers)."""
+    first, second = entry
+    expert_list: list[int]
+    cached_buffers: Any
+
+    if isinstance(first, list):
+        expert_list = first
+        cached_buffers = second
+    elif isinstance(second, list):
+        expert_list = second
+        cached_buffers = first
+    else:
+        raise RuntimeError(
+            f"bit_group_buffers[{bit_tuple}] must contain an expert list and cached buffers"
+        )
+
+    return expert_list, cached_buffers
+
+
+def _normalize_moe_bits(bits: int | tuple[int, int, int]) -> tuple[int, int, int]:
+    """Normalize uniform/per-projection bits to (gate_bits, up_bits, down_bits)."""
+    if isinstance(bits, tuple):
+        return bits
+    return bits, bits, bits
+
+
+def _get_or_create_moe_params_buffer(
+    *,
+    device: Any,
+    batch_size: int,
+    hidden_dim: int,
+    intermediate_dim: int,
+    num_experts: int,
+    top_k: int,
+    bits: int | tuple[int, int, int],
+) -> Any:
+    """Get/create cached params buffer keyed by device, bits, and dispatch shape."""
+    gate_bits, up_bits, down_bits = _normalize_moe_bits(bits)
+    shape_sig = (batch_size, hidden_dim, intermediate_dim, num_experts, top_k)
+    cache_key = (id(device), (gate_bits, up_bits, down_bits), shape_sig)
+
+    params_buf = _moe_params_buffer_cache.get(cache_key)
+    if params_buf is not None:
+        return params_buf
+
+    # Metal struct: batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
+    #               gate_bits, up_bits, down_bits, tile_size,
+    #               gate_n_levels, up_n_levels, down_n_levels
+    params_data = np.array(
+        [
+            batch_size,
+            hidden_dim,
+            intermediate_dim,
+            num_experts,
+            top_k,
+            gate_bits,
+            up_bits,
+            down_bits,
+            128,
+            1 << gate_bits,
+            1 << up_bits,
+            1 << down_bits,
+        ],
+        dtype=np.uint32,
+    )
+    params_buf = device.newBufferWithBytes_length_options_(
+        params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
+    )
+
+    if len(_moe_params_buffer_cache) >= _MOE_PARAMS_CACHE_MAX_ENTRIES:
+        _moe_params_buffer_cache.clear()
+    _moe_params_buffer_cache[cache_key] = params_buf
+
+    return params_buf
 
 
 class MoEDispatchValidationError(ValueError):
@@ -937,32 +1226,20 @@ def select_moe_kernel(
     Returns:
         Tuple of (kernel_name, tile_n)
     """
-    # Check for specialized kernels for common bit-width combinations
-    # These kernels have compile-time known dequant parameters for better performance
-    if batch_size == 1 and not use_fp32_acc:
-        # GLM-4.7-Flash dominant tuple: gate=6, up=2, down=3
-        if gate_bits == 6 and up_bits == 2 and down_bits == 3:
-            return "moe_trellis_swiglu_decode_6_2_3", 64
-        # Alternative: gate=6, up=3, down=4
-        if gate_bits == 6 and up_bits == 3 and down_bits == 4:
-            return "moe_trellis_swiglu_decode_6_3_4", 64
-        # Alternative: gate=6, up=2, down=4
-        if gate_bits == 6 and up_bits == 2 and down_bits == 4:
-            return "moe_trellis_swiglu_decode_6_2_4", 64
+    return get_kernel_for_batch_size(
+        batch_size=batch_size,
+        use_fp32_acc=use_fp32_acc,
+        gate_bits=gate_bits,
+        up_bits=up_bits,
+        down_bits=down_bits,
+    )
 
-    if batch_size == 1:
-        # Decode kernel for batch_size == 1 (no _fp32acc variant exists)
-        return "moe_trellis_swiglu_decode", 64
-    elif batch_size >= 2:
-        # Prefill4 kernel for batch_size >= 2 (supports _fp32acc variant)
-        if use_fp32_acc:
-            return "moe_trellis_swiglu_prefill4_fp32acc", 64
-        return "moe_trellis_swiglu_prefill4", 64
-    else:
-        # Fallback to base kernel (supports _fp32acc variant)
-        if use_fp32_acc:
-            return "moe_trellis_swiglu_fp32acc", 64
-        return "moe_trellis_swiglu", 64
+
+def _get_moe_tile_n_for_kernel(kernel_name: str) -> int:
+    """Infer tile_n from kernel name for benchmark-only kernel overrides."""
+    if "large_batch" in kernel_name:
+        return 128
+    return 64
 
 
 def get_moe_kernel(
@@ -1279,6 +1556,7 @@ def dispatch_moe_trellis_swiglu(
     cached_buffers: CachedWeightBuffers | None = None,
     buffer_pool: MoEBufferPool | None = None,
     use_fp32_acc: bool = False,
+    kernel_name_override: str | None = None,
 ) -> torch.Tensor:
     """Fused MoE GEMM with Trellis quantization and SwiGLU activation.
 
@@ -1290,12 +1568,30 @@ def dispatch_moe_trellis_swiglu(
 
     Args:
         bits: Either uniform bit width (int) or per-projection (gate, up, down) tuple.
-
-    No validation between steps for maximum performance.
+        kernel_name_override: Optional benchmark-only kernel override. When set,
+            dispatch uses this kernel directly instead of select_moe_kernel(...).
 
     Note: MPS availability is checked at module import time (HAS_MPS) and by
     callers (x.is_mps check in forward()). No per-call validation needed here.
     """
+    # Validation (required for correctness tests)
+    if activations.dim() != 2:
+        raise MoEDispatchValidationError(
+            f"activations must be rank-2 [batch, hidden_dim], got shape={tuple(activations.shape)}"
+        )
+    if activations.shape[1] != hidden_dim:
+        raise MoEDispatchValidationError(
+            f"activations hidden dim mismatch: expected {hidden_dim}, got {activations.shape[1]}"
+        )
+    if activations.dtype != torch.float16:
+        raise MoEDispatchValidationError(
+            f"activations must be float16 for optimized MoE kernels, got {activations.dtype}"
+        )
+    if expert_ids.shape != expert_probs.shape:
+        raise MoEDispatchValidationError(
+            f"expert_ids shape {tuple(expert_ids.shape)} must match expert_probs shape {tuple(expert_probs.shape)}"
+        )
+
     device = lib.device
     batch_size = activations.shape[0]
 
@@ -1391,41 +1687,60 @@ def dispatch_moe_trellis_swiglu(
         grid_buf = mps_tensor_to_metal_buffer(grid, device)
 
     # Allocate output buffer
+    dispatch_top_k = 1  # flattened expert dispatch
     if buffer_pool is not None:
         output_fp32, output_buf = buffer_pool.get_output_buffer(n)
-        # Get cached params buffer from pool
-        # NOTE: Pass n as batch_size and 1 as top_k since we flattened the input
-        params_buf = buffer_pool.get_params_buffer(
-            n, hidden_dim, intermediate_dim, num_experts, 1, bits
-        )
     else:
         output_fp32 = torch.zeros(
             n, hidden_dim, dtype=torch.float32, device="mps")
         output_buf = mps_tensor_to_metal_buffer(
             output_fp32, device, copy_back=True)
-        # Create params buffer (slow path) with per-projection bits support
-        if isinstance(bits, tuple):
-            gate_bits, up_bits, down_bits = bits
-        else:
-            gate_bits = up_bits = down_bits = bits
-        # NOTE: Pass n as batch_size and 1 as top_k
-        # Metal struct: batch_size, hidden_dim, intermediate_dim, num_experts, top_k,
-        #               gate_bits, up_bits, down_bits, tile_size,
-        #               gate_n_levels, up_n_levels, down_n_levels
-        params_data = np.array(
-            [n, hidden_dim, intermediate_dim, num_experts, 1,
-             gate_bits, up_bits, down_bits, 128,
-             1 << gate_bits, 1 << up_bits, 1 << down_bits],
-            dtype=np.uint32,
+
+    # Mixed-BPW and no-pool paths use dedicated cache keyed by device + bits + shape.
+    if isinstance(bits, tuple) or buffer_pool is None:
+        params_buf = _get_or_create_moe_params_buffer(
+            device=device,
+            batch_size=n,
+            hidden_dim=hidden_dim,
+            intermediate_dim=intermediate_dim,
+            num_experts=num_experts,
+            top_k=dispatch_top_k,
+            bits=bits,
         )
-        params_buf = device.newBufferWithBytes_length_options_(
-            params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
+    else:
+        params_buf = buffer_pool.get_params_buffer(
+            n,
+            hidden_dim,
+            intermediate_dim,
+            num_experts,
+            dispatch_top_k,
+            bits,
         )
 
     # Select kernel and compute grid
     # NOTE: Use n (expanded batch) for kernel selection
-    kernel_name, tile_n = select_moe_kernel(n, use_fp32_acc)
-    is_decode_kernel = kernel_name == "moe_trellis_swiglu_decode"
+    if kernel_name_override is None:
+        gate_bits, up_bits, down_bits = (
+            bits if isinstance(bits, tuple) else (None, None, None)
+        )
+        kernel_name, tile_n = select_moe_kernel(
+            n, use_fp32_acc, gate_bits=gate_bits, up_bits=up_bits, down_bits=down_bits
+        )
+    else:
+        # Handle short names from benchmark scripts
+        if kernel_name_override == "decode":
+            kernel_name = "moe_trellis_swiglu_decode"
+        elif kernel_name_override == "prefill4":
+            kernel_name = "moe_trellis_swiglu_prefill4" + ("_fp32acc" if use_fp32_acc else "")
+        elif kernel_name_override == "base":
+            kernel_name = "moe_trellis_swiglu" + ("_fp32acc" if use_fp32_acc else "")
+        elif kernel_name_override == "large_batch":
+            kernel_name = "moe_trellis_swiglu_large_batch"
+        else:
+            kernel_name = kernel_name_override
+        tile_n = _get_moe_tile_n_for_kernel(kernel_name)
+
+    is_decode_kernel = kernel_name.startswith("moe_trellis_swiglu_decode")
     is_prefill4_kernel = "prefill4" in kernel_name
 
     if is_decode_kernel:
@@ -1951,12 +2266,174 @@ def dispatch_moe_fused_router_sorted(
     return expert_ids, expert_probs, sorted_indices, expert_offsets
 
 
+def dispatch_moe_trellis_swiglu_grouped_fairway(
+    *,
+    lib: MetalKernelLibrary,
+    activations: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    sorted_probs: torch.Tensor,
+    cached_buffers: CachedWeightBuffers,
+    bit_tuple: tuple[int, int, int],
+    hidden_dim: int,
+    intermediate_dim: int,
+    num_experts: int,
+    buffer_pool: MoEBufferPool | None = None,
+    use_fp32_acc: bool = False,
+) -> torch.Tensor:
+    """Primary fairway dispatch path using grouped expert inputs.
+
+    Dispatches `moe_trellis_swiglu_grouped` with pre-grouped routing tensors:
+    - `sorted_token_ids` grouped by expert
+    - `expert_offsets` cumulative expert ranges
+    - `sorted_probs` aligned probabilities
+
+    Args:
+        activations: Grouped activations [batch, hidden_dim].
+        sorted_token_ids: [total_assignments] token IDs grouped by expert.
+        expert_offsets: [num_experts + 1] cumulative offsets.
+        sorted_probs: [total_assignments] probabilities aligned to sorted tokens.
+        cached_buffers: Metal buffers for this bit tuple's expert weights.
+        bit_tuple: (gate_bits, up_bits, down_bits) for this group.
+        use_fp32_acc: Ignored for grouped kernel (kept for API compatibility).
+
+    Returns:
+        Output [batch, hidden_dim] in fp16 with weighted accumulation.
+    """
+    del use_fp32_acc  # grouped kernel has no fp32acc variant
+
+    batch_size = activations.shape[0]
+    if activations.dim() != 2:
+        raise MoEDispatchValidationError(
+            f"activations must be rank-2 [batch, hidden_dim], got shape={tuple(activations.shape)}"
+        )
+    if activations.shape[1] != hidden_dim:
+        raise MoEDispatchValidationError(
+            f"activations hidden dim mismatch: expected {hidden_dim}, got {activations.shape[1]}"
+        )
+    if sorted_token_ids.dim() != 1 or expert_offsets.dim() != 1 or sorted_probs.dim() != 1:
+        raise MoEDispatchValidationError(
+            "sorted_token_ids, expert_offsets, and sorted_probs must all be rank-1 tensors"
+        )
+    if sorted_token_ids.numel() != sorted_probs.numel():
+        raise MoEDispatchValidationError(
+            f"sorted_token_ids size {sorted_token_ids.numel()} must match "
+            f"sorted_probs size {sorted_probs.numel()}"
+        )
+    if expert_offsets.numel() != (num_experts + 1):
+        raise MoEDispatchValidationError(
+            f"expert_offsets size {expert_offsets.numel()} must be num_experts+1 ({num_experts + 1})"
+        )
+
+    if batch_size == 0:
+        return torch.zeros(0, hidden_dim, dtype=torch.float16, device=activations.device)
+
+    device = lib.device
+
+    # Reuse pooled activation/output/params buffers when available.
+    if buffer_pool is not None:
+        activations_buf = buffer_pool.get_activation_buffer(batch_size, activations)
+        output_fp32, output_buf = buffer_pool.get_output_buffer(batch_size)
+    else:
+        activations_fp16 = (
+            activations.contiguous()
+            if activations.dtype == torch.float16
+            else activations.half().contiguous()
+        )
+        activations_buf = mps_tensor_to_metal_buffer(activations_fp16, device)
+        output_fp32 = torch.zeros(batch_size, hidden_dim, dtype=torch.float32, device="mps")
+        output_buf = mps_tensor_to_metal_buffer(output_fp32, device, copy_back=True)
+
+    sorted_token_ids_i32 = (
+        sorted_token_ids
+        if sorted_token_ids.dtype == torch.int32 and sorted_token_ids.is_contiguous()
+        else sorted_token_ids.to(torch.int32).contiguous()
+    )
+    expert_offsets_i32 = (
+        expert_offsets
+        if expert_offsets.dtype == torch.int32 and expert_offsets.is_contiguous()
+        else expert_offsets.to(torch.int32).contiguous()
+    )
+    sorted_probs_f16 = (
+        sorted_probs
+        if sorted_probs.dtype == torch.float16 and sorted_probs.is_contiguous()
+        else sorted_probs.to(torch.float16).contiguous()
+    )
+
+    sorted_token_ids_buf = mps_tensor_to_metal_buffer(sorted_token_ids_i32, device)
+    expert_offsets_buf = mps_tensor_to_metal_buffer(expert_offsets_i32, device)
+    sorted_probs_buf = mps_tensor_to_metal_buffer(sorted_probs_f16, device)
+
+    # Grouped kernel does not consume top_k directly; keep params stable for caching.
+    params_top_k = 1
+    if buffer_pool is None:
+        params_buf = _get_or_create_moe_params_buffer(
+            device=device,
+            batch_size=batch_size,
+            hidden_dim=hidden_dim,
+            intermediate_dim=intermediate_dim,
+            num_experts=num_experts,
+            top_k=params_top_k,
+            bits=bit_tuple,
+        )
+    else:
+        params_buf = buffer_pool.get_params_buffer(
+            batch_size,
+            hidden_dim,
+            intermediate_dim,
+            num_experts,
+            params_top_k,
+            bit_tuple,
+        )
+
+    tile_n = 64
+    grid_x = (hidden_dim + tile_n - 1) // tile_n
+
+    buffer_list = [
+        activations_buf,
+        cached_buffers.gate_weights,
+        cached_buffers.gate_scales,
+        cached_buffers.up_weights,
+        cached_buffers.up_scales,
+        cached_buffers.down_weights,
+        cached_buffers.down_scales,
+        cached_buffers.gate_su,
+        cached_buffers.gate_sv,
+        cached_buffers.up_su,
+        cached_buffers.up_sv,
+        cached_buffers.down_su,
+        cached_buffers.down_sv,
+        cached_buffers.grid,
+        sorted_token_ids_buf,
+        expert_offsets_buf,
+        sorted_probs_buf,
+        output_buf,
+        params_buf,
+    ]
+
+    dispatch_kernel(
+        lib,
+        function_name="moe_trellis_swiglu_grouped",
+        grid=(grid_x, num_experts, 1),
+        threadgroup=(128, 1, 1),  # GROUPED_THREADS in gemm_trellis_moe.metal
+        buffers=buffer_list,
+        wait=True,
+    )
+
+    if buffer_pool is not None:
+        output_fp16 = buffer_pool.get_output_fp16(batch_size)
+        output_fp16.copy_(output_fp32)
+        return output_fp16
+
+    return output_fp32.half()
+
+
 def dispatch_moe_per_bit_tuple(
     lib: MetalKernelLibrary,
     activations: torch.Tensor,        # [batch, hidden]
     expert_ids: torch.Tensor,         # [batch, top_k]
     expert_probs: torch.Tensor,       # [batch, top_k]
-    bit_group_buffers: dict[tuple[int,int,int], tuple[CachedWeightBuffers, list[int]]],
+    bit_group_buffers: dict[tuple[int, int, int], tuple[Any, Any]],
     hidden_dim: int,
     intermediate_dim: int,
     num_experts: int,
@@ -1977,8 +2454,10 @@ def dispatch_moe_per_bit_tuple(
         activations: Input activations [batch, hidden_dim].
         expert_ids: Selected expert IDs [batch, top_k].
         expert_probs: Expert routing weights [batch, top_k].
-        bit_group_buffers: Dict mapping bit tuple to (cached_buffers, expert_list).
-            Each tuple is (gate_bits, up_bits, down_bits).
+        bit_group_buffers: Dict mapping bit tuple to one of:
+            - (expert_list, cached_buffers)
+            - (cached_buffers, expert_list)
+            Each key is (gate_bits, up_bits, down_bits).
         hidden_dim: Hidden dimension.
         intermediate_dim: Intermediate (FFN) dimension.
         num_experts: Total number of experts.
@@ -1989,7 +2468,6 @@ def dispatch_moe_per_bit_tuple(
     Returns:
         Output tensor [batch, hidden_dim] in fp16.
     """
-    device = lib.device
     batch_size = activations.shape[0]
 
     # Create or reuse output accumulator in fp32
@@ -2000,38 +2478,16 @@ def dispatch_moe_per_bit_tuple(
     else:
         output_accum.zero_()
 
-    # Process each unique bit tuple group
-    for bit_tuple, (expert_list, cached_buffers) in bit_group_buffers.items():
-        # Skip if cached_buffers is a dict (CPU tensors not yet converted)
-        if isinstance(cached_buffers, dict):
-            continue
-        # Create mask for (batch, slot) pairs that selected experts in this group
-        # expert_list contains expert IDs that use this bit tuple
-        expert_set = set(expert_list)
-
-        # Build mask: True where expert_ids is in expert_set
-        mask = torch.zeros_like(expert_ids, dtype=torch.bool)
-        for expert_id in expert_list:
-            mask |= (expert_ids == expert_id)
-
-        # If no hits, skip this group
-        if not mask.any():
-            continue
-
-        # Get indices of matching (batch, slot) pairs
-        batch_indices, slot_indices = mask.nonzero(as_tuple=True)
-
-        if len(batch_indices) == 0:
-            continue
-
-        # Gather inputs for this group
-        group_activations = activations[batch_indices]
-        group_expert_ids = expert_ids[batch_indices, slot_indices].unsqueeze(1)
-        group_expert_probs = expert_probs[batch_indices, slot_indices].unsqueeze(1)
-
-        # Call dispatch_moe_trellis_swiglu with this group's cached_buffers and bits
-        # Set top_k=1 since we've flattened the slots
-        group_output = dispatch_moe_trellis_swiglu(
+    def _dispatch_legacy_per_tuple(
+        *,
+        group_activations: torch.Tensor,
+        group_expert_ids: torch.Tensor,
+        group_expert_probs: torch.Tensor,
+        bit_tuple: tuple[int, int, int],
+        cached_buffers: CachedWeightBuffers,
+    ) -> torch.Tensor:
+        """Legacy per-tuple dispatch used as compatibility fallback."""
+        return dispatch_moe_trellis_swiglu(
             lib,
             activations=group_activations,
             gate_weights=None,
@@ -2058,6 +2514,72 @@ def dispatch_moe_per_bit_tuple(
             buffer_pool=buffer_pool,
             use_fp32_acc=use_fp32_acc,
         )
+
+    # Process each unique bit tuple group
+    for bit_tuple, entry in bit_group_buffers.items():
+        expert_list, cached_buffers = _normalize_bit_group_entry(
+            bit_tuple=bit_tuple,
+            entry=entry,
+        )
+
+        # Skip if cached_buffers is a dict (CPU tensors not yet converted)
+        if isinstance(cached_buffers, dict):
+            continue
+
+        # Build mask: True where expert_ids routes into this bit tuple.
+        mask = torch.zeros_like(expert_ids, dtype=torch.bool)
+        for expert_id in expert_list:
+            mask |= (expert_ids == expert_id)
+
+        # If no hits, skip this group
+        if not mask.any():
+            continue
+
+        # Get indices of matching (batch, slot) pairs
+        batch_indices, slot_indices = mask.nonzero(as_tuple=True)
+
+        if len(batch_indices) == 0:
+            continue
+
+        # Gather inputs for this group
+        group_activations = activations[batch_indices]
+        group_expert_ids = expert_ids[batch_indices, slot_indices].unsqueeze(1)
+        group_expert_probs = expert_probs[batch_indices, slot_indices].unsqueeze(1)
+
+        # Primary path: grouped fairway dispatch for this active tuple.
+        # Fallback path: preserve previous dispatch_moe_trellis_swiglu behavior.
+        try:
+            sorted_token_ids, expert_offsets, sorted_probs = prepare_fairway_grouped_inputs(
+                expert_ids=group_expert_ids,
+                expert_probs=group_expert_probs,
+                num_experts=num_experts,
+            )
+            group_output = dispatch_moe_trellis_swiglu_grouped_fairway(
+                lib=lib,
+                activations=group_activations,
+                sorted_token_ids=sorted_token_ids,
+                expert_offsets=expert_offsets,
+                sorted_probs=sorted_probs,
+                cached_buffers=cached_buffers,
+                bit_tuple=bit_tuple,
+                hidden_dim=hidden_dim,
+                intermediate_dim=intermediate_dim,
+                num_experts=num_experts,
+                buffer_pool=buffer_pool,
+            )
+        except Exception as exc:
+            logger.debug(
+                "grouped fairway dispatch failed for bits=%s, falling back to legacy path: %s",
+                bit_tuple,
+                exc,
+            )
+            group_output = _dispatch_legacy_per_tuple(
+                group_activations=group_activations,
+                group_expert_ids=group_expert_ids,
+                group_expert_probs=group_expert_probs,
+                bit_tuple=bit_tuple,
+                cached_buffers=cached_buffers,
+            )
 
         # Accumulate weighted outputs in fp32
         # group_output is [num_matches, hidden_dim] in fp16

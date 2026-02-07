@@ -146,7 +146,7 @@ def benchmark_kernel(
                     cached_buffers=cached,
                     buffer_pool=buffer_pool,
                     use_fp32_acc=use_fp32_acc,
-                    kernel_override=kernel_name,
+                    kernel_name_override=kernel_name,
                 )
         torch.mps.synchronize()
         
@@ -182,7 +182,7 @@ def benchmark_kernel(
                     cached_buffers=cached,
                     buffer_pool=buffer_pool,
                     use_fp32_acc=use_fp32_acc,
-                    kernel_override=kernel_name,
+                    kernel_name_override=kernel_name,
                 )
             torch.mps.synchronize()
             times.append(time.perf_counter() - start)
