@@ -132,7 +132,7 @@ def benchmark():
                 bits=w["bits"],
                 cached_buffers=cached_buffers,
                 buffer_pool=buffer_pool,
-                kernel_override="base" 
+                kernel_name_override="base" 
             )
         torch.mps.synchronize()
         
@@ -159,7 +159,7 @@ def benchmark():
                     bits=w["bits"],
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    kernel_override=k
+                    kernel_name_override=k
                 )
             torch.mps.synchronize()
             avg = (time.perf_counter() - start) / 50 * 1000

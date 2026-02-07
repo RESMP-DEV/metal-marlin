@@ -19,6 +19,7 @@ The key difference from v1:
 Usage:
     cd contrib/metal_marlin && uv run python scripts/optimize_structural_v2.py
     cd contrib/metal_marlin && uv run python scripts/optimize_structural_v2.py --kernel marlin_gemm.metal
+    cd contrib/metal_marlin && uv run python scripts/optimize_structural_v2.py --mode mixed_bpw_fairway
 """
 
 from __future__ import annotations
@@ -53,8 +54,8 @@ STRUCTURAL_TRANSFORMS: dict[str, dict] = {
         "description": "Add memory prefetch hint before main loop",
         "pattern": r"(kernel\s+void\s+\w+[^{]+\{)",
         "replacement": r"\1\n    // Prefetch hint: consider simdgroup_async_copy for better memory throughput",
-        "max_applications": 1,
-        "applicable_to": ["gemm", "attention"],
+        "max_applications": 4,
+        "applicable_to": ["gemm", "attention", "moe"],
     },
     # Explicit simdgroup barrier instead of threadgroup barrier
     "simdgroup_barrier": {
@@ -72,7 +73,7 @@ STRUCTURAL_TRANSFORMS: dict[str, dict] = {
         "pattern": r"^(kernel\s+void\s+)(\w+\s*\()",
         "replacement": r"[[max_total_threads_per_threadgroup(256)]]\n\1\2",
         "max_applications": 1,
-        "applicable_to": ["attention"],
+        "applicable_to": ["attention", "moe"],
     },
     # Reduce register pressure with explicit casting
     "half_precision_compute": {
@@ -83,6 +84,132 @@ STRUCTURAL_TRANSFORMS: dict[str, dict] = {
         "applicable_to": ["elementwise"],
     },
 }
+
+DEFAULT_MODE = "default"
+MIXED_BPW_FAIRWAY_MODE = "mixed_bpw_fairway"
+MODE_CHOICES = (DEFAULT_MODE, MIXED_BPW_FAIRWAY_MODE)
+
+MIXED_BPW_FAIRWAY_TARGET_KERNEL = SRC_DIR / "gemm_trellis_moe.metal"
+MIXED_BPW_FAIRWAY_SCOPE_KERNELS = (
+    "moe_trellis_swiglu_decode",
+    "moe_trellis_swiglu_prefill4",
+    "moe_trellis_swiglu_prefill4_fp32acc",
+    "moe_trellis_swiglu_grouped",
+)
+MIXED_BPW_FAIRWAY_PROBLEM_SIZES: list[tuple[int, int, int]] = [
+    # Decode (single/few token)
+    (1, 1536, 2048),
+    (2, 1536, 2048),
+    (4, 1536, 2048),
+    # Prefill4-focused
+    (64, 1536, 2048),
+    (128, 1536, 2048),
+    # Grouped fairway dispatch
+    (6, 1536, 2048),
+    (12, 1536, 2048),
+    (24, 1536, 2048),
+]
+
+
+def _find_kernel_block_span(source: str, kernel_name: str) -> tuple[int, int] | None:
+    """Find [start, end) span for a `kernel void <kernel_name>(...) { ... }` block."""
+    import re as re_module
+
+    match = re_module.search(rf"kernel\s+void\s+{re_module.escape(kernel_name)}\s*\(", source)
+    if not match:
+        return None
+
+    brace_start = source.find("{", match.end())
+    if brace_start < 0:
+        return None
+
+    depth = 0
+    for idx in range(brace_start, len(source)):
+        char = source[idx]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return match.start(), idx + 1
+
+    return None
+
+
+def _collect_kernel_scoped_content(source: str, kernel_names: list[str]) -> str:
+    """Collect and concatenate kernel blocks by name."""
+    blocks: list[str] = []
+    for kernel_name in kernel_names:
+        span = _find_kernel_block_span(source, kernel_name)
+        if span is None:
+            continue
+        start, end = span
+        blocks.append(source[start:end])
+    return "\n\n".join(blocks)
+
+
+def _apply_transform(
+    source: str,
+    pattern: str,
+    replacement: str,
+    max_applications: int,
+    scope_kernel_names: list[str] | None = None,
+) -> tuple[str, int]:
+    """Apply regex replacement globally or only inside selected kernel blocks."""
+    import re as re_module
+
+    flags = re_module.MULTILINE if pattern.startswith("^") else 0
+    modified = source
+    count = 0
+
+    if scope_kernel_names:
+        for kernel_name in scope_kernel_names:
+            if count >= max_applications:
+                break
+            span = _find_kernel_block_span(modified, kernel_name)
+            if span is None:
+                continue
+            start, end = span
+            block = modified[start:end]
+            new_block, applied = re_module.subn(
+                pattern,
+                replacement,
+                block,
+                count=max_applications - count,
+                flags=flags,
+            )
+            if applied > 0:
+                modified = f"{modified[:start]}{new_block}{modified[end:]}"
+                count += applied
+    else:
+        for _ in range(max_applications):
+            next_modified = re_module.sub(pattern, replacement, modified, count=1, flags=flags)
+            if next_modified == modified:
+                break
+            modified = next_modified
+            count += 1
+
+    return modified, count
+
+
+def get_mode_scope_kernel_names(mode: str, kernel_path: Path) -> list[str] | None:
+    """Return kernel names to scope transforms to, if mode requires it."""
+    if (
+        mode == MIXED_BPW_FAIRWAY_MODE
+        and kernel_path.resolve() == MIXED_BPW_FAIRWAY_TARGET_KERNEL.resolve()
+    ):
+        return list(MIXED_BPW_FAIRWAY_SCOPE_KERNELS)
+    return None
+
+
+def get_problem_sizes_for_kernel(kernel_path: Path, mode: str = DEFAULT_MODE) -> list[tuple[int, int, int]]:
+    """Get benchmark sizes for kernel path, with optional mode-specific override."""
+    if (
+        mode == MIXED_BPW_FAIRWAY_MODE
+        and kernel_path.resolve() == MIXED_BPW_FAIRWAY_TARGET_KERNEL.resolve()
+    ):
+        return list(MIXED_BPW_FAIRWAY_PROBLEM_SIZES)
+    return get_problem_sizes_for_category(categorize_kernel(kernel_path))
 
 
 def categorize_kernel(kernel_path: Path) -> str:
@@ -118,12 +245,18 @@ def get_problem_sizes_for_category(category: str) -> list[tuple[int, int, int]]:
         return [(1, 4096, 4096), (32, 4096, 4096), (256, 4096, 4096)]
 
 
-def get_applicable_transforms(kernel_path: Path) -> list[tuple[str, dict]]:
+def get_applicable_transforms(kernel_path: Path, mode: str = DEFAULT_MODE) -> list[tuple[str, dict]]:
     """Get transforms applicable to this kernel."""
     import re as re_module
 
     category = categorize_kernel(kernel_path)
     content = kernel_path.read_text()
+    scope_kernel_names = get_mode_scope_kernel_names(mode, kernel_path)
+    search_content = (
+        _collect_kernel_scoped_content(content, scope_kernel_names)
+        if scope_kernel_names
+        else content
+    )
 
     applicable = []
     for name, transform in STRUCTURAL_TRANSFORMS.items():
@@ -139,10 +272,13 @@ def get_applicable_transforms(kernel_path: Path) -> list[tuple[str, dict]]:
         # Check if pattern exists in kernel (use MULTILINE for ^ patterns)
         pattern = transform["pattern"]
         flags = re_module.MULTILINE if pattern.startswith("^") else 0
-        if not re_module.search(pattern, content, flags):
+        if not re_module.search(pattern, search_content, flags):
             continue
 
-        applicable.append((name, transform))
+        transform_config = dict(transform)
+        if scope_kernel_names:
+            transform_config["scope_kernel_names"] = scope_kernel_names
+        applicable.append((name, transform_config))
 
     return applicable
 
@@ -157,6 +293,8 @@ def generate_benchmark_code(
     """Generate Python benchmark code that ALWAYS runs and saves results."""
     problem_str = ", ".join(f"[{m},{n},{k}]" for m, n, k in problem_sizes)
     variant_hash = hashlib.md5(f"{transform_name}:{kernel_path.name}".encode()).hexdigest()[:8]
+    scope_kernel_names = transform.get("scope_kernel_names", [])
+    scope_kernel_names_json = json.dumps(scope_kernel_names)
 
     return f"""
 import json
@@ -175,16 +313,64 @@ transform_name = '{transform_name}'
 pattern = r'{transform["pattern"]}'
 replacement = r'{transform["replacement"]}'
 max_applications = {transform.get("max_applications", 1)}
+scope_kernel_names = {scope_kernel_names_json}
+
+def _find_kernel_block_span(source, kernel_name):
+    match = re.search(rf"kernel\\s+void\\s+{{re.escape(kernel_name)}}\\s*\\(", source)
+    if not match:
+        return None
+
+    brace_start = source.find("{{", match.end())
+    if brace_start < 0:
+        return None
+
+    depth = 0
+    for idx in range(brace_start, len(source)):
+        char = source[idx]
+        if char == "{{":
+            depth += 1
+        elif char == "}}":
+            depth -= 1
+            if depth == 0:
+                return match.start(), idx + 1
+    return None
+
+def _apply_transform(source):
+    flags = re.MULTILINE if pattern.startswith("^") else 0
+    modified = source
+    count = 0
+
+    if scope_kernel_names:
+        for kernel_name in scope_kernel_names:
+            if count >= max_applications:
+                break
+            span = _find_kernel_block_span(modified, kernel_name)
+            if span is None:
+                continue
+            start, end = span
+            block = modified[start:end]
+            new_block, applied = re.subn(
+                pattern,
+                replacement,
+                block,
+                count=max_applications - count,
+                flags=flags,
+            )
+            if applied > 0:
+                modified = modified[:start] + new_block + modified[end:]
+                count += applied
+    else:
+        for _ in range(max_applications):
+            new_modified = re.sub(pattern, replacement, modified, count=1, flags=flags)
+            if new_modified == modified:
+                break
+            modified = new_modified
+            count += 1
+
+    return modified, count
 
 # Apply transformation
-modified = original
-count = 0
-for _ in range(max_applications):
-    new_modified = re.sub(pattern, replacement, modified, count=1)
-    if new_modified == modified:
-        break
-    modified = new_modified
-    count += 1
+modified, count = _apply_transform(original)
 
 result = {{
     'variant': '{transform_name}',
@@ -299,11 +485,11 @@ def generate_task(
     transform_name: str,
     transform: dict,
     session_id: str,
+    mode: str = DEFAULT_MODE,
 ) -> dict:
     """Generate a task with embedded benchmark code."""
 
-    category = categorize_kernel(kernel_path)
-    problem_sizes = get_problem_sizes_for_category(category)
+    problem_sizes = get_problem_sizes_for_kernel(kernel_path, mode)
 
     benchmark_code = generate_benchmark_code(
         kernel_path, transform_name, transform, session_id, problem_sizes
@@ -444,6 +630,13 @@ def find_all_metal_kernels() -> list[Path]:
     return sorted(kernels)
 
 
+def get_mode_target_kernels(mode: str) -> list[Path]:
+    """Get the list of kernel files targeted by mode."""
+    if mode == MIXED_BPW_FAIRWAY_MODE:
+        return [MIXED_BPW_FAIRWAY_TARGET_KERNEL]
+    return find_all_metal_kernels()
+
+
 def generate_task_yaml(
     tasks: list[dict],
     session_id: str,
@@ -487,9 +680,9 @@ def run_benchmark_directly(
     transform_name: str,
     transform: dict,
     session_id: str,
+    mode: str = DEFAULT_MODE,
 ) -> dict:
     """Run benchmark directly without going through task queue."""
-    import re
     import time
 
     try:
@@ -516,19 +709,16 @@ def run_benchmark_directly(
     pattern = transform["pattern"]
     replacement = transform["replacement"]
     max_applications = transform.get("max_applications", 1)
-
-    # Use MULTILINE for patterns that use ^ (start of line)
-    flags = re.MULTILINE if pattern.startswith("^") else 0
+    scope_kernel_names = transform.get("scope_kernel_names")
 
     # Apply transformation
-    modified = original
-    count = 0
-    for _ in range(max_applications):
-        new_modified = re.sub(pattern, replacement, modified, count=1, flags=flags)
-        if new_modified == modified:
-            break
-        modified = new_modified
-        count += 1
+    modified, count = _apply_transform(
+        source=original,
+        pattern=pattern,
+        replacement=replacement,
+        max_applications=max_applications,
+        scope_kernel_names=scope_kernel_names,
+    )
 
     result = {
         "variant": transform_name,
@@ -547,8 +737,7 @@ def run_benchmark_directly(
     kernel_path.write_text(modified)
 
     try:
-        category = categorize_kernel(kernel_path)
-        problem_sizes = get_problem_sizes_for_category(category)
+        problem_sizes = get_problem_sizes_for_kernel(kernel_path, mode)
 
         # Benchmark BASELINE first
         kernel_path.write_text(original)
@@ -622,6 +811,17 @@ def main():
         description="Generate structural optimization tasks with embedded benchmarks",
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=MODE_CHOICES,
+        default=DEFAULT_MODE,
+        help=(
+            "Optimization mode. "
+            "'default' keeps existing behavior; "
+            "'mixed_bpw_fairway' scopes to fairway decode/prefill4/grouped kernels."
+        ),
+    )
+    parser.add_argument(
         "--kernel",
         type=str,
         help="Specific kernel to optimize (partial name match)",
@@ -646,7 +846,14 @@ def main():
     args = parser.parse_args()
 
     # Find kernels
-    kernels = find_all_metal_kernels()
+    kernels = get_mode_target_kernels(args.mode)
+
+    missing_kernels = [k for k in kernels if not k.exists()]
+    if missing_kernels:
+        print("Required kernel file(s) not found:")
+        for kernel in missing_kernels:
+            print(f"  - {kernel}")
+        return
 
     if args.kernel:
         kernels = [k for k in kernels if args.kernel.lower() in k.name.lower()]
@@ -658,7 +865,7 @@ def main():
     # Find applicable transforms for each kernel
     kernel_transforms: list[tuple[Path, str, dict]] = []
     for kernel in kernels:
-        transforms = get_applicable_transforms(kernel)
+        transforms = get_applicable_transforms(kernel, mode=args.mode)
         for name, transform in transforms:
             kernel_transforms.append((kernel, name, transform))
 
@@ -683,6 +890,7 @@ def main():
         print("Structural Metal Kernel Optimization v2 - DIRECT RUN")
         print("=" * 70)
         print(f"Session: {session_id}")
+        print(f"Mode: {args.mode}")
         print(f"Testing {len(kernel_transforms)} transformations...")
         print()
 
@@ -695,7 +903,7 @@ def main():
         for i, (kernel, name, transform) in enumerate(kernel_transforms, 1):
             print(f"[{i}/{len(kernel_transforms)}] {kernel.name} - {name}...")
 
-            result = run_benchmark_directly(kernel, name, transform, session_id)
+            result = run_benchmark_directly(kernel, name, transform, session_id, mode=args.mode)
             all_results.append(result)
 
             # Save individual result
@@ -745,7 +953,7 @@ def main():
     # Generate tasks for AlphaHENG
     tasks = []
     for kernel, name, transform in kernel_transforms:
-        task = generate_task(kernel, name, transform, session_id)
+        task = generate_task(kernel, name, transform, session_id, mode=args.mode)
         tasks.append(task)
 
     # Add collect and apply tasks
@@ -760,6 +968,7 @@ def main():
     print("Structural Metal Kernel Optimization v2")
     print("=" * 70)
     print(f"Session: {session_id}")
+    print(f"Mode: {args.mode}")
     print(f"Kernels: {len(kernels)}")
     print(f"Transforms: {len(kernel_transforms)}")
     print(f"Total tasks: {len(tasks)}")

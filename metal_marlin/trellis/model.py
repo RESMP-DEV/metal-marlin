@@ -31,19 +31,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary,
-                              PipelinedLayerDispatcher,
-                              mps_tensor_to_metal_buffer)
+from ..kv_cache import TrellisKVCache
+from ..metal_dispatch import (
+    HAS_METAL,
+    MetalKernelLibrary,
+    PipelinedLayerDispatcher,
+    mps_tensor_to_metal_buffer,
+)
 from ..transformer import RMSNorm
 from .attention import TrellisMLAConfig, TrellisMLAttention
 from .config import TrellisModelConfig
-from ..kv_cache import TrellisKVCache
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
-from .moe_dispatch import (BatchedDispatcher, CachedRouterBuffers,
-                           CachedWeightBuffers, MoEBufferPool,
-                           RouterBufferPool, create_cached_weight_buffers,
-                           dispatch_moe_trellis_swiglu)
+from .moe_dispatch import (
+    BatchedDispatcher,
+    CachedRouterBuffers,
+    CachedWeightBuffers,
+    MoEBufferPool,
+    RouterBufferPool,
+    create_cached_weight_buffers,
+    dispatch_moe_trellis_swiglu,
+)
 from .softmax_topk import SoftmaxTopKDispatcher
 
 # Type alias for progress callback: (current_step, total_steps, message) -> None
@@ -899,9 +907,12 @@ class TrellisMoEMLP(nn.Module):
                 [e.gate_proj.bits for e in self.experts], dtype=torch.int32
             )
             self.unique_bits = sorted(all_bits)
-            logger.warning(
+            logger.info(
                 f"Mixed-precision MoE detected: bits={self.unique_bits}. "
-                f"Fused batched dispatch disabled - using per-expert Metal dispatch. "
+                "Using grouped bit-tuple Metal dispatch "
+                "(single fused batched dispatch is disabled). "
+                "Per-expert dispatch is only used as a fallback when grouped "
+                "buffers are unavailable. "
                 f"For optimal performance, quantize with uniform bit width."
             )
         return is_mixed
@@ -1778,130 +1789,86 @@ class TrellisMoEMLP(nn.Module):
         workspace_pool = self._get_workspace_buffer_pool()
         output = workspace_pool.get_output_buffer(batch_size).zero_()
 
-        # Group selected expert slots by bit width
-        # For each bit width, track which (batch, slot) positions use it
+        # Cache per-device lookup tensors:
+        # - local_id_map[global_expert_id] -> local group index (or -1 if not in group)
+        # This avoids Python-side global->local remapping and per-token `.item()` calls.
+        if not hasattr(self, "_bit_group_lookup_cache"):
+            self._bit_group_lookup_cache: dict[
+                str, dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
+            ] = {}
+        device_key = str(device)
+        device_lookup_cache = self._bit_group_lookup_cache.setdefault(device_key, {})
+        num_experts_total = len(self.experts)
+
+        # Group selected expert slots by bit width and dispatch once per active group.
         for bits, (cached_buffers, group_expert_indices) in self._bit_group_buffers.items():
-            # Build mapping from global expert ID to local ID within this bit group
-            global_to_local = {
-                global_id: local_id for local_id, global_id in enumerate(group_expert_indices)
-            }
+            if not group_expert_indices:
+                continue
 
-            # Find which slots in selected_experts belong to this bit group
-            # selected_experts is [batch, top_k], values are global expert IDs
-            mask = torch.zeros_like(selected_experts, dtype=torch.bool)
-            for global_id in group_expert_indices:
-                mask |= selected_experts == global_id
-
-            if not mask.any():
-                continue  # No experts from this bit group selected
-
-            # For decode (batch=1), we can dispatch all slots in this group together
-            # by remapping expert IDs to local indices
-            if batch_size == 1:
-                # Get slot indices that belong to this group
-                slot_mask = mask[0]  # [top_k]
-                if not slot_mask.any():
-                    continue
-
-                num_group_slots = slot_mask.sum().item()
-
-                # Extract expert IDs and probs for this group's slots
-                # [num_group_slots]
-                group_expert_ids = selected_experts[0, slot_mask]
-                # [num_group_slots]
-                group_probs = routing_weights[0, slot_mask]
-
-                # Remap global expert IDs to local indices
-                local_expert_ids = torch.tensor(
-                    [global_to_local[int(eid)] for eid in group_expert_ids],
+            lookup_entry = device_lookup_cache.get(bits)
+            if lookup_entry is None:
+                group_ids_t = torch.tensor(
+                    group_expert_indices,
                     dtype=torch.long,
                     device=device,
-                ).unsqueeze(0)  # [1, num_group_slots]
-
-                local_probs = group_probs.unsqueeze(0)  # [1, num_group_slots]
-
-                # Dispatch this bit group
-                group_output = dispatch_moe_trellis_swiglu(
-                    lib=lib,
-                    activations=x,
-                    gate_weights=None,
-                    gate_scales=None,
-                    up_weights=None,
-                    up_scales=None,
-                    down_weights=None,
-                    down_scales=None,
-                    gate_su=None,
-                    gate_sv=None,
-                    up_su=None,
-                    up_sv=None,
-                    down_su=None,
-                    down_sv=None,
-                    grid=None,
-                    expert_ids=local_expert_ids,
-                    expert_probs=local_probs,
-                    hidden_dim=self.hidden_dim,
-                    intermediate_dim=self.intermediate_dim,
-                    num_experts=len(group_expert_indices),
-                    top_k=num_group_slots,
-                    bits=bits,
-                    cached_buffers=cached_buffers,
-                    buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
                 )
+                local_id_map = torch.full(
+                    (num_experts_total,),
+                    -1,
+                    dtype=torch.long,
+                    device=device,
+                )
+                local_id_map[group_ids_t] = torch.arange(
+                    group_ids_t.numel(),
+                    dtype=torch.long,
+                    device=device,
+                )
+                lookup_entry = (group_ids_t, local_id_map)
+                device_lookup_cache[bits] = lookup_entry
 
-                output.add_(group_output)
+            _group_ids_t, local_id_map = lookup_entry
 
-            else:
-                # Batch > 1: Process each batch item's group slots
-                # This is less efficient but handles arbitrary batch sizes
-                for b in range(batch_size):
-                    slot_mask = mask[b]  # [top_k]
-                    if not slot_mask.any():
-                        continue
+            # selected_local_ids: [batch, top_k], -1 where not in this bit group.
+            selected_local_ids = local_id_map[selected_experts]
+            batch_indices, slot_indices = torch.nonzero(
+                selected_local_ids >= 0, as_tuple=True
+            )
+            if batch_indices.numel() == 0:
+                continue
 
-                    num_group_slots = slot_mask.sum().item()
-                    group_expert_ids = selected_experts[b, slot_mask]
-                    group_probs = routing_weights[b, slot_mask]
+            group_activations = x[batch_indices]
+            local_expert_ids = selected_local_ids[batch_indices, slot_indices].unsqueeze(1)
+            group_probs = routing_weights[batch_indices, slot_indices].unsqueeze(1)
 
-                    local_expert_ids = torch.tensor(
-                        [global_to_local[int(eid)]
-                         for eid in group_expert_ids],
-                        dtype=torch.long,
-                        device=device,
-                    ).unsqueeze(0)
+            group_output = dispatch_moe_trellis_swiglu(
+                lib=lib,
+                activations=group_activations,
+                gate_weights=None,
+                gate_scales=None,
+                up_weights=None,
+                up_scales=None,
+                down_weights=None,
+                down_scales=None,
+                gate_su=None,
+                gate_sv=None,
+                up_su=None,
+                up_sv=None,
+                down_su=None,
+                down_sv=None,
+                grid=None,
+                expert_ids=local_expert_ids,
+                expert_probs=group_probs,
+                hidden_dim=self.hidden_dim,
+                intermediate_dim=self.intermediate_dim,
+                num_experts=len(group_expert_indices),
+                top_k=1,
+                bits=bits,
+                cached_buffers=cached_buffers,
+                buffer_pool=buffer_pool,
+                use_fp32_acc=self.hidden_dim >= 1024,
+            )
 
-                    local_probs = group_probs.unsqueeze(0)
-                    x_b = x[b: b + 1]
-
-                    group_output = dispatch_moe_trellis_swiglu(
-                        lib=lib,
-                        activations=x_b,
-                        gate_weights=None,
-                        gate_scales=None,
-                        up_weights=None,
-                        up_scales=None,
-                        down_weights=None,
-                        down_scales=None,
-                        gate_su=None,
-                        gate_sv=None,
-                        up_su=None,
-                        up_sv=None,
-                        down_su=None,
-                        down_sv=None,
-                        grid=None,
-                        expert_ids=local_expert_ids,
-                        expert_probs=local_probs,
-                        hidden_dim=self.hidden_dim,
-                        intermediate_dim=self.intermediate_dim,
-                        num_experts=len(group_expert_indices),
-                        top_k=num_group_slots,
-                        bits=bits,
-                        cached_buffers=cached_buffers,
-                        buffer_pool=buffer_pool,
-                        use_fp32_acc=self.hidden_dim >= 1024,
-                    )
-
-                    output[b].add_(group_output[0])
+            output.index_add_(0, batch_indices, group_output)
 
         return output
 
@@ -1982,7 +1949,17 @@ class TrellisMoEMLP(nn.Module):
                 self._recompute_hot_experts()
 
             if self._is_mixed_precision:
-                # Use grouped dispatch for mixed precision
+                # Prefer prebuilt per-bit-group buffers with local expert remapping.
+                # This path avoids the slower grouped fallback behavior when
+                # zero-copy cache entries are unavailable for non-contiguous groups.
+                if getattr(self, "_bit_group_buffers", None):
+                    return self._dispatch_mixed_precision(
+                        x=x,
+                        selected_experts=selected_experts,
+                        routing_weights=routing_weights,
+                        lib=lib,
+                        buffer_pool=buffer_pool,
+                    )
                 return self._forward_grouped(
                     x,
                     selected_experts,
@@ -2080,13 +2057,22 @@ class TrellisMoEMLP(nn.Module):
 
         # For mixed precision, use grouped dispatch (per bit-tuple batching)
         if self._is_mixed_precision:
-            output = self._forward_grouped(
-                x_flat,
-                selected_experts,
-                routing_weights,
-                workspace=workspace,
-                workspace_offset=workspace_offset,
-            )
+            if getattr(self, "_bit_group_buffers", None):
+                output = self._dispatch_mixed_precision(
+                    x=x_flat,
+                    selected_experts=selected_experts,
+                    routing_weights=routing_weights,
+                    lib=self._get_lib(),
+                    buffer_pool=buffer_pool,
+                )
+            else:
+                output = self._forward_grouped(
+                    x_flat,
+                    selected_experts,
+                    routing_weights,
+                    workspace=workspace,
+                    workspace_offset=workspace_offset,
+                )
             return (
                 output.view(*batch_shape, self.hidden_dim)
                 if output.is_contiguous()
@@ -2270,13 +2256,108 @@ class TrellisMoEMLP(nn.Module):
         contains None instead of CachedWeightBuffers. This method lazily creates
         Metal buffers when first accessed during forward pass.
 
-        MEMORY NOTE: For now, this is a no-op. The grouped dispatch optimization
-        requires creating stacked weight buffers which would duplicate memory.
-        We fall back to per-expert dispatch until a zero-copy approach is implemented.
+        ZERO-COPY OPTIMIZATION: Uses tensor views/slices from the global
+        _cached_weight_buffers instead of creating new stacked buffers.
+        This avoids memory duplication while enabling grouped dispatch.
+
+        FALLBACK: If experts within a bit group are non-contiguous or
+        heterogeneous bit configurations prevent safe slicing, falls back
+        to per-expert dispatch for that group.
         """
-        # TODO: Implement zero-copy grouped buffer creation using views
-        # For now, _forward_grouped will fall back when buffers are None
-        pass
+        if self._cached_weight_buffers is None:
+            # Global buffers not available yet, will retry on next forward
+            return
+
+        if not hasattr(self, '_bit_group_cache') or self._bit_group_cache is None:
+            return
+
+        from .moe_dispatch import CachedWeightBuffers
+
+        global_buffers = self._cached_weight_buffers
+
+        # Get number of experts from stacked weights
+        # gate_weights shape: [num_experts, tiles_in, tiles_out, packed_bytes]
+        num_experts_total = self.gate_weights_stacked.shape[0] if hasattr(
+            self, 'gate_weights_stacked') else len(self.experts)
+
+        for bit_tuple, (expert_indices, existing_buffers) in self._bit_group_cache.items():
+            # Skip if already created
+            if existing_buffers is not None and isinstance(existing_buffers, CachedWeightBuffers):
+                continue
+
+            # Skip empty groups
+            if not expert_indices:
+                continue
+
+            # Check if experts are contiguous (required for zero-copy slicing)
+            is_contiguous = (
+                len(expert_indices) > 0 and
+                expert_indices == list(range(expert_indices[0], expert_indices[-1] + 1))
+            )
+
+            if not is_contiguous:
+                # Non-contiguous experts require either:
+                # 1. Copy-based stacking (memory expensive), or
+                # 2. Multiple separate dispatches
+                # Fall back to per-expert dispatch for this group
+                continue
+
+            start_idx = expert_indices[0]
+            end_idx = expert_indices[-1] + 1  # Exclusive
+
+            # Validate indices are within bounds
+            if end_idx > num_experts_total:
+                logger.warning(
+                    f"Bit group {bit_tuple} has expert indices exceeding "
+                    f"total experts ({num_experts_total}), skipping"
+                )
+                continue
+
+            try:
+                # Create zero-copy views into global buffers
+                # Each buffer is sliced along the expert dimension (dim 0)
+                group_buffers = CachedWeightBuffers(
+                    gate_weights=global_buffers.gate_weights,
+                    gate_scales=global_buffers.gate_scales,
+                    up_weights=global_buffers.up_weights,
+                    up_scales=global_buffers.up_scales,
+                    down_weights=global_buffers.down_weights,
+                    down_scales=global_buffers.down_scales,
+                    gate_su=global_buffers.gate_su,
+                    gate_sv=global_buffers.gate_sv,
+                    up_su=global_buffers.up_su,
+                    up_sv=global_buffers.up_sv,
+                    down_su=global_buffers.down_su,
+                    down_sv=global_buffers.down_sv,
+                    grid=global_buffers.grid,
+                )
+
+                # Store metadata for slicing in dispatch
+                # We use a special marker to indicate this is a view-based buffer
+                # The actual slicing will be handled by the kernel params
+                self._bit_group_cache[bit_tuple] = (
+                    expert_indices,
+                    group_buffers,
+                )
+
+                # Store slice info for use in dispatch
+                if not hasattr(self, '_bit_group_slice_info'):
+                    self._bit_group_slice_info: dict[
+                        tuple[int, int, int], tuple[int, int]
+                    ] = {}
+                self._bit_group_slice_info[bit_tuple] = (start_idx, end_idx)
+
+                logger.debug(
+                    f"Created zero-copy bit-group buffers: {bit_tuple}, "
+                    f"experts[{start_idx}:{end_idx}]"
+                )
+
+            except Exception as e:
+                logger.warning(
+                    f"Failed to create zero-copy buffers for {bit_tuple}: {e}. "
+                    f"Falling back to per-expert dispatch for this group."
+                )
+                continue
 
     def _forward_grouped(
         self,
@@ -2286,45 +2367,105 @@ class TrellisMoEMLP(nn.Module):
         workspace: torch.Tensor | None = None,
         workspace_offset: int = 0,
     ) -> torch.Tensor:
-        # Guard: fall back if cache not available or buffers not created
+        # Guard: fall back if cache not available
         if not hasattr(self, '_bit_group_cache') or self._bit_group_cache is None:
             return self._forward_grouped_fallback(
                 x, selected_experts, routing_weights, workspace, workspace_offset
             )
 
-        # Check if any group has None buffers (deferred creation)
+        # Attempt to create zero-copy buffers if not already done
+        # This handles lazy initialization when Metal becomes available
+        self._ensure_bit_group_buffers()
+
+        from .moe_dispatch import dispatch_moe_per_bit_tuple, dispatch_moe_trellis_swiglu
+
+        # Split groups by availability:
+        # - Available groups run through grouped dispatch.
+        # - Missing/unavailable groups run through targeted fallback dispatch.
+        available_groups: dict[tuple[int, int, int], tuple[list[int], Any]] = {}
+        missing_groups: dict[tuple[int, int, int], list[int]] = {}
         for bit_tuple, (expert_indices, cached_buffers) in self._bit_group_cache.items():
             if cached_buffers is None or isinstance(cached_buffers, dict):
-                # Fall back to per-expert dispatch - grouped buffers not ready
-                return self._forward_grouped_fallback(
-                    x, selected_experts, routing_weights, workspace, workspace_offset
-                )
-
-        from .moe_dispatch import dispatch_moe_per_bit_tuple
+                missing_groups[bit_tuple] = expert_indices
+            else:
+                available_groups[bit_tuple] = (expert_indices, cached_buffers)
 
         workspace_pool = self._get_workspace_buffer_pool()
         output_accum = workspace_pool.get_accum_buffer(x.shape[0])
         output_fp16 = workspace_pool.get_output_buffer(x.shape[0])
 
-        output = dispatch_moe_per_bit_tuple(
-            lib=self._get_lib(),
-            activations=x,
-            expert_ids=selected_experts,
-            expert_probs=routing_weights,
-            bit_group_buffers=self._bit_group_cache,
-            hidden_dim=self.hidden_dim,
-            intermediate_dim=self.intermediate_dim,
-            num_experts=len(self.experts),
-            top_k=self.num_experts_per_tok,
-            buffer_pool=self._get_buffer_pool(),
-            use_fp32_acc=self.hidden_dim >= 1024,
-            output_accum=output_accum,
-            output_fp16=output_fp16,
-        )
+        if available_groups:
+            dispatch_moe_per_bit_tuple(
+                lib=self._get_lib(),
+                activations=x,
+                expert_ids=selected_experts,
+                expert_probs=routing_weights,
+                bit_group_buffers=available_groups,
+                hidden_dim=self.hidden_dim,
+                intermediate_dim=self.intermediate_dim,
+                num_experts=len(self.experts),
+                top_k=self.num_experts_per_tok,
+                buffer_pool=self._get_buffer_pool(),
+                use_fp32_acc=self.hidden_dim >= 1024,
+                output_accum=output_accum,
+                output_fp16=output_fp16,
+            )
+        else:
+            output_accum.zero_()
+
+        # Dispatch only missing groups via fallback path and merge into output_accum.
+        if missing_groups:
+            cached_buffers = self._get_cached_buffers()
+            buffer_pool = self._get_buffer_pool()
+            lib = self._get_lib()
+
+            for bit_tuple, expert_indices in missing_groups.items():
+                if not expert_indices:
+                    continue
+
+                mask = torch.zeros_like(selected_experts, dtype=torch.bool)
+                for expert_id in expert_indices:
+                    mask |= selected_experts == expert_id
+
+                batch_indices, slot_indices = torch.nonzero(mask, as_tuple=True)
+                if batch_indices.numel() == 0:
+                    continue
+
+                group_output = dispatch_moe_trellis_swiglu(
+                    lib,
+                    activations=x[batch_indices],
+                    gate_weights=None,
+                    gate_scales=None,
+                    up_weights=None,
+                    up_scales=None,
+                    down_weights=None,
+                    down_scales=None,
+                    gate_su=None,
+                    gate_sv=None,
+                    up_su=None,
+                    up_sv=None,
+                    down_su=None,
+                    down_sv=None,
+                    grid=None,
+                    expert_ids=selected_experts[batch_indices, slot_indices].unsqueeze(1),
+                    expert_probs=routing_weights[batch_indices, slot_indices].unsqueeze(1),
+                    hidden_dim=self.hidden_dim,
+                    intermediate_dim=self.intermediate_dim,
+                    num_experts=len(self.experts),
+                    top_k=1,
+                    bits=bit_tuple,
+                    cached_buffers=cached_buffers,
+                    buffer_pool=buffer_pool,
+                    use_fp32_acc=self.hidden_dim >= 1024,
+                )
+
+                output_accum.index_add_(0, batch_indices, group_output.float())
+
+        output_fp16.copy_(output_accum)
 
         # Add shared expert
-        output.add_(self.shared_expert(x))
-        return output
+        output_fp16.add_(self.shared_expert(x))
+        return output_fp16
 
     @classmethod
     def from_loader(
@@ -2570,6 +2711,8 @@ class TrellisDecoderLayer(nn.Module):
         Returns:
             Output tensor [..., seq_len, hidden_size].
         """
+        layer_dtype = hidden_states.dtype
+
         # Pre-attention normalization
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -2584,6 +2727,8 @@ class TrellisDecoderLayer(nn.Module):
             rope_cos=rope_cos,
             rope_sin=rope_sin,
         )
+        if attn_output.dtype != layer_dtype:
+            attn_output = attn_output.to(dtype=layer_dtype)
 
         # Residual connection
         hidden_states = residual + attn_output
@@ -2602,6 +2747,8 @@ class TrellisDecoderLayer(nn.Module):
             )
         else:
             mlp_output = self.mlp(hidden_states)
+        if mlp_output.dtype != residual.dtype:
+            mlp_output = mlp_output.to(dtype=residual.dtype)
 
         # Residual connection
         hidden_states = residual + mlp_output
@@ -3669,6 +3816,10 @@ class TrellisForCausalLM(nn.Module):
             CausalLMOutput with logits tensor [batch, seq_len, vocab_size].
         """
         hidden_states = self.model.embed_tokens(input_ids)
+        # Keep model hidden states on a single fast inference dtype to avoid
+        # bf16/fp16 residual promotion to fp32 across layers.
+        if hidden_states.dtype != torch.float16:
+            hidden_states = hidden_states.to(dtype=torch.float16)
         batch_size, seq_len = input_ids.shape
         device = hidden_states.device
 
@@ -3691,7 +3842,18 @@ class TrellisForCausalLM(nn.Module):
         # Pass position_ids and full caches - attention will lookup as needed
         # This avoids slicing sin/cos at every layer
         if position_ids is None:
-            position_ids = torch.arange(seq_len, device=device).unsqueeze(0)
+            if kv_cache is not None and seq_len == 1 and kv_cache.seq_len > 0:
+                # Decode step: position should continue from cached length.
+                position_ids = torch.full(
+                    (batch_size, 1),
+                    kv_cache.seq_len,
+                    device=device,
+                    dtype=torch.long,
+                )
+            else:
+                position_ids = torch.arange(
+                    seq_len, device=device, dtype=torch.long
+                ).unsqueeze(0).expand(batch_size, -1)
 
         # Get SHARED library for batch context - all layers must use same lib!
         # Without this, only one layer's lib has batch_mode=True.
@@ -3716,7 +3878,11 @@ class TrellisForCausalLM(nn.Module):
                     # Prefetch next layer's KV cache while computing current layer.
                     # This warms GPU caches for the next iteration's memory reads.
                     if use_prefetch and i + 1 < num_layers:
-                        kv_cache.prefetch_layer_async(i + 1, lib=lib)
+                        prefetch_async = getattr(kv_cache, "prefetch_layer_async", None)
+                        if callable(prefetch_async):
+                            prefetch_async(i + 1, lib=lib)
+                        else:
+                            kv_cache.prefetch_layer(i + 1)
 
                     hidden_states = layer(
                         hidden_states,

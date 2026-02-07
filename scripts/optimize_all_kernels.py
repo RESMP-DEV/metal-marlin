@@ -31,6 +31,9 @@ Usage:
     # Higher entropy for thorough search
     cd contrib/metal_marlin && uv run python scripts/optimize_all_kernels.py --num-random 50
 
+    # Use a specific benchmark profile for spawned optimize_kernel runs
+    cd contrib/metal_marlin && uv run python scripts/optimize_all_kernels.py --profile mixed_bpw_fairway_glm47
+
     # List available kernels without running
     cd contrib/metal_marlin && uv run python scripts/optimize_all_kernels.py --list
 """
@@ -309,6 +312,7 @@ def run_optimization(
     num_random: int,
     generate_only: bool,
     agents: int,
+    profile: str | None = None,
 ) -> tuple[str, bool]:
     """Run optimization for a single kernel."""
 
@@ -340,6 +344,9 @@ def run_optimization(
         cmd.append("--generate-only")
     else:
         cmd.extend(["--agents", str(agents)])
+
+    if profile:
+        cmd.extend(["--profile", profile])
 
     result = subprocess.run(
         cmd,
@@ -388,6 +395,9 @@ Examples:
 
   # Higher entropy for thorough search
   python scripts/optimize_all_kernels.py --num-random 50
+
+  # Use a specific optimize_kernel benchmark profile
+  python scripts/optimize_all_kernels.py --profile mixed_bpw_fairway_glm47
 """,
     )
     parser.add_argument(
@@ -423,6 +433,14 @@ Examples:
         "--kernel",
         type=str,
         help="Optimize specific kernel by name (partial match)",
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        help=(
+            "Forward benchmark profile to optimize_kernel.py "
+            "(e.g., 'mixed_bpw_fairway_glm47' for GLM-4.7 optimization)"
+        ),
     )
 
     args = parser.parse_args()
@@ -466,6 +484,8 @@ Examples:
     print(f"Kernels: {len(kernels)}")
     print(f"Random variants per kernel: {args.num_random}")
     print(f"Mode: {'generate-only' if args.generate_only else f'dispatch ({args.agents} agents)'}")
+    if args.profile:
+        print(f"Profile: {args.profile}")
     print()
 
     session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -483,6 +503,7 @@ Examples:
             args.num_random,
             args.generate_only,
             args.agents,
+            args.profile,
         )
 
         if success:

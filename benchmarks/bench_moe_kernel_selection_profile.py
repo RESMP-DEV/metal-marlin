@@ -188,7 +188,7 @@ def benchmark_kernel(
                 top_k=top_k,
                 bits=bits,
                 use_fp32_acc=use_fp32_acc,
-                kernel_override=kernel_name,
+                kernel_name_override=kernel_name,
                 **weights,
             )
             torch.mps.synchronize()
@@ -213,7 +213,7 @@ def benchmark_kernel(
             top_k=top_k,
             bits=bits,
             use_fp32_acc=use_fp32_acc,
-            kernel_override=kernel_name,
+            kernel_name_override=kernel_name,
             **weights,
         )
         torch.mps.synchronize()
