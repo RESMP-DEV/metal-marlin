@@ -862,6 +862,7 @@ class MRGPTQQuantizer:
         """
         from safetensors import safe_open
         from safetensors.numpy import save_file
+        import torch
 
         model_path = Path(model_path)
 
@@ -902,7 +903,9 @@ class MRGPTQQuantizer:
                 print("  (Hessian collection requires model loading - using RTN fallback)")
 
         # Process each safetensors file
+        is_sharded_input = len(st_files) > 1
         output_tensors: dict[str, np.ndarray] = {}
+        output_weight_map: dict[str, str] = {}
         layer_reports: list[QuantizationLayerReport] = []
         quantized_count = 0
         skipped_count = 0
@@ -913,9 +916,24 @@ class MRGPTQQuantizer:
             if verbose:
                 print(f"\nProcessing {st_file.name}...")
 
-            with safe_open(str(st_file), framework="numpy") as f:
+            shard_tensors: dict[str, np.ndarray] = {}
+            output_shard_name = st_file.name if is_sharded_input else "model.safetensors"
+
+            with (
+                safe_open(str(st_file), framework="numpy") as f,
+                safe_open(str(st_file), framework="pt") as f_torch,
+            ):
                 for name in f.keys():
-                    tensor = f.get_tensor(name)
+                    try:
+                        tensor = f.get_tensor(name)
+                    except TypeError as exc:
+                        # NumPy safetensors reader may not support bf16 on some versions.
+                        if "bfloat16" not in str(exc).lower():
+                            raise
+                        tensor_pt = f_torch.get_tensor(name)
+                        # Preserve compactness while staying NumPy-compatible.
+                        tensor = tensor_pt.to(dtype=torch.float16).cpu().numpy()
+                        del tensor_pt
                     total_params += tensor.size
 
                     # Check if should quantize
@@ -945,18 +963,22 @@ class MRGPTQQuantizer:
                             meta["kurtosis"] = layer_kurtosis
 
                         # Store packed weights and scales
-                        output_tensors[name] = packed
-                        output_tensors[f"{name}.scales"] = scales
-                        output_tensors[f"{name}.group_size"] = np.array(
+                        shard_tensors[name] = packed
+                        shard_tensors[f"{name}.scales"] = scales
+                        shard_tensors[f"{name}.group_size"] = np.array(
                             [self.group_size], dtype=np.int32
                         )
+                        output_weight_map[name] = output_shard_name
+                        output_weight_map[f"{name}.scales"] = output_shard_name
+                        output_weight_map[f"{name}.group_size"] = output_shard_name
 
                         # Store Hadamard metadata if used
                         if meta.get("hadamard"):
                             h_meta = meta["hadamard"]
-                            output_tensors[f"{name}.hadamard_block_size"] = np.array(
+                            shard_tensors[f"{name}.hadamard_block_size"] = np.array(
                                 [h_meta["block_size"]], dtype=np.int32
                             )
+                            output_weight_map[f"{name}.hadamard_block_size"] = output_shard_name
 
                         # Record statistics
                         err = meta.get("error", {})
@@ -978,17 +1000,45 @@ class MRGPTQQuantizer:
                     else:
                         if verbose:
                             print(f"  Keeping: {name} {tensor.shape}")
-                        output_tensors[name] = tensor
+                        shard_tensors[name] = tensor
+                        output_weight_map[name] = output_shard_name
                         skipped_count += 1
 
                     # Memory cleanup
                     gc.collect()
 
+            if is_sharded_input:
+                shard_output_path = output_path / output_shard_name
+                if verbose:
+                    print(f"  Saving shard: {shard_output_path.name}")
+                save_file(shard_tensors, str(shard_output_path))
+                shard_tensors.clear()
+                gc.collect()
+            else:
+                output_tensors.update(shard_tensors)
+
         # Save quantized model
-        output_file = output_path / "model.safetensors"
-        if verbose:
-            print(f"\nSaving to {output_file}...")
-        save_file(output_tensors, str(output_file))
+        if is_sharded_input:
+            total_size = 0
+            for st_file in st_files:
+                shard_output_path = output_path / st_file.name
+                if shard_output_path.exists():
+                    total_size += shard_output_path.stat().st_size
+
+            index_payload = {
+                "metadata": {"total_size": total_size},
+                "weight_map": output_weight_map,
+            }
+            index_file = output_path / "model.safetensors.index.json"
+            if verbose:
+                print(f"\nSaving index to {index_file}...")
+            with index_file.open("w", encoding="utf-8") as f:
+                json.dump(index_payload, f, indent=2)
+        else:
+            output_file = output_path / "model.safetensors"
+            if verbose:
+                print(f"\nSaving to {output_file}...")
+            save_file(output_tensors, str(output_file))
 
         # Compute overall statistics
         mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
@@ -1087,6 +1137,9 @@ class MRGPTQQuantizer:
         num_calibration_batches: int = 128,
         batch_size: int = 4,
         max_seq_len: int = 2048,
+        max_hessian_layers: int | None = None,
+        hessian_dtype: str = "float64",
+        hessian_exclude_patterns: list[str] | None = None,
         checkpoint_dir: Path | None = None,
         resume: bool = True,
         verbose: bool = True,
@@ -1116,6 +1169,9 @@ class MRGPTQQuantizer:
             num_calibration_batches: Number of calibration batches to run
             batch_size: Samples per calibration batch
             max_seq_len: Maximum sequence length for tokenization
+            max_hessian_layers: Max layers to keep Hessians for (None = unlimited)
+            hessian_dtype: Hessian accumulator dtype ("float64" or "float32")
+            hessian_exclude_patterns: Optional layer-name patterns to exclude
             checkpoint_dir: Directory for checkpoints (default: output_path/checkpoints)
             resume: If True, resume from checkpoint if available
             verbose: Print progress
@@ -1154,6 +1210,10 @@ class MRGPTQQuantizer:
             print(f"Hadamard: {self.use_hadamard} (block={self.hadamard_block_size})")
             print(f"Actorder: {self.actorder}")
             print(f"Calibration batches: {num_calibration_batches}")
+            print(f"Hessian dtype: {hessian_dtype}")
+            print(f"Hessian max layers: {max_hessian_layers if max_hessian_layers else 'unlimited'}")
+            if hessian_exclude_patterns:
+                print(f"Hessian excludes: {', '.join(hessian_exclude_patterns)}")
             print()
 
         # Step 1: Load model for inference
@@ -1179,7 +1239,12 @@ class MRGPTQQuantizer:
         if verbose:
             print("Step 2: Registering Hessian collection hooks...")
 
-        hessian_collector = HessianCollector(damp_ratio=self.percdamp)
+        hessian_collector = HessianCollector(
+            damp_ratio=self.percdamp,
+            exclude_patterns=hessian_exclude_patterns,
+            max_tracked_layers=max_hessian_layers,
+            accumulator_dtype=hessian_dtype,
+        )
 
         # Load existing Hessian checkpoint if available
         hessian_checkpoint_path = checkpoint_dir / "hessians"
@@ -1233,6 +1298,11 @@ class MRGPTQQuantizer:
         hessians = hessian_collector.get_hessians()
         if verbose:
             print(f"  Collected Hessians for {len(hessians)} layers")
+            if hessian_collector.skipped_due_limit:
+                print(
+                    "  Note: skipped "
+                    f"{hessian_collector.skipped_due_limit} layer activations due to Hessian cap"
+                )
             for name, info in list(hessians.items())[:3]:
                 print(f"    {name}: {info.n_samples} samples")
 
@@ -1248,6 +1318,7 @@ class MRGPTQQuantizer:
 
         # Load weights from safetensors and quantize
         from safetensors import safe_open
+        import torch
 
         st_files = sorted(model_path.glob("*.safetensors"))
         if not st_files:
@@ -1264,7 +1335,10 @@ class MRGPTQQuantizer:
             if verbose:
                 print(f"\n  Processing {st_file.name}...")
 
-            with safe_open(str(st_file), framework="numpy") as f:
+            with (
+                safe_open(str(st_file), framework="numpy") as f,
+                safe_open(str(st_file), framework="pt") as f_torch,
+            ):
                 for name in f.keys():
                     # Skip already processed layers
                     if checkpoint.is_layer_complete(name):
@@ -1272,7 +1346,14 @@ class MRGPTQQuantizer:
                             print(f"    Skipping (already done): {name}")
                         continue
 
-                    tensor = f.get_tensor(name)
+                    try:
+                        tensor = f.get_tensor(name)
+                    except TypeError as exc:
+                        if "bfloat16" not in str(exc).lower():
+                            raise
+                        tensor_pt = f_torch.get_tensor(name)
+                        tensor = tensor_pt.to(dtype=torch.float16).cpu().numpy()
+                        del tensor_pt
                     total_params += tensor.size
 
                     # Determine if should quantize
@@ -1551,6 +1632,9 @@ class HessianCollector:
         self,
         damp_ratio: float = 0.01,
         layer_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+        max_tracked_layers: int | None = None,
+        accumulator_dtype: str = "float64",
     ):
         """Initialize collector.
 
@@ -1558,14 +1642,26 @@ class HessianCollector:
             damp_ratio: Damping ratio λ = damp_ratio * mean(diag(H)).
             layer_patterns: Layer name patterns to track. If None, tracks all
                 Linear layers except embeddings/norms/lm_head.
+            exclude_patterns: Layer name patterns to skip.
+            max_tracked_layers: Max layers to keep Hessians for. Additional
+                layers are skipped (they can fall back to RTN quantization).
+            accumulator_dtype: Hessian accumulator dtype ("float64" or "float32").
         """
         self.damp_ratio = damp_ratio
         self.layer_patterns = layer_patterns
+        self.exclude_patterns = [p.lower() for p in exclude_patterns] if exclude_patterns else []
+        self.max_tracked_layers = max_tracked_layers
+        if accumulator_dtype not in {"float64", "float32"}:
+            raise ValueError(
+                f"accumulator_dtype must be 'float64' or 'float32', got {accumulator_dtype}"
+            )
+        self.accumulator_dtype = np.float64 if accumulator_dtype == "float64" else np.float32
 
         # Running sums: layer_name -> (H_sum, n_samples)
-        self._hessians: dict[str, tuple[NDArray[np.float64], int]] = {}
+        self._hessians: dict[str, tuple[NDArray[np.float64] | NDArray[np.float32], int]] = {}
         self._hooks: list = []
         self._layer_dims: dict[str, int] = {}  # Cache in_features per layer
+        self._skipped_due_limit = 0
 
     def register_hooks(self, model) -> None:
         """Register forward hooks on target layers.
@@ -1587,12 +1683,6 @@ class HessianCollector:
             in_features = module.in_features
             self._layer_dims[name] = in_features
 
-            # Initialize Hessian accumulator
-            self._hessians[name] = (
-                np.zeros((in_features, in_features), dtype=np.float64),
-                0,
-            )
-
             # Register hook
             hook = module.register_forward_hook(self._make_hook(name))
             self._hooks.append(hook)
@@ -1613,6 +1703,9 @@ class HessianCollector:
             "bias",
         ]
         if any(p in name_lower for p in skip_patterns):
+            return False
+
+        if any(p in name_lower for p in self.exclude_patterns):
             return False
 
         # If custom patterns specified, check them
@@ -1639,9 +1732,23 @@ class HessianCollector:
             # Flatten to [n_tokens, in_features]
             with torch.no_grad():
                 x_flat = x.view(-1, x.shape[-1]).float()
-                x_np = x_flat.cpu().numpy().astype(np.float64)
+                x_np = x_flat.cpu().numpy().astype(self.accumulator_dtype, copy=False)
 
             # Accumulate H += X^T @ X
+            if layer_name not in self._hessians:
+                if (
+                    self.max_tracked_layers is not None
+                    and len(self._hessians) >= self.max_tracked_layers
+                ):
+                    self._skipped_due_limit += 1
+                    return
+
+                in_features = self._layer_dims.get(layer_name, x_np.shape[-1])
+                self._hessians[layer_name] = (
+                    np.zeros((in_features, in_features), dtype=self.accumulator_dtype),
+                    0,
+                )
+
             H_sum, n_samples = self._hessians[layer_name]
             H_sum += x_np.T @ x_np
             self._hessians[layer_name] = (H_sum, n_samples + x_np.shape[0])
@@ -1725,9 +1832,9 @@ class HessianCollector:
     def clear(self) -> None:
         """Clear accumulated Hessians (but keep hooks)."""
         for name in self._hessians:
-            in_features = self._layer_dims[name]
+            in_features = self._layer_dims.get(name, self._hessians[name][0].shape[0])
             self._hessians[name] = (
-                np.zeros((in_features, in_features), dtype=np.float64),
+                np.zeros((in_features, in_features), dtype=self.accumulator_dtype),
                 0,
             )
 
@@ -1758,8 +1865,16 @@ class HessianCollector:
             H_sum = data["H_sum"]
             n_samples = int(data["n_samples"][0])
 
-            self._hessians[layer_name] = (H_sum, n_samples)
+            self._hessians[layer_name] = (
+                H_sum.astype(self.accumulator_dtype, copy=False),
+                n_samples,
+            )
             self._layer_dims[layer_name] = H_sum.shape[0]
+
+    @property
+    def skipped_due_limit(self) -> int:
+        """Number of hook calls skipped due to max_tracked_layers limit."""
+        return self._skipped_due_limit
 
 
 # =============================================================================

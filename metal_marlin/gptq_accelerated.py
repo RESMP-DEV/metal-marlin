@@ -556,6 +556,8 @@ class CUDABackend:
         H_damped = H + damp * diag_mean * np.eye(n, dtype=np.float32)
 
         H_gpu = torch.from_numpy(H_damped).to(self._device)
+        L_gpu = None
+        L_inv_gpu = None
 
         try:
             # Cholesky decomposition using cuSOLVER
@@ -566,12 +568,19 @@ class CUDABackend:
             H_inv_gpu = torch.mm(L_inv_gpu.T, L_inv_gpu)
 
         except RuntimeError:
-            # Fallback to pseudo-inverse
-            H_inv_gpu = torch.linalg.pinv(H_gpu)
+            # Fallback to CPU pseudo-inverse on numerical or CUDA failures.
+            H_inv = np.linalg.pinv(H_damped.astype(np.float64)).astype(np.float32)
+            del H_gpu
+            torch.cuda.empty_cache()
+            return H_inv
 
         H_inv = H_inv_gpu.cpu().numpy()
 
-        del H_gpu, L_gpu, L_inv_gpu, H_inv_gpu
+        del H_gpu, H_inv_gpu
+        if L_gpu is not None:
+            del L_gpu
+        if L_inv_gpu is not None:
+            del L_inv_gpu
         torch.cuda.empty_cache()
 
         return H_inv.astype(np.float32)
