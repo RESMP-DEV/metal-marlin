@@ -64,7 +64,6 @@ HARDWARE_SPECS = {
     "M2_MAX": HardwareSpec("Apple M2 Max", 400.0, 13.6, 6.8, 96.0),
     "M3_MAX": HardwareSpec("Apple M3 Max", 400.0, 16.4, 8.2, 128.0),
     "M4_MAX": HardwareSpec("Apple M4 Max", 546.0, 32.0, 16.0, 128.0),
-    "P100": HardwareSpec("NVIDIA P100 (PCIe)", 732.0, 18.7, 9.3, 16.0),
     "V100": HardwareSpec("NVIDIA V100", 900.0, 31.4, 15.7, 32.0),
     "A100_40": HardwareSpec("NVIDIA A100 40GB", 1555.0, 78.0, 19.5, 40.0),
     "A100_80": HardwareSpec("NVIDIA A100 80GB", 2039.0, 78.0, 19.5, 80.0),

@@ -66,7 +66,6 @@ HARDWARE_SPECS = {
     "M3_MAX": HardwareSpec("Apple M3 Max", 400.0, 16.4, 8.2),
     "M2_MAX": HardwareSpec("Apple M2 Max", 400.0, 13.6, 6.8),
     "M1_MAX": HardwareSpec("Apple M1 Max", 400.0, 10.4, 5.2),
-    "P100": HardwareSpec("NVIDIA P100", 732.0, 18.7, 9.3),
     "V100": HardwareSpec("NVIDIA V100", 900.0, 31.4, 15.7),
     "A100": HardwareSpec("NVIDIA A100", 2039.0, 78.0, 19.5),
     "H100": HardwareSpec("NVIDIA H100", 3352.0, 197.9, 51.0),
@@ -88,8 +87,6 @@ def detect_hardware() -> HardwareSpec:
                 return HARDWARE_SPECS["A100"]
             elif "v100" in name:
                 return HARDWARE_SPECS["V100"]
-            elif "p100" in name:
-                return HARDWARE_SPECS["P100"]
     return HARDWARE_SPECS["M3_MAX"]  # Default
 
 
@@ -733,7 +730,7 @@ Examples:
     parser.add_argument("--seq-len-kv", type=int, default=None, help="KV sequence length (defaults to seq-len)")
     parser.add_argument("--head-dim", type=int, default=64, help="Head dimension")
     parser.add_argument("--causal", action="store_true", help="Use causal attention")
-    parser.add_argument("--hardware", type=str, default=None, help="Hardware spec (M4_MAX, P100, etc.)")
+    parser.add_argument("--hardware", type=str, default=None, help="Hardware spec (M4_MAX, V100, etc.)")
 
     parser.add_argument("--compare", action="store_true", help="Compare all implementations")
     parser.add_argument("--roofline", action="store_true", help="Generate roofline plot")
