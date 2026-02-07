@@ -101,7 +101,7 @@ def benchmark_kernel_variant(
                 cached_buffers=cached,
                 buffer_pool=moe_layer._get_buffer_pool(),
                 use_fp32_acc=use_fp32_acc,
-                kernel_override=kernel_override,
+                kernel_name_override=kernel_override,
             )
     torch.mps.synchronize()
     
@@ -137,7 +137,7 @@ def benchmark_kernel_variant(
                 cached_buffers=cached,
                 buffer_pool=moe_layer._get_buffer_pool(),
                 use_fp32_acc=use_fp32_acc,
-                kernel_override=kernel_override,
+                kernel_name_override=kernel_override,
             )
         torch.mps.synchronize()
         times.append(time.perf_counter() - start)

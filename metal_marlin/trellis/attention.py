@@ -264,7 +264,10 @@ class TrellisMLAttention(nn.Module):
         if isinstance(kv_cache, TrellisKVCache):
             # Update cache with compressed representation (before layernorm)
             # Returns full sequence of compressed KV: [batch, total_seq, kv_lora_rank + qk_rope_head_dim]
-            compressed_kv_full = kv_cache.update(layer_idx, compressed_kv)
+            compressed_kv_full = kv_cache.update(
+                layer_idx,
+                compressed_kv=compressed_kv,
+            )
             total_seq_len = compressed_kv_full.shape[1]
 
             # Split full sequence into latent and rope components

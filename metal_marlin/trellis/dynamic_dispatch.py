@@ -13,13 +13,95 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary, get_fast_path,
-                              mps_tensor_to_metal_buffer)
+from ..metal_dispatch import HAS_METAL, MetalKernelLibrary, get_fast_path
 
 if TYPE_CHECKING:
     from .moe_dispatch import CachedWeightBuffers, MoEBufferPool
 
 logger = logging.getLogger(__name__)
+
+_MANAGED_BUFFER_TYPENAME = "ManagedBuffer"
+_HALF_COMPATIBLE_DTYPES = (
+    torch.float16,
+    torch.bfloat16,
+    torch.float32,
+)
+_INT32_COMPATIBLE_DTYPES = (
+    torch.uint8,
+    torch.int8,
+    torch.int16,
+    torch.int32,
+    torch.int64,
+)
+_UINT8_COMPATIBLE_DTYPES = (
+    torch.uint8,
+    torch.int8,
+)
+
+
+def _normalize_tensor_for_cpp_bridge(
+    tensor: Any,
+    *,
+    field_name: str,
+    tensor_attr: str,
+    expected_device: torch.device,
+    expected_dtype: torch.dtype,
+    allowed_dtypes: tuple[torch.dtype, ...],
+) -> torch.Tensor:
+    """Normalize tensors before wrapping as nanobind ManagedBuffer."""
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError(
+            f"Unsupported input for C++ bridge: "
+            f"`weight_buffers.{tensor_attr}` for field `{field_name}` must be "
+            f"a torch.Tensor, got {type(tensor).__name__}"
+        )
+
+    if tensor.layout is not torch.strided:
+        raise TypeError(
+            f"Unsupported tensor layout for C++ bridge field `{field_name}`: "
+            f"`weight_buffers.{tensor_attr}` has layout={tensor.layout}. "
+            "Only dense strided tensors are supported."
+        )
+
+    if tensor.dtype not in allowed_dtypes:
+        allowed = ", ".join(str(dtype) for dtype in allowed_dtypes)
+        raise TypeError(
+            f"Unsupported dtype for C++ bridge field `{field_name}`: "
+            f"`weight_buffers.{tensor_attr}` has dtype={tensor.dtype}. "
+            f"Expected one of: {allowed}."
+        )
+
+    normalized = tensor
+    try:
+        if normalized.device != expected_device:
+            normalized = normalized.to(device=expected_device)
+        if normalized.dtype != expected_dtype:
+            normalized = normalized.to(dtype=expected_dtype)
+        if not normalized.is_contiguous():
+            normalized = normalized.contiguous()
+    except Exception as exc:  # pragma: no cover - depends on runtime/device state
+        raise RuntimeError(
+            f"Failed to normalize `weight_buffers.{tensor_attr}` for field "
+            f"`{field_name}` (target device={expected_device}, "
+            f"target dtype={expected_dtype}, contiguous=True): {exc}"
+        ) from exc
+
+    if normalized.device != expected_device:
+        raise RuntimeError(
+            f"Normalization failed for field `{field_name}`: expected device "
+            f"{expected_device}, got {normalized.device}."
+        )
+    if normalized.dtype != expected_dtype:
+        raise RuntimeError(
+            f"Normalization failed for field `{field_name}`: expected dtype "
+            f"{expected_dtype}, got {normalized.dtype}."
+        )
+    if not normalized.is_contiguous():
+        raise RuntimeError(
+            f"Normalization failed for field `{field_name}`: tensor is not contiguous."
+        )
+
+    return normalized
 
 
 @dataclass
@@ -227,65 +309,176 @@ class DynamicMoEDispatch:
                 # This is critical as ManagedBuffer objects hold raw pointers to them.
                 if not hasattr(weight_buffers, "_managed_tensors"):
                     weight_buffers._managed_tensors = []
+                elif not isinstance(weight_buffers._managed_tensors, list):
+                    raise RuntimeError(
+                        "Invalid `weight_buffers._managed_tensors`: expected list "
+                        f"for tensor lifetime tracking, got "
+                        f"{type(weight_buffers._managed_tensors).__name__}"
+                    )
 
-                def to_managed(tensor: torch.Tensor | None) -> Any:
-                    if tensor is None:
-                        return None
+                target_device = torch.device("mps")
 
-                    # Ensure tensor is in optimal format for Metal kernels:
-                    # 1. Contiguous in memory
-                    # 2. On the correct device (MPS)
-                    # 3. Proper dtype (float16 for weights)
-                    if not tensor.is_contiguous():
-                        tensor = tensor.contiguous()
-                    if tensor.device.type != 'mps':
-                        tensor = tensor.to('mps')
-                    # Most Trellis kernels expect float16 weights
-                    if tensor.dtype == torch.float32:
-                        tensor = tensor.half()
-
-                    # By cloning, we ensure we have a dedicated copy for C++
-                    # that won't be modified by other parts of the system.
-                    # We MUST keep this tensor alive as long as the weight_buffers
-                    # exists, because ManagedBuffer holds a raw pointer to it.
-                    clean_tensor = tensor.clone().contiguous()
-                    weight_buffers._managed_tensors.append(clean_tensor)
-
-                    return fast_path.create_buffer_from_ptr(clean_tensor.data_ptr(), clean_tensor.nbytes)
-
-                # Convert all tensor-based buffers to ManagedBuffers for the C++ ext.
-                # Only convert if the ManagedBuffer hasn't been created yet to avoid
-                # memory growth in the _managed_tensors list.
-                def convert_field(attr_name: str, tensor_attr: str) -> None:
-                    current_val = getattr(weight_buffers, attr_name)
-                    # Check if already a ManagedBuffer (from _cpp_ext)
-                    if current_val is not None and type(current_val).__name__ == 'ManagedBuffer':
+                def convert_field(
+                    attr_name: str,
+                    tensor_attr: str,
+                    expected_dtype: torch.dtype,
+                    allowed_dtypes: tuple[torch.dtype, ...],
+                    required: bool = True,
+                ) -> None:
+                    current_val = getattr(weight_buffers, attr_name, None)
+                    # Already converted for C++ fast path
+                    if (
+                        current_val is not None
+                        and type(current_val).__name__ == _MANAGED_BUFFER_TYPENAME
+                    ):
                         return
 
-                    tensor_val = getattr(weight_buffers, tensor_attr)
-                    if tensor_val is not None:
-                        setattr(weight_buffers, attr_name, to_managed(tensor_val))
+                    tensor_val = getattr(weight_buffers, tensor_attr, None)
+                    if tensor_val is None:
+                        if required and current_val is None:
+                            raise RuntimeError(
+                                f"Missing required tensor input for C++ bridge: "
+                                f"`weight_buffers.{attr_name}` is not a ManagedBuffer "
+                                f"and `weight_buffers.{tensor_attr}` is absent."
+                            )
+                        if required and current_val is not None:
+                            raise RuntimeError(
+                                f"Unsupported cached buffer for field `{attr_name}`: "
+                                f"`weight_buffers.{attr_name}` has type "
+                                f"{type(current_val).__name__}, but C++ bridge requires "
+                                f"a ManagedBuffer or a tensor mirror at "
+                                f"`weight_buffers.{tensor_attr}` for normalization."
+                            )
+                        # Optional field not provided; skip conversion.
+                        return
+
+                    normalized = _normalize_tensor_for_cpp_bridge(
+                        tensor_val,
+                        field_name=attr_name,
+                        tensor_attr=tensor_attr,
+                        expected_device=target_device,
+                        expected_dtype=expected_dtype,
+                        allowed_dtypes=allowed_dtypes,
+                    )
+
+                    # Keep tensor alive for the ManagedBuffer lifetime.
+                    clean_tensor = normalized.detach().clone(
+                        memory_format=torch.contiguous_format
+                    )
+                    weight_buffers._managed_tensors.append(clean_tensor)
+
+                    nbytes = clean_tensor.numel() * clean_tensor.element_size()
+                    try:
+                        managed = fast_path.create_buffer_from_ptr(
+                            clean_tensor.data_ptr(),
+                            nbytes,
+                        )
+                    except Exception as exc:  # pragma: no cover - ext/runtime dependent
+                        raise RuntimeError(
+                            f"Failed to wrap normalized tensor for field `{attr_name}` "
+                            f"as ManagedBuffer (dtype={clean_tensor.dtype}, "
+                            f"device={clean_tensor.device}, nbytes={nbytes}): {exc}"
+                        ) from exc
+
+                    setattr(weight_buffers, attr_name, managed)
 
                 # Expert weights and scales
-                convert_field("gate_weights", "gate_weights_tensor")
-                convert_field("gate_scales", "gate_scales_tensor")
-                convert_field("up_weights", "up_weights_tensor")
-                convert_field("up_scales", "up_scales_tensor")
-                convert_field("down_weights", "down_weights_tensor")
-                convert_field("down_scales", "down_scales_tensor")
+                convert_field(
+                    "gate_weights",
+                    "gate_weights_tensor",
+                    torch.uint8,
+                    _UINT8_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "gate_scales",
+                    "gate_scales_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "up_weights",
+                    "up_weights_tensor",
+                    torch.uint8,
+                    _UINT8_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "up_scales",
+                    "up_scales_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "down_weights",
+                    "down_weights_tensor",
+                    torch.uint8,
+                    _UINT8_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "down_scales",
+                    "down_scales_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
 
                 # Sign vectors
-                convert_field("gate_su", "gate_su_tensor")
-                convert_field("gate_sv", "gate_sv_tensor")
-                convert_field("up_su", "up_su_tensor")
-                convert_field("up_sv", "up_sv_tensor")
-                convert_field("down_su", "down_su_tensor")
-                convert_field("down_sv", "down_sv_tensor")
+                convert_field(
+                    "gate_su",
+                    "gate_su_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "gate_sv",
+                    "gate_sv_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "up_su",
+                    "up_su_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "up_sv",
+                    "up_sv_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "down_su",
+                    "down_su_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "down_sv",
+                    "down_sv_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
 
                 # Grid and dynamic buffers
-                convert_field("grid", "grid_tensor")
-                convert_field("dynamic_grid_concat", "_grid_concat_tensor")
-                convert_field("dynamic_grid_offsets", "_grid_offsets_tensor")
+                convert_field(
+                    "grid",
+                    "grid_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                )
+                convert_field(
+                    "dynamic_grid_concat",
+                    "_grid_concat_tensor",
+                    torch.float16,
+                    _HALF_COMPATIBLE_DTYPES,
+                    required=False,
+                )
+                convert_field(
+                    "dynamic_grid_offsets",
+                    "_grid_offsets_tensor",
+                    torch.int32,
+                    _INT32_COMPATIBLE_DTYPES,
+                    required=False,
+                )
 
         # Import here to avoid circular dependency
         from .moe_dispatch import dispatch_moe_trellis_swiglu

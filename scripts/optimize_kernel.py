@@ -31,6 +31,9 @@ Usage:
     # Run local benchmark without AlphaHENG
     cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune
 
+    # Use GLM-4.7-Flash mixed-BPW MoE profile shapes
+    cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune --profile mixed_bpw_fairway_glm47
+
     # Collect results after swarm completes
     cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --collect-results SESSION_ID
 """
@@ -59,6 +62,40 @@ _POTENTIAL_ALPHAHENG_ROOT = METAL_MARLIN_ROOT.parent.parent
 ALPHAHENG_ROOT = (
     _POTENTIAL_ALPHAHENG_ROOT if (_POTENTIAL_ALPHAHENG_ROOT / "alphaheng").is_dir() else None
 )
+
+# Default problem sizes (M, N, K) for benchmarking. Keep this unchanged for
+# backwards-compatible behavior when no named profile is requested.
+DEFAULT_PROBLEM_SIZES = "256,4096,4096;32,4096,4096;1,4096,4096"
+
+# Named benchmark profiles for specific model/kernel operating points.
+PROBLEM_SIZE_PROFILES: dict[str, list[tuple[int, int, int]]] = {
+    "mixed_bpw_fairway_glm47": [
+        # Decode path (single/few-token) for GLM-4.7-Flash mixed-BPW MoE:
+        # hidden_dim=2048, intermediate_dim=1536.
+        (1, 1536, 2048),
+        (2, 1536, 2048),
+        (4, 1536, 2048),
+        (1, 2048, 1536),
+        (2, 2048, 1536),
+        (4, 2048, 1536),
+        # Prefill path (batched tokens) at the same dims.
+        (64, 1536, 2048),
+        (128, 1536, 2048),
+        (256, 1536, 2048),
+        (64, 2048, 1536),
+        (128, 2048, 1536),
+        (256, 2048, 1536),
+        # Grouped-dispatch-focused expert batches (token-grouped routing).
+        (6, 1536, 2048),
+        (12, 1536, 2048),
+        (24, 1536, 2048),
+        (48, 1536, 2048),
+        (6, 2048, 1536),
+        (12, 2048, 1536),
+        (24, 2048, 1536),
+        (48, 2048, 1536),
+    ]
+}
 
 # ============================================================================
 # DETERMINISTIC PATTERNS - Well-known configurations to test
@@ -1770,6 +1807,9 @@ Examples:
   # Local benchmarking without AlphaHENG swarm
   cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune
 
+  # Use GLM-4.7-Flash mixed-BPW MoE profile shapes
+  cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --autotune --profile mixed_bpw_fairway_glm47
+
   # Collect results after swarm completes
   cd contrib/metal_marlin && uv run python scripts/optimize_kernel.py --collect-results SESSION_ID
 
@@ -1793,8 +1833,15 @@ Why Entropy-First:
     parser.add_argument(
         "--problem-sizes",
         type=str,
-        default="256,4096,4096;32,4096,4096;1,4096,4096",
+        default=DEFAULT_PROBLEM_SIZES,
         help="Problem sizes as 'M,N,K;M,N,K;...' (default: common transformer shapes)",
+    )
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=sorted(PROBLEM_SIZE_PROFILES.keys()),
+        default=None,
+        help="Named problem-size profile (overrides --problem-sizes when set)",
     )
     parser.add_argument(
         "--agents",
@@ -1864,17 +1911,22 @@ Why Entropy-First:
     args = parser.parse_args()
 
     # Parse problem sizes
-    problem_sizes = []
-    for size_str in args.problem_sizes.split(";"):
-        parts = size_str.strip().split(",")
-        if len(parts) == 3:
-            problem_sizes.append((int(parts[0]), int(parts[1]), int(parts[2])))
+    if args.profile:
+        problem_sizes = PROBLEM_SIZE_PROFILES[args.profile].copy()
+    else:
+        problem_sizes = []
+        for size_str in args.problem_sizes.split(";"):
+            parts = size_str.strip().split(",")
+            if len(parts) == 3:
+                problem_sizes.append((int(parts[0]), int(parts[1]), int(parts[2])))
 
     # Local autotune mode
     if args.autotune:
         print("=" * 60)
         print("Metal Kernel Local Autotuning")
         print("=" * 60)
+        if args.profile:
+            print(f"Profile: {args.profile}")
         print(f"Problem sizes: {problem_sizes}")
         print()
 
@@ -1980,6 +2032,8 @@ Why Entropy-First:
     print("=" * 60)
     print(f"Kernel: {kernel_path.name}")
     print(f"Type: {kernel_type}")
+    if args.profile:
+        print(f"Profile: {args.profile}")
     print(f"Total variants: {len(variants)}")
     if include_exploratory or num_random > 0:
         print(f"  - Deterministic: {deterministic_count}")
