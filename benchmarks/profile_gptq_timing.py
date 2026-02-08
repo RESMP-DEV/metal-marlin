@@ -8,6 +8,15 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from metal_marlin.eval import load_wikitext2
 from metal_marlin.layer_replacement import (
+import os
+import sys
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
     collect_moe_expert_hessians,
     find_moe_layers,
     quantize_moe_experts,

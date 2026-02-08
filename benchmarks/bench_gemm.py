@@ -86,6 +86,14 @@ else:
 sys.path.insert(0, str(Path(__file__).parent))
 from framework import Benchmark, mps_sync  # noqa: E402
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
 # Standard problem sizes from real models
 SIZES: list[tuple[int, int, int, str]] = [
     # (M, N, K, description)

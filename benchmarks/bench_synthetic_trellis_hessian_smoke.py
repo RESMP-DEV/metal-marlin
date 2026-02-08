@@ -317,6 +317,14 @@ def run_benchmark(output_path: Path) -> dict[str, Any]:
     from metal_marlin.kv_cache import TrellisKVCache
     from metal_marlin.trellis.lm import TrellisForCausalLM
     from tests.helpers.synthetic_trellis_fixture import (
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
         get_checked_in_synthetic_trellis_fixture_path,
     )
 

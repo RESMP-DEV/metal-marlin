@@ -27,6 +27,15 @@ def benchmark_kernel_selection() -> dict[str, Any]:
     """Benchmark the kernel selection logic for different batch sizes."""
     from metal_marlin.trellis.moe_dispatch import select_moe_kernel, get_moe_kernel
 
+import os
+import sys
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
     # Test configurations
     batch_sizes = [1, 2, 4, 8, 16, 17, 24, 32, 33, 48, 64, 96, 128]
     use_fp32_configs = [False, True]

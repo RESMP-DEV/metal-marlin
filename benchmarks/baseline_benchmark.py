@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -17,19 +18,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Skip in AlphaHENG task mode to avoid GPU memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    sys.exit(0)
+
 # Ensure metal_marlin is importable from project layout
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch  # noqa: E402
 from metal_marlin.kv_cache import CacheConfig, KVCache  # noqa: E402
-from metal_marlin.profiling.memory_bandwidth import (  # noqa: E402
-    MemoryBandwidthProfiler,
-)
+from metal_marlin.profiling.memory_bandwidth import \
+    MemoryBandwidthProfiler  # noqa: E402
 from metal_marlin.profiling.occupancy import detect_gpu  # noqa: E402
 
 try:  # Optional dependency
-    from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
+    from transformers import (AutoModelForCausalLM,  # type: ignore
+                              AutoTokenizer)
 except Exception:  # pragma: no cover - optional dependency
     AutoModelForCausalLM = None
     AutoTokenizer = None
@@ -86,7 +92,8 @@ def _require_torch(feature: str) -> None:
 def _require_mps(feature: str) -> None:
     _require_torch(feature)
     if not HAS_MPS:
-        raise RuntimeError("PyTorch MPS backend is required for this benchmark.")
+        raise RuntimeError(
+            "PyTorch MPS backend is required for this benchmark.")
 
 
 def _mps_sync() -> None:
@@ -140,8 +147,10 @@ def _estimate_decode_bandwidth(
     except Exception:
         return None, None, None
 
-    bytes_read = int(2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_elem)
-    bytes_written = int(2 * num_layers * num_kv_heads * head_dim * bytes_per_elem)
+    bytes_read = int(2 * num_layers * num_kv_heads *
+                     head_dim * seq_len * bytes_per_elem)
+    bytes_written = int(2 * num_layers * num_kv_heads *
+                        head_dim * bytes_per_elem)
 
     measurement = profiler.measure(
         name="decode_step",
@@ -230,7 +239,8 @@ def benchmark_metal_marlin(
 
     prefill_tok_s = prompt_tokens / statistics.mean(prefill_times)
     decode_tok_s = num_tokens / statistics.mean(decode_times)
-    first_token_ms = statistics.mean(first_token_latencies_ms) if first_token_latencies_ms else 0.0
+    first_token_ms = statistics.mean(
+        first_token_latencies_ms) if first_token_latencies_ms else 0.0
     p50_ms = _percentile(decode_latencies_ms, 0.50)
     p99_ms = _percentile(decode_latencies_ms, 0.99)
 
@@ -285,7 +295,8 @@ def benchmark_torch_mps(
 ) -> tuple[EndToEndMetrics, dict[str, Any]]:
     _require_mps("PyTorch MPS inference")
     if AutoModelForCausalLM is None or AutoTokenizer is None:
-        raise RuntimeError("transformers is required for PyTorch MPS benchmark.")
+        raise RuntimeError(
+            "transformers is required for PyTorch MPS benchmark.")
     assert torch is not None
 
     device = "mps"
@@ -342,14 +353,16 @@ def benchmark_torch_mps(
 
     prefill_tok_s = prompt_tokens / statistics.mean(prefill_times)
     decode_tok_s = num_tokens / statistics.mean(decode_times)
-    first_token_ms = statistics.mean(first_token_latencies_ms) if first_token_latencies_ms else 0.0
+    first_token_ms = statistics.mean(
+        first_token_latencies_ms) if first_token_latencies_ms else 0.0
     p50_ms = _percentile(decode_latencies_ms, 0.50)
     p99_ms = _percentile(decode_latencies_ms, 0.99)
 
     config = getattr(model, "config", None)
     num_layers = _get_config_value(config, ["num_hidden_layers"], 0)
     num_heads = _get_config_value(config, ["num_attention_heads"], 0)
-    num_kv_heads = _get_config_value(config, ["num_key_value_heads", "num_kv_heads"], num_heads)
+    num_kv_heads = _get_config_value(
+        config, ["num_key_value_heads", "num_kv_heads"], num_heads)
     hidden_size = _get_config_value(config, ["hidden_size"], 0)
     head_dim = hidden_size // num_heads if num_heads else 0
 
@@ -448,9 +461,12 @@ def benchmark_attention(
     import torch.nn.functional as F
 
     batch = 1
-    q = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    k = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    v = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.float16, device="mps")
+    q = torch.randn(batch, heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
+    k = torch.randn(batch, heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
+    v = torch.randn(batch, heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
     scale = 1.0 / math.sqrt(head_dim)
 
     def fn() -> Any:
@@ -494,16 +510,19 @@ def benchmark_moe(
     tokens_per_expert = tokens // active_experts
     total_tokens = tokens_per_expert * active_experts
 
-    x = torch.randn(total_tokens, hidden_size, dtype=torch.float16, device="mps")
+    x = torch.randn(total_tokens, hidden_size,
+                    dtype=torch.float16, device="mps")
     weights = torch.randn(
         active_experts, hidden_size, hidden_size, dtype=torch.float16, device="mps"
     )
-    router = torch.arange(active_experts, device="mps").repeat_interleave(tokens_per_expert)
+    router = torch.arange(
+        active_experts, device="mps").repeat_interleave(tokens_per_expert)
 
     def run_grouped() -> tuple[float, float]:
         t0 = time.perf_counter()
         order = torch.argsort(router)
-        x_sorted = x.index_select(0, order).view(active_experts, tokens_per_expert, hidden_size)
+        x_sorted = x.index_select(0, order).view(
+            active_experts, tokens_per_expert, hidden_size)
         _mps_sync()
         dispatch_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -528,7 +547,8 @@ def benchmark_moe(
     compute_ms = statistics.mean(compute_times)
     total_ms = dispatch_ms + compute_ms
 
-    tokens_per_sec = total_tokens / (total_ms / 1000.0) if total_ms > 0 else 0.0
+    tokens_per_sec = total_tokens / \
+        (total_ms / 1000.0) if total_ms > 0 else 0.0
 
     return {
         "shape": {
@@ -566,18 +586,24 @@ def benchmark_kv_cache(
     )
     cache = KVCache(config, batch_size=1)
 
-    k_new = torch.randn(1, num_kv_heads, 1, head_dim, dtype=torch.float16, device="mps")
-    v_new = torch.randn(1, num_kv_heads, 1, head_dim, dtype=torch.float16, device="mps")
+    k_new = torch.randn(1, num_kv_heads, 1, head_dim,
+                        dtype=torch.float16, device="mps")
+    v_new = torch.randn(1, num_kv_heads, 1, head_dim,
+                        dtype=torch.float16, device="mps")
 
     def write_once() -> None:
         for layer in range(num_layers):
-            cache._slice_update(cache.k_cache[layer], k_new, cache.cache_position, 1)
-            cache._slice_update(cache.v_cache[layer], v_new, cache.cache_position, 1)
+            cache._slice_update(
+                cache.k_cache[layer], k_new, cache.cache_position, 1)
+            cache._slice_update(
+                cache.v_cache[layer], v_new, cache.cache_position, 1)
 
     def read_once() -> None:
         for layer in range(num_layers):
-            _ = cache.k_cache[layer][:, :, : cache.cache_position + 1, :].clone()
-            _ = cache.v_cache[layer][:, :, : cache.cache_position + 1, :].clone()
+            _ = cache.k_cache[layer][:, :,
+                                     : cache.cache_position + 1, :].clone()
+            _ = cache.v_cache[layer][:, :,
+                                     : cache.cache_position + 1, :].clone()
 
     for _ in range(warmup):
         write_once()
@@ -602,16 +628,20 @@ def benchmark_kv_cache(
         read_times.append((time.perf_counter() - start) * 1000.0)
 
     bytes_per_elem = _estimate_kv_bytes_per_elem(cache_dtype)
-    bytes_write = int(2 * num_layers * num_kv_heads * head_dim * bytes_per_elem)
+    bytes_write = int(2 * num_layers * num_kv_heads *
+                      head_dim * bytes_per_elem)
     bytes_read = int(
-        2 * num_layers * num_kv_heads * head_dim * (cache.cache_position) * bytes_per_elem
+        2 * num_layers * num_kv_heads * head_dim *
+        (cache.cache_position) * bytes_per_elem
     )
 
     write_ms = statistics.mean(write_times)
     read_ms = statistics.mean(read_times)
 
-    write_bw_gbs = (bytes_write / (write_ms / 1000.0)) / 1e9 if write_ms > 0 else 0.0
-    read_bw_gbs = (bytes_read / (read_ms / 1000.0)) / 1e9 if read_ms > 0 else 0.0
+    write_bw_gbs = (bytes_write / (write_ms / 1000.0)) / \
+        1e9 if write_ms > 0 else 0.0
+    read_bw_gbs = (bytes_read / (read_ms / 1000.0)) / \
+        1e9 if read_ms > 0 else 0.0
 
     return {
         "shape": {
@@ -714,10 +744,13 @@ def benchmark_mlx(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Baseline benchmark for GLM-4.7-Flash")
-    parser.add_argument("--model-path", type=Path, default=_ROOT / "models" / "GLM-4.7-Flash")
+    parser = argparse.ArgumentParser(
+        description="Baseline benchmark for GLM-4.7-Flash")
+    parser.add_argument("--model-path", type=Path,
+                        default=_ROOT / "models" / "GLM-4.7-Flash")
     parser.add_argument("--quantized-model-path", type=Path, default=None)
-    parser.add_argument("--prompt", type=str, default="Explain transformers in one paragraph.")
+    parser.add_argument("--prompt", type=str,
+                        default="Explain transformers in one paragraph.")
     parser.add_argument("--tokens", type=int, default=128)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--warmup", type=int, default=5)
@@ -748,7 +781,8 @@ def main() -> None:
     if not HAS_TORCH or torch is None:
         raise RuntimeError("PyTorch is required to run this benchmark.")
     if not HAS_MPS:
-        raise RuntimeError("PyTorch MPS backend is required to run this benchmark.")
+        raise RuntimeError(
+            "PyTorch MPS backend is required to run this benchmark.")
 
     gpu = detect_gpu()
     gpu_name = gpu.name.replace("_", " ").title()

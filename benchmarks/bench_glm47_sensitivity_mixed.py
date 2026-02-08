@@ -1261,6 +1261,12 @@ def run_sensitivity_benchmark(
         if quant_model_file.exists():
             from safetensors import safe_open
 
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
             with safe_open(quant_model_file, framework="pt", device="cpu") as f:
                 tensor_count = len(f.keys())
             print(f"  Loaded {tensor_count} tensors from quantized model")

@@ -104,17 +104,17 @@ class TestTrellisMLAttention:
     def test_with_kv_cache(self, attention):
         """Test forward pass with KV cache."""
         device = _get_device()
-        cache_config = CacheConfig(
+        from metal_marlin.kv_cache import TrellisKVCache
+        
+        cache = TrellisKVCache(
             num_layers=1,
-            num_heads=attention.config.num_attention_heads,
-            num_kv_heads=attention.config.num_kv_heads,
-            head_dim=attention.config.v_head_dim,
+            batch_size=1,
             max_seq_len=1024,
-            cache_dtype="fp16",
+            kv_lora_rank=attention.config.kv_lora_rank,
+            qk_rope_head_dim=attention.config.qk_rope_head_dim,
+            device=device,
+            dtype=torch.float16,
         )
-        # Use fp16 for both activations and cache to avoid dtype mismatch
-        dtype_config = DTypeConfig(activations="fp16", kv_cache="fp16")
-        cache = KVCache(config=cache_config, batch_size=1, dtype_config=dtype_config, device=device)
 
         # First forward (prompt)
         x1 = torch.randn(1, 32, attention.config.hidden_size, dtype=torch.float16, device=device)

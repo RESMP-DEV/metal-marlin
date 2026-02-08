@@ -22,6 +22,14 @@ sys.path.insert(0, str(_ROOT))
 from metal_marlin.metal_dispatch import MetalKernelLibrary
 from metal_marlin.quantization.trellis_codebook import TrellisCodebook
 from metal_marlin.trellis.dispatch import (
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
     dispatch_gemm_trellis_packed,
     dispatch_trellis_dequant_packed,
 )

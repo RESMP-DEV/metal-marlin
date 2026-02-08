@@ -14,6 +14,14 @@ sys.path.insert(0, str(_ROOT))
 from metal_marlin.trellis.linear import TrellisLinear
 from metal_marlin.trellis.lm import TrellisForCausalLM
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
 # Disable dequant cache for memory efficiency
 TrellisLinear.enable_cache = False
 

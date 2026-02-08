@@ -29,7 +29,7 @@ from metal_marlin.mla_fused import (
     create_glm_mla_params,
     mla_fused_attention_decode,
 )
-from metal_marlin.quantization import quantize_fp4
+from metal_marlin.quantize_fp4 import quantize_fp4
 
 # Skip tests if MPS unavailable
 pytestmark = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
@@ -50,7 +50,7 @@ class TestMLAFused:
         
         # Quantize to FP4
         weights_packed, scales = quantize_fp4(
-            weights, group_size=64, per_column=False
+            weights, group_size=64
         )
         
         return weights_packed, scales

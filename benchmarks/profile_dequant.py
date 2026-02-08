@@ -247,6 +247,14 @@ def _print_strategy_analysis(K: int, N: int, M: int, group_size: int) -> None:
 
         from metal_marlin.inference import pipeline as pipeline_module
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
         src = inspect.getsource(pipeline_module.MetalMarlinModel.__init__)
         if "_dequant_cache" in src:
             print("Pipeline path: caches dequantized weights (first call upfront, then reuse)")

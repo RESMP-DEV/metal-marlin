@@ -16,6 +16,7 @@ Uses GLM's rotary embedding from transformers.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -25,13 +26,30 @@ import torch.nn as nn
 from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb
 
 from ..attention import scaled_dot_product_attention_metal
-from ..fused_attention_mps import fused_attention  # noqa: F401
+from ..fused_attention_mps import fused_attention
 from .dispatch import dispatch_fused_qkv_trellis
 from ..kv_cache import TrellisKVCache
 from .linear import TrellisLinear
 
 if TYPE_CHECKING:
     pass
+
+# Profiling globals for attention overhead
+_attention_total_ms = 0.0
+_attention_count = 0
+
+
+def get_attention_stats():
+    global _attention_total_ms, _attention_count
+    if _attention_count == 0:
+        return 0.0
+    return _attention_total_ms / _attention_count
+
+
+def reset_attention_stats():
+    global _attention_total_ms, _attention_count
+    _attention_total_ms = 0.0
+    _attention_count = 0
 
 
 @dataclass
@@ -56,6 +74,7 @@ class TrellisMLAConfig:
     q_lora_rank: int | None = 768  # Query compression dimension
     rope_theta: float = 1000000.0  # GLM uses 1M
     max_position_embeddings: int = 131072
+    use_fused_attention: bool = True  # Enable fused Metal attention for decode inference
 
     @property
     def qk_head_dim(self) -> int:
@@ -442,46 +461,46 @@ class TrellisMLAttention(nn.Module):
             k = k.repeat_interleave(self.qkv_repeat_factor, dim=1)
             v = v.repeat_interleave(self.qkv_repeat_factor, dim=1)
 
-        # === Fast Decode Path (batch=1, seq_len=1) ===
-        # Use PyTorch SDPA for decode - optimized and stable on MPS
-        # Note: PyTorch SDPA (~2ms) is faster than fused_attention (~16ms) for decode shapes
-        if batch_size == 1 and seq_len == 1:
-            # Q: [1, num_heads, 1, qk_head_dim]
-            # K: [1, num_heads, total_seq_len, qk_head_dim]
-            # V: [1, num_heads, total_seq_len, v_head_dim]
-            # causal=False for decode: single query attends to all cached keys
-            attn_output_4d = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=self.scale,
-            )  # [1, num_heads, 1, v_head_dim]
+        # Start timing for attention overhead profiling
+        torch.mps.synchronize()
+        t0 = time.perf_counter()
 
-            # Reshape to [batch, seq, heads * v_head_dim]
-            attn_output = attn_output_4d.transpose(1, 2).contiguous().view(
-                batch_size, seq_len, self.num_heads * self.v_head_dim
+        query_states = q
+        key_states = k
+        value_states = v
+
+        # === Attention ===
+        if self.config.use_fused_attention and not self.training:
+            # Fused path for decode
+            attn_output = fused_attention(
+                q=query_states,
+                k=key_states,
+                v=value_states,
+                causal=True,
             )
         else:
-            # === Scaled Dot-Product Attention ===
-            # Note: Q and K have qk_head_dim, V has v_head_dim
-            # For standard attention this works: score = Q @ K.T, out = score @ V
+            # Standard path
             attn_output = scaled_dot_product_attention_metal(
-                q,
-                k,
-                v,
+                query_states,
+                key_states,
+                value_states,
                 attn_mask=attention_mask,
                 scale=self.scale,
-                is_causal=attention_mask is None,
+                is_causal=(attention_mask is None and not is_decode),
             )
 
-            # Output has v_head_dim, not qk_head_dim
-            # Reshape: [batch, heads, seq, v_head_dim] -> [batch, seq, heads * v_head_dim]
-            attn_output = (
-                attn_output.transpose(1, 2)
-                .contiguous()
-                .view(batch_size, seq_len, self.num_heads * self.v_head_dim)
-            )
+        # Output has v_head_dim, not qk_head_dim
+        # Reshape: [batch, heads, seq, v_head_dim] -> [batch, seq, heads * v_head_dim]
+        attn_output = (
+            attn_output.transpose(1, 2)
+            .contiguous()
+            .view(batch_size, seq_len, self.num_heads * self.v_head_dim)
+        )
+
+        torch.mps.synchronize()
+        global _attention_total_ms, _attention_count
+        _attention_total_ms += (time.perf_counter() - t0) * 1000
+        _attention_count += 1
 
         # Output projection
         output = self.o_proj(attn_output)

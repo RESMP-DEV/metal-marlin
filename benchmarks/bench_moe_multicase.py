@@ -45,6 +45,15 @@ def benchmark_moe_forward(moe_layer, batch_sizes, hidden_dim, warmup=3, trials=1
 def main():
     from metal_marlin.trellis.model import TrellisForCausalLM
 
+import os
+import sys
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained(
         'models/GLM-4.7-Flash-Trellis-3bpw', device='mps'

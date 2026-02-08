@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 else:
     _DTYPE_TO_TORCH_CACHE: dict[str, object] = {}
 
+
 def require_mps(feature: str = "KV cache") -> None:
     """Raise if PyTorch MPS is not available."""
     require_torch(feature)
@@ -67,6 +68,7 @@ def require_mps(feature: str = "KV cache") -> None:
             f"{feature} requires PyTorch MPS backend. "
             "Ensure you're on Apple Silicon with PyTorch >= 2.0"
         )
+
 
 def _get_torch_dtype(dtype_str: str) -> torch.dtype:
     """Convert dtype string to PyTorch dtype."""
@@ -96,6 +98,7 @@ def _get_torch_dtype(dtype_str: str) -> torch.dtype:
 
     return dtype  # type: ignore[return-value]
 
+
 def _resolve_dtype(dtype: torch.dtype | str) -> torch.dtype:
     """Resolve dtype string to torch dtype (helper for MLA)."""
     if isinstance(dtype, str):
@@ -105,6 +108,7 @@ def _resolve_dtype(dtype: torch.dtype | str) -> torch.dtype:
 # =============================================================================
 # Standard KVCacheTorch Implementation
 # =============================================================================
+
 
 @dataclass
 class CacheConfigTorch:
@@ -226,7 +230,8 @@ class KVCacheTorch:
                 for _ in range(config.num_layers)
             ]
             scale_dtype = _get_torch_dtype(self.dtype_config.scales)
-            scale_shape = (batch_size, config.num_kv_heads, config.max_seq_len, 1)
+            scale_shape = (batch_size, config.num_kv_heads,
+                           config.max_seq_len, 1)
             self.k_scales: list[torch.Tensor] | None = [
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
@@ -238,7 +243,8 @@ class KVCacheTorch:
         elif self._quantize_mode == "fp8":
             if self._layout == "BSHD":
                 raise ValueError("FP8 quantization only supports BHSD layout")
-            fp8_shape = (batch_size, config.num_kv_heads, config.max_seq_len, config.head_dim)
+            fp8_shape = (batch_size, config.num_kv_heads,
+                         config.max_seq_len, config.head_dim)
             self.k_cache = [
                 torch.zeros(fp8_shape, dtype=torch.uint8, device=device)
                 for _ in range(config.num_layers)
@@ -249,9 +255,11 @@ class KVCacheTorch:
             ]
             scale_dtype = _get_torch_dtype(self.dtype_config.scales)
             if config.fp8_scale_method == "channel":
-                scale_shape = (batch_size, config.num_kv_heads, config.max_seq_len, config.head_dim)
+                scale_shape = (batch_size, config.num_kv_heads,
+                               config.max_seq_len, config.head_dim)
             else:
-                scale_shape = (batch_size, config.num_kv_heads, config.max_seq_len, 1)
+                scale_shape = (batch_size, config.num_kv_heads,
+                               config.max_seq_len, 1)
             self.k_scales = [
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
@@ -263,7 +271,8 @@ class KVCacheTorch:
         elif self._quantize_mode == "int8":
             if self._layout == "BSHD":
                 raise ValueError("INT8 quantization only supports BHSD layout")
-            int8_shape = (batch_size, config.num_kv_heads, config.max_seq_len, config.head_dim)
+            int8_shape = (batch_size, config.num_kv_heads,
+                          config.max_seq_len, config.head_dim)
             self.k_cache = [
                 torch.zeros(int8_shape, dtype=torch.int8, device=device)
                 for _ in range(config.num_layers)
@@ -273,7 +282,8 @@ class KVCacheTorch:
                 for _ in range(config.num_layers)
             ]
             scale_dtype = _get_torch_dtype(self.dtype_config.scales)
-            scale_shape = (batch_size, config.num_kv_heads, config.max_seq_len, 1)
+            scale_shape = (batch_size, config.num_kv_heads,
+                           config.max_seq_len, 1)
             self.k_scales = [
                 torch.zeros(scale_shape, dtype=scale_dtype, device=device)
                 for _ in range(config.num_layers)
@@ -319,10 +329,14 @@ class KVCacheTorch:
         if self._quantize_mode == "fp4":
             k_packed, k_scale = self._quantize_fp4(k_new)
             v_packed, v_scale = self._quantize_fp4(v_new)
-            self._slice_update(self.k_cache[layer_idx], k_packed, start_pos, new_seq_len)
-            self._slice_update(self.v_cache[layer_idx], v_packed, start_pos, new_seq_len)
-            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
-            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_cache[layer_idx], k_packed, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_packed, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
             k_full = self._dequant_fp4(
                 self.k_cache[layer_idx][:, :, :end_pos, :],
                 self.k_scales[layer_idx][:, :, :end_pos, :],
@@ -334,10 +348,14 @@ class KVCacheTorch:
         elif self._quantize_mode == "fp8":
             k_quant, k_scale = self._quantize_fp8(k_new)
             v_quant, v_scale = self._quantize_fp8(v_new)
-            self._slice_update(self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
-            self._slice_update(self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
-            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
-            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
             k_full = self._dequant_fp8(
                 self.k_cache[layer_idx][:, :, :end_pos, :],
                 self.k_scales[layer_idx][:, :, :end_pos, :],
@@ -349,10 +367,14 @@ class KVCacheTorch:
         elif self._quantize_mode == "int8":
             k_quant, k_scale = self._quantize_int8(k_new)
             v_quant, v_scale = self._quantize_int8(v_new)
-            self._slice_update(self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
-            self._slice_update(self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
-            self._slice_update(self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
-            self._slice_update(self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_cache[layer_idx], k_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_cache[layer_idx], v_quant, start_pos, new_seq_len)
+            self._slice_update(
+                self.k_scales[layer_idx], k_scale, start_pos, new_seq_len)
+            self._slice_update(
+                self.v_scales[layer_idx], v_scale, start_pos, new_seq_len)
             k_full = self._dequant_int8(
                 self.k_cache[layer_idx][:, :, :end_pos, :],
                 self.k_scales[layer_idx][:, :, :end_pos, :],
@@ -374,8 +396,10 @@ class KVCacheTorch:
                 self._slice_update_bshd(
                     self.v_cache[layer_idx], v_transposed, start_pos, new_seq_len, storage_dtype
                 )
-                k_full = self.k_cache[layer_idx][:, :end_pos, :, :].permute(0, 2, 1, 3).to(act_dtype)
-                v_full = self.v_cache[layer_idx][:, :end_pos, :, :].permute(0, 2, 1, 3).to(act_dtype)
+                k_full = self.k_cache[layer_idx][:, :end_pos, :, :].permute(
+                    0, 2, 1, 3).to(act_dtype)
+                v_full = self.v_cache[layer_idx][:, :end_pos, :, :].permute(
+                    0, 2, 1, 3).to(act_dtype)
             else:
                 self._slice_update(
                     self.k_cache[layer_idx], k_new, start_pos, new_seq_len, storage_dtype
@@ -383,8 +407,10 @@ class KVCacheTorch:
                 self._slice_update(
                     self.v_cache[layer_idx], v_new, start_pos, new_seq_len, storage_dtype
                 )
-                k_full = self.k_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
-                v_full = self.v_cache[layer_idx][:, :, :end_pos, :].to(act_dtype)
+                k_full = self.k_cache[layer_idx][:,
+                                                 :, :end_pos, :].to(act_dtype)
+                v_full = self.v_cache[layer_idx][:,
+                                                 :, :end_pos, :].to(act_dtype)
 
         return k_full, v_full
 
@@ -434,11 +460,15 @@ class KVCacheTorch:
             ).to(act_dtype)
         else:
             if self._layout == "BSHD":
-                k = self.k_cache[layer_idx][:, : self.seq_len, :, :].permute(0, 2, 1, 3).to(act_dtype)
-                v = self.v_cache[layer_idx][:, : self.seq_len, :, :].permute(0, 2, 1, 3).to(act_dtype)
+                k = self.k_cache[layer_idx][:, : self.seq_len,
+                                            :, :].permute(0, 2, 1, 3).to(act_dtype)
+                v = self.v_cache[layer_idx][:, : self.seq_len,
+                                            :, :].permute(0, 2, 1, 3).to(act_dtype)
             else:
-                k = self.k_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
-                v = self.v_cache[layer_idx][:, :, : self.seq_len, :].to(act_dtype)
+                k = self.k_cache[layer_idx][:, :,
+                                            : self.seq_len, :].to(act_dtype)
+                v = self.v_cache[layer_idx][:, :,
+                                            : self.seq_len, :].to(act_dtype)
 
         return k, v
 
@@ -494,7 +524,8 @@ class KVCacheTorch:
                 for tensor in tensors:
                     if new_len == 0:
                         continue
-                    tensor[:, :new_len, :, :] = tensor[:, shift: shift + new_len, :, :]
+                    tensor[:, :new_len, :, :] = tensor[:,
+                                                       shift: shift + new_len, :, :]
 
             _shift_list_bshd(self.k_cache)
             _shift_list_bshd(self.v_cache)
@@ -503,7 +534,8 @@ class KVCacheTorch:
                 for tensor in tensors:
                     if new_len == 0:
                         continue
-                    tensor[:, :, :new_len, :] = tensor[:, :, shift: shift + new_len, :]
+                    tensor[:, :, :new_len, :] = tensor[:,
+                                                       :, shift: shift + new_len, :]
 
             _shift_list_bhsd(self.k_cache)
             _shift_list_bhsd(self.v_cache)
@@ -716,7 +748,8 @@ class MLAKVCache:
                 device=self.device,
             )
         else:
-            raise ValueError(f"Unsupported quantize_mode: {self.quantize_mode}")
+            raise ValueError(
+                f"Unsupported quantize_mode: {self.quantize_mode}")
 
     def _ensure_capacity(self, required_len: int) -> None:
         """Grow cache if needed."""
@@ -724,7 +757,8 @@ class MLAKVCache:
             return
 
         if not self.auto_grow:
-            raise ValueError(f"Sequence length {required_len} exceeds max_seq_len {self.max_seq_len}")
+            raise ValueError(
+                f"Sequence length {required_len} exceeds max_seq_len {self.max_seq_len}")
 
         new_max = max(required_len, max(1, self.max_seq_len * 2))
         old_max = self.max_seq_len
@@ -772,7 +806,8 @@ class MLAKVCache:
             return self.update_compressed(layer_idx, compressed_kv)
 
         if c_kv_new is None or k_pe_new is None:
-            raise ValueError("Must provide either (c_kv_new, k_pe_new) or compressed_kv")
+            raise ValueError(
+                "Must provide either (c_kv_new, k_pe_new) or compressed_kv")
 
         # Separate components update (MLAAttention style)
         # Concatenate for unified storage update
@@ -780,7 +815,7 @@ class MLAKVCache:
         full_kv = self.update_compressed(layer_idx, combined_kv)
 
         # Split back for return
-        return full_kv[..., : self.kv_lora_rank], full_kv[..., self.kv_lora_rank :]
+        return full_kv[..., : self.kv_lora_rank], full_kv[..., self.kv_lora_rank:]
 
     def update_components(
         self,
@@ -802,7 +837,8 @@ class MLAKVCache:
         batch, seq_len, input_dim = compressed_kv.shape
 
         if input_dim != self.cache_dim:
-            raise ValueError(f"Input dimension {input_dim} != cache_dim {self.cache_dim}")
+            raise ValueError(
+                f"Input dimension {input_dim} != cache_dim {self.cache_dim}")
 
         start = int(self._seq_lens[layer_idx, 0].item())
         end = start + seq_len
@@ -811,13 +847,16 @@ class MLAKVCache:
         if self.quantize_mode == "int8":
             kv_q, kv_scales = self._quantize_int8(compressed_kv)
             self.kv_cache[layer_idx, :batch, start:end] = kv_q
-            self.kv_scales[layer_idx, :batch, start:end] = kv_scales  # type: ignore[index]
+            # type: ignore[index]
+            self.kv_scales[layer_idx, :batch, start:end] = kv_scales
         elif self.quantize_mode == "fp8":
             kv_q, kv_scales = self._quantize_fp8(compressed_kv)
             self.kv_cache[layer_idx, :batch, start:end] = kv_q
-            self.kv_scales[layer_idx, :batch, start:end] = kv_scales  # type: ignore[index]
+            # type: ignore[index]
+            self.kv_scales[layer_idx, :batch, start:end] = kv_scales
         else:
-            self.kv_cache[layer_idx, :batch, start:end] = compressed_kv.to(self.dtype)
+            self.kv_cache[layer_idx, :batch,
+                          start:end] = compressed_kv.to(self.dtype)
 
         self._seq_lens[layer_idx, :batch] = end
 
@@ -833,9 +872,13 @@ class MLAKVCache:
         kv = self.kv_cache[layer_idx, :, :seq_len]
 
         if self.quantize_mode == "int8":
-            kv = self._dequantize_int8(kv, self.kv_scales[layer_idx, :, :seq_len])  # type: ignore[index]
+            kv = self._dequantize_int8(
+                # type: ignore[index]
+                kv, self.kv_scales[layer_idx, :, :seq_len])
         elif self.quantize_mode == "fp8":
-            kv = self._dequantize_fp8(kv, self.kv_scales[layer_idx, :, :seq_len])  # type: ignore[index]
+            kv = self._dequantize_fp8(
+                # type: ignore[index]
+                kv, self.kv_scales[layer_idx, :, :seq_len])
 
         return kv.contiguous()
 
@@ -867,6 +910,14 @@ class MLAKVCache:
     def reset(self) -> None:
         """Clear cache state."""
         self._seq_lens.zero_()
+
+    def advance(self, num_tokens: int = 1) -> None:
+        """No-op: MLAKVCache auto-tracks position via update_compressed().
+
+        This method exists for interface compatibility with KVCacheTorch
+        which requires explicit position advancement. MLAKVCache tracks
+        _seq_lens per-layer in update_compressed(), so advance() is not needed.
+        """
 
     def memory_usage_mb(self) -> float:
         """Return memory usage in MB."""
@@ -900,7 +951,7 @@ class MLAKVCache:
         kv = self.get(layer_idx)
         if kv is None:
             return None
-        return kv[..., : self.kv_lora_rank], kv[..., self.kv_lora_rank :]
+        return kv[..., : self.kv_lora_rank], kv[..., self.kv_lora_rank:]
 
     def get_layer_for_attention(self, layer_idx: int) -> torch_typing.Tensor | None:
         """Get cached KV in BHSD format for attention kernels (zero-copy transpose)."""
@@ -934,7 +985,7 @@ class MLAKVCache:
 
     @property
     def k_pe(self) -> torch_typing.Tensor:
-        return self.kv_cache[..., self.kv_lora_rank :].contiguous()
+        return self.kv_cache[..., self.kv_lora_rank:].contiguous()
 
     @property
     def c_kv_scales(self) -> torch_typing.Tensor | None:
@@ -957,7 +1008,8 @@ class CompressedKVCache(MLAKVCache):
     def __post_init__(self) -> None:
         super().__post_init__()
         self._compression_enabled: list[bool] = [False] * self.num_layers
-        self._window_start = torch.zeros(self.num_layers, dtype=torch.long, device=self.device)
+        self._window_start = torch.zeros(
+            self.num_layers, dtype=torch.long, device=self.device)
 
     def _should_use_sliding_window(self, layer_idx: int) -> bool:
         return layer_idx >= self.sliding_window_layer_threshold
@@ -990,7 +1042,8 @@ class TrellisKVCache(MLAKVCache):
             bpe = 1
             scale_bpe = 2 if self._scale_dtype == torch.float16 else 4
 
-        kv_elements = self.num_layers * self.batch_size * self.max_seq_len * self.cache_dim
+        kv_elements = self.num_layers * self.batch_size * \
+            self.max_seq_len * self.cache_dim
         scale_elements = 0
         if self.kv_scales is not None:
             scale_elements = self.kv_scales.numel()

@@ -26,6 +26,14 @@ sys.path.insert(0, str(_ROOT))
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch  # noqa: E402
 
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
 @dataclass
 class BenchResult:
     seq_len: int
