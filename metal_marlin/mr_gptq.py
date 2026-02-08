@@ -1140,6 +1140,11 @@ class MRGPTQQuantizer:
         max_hessian_layers: int | None = None,
         hessian_dtype: str = "float64",
         hessian_exclude_patterns: list[str] | None = None,
+        hessian_collection_mode: str = "full",
+        model_load_dtype: str = "float32",
+        model_device_map: Any = "cpu",
+        model_low_cpu_mem_usage: bool = False,
+        model_offload_dir: Path | None = None,
         checkpoint_dir: Path | None = None,
         resume: bool = True,
         verbose: bool = True,
@@ -1172,6 +1177,13 @@ class MRGPTQQuantizer:
             max_hessian_layers: Max layers to keep Hessians for (None = unlimited)
             hessian_dtype: Hessian accumulator dtype ("float64" or "float32")
             hessian_exclude_patterns: Optional layer-name patterns to exclude
+            hessian_collection_mode: "full" (single pass, high RAM) or
+                "layer_stream" (multiple passes, low RAM)
+            model_load_dtype: Model dtype for calibration forward passes.
+                One of "float32", "float16", "bfloat16".
+            model_device_map: HuggingFace device_map passed to from_pretrained.
+            model_low_cpu_mem_usage: Enable low_cpu_mem_usage loader mode.
+            model_offload_dir: Optional offload directory for big-model loading.
             checkpoint_dir: Directory for checkpoints (default: output_path/checkpoints)
             resume: If True, resume from checkpoint if available
             verbose: Print progress
@@ -1199,6 +1211,24 @@ class MRGPTQQuantizer:
         if checkpoint is None:
             checkpoint = QuantizationCheckpoint.create(checkpoint_dir, str(model_path))
 
+        hessian_collection_mode = hessian_collection_mode.strip().lower()
+        if hessian_collection_mode not in {"full", "layer_stream"}:
+            raise ValueError(
+                "hessian_collection_mode must be 'full' or 'layer_stream', "
+                f"got {hessian_collection_mode}"
+            )
+
+        dtype_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }
+        if model_load_dtype not in dtype_map:
+            raise ValueError(
+                "model_load_dtype must be one of 'float32', 'float16', 'bfloat16', "
+                f"got {model_load_dtype}"
+            )
+
         if verbose:
             print("=" * 60)
             print("MR-GPTQ Quantization with Hessian Calibration")
@@ -1212,6 +1242,14 @@ class MRGPTQQuantizer:
             print(f"Calibration batches: {num_calibration_batches}")
             print(f"Hessian dtype: {hessian_dtype}")
             print(f"Hessian max layers: {max_hessian_layers if max_hessian_layers else 'unlimited'}")
+            print(f"Hessian collection mode: {hessian_collection_mode}")
+            print(
+                "Model load: "
+                f"dtype={model_load_dtype}, device_map={model_device_map}, "
+                f"low_cpu_mem_usage={model_low_cpu_mem_usage}"
+            )
+            if model_offload_dir is not None:
+                print(f"Model offload dir: {model_offload_dir}")
             if hessian_exclude_patterns:
                 print(f"Hessian excludes: {', '.join(hessian_exclude_patterns)}")
             print()
@@ -1227,84 +1265,199 @@ class MRGPTQQuantizer:
                 "transformers library required. Install with: pip install transformers"
             ) from e
 
-        model = AutoModelForCausalLM.from_pretrained(
-            str(model_path),
-            trust_remote_code=True,
-            torch_dtype=torch.float32,  # FP32 for accurate Hessians
-            device_map="cpu",  # Start on CPU, move to GPU per-layer
-        )
+        model_load_kwargs: dict[str, Any] = {
+            "trust_remote_code": True,
+            "torch_dtype": dtype_map[model_load_dtype],
+            "device_map": model_device_map,
+        }
+        if model_low_cpu_mem_usage:
+            model_load_kwargs["low_cpu_mem_usage"] = True
+        if model_offload_dir is not None:
+            model_offload_dir = Path(model_offload_dir)
+            model_offload_dir.mkdir(parents=True, exist_ok=True)
+            model_load_kwargs["offload_folder"] = str(model_offload_dir)
+            model_load_kwargs["offload_state_dict"] = True
+
+        model = AutoModelForCausalLM.from_pretrained(str(model_path), **model_load_kwargs)
         model.eval()
 
-        # Step 2: Register Hessian collection hooks
-        if verbose:
-            print("Step 2: Registering Hessian collection hooks...")
-
-        hessian_collector = HessianCollector(
-            damp_ratio=self.percdamp,
-            exclude_patterns=hessian_exclude_patterns,
-            max_tracked_layers=max_hessian_layers,
-            accumulator_dtype=hessian_dtype,
-        )
-
-        # Load existing Hessian checkpoint if available
         hessian_checkpoint_path = checkpoint_dir / "hessians"
-        if resume and hessian_checkpoint_path.exists():
-            hessian_collector.load_checkpoint(hessian_checkpoint_path)
-            if verbose:
-                print(f"  Loaded Hessian checkpoint: {len(hessian_collector._hessians)} layers")
-
-        hessian_collector.register_hooks(model)
-        if verbose:
-            print(f"  Registered hooks on {len(hessian_collector._hooks)} layers")
-
-        # Step 3: Run calibration forward passes
-        if verbose:
-            print(f"Step 3: Running {num_calibration_batches} calibration batches...")
-
         calibration_samples = list(calibration.samples)
         n_samples = min(len(calibration_samples), num_calibration_batches * batch_size)
 
-        with torch.no_grad():
-            for batch_idx in range(0, n_samples, batch_size):
-                batch_end = min(batch_idx + batch_size, n_samples)
-                batch_texts = calibration_samples[batch_idx:batch_end]
+        def _run_calibration_batches(
+            collector: HessianCollector,
+            progress_prefix: str = "",
+        ) -> None:
+            collector.register_hooks(model)
+            if verbose:
+                print(f"  Registered hooks on {len(collector._hooks)} layers")
 
-                # Tokenize batch
-                inputs = tokenizer(
-                    batch_texts,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=max_seq_len,
-                    padding=True,
-                )
+            try:
+                with torch.no_grad():
+                    for batch_idx in range(0, n_samples, batch_size):
+                        batch_end = min(batch_idx + batch_size, n_samples)
+                        batch_texts = calibration_samples[batch_idx:batch_end]
 
-                # Forward pass (hooks accumulate Hessians)
-                model(**inputs)
+                        inputs = tokenizer(
+                            batch_texts,
+                            return_tensors="pt",
+                            truncation=True,
+                            max_length=max_seq_len,
+                            padding=True,
+                        )
 
-                if verbose and (batch_idx // batch_size + 1) % 10 == 0:
-                    batches_done = batch_idx // batch_size + 1
-                    total_batches = (n_samples + batch_size - 1) // batch_size
-                    print(f"  Batch {batches_done}/{total_batches}")
+                        # Forward pass (hooks accumulate Hessians)
+                        model(**inputs)
 
-                # Checkpoint Hessians periodically
-                if (batch_idx // batch_size + 1) % 50 == 0:
-                    hessian_collector.save_checkpoint(hessian_checkpoint_path)
+                        if verbose and (batch_idx // batch_size + 1) % 10 == 0:
+                            batches_done = batch_idx // batch_size + 1
+                            total_batches = (n_samples + batch_size - 1) // batch_size
+                            print(f"  {progress_prefix}Batch {batches_done}/{total_batches}")
 
-        # Final Hessian checkpoint
-        hessian_collector.save_checkpoint(hessian_checkpoint_path)
-        hessian_collector.remove_hooks()
+                        # Checkpoint Hessians periodically
+                        if (batch_idx // batch_size + 1) % 50 == 0:
+                            collector.save_checkpoint(hessian_checkpoint_path)
+            finally:
+                collector.save_checkpoint(hessian_checkpoint_path)
+                collector.remove_hooks()
 
-        # Get computed Hessians
-        hessians = hessian_collector.get_hessians()
-        if verbose:
-            print(f"  Collected Hessians for {len(hessians)} layers")
-            if hessian_collector.skipped_due_limit:
+        hessians: dict[str, HessianInfo] = {}
+        use_disk_hessian_lookup = False
+
+        if hessian_collection_mode == "full":
+            # Step 2: Register Hessian collection hooks
+            if verbose:
+                print("Step 2: Registering Hessian collection hooks...")
+
+            hessian_collector = HessianCollector(
+                damp_ratio=self.percdamp,
+                exclude_patterns=hessian_exclude_patterns,
+                max_tracked_layers=max_hessian_layers,
+                accumulator_dtype=hessian_dtype,
+            )
+
+            # Load existing Hessian checkpoint if available
+            if resume and hessian_checkpoint_path.exists():
+                hessian_collector.load_checkpoint(hessian_checkpoint_path)
+                if verbose:
+                    print(f"  Loaded Hessian checkpoint: {len(hessian_collector._hessians)} layers")
+
+            # Step 3: Run calibration forward passes
+            if verbose:
+                print(f"Step 3: Running {num_calibration_batches} calibration batches...")
+            _run_calibration_batches(hessian_collector)
+
+            # Get computed Hessians
+            hessians = hessian_collector.get_hessians()
+            if verbose:
+                print(f"  Collected Hessians for {len(hessians)} layers")
+                if hessian_collector.skipped_due_limit:
+                    print(
+                        "  Note: skipped "
+                        f"{hessian_collector.skipped_due_limit} layer activations due to Hessian cap"
+                    )
+                for name, info in list(hessians.items())[:3]:
+                    print(f"    {name}: {info.n_samples} samples")
+        else:
+            import torch.nn as nn
+
+            if verbose:
+                print("Step 2: Building layer-stream calibration groups...")
+
+            probe_collector = HessianCollector(
+                damp_ratio=self.percdamp,
+                exclude_patterns=hessian_exclude_patterns,
+                max_tracked_layers=max_hessian_layers,
+                accumulator_dtype=hessian_dtype,
+            )
+
+            group_to_layers: dict[str, list[str]] = {}
+            for module_name, module in model.named_modules():
+                if not isinstance(module, nn.Linear):
+                    continue
+                if not probe_collector._should_track_layer(module_name):
+                    continue
+
+                parts = module_name.split(".")
+                if (
+                    len(parts) >= 3
+                    and parts[0] == "model"
+                    and parts[1] == "layers"
+                    and parts[2].isdigit()
+                ):
+                    group = f"model.layers.{parts[2]}."
+                else:
+                    group = module_name
+                group_to_layers.setdefault(group, []).append(module_name)
+
+            def _group_sort_key(group_name: str) -> tuple[int, int | str]:
+                if group_name.startswith("model.layers."):
+                    parts = group_name.split(".")
+                    if len(parts) >= 3 and parts[2].isdigit():
+                        return (0, int(parts[2]))
+                return (1, group_name)
+
+            def _hessian_npz_path(layer_name: str) -> Path:
+                safe_name = layer_name.replace("/", "_").replace(".", "_")
+                return hessian_checkpoint_path / f"{safe_name}.npz"
+
+            groups = sorted(group_to_layers.keys(), key=_group_sort_key)
+            total_groups = len(groups)
+
+            if verbose:
+                tracked_layers = sum(len(v) for v in group_to_layers.values())
                 print(
-                    "  Note: skipped "
-                    f"{hessian_collector.skipped_due_limit} layer activations due to Hessian cap"
+                    f"  Layer-stream mode: {total_groups} groups, "
+                    f"{tracked_layers} tracked linear layers"
                 )
-            for name, info in list(hessians.items())[:3]:
-                print(f"    {name}: {info.n_samples} samples")
+
+            for idx, group in enumerate(groups, start=1):
+                layers = group_to_layers[group]
+                done_layers = sum(1 for ln in layers if _hessian_npz_path(ln).exists())
+
+                if resume and done_layers == len(layers):
+                    if verbose:
+                        print(
+                            f"Step 3: [{idx}/{total_groups}] Skipping {group} "
+                            f"(checkpoint complete: {done_layers}/{len(layers)})"
+                        )
+                    continue
+
+                if verbose:
+                    print(
+                        f"Step 3: [{idx}/{total_groups}] Collecting {group} "
+                        f"({len(layers)} layers)"
+                    )
+
+                layer_collector = HessianCollector(
+                    damp_ratio=self.percdamp,
+                    layer_patterns=[group],
+                    exclude_patterns=hessian_exclude_patterns,
+                    max_tracked_layers=max_hessian_layers,
+                    accumulator_dtype=hessian_dtype,
+                )
+
+                _run_calibration_batches(
+                    layer_collector,
+                    progress_prefix=f"[{idx}/{total_groups}] ",
+                )
+
+                if verbose:
+                    collected_now = len(layer_collector._hessians)
+                    print(f"  Saved Hessians for {collected_now} layers in {group}")
+
+                del layer_collector
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            use_disk_hessian_lookup = True
+            if verbose:
+                print(
+                    "  Layer-stream collection complete. Hessians will be loaded "
+                    "from checkpoint files during quantization."
+                )
 
         # Step 4: Quantize weights with Hessians
         if verbose:
@@ -1324,16 +1477,54 @@ class MRGPTQQuantizer:
         if not st_files:
             raise FileNotFoundError(f"No safetensors files in {model_path}")
 
+        is_sharded_input = len(st_files) > 1
         output_tensors: dict[str, np.ndarray] = {}
+        output_weight_map: dict[str, str] = {}
         layer_reports: list[QuantizationLayerReport] = []
         quantized_count = 0
         skipped_count = 0
         total_params = 0
         quantized_params = 0
 
+        hessian_cache: dict[str, NDArray[np.float32]] = {}
+
+        def _hessian_npz_path(layer_name: str) -> Path:
+            safe_name = layer_name.replace("/", "_").replace(".", "_")
+            return hessian_checkpoint_path / f"{safe_name}.npz"
+
+        def _load_hessian_from_checkpoint(layer_name: str) -> NDArray[np.float32] | None:
+            if layer_name in hessian_cache:
+                return hessian_cache[layer_name]
+
+            npz_path = _hessian_npz_path(layer_name)
+            if not npz_path.exists():
+                return None
+
+            with np.load(npz_path, allow_pickle=True) as data:
+                H_sum = data["H_sum"]
+                n_samples = int(data["n_samples"][0])
+
+            if n_samples <= 0:
+                return None
+
+            H = (H_sum / n_samples).astype(np.float32, copy=False)
+            diag = np.diag(H).copy()
+            if diag.mean() > 0:
+                damp = self.percdamp * diag.mean()
+                H[np.diag_indices_from(H)] += damp
+
+            hessian_cache[layer_name] = H
+            if len(hessian_cache) > 32:
+                oldest = next(iter(hessian_cache))
+                hessian_cache.pop(oldest, None)
+            return H
+
         for st_file in st_files:
             if verbose:
                 print(f"\n  Processing {st_file.name}...")
+
+            shard_tensors: dict[str, np.ndarray] = {}
+            output_shard_name = st_file.name if is_sharded_input else "model.safetensors"
 
             with (
                 safe_open(str(st_file), framework="numpy") as f,
@@ -1371,15 +1562,18 @@ class MRGPTQQuantizer:
                         # Get Hessian for this layer
                         # Map tensor name to hook name (remove .weight suffix)
                         hessian_name = name.replace(".weight", "")
-                        hessian_info = hessians.get(hessian_name)
-                        hessian = hessian_info.hessian if hessian_info else None
+                        if use_disk_hessian_lookup:
+                            hessian = _load_hessian_from_checkpoint(hessian_name)
+                        else:
+                            hessian_info = hessians.get(hessian_name)
+                            hessian = hessian_info.hessian if hessian_info else None
 
-                        if hessian is None:
-                            # Try alternative names
-                            for h_name in hessians:
-                                if h_name in name or name in h_name:
-                                    hessian = hessians[h_name].hessian
-                                    break
+                            if hessian is None:
+                                # Try alternative names
+                                for h_name in hessians:
+                                    if h_name in name or name in h_name:
+                                        hessian = hessians[h_name].hessian
+                                        break
 
                         # Quantize layer
                         try:
@@ -1394,17 +1588,21 @@ class MRGPTQQuantizer:
                             )
 
                         # Store results
-                        output_tensors[name] = packed
-                        output_tensors[f"{name}.scales"] = scales
-                        output_tensors[f"{name}.group_size"] = np.array(
+                        shard_tensors[name] = packed
+                        shard_tensors[f"{name}.scales"] = scales
+                        shard_tensors[f"{name}.group_size"] = np.array(
                             [self.group_size], dtype=np.int32
                         )
+                        output_weight_map[name] = output_shard_name
+                        output_weight_map[f"{name}.scales"] = output_shard_name
+                        output_weight_map[f"{name}.group_size"] = output_shard_name
 
                         if meta.get("hadamard"):
                             h_meta = meta["hadamard"]
-                            output_tensors[f"{name}.hadamard_block_size"] = np.array(
+                            shard_tensors[f"{name}.hadamard_block_size"] = np.array(
                                 [h_meta["block_size"]], dtype=np.int32
                             )
+                            output_weight_map[f"{name}.hadamard_block_size"] = output_shard_name
 
                         # Record stats
                         err = meta.get("error", {})
@@ -1427,7 +1625,8 @@ class MRGPTQQuantizer:
                     else:
                         if verbose:
                             print(f"    Keeping: {name} {tensor.shape}")
-                        output_tensors[name] = tensor
+                        shard_tensors[name] = tensor
+                        output_weight_map[name] = output_shard_name
                         skipped_count += 1
 
                     # Mark layer complete
@@ -1436,12 +1635,37 @@ class MRGPTQQuantizer:
                     # Memory cleanup
                     gc.collect()
 
+            if is_sharded_input:
+                shard_output_path = output_path / output_shard_name
+                if verbose:
+                    print(f"  Saving shard: {shard_output_path.name}")
+                save_file(shard_tensors, str(shard_output_path))
+                shard_tensors.clear()
+                gc.collect()
+            else:
+                output_tensors.update(shard_tensors)
+
         # Step 5: Save quantized model
         if verbose:
             print("\nStep 5: Saving quantized model...")
 
-        output_file = output_path / "model.safetensors"
-        save_file(output_tensors, str(output_file))
+        if is_sharded_input:
+            total_size = 0
+            for st_file in st_files:
+                shard_output_path = output_path / st_file.name
+                if shard_output_path.exists():
+                    total_size += shard_output_path.stat().st_size
+
+            index_payload = {
+                "metadata": {"total_size": total_size},
+                "weight_map": output_weight_map,
+            }
+            index_file = output_path / "model.safetensors.index.json"
+            with index_file.open("w", encoding="utf-8") as f:
+                json.dump(index_payload, f, indent=2)
+        else:
+            output_file = output_path / "model.safetensors"
+            save_file(output_tensors, str(output_file))
 
         # Compute statistics
         mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
