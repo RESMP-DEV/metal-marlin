@@ -206,7 +206,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--force-calibration",
         action="store_true",
-        help="Force full Hessian calibration path even on low-system-RAM hosts",
+        help="Force full-pass calibration mode on low-system-RAM hosts",
     )
     parser.add_argument(
         "--force-download-calibration",
@@ -376,7 +376,10 @@ def main() -> int:
     total_vram_gb = device_props.total_memory / 1e9
     system_ram_gb = get_total_system_ram_gb()
     profile_applied, hessian_dtype = configure_runtime_profile(args, total_vram_gb)
-    use_calibration = args.force_calibration or system_ram_gb >= LOW_SYSTEM_RAM_THRESHOLD_GB
+    low_system_ram = system_ram_gb < LOW_SYSTEM_RAM_THRESHOLD_GB
+    hessian_collection_mode = (
+        "layer_stream" if (low_system_ram and not args.force_calibration) else "full"
+    )
 
     if verbose:
         print("=" * 72)
@@ -395,10 +398,10 @@ def main() -> int:
             print(f"  hessian_dtype={hessian_dtype}")
             if args.hessian_exclude_pattern:
                 print(f"  hessian_exclude={args.hessian_exclude_pattern}")
-        if not use_calibration:
+        if hessian_collection_mode == "layer_stream":
             print(
-                "Low-system-RAM mode: skipping full Hessian calibration and using "
-                "streaming RTN fallback quantization."
+                "Low-system-RAM mode: enabling layer-stream Hessian calibration "
+                "(slow, low-RAM GPTQ path)."
             )
 
     model_path = resolve_model_path(
@@ -419,32 +422,32 @@ def main() -> int:
     calibration_count = 0
     calibration_batches = 0
 
-    if use_calibration:
-        if verbose:
-            print("Loading tokenizer...")
-        tokenizer = load_tokenizer(model_path)
+    if verbose:
+        print("Loading tokenizer...")
+    tokenizer = load_tokenizer(model_path)
 
-        if verbose:
-            print("Loading Bartowski v3 calibration dataset...")
-        calibration = CalibrationDataset.v3(
-            max_samples=args.calibration_samples,
-            force_download=args.force_download_calibration,
-        )
-        calibration_count = len(calibration)
-        calibration_batches = args.calibration_batches
-        if calibration_batches is None:
-            calibration_batches = math.ceil(
-                calibration_count / max(args.batch_size, 1))
+    if verbose:
+        print("Loading Bartowski v3 calibration dataset...")
+    calibration = CalibrationDataset.v3(
+        max_samples=args.calibration_samples,
+        force_download=args.force_download_calibration,
+    )
+    calibration_count = len(calibration)
+    calibration_batches = args.calibration_batches
+    if calibration_batches is None:
+        calibration_batches = math.ceil(
+            calibration_count / max(args.batch_size, 1))
 
-        if verbose:
-            print(f"Calibration samples: {calibration_count}")
-            print(f"Calibration batches: {calibration_batches}")
-            print(f"Batch size: {args.batch_size}")
-            print(f"Max sequence length: {args.max_seq_len}")
-            print(f"Hessian dtype: {hessian_dtype}")
-            print(f"Max Hessian layers: {args.max_hessian_layers or 'unlimited'}")
-            if args.hessian_exclude_pattern:
-                print(f"Hessian excludes: {args.hessian_exclude_pattern}")
+    if verbose:
+        print(f"Calibration samples: {calibration_count}")
+        print(f"Calibration batches: {calibration_batches}")
+        print(f"Batch size: {args.batch_size}")
+        print(f"Max sequence length: {args.max_seq_len}")
+        print(f"Hessian dtype: {hessian_dtype}")
+        print(f"Max Hessian layers: {args.max_hessian_layers or 'unlimited'}")
+        print(f"Hessian collection mode: {hessian_collection_mode}")
+        if args.hessian_exclude_pattern:
+            print(f"Hessian excludes: {args.hessian_exclude_pattern}")
 
     quantizer = CUDAMMFP4Quantizer(
         backend_name="cuda",
@@ -457,46 +460,46 @@ def main() -> int:
         percdamp=args.percdamp,
     )
 
-    quantization_mode = "mr_gptq_calibration"
-    if use_calibration:
-        try:
-            report = quantizer.quantize_model_with_calibration(
-                model_path=model_path,
-                calibration=calibration,
-                tokenizer=tokenizer,
-                output_path=output_path,
-                num_calibration_batches=calibration_batches,
-                batch_size=args.batch_size,
-                max_seq_len=args.max_seq_len,
-                max_hessian_layers=args.max_hessian_layers,
-                hessian_dtype=hessian_dtype,
-                hessian_exclude_patterns=args.hessian_exclude_pattern,
-                resume=not args.no_resume,
-                verbose=verbose,
-            )
-        except (RuntimeError, MemoryError) as exc:
-            msg = str(exc).lower()
-            if "out of memory" in msg or "cannot allocate memory" in msg:
-                print("Calibration mode ran out of memory; switching to RTN streaming fallback.")
-                quantization_mode = "rtn_streaming_fallback"
-                report = quantizer.quantize_model(
-                    model_path=model_path,
-                    calibration_data=None,
-                    output_path=output_path,
-                    verbose=verbose,
-                )
-                calibration_count = 0
-                calibration_batches = 0
-            else:
-                raise
-    else:
-        quantization_mode = "rtn_streaming_fallback"
-        report = quantizer.quantize_model(
+    quantization_mode = (
+        "mr_gptq_layer_stream" if hessian_collection_mode == "layer_stream" else "mr_gptq_calibration"
+    )
+    try:
+        report = quantizer.quantize_model_with_calibration(
             model_path=model_path,
-            calibration_data=None,
+            calibration=calibration,
+            tokenizer=tokenizer,
             output_path=output_path,
+            num_calibration_batches=calibration_batches,
+            batch_size=args.batch_size,
+            max_seq_len=args.max_seq_len,
+            max_hessian_layers=args.max_hessian_layers,
+            hessian_dtype=hessian_dtype,
+            hessian_exclude_patterns=args.hessian_exclude_pattern,
+            hessian_collection_mode=hessian_collection_mode,
+            model_load_dtype="float16" if hessian_collection_mode == "layer_stream" else "float32",
+            model_device_map="auto" if hessian_collection_mode == "layer_stream" else "cpu",
+            model_low_cpu_mem_usage=(hessian_collection_mode == "layer_stream"),
+            model_offload_dir=(
+                output_path / "offload_model" if hessian_collection_mode == "layer_stream" else None
+            ),
+            resume=not args.no_resume,
             verbose=verbose,
         )
+    except (RuntimeError, MemoryError) as exc:
+        msg = str(exc).lower()
+        if "out of memory" in msg or "cannot allocate memory" in msg:
+            print("Calibration mode ran out of memory; switching to RTN streaming fallback.")
+            quantization_mode = "rtn_streaming_fallback"
+            report = quantizer.quantize_model(
+                model_path=model_path,
+                calibration_data=None,
+                output_path=output_path,
+                verbose=verbose,
+            )
+            calibration_count = 0
+            calibration_batches = 0
+        else:
+            raise
 
     copy_model_artifacts(model_path, output_path)
     save_quantization_config(
@@ -515,7 +518,10 @@ def main() -> int:
     if verbose:
         print()
         print("Saved:")
-        print(f"  {output_path / 'model.safetensors'}")
+        if (output_path / "model.safetensors").exists():
+            print(f"  {output_path / 'model.safetensors'}")
+        if (output_path / "model.safetensors.index.json").exists():
+            print(f"  {output_path / 'model.safetensors.index.json'}")
         print(f"  {output_path / 'quantization_report.json'}")
         print(f"  {output_path / 'quantization_config.json'}")
         print("Done.")
