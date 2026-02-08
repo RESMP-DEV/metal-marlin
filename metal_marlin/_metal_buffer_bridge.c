@@ -18,8 +18,11 @@
             "-lobjc"
         ],
         "include_dirs": [
-            "/Users/kearm/AlphaHENG/contrib/metal_marlin/metal_marlin",
-            "/Users/kearm/.cache/uv/builds-v0/.tmpatkmVk/lib/python3.12/site-packages/numpy/_core/include"
+            "/home/kearm/AlphaHENG/contrib/metal_marlin/metal_marlin",
+            "/home/kearm/AlphaHENG/contrib/metal_marlin/include",
+            "/home/kearm/AlphaHENG/contrib/metal_marlin/cpp/include",
+            "/home/kearm/.cache/uv/builds-v0/.tmp9NxKIK/lib/python3.12/site-packages/numpy/_core/include",
+            "/home/kearm/.cache/uv/builds-v0/.tmp9NxKIK/lib/python3.12/site-packages/pybind11/include"
         ],
         "language": "c",
         "name": "metal_marlin._metal_buffer_bridge",
