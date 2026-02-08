@@ -1,7 +1,7 @@
 # Dequantization Algorithms (Overview)
 
 This document is a high-level overview. For exact bitwise masks, packing rules,
-and bias correction used in the kernels, see [dequant_algorithm.md](dequant_algorithm.md).
+and bias correction used in the kernels, see [dequant_algorithm.md](../internals/dequant_algorithm.md).
 
 ## FP4 E2M1 Dequantization
 
@@ -43,7 +43,7 @@ word). The conversion is done by placing each nibble into bits [15:12] of each
 3. Multiply by `2^14` to correct the bias mismatch (FP4 bias 1 vs FP16 bias 15).
 4. Multiply by the per-group scale (often fused with step 3).
 
-See `dequant_algorithm.md` for the exact masks and code.
+See [`dequant_algorithm.md`](../internals/dequant_algorithm.md) for the exact masks and code.
 
 ## INT4 Magic-Bias Dequantization
 
@@ -93,4 +93,4 @@ half8 dequant_u4x8(uint packed, half scale, half zero) {
 
 ## See Also
 
-- [dequant_algorithm.md](dequant_algorithm.md) for the exact bitwise algorithms and constants.
+- [dequant_algorithm.md](../internals/dequant_algorithm.md) for the exact bitwise algorithms and constants.

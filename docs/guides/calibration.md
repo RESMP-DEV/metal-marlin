@@ -405,6 +405,6 @@ unless you use the API.
 
 ## Further Reading
 
-- [MR-GPTQ Algorithm](mr_gptq.md): Detailed GPTQ and Hadamard rotation explanation
-- [MoE Architecture](moe_architecture.md): Expert quantization strategies
-- [Mixed Precision](mixed_precision.md): Layer-specific precision configuration
+- [MR-GPTQ Algorithm](../formats/mr_gptq.md): Detailed GPTQ and Hadamard rotation explanation
+- [MoE Architecture](../concepts/moe_architecture.md): Expert quantization strategies
+- [Mixed Precision](../concepts/mixed_precision.md): Layer-specific precision configuration

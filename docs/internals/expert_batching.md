@@ -44,7 +44,8 @@ for expert_idx in range(self.config.num_experts):
     if start == end:
         continue
     # Load weights once, process all tokens
-    expert_out = self.experts[expert_idx](expert_tokens)
+    expert_module = self.experts[expert_idx]
+    expert_out = expert_module(expert_tokens)
     output.index_add_(0, token_indices, weighted_out)
 ```
 

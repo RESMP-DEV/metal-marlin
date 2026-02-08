@@ -71,6 +71,12 @@ metal_marlin/lib/.metallib_version
 agent_workspace/
 tasks/
 config.alphaheng.json
+reports/
+# Keep benchmarks ignored by default, but allow the continuous tracker artifacts.
+!benchmarks/
+benchmarks/*
+!benchmarks/continuous_perf_tracking.py
+!benchmarks/baseline_perf.json
 
 # Debug/temporary scripts (created during development, not for release)
 scripts/debug_*.py

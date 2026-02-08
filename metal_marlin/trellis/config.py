@@ -57,6 +57,10 @@ class TrellisModelConfig:
     # Set via prune_layers() or from_importance_analysis()
     skip_layers: list[int] | None = None
 
+    # Optimizations
+    use_mixed_bpw_optimizations: bool = True  # Enable MixedBPWMoEDispatcher logic
+    enable_kernel_autotune: bool = True  # Enable automatic kernel tuning on first run
+
     @classmethod
     def from_pretrained(cls, model_path: str) -> "TrellisModelConfig":
         """Load config from model directory or HuggingFace.
@@ -179,6 +183,12 @@ class TrellisModelConfig:
         # RoPE scaling
         if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling:
             kwargs["rope_scaling"] = hf_config.rope_scaling
+
+        if hasattr(hf_config, "use_mixed_bpw_optimizations"):
+            kwargs["use_mixed_bpw_optimizations"] = hf_config.use_mixed_bpw_optimizations
+        
+        if hasattr(hf_config, "enable_kernel_autotune"):
+            kwargs["enable_kernel_autotune"] = hf_config.enable_kernel_autotune
 
         return cls(**kwargs)
 

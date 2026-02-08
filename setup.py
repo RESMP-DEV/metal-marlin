@@ -32,6 +32,14 @@ except ImportError:
     PYBIND11_INCLUDE = None
 
 try:
+    import nanobind
+    NANOBIND_INCLUDE = nanobind.get_include()
+    USE_NANOBIND = True
+except ImportError:
+    NANOBIND_INCLUDE = None
+    USE_NANOBIND = False
+
+try:
     import torch
     TORCH_INCLUDE = torch.utils.cpp_extension.include_paths()
     TORCH_LIB_PATH = [torch.utils.cpp_extension.library_paths(
@@ -80,11 +88,13 @@ extra_link_args = [
 ]
 
 # Include paths
-include_dirs = [str(EXT_DIR), str(HERE / "include")]
+include_dirs = [str(EXT_DIR), str(HERE / "include"), str(HERE / "cpp/include")]
 if np is not None:
     include_dirs.append(np.get_include())
 if PYBIND11_INCLUDE is not None:
     include_dirs.append(PYBIND11_INCLUDE)
+if NANOBIND_INCLUDE is not None:
+    include_dirs.append(NANOBIND_INCLUDE)
 if TORCH_INCLUDE:
     include_dirs.extend(TORCH_INCLUDE)
 
@@ -152,27 +162,68 @@ if HAS_TORCH:
             ],
             language="objc++",
         ),
-        Extension(
-            "metal_marlin._cpp_ext",
-            sources=[
-                "metal_marlin/cpp_extension.cpp",
-                "metal_marlin/cpp/moe_dispatcher.mm",
-            ],
-            include_dirs=include_dirs,
-            extra_compile_args=[
-                "-std=c++17",
-                "-O3",
-                "-fvisibility=hidden",
-                "-fobjc-arc",
-            ],
-            extra_link_args=[
-                "-framework", "Metal",
-                "-framework", "Foundation",
-                "-lobjc",
-            ],
-            language="objc++",
-        ),
     ])
+
+    # _cpp_ext extension: use nanobind version if available, otherwise pybind11
+    if USE_NANOBIND:
+        print("Building _cpp_ext with nanobind (full mixed-bpw dispatch support)", file=sys.stderr)
+        extensions.append(
+            Extension(
+                "metal_marlin._cpp_ext",
+                sources=[
+                    "cpp/src/python_bindings.mm",
+                    "metal_marlin/cpp/moe_dispatcher.mm",
+                    "cpp/src/gemm_dispatch.cpp",
+                    "cpp/src/device.cpp",
+                    "cpp/src/device_discovery.cpp",
+                    "cpp/src/library_manager.mm",
+                    "cpp/src/events.mm",
+                    "cpp/src/encoder_cache.mm",
+                    "cpp/src/buffer_manager.cpp",
+                    "cpp/src/pool.cpp",
+                    "cpp/src/moe_manager.mm",
+                    "cpp/src/moe_router_dispatch.cpp",
+                ],
+                include_dirs=include_dirs,
+                extra_compile_args=[
+                    "-std=c++17",
+                    "-O3",
+                    "-fvisibility=hidden",
+                    "-fobjc-arc",
+                ],
+                extra_link_args=[
+                    "-framework", "Metal",
+                    "-framework", "Foundation",
+                    "-lobjc",
+                ],
+                language="objc++",
+            ),
+        )
+    else:
+        print("Building _cpp_ext with pybind11 (basic MoE dispatch, no mixed-bpw)", file=sys.stderr)
+        extensions.append(
+            Extension(
+                "metal_marlin._cpp_ext",
+                sources=[
+                    "metal_marlin/cpp_extension.cpp",
+                    "metal_marlin/cpp/moe_dispatcher.mm",
+                    "cpp/src/gemm_dispatch.cpp",
+                ],
+                include_dirs=include_dirs,
+                extra_compile_args=[
+                    "-std=c++17",
+                    "-O3",
+                    "-fvisibility=hidden",
+                    "-fobjc-arc",
+                ],
+                extra_link_args=[
+                    "-framework", "Metal",
+                    "-framework", "Foundation",
+                    "-lobjc",
+                ],
+                language="objc++",
+            ),
+        )
 else:
     print("Note: torch not found at build time, skipping C++ MoE dispatcher extensions", file=sys.stderr)
 

@@ -177,7 +177,7 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 | `metallib_loader.py` | ✅ Python loader with caching |
 | Version tracking | ✅ `.metallib_version` file |
 | Incremental builds | ✅ Only recompile changed shaders |
-| Documentation | ✅ `docs/metallib_architecture.md` |
+| Documentation | ✅ `docs/internals/metallib_architecture.md` |
 
 **Build output:**
 - File: `metal_marlin/lib/metal_marlin.metallib` (2.7 MB)

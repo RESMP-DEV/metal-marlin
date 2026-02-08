@@ -12,6 +12,7 @@ Low-level documentation for Metal shader development and optimization.
 - [**Dequant Algorithm**](dequant_algorithm.md) — Dequantization kernel design
 - [**Fused Dequant GEMM**](fused_dequant_gemm.md) — Fused dequantization + GEMM
 - [**Batched GEMM**](batched_gemm.md) — Batched matrix multiplication
+- [**GEMM Trellis Refactor**](gemm_trellis_moe_refactor.md) — `gemm_trellis_moe` structure and helper mapping
 - [**Expert Batching**](expert_batching.md) — MoE token grouping optimization
 - [**Trellis Kernels**](trellis_kernels.md) — Trellis 3-bit quantization kernels
 
@@ -20,11 +21,21 @@ Low-level documentation for Metal shader development and optimization.
 - [**AWQ Implementation**](awq_implementation.md) — Technical AWQ details
 - [**Async Dispatch**](async_dispatch.md) — GPU command execution pipeline
 - [**Metal ASR**](metal_asr.md) — Conformer/Parakeet ASR backend
+- [**Fast Router Dispatcher**](fast_router_dispatcher.md) — CPU-side MoE routing acceleration design
+- [**Metallib Architecture**](metallib_architecture.md) — Precompiled shader build/runtime architecture
 
 ## Optimization
 
 - [**Kernel Optimization**](kernel_optimization.md) — Applied kernel optimization techniques
 - [**MoE Optimization**](moe_optimization.md) — MoE architecture and dispatch strategies
+- [**Compressed KV Cache (MLA)**](compressed_kv_cache_mla.md) — Memory and latency optimizations for GLM-4.7
+- [**Enhanced Expert Memory Pool**](enhanced_expert_memory_pool.md) — Pooling/defrag strategy for MoE experts
+- [**Kernel Selection**](kernel_selection.md) — Core MoE kernel selection strategy
+- [**Mixed Kernel Selection**](mixed_kernel_selection.md) — Mixed precision selector heuristics
+- [**Mixed Kernel Selection (Implementation)**](kernel_selection_mixed_implementation.md) — Implementation details for mixed-BPW routing
+- [**KV Cache Consolidation**](kv_cache_consolidation.md) — Consolidated KV cache module design
+- [**Non-Power-of-2 Hadamard**](hadamard_npow2_optimization.md) — Hadamard optimization for unsupported sizes
+- [**Large-Vocab Sampling Optimization**](sampling_large_vocab_optimization.md) — Sampling kernels for vocab >100K
 - [**Tile Sizing**](tile_sizing.md) — Choosing optimal tile dimensions
 - [**Occupancy Tuning**](occupancy_tuning.md) — Maximizing GPU utilization
 - [**Memory Access Patterns**](memory_access_patterns.md) — Coalesced memory access

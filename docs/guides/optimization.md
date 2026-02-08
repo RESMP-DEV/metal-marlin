@@ -41,7 +41,7 @@ model = TrellisForCausalLM.from_pretrained(
 - ❌ `.dequantize()` unavailable after optimization
 - ❌ Metal-only (not applicable to CUDA)
 
-**See**: [`docs/internals/memory_optimization.md`](internals/memory_optimization.md)
+**See**: [`docs/internals/memory_optimization.md`](../internals/memory_optimization.md)
 
 ---
 
@@ -105,7 +105,7 @@ for (uint i = 0; i < TILE_N; ++i) {
 }
 ```
 
-**See**: [`docs/audits/barrier_optimization.md`](audits/barrier_optimization.md)
+**See**: [`docs/audits/barrier_optimization.md`](../audits/barrier_optimization.md)
 
 ---
 
@@ -202,7 +202,7 @@ replace_linear_layers(
 | 4-bit uniform | 4 GB | 13.8 | +1.4 |
 | 4-6-8 mixed | 5 GB | 12.9 | +0.5 |
 
-**See**: [`docs/guides/calibration.md`](guides/calibration.md)
+**See**: [`docs/guides/calibration.md`](calibration.md)
 
 ---
 
@@ -289,7 +289,7 @@ Compresses KV cache via learned projection (GLM-4.7-Flash architecture).
 | MHA (standard) | 8K × 32 × 128 × 2 × 2 bytes = 131 MB |
 | MLA (compressed) | 8K × 512 × 2 bytes = 16 MB |
 
-**See**: [`docs/architectures/mla.md`](architectures/mla.md)
+**See**: [`docs/architectures/mla.md`](../architectures/mla.md)
 
 ---
 
@@ -423,7 +423,7 @@ generator = SpeculativeGenerator(
 )
 ```
 
-**See**: [`metal_marlin/speculative.py`](../metal_marlin/speculative.py)
+**See**: [`metal_marlin/speculative.py`](../../metal_marlin/speculative.py)
 
 ---
 
@@ -1164,10 +1164,10 @@ uv run python -m metal_marlin.benchmark_report generate \
 
 ## Additional Resources
 
-- **Architecture docs**: [`docs/concepts/architecture.md`](concepts/architecture.md)
-- **Troubleshooting**: [`docs/guides/troubleshooting.md`](guides/troubleshooting.md)
-- **Calibration guide**: [`docs/guides/calibration.md`](guides/calibration.md)
-- **Serving guide**: [`docs/guides/serving.md`](guides/serving.md)
+- **Architecture docs**: [`docs/concepts/architecture.md`](../concepts/architecture.md)
+- **Troubleshooting**: [`docs/guides/troubleshooting.md`](troubleshooting.md)
+- **Calibration guide**: [`docs/guides/calibration.md`](calibration.md)
+- **Serving guide**: [`docs/guides/serving.md`](serving.md)
 - **Metal shader reference**: `src/*.metal` (comments explain optimizations)
 
 ---
@@ -1180,4 +1180,4 @@ Found a performance regression or optimization opportunity?
 2. Open issue with trace + benchmark results
 3. Propose optimization with expected impact
 
-See [`CONTRIBUTING.md`](../CONTRIBUTING.md) for details.
+See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) for details.

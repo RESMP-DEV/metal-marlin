@@ -32,6 +32,7 @@
 #include <Metal/Metal.hpp>
 #include <Foundation/Foundation.hpp>
 #include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
 #include <pybind11/stl/string.h>
 #include <pybind11/stl/vector.h>
 #include <pybind11/stl/optional.h>
@@ -44,6 +45,7 @@
 #include <memory>
 #include <string>
 #include "cpp/moe_dispatcher.h"
+#include "gemm_dispatch.hpp"
 
 #include <cstdint>
 
@@ -655,6 +657,212 @@ PYBIND11_MODULE(_cpp_ext, m) {
 
     m.def("align_buffer_size", &align_buffer_size,
           "Align buffer size to cache line or page boundary");
+
+    // Mixed-BPW dispatch types
+    py::class_<metal_marlin::MoEConfig>(m, "MoEConfig")
+        .def(py::init<>())
+        .def_readwrite("hidden_dim", &metal_marlin::MoEConfig::hidden_dim)
+        .def_readwrite("intermediate_dim", &metal_marlin::MoEConfig::intermediate_dim)
+        .def_readwrite("num_experts", &metal_marlin::MoEConfig::num_experts)
+        .def_readwrite("top_k", &metal_marlin::MoEConfig::top_k)
+        .def_readwrite("max_experts_per_batch",
+                       &metal_marlin::MoEConfig::max_experts_per_batch)
+        .def_readwrite("command_buffers_per_batch_size",
+                       &metal_marlin::MoEConfig::command_buffers_per_batch_size)
+        .def_readwrite("max_inflight_submissions",
+                       &metal_marlin::MoEConfig::max_inflight_submissions)
+        .def_readwrite("threadgroup_size_x", &metal_marlin::MoEConfig::threadgroup_size_x)
+        .def_readwrite("common_batch_sizes", &metal_marlin::MoEConfig::common_batch_sizes)
+        .def_readwrite("use_indirect_command_buffers",
+                       &metal_marlin::MoEConfig::use_indirect_command_buffers)
+        .def_readwrite("overlap_cpu_encoding", &metal_marlin::MoEConfig::overlap_cpu_encoding)
+        .def_readwrite("wait_for_completion", &metal_marlin::MoEConfig::wait_for_completion)
+        .def_readwrite("kernel_name", &metal_marlin::MoEConfig::kernel_name)
+        .def_readwrite("metallib_path", &metal_marlin::MoEConfig::metallib_path);
+
+    py::class_<metal_marlin::MixedBPWBatchPlan>(m, "MixedBPWBatchPlan")
+        .def_readonly("bit_width", &metal_marlin::MixedBPWBatchPlan::bit_width)
+        .def_readonly("expert_ids", &metal_marlin::MixedBPWBatchPlan::expert_ids)
+        .def_readonly("expert_token_counts",
+                      &metal_marlin::MixedBPWBatchPlan::expert_token_counts)
+        .def_readonly("token_count", &metal_marlin::MixedBPWBatchPlan::token_count);
+
+    py::class_<metal_marlin::MixedBPWDispatchStats>(m, "MixedBPWDispatchStats")
+        .def_readonly("queued_experts", &metal_marlin::MixedBPWDispatchStats::queued_experts)
+        .def_readonly("routed_experts", &metal_marlin::MixedBPWDispatchStats::routed_experts)
+        .def_readonly("grouped_batches", &metal_marlin::MixedBPWDispatchStats::grouped_batches)
+        .def_readonly("command_buffer_submissions",
+                      &metal_marlin::MixedBPWDispatchStats::command_buffer_submissions)
+        .def_readonly("indirect_command_batches",
+                      &metal_marlin::MixedBPWDispatchStats::indirect_command_batches);
+
+    py::class_<metal_marlin::BatchDispatchMixedBPW>(m, "BatchDispatchMixedBPW")
+        .def(py::init<>())
+        .def("reset", &metal_marlin::BatchDispatchMixedBPW::reset)
+        .def("add_expert_bits", &metal_marlin::BatchDispatchMixedBPW::add_expert_bits,
+             py::arg("expert_bits"))
+        .def("set_active_experts", &metal_marlin::BatchDispatchMixedBPW::set_active_experts,
+             py::arg("active_expert_ids"))
+        .def("clear_active_experts", &metal_marlin::BatchDispatchMixedBPW::clear_active_experts)
+        .def("reserve_command_buffers",
+             &metal_marlin::BatchDispatchMixedBPW::reserve_command_buffers,
+             py::arg("common_batch_sizes"),
+             py::arg("command_buffers_per_size") = 2)
+        .def("build_batches", &metal_marlin::BatchDispatchMixedBPW::build_batches,
+             py::arg("max_experts_per_batch") = 0)
+        .def(
+            "build_batches_for_routing",
+            [](const metal_marlin::BatchDispatchMixedBPW& dispatcher,
+               py::array_t<int32_t, py::array::c_style | py::array::forcecast> expert_indices,
+               uint32_t max_experts_per_batch) {
+              auto idx_buf = expert_indices.request();
+              if (idx_buf.ndim != 2) {
+                throw std::invalid_argument(
+                    "build_batches_for_routing: expert_indices must be 2D int32");
+              }
+              return dispatcher.build_batches_for_routing(
+                  static_cast<const int32_t*>(idx_buf.ptr),
+                  static_cast<uint32_t>(idx_buf.shape[0]),
+                  static_cast<uint32_t>(idx_buf.shape[1]),
+                  max_experts_per_batch);
+            },
+            py::arg("expert_indices"),
+            py::arg("max_experts_per_batch") = 0)
+        .def("try_acquire_command_buffer_slot",
+             &metal_marlin::BatchDispatchMixedBPW::try_acquire_command_buffer_slot,
+             py::arg("batch_size"))
+        .def("release_command_buffer_slot",
+             &metal_marlin::BatchDispatchMixedBPW::release_command_buffer_slot,
+             py::arg("batch_size"))
+        .def("command_buffer_slot_key",
+             &metal_marlin::BatchDispatchMixedBPW::command_buffer_slot_key,
+             py::arg("batch_size"))
+        .def("stats", [](const metal_marlin::BatchDispatchMixedBPW& dispatcher) {
+          return dispatcher.stats_snapshot();
+        });
+
+    m.def(
+        "dispatch_mixed_bpw_moe",
+        [](py::array_t<float, py::array::c_style | py::array::forcecast> hidden_states,
+           std::vector<py::array_t<uint8_t, py::array::c_style | py::array::forcecast>>
+               expert_weights_packed,
+           std::vector<int> expert_bits,
+           std::vector<py::array_t<py::half, py::array::c_style | py::array::forcecast>>
+               expert_scales,
+           py::array_t<int32_t, py::array::c_style | py::array::forcecast> expert_indices,
+           py::array_t<float, py::array::c_style | py::array::forcecast> expert_probs,
+           metal_marlin::MoEConfig config) {
+          auto hidden_buf = hidden_states.request();
+          auto idx_buf = expert_indices.request();
+          auto probs_buf = expert_probs.request();
+
+          if (hidden_buf.ndim != 2) {
+            throw std::invalid_argument("dispatch_mixed_bpw_moe: hidden_states must be 2D");
+          }
+          if (idx_buf.ndim != 2) {
+            throw std::invalid_argument("dispatch_mixed_bpw_moe: expert_indices must be 2D");
+          }
+          if (probs_buf.ndim != 2) {
+            throw std::invalid_argument("dispatch_mixed_bpw_moe: expert_probs must be 2D");
+          }
+          if (hidden_buf.shape[0] != idx_buf.shape[0]) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: hidden_states and expert_indices batch size mismatch");
+          }
+          if (probs_buf.shape[0] != idx_buf.shape[0]) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: expert_probs and expert_indices batch size mismatch");
+          }
+
+          const size_t num_experts = expert_bits.size();
+          if (num_experts == 0) {
+            return;
+          }
+          if (expert_weights_packed.size() != num_experts ||
+              expert_scales.size() != num_experts) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: expert arrays must match expert_bits length");
+          }
+
+          const uint32_t num_tokens = static_cast<uint32_t>(idx_buf.shape[0]);
+          const uint32_t top_k = static_cast<uint32_t>(idx_buf.shape[1]);
+
+          if (config.hidden_dim == 0) {
+            config.hidden_dim = static_cast<uint32_t>(hidden_buf.shape[1]);
+          }
+          if (config.num_experts == 0) {
+            config.num_experts = static_cast<uint32_t>(num_experts);
+          }
+          if (config.top_k == 0) {
+            config.top_k = top_k;
+          }
+
+          std::vector<const void*> expert_weight_ptrs;
+          std::vector<size_t> expert_weight_sizes;
+          std::vector<const void*> expert_scale_ptrs;
+          std::vector<size_t> expert_scale_sizes;
+          expert_weight_ptrs.reserve(num_experts);
+          expert_weight_sizes.reserve(num_experts);
+          expert_scale_ptrs.reserve(num_experts);
+          expert_scale_sizes.reserve(num_experts);
+
+          for (size_t i = 0; i < num_experts; ++i) {
+            auto weight_buf = expert_weights_packed[i].request();
+            auto scale_buf = expert_scales[i].request();
+            expert_weight_ptrs.push_back(weight_buf.ptr);
+            expert_weight_sizes.push_back(static_cast<size_t>(weight_buf.size) *
+                                          static_cast<size_t>(weight_buf.itemsize));
+            expert_scale_ptrs.push_back(scale_buf.ptr);
+            expert_scale_sizes.push_back(static_cast<size_t>(scale_buf.size) *
+                                         static_cast<size_t>(scale_buf.itemsize));
+          }
+
+          const float* expert_probs_ptr = static_cast<const float*>(probs_buf.ptr);
+          std::vector<float> gathered_topk_probs;
+          if (probs_buf.shape[1] == static_cast<ssize_t>(num_experts) &&
+              probs_buf.shape[1] != idx_buf.shape[1]) {
+            gathered_topk_probs.resize(static_cast<size_t>(num_tokens) * top_k);
+            const auto* idx_ptr = static_cast<const int32_t*>(idx_buf.ptr);
+            for (uint32_t token = 0; token < num_tokens; ++token) {
+              const size_t token_base = static_cast<size_t>(token) * top_k;
+              const size_t probs_base = static_cast<size_t>(token) * num_experts;
+              for (uint32_t k = 0; k < top_k; ++k) {
+                const int32_t expert_id = idx_ptr[token_base + k];
+                if (expert_id < 0 || static_cast<size_t>(expert_id) >= num_experts) {
+                  throw std::invalid_argument(
+                      "dispatch_mixed_bpw_moe: expert_indices contains out-of-range expert id");
+                }
+                gathered_topk_probs[token_base + k] =
+                    expert_probs_ptr[probs_base + static_cast<size_t>(expert_id)];
+              }
+            }
+            expert_probs_ptr = gathered_topk_probs.data();
+          } else if (probs_buf.shape[1] != idx_buf.shape[1]) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: expert_probs width must be top_k or num_experts");
+          }
+
+          py::gil_scoped_release release;
+          metal_marlin::dispatch_mixed_bpw_moe(
+              static_cast<float*>(hidden_buf.ptr),
+              expert_weight_ptrs,
+              expert_weight_sizes,
+              expert_bits,
+              expert_scale_ptrs,
+              expert_scale_sizes,
+              static_cast<const int32_t*>(idx_buf.ptr),
+              expert_probs_ptr,
+              num_tokens,
+              top_k,
+              config);
+        },
+        py::arg("hidden_states"),
+        py::arg("expert_weights_packed"),
+        py::arg("expert_bits"),
+        py::arg("expert_scales"),
+        py::arg("expert_indices"),
+        py::arg("expert_probs"),
+        py::arg("config"));
 
     // Constants
     m.attr("CACHE_LINE_SIZE") = CACHE_LINE_SIZE;

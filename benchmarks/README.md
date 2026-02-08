@@ -8,6 +8,7 @@ This directory contains benchmark scripts for evaluating the performance of meta
 |-----------|---------|---------|
 | `benchmark_cpp_dispatch.py` | MoE C++ vs Python dispatch latency | `uv run python scripts/benchmark_cpp_dispatch.py` |
 | `run_mixed_precision_bench.py` | Mixed-precision MoE strategies | `uv run python scripts/run_mixed_precision_bench.py` |
+| `moe_hotpath_profiler.md` | MoE stage-by-stage profiling guide | `uv run python benchmarks/profile_moe_hotpath.py --output results/profile.json` |
 
 ## Scripts (contrib/metal_marlin/scripts/)
 

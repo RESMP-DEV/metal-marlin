@@ -24,7 +24,6 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -51,6 +50,11 @@ from .moe_dispatch import (
     RouterBufferPool,
     create_cached_weight_buffers,
     dispatch_moe_trellis_swiglu,
+)
+from .optimizations import (
+    ExpertMemoryPool,
+    ExpertSelectionCache,
+    MixedBPWMoEDispatcher,
 )
 from .softmax_topk import SoftmaxTopKDispatcher
 
@@ -108,6 +112,7 @@ def _compiled_router_forward(
 
 
 if TYPE_CHECKING:
+    from .lm import CausalLMOutput, TrellisForCausalLM
     from .loader import TrellisModelLoader
 
 if HAS_METAL:
@@ -682,6 +687,8 @@ class TrellisMoEMLP(nn.Module):
         shared_expert: TrellisDenseMLP,
         num_experts_per_tok: int = 8,
         eager_buffers: bool = True,
+        use_mixed_bpw_optimizations: bool = True,
+        enable_kernel_autotune: bool = True,
     ):
         """Initialize TrellisMoEMLP.
 
@@ -693,6 +700,8 @@ class TrellisMoEMLP(nn.Module):
             eager_buffers: If True (default), skip pre-stacking expert weights
                 and create Metal buffers on-demand for better memory efficiency.
                 If False, pre-stack weights into contiguous tensors (deprecated).
+            use_mixed_bpw_optimizations: Enable mixed-precision dispatch optimizations.
+            enable_kernel_autotune: Enable one-time kernel auto-tuning on first forward.
         """
         super().__init__()
         self._eager_buffers = eager_buffers
@@ -700,10 +709,30 @@ class TrellisMoEMLP(nn.Module):
         self.experts = nn.ModuleList(experts)
         self.shared_expert = shared_expert
         self.num_experts_per_tok = num_experts_per_tok
+        self.use_mixed_bpw_optimizations = use_mixed_bpw_optimizations
+        self.enable_kernel_autotune = enable_kernel_autotune
 
-        # Check for mixed-precision experts (sensitivity-aware quantization)
-        # Different experts may have different bit widths, which prevents stacking
+        # Check for mixed-precision experts (sensitivity-aware quantization).
+        # Different experts may have different bit widths, which prevents stacking.
         self._is_mixed_precision = self._check_mixed_precision()
+
+        # Initialize optimization components
+        self.expert_selection_cache = ExpertSelectionCache()
+        # Large models benefit from hot/cold expert tracking; small ones keep legacy path.
+        self.expert_memory_pool: ExpertMemoryPool | None = (
+            ExpertMemoryPool(self.experts) if len(self.experts) > 8 else None
+        )
+        self.mixed_bpw_dispatcher: MixedBPWMoEDispatcher | None = None
+        if self.use_mixed_bpw_optimizations and self._is_mixed_precision and HAS_METAL:
+            try:
+                self.mixed_bpw_dispatcher = MixedBPWMoEDispatcher(self)
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize MixedBPWMoEDispatcher: %s. "
+                    "Falling back to standard MoE dispatch.",
+                    e,
+                )
+                self.mixed_bpw_dispatcher = None
 
         # Prepare contiguous expert weights for fast dispatch
         self._prepare_expert_weights()
@@ -732,14 +761,7 @@ class TrellisMoEMLP(nn.Module):
 
         # Routing cache for decode optimization
         # Consecutive tokens often select same experts - cache and reuse when similar
-        self._routing_cache_enabled: bool = True
-        self._routing_cache_threshold: float = 0.95  # Cosine similarity threshold
-        # Cache: (last_input_norm, selected_experts, routing_weights)
-        self._cached_routing: tuple[torch.Tensor,
-                                    torch.Tensor, torch.Tensor] | None = None
-        # Stats for monitoring cache effectiveness (disabled by default for perf)
-        self._routing_cache_hits: int = 0
-        self._routing_cache_misses: int = 0
+        # Delegated to self.expert_selection_cache
 
         # Buffer validity tracking for cache invalidation
         self._buffer_version: int = 0
@@ -770,15 +792,27 @@ class TrellisMoEMLP(nn.Module):
         self._use_fused_topk: bool = False
         self._softmax_topk_dispatcher: SoftmaxTopKDispatcher | None = None
 
-        # Expert selection frequency tracking for hot/cold expert management
-        self._expert_selection_counts: list[int] = [0] * len(experts)
-        self._hot_expert_threshold: float = 0.5  # Top 50% are hot experts
-        self._hot_experts: set[int] = set(
-            range(len(experts)))  # Initially all hot
-        # Lazy load cold experts
+        # Expert selection frequency tracking and hot/cold expert management
+        # Delegated to self.expert_memory_pool
+        
+        # Initialize call counters for hot/cold expert recomputation
+        self._forward_call_count = 0
+        self._expert_frequency_update_interval = (
+            self.expert_memory_pool.update_interval
+            if self.expert_memory_pool is not None
+            else 100
+        )  # Update hot/cold experts every N forwards
+        
+        # Kernel auto-tuning state
+        self._kernel_auto_tuned = False
+        self._kernel_config: dict[str, Any] = {}  # Stores optimal kernel settings
+        
+        # Legacy expert tracking (for backward compatibility)
+        self._expert_selection_counts = [0] * len(self.experts)
+        self._hot_experts = set(range(len(self.experts)))
+        self._hot_expert_threshold = 0.5
         self._cold_expert_buffer_pool: dict[int, CachedWeightBuffers] = {}
-        self._expert_frequency_update_interval: int = 100  # Update hot/cold every N calls
-        self._forward_call_count: int = 0
+
 
         # Optional eager buffer creation for memory efficiency
         if eager_buffers:
@@ -1473,87 +1507,31 @@ class TrellisMoEMLP(nn.Module):
             )
 
     def _check_routing_cache(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Check if cached routing decision can be reused for this input.
-
-        For decode (batch=1), consecutive tokens often select same experts.
-        This method checks if the current input is similar enough to the
-        cached input to reuse its routing decision, skipping the router
-        forward pass.
-
-        Args:
-            x: Input tensor [1, hidden_dim] in fp16.
-
-        Returns:
-            Tuple of (selected_experts, routing_weights) if cache hit, None otherwise.
-        """
-        if not self._routing_cache_enabled or self._cached_routing is None:
-            return None
-
-        cached_norm, cached_experts, cached_weights = self._cached_routing
-
-        # Fast cosine similarity: dot(x, cached) / (|x| * |cached|)
-        # Both are already L2-normalized, so just dot product
-        x_flat = x.view(-1)
-        x_norm = x_flat / (x_flat.norm() + 1e-8)
-        similarity = float(torch.dot(x_norm, cached_norm).cpu().numpy())
-
-        if similarity >= self._routing_cache_threshold:
-            self._routing_cache_hits += 1
-            return cached_experts, cached_weights
-
-        self._routing_cache_misses += 1
-        return None
+        """Check if cached routing decision can be reused for this input."""
+        return self.expert_selection_cache.check(x)
 
     def _update_routing_cache(
         self, x: torch.Tensor, selected_experts: torch.Tensor, routing_weights: torch.Tensor
     ) -> None:
-        """Update the routing cache with new routing decision.
-
-        Args:
-            x: Input tensor [1, hidden_dim] in fp16.
-            selected_experts: Selected expert indices [1, top_k].
-            routing_weights: Routing weights [1, top_k].
-        """
-        if not self._routing_cache_enabled:
-            return
-
-        # L2 normalize for cosine similarity
-        x_flat = x.view(-1)
-        x_norm = x_flat / (x_flat.norm() + 1e-8)
-
-        self._cached_routing = (
-            x_norm.clone(), selected_experts.clone(), routing_weights.clone())
+        """Update the routing cache with new routing decision."""
+        self.expert_selection_cache.update(x, selected_experts, routing_weights)
 
     def get_routing_cache_stats(self) -> dict[str, int | float]:
-        """Get routing cache hit/miss statistics.
-
-        Returns:
-            Dict with hits, misses, and hit_rate.
-        """
-        total = self._routing_cache_hits + self._routing_cache_misses
-        hit_rate = self._routing_cache_hits / total if total > 0 else 0.0
-        return {
-            "hits": self._routing_cache_hits,
-            "misses": self._routing_cache_misses,
-            "hit_rate": hit_rate,
-        }
+        """Get routing cache hit/miss statistics."""
+        return self.expert_selection_cache.get_stats()
 
     def reset_routing_cache_stats(self) -> None:
         """Reset routing cache statistics."""
-        self._routing_cache_hits = 0
-        self._routing_cache_misses = 0
+        self.expert_selection_cache.hits = 0
+        self.expert_selection_cache.misses = 0
 
-    def get_expert_stats(self) -> dict[str, Any]:
-        """Get expert selection statistics and hot/cold expert information.
+    def clear_routing_cache(self) -> None:
+        """Clear the routing cache (e.g., at start of new generation)."""
+        self.expert_selection_cache.clear()
+        self._cached_routing = None
 
-        Returns:
-            Dict with:
-            - selection_counts: List of selection counts per expert
-            - hot_experts: Set of hot expert indices
-            - cold_experts: Set of cold expert indices
-            - hot_threshold: Current hot expert threshold (0.0-1.0)
-            - cold_buffer_pool_size: Number of cold experts currently in buffer pool
-        """
+    def get_expert_selection_stats(self) -> dict[str, Any]:
+        """Get expert selection statistics and hot/cold expert information."""
         num_experts = len(self.experts)
         cold_experts = set(range(num_experts)) - self._hot_experts
         return {
@@ -1571,6 +1549,8 @@ class TrellisMoEMLP(nn.Module):
         self._forward_call_count = 0
         self._hot_experts = set(range(len(self.experts)))
         self._cold_expert_buffer_pool.clear()
+        if self.expert_memory_pool is not None:
+            self.expert_memory_pool.reset_stats()
 
     def set_hot_expert_threshold(self, threshold: float) -> None:
         """Set the threshold for hot expert classification.
@@ -1583,6 +1563,8 @@ class TrellisMoEMLP(nn.Module):
         if not 0.0 < threshold <= 1.0:
             raise ValueError(f"threshold must be in (0, 1], got {threshold}")
         self._hot_expert_threshold = threshold
+        if self.expert_memory_pool is not None:
+            self.expert_memory_pool.hot_threshold = threshold
         # Recompute hot experts with new threshold
         self._recompute_hot_experts()
 
@@ -1632,23 +1614,30 @@ class TrellisMoEMLP(nn.Module):
             "num_cold_loaded": num_cold_loaded,
         }
 
-    def clear_routing_cache(self) -> None:
-        """Clear the routing cache (e.g., at start of new generation)."""
-        self._cached_routing = None
-
     def _update_expert_frequencies(self, selected_experts: torch.Tensor) -> None:
         """Update expert selection frequency counts.
 
         Tracks how often each expert is selected to identify hot vs cold experts.
         Called during forward pass to accumulate statistics.
 
+        Uses ExpertMemoryPool for hot/cold expert management.
+        Maintains legacy _expert_selection_counts for backward compatibility.
+
         Args:
             selected_experts: Selected expert indices [batch, top_k].
         """
-        # Flatten and count selections
-        flat_experts = selected_experts.flatten().tolist()
-        for expert_id in flat_experts:
-            self._expert_selection_counts[expert_id] += 1
+        if self.expert_memory_pool is not None:
+            # Use ExpertMemoryPool for hot/cold management on large models.
+            self.expert_memory_pool.record_selection(selected_experts)
+            # ExpertMemoryPool.selection_counts is the source of truth.
+            for i in range(len(self._expert_selection_counts)):
+                self._expert_selection_counts[i] = self.expert_memory_pool.selection_counts[i]
+            return
+
+        # Legacy counting path for smaller models.
+        for eid in selected_experts.flatten().tolist():
+            if 0 <= eid < len(self._expert_selection_counts):
+                self._expert_selection_counts[eid] += 1
 
     def _recompute_hot_experts(self) -> None:
         """Recompute which experts are 'hot' based on selection frequency.
@@ -1657,27 +1646,40 @@ class TrellisMoEMLP(nn.Module):
         Cold experts share a buffer pool and are loaded on demand.
         This reduces GPU memory by ~30% for typical workloads where
         a subset of experts is used more frequently.
+        
+        Syncs legacy attributes with ExpertMemoryPool for backward compatibility.
+        Note: ExpertMemoryPool automatically recomputes hot/cold experts
+        via record_selection(), so this method primarily serves to sync legacy state.
         """
         num_experts = len(self.experts)
         if num_experts == 0:
             return
 
-        # Sort experts by selection count
-        expert_counts = [(i, count)
-                         for i, count in enumerate(self._expert_selection_counts)]
-        expert_counts.sort(key=lambda x: x[1], reverse=True)
+        if self.expert_memory_pool is not None:
+            # Sync legacy attributes with ExpertMemoryPool state.
+            self._hot_experts = self.expert_memory_pool.hot_experts.copy()
+            # Note: We don't sync _cold_expert_buffer_pool since it's a different
+            # implementation (ExpertMemoryPool uses cold_buffer_pool attribute directly)
+            logger.debug(
+                "Synced legacy hot experts: %d hot (%s), %d cold",
+                len(self._hot_experts),
+                sorted(self._hot_experts)[:10],
+                num_experts - len(self._hot_experts),
+            )
+            return
 
-        # Top 50% are hot experts
+        # Legacy fallback: derive hot experts from local selection counters.
+        ranked = sorted(
+            range(num_experts),
+            key=lambda idx: self._expert_selection_counts[idx],
+            reverse=True,
+        )
         num_hot = max(1, int(num_experts * self._hot_expert_threshold))
-        self._hot_experts = set(expert_id for expert_id,
-                                _ in expert_counts[:num_hot])
-
-        # Clear cold expert buffer pool to free memory
-        # They will be lazily reloaded when needed
+        self._hot_experts = set(ranked[:num_hot])
         self._cold_expert_buffer_pool.clear()
 
         logger.debug(
-            "Recomputed hot experts: %d hot (%s), %d cold",
+            "Recomputed hot experts (legacy): %d hot (%s), %d cold",
             len(self._hot_experts),
             sorted(self._hot_experts)[:10],
             num_experts - len(self._hot_experts),
@@ -1791,6 +1793,23 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             Output tensor [batch, hidden_dim] in fp16.
         """
+        # First try to use the MixedBPWMoEDispatcher if available
+        if self.mixed_bpw_dispatcher is not None:
+            try:
+                return self.mixed_bpw_dispatcher.dispatch(
+                    x=x,
+                    selected_experts=selected_experts,
+                    routing_weights=routing_weights,
+                    lib=lib,
+                    buffer_pool=buffer_pool,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"MixedBPWMoEDispatcher dispatch failed: {e}. Falling back to legacy dispatch."
+                )
+                # Fall through to legacy implementation
+
+        # Legacy implementation (original code)
         batch_size = x.shape[0]
         device = x.device
 
@@ -1881,6 +1900,110 @@ class TrellisMoEMLP(nn.Module):
 
         return output
 
+    def _auto_tune_kernels(self, x: torch.Tensor) -> None:
+        """Auto-tune kernel configuration on first forward pass.
+
+        Measures performance of different kernel configurations and selects
+        the optimal settings for subsequent forward passes.
+        
+        This runs once on first forward and caches results.
+        
+        Args:
+            x: Input tensor to test kernels with.
+        """
+        if self._kernel_auto_tuned or not self.enable_kernel_autotune:
+            return
+
+        if not HAS_METAL:
+            logger.info("Skipping kernel auto-tuning: Metal unavailable")
+            self._kernel_config["optimal"] = {"use_fp32_acc": self.hidden_dim >= 1024}
+            self._kernel_auto_tuned = True
+            return
+
+        logger.info("Starting kernel auto-tuning...")
+
+        # Small test for kernel auto-tuning
+        # Only run a few experts to find optimal config
+        test_batch = min(4, x.shape[0])
+        test_x = x[:test_batch]
+
+        optimal_fp32 = self.hidden_dim >= 1024
+        # Test with different FP32 accumulation settings
+        for use_fp32 in [False, True]:
+            if self.hidden_dim >= 1024:
+                # Large models always benefit from FP32 accumulation
+                break
+            # For small models, measure performance
+            try:
+                import time
+
+                test_start = time.perf_counter()
+                # Run small test dispatch
+                selected_test = torch.zeros(test_batch, 1, dtype=torch.long, device=x.device)
+                routing_test = torch.ones(test_batch, 1, dtype=torch.float16, device=x.device)
+
+                lib = self._get_lib()
+                buffer_pool = self._get_buffer_pool()
+                cached = self._get_cached_buffers()
+
+                # Minimal test dispatch (single expert)
+                dispatch_moe_trellis_swiglu(
+                    lib=lib,
+                    activations=test_x,
+                    gate_weights=None,
+                    gate_scales=None,
+                    up_weights=None,
+                    up_scales=None,
+                    down_weights=None,
+                    down_scales=None,
+                    gate_su=None,
+                    gate_sv=None,
+                    up_su=None,
+                    up_sv=None,
+                    down_su=None,
+                    down_sv=None,
+                    grid=None,
+                    expert_ids=selected_test,
+                    expert_probs=routing_test,
+                    hidden_dim=self.hidden_dim,
+                    intermediate_dim=self.intermediate_dim,
+                    num_experts=1,
+                    top_k=1,
+                    bits=self.bits,
+                    cached_buffers=cached,
+                    buffer_pool=buffer_pool,
+                    use_fp32_acc=use_fp32,
+                )
+                test_time = (time.perf_counter() - test_start) * 1000  # Convert to ms
+
+                # Record performance
+                key = f"use_fp32_{use_fp32}"
+                self._kernel_config[key] = {
+                    "time_ms": test_time,
+                    "use_fp32_acc": use_fp32,
+                }
+            except Exception as e:
+                logger.warning(f"Kernel test failed for use_fp32={use_fp32}: {e}")
+
+        # Select optimal configuration
+        if self._kernel_config:
+            optimal_config = min(self._kernel_config.values(), key=lambda x: x["time_ms"])
+            self._kernel_config["optimal"] = optimal_config
+            logger.info(
+                f"Kernel auto-tuning complete. Optimal config: "
+                f"use_fp32_acc={optimal_config['use_fp32_acc']} "
+                f"({optimal_config['time_ms']:.2f}ms)"
+            )
+        else:
+            # Default config if tests failed
+            self._kernel_config["optimal"] = {
+                "use_fp32_acc": optimal_fp32,
+            }
+            logger.warning("Kernel auto-tuning failed, using default config")
+
+        self._kernel_auto_tuned = True
+
+
     def forward_fast(
         self,
         x: torch.Tensor,
@@ -1907,6 +2030,9 @@ class TrellisMoEMLP(nn.Module):
         """
         batch_size = x.shape[0] if x.dim(
         ) == 2 else x.numel() // self.hidden_dim
+
+        # Auto-tune kernels on first forward pass
+        self._auto_tune_kernels(x)
 
         # Track forward calls for periodic hot/cold expert recomputation
         self._forward_call_count += 1
@@ -1958,24 +2084,48 @@ class TrellisMoEMLP(nn.Module):
                 self._recompute_hot_experts()
 
             if self._is_mixed_precision:
-                # Prefer prebuilt per-bit-group buffers with local expert remapping.
-                # This path avoids the slower grouped fallback behavior when
-                # zero-copy cache entries are unavailable for non-contiguous groups.
-                if getattr(self, "_bit_group_buffers", None):
-                    return self._dispatch_mixed_precision(
-                        x=x,
-                        selected_experts=selected_experts,
-                        routing_weights=routing_weights,
-                        lib=lib,
-                        buffer_pool=buffer_pool,
-                    )
-                return self._forward_grouped(
-                    x,
-                    selected_experts,
-                    routing_weights,
-                    workspace=workspace,
-                    workspace_offset=workspace_offset,
-                )
+                output: torch.Tensor | None = None
+
+                # Prefer MixedBPW dispatcher when available.
+                if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
+                    try:
+                        self.mixed_bpw_dispatcher.ensure_buffers()
+                        output = self.mixed_bpw_dispatcher.dispatch(
+                            x=x,
+                            selected_experts=selected_experts,
+                            routing_weights=routing_weights,
+                            lib=lib,
+                            buffer_pool=buffer_pool,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "MixedBPWMoEDispatcher dispatch failed: %s. "
+                            "Falling back to standard mixed dispatch.",
+                            e,
+                        )
+
+                # Standard mixed precision fallback path.
+                if output is None:
+                    if getattr(self, "_bit_group_buffers", None):
+                        output = self._dispatch_mixed_precision(
+                            x=x,
+                            selected_experts=selected_experts,
+                            routing_weights=routing_weights,
+                            lib=lib,
+                            buffer_pool=buffer_pool,
+                        )
+                    else:
+                        output = self._forward_grouped(
+                            x,
+                            selected_experts,
+                            routing_weights,
+                            workspace=workspace,
+                            workspace_offset=workspace_offset,
+                        )
+
+                # Shared expert is always active.
+                output.add_(self.shared_expert(x))
+                return output
             elif self._batched_dispatcher is not None:
                 self._pending_input = x
                 output = self._batched_dispatcher.queue_moe_dispatch(
@@ -2066,7 +2216,24 @@ class TrellisMoEMLP(nn.Module):
 
         # For mixed precision, use grouped dispatch (per bit-tuple batching)
         if self._is_mixed_precision:
-            if getattr(self, "_bit_group_buffers", None):
+            output = None
+            if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
+                try:
+                    self.mixed_bpw_dispatcher.ensure_buffers()
+                    output = self.mixed_bpw_dispatcher.dispatch(
+                        x=x_flat,
+                        selected_experts=selected_experts,
+                        routing_weights=routing_weights,
+                        lib=self._get_lib(),
+                        buffer_pool=buffer_pool,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "MixedBPWMoEDispatcher dispatch failed: %s. "
+                        "Falling back to standard mixed dispatch.",
+                        e,
+                    )
+            if output is None and getattr(self, "_bit_group_buffers", None):
                 output = self._dispatch_mixed_precision(
                     x=x_flat,
                     selected_experts=selected_experts,
@@ -2074,7 +2241,7 @@ class TrellisMoEMLP(nn.Module):
                     lib=self._get_lib(),
                     buffer_pool=buffer_pool,
                 )
-            else:
+            if output is None:
                 output = self._forward_grouped(
                     x_flat,
                     selected_experts,
@@ -2082,6 +2249,8 @@ class TrellisMoEMLP(nn.Module):
                     workspace=workspace,
                     workspace_offset=workspace_offset,
                 )
+
+            output.add_(self.shared_expert(x_flat))
             return (
                 output.view(*batch_shape, self.hidden_dim)
                 if output.is_contiguous()
@@ -2560,6 +2729,8 @@ class TrellisMoEMLP(nn.Module):
             shared_expert=shared_expert,
             num_experts_per_tok=config.num_experts_per_tok,
             eager_buffers=True,  # Memory-optimized: create Metal buffers from CPU
+            use_mixed_bpw_optimizations=getattr(config, "use_mixed_bpw_optimizations", True),
+            enable_kernel_autotune=getattr(config, "enable_kernel_autotune", True),
         )
 
     def quantize_router_to_int8(self) -> dict[str, float]:

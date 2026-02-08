@@ -26,20 +26,18 @@ from metal_marlin.moe.expert_grouping import (
     GroupDispatchInfo,
     GroupedMoEDispatcher,
 )
-from metal_marlin.moe_dispatch import (
-    MoEDispatchInfo,
-    MoEDispatcher,
-    FusedMoEDispatcher,
-    FusedSharedExpertAdd,
-    compute_expert_load,
-    compute_load_balancing_loss,
-    ensure_torch_tensor,
-    gather_for_experts,
-    group_tokens_by_expert,
-    group_tokens_by_expert_full,
-    group_tokens_by_expert_full_gpu,
-    group_tokens_by_expert_gpu,
-    scatter_expert_outputs,
+from metal_marlin.moe.expert_memory_pool import (
+    BitWidthPool,
+    ExpertMemoryPool,
+    PoolConfig,
+)
+from metal_marlin.moe.expert_selection_cache import (
+    CacheLookupResult,
+    ExpertSelectionCache,
+    ExpertSelectionCacheConfig,
+    ExpertSelectionCacheStats,
+    create_expert_selection_cache_for_glm47_flash,
+    create_glm47_flash_config,
 )
 from metal_marlin.moe.moe_dispatch_metal import (
     AsyncExpertCommandBuffer,
@@ -83,6 +81,21 @@ from metal_marlin.moe.sparse_routing import (
     SparseRoutingStats,
     create_sparse_router_from_profiler,
 )
+from metal_marlin.moe_dispatch import (
+    FusedMoEDispatcher,
+    FusedSharedExpertAdd,
+    MoEDispatcher,
+    MoEDispatchInfo,
+    compute_expert_load,
+    compute_load_balancing_loss,
+    ensure_torch_tensor,
+    gather_for_experts,
+    group_tokens_by_expert,
+    group_tokens_by_expert_full,
+    group_tokens_by_expert_full_gpu,
+    group_tokens_by_expert_gpu,
+    scatter_expert_outputs,
+)
 
 __all__ = [
     "AsyncExpertLoader",
@@ -91,10 +104,19 @@ __all__ = [
     "BatchedExpertDispatch",
     "CooccurrenceEnhancer",
     "DispatchMetrics",
+    "CacheLookupResult",
     "ExpertBoundary",
     "ExpertDispatchJob",
     "ExpertExecutionBarrier",
     "ExpertGrouping",
+    "ExpertMemoryPool",
+    "PoolConfig",
+    "BitWidthPool",
+    "ExpertSelectionCache",
+    "ExpertSelectionCacheConfig",
+    "ExpertSelectionCacheStats",
+    "create_expert_selection_cache_for_glm47_flash",
+    "create_glm47_flash_config",
     "ExpertLRUCache",
     "ExpertPrefetcher",
     "ExpertWorkItem",

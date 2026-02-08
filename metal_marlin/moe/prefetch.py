@@ -121,15 +121,29 @@ class RoutingHistory:
     window_size: int
     # deque of (timestamp, expert_ids) tuples
     history: deque[tuple[float, list[int]]] = field(default_factory=deque)
+    # Map of sequence position -> expert_ids for attention-guided prediction
+    position_history: dict[int, list[int]] = field(default_factory=dict)
+    current_pos: int = 0
 
     def record(self, expert_ids: Sequence[int]) -> None:
         """Record a routing decision."""
         timestamp = time.time()
-        self.history.append((timestamp, list(expert_ids)))
+        ids_list = list(expert_ids)
+        self.history.append((timestamp, ids_list))
+        
+        # Track by position for attention-guided prediction
+        self.position_history[self.current_pos] = ids_list
+        self.current_pos += 1
 
         # Trim to window size
         while len(self.history) > self.window_size:
             self.history.popleft()
+            
+        # Keep position history bounded too (e.g. last 2048 positions)
+        if len(self.position_history) > 2048:
+            oldest_pos = self.current_pos - 2048
+            if oldest_pos in self.position_history:
+                del self.position_history[oldest_pos]
 
     def get_frequency_counts(self, decay: float = 1.0) -> dict[int, float]:
         """Get expert frequency counts with optional temporal decay.
@@ -313,14 +327,40 @@ def predict_next_experts(
 
     elif strategy == PrefetchStrategy.ATTENTION_GUIDED:
         # Weight by attention pattern + history
-        if attention_pattern is None or history is None:
+        if attention_pattern is None or history is None or not history.position_history:
             # Fall back to recency
             return _predict_recency(routing, history, prefetch_k, decay_factor)
 
         # Get attention-weighted expert distribution
-        # This assumes we have stored which experts were used at each position
-        # For now, fall back to recency with attention as tiebreaker
-        return _predict_recency(routing, history, prefetch_k, decay_factor)
+        # attention_pattern: [num_heads, current_seq_len] or [batch, num_heads, seq_len]
+        # We average across heads and batches for a simple prediction
+        weights = attention_pattern
+        if HAS_TORCH and torch is not None and isinstance(weights, torch.Tensor):
+            if weights.dim() == 3: # [batch, heads, seq]
+                weights = weights.mean(dim=(0, 1))
+            elif weights.dim() == 2: # [heads, seq]
+                weights = weights.mean(dim=0)
+            weights = weights.cpu().numpy()
+        else:
+            weights = np.asarray(weights)
+            if weights.ndim == 3:
+                weights = weights.mean(axis=(0, 1))
+            elif weights.ndim == 2:
+                weights = weights.mean(axis=0)
+        
+        # weights: [current_seq_len]
+        expert_scores: dict[int, float] = {}
+        for pos, score in enumerate(weights):
+            if pos in history.position_history:
+                for eid in history.position_history[pos]:
+                    expert_scores[eid] = expert_scores.get(eid, 0.0) + float(score)
+        
+        if not expert_scores:
+            return _predict_recency(routing, history, prefetch_k, decay_factor)
+            
+        # Sort by score
+        sorted_experts = sorted(expert_scores.items(), key=lambda x: -x[1])
+        return [eid for eid, _ in sorted_experts[:prefetch_k]]
 
     elif strategy == PrefetchStrategy.TOP_K_RECENCY:
         return _predict_recency(routing, history, prefetch_k, decay_factor)
