@@ -20,7 +20,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 import torch
@@ -47,6 +47,11 @@ group_tokens_by_expert_full_gpu = getattr(
 
 if HAS_METAL:
     import Metal
+
+if TYPE_CHECKING:
+    from Metal import MTLCommandBuffer
+else:
+    MTLCommandBuffer = Any
 
 
 logger = logging.getLogger(__name__)
@@ -1557,7 +1562,8 @@ def dispatch_moe_trellis_swiglu(
     buffer_pool: MoEBufferPool | None = None,
     use_fp32_acc: bool = False,
     kernel_name_override: str | None = None,
-) -> torch.Tensor:
+    cmd_manager: Any | None = None,
+) -> Optional[MTLCommandBuffer]:
     """Fused MoE GEMM with Trellis quantization and SwiGLU activation.
 
     HOT PATH: This function is called for every forward pass. Keep it minimal:
@@ -1570,9 +1576,13 @@ def dispatch_moe_trellis_swiglu(
         bits: Either uniform bit width (int) or per-projection (gate, up, down) tuple.
         kernel_name_override: Optional benchmark-only kernel override. When set,
             dispatch uses this kernel directly instead of select_moe_kernel(...).
+        cmd_manager: Optional AsyncCommandBufferManager for batched dispatch.
 
     Note: MPS availability is checked at module import time (HAS_MPS) and by
     callers (x.is_mps check in forward()). No per-call validation needed here.
+
+    Synchronization: This function does not wait for completion. Callers must
+    call waitUntilCompleted() at a layer boundary after batching dispatches.
     """
     # Validation (required for correctness tests)
     if activations.dim() != 2:
@@ -1604,10 +1614,6 @@ def dispatch_moe_trellis_swiglu(
     activations_sorted = activations[sort_order // top_k]
     expert_ids_sorted = expert_ids_flat[sort_order]
     expert_probs_sorted = expert_probs.view(-1)[sort_order]
-
-    # Track original token positions for scattering results back
-    original_token_indices = sort_order // top_k
-    original_slot_indices = sort_order % top_k
 
     # Expanded batch size for flattened expert dispatch
     n = batch_size * top_k
@@ -1689,12 +1695,16 @@ def dispatch_moe_trellis_swiglu(
     # Allocate output buffer
     dispatch_top_k = 1  # flattened expert dispatch
     if buffer_pool is not None:
-        output_fp32, output_buf = buffer_pool.get_output_buffer(n)
+        output_tensor, output_buf = buffer_pool.get_output_buffer(n)
+        output_fp16 = buffer_pool.get_output_fp16(n)
     else:
-        output_fp32 = torch.zeros(
-            n, hidden_dim, dtype=torch.float32, device="mps")
+        output_tensor = torch.zeros(n, hidden_dim, dtype=torch.float32, device="mps")
         output_buf = mps_tensor_to_metal_buffer(
-            output_fp32, device, copy_back=True)
+            output_tensor,
+            device,
+            copy_back=True,
+        )
+        output_fp16 = torch.zeros(n, hidden_dim, dtype=torch.float16, device="mps")
 
     # Mixed-BPW and no-pool paths use dedicated cache keyed by device + bits + shape.
     if isinstance(bits, tuple) or buffer_pool is None:
@@ -1781,6 +1791,17 @@ def dispatch_moe_trellis_swiglu(
         params_buf,
     ]
 
+    if cmd_manager is not None:
+        cmd_manager.dispatch_kernel(
+            function_name=kernel_name,
+            grid=(grid_x, grid_y, grid_z),
+            threadgroup=(threads_per_tg, 1, 1),
+            buffers=buffer_list,
+        )
+        # Schedule copy from fp32 output to fp16
+        output_fp16.copy_(output_tensor)
+        return output_fp16
+
     cmd_buf = dispatch_kernel(
         lib,
         function_name=kernel_name,
@@ -1789,29 +1810,10 @@ def dispatch_moe_trellis_swiglu(
         buffers=buffer_list,
         wait=False,  # Don't block - allow batching
     )
-    # Synchronize here for correctness until full batching is implemented
-    if cmd_buf is not None:
-        cmd_buf.waitUntilCompleted()
-
-    # Accumulate results using scatter-add
-    if buffer_pool is not None:
-        final_output = buffer_pool.get_output_fp16(batch_size)
-        final_output.zero_()
-    else:
-        final_output = torch.zeros(
-            batch_size, hidden_dim, dtype=torch.float16, device="mps")
-
-    # output_fp32 has shape [batch_size * top_k, hidden_dim]
-    # We need to add output_fp32[i] to final_output[original_token_indices[i]]
-    # original_token_indices has shape [batch_size * top_k]
-
-    # Convert to fp16 for accumulation
-    output_results = output_fp32.half()
-
-    # Scatter add
-    final_output.index_add_(0, original_token_indices, output_results)
-
-    return final_output
+    
+    # Schedule copy from fp32 output to fp16
+    output_fp16.copy_(output_tensor)
+    return output_fp16
 
 
 # ---------------------------------------------------------------------------
@@ -2490,19 +2492,19 @@ def dispatch_moe_per_bit_tuple(
         return dispatch_moe_trellis_swiglu(
             lib,
             activations=group_activations,
-            gate_weights=None,
-            gate_scales=None,
-            up_weights=None,
-            up_scales=None,
-            down_weights=None,
-            down_scales=None,
-            gate_su=None,
-            gate_sv=None,
-            up_su=None,
-            up_sv=None,
-            down_su=None,
-            down_sv=None,
-            grid=None,
+            gate_weights=cached_buffers.gate_weights,
+            gate_scales=cached_buffers.gate_scales,
+            up_weights=cached_buffers.up_weights,
+            up_scales=cached_buffers.up_scales,
+            down_weights=cached_buffers.down_weights,
+            down_scales=cached_buffers.down_scales,
+            gate_su=cached_buffers.gate_su,
+            gate_sv=cached_buffers.gate_sv,
+            up_su=cached_buffers.up_su,
+            up_sv=cached_buffers.up_sv,
+            down_su=cached_buffers.down_su,
+            down_sv=cached_buffers.down_sv,
+            grid=cached_buffers.grid,
             expert_ids=group_expert_ids,
             expert_probs=group_expert_probs,
             hidden_dim=hidden_dim,

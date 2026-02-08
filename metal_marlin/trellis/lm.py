@@ -16,10 +16,9 @@ Usage:
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
@@ -28,15 +27,17 @@ import torch.nn.functional as F
 from ..kv_cache import TrellisKVCache
 from ..metal_dispatch import MetalKernelLibrary
 from .config import TrellisModelConfig
+# Import from model for backward compatibility and usage
+from .model import (TrellisDecoderLayer, TrellisModel, TrellisMoEMLP,
+                    WorkspaceBufferPool)
 from .moe_dispatch import MoEBufferPool
 
-# Import from model for backward compatibility and usage
-from .model import (
-    TrellisDecoderLayer,
-    TrellisModel,
-    TrellisMoEMLP,
-    WorkspaceBufferPool,
-)
+# Import LayerBatchContext for batching command buffers across layers
+try:
+    from .async_dispatch import HAS_METAL, LayerBatchContext
+except ImportError:
+    LayerBatchContext = None
+    HAS_METAL = False
 
 if TYPE_CHECKING:
     # Avoid circular import at runtime if possible, though these are re-exported
@@ -44,12 +45,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class CausalLMOutput:
     """Output from TrellisForCausalLM compatible with HuggingFace interface."""
 
     logits: torch.Tensor
     """Logits tensor [batch, seq_len, vocab_size]."""
+
 
 class TrellisForCausalLM(nn.Module):
     """Trellis model with language modeling head for text generation.
@@ -440,14 +443,25 @@ class TrellisForCausalLM(nn.Module):
 
         num_layers = len(self.model.layers)
 
+        # Use LayerBatchContext for MoE dispatch batching (reduces commits from 46 to ~12)
+        # This is separate from lib.batch_dispatch() which handles attention kernel batching.
+        from contextlib import nullcontext
+        use_layer_batch = (
+            batch_size == 1 and HAS_METAL and LayerBatchContext is not None)
+        layer_batch_mgr = (
+            LayerBatchContext(
+                self.model, batch_size=4) if use_layer_batch else nullcontext()
+        )
+
         # Batch all layer dispatches into single command buffer
         if lib is not None:
-            with lib.batch_dispatch():
+            with lib.batch_dispatch(), layer_batch_mgr as batch_ctx:
                 for i, layer in enumerate(self.model.layers):
                     # Prefetch next layer's KV cache while computing current layer.
                     # This warms GPU caches for the next iteration's memory reads.
                     if use_prefetch and i + 1 < num_layers:
-                        prefetch_async = getattr(kv_cache, "prefetch_layer_async", None)
+                        prefetch_async = getattr(
+                            kv_cache, "prefetch_layer_async", None)
                         if callable(prefetch_async):
                             prefetch_async(i + 1, lib=lib)
                         else:
@@ -460,23 +474,26 @@ class TrellisForCausalLM(nn.Module):
                         kv_cache=kv_cache,
                         rope_cos=cos_cache,
                         rope_sin=sin_cache,
+                        _batch_ctx=batch_ctx,
                     )
                     # NOTE: No sync inside batch_dispatch! It would conflict with batched
                     # command buffer. The batch_dispatch context manager handles the sync.
         else:
-            for i, layer in enumerate(self.model.layers):
-                # Prefetch next layer's KV cache
-                if use_prefetch and i + 1 < num_layers:
-                    kv_cache.prefetch_layer(i + 1)
+            with layer_batch_mgr as batch_ctx:
+                for i, layer in enumerate(self.model.layers):
+                    # Prefetch next layer's KV cache
+                    if use_prefetch and i + 1 < num_layers:
+                        kv_cache.prefetch_layer(i + 1)
 
-                hidden_states = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    kv_cache=kv_cache,
-                    rope_cos=cos_cache,
-                    rope_sin=sin_cache,
-                )
+                    hidden_states = layer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        kv_cache=kv_cache,
+                        rope_cos=cos_cache,
+                        rope_sin=sin_cache,
+                        _batch_ctx=batch_ctx,
+                    )
 
         # Final normalization - keep in fp16 for memory efficiency
         hidden_states = self.model.norm(hidden_states)
@@ -502,7 +519,7 @@ class TrellisForCausalLM(nn.Module):
         Args:
             input_ids: Initial token IDs [batch, seq_len].
             max_new_tokens: Maximum number of new tokens to generate.
-            temperature: Sampling temperature (1.0 = greedy, <1.0 = focused, >1.0 = random).
+            temperature: Sampling temperature (0.0 = greedy/argmax, <1.0 = focused, >1.0 = random).
             top_k: Number of highest probability tokens to keep for top-k sampling.
             top_p: Cumulative probability threshold for nucleus (top-p) sampling.
 
@@ -578,8 +595,18 @@ class TrellisForCausalLM(nn.Module):
                     indices_to_remove, float("-inf"))
 
             # Sample from the filtered distribution
-            probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # [batch, 1]
+            if temperature == 0.0:
+                # Greedy decoding: pick argmax directly (no softmax needed)
+                next_token = next_token_logits.argmax(dim=-1, keepdim=True)
+            else:
+                probs = F.softmax(next_token_logits, dim=-1)
+                # Clamp to avoid nan/inf issues in multinomial
+                probs = probs.clamp(min=0.0)
+                prob_sum = probs.sum(dim=-1, keepdim=True)
+                prob_sum = prob_sum.clamp(min=1e-8)
+                probs = probs / prob_sum
+                next_token = torch.multinomial(
+                    probs, num_samples=1)  # [batch, 1]
 
             # Mark sequences as finished if EOS token is generated
             if hasattr(self.config, "eos_token_id") and self.config.eos_token_id is not None:
@@ -603,6 +630,7 @@ class TrellisForCausalLM(nn.Module):
         cls,
         model_path: str | Path,
         device: str = "mps",
+        mmap: bool = True,
         optimize_memory: bool = True,
     ) -> TrellisForCausalLM:
         """Load a TrellisForCausalLM model from path.
@@ -614,11 +642,15 @@ class TrellisForCausalLM(nn.Module):
             model_path: Path to the model directory containing config.json
                 and base_weights.safetensors.
             device: Device to load the model on (default: "mps").
+            mmap: Enable memory-mapped loading when reading PyTorch
+                checkpoints with torch.load (default: True).
+            optimize_memory: Enable post-load memory optimizations.
 
         Returns:
             Loaded TrellisForCausalLM instance.
         """
-        config = TrellisModelConfig.from_pretrained(model_path)
+        model_path = Path(model_path)
+        config = TrellisModelConfig.from_pretrained(str(model_path))
         model = cls(config)
 
         # CRITICAL: Move model to device FIRST, then load weights
@@ -626,13 +658,51 @@ class TrellisForCausalLM(nn.Module):
         model = model.to(device)
 
         # Load base model
-        model.model = TrellisModel.from_pretrained(model_path, device)
+        model.model = TrellisModel.from_pretrained(str(model_path), device)
 
-        # Load lm_head weight from base_weights.safetensors (may be tied to embed_tokens)
-        base_weights = TrellisModel._load_base_weights(model_path)
-        if "lm_head.weight" in base_weights:
-            model.lm_head.weight.data = base_weights["lm_head.weight"].to(
-                device)
+        # Load lm_head weight. Prefer memory-mapped torch checkpoints when present.
+        # This avoids eagerly copying large checkpoint files into RAM.
+        checkpoint_path: Path | None = None
+        for candidate in ("model.pt", "pytorch_model.bin", "checkpoint.pt"):
+            candidate_path = model_path / candidate
+            if candidate_path.exists():
+                checkpoint_path = candidate_path
+                break
+
+        lm_head_weight: torch.Tensor | None = None
+        if checkpoint_path is not None:
+            try:
+                state_dict = torch.load(
+                    checkpoint_path,
+                    map_location="cpu",
+                    mmap=mmap,
+                )
+            except TypeError:
+                # Backward compatibility for older torch versions without mmap arg.
+                state_dict = torch.load(
+                    checkpoint_path,
+                    map_location="cpu",
+                )
+            if (
+                isinstance(state_dict, dict)
+                and "state_dict" in state_dict
+                and isinstance(state_dict["state_dict"], dict)
+            ):
+                state_dict = state_dict["state_dict"]
+
+            if isinstance(state_dict, dict) and "lm_head.weight" in state_dict:
+                maybe_weight = state_dict["lm_head.weight"]
+                if isinstance(maybe_weight, torch.Tensor):
+                    lm_head_weight = maybe_weight
+
+        if lm_head_weight is None:
+            # Fall back to trellis base_weights.safetensors.
+            base_weights = TrellisModel._load_base_weights(str(model_path))
+            if "lm_head.weight" in base_weights:
+                lm_head_weight = base_weights["lm_head.weight"]
+
+        if lm_head_weight is not None:
+            model.lm_head.weight.data = lm_head_weight.to(device)
         else:
             # Tied embeddings - share weight with embed_tokens
             model.lm_head.weight = model.model.embed_tokens.weight
@@ -784,24 +854,16 @@ class TrellisForCausalLM(nn.Module):
 
         return stats
 
+
 # Public compatibility aliases.
 #
 # `TrellisForCausalLM` and related core model classes are now canonicalized in
 # `trellis.model`. Keep these names available from `trellis.lm` so existing
 # import sites continue working without caller-side rewrites.
-from .model import (
-    CausalLMOutput as _CanonicalCausalLMOutput,
-    TrellisDecoderLayer as _CanonicalTrellisDecoderLayer,
-    TrellisForCausalLM as _CanonicalTrellisForCausalLM,
-    TrellisModel as _CanonicalTrellisModel,
-    TrellisMoEMLP as _CanonicalTrellisMoEMLP,
-)
 
-CausalLMOutput = _CanonicalCausalLMOutput
-TrellisForCausalLM = _CanonicalTrellisForCausalLM
-TrellisModel = _CanonicalTrellisModel
-TrellisDecoderLayer = _CanonicalTrellisDecoderLayer
-TrellisMoEMLP = _CanonicalTrellisMoEMLP
+# CausalLMOutput is defined in this module
+# TrellisForCausalLM is defined in this module
+# TrellisModel, TrellisDecoderLayer, TrellisMoEMLP are imported from .model
 
 __all__ = [
     "CausalLMOutput",

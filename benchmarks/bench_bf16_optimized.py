@@ -10,6 +10,7 @@ Covers:
 """
 
 from __future__ import annotations
+import os
 
 import argparse
 import json
@@ -24,7 +25,14 @@ from typing import Any
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
 
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch  # noqa: E402
+
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
 
 try:
     import torch.nn.functional as F
@@ -44,7 +52,8 @@ def _require_torch(feature: str) -> None:
 def _require_mps(feature: str) -> None:
     _require_torch(feature)
     if not HAS_MPS:
-        raise RuntimeError("PyTorch MPS backend is required for this benchmark.")
+        raise RuntimeError(
+            "PyTorch MPS backend is required for this benchmark.")
 
 
 def _mps_sync() -> None:
@@ -116,7 +125,8 @@ def _benchmark_gemm(
 
     def _run_old() -> dict[str, float]:
         t1, (a_fp32, b_fp32) = _time_stage(lambda: (A.float(), B.float()))
-        t2, (a_fp16, b_fp16) = _time_stage(lambda: (a_fp32.half(), b_fp32.half()))
+        t2, (a_fp16, b_fp16) = _time_stage(
+            lambda: (a_fp32.half(), b_fp32.half()))
         t3, c_fp16 = _time_stage(lambda: a_fp16 @ b_fp16)
         t4, c_fp32 = _time_stage(lambda: c_fp16.float())
         t5, _ = _time_stage(lambda: c_fp32.to(torch.bfloat16))
@@ -158,9 +168,12 @@ def _benchmark_gemm(
         tflops = (flops / (total_ms / 1000.0)) / 1e12 if total_ms > 0 else 0.0
         gemm_key = "gemm_fp16_ms" if is_old else "gemm_fp32_ms"
         gemm_ms = means.get(gemm_key, 0.0)
-        gemm_tflops = (flops / (gemm_ms / 1000.0)) / 1e12 if gemm_ms > 0 else 0.0
-        bytes_moved = _gemm_bytes_old(M, N, K) if is_old else _gemm_bytes_new(M, N, K)
-        memory_gb_s = (bytes_moved / (total_ms / 1000.0)) / 1e9 if total_ms > 0 else 0.0
+        gemm_tflops = (flops / (gemm_ms / 1000.0)) / \
+            1e12 if gemm_ms > 0 else 0.0
+        bytes_moved = _gemm_bytes_old(
+            M, N, K) if is_old else _gemm_bytes_new(M, N, K)
+        memory_gb_s = (bytes_moved / (total_ms / 1000.0)) / \
+            1e9 if total_ms > 0 else 0.0
         return {
             "total_ms": total_ms,
             "tflops": tflops,
@@ -186,13 +199,17 @@ def _benchmark_attention(
 ) -> dict[str, Any]:
     _require_mps("attention benchmarking")
     if F is None:
-        raise RuntimeError("torch.nn.functional is required for attention benchmarking.")
+        raise RuntimeError(
+            "torch.nn.functional is required for attention benchmarking.")
     assert torch is not None
 
     batch = 1
-    q_bf16 = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.bfloat16, device="mps")
-    k_bf16 = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.bfloat16, device="mps")
-    v_bf16 = torch.randn(batch, heads, seq_len, head_dim, dtype=torch.bfloat16, device="mps")
+    q_bf16 = torch.randn(batch, heads, seq_len, head_dim,
+                         dtype=torch.bfloat16, device="mps")
+    k_bf16 = torch.randn(batch, heads, seq_len, head_dim,
+                         dtype=torch.bfloat16, device="mps")
+    v_bf16 = torch.randn(batch, heads, seq_len, head_dim,
+                         dtype=torch.bfloat16, device="mps")
     scale = 1.0 / math.sqrt(head_dim)
 
     def _run_old() -> float:
@@ -274,13 +291,15 @@ def _benchmark_moe(
     tokens_per_expert = tokens // active_experts
     total_tokens = tokens_per_expert * active_experts
 
-    x = torch.randn(total_tokens, hidden_size, dtype=torch.bfloat16, device="mps")
+    x = torch.randn(total_tokens, hidden_size,
+                    dtype=torch.bfloat16, device="mps")
     # Only materialize active expert weights to keep memory bounded
     weights = torch.randn(
         active_experts, hidden_size, hidden_size, dtype=torch.bfloat16, device="mps"
     )
 
-    router = torch.arange(active_experts, device="mps").repeat_interleave(tokens_per_expert)
+    router = torch.arange(
+        active_experts, device="mps").repeat_interleave(tokens_per_expert)
 
     def _run_old() -> tuple[float, float]:
         dispatch_ms = 0.0
@@ -301,7 +320,8 @@ def _benchmark_moe(
     def _run_new() -> tuple[float, float]:
         t0 = time.perf_counter()
         order = torch.argsort(router)
-        x_sorted = x.index_select(0, order).view(active_experts, tokens_per_expert, hidden_size)
+        x_sorted = x.index_select(0, order).view(
+            active_experts, tokens_per_expert, hidden_size)
         _mps_sync()
         dispatch_ms = (time.perf_counter() - t0) * 1000.0
 
@@ -373,7 +393,8 @@ def _benchmark_inference(
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError("transformers is required for inference benchmark") from exc
+        raise RuntimeError(
+            "transformers is required for inference benchmark") from exc
 
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
@@ -395,7 +416,8 @@ def _benchmark_inference(
         )
         input_ids = inputs["input_ids"].to(model.device)
     else:
-        input_ids = tokenizer(prompt, return_tensors="pt")["input_ids"].to(model.device)
+        input_ids = tokenizer(prompt, return_tensors="pt")[
+            "input_ids"].to(model.device)
 
     prompt_tokens = int(input_ids.shape[1])
     memory = MemoryTracker()
@@ -420,7 +442,8 @@ def _benchmark_inference(
 
             _mps_sync()
             t0 = time.perf_counter()
-            output = model.generate(input_ids, max_new_tokens=max_new_tokens, do_sample=False)
+            output = model.generate(
+                input_ids, max_new_tokens=max_new_tokens, do_sample=False)
             _mps_sync()
             decode_times.append(time.perf_counter() - t0)
             output_lengths.append(int(output.shape[1] - input_ids.shape[1]))
@@ -510,8 +533,10 @@ def _print_report(results: dict[str, Any]) -> None:
     print("=" * 80)
 
     print("\nGEMM 4096x4096x4096")
-    print(f"  Old: {gemm['old']['total_ms']:.3f} ms, {gemm['old']['tflops']:.2f} TFLOPS, {gemm['old']['memory_gb_s']:.1f} GB/s")
-    print(f"  New: {gemm['new']['total_ms']:.3f} ms, {gemm['new']['tflops']:.2f} TFLOPS, {gemm['new']['memory_gb_s']:.1f} GB/s")
+    print(
+        f"  Old: {gemm['old']['total_ms']:.3f} ms, {gemm['old']['tflops']:.2f} TFLOPS, {gemm['old']['memory_gb_s']:.1f} GB/s")
+    print(
+        f"  New: {gemm['new']['total_ms']:.3f} ms, {gemm['new']['tflops']:.2f} TFLOPS, {gemm['new']['memory_gb_s']:.1f} GB/s")
     print("  Breakdown (old):")
     for k, v in gemm["old"]["breakdown_ms"].items():
         print(f"    {k}: {v:.3f} ms")
@@ -520,17 +545,22 @@ def _print_report(results: dict[str, Any]) -> None:
         print(f"    {k}: {v:.3f} ms")
 
     print("\nAttention (seq_len=2048, head_dim=128)")
-    print(f"  Old: {attention['old']['tokens_per_sec']:.1f} tok/s, {attention['old']['memory_mb']:.1f} MB")
-    print(f"  New: {attention['new']['tokens_per_sec']:.1f} tok/s, {attention['new']['memory_mb']:.1f} MB")
+    print(
+        f"  Old: {attention['old']['tokens_per_sec']:.1f} tok/s, {attention['old']['memory_mb']:.1f} MB")
+    print(
+        f"  New: {attention['new']['tokens_per_sec']:.1f} tok/s, {attention['new']['memory_mb']:.1f} MB")
 
     print("\nMoE (64 experts, 4 active)")
-    print(f"  Old: compute={moe['old']['expert_compute_ms']:.2f} ms, dispatch={moe['old']['dispatch_overhead_ms']:.2f} ms")
-    print(f"  New: compute={moe['new']['expert_compute_ms']:.2f} ms, dispatch={moe['new']['dispatch_overhead_ms']:.2f} ms")
+    print(
+        f"  Old: compute={moe['old']['expert_compute_ms']:.2f} ms, dispatch={moe['old']['dispatch_overhead_ms']:.2f} ms")
+    print(
+        f"  New: compute={moe['new']['expert_compute_ms']:.2f} ms, dispatch={moe['new']['dispatch_overhead_ms']:.2f} ms")
 
     print("\nEnd-to-end inference")
     print(f"  Model: {inference['model_id']}")
     print(f"  Tokens/sec: {inference['tokens_per_sec']:.1f}")
-    print(f"  Time to first token: {inference['time_to_first_token_ms']:.2f} ms")
+    print(
+        f"  Time to first token: {inference['time_to_first_token_ms']:.2f} ms")
     print(f"  Memory peak: {inference['memory_peak_mb']:.1f} MB")
 
     improvements = results.get("improvements")
@@ -541,8 +571,10 @@ def _print_report(results: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BF16 optimization benchmark suite")
-    parser.add_argument("--model", default="zai-org/GLM-4.7-Flash", help="HF model ID")
+    parser = argparse.ArgumentParser(
+        description="BF16 optimization benchmark suite")
+    parser.add_argument(
+        "--model", default="zai-org/GLM-4.7-Flash", help="HF model ID")
     parser.add_argument("--prompt", default="Explain transformer attention.")
     parser.add_argument("--max-new-tokens", type=int, default=128)
     parser.add_argument("--runs", type=int, default=3)

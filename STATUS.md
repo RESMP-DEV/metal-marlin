@@ -1,6 +1,6 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-02-06
+**Last Updated:** 2026-02-08
 
 ## Summary
 
@@ -11,8 +11,9 @@
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
 | **Trellis Inference** | **Complete** ✅ (11 modules, 3500 LOC, fused GEMM ~50x speedup) |
+| **Async Dispatch Batching** | **Complete** ✅ (LayerBatchContext, 1.29x speedup) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
-| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working) |
+| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working, ~0.28 tok/s) |
 | OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
@@ -64,7 +65,7 @@ cp _cpp_ext.cpython-312-darwin.so ../metal_marlin/
 
 | Task | Description | Impact |
 |------|-------------|--------|
-| **Wire C++ extension to inference** | Use `_cpp_ext` for kernel dispatch | 5-10x dispatch speedup |
+| **Unify MoE dispatch paths** | Route all dispatches through AsyncCommandBufferManager | Consistent batching |
 | **Flash Attention v3** | Chunked prefill for long contexts | 2-3x prefill speedup at >4K |
 | **Continuous batching** | KV cache sharing across requests | 5-10x throughput |
 | **Speculative decoding** | Draft-verify architecture | 2-3x decode speed |
@@ -73,6 +74,7 @@ cp _cpp_ext.cpython-312-darwin.so ../metal_marlin/
 
 | Task | Description | Impact |
 |------|-------------|--------|
+| **Wire C++ extension to inference** | Use `_cpp_ext` for kernel dispatch | 5-10x dispatch speedup |
 | **INT8 KV cache** | Quantized attention cache | 2x context length |
 | **MoE kernel fusion** | Fuse router + expert GEMM | Reduce per-layer latency |
 | **Decode GEMV optimization** | Single-token decode kernel | Target: 10+ tok/s |
@@ -211,15 +213,48 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 | 32x2048x1536 | 3 | 162.4ms | 4.2ms | 38.7x |
 | 128x2048x1536 | 3 | 189.6ms | 12.5ms | 15.2x |
 
-**End-to-end (GLM-4.7-Flash Trellis 3bpw):**
-- Decode latency: 185ms/tok (was ~20s/tok)
-- Prefill throughput: 42 tok/s
-- Memory: 16.93 GB (unchanged)
+**End-to-end (GLM-4.7-Flash Trellis mixed-precision):**
+- Decode: ~0.28 tok/s (after async batch fix, up from 0.22 tok/s)
+- Prefill throughput: TBD
+- Memory: ~8-9 GB (mixed 2-6 bit quantized)
 
 ### Remaining on CPU/MPS
 - Image preprocessing (scipy.ndimage)
 - ONNX graph execution
 - Model loading (safetensors)
+
+---
+
+## Async Dispatch Batching
+
+**Status:** ✅ Complete (2026-02-08)
+
+Layer batching reduces command buffer commits by grouping dispatches across multiple
+transformer layers into a single Metal command buffer.
+
+### Components
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `AsyncCommandBufferManager` | Batches kernel dispatches into shared command buffer | ✅ Working |
+| `LayerBatchContext` | Groups N layers per commit (default: 4) | ✅ Working |
+| `MixedBPWMoEDispatcher` | Grouped dispatch for mixed-precision experts | ✅ Working |
+| `dispatch_immediate()` | Fallback unbatched dispatch | ✅ Working |
+| `ensure_batch_active()` | Recovers batch state if lost | ✅ Working |
+| `has_active_batch()` | Query batch state | ✅ Working |
+
+### Performance
+
+| Metric | Before | After | Change |
+|--------|--------|-------|--------|
+| Decode (tok/s) | 0.22 | 0.28 | **1.29x** |
+| Commits per forward | ~58 | ~12 | **4.8x reduction** |
+
+### Analysis Reports
+
+- [Batch Dispatch Analysis](docs/reports/batch_dispatch_analysis.md) — lib.dispatch() interference analysis
+- [Attention Batch Analysis](docs/reports/attention_batch_analysis.md) — CopyBackBuffer and commit() tracing
+- [Batch Fix Benchmark](docs/reports/batch_fix_benchmark.md) — Before/after performance data
 
 ---
 
@@ -230,18 +265,19 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 | `moe_trellis_swiglu` | ✅ Working | Fused MoE GEMM with SwiGLU |
 | Slow fallback | ✅ Working | Memory-optimized sequential path |
 
-### Performance (GLM-4.7-Flash 3BPW)
+### Performance (GLM-4.7-Flash mixed-precision)
 
-| Context | Fast Path TPS | Slow Path TPS | Memory |
-|---------|---------------|---------------|--------|
-| 1024    | ~5.4          | ~0.08         | 16.9 GB |
-| 4096    | ~5.4          | ~0.08         | 16.9 GB |
+| Metric | Before Batching | After Batching | Improvement |
+|--------|----------------|----------------|-------------|
+| Decode (tok/s) | 0.22 | 0.28 | **1.29x** |
+| GPU commits/fwd | ~58 | ~12 | **4.8x fewer** |
 
 **Notes:**
-- Fast path uses `moe_trellis_swiglu` kernel with batched expert dispatch
-- Slow path uses sequential expert iteration (~12s/tok)
-- Memory usage is dominated by model weights, constant across context lengths
-- Fast path availability requires `x.is_mps` and Metal kernel compilation
+- Fast path uses `moe_trellis_swiglu` kernel with batched expert dispatch via `AsyncCommandBufferManager`
+- `MixedBPWMoEDispatcher` groups experts by BPW (2/3/4-bit) and dispatches in batched Metal command buffers
+- `LayerBatchContext` accumulates dispatches across 4 consecutive MoE layers before committing
+- MoE compute remains ~98.5% of forward-pass time — kernel fusion is the next optimization frontier
+- Memory usage dominated by model weights (~15 GB for 3 BPW), constant across context lengths
 
 ---
 
@@ -250,7 +286,7 @@ Precompiled Metal shaders for 100-1000x faster kernel dispatch:
 | Model | Size | Memory | Speed | Status |
 |-------|------|--------|-------|--------|
 | **Qwen/Qwen3-4B** | 4B | ~2GB FP4 | ~27 tok/s | ✅ Fully Working |
-| **zai-org/GLM-4.7-Flash** | 30B-A3B MoE | ~15GB FP4 | TBD | ✅ MoE + MLA Verified |
+| **zai-org/GLM-4.7-Flash** | 30B-A3B MoE | ~15GB FP4 | ~0.28 tok/s | ✅ MoE + MLA Verified |
 | Llama-3.1-8B | 8B | ~4GB FP4 | ~20 tok/s (est.) | ✅ Working |
 | Mixtral-8x7B | 47B | ~24GB FP4 | MoE optimized | ✅ Working |
 

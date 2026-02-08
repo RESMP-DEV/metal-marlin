@@ -2,7 +2,7 @@
 
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
-[![Tests](https://img.shields.io/badge/tests-1565%20collected-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-5427%20collected-brightgreen)]()
 [![Python](https://img.shields.io/badge/python-3.12-blue)]()
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)]()
 
@@ -113,11 +113,10 @@ print(tokenizer.decode(output[0], skip_special_tokens=True))
 
 | Metric | Value |
 |--------|-------|
-| Decode | 5.4 tok/s (185ms/tok) |
-| Prefill | 42 tok/s |
-| Memory | 16.9 GB |
-
-The fused Trellis GEMM kernels provide **108x speedup** over naive dequant+matmul.
+| Decode | ~0.28 tok/s (async batched dispatch) |
+| Prefill | ~11 tok/s |
+| Memory | ~15 GB (mixed-precision 2-4 BPW) |
+| GPU commits/fwd | ~12 (down from ~58) |
 
 ### Streaming Generation
 
@@ -334,32 +333,28 @@ print(tokenizer.decode(output[0]))
 
 | Module | Purpose |
 |--------|---------|
-| `trellis_model.py` | Complete model with MoE/dense layers |
-| `trellis_attention.py` | MLA with KV compression |
-| `trellis_linear.py` | Quantized linear with Metal dequant |
-| `trellis_loader.py` | Layer-wise model loading |
-| `trellis_generate.py` | Text generation with sampling |
-| `trellis_kv_cache.py` | Compressed KV cache for MLA |
+| `model.py` | MoE/dense transformer layers, `MixedBPWMoEDispatcher` |
+| `attention.py` | MLA (Multi-head Latent Attention) with KV compression |
+| `linear.py` | Quantized linear with Metal dequant kernels |
+| `loader.py` | Layer-wise streaming model loading |
+| `generate.py` | Text generation with sampling and streaming |
+| `kv_cache_compressed.py` | Compressed KV cache for MLA |
+| `async_dispatch.py` | `AsyncCommandBufferManager` + `LayerBatchContext` |
+| `optimizations.py` | Expert selection cache + memory pool |
+| `lm.py` | `TrellisForCausalLM` language model wrapper |
 
 ## Performance
 
-Benchmark results on Apple M4 Max with GLM-4.7-Flash (Trellis 3-bit quantization).
-
-### Throughput (M4 Max)
+Benchmark results on Apple M4 Max with GLM-4.7-Flash (Trellis mixed-precision quantization).
 
 | Metric | Value |
 |--------|-------|
-| Prefill (2K context) | 42 tok/s |
-| Decode | 5.4 tok/s (185 ms/tok) |
-| Memory | 16.9 GB |
+| Decode throughput | ~0.28 tok/s |
+| Prefill throughput | ~11 tok/s |
+| Model memory | ~15 GB (2-4 BPW mixed) |
+| GPU commits per forward | ~12 (async batched) |
 
-### Baseline vs Optimized Comparison
-
-| Configuration | Decode (tok/s) | Speedup | Memory |
-|---------------|----------------|---------|--------|
-| Naive dequant+matmul | 0.05 tok/s | 1x | 61 GB (unpacked) |
-| Fused trellis kernel | 5.4 tok/s | **108x** | 16.9 GB |
-
+> MoE compute accounts for ~98.5% of forward-pass time. Kernel fusion is the next optimization target.
 ### Optimizations Applied
 
 - **Fused GEMM kernels**: `gemm_trellis_packed` combines dequantization and matrix multiplication in a single kernel pass, eliminating intermediate memory traffic
@@ -378,13 +373,6 @@ Performance on GLM-4.7-Flash expert shapes (2048x1536):
 | 32 | 162.4 | 4.2 | **38.7x** |
 | 128 | 189.6 | 12.5 | **15.2x** |
 
-### Comparison to Other Backends
-
-| Backend | Device | GLM-4.7-Flash | Notes |
-|---------|--------|---------------|-------|
-| Metal Marlin | M4 Max | 5.4 tok/s | Fused trellis kernels |
-| llama.cpp | M4 Max | ~3 tok/s | Q4_K_M quantization |
-| MLX | M4 Max | ~4 tok/s | Native Apple framework |
 
 ### Known Limitations
 
@@ -432,150 +420,3 @@ uv run pyright metal_marlin/         # Type checking
 ## License
 
 Apache 2.0
-
----
-
-## Trellis Inference Usage
-
-Complete guide for running inference with Trellis-quantized models using the simplified `TrellisForCausalLM` API.
-
-### Quick Start
-
-Load and run inference with 5 lines of code:
-
-```python
-from metal_marlin.trellis import TrellisForCausalLM
-from transformers import AutoTokenizer
-
-model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-trellis-v2-3bpw", device="mps")
-tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
-
-input_ids = tokenizer("Hello, ", return_tensors="pt").input_ids.to("mps")
-output = model.generate(input_ids, max_new_tokens=50)
-print(tokenizer.decode(output[0]))
-```
-
-### Model Loading
-
-Use `TrellisForCausalLM.from_pretrained()` to load quantized models:
-
-```python
-from metal_marlin import TrellisForCausalLM
-from transformers import AutoTokenizer
-
-# Load model and tokenizer
-model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-trellis-v2-3bpw")
-tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
-
-# Model is automatically loaded to Metal (MPS) device
-print(f"Model loaded: {model.config.model_type}")
-print(f"Device: {model.device}")
-```
-
-**Supported model formats:**
-- trellis_v2 (uint8 packed) quantized models
-- MoE and dense architectures within trellis_v2
-
-### Generation
-
-Control generation with sampling parameters:
-
-```python
-# Basic generation
-output = model.generate(
-    input_ids,
-    max_new_tokens=100,
-    temperature=0.7,      # Sampling temperature (0.0 = greedy)
-    top_k=50,             # Top-k sampling (0 = disabled)
-    top_p=0.9,            # Nucleus sampling (1.0 = disabled)
-)
-
-# Streaming generation
-for token in model.generate_stream(input_ids, max_new_tokens=50):
-    print(tokenizer.decode(token), end="", flush=True)
-```
-
-**Parameter reference:**
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `max_new_tokens` | 100 | Maximum tokens to generate |
-| `temperature` | 0.7 | Sampling temperature (0.0 = deterministic) |
-| `top_k` | 50 | Top-k sampling cutoff |
-| `top_p` | 0.9 | Nucleus sampling threshold |
-| `repetition_penalty` | 1.0 | Penalty for repeated tokens |
-
-### Benchmarking
-
-Run evaluation scripts to measure performance:
-
-```bash
-# Perplexity evaluation
-cd contrib/metal_marlin
-python scripts/eval_perplexity.py \
-    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
-    --dataset wikitext \
-    --split test
-
-# Token throughput benchmark
-python scripts/benchmark_throughput.py \
-    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
-    --prompt "Explain quantum computing:" \
-    --max_tokens 256 \
-    --iterations 10
-
-# Memory profiling
-python scripts/profile_memory.py \
-    --model models/GLM-4.7-Flash-trellis-v2-3bpw \
-    --batch_sizes 1,4,8
-```
-
-**Benchmark outputs:**
-- `eval_perplexity.py`: Perplexity score, eval time, tokens/sec
-- `benchmark_throughput.py`: Average tok/s, latency percentiles (P50, P95, P99)
-- `profile_memory.py`: Peak VRAM/RAM usage per batch size
-
-### Memory Usage
-
-Expected VRAM/RAM for different models (Apple Silicon):
-
-| Model | Quantization | Memory | Context (4K) | Context (8K) |
-|-------|-------------|--------|--------------|--------------|
-| GLM-4.7-Flash | 2-bit  | ~6 GB | ~7 GB | ~9 GB |
-| GLM-4.7-Flash | 3-bit  | ~8 GB | ~9 GB | ~11 GB |
-| GLM-4.7-Flash | 4-bit  | ~10 GB | ~11 GB | ~13 GB |
-| Qwen3-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
-| Llama-3.1-8B | FP4 | ~4 GB | ~5 GB | ~7 GB |
-| Llama-3.1-70B | FP4 | ~35 GB | ~40 GB | ~50 GB |
-
-**Notes:**
-- Memory includes model weights + KV cache + activations
-- MLA (Multi-head Latent Attention) reduces KV cache by ~8x
-- MoE models use sparse expert activation (2-4 experts per token)
-- Add ~1-2 GB overhead for Metal driver and PyTorch
-
-## Development
-
-See [docs/guides/development_setup.md](docs/guides/development_setup.md) for complete environment management guidelines.
-
-**Quick sanity check:**
-```bash
-# Verify you're using the correct environment
-uv run python -c "import sys; print(sys.prefix)"
-# Should show: /path/to/contrib/metal_marlin/.venv
-
-# Clean up leftover environments (if any)
-./scripts/cleanup_venvs.sh
-```
-
-**Running tests:**
-```bash
-cd contrib/metal_marlin
-uv run pytest tests/ -v --tb=short
-
-# Specific test file
-uv run pytest tests/test_gemm.py -v
-
-# With pattern matching
-uv run pytest -k "moe" tests/ -v
-```

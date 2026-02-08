@@ -20,10 +20,13 @@ buffers.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -31,31 +34,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..kv_cache import TrellisKVCache
-from ..metal_dispatch import (
-    HAS_METAL,
-    MetalKernelLibrary,
-    PipelinedLayerDispatcher,
-    mps_tensor_to_metal_buffer,
-)
+from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary,
+                              PipelinedLayerDispatcher,
+                              mps_tensor_to_metal_buffer)
 from ..transformer import RMSNorm
+from .async_dispatch import LayerBatchContext
 from .attention import TrellisMLAConfig, TrellisMLAttention
 from .config import TrellisModelConfig
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
-from .moe_dispatch import (
-    BatchedDispatcher,
-    CachedRouterBuffers,
-    CachedWeightBuffers,
-    MoEBufferPool,
-    RouterBufferPool,
-    create_cached_weight_buffers,
-    dispatch_moe_trellis_swiglu,
-)
-from .optimizations import (
-    ExpertMemoryPool,
-    ExpertSelectionCache,
-    MixedBPWMoEDispatcher,
-)
+from .moe_dispatch import (BatchedDispatcher, CachedRouterBuffers,
+                           CachedWeightBuffers, MoEBufferPool,
+                           RouterBufferPool, create_cached_weight_buffers,
+                           dispatch_moe_trellis_swiglu)
+from .optimizations import (ExpertMemoryPool, ExpertSelectionCache,
+                            MixedBPWMoEDispatcher)
 from .softmax_topk import SoftmaxTopKDispatcher
 
 __all__ = [
@@ -112,11 +105,12 @@ def _compiled_router_forward(
 
 
 if TYPE_CHECKING:
+    from .async_dispatch import AsyncCommandBufferManager
     from .lm import CausalLMOutput, TrellisForCausalLM
     from .loader import TrellisModelLoader
 
 if HAS_METAL:
-    pass
+    from .async_dispatch import AsyncCommandBufferManager, LayerBatchContext
 
 
 # Module-level timing stats for buffer caching performance measurement
@@ -664,6 +658,7 @@ class WorkspaceBufferPool:
 
 
 class TrellisMoEMLP(nn.Module):
+    _tuning_message_printed = False
     """MoE MLP with trellis-quantized weights for MoE layers.
 
     Implements a mixture of experts with:
@@ -739,6 +734,7 @@ class TrellisMoEMLP(nn.Module):
 
         # Initialize _lib to None before _build_bit_group_cache which checks it
         self._lib: MetalKernelLibrary | None = None
+        self._async_cmd_manager: AsyncCommandBufferManager | None = None
 
         # Build bit-group cache for unified dispatch by (gate, up, down) bit tuple
         self._build_bit_group_cache()
@@ -794,7 +790,7 @@ class TrellisMoEMLP(nn.Module):
 
         # Expert selection frequency tracking and hot/cold expert management
         # Delegated to self.expert_memory_pool
-        
+
         # Initialize call counters for hot/cold expert recomputation
         self._forward_call_count = 0
         self._expert_frequency_update_interval = (
@@ -802,17 +798,17 @@ class TrellisMoEMLP(nn.Module):
             if self.expert_memory_pool is not None
             else 100
         )  # Update hot/cold experts every N forwards
-        
+
         # Kernel auto-tuning state
         self._kernel_auto_tuned = False
-        self._kernel_config: dict[str, Any] = {}  # Stores optimal kernel settings
-        
+        # Stores optimal kernel settings
+        self._kernel_config: dict[str, Any] = {}
+
         # Legacy expert tracking (for backward compatibility)
         self._expert_selection_counts = [0] * len(self.experts)
         self._hot_experts = set(range(len(self.experts)))
         self._hot_expert_threshold = 0.5
         self._cold_expert_buffer_pool: dict[int, CachedWeightBuffers] = {}
-
 
         # Optional eager buffer creation for memory efficiency
         if eager_buffers:
@@ -1169,6 +1165,14 @@ class TrellisMoEMLP(nn.Module):
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
+    def _get_async_cmd_manager(self) -> AsyncCommandBufferManager:
+        """Get or create async command buffer manager for layer."""
+        if self._async_cmd_manager is None:
+            from .async_dispatch import AsyncCommandBufferManager
+            self._async_cmd_manager = AsyncCommandBufferManager(
+                self._get_lib())
+        return self._async_cmd_manager
+
     def _check_fast_moe_available(self) -> bool:
         """Check if fast MoE kernel is available."""
         try:
@@ -1196,7 +1200,7 @@ class TrellisMoEMLP(nn.Module):
         if self._cached_weight_buffers is not None:
             return self._cached_weight_buffers
 
-        # If eager_buffers mode but buffers weren't created, create them now
+        # If eager buffers mode but buffers weren't created, create them now
         if getattr(self, "_eager_buffers", False):
             self._create_buffers_eagerly()
             return self._cached_weight_buffers
@@ -1514,7 +1518,8 @@ class TrellisMoEMLP(nn.Module):
         self, x: torch.Tensor, selected_experts: torch.Tensor, routing_weights: torch.Tensor
     ) -> None:
         """Update the routing cache with new routing decision."""
-        self.expert_selection_cache.update(x, selected_experts, routing_weights)
+        self.expert_selection_cache.update(
+            x, selected_experts, routing_weights)
 
     def get_routing_cache_stats(self) -> dict[str, int | float]:
         """Get routing cache hit/miss statistics."""
@@ -1646,7 +1651,7 @@ class TrellisMoEMLP(nn.Module):
         Cold experts share a buffer pool and are loaded on demand.
         This reduces GPU memory by ~30% for typical workloads where
         a subset of experts is used more frequently.
-        
+
         Syncs legacy attributes with ExpertMemoryPool for backward compatibility.
         Note: ExpertMemoryPool automatically recomputes hot/cold experts
         via record_selection(), so this method primarily serves to sync legacy state.
@@ -1764,6 +1769,7 @@ class TrellisMoEMLP(nn.Module):
         routing_weights: torch.Tensor,
         lib: MetalKernelLibrary,
         buffer_pool: MoEBufferPool,
+        cmd_manager: Any | None = None,
     ) -> torch.Tensor:
         """Grouped dispatch for mixed-precision experts.
 
@@ -1771,6 +1777,10 @@ class TrellisMoEMLP(nn.Module):
         we group selected experts by their bit width and dispatch each group
         separately using the fast Metal kernel. This is more efficient than
         per-expert sequential dispatch while handling mixed precision.
+
+        Args:
+            cmd_manager: Optional async command buffer manager for batched dispatch.
+                When provided, kernels are queued for batched commit by caller.
 
         Algorithm:
         1. Group selected expert slots by their bit width
@@ -1802,6 +1812,7 @@ class TrellisMoEMLP(nn.Module):
                     routing_weights=routing_weights,
                     lib=lib,
                     buffer_pool=buffer_pool,
+                    cmd_manager=cmd_manager,
                 )
             except Exception as e:
                 logger.warning(
@@ -1822,10 +1833,12 @@ class TrellisMoEMLP(nn.Module):
         # This avoids Python-side global->local remapping and per-token `.item()` calls.
         if not hasattr(self, "_bit_group_lookup_cache"):
             self._bit_group_lookup_cache: dict[
-                str, dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
+                str, dict[tuple[int, int, int],
+                          tuple[torch.Tensor, torch.Tensor]]
             ] = {}
         device_key = str(device)
-        device_lookup_cache = self._bit_group_lookup_cache.setdefault(device_key, {})
+        device_lookup_cache = self._bit_group_lookup_cache.setdefault(
+            device_key, {})
         num_experts_total = len(self.experts)
 
         # Group selected expert slots by bit width and dispatch once per active group.
@@ -1865,25 +1878,27 @@ class TrellisMoEMLP(nn.Module):
                 continue
 
             group_activations = x[batch_indices]
-            local_expert_ids = selected_local_ids[batch_indices, slot_indices].unsqueeze(1)
-            group_probs = routing_weights[batch_indices, slot_indices].unsqueeze(1)
+            local_expert_ids = selected_local_ids[batch_indices, slot_indices].unsqueeze(
+                1)
+            group_probs = routing_weights[batch_indices,
+                                          slot_indices].unsqueeze(1)
 
             group_output = dispatch_moe_trellis_swiglu(
                 lib=lib,
                 activations=group_activations,
-                gate_weights=None,
-                gate_scales=None,
-                up_weights=None,
-                up_scales=None,
-                down_weights=None,
-                down_scales=None,
-                gate_su=None,
-                gate_sv=None,
-                up_su=None,
-                up_sv=None,
-                down_su=None,
-                down_sv=None,
-                grid=None,
+                gate_weights=cached_buffers.gate_weights,
+                gate_scales=cached_buffers.gate_scales,
+                up_weights=cached_buffers.up_weights,
+                up_scales=cached_buffers.up_scales,
+                down_weights=cached_buffers.down_weights,
+                down_scales=cached_buffers.down_scales,
+                gate_su=cached_buffers.gate_su,
+                gate_sv=cached_buffers.gate_sv,
+                up_su=cached_buffers.up_su,
+                up_sv=cached_buffers.up_sv,
+                down_su=cached_buffers.down_su,
+                down_sv=cached_buffers.down_sv,
+                grid=cached_buffers.grid,
                 expert_ids=local_expert_ids,
                 expert_probs=group_probs,
                 hidden_dim=self.hidden_dim,
@@ -1893,37 +1908,129 @@ class TrellisMoEMLP(nn.Module):
                 bits=bits,
                 cached_buffers=cached_buffers,
                 buffer_pool=buffer_pool,
-                use_fp32_acc=self.hidden_dim >= 1024,
+                use_fp32_acc=self._get_optimal_use_fp32_acc(),
             )
 
             output.index_add_(0, batch_indices, group_output)
 
         return output
 
-    def _auto_tune_kernels(self, x: torch.Tensor) -> None:
+    def _get_tuning_cache_key(self) -> dict[str, Any]:
+        """Build a stable cache key for kernel auto-tuning results."""
+        bits_key: int | list[int]
+        if self._is_mixed_precision:
+            # Use a canonical mixed-bpw signature so equivalent models share cache.
+            unique_bits: set[int] = set()
+            for expert in self.experts:
+                unique_bits.add(int(expert.gate_proj.bits))
+                unique_bits.add(int(expert.up_proj.bits))
+                unique_bits.add(int(expert.down_proj.bits))
+            bits_key = sorted(unique_bits)
+        else:
+            bits_key = int(self.bits)
+
+        return {
+            "version": 2,
+            "hidden_dim": int(self.hidden_dim),
+            "intermediate_dim": int(self.intermediate_dim),
+            "num_experts": len(self.experts),
+            "bits": bits_key,
+        }
+
+    def _get_tuning_cache_path(self) -> Path:
+        """Get disk cache path for this layer's kernel auto-tuning results."""
+        cache_key = self._get_tuning_cache_key()
+        key_json = json.dumps(cache_key, sort_keys=True, separators=(",", ":"))
+        model_hash = hashlib.sha256(key_json.encode("utf-8")).hexdigest()
+        return (
+            Path.home()
+            / ".cache"
+            / "metal_marlin"
+            / f"kernel_tuning_{model_hash}.json"
+        )
+
+    def _load_cached_tuning(self) -> dict[str, Any] | None:
+        """Load kernel auto-tuning configuration from disk cache."""
+        cache_path = self._get_tuning_cache_path()
+        if not cache_path.exists():
+            return None
+
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.debug(
+                "Failed loading kernel config cache %s: %s", cache_path, e)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        # Check cache key compatibility
+        cached_key = payload.get("cache_key")
+        if cached_key is not None and cached_key != self._get_tuning_cache_key():
+            return None
+
+        kernel_config = payload.get("kernel_config", payload)
+        if not isinstance(kernel_config, dict):
+            return None
+
+        # Ensure we have a valid 'optimal' config
+        optimal = kernel_config.get("optimal")
+        if not isinstance(optimal, dict) or "use_fp32_acc" not in optimal:
+            return None
+
+        return kernel_config
+
+    def _save_tuning_cache(self) -> None:
+        """Save kernel auto-tuning configuration to disk cache."""
+        if not self._kernel_config or "optimal" not in self._kernel_config:
+            return
+
+        cache_path = self._get_tuning_cache_path()
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cache_key": self._get_tuning_cache_key(),
+                "kernel_config": self._kernel_config,
+            }
+            cache_path.write_text(
+                json.dumps(payload, sort_keys=True, indent=2),
+                encoding="utf-8",
+            )
+            logger.debug("Saved kernel config to %s", cache_path)
+        except Exception as e:
+            logger.warning(
+                "Failed to save kernel config cache to %s: %s", cache_path, e)
+
+    def _auto_tune_kernel(self, x: torch.Tensor) -> None:
         """Auto-tune kernel configuration on first forward pass.
 
         Measures performance of different kernel configurations and selects
         the optimal settings for subsequent forward passes.
-        
-        This runs once on first forward and caches results.
-        
-        Args:
-            x: Input tensor to test kernels with.
         """
         if self._kernel_auto_tuned or not self.enable_kernel_autotune:
             return
 
+        # Try loading from cache first
+        if cached := self._load_cached_tuning():
+            self._kernel_config = cached
+            self._kernel_auto_tuned = True
+            logger.debug("Loaded kernel config from cache")
+            return
+
         if not HAS_METAL:
-            logger.info("Skipping kernel auto-tuning: Metal unavailable")
-            self._kernel_config["optimal"] = {"use_fp32_acc": self.hidden_dim >= 1024}
+            self._kernel_config["optimal"] = {
+                "use_fp32_acc": self.hidden_dim >= 1024}
             self._kernel_auto_tuned = True
             return
 
-        logger.info("Starting kernel auto-tuning...")
+        if not TrellisMoEMLP._tuning_message_printed:
+            logger.info("Starting kernel auto-tuning for MoE layer...")
+            TrellisMoEMLP._tuning_message_printed = True
+        else:
+            logger.debug("Optimizing kernel for MoE layer...")
 
         # Small test for kernel auto-tuning
-        # Only run a few experts to find optimal config
         test_batch = min(4, x.shape[0])
         test_x = x[:test_batch]
 
@@ -1932,77 +2039,108 @@ class TrellisMoEMLP(nn.Module):
         for use_fp32 in [False, True]:
             if self.hidden_dim >= 1024:
                 # Large models always benefit from FP32 accumulation
+                self._kernel_config["use_fp32_True"] = {
+                    "time_ms": 0.0,
+                    "use_fp32_acc": True,
+                }
                 break
-            # For small models, measure performance
-            try:
-                import time
 
-                test_start = time.perf_counter()
+            try:
                 # Run small test dispatch
-                selected_test = torch.zeros(test_batch, 1, dtype=torch.long, device=x.device)
-                routing_test = torch.ones(test_batch, 1, dtype=torch.float16, device=x.device)
+                selected_test = torch.zeros(
+                    test_batch, 1, dtype=torch.long, device=x.device)
+                routing_test = torch.ones(
+                    test_batch, 1, dtype=torch.float16, device=x.device)
 
                 lib = self._get_lib()
                 buffer_pool = self._get_buffer_pool()
-                cached = self._get_cached_buffers()
 
+                # Start with global cached buffers, then prefer bit-group buffers
+                # for mixed-precision to match runtime grouped dispatch.
+                # FIX: Ensure we use valid buffers instead of None for auto-tuning
+                cached = self._get_cached_buffers()
+                test_buffers: CachedWeightBuffers = cached
+                test_bits: int | tuple[int, int, int] = self.bits
+                test_num_experts = len(self.experts)
+
+                if self._is_mixed_precision:
+                    bit_group_buffers = getattr(
+                        self, "_bit_group_buffers", None)
+                    if bit_group_buffers:
+                        # Use first bit group's buffers for testing
+                        first_bits = next(iter(bit_group_buffers.keys()))
+                        test_buffers, group_expert_indices = bit_group_buffers[first_bits]
+                        test_bits = first_bits
+                        test_num_experts = len(group_expert_indices)
+
+                test_start = time.perf_counter()
                 # Minimal test dispatch (single expert)
                 dispatch_moe_trellis_swiglu(
                     lib=lib,
                     activations=test_x,
-                    gate_weights=None,
-                    gate_scales=None,
-                    up_weights=None,
-                    up_scales=None,
-                    down_weights=None,
-                    down_scales=None,
-                    gate_su=None,
-                    gate_sv=None,
-                    up_su=None,
-                    up_sv=None,
-                    down_su=None,
-                    down_sv=None,
-                    grid=None,
+                    gate_weights=test_buffers.gate_weights,
+                    gate_scales=test_buffers.gate_scales,
+                    up_weights=test_buffers.up_weights,
+                    up_scales=test_buffers.up_scales,
+                    down_weights=test_buffers.down_weights,
+                    down_scales=test_buffers.down_scales,
+                    gate_su=test_buffers.gate_su,
+                    gate_sv=test_buffers.gate_sv,
+                    up_su=test_buffers.up_su,
+                    up_sv=test_buffers.up_sv,
+                    down_su=test_buffers.down_su,
+                    down_sv=test_buffers.down_sv,
+                    grid=test_buffers.grid,
                     expert_ids=selected_test,
                     expert_probs=routing_test,
                     hidden_dim=self.hidden_dim,
                     intermediate_dim=self.intermediate_dim,
-                    num_experts=1,
+                    num_experts=test_num_experts,
                     top_k=1,
-                    bits=self.bits,
-                    cached_buffers=cached,
+                    bits=test_bits,
+                    cached_buffers=test_buffers,
                     buffer_pool=buffer_pool,
                     use_fp32_acc=use_fp32,
                 )
-                test_time = (time.perf_counter() - test_start) * 1000  # Convert to ms
+                test_time = (time.perf_counter() - test_start) * 1000
 
-                # Record performance
                 key = f"use_fp32_{use_fp32}"
                 self._kernel_config[key] = {
                     "time_ms": test_time,
                     "use_fp32_acc": use_fp32,
                 }
             except Exception as e:
-                logger.warning(f"Kernel test failed for use_fp32={use_fp32}: {e}")
+                logger.debug(
+                    "Kernel test failed for use_fp32=%s: %s", use_fp32, e)
 
-        # Select optimal configuration
-        if self._kernel_config:
-            optimal_config = min(self._kernel_config.values(), key=lambda x: x["time_ms"])
-            self._kernel_config["optimal"] = optimal_config
+        # Select optimal configuration from measured results
+        measured = {k: v for k, v in self._kernel_config.items()
+                    if k != "optimal"}
+        if measured:
+            self._kernel_config["optimal"] = min(
+                measured.values(), key=lambda v: v["time_ms"])
+            optimal = self._kernel_config["optimal"]
             logger.info(
-                f"Kernel auto-tuning complete. Optimal config: "
-                f"use_fp32_acc={optimal_config['use_fp32_acc']} "
-                f"({optimal_config['time_ms']:.2f}ms)"
+                "Optimal config: use_fp32_acc=%s (%.2fms)",
+                optimal["use_fp32_acc"],
+                optimal["time_ms"],
             )
         else:
-            # Default config if tests failed
-            self._kernel_config["optimal"] = {
-                "use_fp32_acc": optimal_fp32,
-            }
             logger.warning("Kernel auto-tuning failed, using default config")
+            self._kernel_config["optimal"] = {"use_fp32_acc": optimal_fp32}
 
         self._kernel_auto_tuned = True
+        self._save_tuning_cache()
 
+    def _auto_tune_kernels(self, x: torch.Tensor) -> None:
+        """Alias for _auto_tune_kernel."""
+        self._auto_tune_kernel(x)
+
+    def _get_optimal_use_fp32_acc(self) -> bool:
+        """Get optimal accumulator precision from auto-tuning results."""
+        if self._kernel_config and "optimal" in self._kernel_config:
+            return self._kernel_config["optimal"].get("use_fp32_acc", self.hidden_dim >= 1024)
+        return self.hidden_dim >= 1024
 
     def forward_fast(
         self,
@@ -2010,6 +2148,7 @@ class TrellisMoEMLP(nn.Module):
         workspace: torch.Tensor | None = None,
         workspace_offset: int = 0,
         cached_buffers: CachedWeightBuffers | None = None,
+        _batch_ctx: LayerBatchContext | None = None,
     ) -> torch.Tensor:
         """Fast forward pass using fused MoE dispatch.
 
@@ -2085,24 +2224,34 @@ class TrellisMoEMLP(nn.Module):
 
             if self._is_mixed_precision:
                 output: torch.Tensor | None = None
+                # Use shared command manager from batch context for layer batching.
+                # Each layer still commits immediately (layers are sequential),
+                # but using the shared manager avoids per-layer alloc overhead.
+                cmd_manager = _batch_ctx._shared_cmd_manager if _batch_ctx else None
+                async_batch_started = cmd_manager is not None
 
+                # TEMPORARILY DISABLED: Async dispatch causing segfault
                 # Prefer MixedBPW dispatcher when available.
-                if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
-                    try:
-                        self.mixed_bpw_dispatcher.ensure_buffers()
-                        output = self.mixed_bpw_dispatcher.dispatch(
-                            x=x,
-                            selected_experts=selected_experts,
-                            routing_weights=routing_weights,
-                            lib=lib,
-                            buffer_pool=buffer_pool,
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            "MixedBPWMoEDispatcher dispatch failed: %s. "
-                            "Falling back to standard mixed dispatch.",
-                            e,
-                        )
+                # if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
+                #     try:
+                #         cmd_manager = self._get_async_cmd_manager()
+                #         cmd_manager.begin_batch()
+                #         async_batch_started = True
+                #         self.mixed_bpw_dispatcher.ensure_buffers()
+                #         output = self.mixed_bpw_dispatcher.dispatch(
+                #             x=x,
+                #             selected_experts=selected_experts,
+                #             routing_weights=routing_weights,
+                #             lib=lib,
+                #             buffer_pool=buffer_pool,
+                #             cmd_manager=cmd_manager,
+                #         )
+                #     except Exception as e:
+                #         logger.warning(
+                #             "MixedBPWMoEDispatcher dispatch failed: %s. "
+                #             "Falling back to standard mixed dispatch.",
+                #             e,
+                #         )
 
                 # Standard mixed precision fallback path.
                 if output is None:
@@ -2113,6 +2262,7 @@ class TrellisMoEMLP(nn.Module):
                             routing_weights=routing_weights,
                             lib=lib,
                             buffer_pool=buffer_pool,
+                            cmd_manager=cmd_manager,
                         )
                     else:
                         output = self._forward_grouped(
@@ -2122,6 +2272,10 @@ class TrellisMoEMLP(nn.Module):
                             workspace=workspace,
                             workspace_offset=workspace_offset,
                         )
+
+                # Sync once after all mixed dispatches complete.
+                if async_batch_started and cmd_manager is not None:
+                    cmd_manager.commit_and_wait()
 
                 # Shared expert is always active.
                 output.add_(self.shared_expert(x))
@@ -2139,25 +2293,28 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
             else:
+                # Use shared command manager from batch context if provided
+                cmd_manager = _batch_ctx._shared_cmd_manager if _batch_ctx else None
+
                 output = dispatch_moe_trellis_swiglu(
                     lib=lib,
                     activations=x,
-                    gate_weights=None,
-                    gate_scales=None,
-                    up_weights=None,
-                    up_scales=None,
-                    down_weights=None,
-                    down_scales=None,
-                    gate_su=None,
-                    gate_sv=None,
-                    up_su=None,
-                    up_sv=None,
-                    down_su=None,
-                    down_sv=None,
-                    grid=None,
+                    gate_weights=cached.gate_weights,
+                    gate_scales=cached.gate_scales,
+                    up_weights=cached.up_weights,
+                    up_scales=cached.up_scales,
+                    down_weights=cached.down_weights,
+                    down_scales=cached.down_scales,
+                    gate_su=cached.gate_su,
+                    gate_sv=cached.gate_sv,
+                    up_su=cached.up_su,
+                    up_sv=cached.up_sv,
+                    down_su=cached.down_su,
+                    down_sv=cached.down_sv,
+                    grid=cached.grid,
                     expert_ids=selected_experts,
                     expert_probs=routing_weights,
                     hidden_dim=self.hidden_dim,
@@ -2167,7 +2324,8 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
+                    cmd_manager=cmd_manager,
                 )
 
             # Add shared expert - output and shared_expert(x) are both fp16
@@ -2217,22 +2375,30 @@ class TrellisMoEMLP(nn.Module):
         # For mixed precision, use grouped dispatch (per bit-tuple batching)
         if self._is_mixed_precision:
             output = None
-            if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
-                try:
-                    self.mixed_bpw_dispatcher.ensure_buffers()
-                    output = self.mixed_bpw_dispatcher.dispatch(
-                        x=x_flat,
-                        selected_experts=selected_experts,
-                        routing_weights=routing_weights,
-                        lib=self._get_lib(),
-                        buffer_pool=buffer_pool,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "MixedBPWMoEDispatcher dispatch failed: %s. "
-                        "Falling back to standard mixed dispatch.",
-                        e,
-                    )
+            # Use shared command manager from batch context for layer batching
+            cmd_manager = _batch_ctx._shared_cmd_manager if _batch_ctx else None
+            async_batch_started = cmd_manager is not None
+            # TEMPORARILY DISABLED: Async dispatch causing segfault
+            # if self.mixed_bpw_dispatcher is not None and self.use_mixed_bpw_optimizations:
+            #     try:
+            #         cmd_manager = self._get_async_cmd_manager()
+            #         cmd_manager.begin_batch()
+            #         async_batch_started = True
+            #         self.mixed_bpw_dispatcher.ensure_buffers()
+            #         output = self.mixed_bpw_dispatcher.dispatch(
+            #             x=x_flat,
+            #             selected_experts=selected_experts,
+            #             routing_weights=routing_weights,
+            #             lib=self._get_lib(),
+            #             buffer_pool=buffer_pool,
+            #             cmd_manager=cmd_manager,
+            #         )
+            #     except Exception as e:
+            #         logger.warning(
+            #             "MixedBPWMoEDispatcher dispatch failed: %s. "
+            #             "Falling back to standard mixed dispatch.",
+            #             e,
+            #         )
             if output is None and getattr(self, "_bit_group_buffers", None):
                 output = self._dispatch_mixed_precision(
                     x=x_flat,
@@ -2240,6 +2406,7 @@ class TrellisMoEMLP(nn.Module):
                     routing_weights=routing_weights,
                     lib=self._get_lib(),
                     buffer_pool=buffer_pool,
+                    cmd_manager=cmd_manager,
                 )
             if output is None:
                 output = self._forward_grouped(
@@ -2249,6 +2416,10 @@ class TrellisMoEMLP(nn.Module):
                     workspace=workspace,
                     workspace_offset=workspace_offset,
                 )
+
+            # Sync once after all mixed dispatches complete.
+            if async_batch_started and cmd_manager is not None:
+                cmd_manager.commit_and_wait()
 
             output.add_(self.shared_expert(x_flat))
             return (
@@ -2269,7 +2440,7 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
             else:
                 output = self._batched_dispatcher.queue_moe_dispatch(
@@ -2283,7 +2454,7 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
             self._pending_output = output
         else:
@@ -2291,19 +2462,19 @@ class TrellisMoEMLP(nn.Module):
                 output = dispatch_moe_trellis_swiglu(
                     lib=self._get_lib(),
                     activations=x_flat,
-                    gate_weights=None,
-                    gate_scales=None,
-                    up_weights=None,
-                    up_scales=None,
-                    down_weights=None,
-                    down_scales=None,
-                    gate_su=None,
-                    gate_sv=None,
-                    up_su=None,
-                    up_sv=None,
-                    down_su=None,
-                    down_sv=None,
-                    grid=None,
+                    gate_weights=cached_buffers.gate_weights,
+                    gate_scales=cached_buffers.gate_scales,
+                    up_weights=cached_buffers.up_weights,
+                    up_scales=cached_buffers.up_scales,
+                    down_weights=cached_buffers.down_weights,
+                    down_scales=cached_buffers.down_scales,
+                    gate_su=cached_buffers.gate_su,
+                    gate_sv=cached_buffers.gate_sv,
+                    up_su=cached_buffers.up_su,
+                    up_sv=cached_buffers.up_sv,
+                    down_su=cached_buffers.down_su,
+                    down_sv=cached_buffers.down_sv,
+                    grid=cached_buffers.grid,
                     expert_ids=selected_experts,
                     expert_probs=routing_weights,
                     hidden_dim=self.hidden_dim,
@@ -2313,7 +2484,7 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
             else:
                 output = dispatch_moe_trellis_swiglu(
@@ -2341,7 +2512,7 @@ class TrellisMoEMLP(nn.Module):
                     bits=self.bits,
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
 
         # Add shared expert (always applied) - both output and shared_expert(x) are fp16
@@ -2360,6 +2531,7 @@ class TrellisMoEMLP(nn.Module):
         workspace: torch.Tensor | None = None,
         workspace_offset: int = 0,
         cached_buffers: CachedWeightBuffers | None = None,
+        _batch_ctx: LayerBatchContext | None = None,
     ) -> torch.Tensor:
         """Forward pass with MoE routing using fused Metal kernel.
 
@@ -2370,6 +2542,7 @@ class TrellisMoEMLP(nn.Module):
             workspace: Optional persistent workspace buffer.
             workspace_offset: Byte offset for scratch memory.
             cached_buffers: Pre-cached weight buffers (optimized path).
+            _batch_ctx: Optional batched dispatch context for MoE layers.
 
         Returns:
             Output tensor [..., hidden_size].
@@ -2379,6 +2552,7 @@ class TrellisMoEMLP(nn.Module):
             workspace=workspace,
             workspace_offset=workspace_offset,
             cached_buffers=cached_buffers,
+            _batch_ctx=_batch_ctx,
         )
 
     def _forward_grouped_fallback(
@@ -2399,19 +2573,19 @@ class TrellisMoEMLP(nn.Module):
         output = dispatch_moe_trellis_swiglu(
             lib=lib,
             activations=x,
-            gate_weights=None,
-            gate_scales=None,
-            up_weights=None,
-            up_scales=None,
-            down_weights=None,
-            down_scales=None,
-            gate_su=None,
-            gate_sv=None,
-            up_su=None,
-            up_sv=None,
-            down_su=None,
-            down_sv=None,
-            grid=None,
+            gate_weights=cached.gate_weights,
+            gate_scales=cached.gate_scales,
+            up_weights=cached.up_weights,
+            up_scales=cached.up_scales,
+            down_weights=cached.down_weights,
+            down_scales=cached.down_scales,
+            gate_su=cached.gate_su,
+            gate_sv=cached.gate_sv,
+            up_su=cached.up_su,
+            up_sv=cached.up_sv,
+            down_su=cached.down_su,
+            down_sv=cached.down_sv,
+            grid=cached.grid,
             expert_ids=selected_experts,
             expert_probs=routing_weights,
             hidden_dim=self.hidden_dim,
@@ -2421,7 +2595,7 @@ class TrellisMoEMLP(nn.Module):
             bits=self.bits,
             cached_buffers=cached,
             buffer_pool=buffer_pool,
-            use_fp32_acc=self.hidden_dim >= 1024,
+            use_fp32_acc=self._get_optimal_use_fp32_acc(),
         )
 
         output.add_(self.shared_expert(x))
@@ -2470,7 +2644,8 @@ class TrellisMoEMLP(nn.Module):
             # Check if experts are contiguous (required for zero-copy slicing)
             is_contiguous = (
                 len(expert_indices) > 0 and
-                expert_indices == list(range(expert_indices[0], expert_indices[-1] + 1))
+                expert_indices == list(
+                    range(expert_indices[0], expert_indices[-1] + 1))
             )
 
             if not is_contiguous:
@@ -2555,12 +2730,14 @@ class TrellisMoEMLP(nn.Module):
         # This handles lazy initialization when Metal becomes available
         self._ensure_bit_group_buffers()
 
-        from .moe_dispatch import dispatch_moe_per_bit_tuple, dispatch_moe_trellis_swiglu
+        from .moe_dispatch import (dispatch_moe_per_bit_tuple,
+                                   dispatch_moe_trellis_swiglu)
 
         # Split groups by availability:
         # - Available groups run through grouped dispatch.
         # - Missing/unavailable groups run through targeted fallback dispatch.
-        available_groups: dict[tuple[int, int, int], tuple[list[int], Any]] = {}
+        available_groups: dict[tuple[int, int, int],
+                               tuple[list[int], Any]] = {}
         missing_groups: dict[tuple[int, int, int], list[int]] = {}
         for bit_tuple, (expert_indices, cached_buffers) in self._bit_group_cache.items():
             if cached_buffers is None or isinstance(cached_buffers, dict):
@@ -2584,7 +2761,7 @@ class TrellisMoEMLP(nn.Module):
                 num_experts=len(self.experts),
                 top_k=self.num_experts_per_tok,
                 buffer_pool=self._get_buffer_pool(),
-                use_fp32_acc=self.hidden_dim >= 1024,
+                use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 output_accum=output_accum,
                 output_fp16=output_fp16,
             )
@@ -2605,28 +2782,31 @@ class TrellisMoEMLP(nn.Module):
                 for expert_id in expert_indices:
                     mask |= selected_experts == expert_id
 
-                batch_indices, slot_indices = torch.nonzero(mask, as_tuple=True)
+                batch_indices, slot_indices = torch.nonzero(
+                    mask, as_tuple=True)
                 if batch_indices.numel() == 0:
                     continue
 
                 group_output = dispatch_moe_trellis_swiglu(
                     lib,
                     activations=x[batch_indices],
-                    gate_weights=None,
-                    gate_scales=None,
-                    up_weights=None,
-                    up_scales=None,
-                    down_weights=None,
-                    down_scales=None,
-                    gate_su=None,
-                    gate_sv=None,
-                    up_su=None,
-                    up_sv=None,
-                    down_su=None,
-                    down_sv=None,
-                    grid=None,
-                    expert_ids=selected_experts[batch_indices, slot_indices].unsqueeze(1),
-                    expert_probs=routing_weights[batch_indices, slot_indices].unsqueeze(1),
+                    gate_weights=cached_buffers.gate_weights,
+                    gate_scales=cached_buffers.gate_scales,
+                    up_weights=cached_buffers.up_weights,
+                    up_scales=cached_buffers.up_scales,
+                    down_weights=cached_buffers.down_weights,
+                    down_scales=cached_buffers.down_scales,
+                    gate_su=cached_buffers.gate_su,
+                    gate_sv=cached_buffers.gate_sv,
+                    up_su=cached_buffers.up_su,
+                    up_sv=cached_buffers.up_sv,
+                    down_su=cached_buffers.down_su,
+                    down_sv=cached_buffers.down_sv,
+                    grid=cached_buffers.grid,
+                    expert_ids=selected_experts[batch_indices, slot_indices].unsqueeze(
+                        1),
+                    expert_probs=routing_weights[batch_indices, slot_indices].unsqueeze(
+                        1),
                     hidden_dim=self.hidden_dim,
                     intermediate_dim=self.intermediate_dim,
                     num_experts=len(self.experts),
@@ -2634,7 +2814,7 @@ class TrellisMoEMLP(nn.Module):
                     bits=bit_tuple,
                     cached_buffers=cached_buffers,
                     buffer_pool=buffer_pool,
-                    use_fp32_acc=self.hidden_dim >= 1024,
+                    use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )
 
                 output_accum.index_add_(0, batch_indices, group_output.float())
@@ -2729,8 +2909,10 @@ class TrellisMoEMLP(nn.Module):
             shared_expert=shared_expert,
             num_experts_per_tok=config.num_experts_per_tok,
             eager_buffers=True,  # Memory-optimized: create Metal buffers from CPU
-            use_mixed_bpw_optimizations=getattr(config, "use_mixed_bpw_optimizations", True),
-            enable_kernel_autotune=getattr(config, "enable_kernel_autotune", True),
+            use_mixed_bpw_optimizations=getattr(
+                config, "use_mixed_bpw_optimizations", True),
+            enable_kernel_autotune=getattr(
+                config, "enable_kernel_autotune", True),
         )
 
     def quantize_router_to_int8(self) -> dict[str, float]:
@@ -2874,6 +3056,7 @@ class TrellisDecoderLayer(nn.Module):
         workspace: torch.Tensor | None = None,
         workspace_offset: int = 0,
         cached_buffers: CachedWeightBuffers | None = None,
+        _batch_ctx: LayerBatchContext | None = None,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer.
 
@@ -2885,8 +3068,9 @@ class TrellisDecoderLayer(nn.Module):
             rope_cos: Precomputed RoPE cos values [1, 1, seq_len, rope_dim//2].
             rope_sin: Precomputed RoPE sin values [1, 1, seq_len, rope_dim//2].
             workspace: Optional persistent workspace buffer.
-            workspace_offset: Byte offset in workspace for scratch memory.
+            workspace_offset: Byte offset for scratch memory.
             cached_buffers: Pre-cached weight buffers for MoE MLP.
+            _batch_ctx: Optional batched dispatch context for MoE layers.
 
         Returns:
             Output tensor [..., seq_len, hidden_size].
@@ -2924,9 +3108,15 @@ class TrellisDecoderLayer(nn.Module):
                 workspace=workspace,
                 workspace_offset=workspace_offset,
                 cached_buffers=cached_buffers,
+                _batch_ctx=_batch_ctx,
             )
+            # Mark completion after MoE dispatch so LayerBatchContext can
+            # commit at its configured layer batch boundary.
+            if _batch_ctx is not None:
+                _batch_ctx.layer_complete()
         else:
             mlp_output = self.mlp(hidden_states)
+
         if mlp_output.dtype != residual.dtype:
             mlp_output = mlp_output.to(dtype=residual.dtype)
 
@@ -2950,6 +3140,8 @@ class TrellisDecoderLayer(nn.Module):
             workspace=context["workspace"],
             workspace_offset=context["workspace_offset"],
             cached_buffers=context["cached_buffers"],
+            # Checkpointing doesn't support batch context (only used in inference)
+            _batch_ctx=None,
         )
 
     def forward(
@@ -2963,6 +3155,7 @@ class TrellisDecoderLayer(nn.Module):
         workspace: torch.Tensor | None = None,
         workspace_offset: int = 0,
         cached_buffers: CachedWeightBuffers | None = None,
+        _batch_ctx: LayerBatchContext | None = None,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer."""
         if self.gradient_checkpointing and self.training:
@@ -2995,6 +3188,7 @@ class TrellisDecoderLayer(nn.Module):
             workspace=workspace,
             workspace_offset=workspace_offset,
             cached_buffers=cached_buffers,
+            _batch_ctx=_batch_ctx,
         )
 
     @classmethod
@@ -3303,6 +3497,14 @@ class TrellisModel(nn.Module):
         for layer in self.layers:
             layer.gradient_checkpointing = True
 
+    def _prefetch_layer_weights(self, layer_idx: int) -> None:
+        """Prefetch next layer's weight buffers."""
+        if layer_idx >= len(self.layers):
+            return
+        next_mlp = self.layers[layer_idx].mlp
+        if hasattr(next_mlp, "_ensure_buffers_staged"):
+            next_mlp._ensure_buffers_staged()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -3344,9 +3546,6 @@ class TrellisModel(nn.Module):
             position_ids = torch.arange(
                 seq_len, device=hidden_states.device).unsqueeze(0)
 
-        # Set up batched dispatch for all MoE layers
-        self.setup_batched_dispatch()
-
         # Get Metal library for async KV cache prefetching
         lib = None
         for layer in self.layers:
@@ -3376,30 +3575,36 @@ class TrellisModel(nn.Module):
                     if weights is not None:
                         pipeliner.prefetch_layer_weights_sync(0, weights)
 
-        # Use ping-pong buffers to reduce activation memory by 50%
-        if use_ping_pong:
-            if self._activation_buffers is None:
-                self._activation_buffers = ActivationPingPongBuffer(
-                    hidden_dim=self.config.hidden_size,
-                    device=str(hidden_states.device),
-                    dtype=hidden_states.dtype,
-                )
-
-            # Configure workspace for ping-pong buffers
-            self._activation_buffers.set_workspace(
-                self.workspace, offset_a, offset_b)
-
-            # Copy embedding output to first buffer
-            input_buffer = self._activation_buffers.get_input_buffer(
-                batch_size, seq_len)
-            input_buffer.copy_(hidden_states)
+        # Use LayerBatchContext for decode speedup (batch_size=1)
+        # This batches multiple layer MoE dispatches into a single command buffer,
+        # reducing from 46 commits to ~12 commits.
+        use_batch_ctx = (batch_size == 1 and HAS_METAL and lib is not None)
+        batch_mgr = LayerBatchContext(
+            self, batch_size=4) if use_batch_ctx else nullcontext()
+        with batch_mgr as batch_ctx:
+            # Determine activation buffer strategy
+            if use_ping_pong:
+                if self._activation_buffers is None:
+                    self._activation_buffers = ActivationPingPongBuffer(
+                        hidden_dim=self.config.hidden_size,
+                        device=str(hidden_states.device),
+                        dtype=hidden_states.dtype,
+                    )
+                self._activation_buffers.set_workspace(
+                    self.workspace, offset_a, offset_b)
+                input_buffer = self._activation_buffers.get_input_buffer(
+                    batch_size, seq_len)
+                input_buffer.copy_(hidden_states)
+            else:
+                input_buffer = hidden_states
 
             for layer_idx, layer in enumerate(self.layers):
-                # Prefetch KV cache for layer N+1 before computing layer N
+                # Prefetch layer N+1 weights and KV cache while layer N computes
+                self._prefetch_layer_weights(layer_idx + 1)
                 if kv_cache is not None and lib is not None and layer_idx + 1 < len(self.layers):
                     kv_cache.prefetch_layer_async(layer_idx + 1, lib=lib)
 
-                # 1. Start async transfer for layer N+1 weights
+                # Start async transfer for layer N+1 weights
                 if pipeliner is not None and layer_idx + 1 < len(self.layers):
                     next_layer = self.layers[layer_idx + 1]
                     if hasattr(next_layer, "get_weight_tensors"):
@@ -3408,62 +3613,48 @@ class TrellisModel(nn.Module):
                             pipeliner.start_prefetch_async(
                                 layer_idx + 1, weights)
 
-                # Skip layers marked for pruning (identity pass-through)
+                # Skip layers marked for pruning
                 if self.config.should_skip_layer(layer_idx):
                     continue
-
-                # Get output buffer for this layer
-                output_buffer = self._activation_buffers.get_output_buffer(
-                    batch_size, seq_len)
 
                 # Get weight buffers for this layer (wait if transfer pending)
                 layer_buffers = None
                 if pipeliner is not None:
-                    # Check if we have pre-fetched buffers
                     buf_dict = pipeliner.wait_for_prefetch(layer_idx)
                     if buf_dict:
                         layer_buffers = CachedWeightBuffers(**buf_dict)
 
-                # 2. Compute layer N (with transferred buffers if available)
-                output_buffer = layer(
-                    input_buffer,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    kv_cache=kv_cache,
-                    rope_cos=rope_cos,
-                    rope_sin=rope_sin,
-                    workspace=self.workspace,
-                    workspace_offset=offset_scratch,
-                    cached_buffers=layer_buffers,
-                )
-
-                # Ping-pong swap: output becomes input for next layer
-                input_buffer = output_buffer
+                # Compute layer N
+                if use_ping_pong:
+                    output_buffer = self._activation_buffers.get_output_buffer(
+                        batch_size, seq_len)
+                    input_buffer = layer(
+                        input_buffer,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        kv_cache=kv_cache,
+                        rope_cos=rope_cos,
+                        rope_sin=rope_sin,
+                        workspace=self.workspace,
+                        workspace_offset=offset_scratch,
+                        cached_buffers=layer_buffers,
+                        _batch_ctx=batch_ctx,  # Pass context to layer
+                    )
+                else:
+                    input_buffer = layer(
+                        input_buffer,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        kv_cache=kv_cache,
+                        rope_cos=rope_cos,
+                        rope_sin=rope_sin,
+                        workspace=self.workspace,
+                        workspace_offset=offset_scratch,
+                        cached_buffers=layer_buffers,
+                        _batch_ctx=batch_ctx,  # Pass context to layer
+                    )
 
             hidden_states = input_buffer
-        else:
-            for layer_idx, layer in enumerate(self.layers):
-                # Prefetch KV cache for layer N+1 before computing layer N
-                if kv_cache is not None and lib is not None and layer_idx + 1 < len(self.layers):
-                    kv_cache.prefetch_layer_async(layer_idx + 1, lib=lib)
-
-                # Skip layers marked for pruning (identity pass-through)
-                if self.config.should_skip_layer(layer_idx):
-                    continue
-
-                hidden_states = layer(
-                    hidden_states,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    kv_cache=kv_cache,
-                    rope_cos=rope_cos,
-                    rope_sin=rope_sin,
-                    workspace=self.workspace,
-                    workspace_offset=offset_scratch,
-                )
-
-        # Flush all batched MoE dispatches in a single command buffer
-        self.flush_batched_dispatch()
 
         # Final normalization
         hidden_states = self.norm(hidden_states)

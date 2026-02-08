@@ -9,7 +9,8 @@ import pytest
 
 # Import at module level to catch import errors
 try:
-    from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
+    from metal_marlin.trellis.generate import (GenerationConfig,
+                                               TrellisGenerator)
 
     HAS_TRELLIS_GENERATE = True
 except ImportError:
@@ -91,14 +92,9 @@ class TestTrellisGenerator:
 
 def test_module_exports():
     """Test module exports."""
-    if not HAS_TRELLIS_GENERATE:
-        pytest.skip("trellis_generate not available")
-
-    from metal_marlin import trellis_generate
-
-    assert hasattr(trellis_generate, "__all__")
-    assert "GenerationConfig" in trellis_generate.__all__
-    assert "TrellisGenerator" in trellis_generate.__all__
+    from metal_marlin.trellis import GenerationConfig, TrellisGenerator
+    assert TrellisGenerator is not None
+    assert GenerationConfig is not None
 
 
 if __name__ == "__main__":

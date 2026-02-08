@@ -225,7 +225,7 @@ inline void fused_q_projection_glm4(
     uint hidden_size,                          // Hidden dimension
     threadgroup half (&q_out)[HEAD_DIM_PADDED], // Output Q for this head
     constant MLAAttentionParams& params,
-    uint tid                                   // Thread ID
+    uint tid_x                                   // Thread ID
 ) {
     const uint q_lora_rank = params.q_lora_rank;      // 768
     const uint head_dim = params.head_dim;            // 128
@@ -236,7 +236,7 @@ inline void fused_q_projection_glm4(
     // Each thread computes a strip of q_latent
     
     uint elems_per_thread = (q_lora_rank + THREADS_PER_TG - 1) / THREADS_PER_TG;
-    uint lat_start = tid * elems_per_thread;
+    uint lat_start = tid_x * elems_per_thread;
     uint lat_end = min(lat_start + elems_per_thread, q_lora_rank);
     
     // Process hidden in chunks of 8 (FP4 packed size)
@@ -278,7 +278,7 @@ inline void fused_q_projection_glm4(
     // Each thread computes a strip of head_dim
     
     uint head_elems_per_thread = (head_dim + THREADS_PER_TG - 1) / THREADS_PER_TG;
-    uint head_start = tid * head_elems_per_thread;
+    uint head_start = tid_x * head_elems_per_thread;
     uint head_end = min(head_start + head_elems_per_thread, head_dim);
     
     // Head offset in combined weight matrix
@@ -342,7 +342,7 @@ inline void fused_kv_projection_glm4(
     threadgroup half (&k_out)[HEAD_DIM_PADDED], // Output K for this head
     threadgroup half (&v_out)[HEAD_DIM_PADDED], // Output V for this head
     constant MLAAttentionParams& params,
-    uint tid                                    // Thread ID
+    uint tid_x                                    // Thread ID
 ) {
     const uint kv_lora_rank = params.kv_lora_rank;    // 512
     const uint rope_dim = params.rope_dim;            // 64
@@ -355,7 +355,7 @@ inline void fused_kv_projection_glm4(
     // Each thread computes a strip of kv_latent
     
     uint elems_per_thread = (total_kv_latent + THREADS_PER_TG - 1) / THREADS_PER_TG;
-    uint lat_start = tid * elems_per_thread;
+    uint lat_start = tid_x * elems_per_thread;
     uint lat_end = min(lat_start + elems_per_thread, total_kv_latent);
     
     // Process hidden in chunks of 8
@@ -406,7 +406,7 @@ inline void fused_kv_projection_glm4(
     
     // Each thread computes a strip of head_dim for both K and V
     uint head_elems_per_thread = (head_dim + THREADS_PER_TG - 1) / THREADS_PER_TG;
-    uint head_start = tid * head_elems_per_thread;
+    uint head_start = tid_x * head_elems_per_thread;
     uint head_end = min(head_start + head_elems_per_thread, head_dim);
     
     // Head offsets in combined weight matrix
@@ -458,7 +458,7 @@ inline void fused_kv_projection_glm4(
                 
                 // K projection
                 half s_k = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
-                uint32_t packed_k = kv_b_weights_packed[lat_pack * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
+                uint32_t packed_k = kv_b_weights_packed[(lat_packs_kv + rope_pack) * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
                 
                 half w_k_vals[FP4_PER_UINT];
                 dequant_fp4x8(packed_k, s_k, w_k_vals);
@@ -481,7 +481,7 @@ inline void fused_kv_projection_glm4(
                 
                 // V projection (no RoPE for V)
                 half s_v = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
-                uint32_t packed_v = kv_b_weights_packed[lat_pack * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
+                uint32_t packed_v = kv_b_weights_packed[(lat_packs_kv + rope_pack) * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
                 
                 half w_v_vals[FP4_PER_UINT];
                 dequant_fp4x8(packed_v, s_v, w_v_vals);
@@ -539,7 +539,7 @@ inline void fused_kv_projection_glm4(
     constant MLAAttentionParams& params         [[buffer(17)]],
     
     // Thread/group IDs
-    uint3 tid                                  [[thread_position_in_threadgroup]],
+    uint tid_x                                 [[thread_index_in_threadgroup]], // Fixed: matches helper function signature
     uint3 tgid                                  [[threadgroup_position_in_grid]],
     uint3 grid_size                            [[threads_per_grid]]
 ) {
@@ -576,7 +576,7 @@ inline void fused_kv_projection_glm4(
         shared_q_latent,
         hidden_idx, head_idx, params.hidden_size,
         Q_head,
-        params, tid
+        params, tid_x
     );
     
     // -----------------------------------------------------------------------
@@ -589,7 +589,7 @@ inline void fused_kv_projection_glm4(
         hidden_idx, head_idx, seq_idx + params.cache_start_pos,
         params.hidden_size,
         K_head, V_head,
-        params, tid
+        params, tid_x
     );
     
     // Initialize attention accumulator
@@ -629,7 +629,7 @@ inline void fused_kv_projection_glm4(
             
             // SIMD-optimized dot product
             for (uint d = 0; d < params.head_dim; d += SIMD_SIZE) {
-                half q_val = Q_head[d + tid % SIMD_SIZE];
+                half q_val = Q_head[d + tid_x % SIMD_SIZE];
                 
                 // Load compressed K from cache
                 uint scale_d = d / params.kv_b_group_size;
@@ -696,7 +696,8 @@ inline void fused_kv_projection_glm4(
     
     // Each thread computes a strip of hidden dimension
     uint hidden_elems_per_thread = (params.hidden_size + THREADS_PER_TG - 1) / THREADS_PER_TG;
-    uint hidden_start = tid * hidden_elems_per_thread;
+    // Use tid_x (scalar) for proper index calculation
+    uint hidden_start = tid_x * hidden_elems_per_thread;
     uint hidden_end = min(hidden_start + hidden_elems_per_thread, params.hidden_size);
     
     for (uint h = hidden_start; h < hidden_end; ++h) {
@@ -734,7 +735,7 @@ inline void fused_kv_projection_glm4(
 }
 
 // ---------------------------------------------------------------------------
-// MLA fused attention prefill kernel (batch processing)
+// MLA fused attention prefill kernel (batch processing, decode-style thread index)
 // ---------------------------------------------------------------------------
 
 [[kernel]] void mla_fused_attention_prefill_glm4(
@@ -757,28 +758,11 @@ inline void fused_kv_projection_glm4(
     device const half* o_scales                [[buffer(15)]],
     device half* output                        [[buffer(16)]],
     constant MLAAttentionParams& params         [[buffer(17)]],
-    uint3 tid                                  [[thread_position_in_threadgroup]],
+    uint tid_x                                 [[thread_index_in_threadgroup]],
     uint3 tgid                                  [[threadgroup_position_in_grid]]
 ) {
-    // Note: Prefill implementation would follow similar pattern but with
-    // batched Q computation and more optimized memory access patterns.
-    // For brevity, focusing on the decode kernel which is more critical
-    // for inference latency.
-    
-    // Implementation would process multiple Q positions per threadgroup
-    // and use different tiling strategies for longer sequences.
-    
-    // For now, we can use the decode kernel with appropriate grid dimensions
-    // or implement a separate prefill kernel based on flash attention patterns.
-    
-    // Placeholder: call decode kernel with appropriate parameters
-    mla_fused_attention_decode_glm4(
-        hidden, q_a_weights_packed, q_a_scales,
-        q_b_weights_packed, q_b_scales, q_bias,
-        kv_a_weights_packed, kv_a_scales,
-        kv_b_weights_packed, kv_b_scales,
-        K_cache, V_cache, K_scales, V_scales,
-        o_weights_packed, o_scales, output,
-        params, tid, tgid, uint3(0, 0, 0)
-    );
+    // Prefill implementation requires separate logic - cannot call decode kernel
+    // TODO: Implement batched flash attention for prefill
+    // For now, return early (host code should fall back to non-fused path)
+    return;
 }

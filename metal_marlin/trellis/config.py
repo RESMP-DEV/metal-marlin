@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+# Tokenizer ID for GLM-4.7 models
+GLM4_TOKENIZER_ID = "zai-org/GLM-4.7-Flash"
+
 
 @dataclass
 class TrellisModelConfig:
@@ -27,7 +30,8 @@ class TrellisModelConfig:
     # When set, enables compressed KV cache via low-rank projections
     kv_lora_rank: int | None = None  # None = standard GQA, 512 = GLM MLA
     q_lora_rank: int | None = None  # None = no Q compression, 768 = GLM MLA
-    kv_head_dim: int | None = None  # KV head dim if different from Q (GLM: 1120)
+    # KV head dim if different from Q (GLM: 1120)
+    kv_head_dim: int | None = None
     kv_rope_dim: int = 0  # Position-dependent component in kv_a_proj (GLM: 64)
 
     # GLM-4 MLA specific dimensions (used when kv_lora_rank is set)
@@ -59,7 +63,8 @@ class TrellisModelConfig:
 
     # Optimizations
     use_mixed_bpw_optimizations: bool = True  # Enable MixedBPWMoEDispatcher logic
-    enable_kernel_autotune: bool = True  # Enable automatic kernel tuning on first run
+    # Enable automatic kernel tuning on first run
+    enable_kernel_autotune: bool = True
 
     @classmethod
     def from_pretrained(cls, model_path: str) -> "TrellisModelConfig":
@@ -128,7 +133,8 @@ class TrellisModelConfig:
         # Detect MoE vs dense
         if kwargs.get("num_experts", 1) <= 1:
             kwargs["num_experts"] = 1
-            kwargs["first_moe_layer"] = kwargs.get("num_hidden_layers", 32)  # No MoE layers
+            kwargs["first_moe_layer"] = kwargs.get(
+                "num_hidden_layers", 32)  # No MoE layers
 
         return cls(**kwargs)
 
@@ -186,7 +192,7 @@ class TrellisModelConfig:
 
         if hasattr(hf_config, "use_mixed_bpw_optimizations"):
             kwargs["use_mixed_bpw_optimizations"] = hf_config.use_mixed_bpw_optimizations
-        
+
         if hasattr(hf_config, "enable_kernel_autotune"):
             kwargs["enable_kernel_autotune"] = hf_config.enable_kernel_autotune
 

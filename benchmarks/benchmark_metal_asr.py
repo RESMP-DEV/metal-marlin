@@ -339,6 +339,14 @@ def apply_backend_config(model: torch.nn.Module, config: BenchmarkConfig) -> tor
             try:
                 from metal_marlin.layer_replacement import replace_linear_layers
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
                 model = replace_linear_layers(model, quant_bits=4)
             except Exception as e:
                 print(f"Warning: Metal Marlin FP4 quantization failed ({e})")

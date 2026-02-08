@@ -18,6 +18,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -747,7 +754,6 @@ def main():
     # Save results if requested
     if args.output:
         import json
-
         output_data = [r.to_dict() for r in results]
         with open(args.output, "w") as f:
             json.dump(output_data, f, indent=2)

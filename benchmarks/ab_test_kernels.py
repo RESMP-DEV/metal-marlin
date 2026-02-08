@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -28,12 +29,11 @@ from pathlib import Path
 from typing import Protocol
 
 import torch
+from metal_marlin.kernels import HAS_MPS
 
 # Ensure metal_marlin is importable
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
-
-from metal_marlin.kernels import HAS_MPS
 
 
 class KernelFn(Protocol):
@@ -213,7 +213,13 @@ def bootstrap_ci(
 
     Uses percentile method.
     """
-    import random
+
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
 
     differences: list[float] = []
     for _ in range(n_bootstrap):
@@ -423,12 +429,15 @@ class ABTester:
                     f"    (|d|={abs(r.cohens_d):.3f} < threshold={r.effect_size_threshold})"
                 )
         else:
-            speedup_pct = (r.speedup - 1) * 100 if r.speedup > 1 else (1 / r.speedup - 1) * 100
+            speedup_pct = (r.speedup - 1) * \
+                100 if r.speedup > 1 else (1 / r.speedup - 1) * 100
             faster = "B" if r.speedup > 1 else "A"
             print(f"  WINNER: {r.winner}")
-            print(f"    {faster} is {speedup_pct:.1f}% faster (speedup: {r.speedup:.3f}x)")
+            print(
+                f"    {faster} is {speedup_pct:.1f}% faster (speedup: {r.speedup:.3f}x)")
             print(f"    p-value: {r.p_value:.4f} (significant at α={r.alpha})")
-            print(f"    Effect size: {abs(r.cohens_d):.3f} (practical threshold: {r.effect_size_threshold})")
+            print(
+                f"    Effect size: {abs(r.cohens_d):.3f} (practical threshold: {r.effect_size_threshold})")
 
     def export_json(self, path: str | Path) -> None:
         """Export all results to JSON."""
@@ -480,7 +489,8 @@ def create_gemm_baseline(M: int, N: int, K: int, **_) -> KernelFn:
 def create_gemm_batched(M: int, N: int, K: int, batch_size: int = 4, **_) -> KernelFn:
     """Create batched GEMM for comparison."""
     # Simulate batched by doing multiple smaller GEMMs
-    A = torch.randn(batch_size, M // batch_size, K, dtype=torch.float16, device="mps")
+    A = torch.randn(batch_size, M // batch_size, K,
+                    dtype=torch.float16, device="mps")
     B = torch.randn(K, N, dtype=torch.float16, device="mps")
     mps_sync()
 
@@ -498,9 +508,12 @@ def create_attention_baseline(
     head_dim = K // num_heads
     batch = 1
 
-    Q = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    K_mat = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    V = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
+    Q = torch.randn(batch, num_heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
+    K_mat = torch.randn(batch, num_heads, seq_len, head_dim,
+                        dtype=torch.float16, device="mps")
+    V = torch.randn(batch, num_heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
     scale = 1.0 / math.sqrt(head_dim)
     mps_sync()
 
@@ -518,9 +531,12 @@ def create_attention_sdpa(M: int, N: int, K: int, num_heads: int = 8, **_) -> Ke
     head_dim = K // num_heads
     batch = 1
 
-    Q = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    K_mat = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
-    V = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
+    Q = torch.randn(batch, num_heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
+    K_mat = torch.randn(batch, num_heads, seq_len, head_dim,
+                        dtype=torch.float16, device="mps")
+    V = torch.randn(batch, num_heads, seq_len, head_dim,
+                    dtype=torch.float16, device="mps")
     mps_sync()
 
     def fn() -> torch.Tensor:
@@ -554,7 +570,7 @@ def create_moe_baseline(
             for k in range(top_k):
                 expert = expert_ids[b, k].item()
                 prob = expert_probs[b, k]
-                out = activations[b : b + 1] @ expert_weights[expert]
+                out = activations[b: b + 1] @ expert_weights[expert]
                 output[b] += prob * out.squeeze(0)
         return output
 
@@ -610,12 +626,15 @@ def create_moe_batched(
 
 KERNEL_TESTS: dict[str, tuple[KernelVariant, KernelVariant, tuple[int, int, int]]] = {
     "gemm_standard": (
-        KernelVariant("standard", "Standard A @ B matmul", create_gemm_baseline),
-        KernelVariant("batched", "Batched einsum matmul", create_gemm_batched, {"batch_size": 4}),
+        KernelVariant("standard", "Standard A @ B matmul",
+                      create_gemm_baseline),
+        KernelVariant("batched", "Batched einsum matmul",
+                      create_gemm_batched, {"batch_size": 4}),
         (512, 4096, 4096),
     ),
     "attention_impl": (
-        KernelVariant("manual", "Manual QK @ V attention", create_attention_baseline),
+        KernelVariant("manual", "Manual QK @ V attention",
+                      create_attention_baseline),
         KernelVariant("sdpa", "PyTorch SDPA", create_attention_sdpa),
         (128, 128, 1024),  # seq_len=128, head_dim=128 (8 heads)
     ),

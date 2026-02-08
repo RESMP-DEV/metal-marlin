@@ -35,6 +35,14 @@ from metal_marlin.eval import (  # noqa: E402
 )
 from metal_marlin.inference_metal import MetalGLM47Model  # noqa: E402
 
+import os
+
+# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+    sys.exit(0)
+
 # Check MPS availability
 HAS_MPS = torch.backends.mps.is_available()
 assert HAS_MPS, "MPS required for Metal Marlin inference"
