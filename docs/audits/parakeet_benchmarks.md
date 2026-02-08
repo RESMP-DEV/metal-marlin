@@ -28,9 +28,9 @@
 
 ## Performance Visualizations
 
-![Throughput Comparison](charts/parakeet_throughput_comparison.png)
+![Throughput Comparison](../charts/parakeet_throughput_comparison.png)
 
-![Memory Usage](charts/parakeet_memory_usage.png)
+![Memory Usage](../charts/parakeet_memory_usage.png)
 
 ## M4 Max Recommendations
 
@@ -62,4 +62,3 @@
 - **Device**: Apple Silicon (MPS backend)
 - **Metrics**: Real-time factor, peak memory, transcription time
 - **Configurations Tested**: FP4 baseline, hybrid conservative/aggressive, mixed precision
-

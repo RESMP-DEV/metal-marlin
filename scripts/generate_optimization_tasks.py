@@ -193,7 +193,7 @@ def generate_optimization_tasks():
         "Implement a terminal-based 'Inference Monitor' dashboard in `contrib/metal_marlin/scripts/inference_monitor.py`.",
         "Add Prometheus metrics exporter to the `metal-marlin serve` command in `contrib/metal_marlin/metal_marlin/serving/cli.py`.",
         "Document the C++ extension architecture in `contrib/metal_marlin/docs/cpp_integration.md`.",
-        "Create `contrib/metal_marlin/docs/metal_error_guide.md` for common Metal compiler errors.",
+        "Create `contrib/metal_marlin/docs/guides/metal_error_guide.md` for common Metal compiler errors.",
         "Add a 'Performance Regression Test' in `contrib/metal_marlin/tests/test_perf_regression.py` that fails if latency increases >5%.",
         "Implement a `metal_marlin.profile` module in `contrib/metal_marlin/metal_marlin/utils/profile_ops.py` for per-layer FLOPs calculation.",
         "Add `API Reference` documentation in `contrib/metal_marlin/docs/api/` using pdoc or sphinx.",
@@ -202,8 +202,8 @@ def generate_optimization_tasks():
         "Add support for 'GGUF' metadata extraction in `contrib/metal_marlin/metal_marlin/gguf_loader.py` for better config parity.",
         "Implement a 'Weight Visualization' tool in `contrib/metal_marlin/scripts/viz_quant.py` for analyzing quantization errors.",
         "Add per-kernel memory bandwidth utilization metrics in `contrib/metal_marlin/scripts/perf_summary.py`.",
-        "Create a 'Compatibility Matrix' in `contrib/metal_marlin/docs/compatibility.md` for different Apple Silicon generations.",
-        "Document the 'Flash Attention v3' tiling strategies in `contrib/metal_marlin/docs/fa3_architecture.md`.",
+        "Create a 'Compatibility Matrix' in `contrib/metal_marlin/docs/reference/compatibility.md` for different Apple Silicon generations.",
+        "Document the 'Flash Attention v3' tiling strategies in `contrib/metal_marlin/docs/architectures/fa3.md`.",
         "Clean up all temporary files and logs generated during benchmarks in `contrib/metal_marlin/scripts/cleanup_benchmarks.sh`.",
     ]
     for i, p in enumerate(dx_tasks):

@@ -447,8 +447,8 @@ Typical speedup: 5-15% for attention-bound workloads.
 
 ## Related Documentation
 
-- [KV Cache Design](../kv_cache.md) - General KV cache architecture
-- [Mixed Precision](../mixed_precision.md) - Layer-wise precision configuration
-- [MoE Architecture](../moe_architecture.md) - MoE-specific considerations
-- [MR-GPTQ](../mr_gptq.md) - Hadamard rotation and Hessian calibration
-- [RoPE Implementation](../metal_kernel_audit.md#position-encoding-15-variants) - RoPE kernel documentation
+- [KV Cache Design](../concepts/kv_cache.md) - General KV cache architecture
+- [Mixed Precision](../concepts/mixed_precision.md) - Layer-wise precision configuration
+- [MoE Architecture](../concepts/moe_architecture.md) - MoE-specific considerations
+- [MR-GPTQ](../formats/mr_gptq.md) - Hadamard rotation and Hessian calibration
+- [RoPE Implementation](../audits/metal_kernel_audit.md#position-encoding-15-variants) - RoPE kernel documentation

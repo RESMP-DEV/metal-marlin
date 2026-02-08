@@ -38,13 +38,21 @@
 #include "buffer_pool.hpp"
 #include "direct_access.hpp"
 #include "encoder_cache.hpp"
+#include "gemm_dispatch.hpp"
 #include "library_manager.hpp"
 #include "metal_device.hpp"
 #include "moe_manager.hpp"
+#include "moe_router_dispatch.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace nb = nanobind;
 using namespace metal_marlin;
@@ -102,7 +110,7 @@ public:
 
     NSError *error = nullptr;
     id<MTLComputePipelineState> pipeline =
-        [device_.device() newComputePipelineStateWithFunction:(id)func
+        [device_.device() newComputePipelineStateWithFunction:(__bridge id<MTLFunction>)func
                                                         error:&error];
 
     if (!pipeline) {
@@ -113,7 +121,13 @@ public:
       throw std::runtime_error(msg);
     }
 
-    return nb::capsule(pipeline, "Pipeline");
+    void *pipeline_ptr = (__bridge_retained void *)pipeline;
+    return nb::capsule(
+        pipeline_ptr, "Pipeline", [](void *ptr) noexcept {
+          if (ptr != nullptr) {
+            (void)CFBridgingRelease(ptr);
+          }
+        });
   }
 
   MetalDeviceDirect &device() { return device_; }
@@ -138,7 +152,7 @@ public:
                   std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
                   const std::vector<ManagedBuffer *> &buffers) {
     id<MTLComputePipelineState> pipeline =
-        (id<MTLComputePipelineState>)pipeline_capsule.data();
+        (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
     [encoder_ setComputePipelineState:pipeline];
 
     for (size_t i = 0; i < buffers.size(); ++i) {
@@ -292,7 +306,8 @@ void bind_buffer_pool(nb::module_ &m) {
             auto result = rb.allocate(size);
             if (!result)
               return nb::none();
-            return nb::make_tuple(nb::capsule(result->first, "mtlbuffer"),
+            return nb::make_tuple(
+                nb::capsule((__bridge void *)result->first, "mtlbuffer"),
                                   result->second);
           },
           "Allocate from ring buffer, returns (buffer, offset)")
@@ -497,6 +512,117 @@ void bind_moe_manager(nb::module_ &m) {
 }
 
 // =============================================================================
+// Router Dispatcher Bindings
+// =============================================================================
+
+void bind_router_dispatcher(nb::module_ &m) {
+  // RouterBatchOutput struct
+  nb::class_<moe::RouterBatchOutput>(m, "RouterBatchOutput")
+      .def_ro("num_tokens", &moe::RouterBatchOutput::num_tokens)
+      .def_ro("top_k", &moe::RouterBatchOutput::top_k)
+      .def_ro("num_experts", &moe::RouterBatchOutput::num_experts)
+      .def_ro("logits", &moe::RouterBatchOutput::logits)
+      .def_ro("topk_expert_ids", &moe::RouterBatchOutput::topk_expert_ids)
+      .def_ro("topk_probs", &moe::RouterBatchOutput::topk_probs)
+      .def_ro("dispatch_info", &moe::RouterBatchOutput::dispatch_info);
+
+  // RouterBuffer struct
+  nb::class_<moe::RouterBuffer>(m, "RouterBuffer")
+      .def_ro("sequence_id", &moe::RouterBuffer::sequence_id)
+      .def_ro("output", &moe::RouterBuffer::output);
+
+  // FastRouterDispatcher class
+  nb::class_<moe::FastRouterDispatcher>(m, "FastRouterDispatcher")
+      .def(nb::init<int32_t, int32_t, int32_t, int32_t, size_t, uint32_t>(),
+           nb::arg("num_experts"),
+           nb::arg("hidden_dim"),
+           nb::arg("top_k"),
+           nb::arg("max_batch_tokens") = 128,
+           nb::arg("hot_pair_cache_capacity") = 256,
+           nb::arg("hot_pair_threshold") = 8)
+      .def("route_batch",
+           [](moe::FastRouterDispatcher &dispatcher,
+              nb::bytes token_activations_bf16,
+              int32_t num_tokens,
+              nb::ndarray<float, nb::c_contig> router_weights,
+              nb::object router_bias_obj) -> moe::RouterBatchOutput {
+                
+             const uint16_t* activations_ptr =
+                 reinterpret_cast<const uint16_t*>(token_activations_bf16.data());
+             
+             const float* weights_ptr = router_weights.data();
+             const float* bias_ptr = nullptr;
+             
+             if (!router_bias_obj.is_none()) {
+               auto bias_array = nb::cast<nb::ndarray<float, nb::c_contig>>(router_bias_obj);
+               bias_ptr = bias_array.data();
+             }
+             
+             return dispatcher.route_batch(activations_ptr,
+                                           num_tokens,
+                                           weights_ptr,
+                                           bias_ptr);
+           },
+           nb::arg("token_activations_bf16"),
+           nb::arg("num_tokens"),
+           nb::arg("router_weights"),
+           nb::arg("router_bias") = nb::none(),
+           "Synchronous batched router forward + top-k + dispatch packing")
+      .def("submit_async",
+           [](moe::FastRouterDispatcher &dispatcher,
+              nb::bytes token_activations_bf16,
+              int32_t num_tokens,
+              nb::ndarray<float, nb::c_contig> router_weights,
+              nb::object router_bias_obj,
+              nb::callable launch_experts) {
+             
+             const uint16_t* activations_ptr =
+                 reinterpret_cast<const uint16_t*>(token_activations_bf16.data());
+             
+             const float* weights_ptr = router_weights.data();
+             const float* bias_ptr = nullptr;
+             
+             if (!router_bias_obj.is_none()) {
+               auto bias_array = nb::cast<nb::ndarray<float, nb::c_contig>>(router_bias_obj);
+               bias_ptr = bias_array.data();
+             }
+
+             // Wrap the Python callable into ExpertLaunchFn
+             auto wrapped_launch = [launch_experts](const moe::RouterBuffer& buffer) -> std::shared_future<void> {
+               nb::gil_scoped_acquire acquire;
+               launch_experts(nb::cast(buffer));
+               
+               // For now we return a dummy future as Python async might be handled differently
+               std::promise<void> p;
+               p.set_value();
+               return p.get_future().share();
+             };
+
+             {
+               nb::gil_scoped_release release;
+               dispatcher.submit_async(activations_ptr,
+                                       num_tokens,
+                                       weights_ptr,
+                                       bias_ptr,
+                                       wrapped_launch);
+             }
+           },
+           nb::arg("token_activations_bf16"),
+           nb::arg("num_tokens"),
+           nb::arg("router_weights"),
+           nb::arg("router_bias") = nb::none(),
+           nb::arg("launch_experts"),
+           "Asynchronous overlap path with expert launch callback")
+      .def("current_router_buffer", &moe::FastRouterDispatcher::current_router_buffer)
+      .def("previous_router_buffer", &moe::FastRouterDispatcher::previous_router_buffer)
+      .def("reset_hot_pair_cache", &moe::FastRouterDispatcher::reset_hot_pair_cache)
+      .def("num_experts", &moe::FastRouterDispatcher::num_experts)
+      .def("hidden_dim", &moe::FastRouterDispatcher::hidden_dim)
+      .def("top_k", &moe::FastRouterDispatcher::top_k)
+      .def("hot_pair_count", &moe::FastRouterDispatcher::hot_pair_count);
+}
+
+// =============================================================================
 // Metal Device Bindings
 // =============================================================================
 
@@ -674,6 +800,223 @@ void bind_library_manager(nb::module_ &m) {
 }
 
 // =============================================================================
+// Mixed-BPW Dispatch Bindings
+// =============================================================================
+
+void bind_mixed_bpw_dispatch(nb::module_ &m) {
+  nb::class_<MoEConfig>(m, "MoEConfig")
+      .def(nb::init<>())
+      .def_rw("hidden_dim", &MoEConfig::hidden_dim)
+      .def_rw("intermediate_dim", &MoEConfig::intermediate_dim)
+      .def_rw("num_experts", &MoEConfig::num_experts)
+      .def_rw("top_k", &MoEConfig::top_k)
+      .def_rw("max_experts_per_batch", &MoEConfig::max_experts_per_batch)
+      .def_rw("command_buffers_per_batch_size",
+              &MoEConfig::command_buffers_per_batch_size)
+      .def_rw("max_inflight_submissions",
+              &MoEConfig::max_inflight_submissions)
+      .def_rw("threadgroup_size_x", &MoEConfig::threadgroup_size_x)
+      .def_rw("common_batch_sizes", &MoEConfig::common_batch_sizes)
+      .def_rw("use_indirect_command_buffers",
+              &MoEConfig::use_indirect_command_buffers)
+      .def_rw("overlap_cpu_encoding", &MoEConfig::overlap_cpu_encoding)
+      .def_rw("wait_for_completion", &MoEConfig::wait_for_completion)
+      .def_rw("kernel_name", &MoEConfig::kernel_name)
+      .def_rw("metallib_path", &MoEConfig::metallib_path);
+
+  nb::class_<MixedBPWBatchPlan>(m, "MixedBPWBatchPlan")
+      .def_ro("bit_width", &MixedBPWBatchPlan::bit_width)
+      .def_ro("expert_ids", &MixedBPWBatchPlan::expert_ids)
+      .def_ro("expert_token_counts", &MixedBPWBatchPlan::expert_token_counts)
+      .def_ro("token_count", &MixedBPWBatchPlan::token_count);
+
+  nb::class_<MixedBPWDispatchStats>(m, "MixedBPWDispatchStats")
+      .def_ro("queued_experts", &MixedBPWDispatchStats::queued_experts)
+      .def_ro("routed_experts", &MixedBPWDispatchStats::routed_experts)
+      .def_ro("grouped_batches", &MixedBPWDispatchStats::grouped_batches)
+      .def_ro("command_buffer_submissions",
+              &MixedBPWDispatchStats::command_buffer_submissions)
+      .def_ro("indirect_command_batches",
+              &MixedBPWDispatchStats::indirect_command_batches);
+
+  nb::class_<BatchDispatchMixedBPW>(m, "BatchDispatchMixedBPW")
+      .def(nb::init<>())
+      .def("reset", &BatchDispatchMixedBPW::reset)
+      .def("add_expert_bits", &BatchDispatchMixedBPW::add_expert_bits,
+           nb::arg("expert_bits"))
+      .def("set_active_experts", &BatchDispatchMixedBPW::set_active_experts,
+           nb::arg("active_expert_ids"))
+      .def("clear_active_experts", &BatchDispatchMixedBPW::clear_active_experts)
+      .def("reserve_command_buffers",
+           &BatchDispatchMixedBPW::reserve_command_buffers,
+           nb::arg("common_batch_sizes"),
+           nb::arg("command_buffers_per_size") = 2)
+      .def("build_batches", &BatchDispatchMixedBPW::build_batches,
+           nb::arg("max_experts_per_batch") = 0)
+      .def(
+          "build_batches_for_routing",
+          [](const BatchDispatchMixedBPW &dispatcher,
+             nb::ndarray<nb::numpy, int32_t, nb::ndim<2>, nb::c_contig>
+                 expert_indices,
+             uint32_t max_experts_per_batch) {
+            return dispatcher.build_batches_for_routing(
+                expert_indices.data(), static_cast<uint32_t>(expert_indices.shape(0)),
+                static_cast<uint32_t>(expert_indices.shape(1)),
+                max_experts_per_batch);
+          },
+          nb::arg("expert_indices"), nb::arg("max_experts_per_batch") = 0)
+      .def("try_acquire_command_buffer_slot",
+           &BatchDispatchMixedBPW::try_acquire_command_buffer_slot,
+           nb::arg("batch_size"))
+      .def("release_command_buffer_slot",
+           &BatchDispatchMixedBPW::release_command_buffer_slot,
+           nb::arg("batch_size"))
+      .def("command_buffer_slot_key",
+           &BatchDispatchMixedBPW::command_buffer_slot_key,
+           nb::arg("batch_size"))
+      .def("stats",
+           [](const BatchDispatchMixedBPW &dispatcher) {
+             return dispatcher.stats_snapshot();
+           });
+
+  m.def(
+      "dispatch_mixed_bpw_moe",
+      [](nb::ndarray<nb::numpy, float, nb::ndim<2>, nb::c_contig> hidden_states,
+         std::vector<nb::ndarray<nb::numpy, nb::c_contig>> expert_weights_packed,
+         const std::vector<int> &expert_bits,
+         std::vector<nb::ndarray<nb::numpy, nb::c_contig>> expert_scales,
+         nb::ndarray<nb::numpy, int32_t, nb::ndim<2>, nb::c_contig>
+             expert_indices,
+         nb::ndarray<nb::numpy, float, nb::ndim<2>, nb::c_contig> expert_probs,
+         MoEConfig config) {
+        const size_t num_experts = expert_bits.size();
+        if (num_experts == 0) {
+          return;
+        }
+        if (hidden_states.shape(0) != expert_indices.shape(0)) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: hidden_states batch dimension must match "
+              "expert_indices");
+        }
+        if (expert_probs.shape(0) != expert_indices.shape(0)) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: expert_probs batch dimension must match "
+              "expert_indices");
+        }
+        if (expert_weights_packed.size() != num_experts ||
+            expert_scales.size() != num_experts) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: expert weight/scale array lengths must "
+              "match expert_bits length");
+        }
+
+        const uint32_t num_tokens = static_cast<uint32_t>(hidden_states.shape(0));
+        const uint32_t hidden_dim = static_cast<uint32_t>(hidden_states.shape(1));
+        const uint32_t top_k = static_cast<uint32_t>(expert_indices.shape(1));
+
+        if (config.hidden_dim == 0) {
+          config.hidden_dim = hidden_dim;
+        } else if (config.hidden_dim != hidden_dim) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: config.hidden_dim must match hidden_states");
+        }
+        if (config.num_experts == 0) {
+          config.num_experts = static_cast<uint32_t>(num_experts);
+        } else if (config.num_experts != static_cast<uint32_t>(num_experts)) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: config.num_experts must match "
+              "expert_bits/expert_weights/expert_scales length");
+        }
+        if (config.top_k == 0) {
+          config.top_k = top_k;
+        } else if (config.top_k != top_k) {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: config.top_k must match "
+              "expert_indices.shape[1]");
+        }
+
+        std::vector<const void *> expert_weight_ptrs;
+        std::vector<size_t> expert_weight_sizes;
+        std::vector<const void *> expert_scale_ptrs;
+        std::vector<size_t> expert_scale_sizes;
+        expert_weight_ptrs.reserve(num_experts);
+        expert_weight_sizes.reserve(num_experts);
+        expert_scale_ptrs.reserve(num_experts);
+        expert_scale_sizes.reserve(num_experts);
+
+        for (size_t i = 0; i < num_experts; ++i) {
+          auto weight_dtype = expert_weights_packed[i].dtype();
+          if (weight_dtype.code != static_cast<uint8_t>(nb::dlpack::dtype_code::UInt) ||
+              weight_dtype.bits != 8) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: expert_weights_packed entries must be uint8 arrays");
+          }
+
+          auto scale_dtype = expert_scales[i].dtype();
+          if (scale_dtype.code != static_cast<uint8_t>(nb::dlpack::dtype_code::Float) ||
+              scale_dtype.bits != 16) {
+            throw std::invalid_argument(
+                "dispatch_mixed_bpw_moe: expert_scales entries must be float16 arrays");
+          }
+          expert_weight_ptrs.push_back(expert_weights_packed[i].data());
+          expert_weight_sizes.push_back(expert_weights_packed[i].nbytes());
+          expert_scale_ptrs.push_back(expert_scales[i].data());
+          expert_scale_sizes.push_back(expert_scales[i].nbytes());
+        }
+
+        const float *expert_probs_ptr = nullptr;
+        std::vector<float> gathered_topk_probs;
+        const int64_t probs_width = expert_probs.shape(1);
+        if (probs_width == expert_indices.shape(1)) {
+          expert_probs_ptr = expert_probs.data();
+        } else if (probs_width == static_cast<int64_t>(num_experts)) {
+          gathered_topk_probs.resize(
+              static_cast<size_t>(num_tokens) * static_cast<size_t>(top_k));
+          const float *all_probs = expert_probs.data();
+          const int32_t *idx_ptr = expert_indices.data();
+          for (uint32_t token = 0; token < num_tokens; ++token) {
+            const size_t token_base = static_cast<size_t>(token) * static_cast<size_t>(top_k);
+            const size_t probs_base = static_cast<size_t>(token) * static_cast<size_t>(num_experts);
+            for (uint32_t k = 0; k < top_k; ++k) {
+              const int32_t expert_id = idx_ptr[token_base + k];
+              if (expert_id < 0 || static_cast<size_t>(expert_id) >= num_experts) {
+                throw std::invalid_argument(
+                    "dispatch_mixed_bpw_moe: expert_indices contains out-of-range "
+                    "expert id");
+              }
+              gathered_topk_probs[token_base + k] =
+                  all_probs[probs_base + static_cast<size_t>(expert_id)];
+            }
+          }
+          expert_probs_ptr = gathered_topk_probs.data();
+        } else {
+          throw std::invalid_argument(
+              "dispatch_mixed_bpw_moe: expert_probs shape must be [tokens, top_k] "
+              "or [tokens, num_experts]");
+        }
+
+        {
+          nb::gil_scoped_release release;
+          dispatch_mixed_bpw_moe(
+              hidden_states.data(),
+              expert_weight_ptrs,
+              expert_weight_sizes,
+              expert_bits,
+              expert_scale_ptrs,
+              expert_scale_sizes,
+              expert_indices.data(),
+              expert_probs_ptr,
+              num_tokens,
+              top_k,
+              config);
+        }
+      },
+      nb::arg("hidden_states"), nb::arg("expert_weights_packed"),
+      nb::arg("expert_bits"), nb::arg("expert_scales"),
+      nb::arg("expert_indices"), nb::arg("expert_probs"), nb::arg("config"));
+}
+
+// =============================================================================
 // Module Definition
 // =============================================================================
 
@@ -701,8 +1044,10 @@ NB_MODULE(_cpp_ext, m) {
   bind_buffer_pool(m);
   bind_encoder_cache(m);
   bind_moe_manager(m);
+  bind_router_dispatcher(m);
   bind_metal_device(m);
   bind_library_manager(m);
+  bind_mixed_bpw_dispatch(m);
 
   // Bind _cpp_ext compatibility layer
   nb::class_<ManagedBuffer>(m, "ManagedBuffer")
@@ -731,7 +1076,7 @@ NB_MODULE(_cpp_ext, m) {
         id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
 
         id<MTLComputePipelineState> pipeline =
-            (id<MTLComputePipelineState>)pipeline_capsule.data();
+            (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
         [encoder setComputePipelineState:pipeline];
 
         for (size_t i = 0; i < buffers.size(); ++i) {

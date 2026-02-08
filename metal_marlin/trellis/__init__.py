@@ -32,6 +32,30 @@ from .dispatch import (
     dispatch_trellis_dequant_packed,
 )
 
+# Mixed bit-width MoE dispatch
+try:
+    from .mixed_bpw_dispatch import (
+        MixedBPWMoEDispatcher,
+        MoEConfig,
+        dispatch_mixed_bpw_moe,
+        dispatch_mixed_bpw_moe_with_cpp_fallback,
+        get_mixed_bpw_stats,
+        reset_mixed_bpw_stats,
+    )
+except ImportError:
+    pass
+
+# Auto-tuning for mixed bit-width kernels
+try:
+    from .autotune_mixed_bpw import (
+        AutotuneConfig,
+        BenchmarkResult,
+        KernelConfig,
+        MixedBPWAutoTuner,
+    )
+except ImportError:
+    pass
+
 # Generation
 from .generate import GenerationConfig, TrellisGenerator
 
@@ -113,6 +137,18 @@ __all__ = [
     "dequantize_trellis_weight",
     "dispatch_gemm_trellis_auto",
     "dispatch_gemm_trellis_decode_auto",
+    # Mixed bit-width MoE
+    "MixedBPWMoEDispatcher",
+    "MoEConfig",
+    "dispatch_mixed_bpw_moe",
+    "dispatch_mixed_bpw_moe_with_cpp_fallback",
+    "get_mixed_bpw_stats",
+    "reset_mixed_bpw_stats",
+    # Auto-tuning
+    "MixedBPWAutoTuner",
+    "KernelConfig",
+    "BenchmarkResult",
+    "AutotuneConfig",
     # Packing
     "pack_indices",
     "unpack_indices",

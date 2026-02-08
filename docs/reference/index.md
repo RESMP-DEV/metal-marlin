@@ -11,6 +11,7 @@ Technical reference documentation for Metal Marlin APIs and integrations.
 ## Model Support
 
 - [**Supported Models**](supported_models.md) — Compatibility matrix and model-specific notes
+- [**Compatibility Matrix**](compatibility.md) — Hardware/software support across Apple Silicon
 
 ## Development Reference
 
@@ -19,5 +20,5 @@ Technical reference documentation for Metal Marlin APIs and integrations.
 ## Model Architectures
 
 - [**Vision Preprocessing**](../concepts/vision_1024_implementation.md) — High-resolution image processing
-- [**MLA (Multi-head Latent Attention)**](architectures/mla.md) — MLA attention support
-- [**Byte-level Models**](architectures/byte_models.md) — Byte-level tokenization models
+- [**MLA (Multi-head Latent Attention)**](../architectures/mla.md) — MLA attention support
+- [**Byte-level Models**](../architectures/byte_models.md) — Byte-level tokenization models

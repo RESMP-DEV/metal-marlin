@@ -1,11 +1,14 @@
+from pathlib import Path
+
 import pytest
 import torch
-from pathlib import Path
+
+from metal_marlin.trellis.lm import TrellisForCausalLM
 from tests.helpers.synthetic_trellis_fixture import (
     create_synthetic_trellis_fixture,
     get_checked_in_synthetic_trellis_fixture_path,
 )
-from metal_marlin.trellis.lm import TrellisForCausalLM
+
 
 def test_create_synthetic_trellis_fixture(tmp_path: Path):
     """

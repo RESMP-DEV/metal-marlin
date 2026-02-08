@@ -167,7 +167,7 @@ lib = get_precompiled_library()  # ~0.01ms
 | JIT (first call) | 50-100 ms |
 | JIT (cached) | 0.1 ms |
 
-See [docs/metallib_architecture.md](docs/metallib_architecture.md) for details.
+See [docs/internals/metallib_architecture.md](docs/internals/metallib_architecture.md) for details.
 
 ## Serving
 
@@ -556,7 +556,7 @@ Expected VRAM/RAM for different models (Apple Silicon):
 
 ## Development
 
-See [docs/development_setup.md](docs/development_setup.md) for complete environment management guidelines.
+See [docs/guides/development_setup.md](docs/guides/development_setup.md) for complete environment management guidelines.
 
 **Quick sanity check:**
 ```bash

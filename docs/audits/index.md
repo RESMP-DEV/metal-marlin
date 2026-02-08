@@ -15,7 +15,11 @@ during development and their resolutions.
 
 ## Performance & Benchmarks
 
-- [**Implementation Summary**](../implementation_summary.md) — Overall project status summary
+- [**Speculative Decoding Implementation Summary**](speculative_decoding_implementation_summary.md) — Draft model generation loop implementation details
+- [**Batch Scheduler Implementation**](batch_scheduler_implementation.md) — Dynamic request scheduling behavior and usage
+- [**MLA Projection Refactor Analysis**](mla_proj_refactor.md) — MLA kernel refactor flow and barrier notes
+- [**Missing Reductions Analysis**](missing_reductions_analysis.md) — FP4 dequant reduction path analysis
+- [**MPS Indexing Issue**](mps_indexing_issue.md) — Advanced indexing bottleneck investigation
 - [**Parakeet Benchmarks**](parakeet_benchmarks.md) — ASR performance benchmarks
 - [**Parakeet Layer Analysis**](parakeet_layers.md) — Layer-wise ASR breakdown
 
@@ -29,3 +33,8 @@ during development and their resolutions.
 - [**Metal Array Parameter Bugs**](metal_array_parameter_bugs.md) — Array parameter issues
 - [**Metal Half Precision Bug**](metal_half_precision_bug.md) — Half precision edge cases
 - [**Resolved Bugs**](resolved_bugs.md) — Previously resolved issues
+
+## Maintenance Summaries
+
+- [**Code Cleanup Summary**](code_cleanup_summary.md) — Module/script cleanup and consolidation summary
+- [**Final Cleanup Summary**](final_cleanup_summary.md) — Final project cleanup pass notes

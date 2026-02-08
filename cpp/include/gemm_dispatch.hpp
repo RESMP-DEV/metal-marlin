@@ -5,7 +5,10 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -395,5 +398,164 @@ class DimensionError : public GEMMDispatchError {
 public:
     DimensionError(const std::string& msg) : GEMMDispatchError(msg) {}
 };
+
+// -----------------------------------------------------------------------------
+// Mixed-BPW MoE batch dispatch
+// -----------------------------------------------------------------------------
+
+/**
+ * @brief Runtime configuration for mixed bit-width MoE dispatch.
+ */
+struct MoEConfig {
+    uint32_t hidden_dim = 0;
+    uint32_t intermediate_dim = 0;
+    uint32_t num_experts = 0;
+    uint32_t top_k = 2;
+    uint32_t max_experts_per_batch = 64;
+    uint32_t command_buffers_per_batch_size = 2;
+    uint32_t max_inflight_submissions = 2;
+    uint32_t threadgroup_size_x = kThreadsPerTG;
+    std::vector<uint32_t> common_batch_sizes = {32, 64, 128, 256};
+    bool use_indirect_command_buffers = true;
+    bool overlap_cpu_encoding = true;
+    bool wait_for_completion = true;
+    std::string kernel_name = "moe_trellis_swiglu_grouped";
+    std::string metallib_path;
+};
+
+/**
+ * @brief Single grouped mixed-BPW dispatch batch.
+ */
+struct MixedBPWBatchPlan {
+    int bit_width = 0;
+    std::vector<uint32_t> expert_ids;
+    std::vector<uint32_t> expert_token_counts;
+    uint32_t token_count = 0;
+};
+
+/**
+ * @brief Dispatcher statistics for observability.
+ */
+struct MixedBPWDispatchStats {
+    uint64_t queued_experts = 0;
+    uint64_t routed_experts = 0;
+    uint64_t grouped_batches = 0;
+    uint64_t command_buffer_submissions = 0;
+    uint64_t indirect_command_batches = 0;
+};
+
+/**
+ * @brief Group experts by bit-width and coordinate batch submission.
+ *
+ * This class is a CPU-side scheduler that:
+ * 1. Accepts per-expert bit-width arrays.
+ * 2. Builds grouped expert batches by bit-width.
+ * 3. Tracks pre-allocated command-buffer slots for common batch sizes.
+ */
+class BatchDispatchMixedBPW {
+public:
+    using BatchList = std::vector<MixedBPWBatchPlan>;
+
+    BatchDispatchMixedBPW() = default;
+    ~BatchDispatchMixedBPW() = default;
+
+    void reset();
+    void add_expert_bits(const std::vector<int>& expert_bits);
+    void set_active_experts(const std::vector<uint32_t>& active_expert_ids);
+    void clear_active_experts();
+
+    void reserve_command_buffers(
+        const std::vector<uint32_t>& common_batch_sizes,
+        uint32_t command_buffers_per_size = 2
+    );
+
+    [[nodiscard]] BatchList build_batches(
+        uint32_t max_experts_per_batch = 0
+    ) const;
+    [[nodiscard]] BatchList build_batches_for_routing(
+        const int32_t* expert_indices,
+        uint32_t num_tokens,
+        uint32_t top_k,
+        uint32_t max_experts_per_batch = 0
+    ) const;
+
+    [[nodiscard]] bool try_acquire_command_buffer_slot(uint32_t batch_size);
+    void release_command_buffer_slot(uint32_t batch_size);
+    [[nodiscard]] uint32_t command_buffer_slot_key(uint32_t batch_size) const;
+
+    void note_submission(bool used_indirect_command_buffer);
+
+    [[nodiscard]] const MixedBPWDispatchStats& stats() const noexcept {
+        return stats_;
+    }
+    [[nodiscard]] MixedBPWDispatchStats stats_snapshot() const;
+
+private:
+    [[nodiscard]] uint32_t resolve_slot_key(uint32_t batch_size) const;
+
+    std::vector<int> expert_bits_;
+    std::vector<uint32_t> active_expert_ids_;
+    std::map<uint32_t, uint32_t> configured_command_buffer_slots_;
+    std::map<uint32_t, uint32_t> available_command_buffer_slots_;
+    bool use_active_expert_filter_ = false;
+    mutable MixedBPWDispatchStats stats_;
+    mutable std::mutex mutex_;
+};
+
+using MixedBPWEncodeCallback = std::function<void(const MixedBPWBatchPlan&)>;
+using MixedBPWSubmitCallback = std::function<void(const MixedBPWBatchPlan&)>;
+
+/**
+ * @brief Execute grouped mixed-BPW batches with optional CPU encode/GPU submit overlap.
+ *
+ * The encode callback runs on the caller thread. The submit callback can be
+ * pipelined asynchronously so CPU encoding of batch N+1 overlaps GPU execution
+ * of batch N.
+ *
+ * If routing inputs are provided (`expert_indices`, `num_tokens`, `top_k`),
+ * batches are built from active routed experts and per-expert token counts.
+ * Passing null/zero routing inputs falls back to static expert grouping.
+ */
+void execute_mixed_bpw_pipeline(
+    BatchDispatchMixedBPW& dispatcher,
+    const MoEConfig& config,
+    const int32_t* expert_indices,
+    uint32_t num_tokens,
+    uint32_t top_k,
+    MixedBPWEncodeCallback encode_callback,
+    MixedBPWSubmitCallback submit_callback
+);
+
+/**
+ * @brief High-level mixed bit-width MoE dispatch.
+ * 
+ * This function orchestrates the entire MoE dispatch process, including
+ * expert grouping, command buffer management, and pipeline execution.
+ * 
+ * @param hidden_states Input/output activations [num_tokens, hidden_dim].
+ * @param expert_weights_packed Vector of packed weight buffers.
+ * @param expert_weight_sizes Sizes of each weight buffer in bytes.
+ * @param expert_bits Bit-width for each expert.
+ * @param expert_scales Vector of scale buffers (fp16).
+ * @param expert_scale_sizes Sizes of each scale buffer in bytes.
+ * @param expert_indices Expert indices per token [num_tokens, top_k].
+ * @param expert_probs Routing probabilities per token [num_tokens, top_k].
+ * @param num_tokens Number of tokens in batch.
+ * @param top_k Number of experts per token.
+ * @param config MoE configuration and optimizations.
+ */
+void dispatch_mixed_bpw_moe(
+    float* hidden_states,
+    const std::vector<const void*>& expert_weights_packed,
+    const std::vector<size_t>& expert_weight_sizes,
+    const std::vector<int>& expert_bits,
+    const std::vector<const void*>& expert_scales,
+    const std::vector<size_t>& expert_scale_sizes,
+    const int32_t* expert_indices,
+    const float* expert_probs,
+    uint32_t num_tokens,
+    uint32_t top_k,
+    const MoEConfig& config
+);
 
 } // namespace metal_marlin

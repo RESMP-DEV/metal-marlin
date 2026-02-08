@@ -250,10 +250,12 @@ class GPTQMetal:
         self._uint32_constant_buffer_cache[value] = buffer
         return buffer
 
-    def _should_force_torch_matmul(self) -> bool:
+    @staticmethod
+    def _should_force_torch_matmul() -> bool:
         return os.environ.get(_FORCE_TORCH_MATMUL_ENV, "0").strip() == "1"
 
-    def _torch_hessian_matmul(self, X: torch.Tensor, normalize: bool) -> torch.Tensor:
+    @staticmethod
+    def _torch_hessian_matmul(X: torch.Tensor, normalize: bool) -> torch.Tensor:
         """Safe fallback path that keeps output on MPS with expected contract."""
         # Use float32 for accumulation to ensure numerical stability and MPS compatibility
         X_fp32 = X.to(device="mps", dtype=torch.float32)
@@ -278,7 +280,7 @@ class GPTQMetal:
         """
         try:
             # Force torch matmul via environment variable override
-            if self._should_force_torch_matmul():
+            if GPTQMetal._should_force_torch_matmul():
                 logger.debug("GPTQMetal: torch fallback forced via env var")
                 return False
 
@@ -1009,9 +1011,9 @@ class GPTQMetal:
         n_samples, in_features = X.shape
 
         # 1. Environment variable force fallback (highest priority)
-        if self._should_force_torch_matmul():
+        if GPTQMetal._should_force_torch_matmul():
             logger.debug("GPTQMetal: Force fallback via METAL_MARLIN_GPTQ_FORCE_TORCH_MATMUL=1")
-            H_forced = self._torch_hessian_matmul(X, normalize=normalize)
+            H_forced = GPTQMetal._torch_hessian_matmul(X, normalize=normalize)
             self._validate_hessian_output_contract(H_forced, in_features=in_features)
             return H_forced
 
@@ -1025,7 +1027,7 @@ class GPTQMetal:
             logger.debug("GPTQMetal: Metal dispatch failed, proceeding with torch fallback.")
 
         # 3. Fallback path for ineligibility or Metal kernel failure
-        H_fallback = self._torch_hessian_matmul(X, normalize=normalize)
+        H_fallback = GPTQMetal._torch_hessian_matmul(X, normalize=normalize)
         self._validate_hessian_output_contract(H_fallback, in_features=in_features)
         return H_fallback
 

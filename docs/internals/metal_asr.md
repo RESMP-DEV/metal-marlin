@@ -97,7 +97,7 @@ Input Audio → Mel Spectrogram → Conformer Encoder (Metal) → Decoder → Te
 
 ### Throughput Comparison
 
-![Throughput Comparison](charts/parakeet_throughput_comparison.png)
+![Throughput Comparison](../charts/parakeet_throughput_comparison.png)
 
 **Test Configuration:**
 - Device: Apple M2 Pro (12-core CPU, 19-core GPU, 16GB unified memory)
@@ -116,7 +116,7 @@ Input Audio → Mel Spectrogram → Conformer Encoder (Metal) → Decoder → Te
 
 ### Memory Usage Analysis
 
-![Memory Usage](charts/parakeet_memory_usage.png)
+![Memory Usage](../charts/parakeet_memory_usage.png)
 
 | Model | Format | Peak Memory (GB) | Reduction vs FP16 |
 |-------|--------|------------------|-------------------|
