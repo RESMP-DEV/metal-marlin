@@ -1,5 +1,9 @@
 # Metal Marlin
 
+<p align="center">
+  <img src="assets/metalmarlinfish_cropped.png" alt="Metal Marlin" width="700">
+</p>
+
 Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 
 [![Tests](https://img.shields.io/badge/tests-5427%20collected-brightgreen)]()
