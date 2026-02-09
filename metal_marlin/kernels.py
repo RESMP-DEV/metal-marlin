@@ -27,6 +27,7 @@ Note:
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
@@ -104,6 +105,33 @@ if not HAS_METAL or not HAS_MPS:
 
     # Hadamard transform
     hadamard_transform = _metal_required
+
+    # MMFP4 kernels
+    mmfp4_gemm = _metal_required
+    dequantize_mmfp4 = _metal_required
+
+    class MetalKernels:
+        """Stub MMFP4 kernel wrapper when Metal/MPS is unavailable."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._available = False
+
+        def dequantize_mmfp4(
+            self,
+            packed: torch.Tensor,
+            scales: torch.Tensor,
+            group_size: int = 128,
+        ) -> torch.Tensor:
+            return _metal_required(packed, scales, group_size)
+
+        def mmfp4_gemm(
+            self,
+            A: torch.Tensor,
+            B_packed: torch.Tensor,
+            B_scales: torch.Tensor,
+            group_size: int = 128,
+        ) -> torch.Tensor:
+            return _metal_required(A, B_packed, B_scales, group_size)
 
 # Constants and Metal shader strings don't require Metal - defined unconditionally
 # ---------------------------------------------------------------------------
@@ -1137,7 +1165,10 @@ if HAS_METAL and HAS_MPS:
         return private_buf
 
     def _params_buffer(lib: MetalKernelLibrary, device: Any, params: np.ndarray) -> Any:
-        return _private_buffer_from_bytes(lib, device, params.tobytes())
+        data = params.tobytes()
+        return device.newBufferWithBytes_length_options_(
+            data, len(data), Metal.MTLResourceStorageModeShared
+        )
 
     def pack_fp4_weights(
         weight: torch.Tensor,
@@ -3070,3 +3101,170 @@ if HAS_METAL and HAS_MPS:
         )
 
         return out.reshape(*orig_shape[:-1], hidden_dim)
+
+    class MetalKernels:
+        """Metal kernel interface for MMFP4 operations."""
+
+        def __init__(self) -> None:
+            require_mps()
+            self.lib = get_default_library()
+            self._load_kernels()
+
+        def _load_kernels(self) -> None:
+            shader_dir = Path(__file__).parent / "shaders"
+
+            gemm_shader_path = shader_dir / "mmfp4_gemm.metal"
+            if not gemm_shader_path.exists():
+                raise FileNotFoundError(f"Shader file not found: {gemm_shader_path}")
+            _ensure_kernel_compiled(
+                self.lib,
+                "mmfp4_gemm",
+                gemm_shader_path.read_text(encoding="utf-8"),
+            )
+
+            dequant_shader_path = shader_dir / "mmfp4_dequant.metal"
+            if not dequant_shader_path.exists():
+                raise FileNotFoundError(f"Shader file not found: {dequant_shader_path}")
+            _ensure_kernel_compiled(
+                self.lib,
+                "dequantize_mmfp4",
+                dequant_shader_path.read_text(encoding="utf-8"),
+            )
+
+        def dequantize_mmfp4(
+            self,
+            packed: torch.Tensor,  # uint32 [K, N//8]
+            scales: torch.Tensor,  # fp16 [K//group_size, N]
+            group_size: int = 128,
+        ) -> torch.Tensor:
+            """Dequantize MMFP4 packed weights to FP16 [K, N]."""
+            if packed.dim() != 2:
+                raise ValueError("packed must be 2D [K, N//8]")
+            if scales.dim() != 2:
+                raise ValueError("scales must be 2D [K//group_size, N]")
+            if group_size <= 0:
+                raise ValueError(f"group_size must be > 0, got {group_size}")
+
+            packed_u32 = packed.to(dtype=torch.uint32, device="mps").contiguous()
+            scales_f16 = scales.to(dtype=torch.float16, device="mps").contiguous()
+
+            K, N_packed = packed_u32.shape
+            N = N_packed * 8
+            expected_scale_rows = (K + group_size - 1) // group_size
+
+            if scales_f16.shape[0] != expected_scale_rows:
+                raise ValueError(
+                    f"scales shape[0] mismatch: expected {expected_scale_rows}, got {scales_f16.shape[0]}"
+                )
+            if scales_f16.shape[1] != N:
+                raise ValueError(f"scales shape[1] mismatch: expected {N}, got {scales_f16.shape[1]}")
+
+            output = torch.empty((K, N), dtype=torch.float16, device="mps")
+            device = self.lib.device
+
+            packed_buf = _private_buffer_from_tensor(packed_u32, self.lib, device, cache=True)
+            scales_buf = _private_buffer_from_tensor(scales_f16, self.lib, device, cache=True)
+            output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+
+            K_buf = _params_buffer(self.lib, device, np.array([K], dtype=np.uint32))
+            N_buf = _params_buffer(self.lib, device, np.array([N], dtype=np.uint32))
+            gs_buf = _params_buffer(self.lib, device, np.array([group_size], dtype=np.uint32))
+
+            tile_n = 32
+            tile_k = 8
+            dispatch_kernel(
+                self.lib,
+                function_name="dequantize_mmfp4",
+                grid=((N + tile_n - 1) // tile_n, (K + tile_k - 1) // tile_k, 1),
+                threadgroup=(tile_n, tile_k, 1),
+                buffers=[packed_buf, scales_buf, output_buf, K_buf, N_buf, gs_buf],
+                wait=False,  # Async dispatch
+            )
+            return output
+
+        def mmfp4_gemm(
+            self,
+            A: torch.Tensor,  # fp16 [M, K]
+            B_packed: torch.Tensor,  # uint32 [K/8, N]
+            B_scales: torch.Tensor,  # fp16 [K//group_size, N]
+            group_size: int = 128,
+        ) -> torch.Tensor:
+            """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
+            if A.dim() != 2:
+                raise ValueError("A must be 2D [M, K]")
+            if B_packed.dim() != 2:
+                raise ValueError("B_packed must be 2D [K/8, N]")
+            if B_scales.dim() != 2:
+                raise ValueError("B_scales must be 2D [K//group_size, N]")
+            if group_size <= 0:
+                raise ValueError(f"group_size must be > 0, got {group_size}")
+
+            A_f16 = A.to(dtype=torch.float16, device="mps").contiguous()
+            B_u32 = B_packed.to(dtype=torch.uint32, device="mps").contiguous()
+            scales_f16 = B_scales.to(dtype=torch.float16, device="mps").contiguous()
+
+            M, K = A_f16.shape
+            # Update: B_packed is [K/8, N] (packing along K)
+            K_packed, N = B_u32.shape
+            K_b = K_packed * 8
+
+            if K != K_b:
+                raise ValueError(f"K mismatch: A has {K}, B_packed implies {K_b} (packed dim0 * 8)")
+
+            expected_scale_rows = (K + group_size - 1) // group_size
+            if scales_f16.shape[0] != expected_scale_rows:
+                raise ValueError(
+                    f"B_scales shape[0] mismatch: expected {expected_scale_rows}, got {scales_f16.shape[0]}"
+                )
+            if scales_f16.shape[1] != N:
+                raise ValueError(f"B_scales shape[1] mismatch: expected {N}, got {scales_f16.shape[1]}")
+
+            output = torch.empty((M, N), dtype=torch.float16, device="mps")
+            device = self.lib.device
+
+            A_buf = _private_buffer_from_tensor(A_f16, self.lib, device, cache=False)
+            B_buf = _private_buffer_from_tensor(B_u32, self.lib, device, cache=True)
+            S_buf = _private_buffer_from_tensor(scales_f16, self.lib, device, cache=True)
+            C_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+
+            M_buf = _params_buffer(self.lib, device, np.array([M], dtype=np.uint32))
+            K_buf = _params_buffer(self.lib, device, np.array([K], dtype=np.uint32))
+            N_buf = _params_buffer(self.lib, device, np.array([N], dtype=np.uint32))
+            gs_buf = _params_buffer(self.lib, device, np.array([group_size], dtype=np.uint32))
+
+            tile_m = 64
+            tile_n = 64
+            dispatch_kernel(
+                self.lib,
+                function_name="mmfp4_gemm",
+                grid=((N + tile_n - 1) // tile_n, (M + tile_m - 1) // tile_m, 1),
+                threadgroup=(THREADS_PER_TG, 1, 1),  # 128 threads = 4 simdgroups
+                buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, K_buf, N_buf, gs_buf],
+                wait=False,  # Async dispatch
+            )
+            return output
+
+    _mmfp4_kernels: MetalKernels | None = None
+
+    def _get_mmfp4_kernels() -> MetalKernels:
+        global _mmfp4_kernels
+        if _mmfp4_kernels is None:
+            _mmfp4_kernels = MetalKernels()
+        return _mmfp4_kernels
+
+    def dequantize_mmfp4(
+        packed: torch.Tensor,
+        scales: torch.Tensor,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Dequantize MMFP4 packed weights to FP16 [K, N]."""
+        return _get_mmfp4_kernels().dequantize_mmfp4(packed, scales, group_size)
+
+    def mmfp4_gemm(
+        A: torch.Tensor,
+        B_packed: torch.Tensor,
+        B_scales: torch.Tensor,
+        group_size: int = 128,
+    ) -> torch.Tensor:
+        """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
+        return _get_mmfp4_kernels().mmfp4_gemm(A, B_packed, B_scales, group_size)

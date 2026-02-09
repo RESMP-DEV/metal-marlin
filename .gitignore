@@ -2,6 +2,12 @@
 models/
 *.gguf
 
+# Developer tests (internal debugging scripts, not for release)
+developer_tests/
+
+# Stray development scripts in repo root
+verify_*.py
+
 # Python
 __pycache__/
 *.py[cod]
