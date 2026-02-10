@@ -10,7 +10,7 @@ Emits a JSON summary with:
 Usage:
     cd contrib/metal_marlin
     uv run python benchmarks/benchmark_mixed_bpw_decode.py \
-        --model-path models/GLM-4.7-Flash-Trellis-3bpw
+        --model-path models/GLM-4.7-Flash-Marlin-MMFP4
 
 Model/config can be provided via CLI or env vars:
     MIXED_BPW_MODEL_PATH
@@ -396,7 +396,7 @@ def main() -> int:
         if loaded is not None:
             bench_cfg = loaded
 
-    default_model = str(_ROOT / "models" / "GLM-4.7-Flash-Trellis-3bpw")
+    default_model = str(_ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4")
     model_path = _pick_str(
         args.model_path,
         ["MIXED_BPW_MODEL_PATH", "METAL_MARLIN_MODEL_PATH", "MODEL_PATH"],

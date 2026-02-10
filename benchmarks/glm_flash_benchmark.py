@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from metal_marlin.trellis.lm import TrellisForCausalLM
+from metal_marlin.inference.pipeline_v2 import TransformersMarlinPipeline
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -345,7 +345,7 @@ class LayerTimingHooks:
                 "attention_ms": 0.0, "mlp_ms": 0.0, "total_ms": 0.0}
 
 
-def benchmark_model_load(model_path: str) -> tuple[TrellisForCausalLM, float, MemoryMetrics]:
+def benchmark_model_load(model_path: str) -> tuple[TransformersMarlinPipeline, float, MemoryMetrics]:
     """Benchmark model loading time and memory."""
     gc.collect()
     torch.mps.empty_cache()
@@ -354,11 +354,10 @@ def benchmark_model_load(model_path: str) -> tuple[TrellisForCausalLM, float, Me
 
     print(f"Loading model from {model_path}...")
     start = time.perf_counter()
-    model = TrellisForCausalLM.from_pretrained(model_path, device="mps")
+    pipeline = TransformersMarlinPipeline.from_pretrained(
+        model_path, device="mps")
     _mps_sync()
     load_time = time.perf_counter() - start
-
-    model.eval()
 
     _mps_sync()
     allocated = _get_memory_gb()
@@ -366,8 +365,9 @@ def benchmark_model_load(model_path: str) -> tuple[TrellisForCausalLM, float, Me
 
     # Run a dummy forward to trigger any lazy initialization
     with torch.no_grad():
-        dummy = torch.randint(0, 1000, (1, 1), device="mps")
-        _ = model(dummy)
+        dummy = pipeline.tokenizer.encode(
+            "Hello", return_tensors="pt").to("mps")
+        _ = pipeline.model(dummy)
     _mps_sync()
 
     peak = _get_memory_gb()
@@ -375,17 +375,18 @@ def benchmark_model_load(model_path: str) -> tuple[TrellisForCausalLM, float, Me
     memory = MemoryMetrics(allocated_gb=allocated,
                            peak_gb=peak, model_size_gb=model_size)
 
-    return model, load_time, memory
+    return pipeline, load_time, memory
 
 
 def benchmark_prefill(
-    model: TrellisForCausalLM,
+    pipeline: TransformersMarlinPipeline,
     seq_lengths: list[int],
     warmup: int = 2,
     iterations: int = 5,
 ) -> list[PrefillMetrics]:
     """Benchmark prefill throughput for various sequence lengths."""
     results = []
+    model = pipeline.model
 
     for seq_len in seq_lengths:
         print(f"  Benchmarking prefill ({seq_len} tokens)...")
@@ -425,13 +426,14 @@ def benchmark_prefill(
 
 
 def benchmark_decode(
-    model: TrellisForCausalLM,
+    pipeline: TransformersMarlinPipeline,
     num_tokens: int = 100,
     warmup: int = 5,
     num_runs: int = 3,
 ) -> DecodeMetrics:
     """Benchmark decode throughput (single token generation)."""
     print(f"  Benchmarking decode ({num_tokens} tokens x {num_runs} runs)...")
+    model = pipeline.model
 
     # Use single-token input to simulate decode phase
     input_ids = torch.randint(0, 1000, (1, 1), device="mps")
@@ -485,13 +487,14 @@ def benchmark_decode(
 
 
 def benchmark_layer_breakdown(
-    model: TrellisForCausalLM,
+    pipeline: TransformersMarlinPipeline,
     seq_len: int = 128,
     iterations: int = 3,
 ) -> LayerBreakdown | None:
     """Benchmark per-layer timing breakdown."""
     print(
         f"  Profiling layer breakdown ({seq_len} tokens, {iterations} iterations)...")
+    model = pipeline.model
 
     input_ids = torch.randint(0, 1000, (1, seq_len), device="mps")
 
@@ -692,7 +695,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         type=str,
-        default=str(_ROOT / "models" / "GLM-4.7-Flash-Trellis-3bpw"),
+        default=str(_ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4"),
         help="Path to model directory",
     )
     parser.add_argument(
@@ -775,11 +778,12 @@ def main() -> None:
 
     # 1. Model loading
     print("\n[1/5] Model Loading...")
-    model, load_time, memory = benchmark_model_load(args.model)
+    pipeline, load_time, memory = benchmark_model_load(args.model)
     print(
         f"  Loaded in {load_time:.2f}s, memory: {memory.allocated_gb:.2f} GB")
 
     # Get model info
+    model = pipeline.model
     num_layers = 0
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         num_layers = len(model.model.layers)
@@ -788,13 +792,13 @@ def main() -> None:
     # 2. Prefill benchmark
     print("\n[2/5] Prefill Benchmark...")
     prefill_metrics = benchmark_prefill(
-        model, prefill_lengths, warmup=args.warmup, iterations=args.iterations
+        pipeline, prefill_lengths, warmup=args.warmup, iterations=args.iterations
     )
 
     # 3. Decode benchmark
     print("\n[3/5] Decode Benchmark...")
     decode_metrics = benchmark_decode(
-        model,
+        pipeline,
         num_tokens=args.decode_tokens,
         warmup=args.warmup,
         num_runs=args.decode_runs,
@@ -805,7 +809,7 @@ def main() -> None:
     if not args.no_layer_breakdown:
         print("\n[4/5] Layer Breakdown...")
         layer_breakdown = benchmark_layer_breakdown(
-            model,
+            pipeline,
             seq_len=min(256, max(prefill_lengths)),
             iterations=args.iterations,
         )

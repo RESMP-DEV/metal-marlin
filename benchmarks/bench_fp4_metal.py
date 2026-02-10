@@ -31,7 +31,7 @@ if __name__ == "__main__":
         (256, 512),
         (1024, 4096),
         (4096, 4096),
-        (4096, 14336),  # GLM-4 MLP size
+        (4096, 14336),  # LLaMA-3-8B MLP size
     ]
 
     print("FP4 Quantization Benchmark")

@@ -39,7 +39,7 @@ BENCH_ITERS = 50
 
 def load_model() -> TrellisForCausalLM:
     """Load Trellis model for benchmarking."""
-    model_path = Path("models/GLM-4.7-Flash-Trellis-MM")
+    model_path = Path("models/GLM-4.7-Flash-Marlin-MMFP4")
     if not model_path.exists():
         raise RuntimeError(f"Model not found at {model_path}")
     
@@ -275,7 +275,7 @@ def run_benchmark():
     model = load_model()
     moe = get_moe_layer(model)
     
-    print(f"\nModel: GLM-4.7-Flash-Trellis-MM")
+    print(f"\nModel: GLM-4.7-Flash-Marlin-MMFP4")
     print(f"Hidden dim: {moe.hidden_dim}, Intermediate: {moe.intermediate_dim}")
     print(f"Experts: {len(moe.experts)}, Top-K: {TOP_K}")
     print(f"\nBatch sizes: {BATCH_SIZES}")
@@ -336,7 +336,7 @@ def run_benchmark():
     with open(output_file, "w") as f:
         json.dump({
             "device": "M4 Max",
-            "model": "GLM-4.7-Flash-Trellis-MM",
+            "model": "GLM-4.7-Flash-Marlin-MMFP4",
             "warmup_iters": WARMUP_ITERS,
             "bench_iters": BENCH_ITERS,
             "results": results,

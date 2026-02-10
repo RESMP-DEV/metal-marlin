@@ -12,184 +12,184 @@
   },
   "write_benchmarks": {
     "BHSD (per-layer)": {
-      "time_per_write_us": 17.83999992767349,
-      "writes_per_sec": 56053.81188644488
+      "time_per_write_us": 18.33332993555814,
+      "writes_per_sec": 54545.46465453964
     },
     "BSHD (per-layer)": {
-      "time_per_write_us": 18.9425001735799,
-      "writes_per_sec": 52791.341736121634
+      "time_per_write_us": 20.253749971743673,
+      "writes_per_sec": 49373.57286404324
     },
     "LBHSD (stacked)": {
-      "time_per_write_us": 5.206249770708382,
-      "writes_per_sec": 192076.83919166564
+      "time_per_write_us": 5.326249811332673,
+      "writes_per_sec": 187749.3612620831
     },
     "LBSHD (stacked)": {
-      "time_per_write_us": 6.191660067997873,
-      "writes_per_sec": 161507.57454670127
+      "time_per_write_us": 6.336249934975058,
+      "writes_per_sec": 157822.05725190297
     }
   },
   "read_benchmarks": {
     "BHSD (per-layer)_seq128": {
-      "time_per_read_us": 34.89374998025596,
-      "reads_per_sec": 28658.427385014023,
+      "time_per_read_us": 37.6887500169687,
+      "reads_per_sec": 26533.116634267986,
       "bytes_read": 1048576,
-      "bandwidth_gbps": 30.050539153668463
+      "bandwidth_gbps": 27.82198930789419
     },
     "BSHD (per-layer)_seq128": {
-      "time_per_read_us": 44.083330139983445,
-      "reads_per_sec": 22684.31166213106,
+      "time_per_read_us": 49.69375004293397,
+      "reads_per_sec": 20123.25491910006,
       "bytes_read": 1048576,
-      "bandwidth_gbps": 23.786224785430736
+      "bandwidth_gbps": 21.100762150050265
     },
     "LBHSD (stacked)_seq128": {
-      "time_per_read_us": 1.8191701383329928,
-      "reads_per_sec": 549701.1955772075,
+      "time_per_read_us": 2.0004098769277334,
+      "reads_per_sec": 499897.55176365084,
       "bytes_read": 1048576,
-      "bandwidth_gbps": 576.403480853566
+      "bandwidth_gbps": 524.180575238122
     },
     "LBSHD (stacked)_seq128": {
-      "time_per_read_us": 2.9133399948477745,
-      "reads_per_sec": 343248.6430586524,
+      "time_per_read_us": 3.325830039102584,
+      "reads_per_sec": 300676.8199946357,
       "bytes_read": 1048576,
-      "bandwidth_gbps": 359.92228914386953
+      "bandwidth_gbps": 315.28249720269514
     },
     "BHSD (per-layer)_seq512": {
-      "time_per_read_us": 576.8045800505206,
-      "reads_per_sec": 1733.689423742809,
+      "time_per_read_us": 630.3754198597744,
+      "reads_per_sec": 1586.3562703990706,
       "bytes_read": 4194304,
-      "bandwidth_gbps": 7.271620484762159
+      "bandwidth_gbps": 6.6536604503599035
     },
     "BSHD (per-layer)_seq512": {
-      "time_per_read_us": 564.8387499968521,
-      "reads_per_sec": 1770.416778249674,
+      "time_per_read_us": 613.6733401217498,
+      "reads_per_sec": 1629.5314373630845,
       "bytes_read": 4194304,
-      "bandwidth_gbps": 7.425666174679721
+      "bandwidth_gbps": 6.834750225857735
     },
     "LBHSD (stacked)_seq512": {
-      "time_per_read_us": 1.722919987514615,
-      "reads_per_sec": 580410.0058311718,
+      "time_per_read_us": 1.8266699044033885,
+      "reads_per_sec": 547444.2851384315,
       "bytes_read": 4194304,
-      "bandwidth_gbps": 2434.416009097707
+      "bandwidth_gbps": 2296.1477549332635
     },
     "LBSHD (stacked)_seq512": {
-      "time_per_read_us": 2.9491697205230594,
-      "reads_per_sec": 339078.4847142137,
+      "time_per_read_us": 3.352499916218221,
+      "reads_per_sec": 298284.86949763965,
       "bytes_read": 4194304,
-      "bandwidth_gbps": 1422.1982447507653
+      "bandwidth_gbps": 1251.097421273428
     },
     "BHSD (per-layer)_seq1024": {
-      "time_per_read_us": 570.4625000362284,
-      "reads_per_sec": 1752.9636039818442,
+      "time_per_read_us": 659.5991700305603,
+      "reads_per_sec": 1516.0722533257103,
       "bytes_read": 8388608,
-      "bandwidth_gbps": 14.70492451207093
+      "bandwidth_gbps": 12.71773583282608
     },
     "BSHD (per-layer)_seq1024": {
-      "time_per_read_us": 629.623340209946,
-      "reads_per_sec": 1588.2511592828705,
+      "time_per_read_us": 681.4454201958142,
+      "reads_per_sec": 1467.4689569601169,
       "bytes_read": 8388608,
-      "bandwidth_gbps": 13.323216380769562
+      "bandwidth_gbps": 12.310021832107292
     },
     "LBHSD (stacked)_seq1024": {
-      "time_per_read_us": 1.9937497563660145,
-      "reads_per_sec": 501567.4594100961,
+      "time_per_read_us": 2.0254202536307275,
+      "reads_per_sec": 493724.69649566314,
       "bytes_read": 8388608,
-      "bandwidth_gbps": 4207.452802547207
+      "bandwidth_gbps": 4141.662938821092
     },
     "LBSHD (stacked)_seq1024": {
-      "time_per_read_us": 3.084579948335886,
-      "reads_per_sec": 324193.2505395085,
+      "time_per_read_us": 3.3320800866931677,
+      "reads_per_sec": 300112.8346204976,
       "bytes_read": 8388608,
-      "bandwidth_gbps": 2719.530095021725
+      "bandwidth_gbps": 2517.528925400183
     },
     "BHSD (per-layer)_seq2048": {
-      "time_per_read_us": 625.9437499102205,
-      "reads_per_sec": 1597.587642888727,
+      "time_per_read_us": 684.3954199575819,
+      "reads_per_sec": 1461.143617913134,
       "bytes_read": 16777216,
-      "bandwidth_gbps": 26.80307296367504
+      "bandwidth_gbps": 24.513922084750117
     },
     "BSHD (per-layer)_seq2048": {
-      "time_per_read_us": 623.9574999199249,
-      "reads_per_sec": 1602.673259201683,
+      "time_per_read_us": 665.0345801608637,
+      "reads_per_sec": 1503.6812067097508,
       "bytes_read": 16777216,
-      "bandwidth_gbps": 26.888395447050623
+      "bandwidth_gbps": 25.22758440011014
     },
     "LBHSD (stacked)_seq2048": {
-      "time_per_read_us": 2.08500016015023,
-      "reads_per_sec": 479616.2701147933,
+      "time_per_read_us": 1.793340197764337,
+      "reads_per_sec": 557618.6834191568,
       "bytes_read": 16777216,
-      "bandwidth_gbps": 8046.625760830232
+      "bandwidth_gbps": 9355.289097358813
     },
     "LBSHD (stacked)_seq2048": {
-      "time_per_read_us": 3.0704200617037714,
-      "reads_per_sec": 325688.3357663777,
+      "time_per_read_us": 3.080829919781536,
+      "reads_per_sec": 324587.86302325665,
       "bytes_read": 16777216,
-      "bandwidth_gbps": 5464.143557833044
+      "bandwidth_gbps": 5445.68068891959
     },
     "BHSD (per-layer)_seq4096": {
-      "time_per_read_us": 649.8108297819272,
-      "reads_per_sec": 1538.9094089669056,
+      "time_per_read_us": 652.9854101245292,
+      "reads_per_sec": 1531.4277845952065,
       "bytes_read": 33554432,
-      "bandwidth_gbps": 51.63723111734023
+      "bandwidth_gbps": 51.386189461110504
     },
     "BSHD (per-layer)_seq4096": {
-      "time_per_read_us": 609.3441598932259,
-      "reads_per_sec": 1641.1086965619363,
+      "time_per_read_us": 662.153750017751,
+      "reads_per_sec": 1510.2232675918426,
       "bytes_read": 33554432,
-      "bandwidth_gbps": 55.066470163396126
+      "bandwidth_gbps": 50.67468393722829
     },
     "LBHSD (stacked)_seq4096": {
-      "time_per_read_us": 1.6908301040530205,
-      "reads_per_sec": 591425.4765176823,
+      "time_per_read_us": 2.0237499848008156,
+      "reads_per_sec": 494132.18406937923,
       "bytes_read": 33554432,
-      "bandwidth_gbps": 19844.94593488017
+      "bandwidth_gbps": 16580.324769367468
     },
     "LBSHD (stacked)_seq4096": {
-      "time_per_read_us": 2.606670022942126,
-      "reads_per_sec": 383631.2196015162,
+      "time_per_read_us": 2.6012500165961683,
+      "reads_per_sec": 384430.55977700173,
       "bytes_read": 33554432,
-      "bandwidth_gbps": 12872.527671196143
+      "bandwidth_gbps": 12899.34907675934
     }
   },
   "attention_benchmarks": {
     "BHSD (per-layer)_seq512": {
-      "time_per_layer_ms": 0.23404218754876638,
-      "total_time_ms": 1.872337500390131,
-      "layers_per_sec": 4272.7339479837765
+      "time_per_layer_ms": 0.2580997375844163,
+      "total_time_ms": 2.0647979006753303,
+      "layers_per_sec": 3874.4712000062827
     },
     "BSHD (per-layer)_seq512": {
-      "time_per_layer_ms": 0.2459731749695493,
-      "total_time_ms": 1.9677853997563943,
-      "layers_per_sec": 4065.483970452456
+      "time_per_layer_ms": 0.2601356813102029,
+      "total_time_ms": 2.0810854504816234,
+      "layers_per_sec": 3844.1477730520714
     },
     "LBHSD (stacked)_seq512": {
-      "time_per_layer_ms": 0.17492265615146607,
-      "total_time_ms": 1.3993812492117286,
-      "layers_per_sec": 5716.812344388922
+      "time_per_layer_ms": 0.16514192502654623,
+      "total_time_ms": 1.3211354002123699,
+      "layers_per_sec": 6055.397500297105
     },
     "LBSHD (stacked)_seq512": {
-      "time_per_layer_ms": 0.16958203123067506,
-      "total_time_ms": 1.3566562498454005,
-      "layers_per_sec": 5896.851174283574
+      "time_per_layer_ms": 0.17492005626991158,
+      "total_time_ms": 1.3993604501592927,
+      "layers_per_sec": 5716.897314833602
     },
     "BHSD (per-layer)_seq2048": {
-      "time_per_layer_ms": 0.3247315124099259,
-      "total_time_ms": 2.5978520992794074,
-      "layers_per_sec": 3079.467072901895
+      "time_per_layer_ms": 0.3304177062091185,
+      "total_time_ms": 2.643341649672948,
+      "layers_per_sec": 3026.4721932519824
     },
     "BSHD (per-layer)_seq2048": {
-      "time_per_layer_ms": 0.3165825499308994,
-      "total_time_ms": 2.5326603994471952,
-      "layers_per_sec": 3158.7337969773457
+      "time_per_layer_ms": 0.7561791626358172,
+      "total_time_ms": 6.0494333010865375,
+      "layers_per_sec": 1322.437921344322
     },
     "LBHSD (stacked)_seq2048": {
-      "time_per_layer_ms": 0.23918828137539094,
-      "total_time_ms": 1.9135062510031275,
-      "layers_per_sec": 4180.806828201433
+      "time_per_layer_ms": 0.25186666262015933,
+      "total_time_ms": 2.0149333009612747,
+      "layers_per_sec": 3970.3547488065233
     },
     "LBSHD (stacked)_seq2048": {
-      "time_per_layer_ms": 0.23660521237616194,
-      "total_time_ms": 1.8928416990092956,
-      "layers_per_sec": 4226.449578000718
+      "time_per_layer_ms": 0.252939318670542,
+      "total_time_ms": 2.023514549364336,
+      "layers_per_sec": 3953.5174098516413
     }
   }
 }

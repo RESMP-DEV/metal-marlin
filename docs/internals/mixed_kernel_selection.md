@@ -27,7 +27,7 @@ Main selector module implementing intelligent kernel selection:
 
 Integration examples and helper functions:
 
-- **`MixedBpwMoEDispatcher`**: High-level dispatcher class
+- **`MixedBpwMoEDispatcherExample`**: High-level dispatcher class
 - **`get_expert_bits()`**: Extract bit-width information
 - **`estimate_gpu_memory_pressure()`**: Memory pressure estimation
 - **`analyze_expert_activation_pattern()`**: Expert utilization analysis
@@ -118,11 +118,11 @@ record_kernel_latency(kernel_name, batch_size, latency_ms)
 
 ```python
 from metal_marlin.trellis.kernel_selection_mixed_integration import (
-    MixedBpwMoEDispatcher,
+    MixedBpwMoEDispatcherExample,
 )
 
 # Initialize dispatcher
-dispatcher = MixedBpwMoEDispatcher(
+dispatcher = MixedBpwMoEDispatcherExample(
     lib=metal_lib,
     expert_bit_metadata={
         0: (6, 2, 3),

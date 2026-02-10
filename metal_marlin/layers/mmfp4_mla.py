@@ -139,6 +139,8 @@ if HAS_TORCH and torch is not None:
             group_size: int = 128,
             rope_theta: float = 10000.0,
             rope_ratio: float = 1.0,
+            use_fused_qkv: bool = False,
+            use_paged_attention: bool = False,
         ):
             super().__init__()
             if num_heads <= 0 or num_kv_heads <= 0:
@@ -162,6 +164,9 @@ if HAS_TORCH and torch is not None:
             self.qkv_repeat_factor = num_heads // num_kv_heads
             self.scale = self.qk_head_dim ** -0.5
             self.layer_idx = 0
+            self.use_fused_qkv = use_fused_qkv
+            self.use_paged_attention = use_paged_attention
+            self._paged_adapter: Any = None
 
             # Helper to create dummy weights for MMFP4Linear
             def create_dummy_linear(in_features: int, out_features: int) -> MMFP4Linear:
@@ -190,17 +195,31 @@ if HAS_TORCH and torch is not None:
                     group_size=group_size
                 )
 
-            # Query: hidden -> q_lora -> [heads * (qk_nope + qk_rope)]
-            # We assume q_lora_rank > 0 implies query compression
-            self.q_a_proj = create_dummy_linear(hidden_size, q_lora_rank)
+            if self.use_fused_qkv:
+                # Fused Q/KV compression: hidden -> [q_lora + kv_lora + qk_rope]
+                self.qkv_a_proj = create_dummy_linear(
+                    hidden_size,
+                    q_lora_rank + kv_lora_rank + qk_rope_head_dim,
+                )
+                # To avoid attribute errors if accessed, we can initialize others to None
+                # or just skip them. For now, skipping specific init for them.
+                # But to maintain structure if someone inspects 'q_a_proj',
+                # we might want to keep them or not.
+                # Given strict instruction to "Concatenate weights and use single dispatch",
+                # I will NOT create the separate ones if fused is True.
+            else:
+                # Query: hidden -> q_lora -> [heads * (qk_nope + qk_rope)]
+                # We assume q_lora_rank > 0 implies query compression
+                self.q_a_proj = create_dummy_linear(hidden_size, q_lora_rank)
+
+                # KV compression: hidden -> [kv_lora + qk_rope]
+                self.kv_a_proj = create_dummy_linear(
+                    hidden_size,
+                    kv_lora_rank + qk_rope_head_dim,
+                )
+
             self.q_b_proj = create_dummy_linear(
                 q_lora_rank, num_heads * self.qk_head_dim
-            )
-
-            # KV compression: hidden -> [kv_lora + qk_rope]
-            self.kv_a_proj = create_dummy_linear(
-                hidden_size,
-                kv_lora_rank + qk_rope_head_dim,
             )
 
             # KV decompression: kv_lora -> [num_kv_heads * (qk_nope + v)]
@@ -284,6 +303,63 @@ if HAS_TORCH and torch is not None:
             # Shape: [B, 1, Q, K], True = can attend.
             return (query_positions.unsqueeze(-1) >= key_positions.unsqueeze(-2)).unsqueeze(1)
 
+        def _get_or_create_paged_adapter(self) -> Any:
+            """Lazy initialization of paged attention adapter."""
+            if self._paged_adapter is None:
+                from ..paged.mmfp4_paged_adapter import MMFP4PagedAttention
+                self._paged_adapter = MMFP4PagedAttention(
+                    mla_layer=self,
+                    max_batch_size=1,  # Will be inferred at runtime
+                    max_seq_len=8192,
+                )
+            return self._paged_adapter
+
+        def _forward_paged_attention(
+            self,
+            q_states: torch.Tensor,
+            k_states: torch.Tensor,
+            v_states: torch.Tensor,
+            pos_q: torch.Tensor,
+            key_positions: torch.Tensor,
+        ) -> torch.Tensor:
+            """Forward using paged attention adapter for decode mode.
+
+            Args:
+                q_states: [B, num_heads, 1, qk_head_dim]
+                k_states: [B, num_heads, total_seq, qk_head_dim]
+                v_states: [B, num_heads, total_seq, v_head_dim]
+                pos_q: Query positions [B, 1]
+                key_positions: Key positions [B, total_seq]
+
+            Returns:
+                attn_output: [B, num_heads, 1, v_head_dim]
+            """
+            adapter = self._get_or_create_paged_adapter()
+
+            # Split q_states into nope and rope components
+            # [B, H, 1, nope_dim]
+            q_nope = q_states[..., : self.qk_nope_head_dim]
+            # [B, H, 1, rope_dim]
+            q_rope = q_states[..., self.qk_nope_head_dim:]
+
+            # Squeeze seq_len dimension (which is 1 for decode)
+            q_nope = q_nope.squeeze(2)  # [B, H, nope_dim]
+            q_rope = q_rope.squeeze(2)  # [B, H, rope_dim]
+
+            # Compute context lengths from key positions
+            context_lens = (key_positions.max(dim=1)[0] + 1).to(torch.int32)
+
+            # Call adapter forward
+            attn_out = adapter.forward(
+                q_nope=q_nope,
+                q_rope=q_rope,
+                layer_idx=self.layer_idx,
+                context_lens=context_lens,
+            )  # Returns [B, H, v_head_dim]
+
+            # Reshape to match standard attention output: [B, H, 1, v_head_dim]
+            return attn_out.unsqueeze(2)
+
         def forward(
             self,
             x: torch.Tensor,
@@ -304,7 +380,16 @@ if HAS_TORCH and torch is not None:
             )
 
             # Query path
-            q_latent = self.q_a_proj(x)
+            if self.use_fused_qkv:
+                qkv_out = self.qkv_a_proj(x)
+                q_latent, kv_compressed = torch.split(
+                    qkv_out,
+                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                    dim=-1
+                )
+            else:
+                q_latent = self.q_a_proj(x)
+
             # Apply layernorm after compression
             q_latent = self.q_a_layernorm(q_latent)
             q = self.q_b_proj(q_latent).view(
@@ -327,7 +412,8 @@ if HAS_TORCH and torch is not None:
             q_states = torch.cat((q_nope, q_rope), dim=-1)
 
             # KV compression: ~8x less cache bandwidth by storing [kv_lora + rope]
-            kv_compressed = self.kv_a_proj(x)
+            if not self.use_fused_qkv:
+                kv_compressed = self.kv_a_proj(x)
 
             if isinstance(kv_cache, MLAKVCache):
                 kv_full = kv_cache.update(
@@ -438,17 +524,44 @@ if HAS_TORCH and torch is not None:
 
             attn_mask = self._build_attention_mask(pos_q, key_positions)
 
-            # Use standard attention
-            attn_output = F.scaled_dot_product_attention(
-                q_states,
-                k_states.to(q_states.dtype),
-                v_states.to(q_states.dtype),
-                attn_mask=attn_mask,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=self.scale,
-            )
+            # Use paged attention for decode mode if enabled (adapter created lazily)
+            if self.use_paged_attention and seq_len == 1:
+                attn_output = self._forward_paged_attention(
+                    q_states, k_states, v_states, pos_q, key_positions
+                )
+            elif q_states.device.type == "mps" and v_states.shape[-1] != q_states.shape[-1]:
+                # Workaround for PyTorch MPS SDPA bug where output dim matches Q/K instead of V
+                # when dimensions differ. Fallback to eager attention.
+                # q: [B, H, L, D], k: [B, H, S, D] -> scores: [B, H, L, S]
+                attn_weights = torch.matmul(
+                    q_states, k_states.transpose(-2, -1)) * self.scale
 
+                if attn_mask is not None:
+                    if attn_mask.dtype == torch.bool:
+                        # Convert bool mask (True=keep) to additive float mask (0=keep, -inf=mask)
+                        new_mask = torch.zeros_like(attn_weights)
+                        new_mask.masked_fill_(~attn_mask, float("-inf"))
+                        attn_weights = attn_weights + new_mask
+                    else:
+                        attn_weights = attn_weights + attn_mask
+
+                attn_weights = F.softmax(
+                    attn_weights, dim=-1, dtype=torch.float32).to(q_states.dtype)
+                attn_output = torch.matmul(attn_weights, v_states)
+            else:
+                # Use standard attention
+                attn_output = F.scaled_dot_product_attention(
+                    q_states,
+                    k_states.to(q_states.dtype),
+                    v_states.to(q_states.dtype),
+                    attn_mask=attn_mask,
+                    dropout_p=0.0,
+                    is_causal=False,
+                    scale=self.scale,
+                )
+
+            # attn_output: [B, num_heads, S, v_head_dim]
+            # Transpose to [B, S, num_heads, v_head_dim] then flatten
             attn_output = attn_output.transpose(1, 2).contiguous().view(
                 batch_size,
                 seq_len,

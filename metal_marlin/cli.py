@@ -1719,6 +1719,84 @@ def analyze(
         click.echo("=" * 60)
 
 
+@cli.group("mmfp4")
+def mmfp4():
+    """MMFP4 model inference commands."""
+    pass
+
+
+@mmfp4.command("generate")
+@click.option("--model", "-m", required=True, help="Model path")
+@click.option("--prompt", "-p", required=True, help="Input prompt")
+@click.option("--max-tokens", default=100, type=int)
+@click.option("--temperature", default=0.7, type=float)
+@click.option("--no-fused-moe", is_flag=True, help="Disable fused MoE kernels")
+def mmfp4_generate(model, prompt, max_tokens, temperature, no_fused_moe):
+    """Generate text using MMFP4 model."""
+    import torch
+    from transformers import AutoTokenizer
+
+    from .models.mmfp4_causal_lm import MMFP4ForCausalLM
+
+    click.echo(f"Loading MMFP4 model from {model}...")
+    model_obj = MMFP4ForCausalLM.from_pretrained(model, use_fused_moe=not no_fused_moe)
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model_obj.device)
+
+    click.echo("Generating...")
+    with torch.inference_mode():
+        output_ids = model_obj.generate(
+            input_ids,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+    output_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    click.echo(output_text)
+
+
+@mmfp4.command("bench")
+@click.option("--model", "-m", required=True, help="Model path")
+def mmfp4_bench(model):
+    """Benchmark MMFP4 model throughput."""
+    import time
+
+    import torch
+
+    from .models.mmfp4_causal_lm import MMFP4ForCausalLM
+
+    click.echo(f"Benchmarking MMFP4 model: {model}")
+    model_obj = MMFP4ForCausalLM.from_pretrained(model)
+
+    # Simple benchmark logic
+    batch_size = 1
+    seq_len = 128
+    vocab_size = model_obj.vocab_size
+    input_ids = torch.randint(
+        0, vocab_size, (batch_size, seq_len), device=model_obj.device
+    )
+
+    click.echo("Warming up...")
+    with torch.inference_mode():
+        model_obj(input_ids)
+
+    if hasattr(torch.mps, "synchronize"):
+        torch.mps.synchronize()
+
+    click.echo("Running benchmark (10 iterations)...")
+    start = time.perf_counter()
+    with torch.inference_mode():
+        for _ in range(10):
+            model_obj(input_ids)
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+    end = time.perf_counter()
+
+    avg_time = (end - start) / 10
+    click.echo(f"Average forward pass time: {avg_time * 1000:.2f} ms")
+
+
 def main():
     cli()
 

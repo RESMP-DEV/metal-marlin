@@ -56,7 +56,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained(
-        'models/GLM-4.7-Flash-Trellis-3bpw', device='mps'
+        'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps'
     )
 
     moe = model.model.layers[1].mlp  # Use layer 1's MoE

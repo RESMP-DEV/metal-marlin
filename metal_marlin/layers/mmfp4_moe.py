@@ -15,6 +15,8 @@ import torch.nn.functional as F
 
 from .mmfp4_linear import MMFP4Linear
 
+_first_call = True
+
 if TYPE_CHECKING:
     pass
 
@@ -201,6 +203,8 @@ class MMFP4MoE(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run top-k routing + grouped batched expert execution + weighted combine."""
+        global _first_call
+
         if x.shape[-1] != self.hidden_size:
             raise ValueError(
                 f"Expected input hidden_size={self.hidden_size}, got {x.shape[-1]}"
@@ -233,21 +237,29 @@ class MMFP4MoE(nn.Module):
         expert_outputs = hidden_flat.new_empty(
             (expert_inputs.shape[0], self.hidden_size))
 
-        # Move offsets to CPU once to avoid synchronization in the loop
-        expert_offsets_cpu = dispatch_info.expert_offsets.cpu()
+        # Try fused dispatch first, fall back to sequential if unavailable
+        used_fused = False
+        try:
+            expert_outputs = dispatch.dispatch_mmfp4_experts_fused(
+                expert_inputs, self.experts, dispatch_info, self.n_experts
+            )
+            used_fused = True
+        except (ValueError, NotImplementedError) as e:
+            # Fused dispatch unavailable (non-MPS device or kernel not built)
+            # Fall back to sequential expert dispatch
+            expert_offsets_cpu = dispatch_info.expert_offsets.cpu()
+            for expert_idx in range(self.n_experts):
+                start = int(expert_offsets_cpu[expert_idx].item())
+                end = int(expert_offsets_cpu[expert_idx + 1].item())
+                if start == end:
+                    continue
+                expert = self.experts[expert_idx]
+                chunk = expert_inputs[start:end].to(torch.float16)
+                chunk_out = expert(chunk)
+                expert_outputs[start:end] = chunk_out.to(expert_outputs.dtype)
 
-        for expert_idx in range(self.n_experts):
-            start = int(expert_offsets_cpu[expert_idx].item())
-            end = int(expert_offsets_cpu[expert_idx + 1].item())
-            if start == end:
-                continue
-
-            expert = self.experts[expert_idx]
-            chunk = expert_inputs[start:end]
-            # MMFP4Linear expects float16 input
-            chunk = chunk.to(torch.float16)
-            chunk_out = expert(chunk)
-            expert_outputs[start:end] = chunk_out.to(expert_outputs.dtype)
+        if _first_call:
+            _first_call = False
 
         # Keep expert execution asynchronous; synchronize once per layer.
         if hidden_flat.is_mps:

@@ -143,7 +143,7 @@ register usage, so the numbers below are theoretical upper bounds:
 ```
 Traditional (double-buffered):  floor(32768 / 16384) = 2 threadgroups/CU
 Traditional (single-buffered):  floor(32768 / 8192)  = 4 threadgroups/CU
-Fused:                           floor(32768 / 4608)  = 7 threadgroups/CU
+Fused:                           floor(32768 / (4096 + 512)) = 7 threadgroups/CU
 ```
 
 Higher occupancy means the GPU can hide latency by switching between more

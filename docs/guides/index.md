@@ -28,5 +28,10 @@ Step-by-step tutorials for common Metal Marlin workflows.
 ## Troubleshooting
 
 - [**Troubleshooting**](troubleshooting.md) — Common issues and solutions
+- [**MMFP4 Troubleshooting**](mmfp4_troubleshooting.md) — MMFP4-specific issues and workarounds
 - [**Metallib Troubleshooting**](metallib_troubleshooting.md) — Diagnose precompiled shader issues
 - [**Metal Compiler Error Guide**](metal_error_guide.md) — Common compiler failures and fixes
+
+## MMFP4 Inference
+
+- [**MMFP4 Inference Guide**](mmfp4_inference.md) — MMFP4 quantized model inference workflow

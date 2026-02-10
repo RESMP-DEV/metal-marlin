@@ -7,7 +7,7 @@ from metal_marlin.trellis.lm import TrellisForCausalLM
 
 print("Loading model...")
 model = TrellisForCausalLM.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-3bpw', device='mps')
+    'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps')
 
 # Single prefill test with timeout
 seq_len = 128

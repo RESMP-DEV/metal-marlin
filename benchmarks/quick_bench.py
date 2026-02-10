@@ -27,7 +27,7 @@ TrellisLinear.enable_cache = False
 
 
 def main():
-    model_path = _ROOT / "models" / "GLM-4.7-Flash-Trellis-3bpw"
+    model_path = _ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4"
 
     print("=" * 60)
     print("GLM-4.7-Flash Trellis 3bpw Quick Benchmark")

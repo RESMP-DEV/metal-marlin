@@ -16,7 +16,7 @@ sys.stdout.reconfigure(line_buffering=True)
 print("Loading model...")
 t0 = time.perf_counter()
 model = TrellisForCausalLM.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-3bpw', device='mps')
+    'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps')
 tokenizer = AutoTokenizer.from_pretrained(
     'zai-org/GLM-4.7-Flash', trust_remote_code=True)
 load_time = time.perf_counter() - t0

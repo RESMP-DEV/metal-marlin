@@ -8,7 +8,7 @@ from metal_marlin.trellis.model import TrellisForCausalLM
 from transformers import AutoTokenizer
 
 # Model path relative to this script
-MODEL_PATH = Path(__file__).parent.parent / "models" / "GLM-4.7-Flash-Trellis-MM"
+MODEL_PATH = Path(__file__).parent.parent / "models" / "GLM-4.7-Flash-Marlin-MMFP4"
 
 print("Loading model...")
 model = TrellisForCausalLM.from_pretrained(str(MODEL_PATH), device="mps")
