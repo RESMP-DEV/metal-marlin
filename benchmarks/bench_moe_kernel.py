@@ -43,7 +43,7 @@ def benchmark_forward(model, input_ids, warmup=5, trials=20):
 def main():
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained(
-        'models/GLM-4.7-Flash-Trellis-3bpw', device='mps'
+        'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps'
     )
     tokenizer = AutoTokenizer.from_pretrained(
         'zai-org/GLM-4.7-Flash', trust_remote_code=True

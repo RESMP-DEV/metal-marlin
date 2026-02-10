@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick benchmark for GLM-4.7-Flash-Trellis-MM decode speed."""
+"""Quick benchmark for GLM-4.7-Flash-Marlin-MMFP4 decode speed."""
 import time
 import warnings
 
@@ -12,9 +12,9 @@ warnings.filterwarnings('ignore')
 
 print('Loading model...')
 model = TrellisForCausalLM.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-MM', device='mps')
+    'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps')
 tokenizer = AutoTokenizer.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-MM', trust_remote_code=True)
+    'models/GLM-4.7-Flash-Marlin-MMFP4', trust_remote_code=True)
 
 prompt = 'The meaning of life is'
 tokens = tokenizer(prompt, return_tensors='pt').input_ids.to('mps')

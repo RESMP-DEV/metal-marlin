@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Debug forward pass for GLM-4.7-Flash-Trellis-MM."""
+"""Debug forward pass for GLM-4.7-Flash-Marlin-MMFP4."""
 from transformers import AutoTokenizer
 from metal_marlin.trellis.model import TrellisForCausalLM
 import sys
@@ -21,12 +21,12 @@ print('OK')
 
 print('Step 3: Load model...')
 model = TrellisForCausalLM.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-MM', device='mps')
+    'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps')
 print('OK')
 
 print('Step 4: Load tokenizer...')
 tokenizer = AutoTokenizer.from_pretrained(
-    'models/GLM-4.7-Flash-Trellis-MM', trust_remote_code=True)
+    'models/GLM-4.7-Flash-Marlin-MMFP4', trust_remote_code=True)
 print('OK')
 
 print('Step 5: Tokenize input...')

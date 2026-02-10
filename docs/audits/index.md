@@ -34,6 +34,10 @@ during development and their resolutions.
 - [**Metal Half Precision Bug**](metal_half_precision_bug.md) — Half precision edge cases
 - [**Resolved Bugs**](resolved_bugs.md) — Previously resolved issues
 
+## Debug Investigations
+
+- [**MMFP4 Debug Summary**](mmfp4_debug_summary.md) — MMFP4 inference stack NaN debugging analysis
+
 ## Maintenance Summaries
 
 - [**Code Cleanup Summary**](code_cleanup_summary.md) — Module/script cleanup and consolidation summary

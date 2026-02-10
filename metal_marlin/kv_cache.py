@@ -699,7 +699,7 @@ class MLAKVCache:
     qk_rope_head_dim: int = 64
     device: str = "mps"
     dtype: torch.dtype | str = "float16"
-    quantize_mode: Literal["none", "int8", "fp8"] = "none"
+    quantize_mode: Literal["none", "int8", "fp8", "fp4"] = "none"
     fp8_scale_method: Literal["tensor", "channel"] = "tensor"
     auto_grow: bool = True
 
@@ -713,6 +713,40 @@ class MLAKVCache:
         self._scale_dtype = torch.float16 if self.dtype == torch.float16 else torch.float32
 
         self._allocate(self.max_seq_len)
+
+    def __init__(
+        self,
+        num_layers: int,
+        batch_size: int = 1,
+        max_seq_len: int = 2048,
+        kv_lora_rank: int = 512,
+        qk_rope_head_dim: int = 64,
+        device: str = "mps",
+        dtype: torch.dtype | str = "float16",
+        quantize_mode: Literal["none", "int8", "fp8", "fp4"] = "none",
+        fp8_scale_method: Literal["tensor", "channel"] = "tensor",
+        auto_grow: bool = True,
+        max_batch_size: int | None = None,
+    ) -> None:
+        """Initialize MLA KV Cache with optional max_batch_size alias for compatibility."""
+        # Handle max_batch_size alias for backward compatibility
+        if max_batch_size is not None:
+            batch_size = max_batch_size
+
+        # Set dataclass fields manually
+        self.num_layers = num_layers
+        self.batch_size = batch_size
+        self.max_seq_len = max_seq_len
+        self.kv_lora_rank = kv_lora_rank
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.device = device
+        self.dtype = dtype
+        self.quantize_mode = quantize_mode
+        self.fp8_scale_method = fp8_scale_method
+        self.auto_grow = auto_grow
+
+        # Call post-init for setup
+        self.__post_init__()
 
     def _allocate(self, max_seq_len: int) -> None:
         """Allocate cache tensors in BSHD layout."""
@@ -744,6 +778,22 @@ class MLAKVCache:
             scale_dim = self.cache_dim if self.fp8_scale_method == "channel" else 1
             self.kv_scales = torch.zeros(
                 (self.num_layers, self.batch_size, max_seq_len, scale_dim),
+                dtype=self._scale_dtype,
+                device=self.device,
+            )
+        elif self.quantize_mode == "fp4":
+            if self.cache_dim % 8 != 0:
+                raise ValueError(
+                    f"FP4 quantization requires cache_dim ({self.cache_dim}) to be divisible by 8"
+                )
+            self.kv_cache = torch.zeros(
+                (self.num_layers, self.batch_size, max_seq_len, self.cache_dim // 8),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            # FP4 uses per-token scaling (similar to standard behavior in KVCacheTorch)
+            self.kv_scales = torch.zeros(
+                (self.num_layers, self.batch_size, max_seq_len, 1),
                 dtype=self._scale_dtype,
                 device=self.device,
             )
@@ -854,6 +904,11 @@ class MLAKVCache:
             self.kv_cache[layer_idx, :batch, start:end] = kv_q
             # type: ignore[index]
             self.kv_scales[layer_idx, :batch, start:end] = kv_scales
+        elif self.quantize_mode == "fp4":
+            kv_packed, kv_scale = self._pack_fp4(compressed_kv)
+            self.kv_cache[layer_idx, :batch, start:end] = kv_packed
+            # type: ignore[index]
+            self.kv_scales[layer_idx, :batch, start:end] = kv_scale
         else:
             self.kv_cache[layer_idx, :batch,
                           start:end] = compressed_kv.to(self.dtype)
@@ -877,6 +932,10 @@ class MLAKVCache:
                 kv, self.kv_scales[layer_idx, :, :seq_len])
         elif self.quantize_mode == "fp8":
             kv = self._dequantize_fp8(
+                # type: ignore[index]
+                kv, self.kv_scales[layer_idx, :, :seq_len])
+        elif self.quantize_mode == "fp4":
+            kv = self._unpack_fp4(
                 # type: ignore[index]
                 kv, self.kv_scales[layer_idx, :, :seq_len])
 
@@ -906,6 +965,73 @@ class MLAKVCache:
     def _dequantize_fp8(self, quantized: torch_typing.Tensor, scale: torch_typing.Tensor) -> torch_typing.Tensor:
         signed = quantized.float() - 128.0
         return (signed / 127.0 * _FP8_E4M3_MAX * scale.float()).to(self.dtype)
+
+    def _pack_fp4(
+        self, tensor: torch_typing.Tensor
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Pack FP4 quantized tensor into uint32 format.
+
+        FP4 E2M1 format: 2-bit exponent, 1-bit mantissa, 1-bit sign.
+        Packs 8 FP4 values into 1 uint32 (4 bytes).
+
+        Args:
+            tensor: Input tensor to quantize [batch, seq_len, cache_dim]
+            scales: Scale factors [batch, seq_len, 1] or [batch, seq_len, cache_dim]
+
+        Returns:
+            packed_uint32: Packed uint32 tensor [batch, seq_len, cache_dim // 8]
+            scales_fp16: Scale factors in float16
+        """
+        require_torch("_pack_fp4")
+        # Quantize: scale and convert to 4-bit indices (0-15)
+        abs_max = tensor.abs().amax(dim=-1, keepdim=True)
+        abs_max = torch.clamp(abs_max, min=1e-8)
+        scale = abs_max / 6.0
+        scaled = tensor / scale
+        scaled = torch.clamp(scaled, -6.0, 6.0)
+        quantized = torch.round(scaled * 2.0).to(torch.int8)
+        quantized = torch.clamp(quantized + 8, 0, 15).to(torch.uint8)
+
+        batch, seq_len, dim = tensor.shape
+        # Reshape to pack 8 nibbles per uint32
+        reshaped = quantized.view(batch, seq_len, dim // 8, 8)
+
+        packed = torch.zeros(
+            (batch, seq_len, dim // 8),
+            dtype=torch.int32,
+            device=tensor.device,
+        )
+        for i in range(8):
+            packed = packed | (reshaped[..., i].to(torch.int32) << (i * 4))
+
+        scales_fp16 = scale.to(torch.float16)
+        return packed, scales_fp16
+
+    def _unpack_fp4(
+        self, packed: torch_typing.Tensor, scales: torch_typing.Tensor
+    ) -> torch_typing.Tensor:
+        """Unpack FP4 quantized tensor from uint32 format to float16.
+
+        Args:
+            packed: Packed uint32 tensor [batch, seq_len, cache_dim // 8]
+            scales: Scale factors in float16 [batch, seq_len, 1] or [batch, seq_len, cache_dim]
+
+        Returns:
+            Dequantized float16 tensor [batch, seq_len, cache_dim]
+        """
+        require_torch("_unpack_fp4")
+        batch, seq_len, packed_dim = packed.shape
+        dim = packed_dim * 8
+
+        unpacked_list = []
+        for i in range(8):
+            nibble = (packed >> (i * 4)) & 0xF
+            signed = nibble.float() - 8.0
+            unpacked_list.append(signed)
+
+        unpacked = torch.stack(unpacked_list, dim=-1)
+        unpacked = unpacked.view(batch, seq_len, dim)
+        return (unpacked * scales.float() / 2.0).to(torch.float16)
 
     def reset(self) -> None:
         """Clear cache state."""

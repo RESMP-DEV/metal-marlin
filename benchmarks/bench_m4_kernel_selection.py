@@ -383,7 +383,7 @@ def main() -> int:
     print("=" * 70)
     
     # Check for model
-    model_path = _ROOT / "models" / "GLM-4.7-Flash-Trellis-MM"
+    model_path = _ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4"
     if not model_path.exists():
         print(f"\nERROR: Model not found at {model_path}")
         print("Creating synthetic benchmark instead...")

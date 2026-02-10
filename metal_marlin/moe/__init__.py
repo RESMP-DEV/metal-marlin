@@ -83,12 +83,10 @@ from metal_marlin.moe.sparse_routing import (
 )
 from metal_marlin.moe_dispatch import (
     FusedMoEDispatcher,
-    FusedSharedExpertAdd,
     MoEDispatcher,
     MoEDispatchInfo,
     compute_expert_load,
     compute_load_balancing_loss,
-    ensure_torch_tensor,
     gather_for_experts,
     group_tokens_by_expert,
     group_tokens_by_expert_full,
@@ -121,7 +119,6 @@ __all__ = [
     "ExpertPrefetcher",
     "ExpertWorkItem",
     "FusedMoEDispatcher",
-    "FusedSharedExpertAdd",
     "GroupDispatchInfo",
     "GroupedMoEDispatcher",
     "MetalBatchedDispatch",
@@ -150,7 +147,6 @@ __all__ = [
     "create_sparse_router_from_profiler",
     "dispatch_single_expert_async",
     "enable_sparse_routing",
-    "ensure_torch_tensor",
     "execute_experts_parallel",
     "gather_for_experts",
     "group_tokens_by_expert",

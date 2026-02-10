@@ -170,7 +170,7 @@ def main():
     
     # Load model
     print("\nLoading model...")
-    model_path = "models/GLM-4.7-Flash-Trellis-MM"
+    model_path = "models/GLM-4.7-Flash-Marlin-MMFP4"
     if not Path(model_path).exists():
         print(f"ERROR: Model not found at {model_path}")
         print("Please ensure the model is downloaded.")
@@ -327,7 +327,7 @@ def main():
     with open(output_path, "w") as f:
         json.dump({
             "device": "M4 Max",
-            "model": "GLM-4.7-Flash-Trellis-MM",
+            "model": "GLM-4.7-Flash-Marlin-MMFP4",
             "batch_sizes": batch_sizes,
             "kernel_variants": [v[2] for v in available_kernels],
             "results": results,

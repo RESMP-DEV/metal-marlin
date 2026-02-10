@@ -8,7 +8,7 @@ from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
 print("Loading model...")
 model = TrellisForCausalLM.from_pretrained(
-    "models/GLM-4.7-Flash-Trellis-MM", device="mps"
+    "models/GLM-4.7-Flash-Marlin-MMFP4", device="mps"
 )
 
 # Find first MoE layer

@@ -31,6 +31,8 @@ Step-by-step tutorials and workflows for using Metal Marlin.
 - [Performance Analysis](reports/performance_analysis.md) — Benchmarking and latency analysis
 - [Calibration Guide](guides/calibration.md) — Custom calibration for quality
 - [Troubleshooting](guides/troubleshooting.md) — Fix common problems
+- [MMFP4 Troubleshooting](guides/mmfp4_troubleshooting.md) — MMFP4 debugging and workarounds
+- [MMFP4 Inference](guides/mmfp4_inference.md) — MMFP4 quantized model inference
 - [Metallib Troubleshooting](guides/metallib_troubleshooting.md) — Precompiled shader diagnostics
 
 ### [API Reference](reference/index.md)
@@ -81,6 +83,7 @@ Investigation reports and bug analyses.
 - [Implementation Summary](audits/speculative_decoding_implementation_summary.md) — Speculative decoding implementation details
 - [Batch Scheduler Implementation](audits/batch_scheduler_implementation.md) — Dynamic request scheduling
 - [Metal Kernel Audit](audits/metal_kernel_audit.md) — Kernel review
+- [MMFP4 Debug Summary](audits/mmfp4_debug_summary.md) — MMFP4 inference stack debugging analysis
 - [Resolved Bugs](audits/resolved_bugs.md) — Fixed issues
 - [Metadata Refactor](audits/mla_proj_refactor.md) — MLA projection changes
 

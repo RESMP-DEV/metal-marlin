@@ -475,7 +475,7 @@ def main():
     models_dir = Path(args.models_dir)
 
     # Trellis 3bpw
-    trellis_path = args.trellis or models_dir / "GLM-4.7-Flash-Trellis-3bpw"
+    trellis_path = args.trellis or models_dir / "GLM-4.7-Flash-Marlin-MMFP4"
     if Path(trellis_path).exists():
         try:
             result = benchmark_trellis_3bpw(str(trellis_path), texts)

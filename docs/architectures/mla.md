@@ -138,6 +138,7 @@ def mla_attention(hidden_states, kv_cache):
 | **GQA-8** | `2 × L × S × (H/4) × D × 2` | 1.0 GB | 8.0 GB |
 | **MQA** | `2 × L × S × 1 × D × 2` | 0.25 GB | 2.0 GB |
 | **MLA-512** | `L × S × kv_rank × 2` | 0.13 GB | 1.0 GB |
+| **MLA-512 + INT4** | `L × S × kv_rank × 0.5` | 0.03 GB | 0.25 GB |
 
 Where:
 - L = layers (32)
@@ -437,6 +438,24 @@ Fused RoPE provides:
 - **Smaller compute footprint**: Only `qk_rope_head_dim` (64) rotated, not full K
 
 Typical speedup: 5-15% for attention-bound workloads.
+
+## Metal Kernel Integration
+
+- **mla_fused_attention_decode**: Primary decode kernel. It fuses the `kv_b_proj` decompression and RoPE rotation directly into the attention operation, reading compressed latents to maximize memory bandwidth.
+- **paged_attention_v1_int4**: Used for long context scenarios. It manages the KV cache in paged blocks with INT4 quantization on the latent vector, enabling 128k+ context lengths on consumer hardware.
+- **flash_attention_v3_causal_gqa**: Optimized prefill kernel. It treats the up-projected MLA key-values as a form of Grouped Query Attention (GQA) to leverage high-throughput computation during prompt processing.
+
+## GLM-4.7-Flash Specific Notes
+
+- **Correct Model Dimensions**: The hidden size is **2048**, not the standard 4096 used in many other models. Ensure `hidden_size=2048` is set in your configuration.
+- **MLA Compression Ratio**:
+    - **Formula**: `(Standard MHA Cache) / (MLA Latent Cache)`
+    - With `hidden=2048`, `heads=16`, `head_dim=128`: MHA stores `16 * 128 * 2 = 4096` elements per token.
+    - MLA stores `kv_lora_rank=512` elements per token.
+    - **Ratio**: 8x compression (FP16 vs FP16). With INT4 latent cache, compression increases to **32x**.
+- **Performance Expectations**:
+    - **Short Context (<8k)**: Performance is compute-bound by the projection layers (`q_b_proj`, `kv_b_proj`).
+    - **Long Context (>32k)**: Performance becomes memory-bound. MLA's small cache footprint significantly reduces memory traffic, sustaining higher tokens/sec.
 
 ## References
 

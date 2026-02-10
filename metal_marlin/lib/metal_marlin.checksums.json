@@ -4,7 +4,7 @@
     "metal_marlin/vision/preprocess.metal": "a8cba0d9cf7d8d824af509da000c78e9f595a017048e4d8f9968a68560e85c59",
     "src/attention.metal": "c8c32a41290d8b4a2f750feb786957ebd1987913ebf0f40fe1b8b36086bab07f",
     "src/attention_mla_fused.metal": "4dabb1a70b85bb32830fda00c1c8dfcdae695734568b299cd485833251384247",
-    "src/attention_mla_fused_optimized.metal": "3e86f860bfebe2e79b8f65107e9e6f8db4696a76a0cb90e85f8371c14656b114",
+    "src/attention_mla_fused_optimized.metal": "8c720057294148c9073506fcab1a13a7a581740add16bd2deeaf9dce08c12e31",
     "src/batched_gemm.metal": "f90de72b6a61cbb188c258eca433a55a614bf95cb4b006b6e16fbdb432a50f55",
     "src/bf16_compat.metal": "0eb1d13a7efbaeb8692a1dc709805e9c3a2b7935d5e3789091ca67fb6f1cd85d",
     "src/bf16_kernels.metal": "fd346a55d359f4dbbb1c7b89fcd6045dc9197615f6b9496e8ba9945a25806381",
@@ -40,6 +40,7 @@
     "src/gemm_trellis_2bit.metal": "2cf9cb68913d2323f6f8e8246ef8329275e20827dc114ebbb265a7cc4ff54d18",
     "src/gemm_trellis_int8.metal": "614ec13dffa22d93f7a0d306a2c18b44bea808cf1dc853ae6f1c620b54b854e9",
     "src/gemm_trellis_moe.metal": "ce7fbcf15778218a2f31d97dc026947c36a6c852ce555aa3101d28fde6e89cf8",
+    "src/gemm_trellis_swiglu.metal": "f1927349d6474e689cd2ad02dcb6e646ef34d976bec80acd9df20255221f177f",
     "src/gemm_trellis_w2.metal": "9ae6686bdc31cbc76f963146f76be4f88b761763dd0959d53f0cc76675da3998",
     "src/hadamard.metal": "e025255cee76dc3d5a06d478701c0e047c82b28d7f6cd5e7c31be8d95ef66569",
     "src/hessian.metal": "fd40666c3498af3b86afc6b10911ba34dd361da964295a919ae80e6fbc54edb8",
@@ -65,6 +66,7 @@
     "src/moe_shared_expert.metal": "9e853e547b75605a3c2a0cf01f7f2c31a55ae80793803d50cb828d3b25205b6a",
     "src/moe_trellis.metal": "dcd75fefa21ef422207d8b6f0b7f7cd70980a00a4c80dd2c41a81b89c6fe89d2",
     "src/moe_trellis_mixed.metal": "a04b338498b19f547dcfd43807b4bf71535e8da86ae7d77f23ee0e059b1d75c7",
+    "src/noop_dispatch.metal": "0fdce7e9a439a85c2af1a37ac5de545f5cf6ed54ad87eec89ba850a34c57f1c3",
     "src/paged_attention.metal": "5c6393e6cd0772d616e02e522b4a4b6300eed3b137ffd8855e793238f1a08351",
     "src/parallel_multihead_attention.metal": "24c4ae640b49706e2cee68e9cd5507b95d15c135c2e266a5621db667041cb94f",
     "src/psd_project.metal": "e5e107309047a06c509341ada807e62a7d9b502296bf74ead562dc1f831cbce9",
@@ -84,7 +86,7 @@
     "src/vision_preprocess.metal": "2e352b541e4a9698a8b679111316e9827917dcd924f74f6d77b25ad54624f5f2",
     "src/viterbi_quant.metal": "5ea595e16f9e18a64761566b08bed1c3b74136351678e55be31666ba3d457154"
   },
-  "file_count": 83,
+  "file_count": 85,
   "metallib": "metal_marlin.metallib",
   "version": 1
 }

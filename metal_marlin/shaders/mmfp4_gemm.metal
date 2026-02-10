@@ -3,6 +3,7 @@
 using namespace metal;
 
 // --- FP4 E2M1 branchless dequant (pure ALU, no LUT) ---
+__attribute__((always_inline))
 inline half dequant_fp4_scalar(uint nibble) {
     uint sign_bit = (nibble >> 3) & 1;
     uint exp_bits = (nibble >> 1) & 0x3;
@@ -16,6 +17,7 @@ inline half dequant_fp4_scalar(uint nibble) {
 
 // NOTE: Uses float scale to work around Metal compiler bug where
 // half parameters in inline functions have fractional parts rounded.
+__attribute__((always_inline))
 inline void dequant_fp4x8(uint32_t packed, half scale, thread half *out) {
     float fscale = (float)scale;
     out[0] = (half)((float)dequant_fp4_scalar((packed >>  0) & 0xF) * fscale);
@@ -62,11 +64,11 @@ kernel void mmfp4_gemm(
     uint sg_row_base = (simd_id / 2) * 32;
     uint sg_col_base = (simd_id % 2) * 32;
 
-    // Use float accumulators for higher precision
-    simdgroup_matrix<half, 8, 8> acc[4][4];
+    // Use float accumulators to prevent overflow during accumulation
+    simdgroup_matrix<float, 8, 8> acc[4][4];
     for (uint mi = 0; mi < 4; ++mi)
         for (uint ni = 0; ni < 4; ++ni)
-            acc[mi][ni] = make_filled_simdgroup_matrix<half, 8, 8>(0.0h);
+            acc[mi][ni] = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
 
     for (uint k_tile = 0; k_tile < K; k_tile += TILE_K) {
         uint elems_per_thread = (TILE_M * TILE_K + THREADS_PER_TG - 1) / THREADS_PER_TG;
@@ -125,23 +127,25 @@ kernel void mmfp4_gemm(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    // Store results
+    // Store results - convert from float accumulator to half output
+    // Per-simdgroup staging to avoid race conditions between 4 simdgroups
+    threadgroup float out_staging[SIMDGROUPS_PER_TG][8][8];
+
     for (uint mi = 0; mi < 4; ++mi) {
         for (uint ni = 0; ni < 4; ++ni) {
             uint out_row = tgid.y * TILE_M + sg_row_base + mi * 8;
             uint out_col = tgid.x * TILE_N + sg_col_base + ni * 8;
 
-            // Always use staging to convert float acc to half output
-            // Direct store would require C to be float*, which it isn't
-            threadgroup half out_staging[8][8];
-            simdgroup_store(acc[mi][ni], &out_staging[0][0], 8);
+            // Each simdgroup uses its own staging slot
+            simdgroup_store(acc[mi][ni], &out_staging[simd_id][0][0], 8);
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
+            // Convert float to half during write to output
             for (uint elem = simd_lane; elem < 64; elem += 32) {
                 uint r = elem / 8;
                 uint c = elem % 8;
                 if (out_row + r < M && out_col + c < N) {
-                    C[(out_row + r) * N + out_col + c] = out_staging[r][c];
+                    C[(out_row + r) * N + out_col + c] = half(out_staging[simd_id][r][c]);
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);

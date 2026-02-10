@@ -39,8 +39,8 @@ DEFAULT_PRESETS = list(SUPPORTED_PRESETS)
 
 PRESET_CANDIDATES: dict[str, list[str]] = {
     "glm47_moe": [
-        "models/GLM-4.7-Flash-Trellis-MM",
-        "models/GLM-4.7-Flash-Trellis-3bpw",
+        "models/GLM-4.7-Flash-Marlin-MMFP4",
+        "models/GLM-4.7-Flash-Marlin-MMFP4",
         "models/GLM-4.7-Flash-Trellis",
     ],
     "qwen3_coder_next": [

@@ -58,7 +58,7 @@ def benchmark_quantized_loading(model_path: str) -> dict:
 
 
 if __name__ == "__main__":
-    model_path = sys.argv[1] if len(sys.argv) > 1 else "models/GLM-4.7-Flash-Trellis-3bpw"
+    model_path = sys.argv[1] if len(sys.argv) > 1 else "models/GLM-4.7-Flash-Marlin-MMFP4"
     results = benchmark_quantized_loading(model_path)
     print(f"\nResults: {results}")
 

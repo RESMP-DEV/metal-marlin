@@ -23,7 +23,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 def main():
     print("Loading model...")
-    model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-Trellis-3bpw/", device="mps")
+    model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-Marlin-MMFP4/", device="mps")
     print(f"Config: {model.config.num_hidden_layers} layers, {model.config.num_experts} experts")
 
     # Count TrellisLinear modules and their sizes
