@@ -70,6 +70,7 @@ With fused MoE kernel (13× measured) and MLA fused decode wired:
 13. **Async dispatch causes random NaN** - `wait=False` + immediate output read = uninitialized data (Feb 2026)
 14. **C++ dispatch API mismatch** - `dispatch_kernel` wrapper expects `(lib, fn_name)`, C++ expects `(ctx, pipeline)` - use Python path (Feb 2026)
 15. **Metal compiler has bugs** - `__attribute__((always_inline))` required for simdgroup arrays, float intermediates for dequant (Jan 2026)
+16. **Buffer pool ≠ always faster** - manual `.copy_()` into pooled buffers caused 3× regression vs `torch.stack()`; MPS copy overhead dominates benefits (Feb 2026)
 
 ## Architecture: Apple Silicon vs CUDA
 
