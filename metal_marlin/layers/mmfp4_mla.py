@@ -143,6 +143,7 @@ if HAS_TORCH and torch is not None:
             use_fused_qkv: bool = False,
             use_paged_attention: bool = False,
             use_fused_decode: bool = True,
+            num_layers: int = 32,  # Accepted for compat with mmfp4_causal_lm.py
         ):
             super().__init__()
             if num_heads <= 0 or num_kv_heads <= 0:
@@ -157,6 +158,7 @@ if HAS_TORCH and torch is not None:
             self.hidden_size = hidden_size
             self.num_heads = num_heads
             self.num_kv_heads = num_kv_heads
+            self.num_layers = num_layers
             self.q_lora_rank = q_lora_rank
             self.kv_lora_rank = kv_lora_rank
             self.qk_nope_head_dim = qk_nope_head_dim
@@ -314,6 +316,7 @@ if HAS_TORCH and torch is not None:
                     mla_layer=self,
                     max_batch_size=1,  # Will be inferred at runtime
                     max_seq_len=8192,
+                    num_layers=self.num_layers,
                 )
             return self._paged_adapter
 
