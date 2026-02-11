@@ -251,7 +251,8 @@ def inverse_hadamard_rotation(
     axis = metadata["axis"]
 
     # Apply same rotation (Hadamard is self-inverse)
-    w_restored, _ = apply_hadamard_rotation(weights, block_size=block_size, axis=axis)
+    w_restored, _ = apply_hadamard_rotation(
+        weights, block_size=block_size, axis=axis)
 
     # Remove padding
     if axis == 1:
@@ -616,7 +617,8 @@ def _pack_fp4_weights(
     """
     out_feat, in_feat = indices.shape
     if in_feat % 8 != 0:
-        raise ValueError(f"in_features ({in_feat}) must be divisible by 8 for FP4 packing")
+        raise ValueError(
+            f"in_features ({in_feat}) must be divisible by 8 for FP4 packing")
 
     packed = np.zeros((out_feat, in_feat // 8), dtype=np.uint32)
     for i in range(8):
@@ -745,7 +747,8 @@ class MRGPTQQuantizer:
 
         # Ensure dimensions are compatible
         if in_feat % 8 != 0:
-            raise ValueError(f"in_features ({in_feat}) must be divisible by 8 for Marlin packing")
+            raise ValueError(
+                f"in_features ({in_feat}) must be divisible by 8 for Marlin packing")
         if in_feat % self.group_size != 0:
             raise ValueError(
                 f"in_features ({in_feat}) must be divisible by group_size ({self.group_size})"
@@ -873,7 +876,8 @@ class MRGPTQQuantizer:
         else:
             st_files = sorted(model_path.glob("*.safetensors"))
             if not st_files:
-                raise FileNotFoundError(f"No safetensors files found in {model_path}")
+                raise FileNotFoundError(
+                    f"No safetensors files found in {model_path}")
             model_dir = model_path
 
         if output_path is None:
@@ -885,9 +889,11 @@ class MRGPTQQuantizer:
             print("MR-GPTQ Quantization")
             print(f"  Format: {self.format.value}")
             print(f"  Group size: {self.group_size}")
-            print(f"  Hadamard: {self.use_hadamard} (block_size={self.hadamard_block_size})")
+            print(
+                f"  Hadamard: {self.use_hadamard} (block_size={self.hadamard_block_size})")
             if self.hadamard_kurtosis_threshold is not None:
-                print(f"  Hadamard kurtosis threshold: {self.hadamard_kurtosis_threshold}")
+                print(
+                    f"  Hadamard kurtosis threshold: {self.hadamard_kurtosis_threshold}")
             print(f"  Actorder: {self.actorder}")
             print()
 
@@ -900,7 +906,8 @@ class MRGPTQQuantizer:
             # This is a placeholder - actual implementation needs model loading
             # For now, we'll use RTN quantization
             if verbose:
-                print("  (Hessian collection requires model loading - using RTN fallback)")
+                print(
+                    "  (Hessian collection requires model loading - using RTN fallback)")
 
         # Process each safetensors file
         is_sharded_input = len(st_files) > 1
@@ -932,12 +939,14 @@ class MRGPTQQuantizer:
                             raise
                         tensor_pt = f_torch.get_tensor(name)
                         # Preserve compactness while staying NumPy-compatible.
-                        tensor = tensor_pt.to(dtype=torch.float16).cpu().numpy()
+                        tensor = tensor_pt.to(
+                            dtype=torch.float16).cpu().numpy()
                         del tensor_pt
                     total_params += tensor.size
 
                     # Check if should quantize
-                    should_quant = self._should_quantize_tensor(name, tensor, layers_to_quantize)
+                    should_quant = self._should_quantize_tensor(
+                        name, tensor, layers_to_quantize)
 
                     if should_quant:
                         if verbose:
@@ -988,10 +997,12 @@ class MRGPTQQuantizer:
                                 shape=tensor.shape,
                                 group_size=self.group_size,
                                 format=self.format,
-                                use_hadamard=bool(meta.get("use_hadamard", False)),
+                                use_hadamard=bool(
+                                    meta.get("use_hadamard", False)),
                                 rmse=err.get("rmse", 0.0),
                                 max_error=err.get("max_error", 0.0),
-                                mean_relative_error=err.get("mean_relative_error", 0.0),
+                                mean_relative_error=err.get(
+                                    "mean_relative_error", 0.0),
                             )
                         )
 
@@ -1041,14 +1052,16 @@ class MRGPTQQuantizer:
             save_file(output_tensors, str(output_file))
 
         # Compute overall statistics
-        mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
+        mean_rmse = float(
+            np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
 
         # Original size: FP16 per weight
         # Quantized size: 4 bits per weight + FP16 scale per group
         original_bits = quantized_params * 16
         quant_weight_bits = quantized_params * 4
         quant_scale_bits = (quantized_params // self.group_size) * 16
-        compression_ratio = original_bits / max(quant_weight_bits + quant_scale_bits, 1)
+        compression_ratio = original_bits / \
+            max(quant_weight_bits + quant_scale_bits, 1)
 
         report = QuantizationReport(
             model_path=str(model_path),
@@ -1134,6 +1147,7 @@ class MRGPTQQuantizer:
         tokenizer,
         output_path: Path,
         precision_config: MoEPrecisionConfig | None = None,
+        layers_to_quantize: list[str] | None = None,
         num_calibration_batches: int = 128,
         batch_size: int = 4,
         max_seq_len: int = 2048,
@@ -1206,10 +1220,12 @@ class MRGPTQQuantizer:
         if resume:
             checkpoint = QuantizationCheckpoint.load(checkpoint_dir)
             if checkpoint is not None and verbose:
-                print(f"Resuming from checkpoint: {len(checkpoint.completed_layers)} layers done")
+                print(
+                    f"Resuming from checkpoint: {len(checkpoint.completed_layers)} layers done")
 
         if checkpoint is None:
-            checkpoint = QuantizationCheckpoint.create(checkpoint_dir, str(model_path))
+            checkpoint = QuantizationCheckpoint.create(
+                checkpoint_dir, str(model_path))
 
         hessian_collection_mode = hessian_collection_mode.strip().lower()
         if hessian_collection_mode not in {"full", "layer_stream"}:
@@ -1237,11 +1253,13 @@ class MRGPTQQuantizer:
             print(f"Output: {output_path}")
             print(f"Format: {self.format.value}")
             print(f"Group size: {self.group_size}")
-            print(f"Hadamard: {self.use_hadamard} (block={self.hadamard_block_size})")
+            print(
+                f"Hadamard: {self.use_hadamard} (block={self.hadamard_block_size})")
             print(f"Actorder: {self.actorder}")
             print(f"Calibration batches: {num_calibration_batches}")
             print(f"Hessian dtype: {hessian_dtype}")
-            print(f"Hessian max layers: {max_hessian_layers if max_hessian_layers else 'unlimited'}")
+            print(
+                f"Hessian max layers: {max_hessian_layers if max_hessian_layers else 'unlimited'}")
             print(f"Hessian collection mode: {hessian_collection_mode}")
             print(
                 "Model load: "
@@ -1251,7 +1269,8 @@ class MRGPTQQuantizer:
             if model_offload_dir is not None:
                 print(f"Model offload dir: {model_offload_dir}")
             if hessian_exclude_patterns:
-                print(f"Hessian excludes: {', '.join(hessian_exclude_patterns)}")
+                print(
+                    f"Hessian excludes: {', '.join(hessian_exclude_patterns)}")
             print()
 
         # Step 1: Load model for inference
@@ -1278,12 +1297,14 @@ class MRGPTQQuantizer:
             model_load_kwargs["offload_folder"] = str(model_offload_dir)
             model_load_kwargs["offload_state_dict"] = True
 
-        model = AutoModelForCausalLM.from_pretrained(str(model_path), **model_load_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_path), **model_load_kwargs)
         model.eval()
 
         hessian_checkpoint_path = checkpoint_dir / "hessians"
         calibration_samples = list(calibration.samples)
-        n_samples = min(len(calibration_samples), num_calibration_batches * batch_size)
+        n_samples = min(len(calibration_samples),
+                        num_calibration_batches * batch_size)
 
         def _run_calibration_batches(
             collector: HessianCollector,
@@ -1312,8 +1333,10 @@ class MRGPTQQuantizer:
 
                         if verbose and (batch_idx // batch_size + 1) % 10 == 0:
                             batches_done = batch_idx // batch_size + 1
-                            total_batches = (n_samples + batch_size - 1) // batch_size
-                            print(f"  {progress_prefix}Batch {batches_done}/{total_batches}")
+                            total_batches = (
+                                n_samples + batch_size - 1) // batch_size
+                            print(
+                                f"  {progress_prefix}Batch {batches_done}/{total_batches}")
 
                         # Checkpoint Hessians periodically
                         if (batch_idx // batch_size + 1) % 50 == 0:
@@ -1341,11 +1364,13 @@ class MRGPTQQuantizer:
             if resume and hessian_checkpoint_path.exists():
                 hessian_collector.load_checkpoint(hessian_checkpoint_path)
                 if verbose:
-                    print(f"  Loaded Hessian checkpoint: {len(hessian_collector._hessians)} layers")
+                    print(
+                        f"  Loaded Hessian checkpoint: {len(hessian_collector._hessians)} layers")
 
             # Step 3: Run calibration forward passes
             if verbose:
-                print(f"Step 3: Running {num_calibration_batches} calibration batches...")
+                print(
+                    f"Step 3: Running {num_calibration_batches} calibration batches...")
             _run_calibration_batches(hessian_collector)
 
             # Get computed Hessians
@@ -1414,7 +1439,8 @@ class MRGPTQQuantizer:
 
             for idx, group in enumerate(groups, start=1):
                 layers = group_to_layers[group]
-                done_layers = sum(1 for ln in layers if _hessian_npz_path(ln).exists())
+                done_layers = sum(
+                    1 for ln in layers if _hessian_npz_path(ln).exists())
 
                 if resume and done_layers == len(layers):
                     if verbose:
@@ -1445,7 +1471,8 @@ class MRGPTQQuantizer:
 
                 if verbose:
                     collected_now = len(layer_collector._hessians)
-                    print(f"  Saved Hessians for {collected_now} layers in {group}")
+                    print(
+                        f"  Saved Hessians for {collected_now} layers in {group}")
 
                 del layer_collector
                 gc.collect()
@@ -1543,13 +1570,14 @@ class MRGPTQQuantizer:
                         if "bfloat16" not in str(exc).lower():
                             raise
                         tensor_pt = f_torch.get_tensor(name)
-                        tensor = tensor_pt.to(dtype=torch.float16).cpu().numpy()
+                        tensor = tensor_pt.to(
+                            dtype=torch.float16).cpu().numpy()
                         del tensor_pt
                     total_params += tensor.size
 
                     # Determine if should quantize
                     should_quant = self._should_quantize_tensor(
-                        name, tensor, layers_to_quantize=None
+                        name, tensor, layers_to_quantize=layers_to_quantize
                     )
 
                     if should_quant:
@@ -1563,7 +1591,8 @@ class MRGPTQQuantizer:
                         # Map tensor name to hook name (remove .weight suffix)
                         hessian_name = name.replace(".weight", "")
                         if use_disk_hessian_lookup:
-                            hessian = _load_hessian_from_checkpoint(hessian_name)
+                            hessian = _load_hessian_from_checkpoint(
+                                hessian_name)
                         else:
                             hessian_info = hessians.get(hessian_name)
                             hessian = hessian_info.hessian if hessian_info else None
@@ -1582,7 +1611,8 @@ class MRGPTQQuantizer:
                             )
                         except Exception as e:
                             if verbose:
-                                print(f"      Warning: GPTQ failed ({e}), using RTN")
+                                print(
+                                    f"      Warning: GPTQ failed ({e}), using RTN")
                             packed, scales, meta = self.quantize_layer(
                                 tensor, hessian=None, layer_name=name
                             )
@@ -1615,7 +1645,8 @@ class MRGPTQQuantizer:
                                 use_hadamard=self.use_hadamard,
                                 rmse=err.get("rmse", 0.0),
                                 max_error=err.get("max_error", 0.0),
-                                mean_relative_error=err.get("mean_relative_error", 0.0),
+                                mean_relative_error=err.get(
+                                    "mean_relative_error", 0.0),
                             )
                         )
 
@@ -1668,12 +1699,14 @@ class MRGPTQQuantizer:
             save_file(output_tensors, str(output_file))
 
         # Compute statistics
-        mean_rmse = float(np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
+        mean_rmse = float(
+            np.mean([r.rmse for r in layer_reports])) if layer_reports else 0.0
 
         original_bits = quantized_params * 16
         quant_weight_bits = quantized_params * 4
         quant_scale_bits = (quantized_params // self.group_size) * 16
-        compression_ratio = original_bits / max(quant_weight_bits + quant_scale_bits, 1)
+        compression_ratio = original_bits / \
+            max(quant_weight_bits + quant_scale_bits, 1)
 
         report = QuantizationReport(
             model_path=str(model_path),
@@ -1873,7 +1906,8 @@ class HessianCollector:
         """
         self.damp_ratio = damp_ratio
         self.layer_patterns = layer_patterns
-        self.exclude_patterns = [p.lower() for p in exclude_patterns] if exclude_patterns else []
+        self.exclude_patterns = [
+            p.lower() for p in exclude_patterns] if exclude_patterns else []
         self.max_tracked_layers = max_tracked_layers
         if accumulator_dtype not in {"float64", "float32"}:
             raise ValueError(
@@ -1882,7 +1916,8 @@ class HessianCollector:
         self.accumulator_dtype = np.float64 if accumulator_dtype == "float64" else np.float32
 
         # Running sums: layer_name -> (H_sum, n_samples)
-        self._hessians: dict[str, tuple[NDArray[np.float64] | NDArray[np.float32], int]] = {}
+        self._hessians: dict[str, tuple[NDArray[np.float64]
+                                        | NDArray[np.float32], int]] = {}
         self._hooks: list = []
         self._layer_dims: dict[str, int] = {}  # Cache in_features per layer
         self._skipped_due_limit = 0
@@ -1969,7 +2004,8 @@ class HessianCollector:
 
                 in_features = self._layer_dims.get(layer_name, x_np.shape[-1])
                 self._hessians[layer_name] = (
-                    np.zeros((in_features, in_features), dtype=self.accumulator_dtype),
+                    np.zeros((in_features, in_features),
+                             dtype=self.accumulator_dtype),
                     0,
                 )
 
@@ -2056,9 +2092,11 @@ class HessianCollector:
     def clear(self) -> None:
         """Clear accumulated Hessians (but keep hooks)."""
         for name in self._hessians:
-            in_features = self._layer_dims.get(name, self._hessians[name][0].shape[0])
+            in_features = self._layer_dims.get(
+                name, self._hessians[name][0].shape[0])
             self._hessians[name] = (
-                np.zeros((in_features, in_features), dtype=self.accumulator_dtype),
+                np.zeros((in_features, in_features),
+                         dtype=self.accumulator_dtype),
                 0,
             )
 
@@ -2149,10 +2187,12 @@ class QuantizationCheckpoint:
             completed_layers=data.get("completed_layers", []),
             current_layer=data.get("current_layer"),
             hessian_checkpoint=(
-                Path(data["hessian_checkpoint"]) if data.get("hessian_checkpoint") else None
+                Path(data["hessian_checkpoint"]) if data.get(
+                    "hessian_checkpoint") else None
             ),
             partial_output_file=(
-                Path(data["partial_output_file"]) if data.get("partial_output_file") else None
+                Path(data["partial_output_file"]) if data.get(
+                    "partial_output_file") else None
             ),
         )
 
@@ -2271,8 +2311,10 @@ Examples:
 """,
     )
 
-    parser.add_argument("model_path", help="Path to model directory or safetensors file")
-    parser.add_argument("output_path", help="Output directory for quantized model")
+    parser.add_argument(
+        "model_path", help="Path to model directory or safetensors file")
+    parser.add_argument(
+        "output_path", help="Output directory for quantized model")
     parser.add_argument(
         "--format",
         choices=["fp4", "int4", "nf4"],
@@ -2333,7 +2375,8 @@ Examples:
     )
 
     if not args.quiet:
-        print(f"\nReport saved to: {args.output_path}/quantization_report.json")
+        print(
+            f"\nReport saved to: {args.output_path}/quantization_report.json")
 
 
 # =============================================================================
@@ -2544,7 +2587,8 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         """
 
         model_path = Path(model_path)
-        output_path = Path(output_path) if output_path else model_path / "quantized"
+        output_path = Path(
+            output_path) if output_path else model_path / "quantized"
         output_path.mkdir(parents=True, exist_ok=True)
 
         if verbose:
