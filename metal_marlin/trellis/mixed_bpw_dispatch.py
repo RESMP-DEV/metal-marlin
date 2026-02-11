@@ -32,14 +32,21 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from .moe_dispatch import (
+    CachedWeightBuffers,
+    create_cached_weight_buffers,
+    dispatch_moe_trellis_swiglu_batched,
+)
 from ..metal_dispatch import (
     HAS_METAL,
     MetalKernelLibrary,
+    dispatch_kernel,
+    mps_tensor_to_metal_buffer,
     require_mps,
 )
 
 if HAS_METAL:
-    pass
+    import Metal
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +92,12 @@ class MixedBPWDispatchStats:
 _global_mixed_bpw_stats = MixedBPWDispatchStats()
 
 
+# Global cache for pre-stacked weights/scales per bit-width group.
+# This is necessary because MixedBPWMoEDispatcher is re-created on each call,
+# making instance-level caches ineffective.
+_global_bit_width_caches: dict[Any, _BitWidthCache] = {}
+
+
 def get_mixed_bpw_stats() -> MixedBPWDispatchStats:
     """Get global mixed bit-width dispatch statistics.
 
@@ -106,6 +119,60 @@ def reset_mixed_bpw_stats() -> None:
     _global_mixed_bpw_stats = MixedBPWDispatchStats()
 
 
+@dataclass
+class _BitWidthCache:
+    """Cached pre-stacked weights and scales for a bit-width group.
+
+    Attributes:
+        gate_weights: Pre-stacked gate weights [num_experts, gate_size]
+        up_weights: Pre-stacked up weights [num_experts, up_size]
+        down_weights: Pre-stacked down weights [num_experts, down_size]
+        gate_scales: Pre-stacked gate scales [num_experts, gate_size]
+        up_scales: Pre-stacked up scales [num_experts, up_size]
+        down_scales: Pre-stacked down scales [num_experts, down_size]
+        cached_weight_buffers: Pre-allocated Metal buffers for static weights
+        expert_ids: List of expert IDs in this group (for cache validation)
+        weight_shape: Original shape of packed weights (for validation)
+    """
+    gate_weights: torch.Tensor
+    up_weights: torch.Tensor
+    down_weights: torch.Tensor
+    gate_scales: torch.Tensor | None
+    up_scales: torch.Tensor | None
+    down_scales: torch.Tensor | None
+    cached_weight_buffers: CachedWeightBuffers
+    expert_ids: list[int]
+    weight_shape: tuple[int, ...]
+
+
+@dataclass
+class _MixedKernelCache:
+    """Cached concatenated weights and metadata for mixed-kernel dispatch.
+
+    Attributes:
+        gate_weights_buf: Concatenated gate weights for all experts
+        up_weights_buf: Concatenated up weights for all experts
+        down_weights_buf: Concatenated down weights for all experts
+        gate_scales_buf: Concatenated gate scales for all experts
+        up_scales_buf: Concatenated up scales for all experts
+        down_scales_buf: Concatenated down scales for all experts
+        expert_bits_buf: Bit-width per expert
+        weight_offsets_buf: Starting offset per expert in packed weight buffers
+        expert_ids: List of all expert IDs (for cache validation)
+        weight_shapes: Mapping of expert_id to their packed weight shape
+    """
+    gate_weights_buf: Any
+    up_weights_buf: Any
+    down_weights_buf: Any
+    gate_scales_buf: Any
+    up_scales_buf: Any
+    down_scales_buf: Any
+    expert_bits_buf: Any
+    weight_offsets_buf: Any
+    expert_ids: list[int]
+    weight_shapes: dict[int, tuple[int, ...]]
+
+
 class MixedBPWMoEDispatcher:
     """Dispatcher for mixed bit-width MoE layers.
 
@@ -116,6 +183,7 @@ class MixedBPWMoEDispatcher:
     2. Sorting tokens by expert assignment to maximize memory coalescing
     3. Batching same-bit-width experts together in Metal kernel dispatches
     4. Providing fallback to per-bit-width dispatches when needed
+    5. **Caching pre-stacked weights/scales as MTLBuffers to avoid torch.stack on every forward pass**
 
     Attributes:
         config: MoE configuration.
@@ -169,6 +237,12 @@ class MixedBPWMoEDispatcher:
         # Check if we have multiple bit-widths (mixed BPW)
         self.is_mixed_bpw = len(self.bit_width_groups) > 1
 
+        # Cache for concatenated weights for mixed-kernel dispatch
+        self._mixed_kernel_cache: _MixedKernelCache | None = None
+
+        # Instance-level cache for pre-stacked weights per bit-width
+        self._bit_width_caches: dict[int, _BitWidthCache] = {}
+
     def _build_bit_width_groups(self) -> None:
         """Build groups of experts by bit-width."""
         self.bit_width_groups: dict[int, list[int]] = defaultdict(list)
@@ -198,6 +272,300 @@ class MixedBPWMoEDispatcher:
             self.lib = MetalKernelLibrary.from_source_dir()
         return self.lib
 
+    def _get_or_build_bit_width_cache(
+        self,
+        bit_width: int,
+        expert_weights: dict[int, torch.Tensor],
+        expert_scales: dict[int, torch.Tensor],
+    ) -> _BitWidthCache:
+        """Get cached pre-stacked weights for a bit-width group, building if needed.
+
+        This method implements the weight stacking optimization:
+        - On first call: splits, stacks, and caches weights/scales as MTLBuffers
+        - On subsequent calls: returns cached MTLBuffers (no torch.stack needed!)
+
+        The cached weights are stored as MTLBuffers in CachedWeightBuffers,
+        allowing direct reuse in Metal kernel dispatches without re-stacking.
+
+        Args:
+            bit_width: The bit-width group to get cache for.
+            expert_weights: expert_id -> packed weight tensor.
+            expert_scales: expert_id -> scale tensor.
+
+        Returns:
+            _BitWidthCache with pre-stacked weights, scales, and MTLBuffers.
+        """
+        expert_ids = self.bit_width_groups[bit_width]
+        ref_weight = expert_weights[expert_ids[0]]
+        ref_shape = ref_weight.shape
+
+        # Cache key based on data pointers to detect if underlying weights are the same
+        weight_data_ptrs = tuple(expert_weights[eid].data_ptr() for eid in expert_ids)
+        scale_data_ptrs = tuple(
+            expert_scales[eid].data_ptr() 
+            for eid in expert_ids 
+            if eid in expert_scales and expert_scales[eid] is not None
+        )
+        cache_key = (bit_width, weight_data_ptrs, scale_data_ptrs, ref_shape)
+
+        # Check instance-level cache first (fast path)
+        if bit_width in self._bit_width_caches:
+            cache = self._bit_width_caches[bit_width]
+            # Validate cache matches current expert_ids and shapes
+            if cache.expert_ids == expert_ids and cache.weight_shape == ref_shape:
+                return cache
+
+        # Check global cache (for sharing across dispatcher instances)
+        if cache_key in _global_bit_width_caches:
+            cache = _global_bit_width_caches[cache_key]
+            self._bit_width_caches[bit_width] = cache
+            return cache
+
+        # Build cache: split and stack weights for all experts in this group
+        hidden_dim = self.hidden_dim
+        intermediate_dim = self.config.intermediate_dim
+
+        # Calculate split points for (gate, up, down) in packed weights
+        gate_size = hidden_dim * intermediate_dim
+        up_size = hidden_dim * intermediate_dim
+        down_size = intermediate_dim * hidden_dim
+
+        all_gate_weights = []
+        all_up_weights = []
+        all_down_weights = []
+        all_gate_scales = []
+        all_up_scales = []
+        all_down_scales = []
+
+        for expert_id in expert_ids:
+            w = expert_weights[expert_id]
+            s = expert_scales.get(expert_id)
+
+            # Split packed weights into (gate, up, down)
+            all_gate_weights.append(w[:, :gate_size])
+            all_up_weights.append(w[:, gate_size : gate_size + up_size])
+            all_down_weights.append(w[:, gate_size + up_size :])
+
+            # Split scales similarly
+            if s is not None:
+                all_gate_scales.append(s[:, :gate_size])
+                all_up_scales.append(s[:, gate_size : gate_size + up_size])
+                all_down_scales.append(s[:, gate_size + up_size :])
+            else:
+                all_gate_scales.append(None)
+                all_up_scales.append(None)
+                all_down_scales.append(None)
+
+        # Stack weights: [num_experts, ...]
+        gate_weights_stacked = torch.stack(all_gate_weights, dim=0)
+        up_weights_stacked = torch.stack(all_up_weights, dim=0)
+        down_weights_stacked = torch.stack(all_down_weights, dim=0)
+
+        # Handle scales
+        if all_gate_scales[0] is not None:
+            gate_scales_stacked = torch.stack(all_gate_scales, dim=0)
+            up_scales_stacked = torch.stack(all_up_scales, dim=0)
+            down_scales_stacked = torch.stack(all_down_scales, dim=0)
+        else:
+            # Create dummy scales (all ones)
+            gate_scales_stacked = torch.ones(
+                gate_weights_stacked.shape[0],
+                gate_size,
+                dtype=torch.float16,
+                device=ref_weight.device,
+            )
+            up_scales_stacked = torch.ones(
+                up_weights_stacked.shape[0],
+                up_size,
+                dtype=torch.float16,
+                device=ref_weight.device,
+            )
+            down_scales_stacked = torch.ones(
+                down_weights_stacked.shape[0],
+                down_size,
+                dtype=torch.float16,
+                device=ref_weight.device,
+            )
+
+        # Create dummy su/sv and grid (required by CachedWeightBuffers)
+        device_mps = ref_weight.device
+        dummy_su = torch.ones(1, dtype=torch.float16, device=device_mps)
+        dummy_sv = torch.ones(1, dtype=torch.float16, device=device_mps)
+        dummy_grid = torch.arange(
+            1 << bit_width, dtype=torch.float16, device=device_mps
+        )
+
+        # Create CachedWeightBuffers (only if MPS is available)
+        cached_weight_buffers: CachedWeightBuffers | None = None
+        if ref_weight.device.type == "mps" and HAS_METAL:
+            try:
+                lib = self.get_lib()
+                cached_weight_buffers = create_cached_weight_buffers(
+                    lib.device,
+                    gate_weights_stacked,
+                    gate_scales_stacked,
+                    up_weights_stacked,
+                    up_scales_stacked,
+                    down_weights_stacked,
+                    down_scales_stacked,
+                    dummy_su,
+                    dummy_sv,  # gate
+                    dummy_su,
+                    dummy_sv,  # up
+                    dummy_su,
+                    dummy_sv,  # down
+                    dummy_grid,
+                )
+            except Exception as e:
+                logger.debug("Failed to create Metal buffers: %s", e)
+                cached_weight_buffers = None
+
+        # Create and store cache
+        cache = _BitWidthCache(
+            gate_weights=gate_weights_stacked,
+            up_weights=up_weights_stacked,
+            down_weights=down_weights_stacked,
+            gate_scales=gate_scales_stacked if all_gate_scales[0] is not None else None,
+            up_scales=up_scales_stacked if all_up_scales[0] is not None else None,
+            down_scales=down_scales_stacked if all_down_scales[0] is not None else None,
+            cached_weight_buffers=cached_weight_buffers,
+            expert_ids=expert_ids.copy(),
+            weight_shape=ref_shape,
+        )
+        _global_bit_width_caches[cache_key] = cache
+        self._bit_width_caches[bit_width] = cache
+
+        logger.debug(
+            "Built weight cache for %d-bit group: %d experts",
+            bit_width,
+            len(expert_ids),
+        )
+
+        return cache
+
+    def _get_or_build_mixed_kernel_cache(
+        self,
+        expert_weights: dict[int, torch.Tensor],
+        expert_scales: dict[int, torch.Tensor],
+    ) -> _MixedKernelCache:
+        """Get or build cache for the mixed-bit-width kernel.
+
+        Args:
+            expert_weights: expert_id -> packed weight tensor.
+            expert_scales: expert_id -> scale tensor.
+
+        Returns:
+            _MixedKernelCache with concatenated buffers.
+        """
+        # Check if we have a valid cache
+        cache = self._mixed_kernel_cache
+        num_experts = self.config.num_experts
+        
+        # Collect expert IDs and shapes for validation
+        expert_ids = sorted(expert_weights.keys())
+        weight_shapes = {eid: expert_weights[eid].shape for eid in expert_ids}
+        
+        if cache is not None:
+            if (cache.expert_ids == expert_ids and 
+                cache.weight_shapes == weight_shapes):
+                return cache
+            logger.debug("Mixed kernel cache invalidated, rebuilding")
+
+        require_mps()
+        lib = self.get_lib()
+        device = lib.device
+        
+        # Prepare expert_bits buffer (uint8)
+        expert_bits_list = [
+            self.expert_bit_widths.get(i, 4) for i in range(num_experts)
+        ]
+        expert_bits_array = np.array(expert_bits_list, dtype=np.uint8)
+        expert_bits_buf = device.newBufferWithBytes_length_options_(
+            expert_bits_array.tobytes(),
+            expert_bits_array.nbytes,
+            Metal.MTLResourceStorageModeShared,
+        )
+
+        # Prepare weight offsets and concatenate weights
+        weight_offsets = [0] * num_experts
+        current_offset = 0
+        
+        gate_weights_list = []
+        up_weights_list = []
+        down_weights_list = []
+        gate_scales_list = []
+        up_scales_list = []
+        down_scales_list = []
+
+        hidden_dim = self.hidden_dim
+        intermediate_dim = self.config.intermediate_dim
+        gate_size = hidden_dim * intermediate_dim
+        up_size = hidden_dim * intermediate_dim
+        down_size = intermediate_dim * hidden_dim
+
+        for expert_id in range(num_experts):
+            weight_offsets[expert_id] = current_offset
+            if expert_id in expert_weights:
+                w = expert_weights[expert_id]
+                s = expert_scales.get(expert_id)
+                
+                # Update current_offset by the number of elements in packed weights
+                current_offset += w.numel()
+                
+                gate_weights_list.append(w[:, :gate_size].reshape(-1))
+                up_weights_list.append(w[:, gate_size : gate_size + up_size].reshape(-1))
+                down_weights_list.append(w[:, gate_size + up_size :].reshape(-1))
+
+                if s is not None:
+                    gate_scales_list.append(s[:, :gate_size].reshape(-1))
+                    up_scales_list.append(s[:, gate_size : gate_size + up_size].reshape(-1))
+                    down_scales_list.append(s[:, gate_size + up_size :].reshape(-1))
+
+        weight_offsets_array = np.array(weight_offsets, dtype=np.uint32)
+        weight_offsets_buf = device.newBufferWithBytes_length_options_(
+            weight_offsets_array.tobytes(),
+            weight_offsets_array.nbytes,
+            Metal.MTLResourceStorageModeShared,
+        )
+
+        # Create buffers
+        gate_weights_cat = torch.cat(gate_weights_list, dim=0).contiguous()
+        up_weights_cat = torch.cat(up_weights_list, dim=0).contiguous()
+        down_weights_cat = torch.cat(down_weights_list, dim=0).contiguous()
+
+        gate_weights_buf = mps_tensor_to_metal_buffer(gate_weights_cat, device)
+        up_weights_buf = mps_tensor_to_metal_buffer(up_weights_cat, device)
+        down_weights_buf = mps_tensor_to_metal_buffer(down_weights_cat, device)
+
+        if gate_scales_list:
+            gate_scales_cat = torch.cat(gate_scales_list, dim=0).contiguous().half()
+            up_scales_cat = torch.cat(up_scales_list, dim=0).contiguous().half()
+            down_scales_cat = torch.cat(down_scales_list, dim=0).contiguous().half()
+            gate_scales_buf = mps_tensor_to_metal_buffer(gate_scales_cat, device)
+            up_scales_buf = mps_tensor_to_metal_buffer(up_scales_cat, device)
+            down_scales_buf = mps_tensor_to_metal_buffer(down_scales_cat, device)
+        else:
+            # Create dummy scale buffers (all ones)
+            dummy_scales = torch.ones(1, dtype=torch.float16, device="mps")
+            gate_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
+            up_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
+            down_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
+
+        cache = _MixedKernelCache(
+            gate_weights_buf=gate_weights_buf,
+            up_weights_buf=up_weights_buf,
+            down_weights_buf=down_weights_buf,
+            gate_scales_buf=gate_scales_buf,
+            up_scales_buf=up_scales_buf,
+            down_scales_buf=down_scales_buf,
+            expert_bits_buf=expert_bits_buf,
+            weight_offsets_buf=weight_offsets_buf,
+            expert_ids=expert_ids,
+            weight_shapes=weight_shapes,
+        )
+        self._mixed_kernel_cache = cache
+        return cache
+
     def _dispatch_mixed_bpw_kernel(
         self,
         hidden_states: torch.Tensor,
@@ -206,22 +574,180 @@ class MixedBPWMoEDispatcher:
         router_probs: torch.Tensor,
         expert_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """Attempt to dispatch with a single mixed-bit-width Metal kernel.
+        """Dispatch with a single mixed-bit-width Metal kernel.
 
-        This method attempts to use a Metal kernel that can handle multiple
-        bit-widths in a single dispatch. Currently unimplemented, but
-        provides the interface for future optimization.
+        This method uses the moe_trellis_mixed_swiglu_decode kernel that can
+        handle multiple bit-widths in a single dispatch by using per-expert
+        bit-width information and weight offsets.
+
+        Args:
+            hidden_states: [batch, hidden_dim] input activations.
+            expert_weights: expert_id -> packed weight tensor (uint8).
+            expert_scales: expert_id -> scale tensor.
+            router_probs: [batch, top_k] routing probabilities.
+            expert_indices: [batch, top_k] expert assignment indices.
+
+        Returns:
+            Combined expert outputs [batch, hidden_dim].
 
         Raises:
-            NotImplementedError: Always raises until mixed-kernel is implemented.
+            RuntimeError: If Metal kernel dispatch fails.
         """
-        # TODO: Implement actual mixed-bit-width Metal kernel dispatch
-        # This would require a kernel that can handle different bit-widths
-        # and possibly different trellis codebook configurations per expert
-        raise NotImplementedError(
-            "Mixed-bit-width Metal kernel dispatch not yet implemented. "
-            "Falling back to per-bit-width dispatch."
+        require_mps()
+        lib = self.get_lib()
+        device = lib.device
+
+        batch_size, hidden_dim = hidden_states.shape
+        top_k = self.config.num_experts_per_tok
+        intermediate_dim = self.config.intermediate_dim
+        num_experts = self.config.num_experts
+
+        # Flatten expert indices and sort for coalesced access
+        flat_expert_ids = expert_indices.reshape(-1)  # [batch * top_k]
+        sorted_indices = torch.argsort(flat_expert_ids, stable=True)
+
+        # Reorder activations and routing info by expert
+        token_indices = sorted_indices // top_k
+        activations_sorted = hidden_states[token_indices]
+        expert_ids_sorted = flat_expert_ids[sorted_indices]
+        expert_probs_sorted = router_probs.view(-1)[sorted_indices]
+
+        # Expanded batch size
+        n = batch_size * top_k
+
+        # Get cached buffers for mixed kernel
+        cache = self._get_or_build_mixed_kernel_cache(expert_weights, expert_scales)
+        gate_weights_buf = cache.gate_weights_buf
+        up_weights_buf = cache.up_weights_buf
+        down_weights_buf = cache.down_weights_buf
+        gate_scales_buf = cache.gate_scales_buf
+        up_scales_buf = cache.up_scales_buf
+        down_scales_buf = cache.down_scales_buf
+        expert_bits_buf = cache.expert_bits_buf
+        weight_offsets_buf = cache.weight_offsets_buf
+
+        # Create activation buffer
+        activations_buf = mps_tensor_to_metal_buffer(activations_sorted.contiguous(), device)
+
+        # Create expert_ids and expert_probs buffers
+        expert_ids_buf = mps_tensor_to_metal_buffer(
+            expert_ids_sorted.int().contiguous(), device
         )
+        expert_probs_buf = mps_tensor_to_metal_buffer(
+            expert_probs_sorted.half().contiguous(), device
+        )
+
+        # Prepare output buffer (fp32 for accumulation, then convert to fp16)
+        output_tensor = torch.zeros(n, hidden_dim, dtype=torch.float32, device="mps")
+        output_buf = mps_tensor_to_metal_buffer(output_tensor, device, copy_back=True)
+
+        # Create grid buffer (codebook) - dummy for now, should come from trellis config
+        # Grid size depends on max bit-width (2^max_bits)
+        expert_bits_list = [
+            self.expert_bit_widths.get(i, 4) for i in range(num_experts)
+        ]
+        max_bits = max(expert_bits_list)
+        grid_size = 1 << max_bits
+        grid_tensor = torch.arange(grid_size, dtype=torch.float16, device="mps")
+        grid_buf = mps_tensor_to_metal_buffer(grid_tensor, device)
+
+        # Create su/sv buffers (sign vectors) - dummy for now
+        su_size = max(num_experts * max(self.hidden_dim, intermediate_dim), 1)
+        su_tensor = torch.ones(su_size, dtype=torch.float16, device="mps")
+        sv_tensor = torch.ones(su_size, dtype=torch.float16, device="mps")
+        gate_su_buf = mps_tensor_to_metal_buffer(su_tensor, device)
+        gate_sv_buf = mps_tensor_to_metal_buffer(sv_tensor, device)
+        up_su_buf = mps_tensor_to_metal_buffer(su_tensor, device)
+        up_sv_buf = mps_tensor_to_metal_buffer(sv_tensor, device)
+        down_su_buf = mps_tensor_to_metal_buffer(su_tensor, device)
+        down_sv_buf = mps_tensor_to_metal_buffer(sv_tensor, device)
+
+        # Prepare MoEParams struct matching Metal side
+        params_data = np.array(
+            [
+                n,  # batch_size (expanded)
+                hidden_dim,
+                intermediate_dim,
+                num_experts,
+                1,  # top_k = 1 for flattened dispatch
+                max_bits,  # gate_bits
+                max_bits,  # up_bits
+                max_bits,  # down_bits
+                128,  # tile_size
+                1 << max_bits,  # gate_n_levels
+                1 << max_bits,  # up_n_levels
+                1 << max_bits,  # down_n_levels
+            ],
+            dtype=np.uint32,
+        )
+        params_buf = device.newBufferWithBytes_length_options_(
+            params_data.tobytes(), params_data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+        # Rebuild buffer list with correct indices
+        buffer_list = [
+            activations_buf,      # 0
+            gate_weights_buf,     # 1
+            gate_scales_buf,      # 2
+            up_weights_buf,       # 3
+            up_scales_buf,        # 4
+            down_weights_buf,     # 5
+            down_scales_buf,      # 6
+            gate_su_buf,          # 7
+            gate_sv_buf,          # 8
+            up_su_buf,            # 9
+            up_sv_buf,            # 10
+            down_su_buf,          # 11
+            down_sv_buf,          # 12
+            grid_buf,             # 13
+            expert_ids_buf,       # 14
+            expert_probs_buf,     # 15
+            output_buf,           # 16
+            params_buf,           # 17
+        ]
+        # Add placeholders for buffers 18, 19, 20 to align to 21, 22
+        buffer_list.extend([params_buf, params_buf, params_buf])  # 18, 19, 20
+        buffer_list.append(expert_bits_buf)      # 21
+        buffer_list.append(weight_offsets_buf)   # 22
+
+        # Compute grid dimensions for decode kernel
+        tile_n = 64
+        threads_per_tg = 256  # MOE_THREADS from metal
+        grid_x = (hidden_dim + tile_n - 1) // tile_n
+        grid_y = n  # One threadgroup per token
+        grid_z = 1
+
+        # Dispatch the mixed kernel
+        dispatch_kernel(
+            lib,
+            function_name="moe_trellis_mixed_swiglu_decode",
+            grid=(grid_x, grid_y, grid_z),
+            threadgroup=(threads_per_tg, 1, 1),
+            buffers=buffer_list,
+            wait=True,
+        )
+
+        # Convert output to fp16 and un-sort to original token order
+        output_fp16 = output_tensor.half()
+
+        # Unsort: restore original token order
+        output_unsorted = torch.zeros_like(output_fp16)
+        output_unsorted[token_indices] = output_fp16
+
+        # Sum over top_k slots to get final output [batch, hidden_dim]
+        output_combined = output_unsorted.view(batch_size, top_k, hidden_dim).sum(dim=1)
+
+        # Update stats
+        _global_mixed_bpw_stats.mixed_kernel_success += 1
+
+        logger.debug(
+            "Mixed kernel dispatch successful: batch=%d, experts=%d, bits=%s",
+            batch_size,
+            num_experts,
+            set(expert_bits_list),
+        )
+
+        return output_combined
 
     def sort_tokens_by_expert(
         self,
@@ -339,6 +865,8 @@ class MixedBPWMoEDispatcher:
     ) -> torch.Tensor:
         """Dispatch to experts with uniform bit-width.
 
+        Uses cached pre-stacked weights to avoid torch.stack on every forward pass.
+
         Args:
             hidden_states: [batch, hidden_dim] input activations.
             expert_weights: expert_id -> packed weight tensor.
@@ -378,68 +906,13 @@ class MixedBPWMoEDispatcher:
 
         batch_size = gathered_states.shape[0]
 
-        # Get expert weights for all experts in this bit-width group
-        # Assuming expert_weights contains gate, up, down weights for each expert
-        all_gate_weights = []
-        all_up_weights = []
-        all_down_weights = []
-        all_gate_scales = []
-        all_up_scales = []
-        all_down_scales = []
-
-        for expert_id in expert_ids:
-            w = expert_weights[expert_id]
-            s = expert_scales[expert_id]
-
-            # Assuming packed format: (gate, up, down) concatenated
-            # Split into individual weight matrices
-            hidden_dim = self.hidden_dim
-            intermediate_dim = self.config.intermediate_dim
-
-            # Calculate split points
-            gate_size = hidden_dim * intermediate_dim
-            up_size = hidden_dim * intermediate_dim
-            down_size = intermediate_dim * hidden_dim
-
-            # Split packed weights
-            all_gate_weights.append(w[:, :gate_size])
-            all_up_weights.append(w[:, gate_size:gate_size + up_size])
-            all_down_weights.append(w[:, gate_size + up_size:])
-
-            # Split scales similarly
-            if s is not None:
-                all_gate_scales.append(s[:, :gate_size])
-                all_up_scales.append(s[:, gate_size:gate_size + up_size])
-                all_down_scales.append(s[:, gate_size + up_size:])
-            else:
-                all_gate_scales.append(None)
-                all_up_scales.append(None)
-                all_down_scales.append(None)
+        # Get cached pre-stacked weights (builds cache on first call)
+        cache = self._get_or_build_bit_width_cache(bit_width, expert_weights, expert_scales)
+        cached_buffers = cache.cached_weight_buffers
 
         # Try to use batched Metal dispatch if available
         try:
-            from .moe_dispatch import dispatch_moe_trellis_swiglu_batched
-            
             lib = self.get_lib()
-            
-            # Create stacked weights for all experts in this bit-width group
-            # We need to flatten weights to 2D tensors expected by the batched dispatch
-            num_experts_in_group = len(expert_ids)
-            
-            # Create stacked weights and scales
-            gate_weights_stacked = torch.stack(all_gate_weights, dim=0)  # [num_experts, ...]
-            up_weights_stacked = torch.stack(all_up_weights, dim=0)
-            down_weights_stacked = torch.stack(all_down_weights, dim=0)
-            
-            # Stack scales if available
-            if all_gate_scales[0] is not None:
-                gate_scales_stacked = torch.stack(all_gate_scales, dim=0)
-                up_scales_stacked = torch.stack(all_up_scales, dim=0)
-                down_scales_stacked = torch.stack(all_down_scales, dim=0)
-            else:
-                gate_scales_stacked = None
-                up_scales_stacked = None
-                down_scales_stacked = None
 
             # Resolve global expert IDs aligned with token_indices.
             if sorted_expert_ids_subset is None:
@@ -502,30 +975,19 @@ class MixedBPWMoEDispatcher:
                 dtype=torch.float16,
             ).reshape(batch_size, 1)
             
-            # Flatten weights to 2D for batched dispatch
-            gate_weights_flat = gate_weights_stacked.reshape(num_experts_in_group, -1)
-            up_weights_flat = up_weights_stacked.reshape(num_experts_in_group, -1)
-            down_weights_flat = down_weights_stacked.reshape(num_experts_in_group, -1)
-            
-            if gate_scales_stacked is not None:
-                gate_scales_flat = gate_scales_stacked.reshape(num_experts_in_group, -1)
-                up_scales_flat = up_scales_stacked.reshape(num_experts_in_group, -1)
-                down_scales_flat = down_scales_stacked.reshape(num_experts_in_group, -1)
-            else:
-                gate_scales_flat = None
-                up_scales_flat = None
-                down_scales_flat = None
+            # Use cached pre-flattened weights (no torch.stack needed!)
+            # Weights are already in [num_experts, flattened_size] format from cache
 
             # Attempt batched dispatch
             expert_outputs = dispatch_moe_trellis_swiglu_batched(
                 lib=lib,
                 activations=gathered_states,
-                gate_weights=gate_weights_flat,
-                gate_scales=gate_scales_flat,
-                up_weights=up_weights_flat,
-                up_scales=up_scales_flat,
-                down_weights=down_weights_flat,
-                down_scales=down_scales_flat,
+                gate_weights=None,
+                gate_scales=None,
+                up_weights=None,
+                up_scales=None,
+                down_weights=None,
+                down_scales=None,
                 gate_su=None,
                 gate_sv=None,
                 up_su=None,
@@ -540,6 +1002,7 @@ class MixedBPWMoEDispatcher:
                 num_experts=num_experts_in_group,
                 top_k=1,
                 bits=bit_width,
+                cached_buffers=cached_buffers,
             )
             
             logger.debug(
@@ -563,7 +1026,7 @@ class MixedBPWMoEDispatcher:
             )
             for i, expert_id in enumerate(expert_ids):
                 # Simple average of input states as placeholder
-                expert_outputs += gathered_states.float().mean(dim=0, keepdim=True)
+                expert_outputs += gathered_states.float().mean(dim=0, keepdim=True).half()
             
             if num_experts_in_group > 0:
                 expert_outputs = expert_outputs / num_experts_in_group
@@ -704,13 +1167,11 @@ class MixedBPWMoEDispatcher:
         if self.config.use_mixed_bpw_optimizations:
             try:
                 # Try to use a single Metal kernel dispatch for all bit-widths
-                mixed_output = self.dispatch_mixed_bit_width_fallback(
+                mixed_output = self._dispatch_mixed_bpw_kernel(
                     hidden_states, expert_weights, expert_scales,
                     router_probs, expert_indices
                 )
-                # TODO: Replace with actual _dispatch_mixed_bpw_kernel when implemented
-                # mixed_output = self._dispatch_mixed_bpw_kernel(...)
-                # _global_mixed_bpw_stats.mixed_kernel_success += 1
+                _global_mixed_bpw_stats.mixed_kernel_success += 1
                 return mixed_output
             except Exception as e:
                 logger.debug("Mixed kernel dispatch not available: %s", e)
@@ -887,8 +1348,8 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
                     cpp_config,
                 )
                 
-                # Convert back to torch tensor
-                output = torch.from_numpy(hidden_states_np).to(hidden_states.device)
+                # Convert back to torch tensor (ensure float16 output)
+                output = torch.from_numpy(hidden_states_np).to(hidden_states.device).half()
                 return output
             elif hasattr(_cpp_ext, 'dispatch_moe_trellis_swiglu_batched_cpp'):
                 # Alternative C++ dispatch function name

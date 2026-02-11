@@ -712,6 +712,10 @@ class MLAKVCache:
         )
         self._scale_dtype = torch.float16 if self.dtype == torch.float16 else torch.float32
 
+        self.k_nope_cache: torch_typing.Tensor | None = None
+        self.v_cache: torch_typing.Tensor | None = None
+        self.decompressed_dims: tuple[int, int, int] | None = None
+
         self._allocate(self.max_seq_len)
 
     def __init__(
@@ -747,6 +751,39 @@ class MLAKVCache:
 
         # Call post-init for setup
         self.__post_init__()
+
+    def init_decompressed_cache(
+        self,
+        num_kv_heads: int,
+        qk_nope_head_dim: int,
+        v_head_dim: int,
+    ) -> None:
+        """Initialize caching for decompressed states to avoid re-projection."""
+        self.decompressed_dims = (num_kv_heads, qk_nope_head_dim, v_head_dim)
+        
+        # BHSD layout: [layers, batch, heads, seq, dim]
+        # We store layers in dim 0
+        k_shape = (
+            self.num_layers,
+            self.batch_size,
+            num_kv_heads,
+            self.max_seq_len,
+            qk_nope_head_dim,
+        )
+        v_shape = (
+            self.num_layers,
+            self.batch_size,
+            num_kv_heads,
+            self.max_seq_len,
+            v_head_dim,
+        )
+        
+        self.k_nope_cache = torch.zeros(
+            k_shape, dtype=self.dtype, device=self.device
+        )
+        self.v_cache = torch.zeros(
+            v_shape, dtype=self.dtype, device=self.device
+        )
 
     def _allocate(self, max_seq_len: int) -> None:
         """Allocate cache tensors in BSHD layout."""
@@ -800,6 +837,31 @@ class MLAKVCache:
         else:
             raise ValueError(
                 f"Unsupported quantize_mode: {self.quantize_mode}")
+        
+        # Allocate decompressed cache if enabled
+        if self.decompressed_dims is not None:
+            num_kv_heads, qk_nope_head_dim, v_head_dim = self.decompressed_dims
+            k_shape = (
+                self.num_layers,
+                self.batch_size,
+                num_kv_heads,
+                max_seq_len,
+                qk_nope_head_dim,
+            )
+            v_shape = (
+                self.num_layers,
+                self.batch_size,
+                num_kv_heads,
+                max_seq_len,
+                v_head_dim,
+            )
+            # We don't preserve data here as _allocate is usually called fresh or by _ensure_capacity which handles copy
+            self.k_nope_cache = torch.zeros(
+                k_shape, dtype=self.dtype, device=self.device
+            )
+            self.v_cache = torch.zeros(
+                v_shape, dtype=self.dtype, device=self.device
+            )
 
     def _ensure_capacity(self, required_len: int) -> None:
         """Grow cache if needed."""
@@ -815,12 +877,22 @@ class MLAKVCache:
 
         old_kv_cache = self.kv_cache
         old_kv_scales = self.kv_scales
+        
+        # Save old decompressed
+        old_k_nope = self.k_nope_cache
+        old_v = self.v_cache
 
         self._allocate(new_max)
 
         self.kv_cache[:, :, :old_max, :] = old_kv_cache
         if self.kv_scales is not None and old_kv_scales is not None:
             self.kv_scales[:, :, :old_max, :] = old_kv_scales
+            
+        # Restore decompressed
+        if self.k_nope_cache is not None and old_k_nope is not None:
+            self.k_nope_cache[..., :old_max, :] = old_k_nope
+        if self.v_cache is not None and old_v is not None:
+            self.v_cache[..., :old_max, :] = old_v
 
         self.max_seq_len = new_max
 
@@ -837,6 +909,65 @@ class MLAKVCache:
     def get_seq_len(self) -> int:
         """Get current sequence length (for backward compatibility)."""
         return self.seq_len
+
+    def update_decompressed(
+        self,
+        layer_idx: int,
+        k_nope_new: torch_typing.Tensor,
+        v_new: torch_typing.Tensor,
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Update decompressed cache with new tokens and return full sequence."""
+        if self.k_nope_cache is None or self.v_cache is None:
+            raise RuntimeError("Decompressed cache not initialized. Call init_decompressed_cache() first.")
+            
+        # k_nope_new: [batch, heads, seq, dim]
+        # v_new: [batch, heads, seq, dim]
+        
+        batch, heads, seq_len, _ = k_nope_new.shape
+        start = int(self._seq_lens[layer_idx, 0].item()) - seq_len # We assume seq_lens already updated by update_compressed
+        
+        # But wait, update_compressed updates seq_lens. 
+        # So if we call this AFTER update_compressed, start should be derived.
+        # Let's trust seq_len passed in match.
+        
+        # We actually need to know where to write.
+        # If this is called AFTER update_compressed, self._seq_lens is already advanced.
+        # So start = current_len - seq_len
+        
+        current_len = int(self._seq_lens[layer_idx, 0].item())
+        start = current_len - seq_len
+        end = current_len
+        
+        if start < 0:
+             # If seq_lens wasn't updated yet? 
+             # Let's assume this is called alongside update. 
+             # But if update_compressed was called, it advanced seq_lens.
+             pass
+             
+        self.k_nope_cache[layer_idx, :batch, :, start:end, :] = k_nope_new
+        self.v_cache[layer_idx, :batch, :, start:end, :] = v_new
+        
+        return (
+            self.k_nope_cache[layer_idx, :batch, :, :end, :],
+            self.v_cache[layer_idx, :batch, :, :end, :]
+        )
+
+    def get_decompressed(
+        self, 
+        layer_idx: int
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor] | None:
+        """Get full decompressed k_nope and v for a layer."""
+        if self.k_nope_cache is None or self.v_cache is None:
+            return None
+            
+        seq_len = int(self._seq_lens[layer_idx, 0].item())
+        if seq_len == 0:
+            return None
+            
+        return (
+            self.k_nope_cache[layer_idx, :, :, :seq_len, :],
+            self.v_cache[layer_idx, :, :, :seq_len, :]
+        )
 
     def update(
         self,

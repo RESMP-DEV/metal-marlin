@@ -678,6 +678,30 @@ def dispatch_gemm_trellis_decode(
     return output
 
 
+def dispatch_decode_gemv_trellis(
+    lib: MetalKernelLibrary,
+    x: torch.Tensor,           # [1, K]
+    packed_weights: torch.Tensor,
+    scales: torch.Tensor,
+    output: torch.Tensor,      # [1, N]
+    bits: int,
+    group_size: int,
+) -> None:
+    '''Optimized M=1 GEMV for decode.
+
+    Uses decode_gemv_fp4 kernel instead of gemm_trellis_packed_decode.
+    Better memory coalescing for vector-matrix multiply.
+    '''
+    K, N = x.shape[1], output.shape[1]
+
+    # Grid: one threadgroup per output column group
+    grid = ((N + 127) // 128, 1, 1)
+    threads = (128, 1, 1)  # 128 threads per TG
+
+    buffers = [x, packed_weights, scales, output]
+    lib.dispatch("decode_gemv_trellis", grid, threads, buffers, bits=bits)
+
+
 def dispatch_gemm_trellis_packed(
     lib: MetalKernelLibrary,
     A: torch.Tensor,

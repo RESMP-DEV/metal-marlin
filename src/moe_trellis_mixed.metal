@@ -186,6 +186,7 @@ inline void moe_trellis_mixed_impl(
     device float* output,
     constant MoEParams& p,
     device const uint8_t* expert_bits,
+    device const uint32_t* weight_offsets,
     uint3 tgid,
     uint thread_idx,
     threadgroup half (&A_tile)[MOE_TILE_K],
@@ -207,24 +208,10 @@ inline void moe_trellis_mixed_impl(
     const float prob = float(expert_probs[token_idx * p.top_k + slot]);
     const uint bit_width = expert_bits[expert_id];
 
-    // Expert size calculation
-    uint packed_bytes_per_tile = 0;
-    if (bit_width == 2) packed_bytes_per_tile = PACKED_BYTES_2BIT;
-    else if (bit_width == 3) packed_bytes_per_tile = PACKED_BYTES_3BIT;
-    else if (bit_width == 4) packed_bytes_per_tile = PACKED_BYTES_4BIT;
-    else packed_bytes_per_tile = PACKED_BYTES_8BIT;
-
-    uint num_tiles_k_gate = (p.hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
-    uint num_tiles_n_gate = (p.intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
-    uint gate_up_expert_size = num_tiles_k_gate * num_tiles_n_gate * packed_bytes_per_tile;
-
-    uint num_tiles_k_down = (p.intermediate_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
-    uint num_tiles_n_down = (p.hidden_dim + TRELLIS_TILE - 1) / TRELLIS_TILE;
-    uint down_expert_size = num_tiles_k_down * num_tiles_n_down * packed_bytes_per_tile;
-
-    device const uint8_t* gate_w = gate_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* up_w = up_weights + expert_id * gate_up_expert_size;
-    device const uint8_t* down_w = down_weights + expert_id * down_expert_size;
+    uint offset = weight_offsets[expert_id];
+    device const uint8_t* gate_w = gate_weights + offset;
+    device const uint8_t* up_w = up_weights + offset;
+    device const uint8_t* down_w = down_weights + offset;
 
     for (uint i = thread_idx; i < MOE_TILE_N; i += MOE_THREADS) {
         output_tile[i] = 0.0f;
@@ -354,6 +341,7 @@ inline void moe_trellis_mixed_impl(
     device float* output                 [[buffer(16)]], \
     constant MoEParams& p                [[buffer(17)]], \
     device const uint8_t* expert_bits    [[buffer(21)]], \
+    device const uint32_t* weight_offsets [[buffer(22)]], \
     uint3 tgid                           [[threadgroup_position_in_grid]], \
     uint thread_idx                      [[thread_index_in_threadgroup]]
 
@@ -368,7 +356,7 @@ kernel void moe_trellis_mixed_swiglu_decode(MOE_TRELLIS_MIXED_ARGS) {
     moe_trellis_mixed_impl<true>(
         activations, gate_weights, gate_scales, up_weights, up_scales, down_weights, down_scales,
         gate_su, gate_sv, up_su, up_sv, down_su, down_sv, grid, expert_ids, expert_probs,
-        output, p, expert_bits, tgid, thread_idx,
+        output, p, expert_bits, weight_offsets, tgid, thread_idx,
         A_tile, B_gate, B_up, B_down, swiglu_result, output_tile
     );
 }
@@ -384,7 +372,7 @@ kernel void moe_trellis_mixed_swiglu_prefill(MOE_TRELLIS_MIXED_ARGS) {
     moe_trellis_mixed_impl<true>(
         activations, gate_weights, gate_scales, up_weights, up_scales, down_weights, down_scales,
         gate_su, gate_sv, up_su, up_sv, down_su, down_sv, grid, expert_ids, expert_probs,
-        output, p, expert_bits, tgid, thread_idx,
+        output, p, expert_bits, weight_offsets, tgid, thread_idx,
         A_tile, B_gate, B_up, B_down, swiglu_result, output_tile
     );
 }
@@ -400,7 +388,7 @@ kernel void moe_trellis_mixed_swiglu(MOE_TRELLIS_MIXED_ARGS) {
     moe_trellis_mixed_impl<false>(
         activations, gate_weights, gate_scales, up_weights, up_scales, down_weights, down_scales,
         gate_su, gate_sv, up_su, up_sv, down_su, down_sv, grid, expert_ids, expert_probs,
-        output, p, expert_bits, tgid, thread_idx,
+        output, p, expert_bits, weight_offsets, tgid, thread_idx,
         A_tile, B_gate, B_up, B_down, swiglu_result, output_tile
     );
 }
@@ -416,7 +404,7 @@ kernel void moe_trellis_mixed_swiglu_large(MOE_TRELLIS_MIXED_ARGS) {
     moe_trellis_mixed_impl<false>(
         activations, gate_weights, gate_scales, up_weights, up_scales, down_weights, down_scales,
         gate_su, gate_sv, up_su, up_sv, down_su, down_sv, grid, expert_ids, expert_probs,
-        output, p, expert_bits, tgid, thread_idx,
+        output, p, expert_bits, weight_offsets, tgid, thread_idx,
         A_tile, B_gate, B_up, B_down, swiglu_result, output_tile
     );
 }

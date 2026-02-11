@@ -32,11 +32,27 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
-from .metal_dispatch import (HAS_METAL, HAS_MPS, HAS_TORCH, MetalKernelLibrary,
-                             dispatch_kernel, get_default_library,
-                             get_shader_source, mps_tensor_to_metal_buffer,
-                             require_mps)
+from .metal_dispatch import HAS_METAL, HAS_MPS, HAS_TORCH, MetalKernelLibrary
+from .metal_dispatch import dispatch_kernel as _dispatch_kernel_python
+from .metal_dispatch import (get_default_library, get_shader_source,
+                             mps_tensor_to_metal_buffer, require_mps)
 from .utils.padding import pad_torch_2d, round_up
+
+try:
+    from ._cpp_ext import dispatch_kernel as cpp_dispatch
+    HAS_CPP_EXT = True
+except ImportError:
+    HAS_CPP_EXT = False
+    cpp_dispatch = None
+
+
+def dispatch_kernel(
+    lib, function_name, grid, threadgroup, buffers, **kwargs
+):
+    # NOTE: C++ dispatch has a different API (expects MetalContext + precompiled pipeline)
+    # Always use Python path for kernel dispatch by function name
+    return _dispatch_kernel_python(lib, function_name, grid, threadgroup, buffers, **kwargs)
+
 
 if HAS_TORCH:
     import torch

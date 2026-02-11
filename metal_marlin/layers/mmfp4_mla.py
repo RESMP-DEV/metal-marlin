@@ -19,6 +19,7 @@ if HAS_TORCH and torch is not None:
     import torch.nn.functional as F
 
     from ..kv_cache import KVCache, MLAKVCache
+    from ..mla_fused import MLAAttentionParams, mla_fused_attention_decode
     from .mmfp4_linear import MMFP4Linear
 
     class _RotaryEmbedding(nn.Module):
@@ -141,6 +142,7 @@ if HAS_TORCH and torch is not None:
             rope_ratio: float = 1.0,
             use_fused_qkv: bool = False,
             use_paged_attention: bool = False,
+            use_fused_decode: bool = True,
         ):
             super().__init__()
             if num_heads <= 0 or num_kv_heads <= 0:
@@ -166,6 +168,7 @@ if HAS_TORCH and torch is not None:
             self.layer_idx = 0
             self.use_fused_qkv = use_fused_qkv
             self.use_paged_attention = use_paged_attention
+            self.use_fused_decode = use_fused_decode
             self._paged_adapter: Any = None
 
             # Helper to create dummy weights for MMFP4Linear
@@ -360,6 +363,120 @@ if HAS_TORCH and torch is not None:
             # Reshape to match standard attention output: [B, H, 1, v_head_dim]
             return attn_out.unsqueeze(2)
 
+        def _forward_fused_decode(
+            self,
+            x: torch.Tensor,
+            pos_q: torch.Tensor,
+            kv_cache: KVCache | None,
+        ) -> torch.Tensor:
+            """Fused decode path (batch=1, seq=1) using mla_fused_attention_decode."""
+            if self.use_fused_qkv:
+                raise RuntimeError(
+                    "Fused decode path requires split q/kv projections")
+            if not isinstance(kv_cache, MLAKVCache) and kv_cache is not None:
+                raise RuntimeError(
+                    "Fused decode path currently supports MLAKVCache only")
+
+            kv_compressed_new = self.kv_a_proj(x)
+            cached_kv = kv_cache.get(self.layer_idx) if isinstance(
+                kv_cache, MLAKVCache) else None
+
+            if cached_kv is None:
+                kv_full = kv_compressed_new
+            else:
+                if cached_kv.shape[0] != 1:
+                    raise RuntimeError(
+                        f"Fused decode expects batch_size=1 cache, got {cached_kv.shape[0]}"
+                    )
+                kv_full = torch.cat((cached_kv, kv_compressed_new), dim=1)
+
+            cache_len = int(kv_full.shape[1])
+            if cache_len <= 0:
+                raise RuntimeError("Fused decode requires non-empty KV cache")
+
+            # Fused kernel expects compressed cache tensors [cache_len, kv_lora_rank].
+            compressed_kv = kv_full[0, :, : self.kv_lora_rank].contiguous()
+            n_groups = (self.kv_lora_rank + self.kv_b_proj.group_size -
+                        1) // self.kv_b_proj.group_size
+            cache_scales = torch.ones(
+                (cache_len, n_groups),
+                dtype=torch.float16,
+                device=x.device,
+            )
+
+            def _kernel_layout(
+                linear: MMFP4Linear,
+            ) -> tuple[torch.Tensor, torch.Tensor]:
+                packed = linear.packed_weights
+                scales = linear.scales
+                if packed.device != x.device:
+                    packed = packed.to(x.device)
+                if scales.device != x.device or scales.dtype != torch.float16:
+                    scales = scales.to(device=x.device, dtype=torch.float16)
+                return packed.transpose(0, 1).contiguous(), scales.contiguous()
+
+            q_a_packed, q_a_scales = _kernel_layout(self.q_a_proj)
+            q_b_packed, q_b_scales = _kernel_layout(self.q_b_proj)
+            kv_a_packed, kv_a_scales = _kernel_layout(self.kv_a_proj)
+            kv_b_packed, kv_b_scales = _kernel_layout(self.kv_b_proj)
+            o_packed, o_scales = _kernel_layout(self.o_proj)
+
+            q_bias = self.q_b_proj.bias
+            if q_bias is not None:
+                q_bias = q_bias.to(device=x.device, dtype=torch.float16)
+
+            params = MLAAttentionParams(
+                batch=1,
+                seq_q=1,
+                seq_k=cache_len,
+                hidden_size=self.hidden_size,
+                num_heads=self.num_heads,
+                head_dim=self.qk_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                q_lora_rank=self.q_lora_rank,
+                rope_dim=self.qk_rope_head_dim,
+                scale=self.scale,
+                is_causal=True,
+                q_a_group_size=self.q_a_proj.group_size,
+                q_b_group_size=self.q_b_proj.group_size,
+                kv_a_group_size=self.kv_a_proj.group_size,
+                kv_b_group_size=self.kv_b_proj.group_size,
+                o_group_size=self.o_proj.group_size,
+                rope_theta=self.rotary_emb.base,
+                rope_ratio=self.rotary_emb.rope_ratio,
+                rope_base_seq_len=0,
+                cache_start_pos=int(pos_q[0, 0].item()),
+                cache_len=cache_len,
+                max_cache_len=max(
+                    cache_len,
+                    int(getattr(kv_cache, "max_seq_len", cache_len)),
+                ),
+                use_fused_q_proj=True,
+                use_fused_kv_proj=True,
+                fuse_rope_in_kv_a=True,
+                skip_kv_decompress=False,
+            )
+
+            return mla_fused_attention_decode(
+                hidden=x.to(torch.float16),
+                q_a_weights_packed=q_a_packed,
+                q_a_scales=q_a_scales,
+                q_b_weights_packed=q_b_packed,
+                q_b_scales=q_b_scales,
+                q_bias=q_bias,
+                kv_a_weights_packed=kv_a_packed,
+                kv_a_scales=kv_a_scales,
+                kv_b_weights_packed=kv_b_packed,
+                kv_b_scales=kv_b_scales,
+                k_cache=compressed_kv,
+                v_cache=compressed_kv,
+                k_scales=cache_scales,
+                v_scales=cache_scales,
+                o_weights_packed=o_packed,
+                o_scales=o_scales,
+                params=params,
+            )
+
         def forward(
             self,
             x: torch.Tensor,
@@ -378,6 +495,15 @@ if HAS_TORCH and torch is not None:
                 seq_len=seq_len,
                 device=x.device,
             )
+
+            if self.use_fused_decode and batch_size == 1 and seq_len == 1 and x.device.type == "mps":
+                try:
+                    fused_out = self._forward_fused_decode(x, pos_q, kv_cache)
+                    return fused_out.to(dtype=x.dtype)
+                except ImportError:
+                    pass  # Fall back to standard path
+                except Exception:
+                    pass  # Fall back to standard path on kernel failure
 
             # Query path
             if self.use_fused_qkv:

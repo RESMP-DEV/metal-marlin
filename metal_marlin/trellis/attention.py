@@ -30,6 +30,7 @@ from ..fused_attention_mps import fused_attention
 from .dispatch import dispatch_fused_qkv_trellis
 from ..kv_cache import TrellisKVCache
 from .linear import TrellisLinear
+from metal_marlin.mla_fused import create_glm_mla_params, mla_fused_attention_decode
 
 if TYPE_CHECKING:
     pass
@@ -113,9 +114,11 @@ class TrellisMLAttention(nn.Module):
         o_proj: TrellisLinear,
         q_a_layernorm: nn.Module | None = None,
         kv_a_layernorm: nn.Module | None = None,
+        use_fused_decode: bool = True,
     ):
         super().__init__()
         self.config = config
+        self.use_fused_decode = use_fused_decode
         self.q_a_proj = q_a_proj
         self.q_b_proj = q_b_proj
         self.kv_a_proj = kv_a_proj
@@ -158,6 +161,20 @@ class TrellisMLAttention(nn.Module):
 
         # GQA repeat factor (1 if num_heads == num_kv_heads)
         self.qkv_repeat_factor = self.num_heads // self.num_kv_heads
+
+        # At end of __init__, after all weights loaded:
+        if self.use_fused_decode:
+            try:
+                self._fused_params = create_glm_mla_params(
+                    q_a_weight=self.q_a_proj.weight,
+                    q_b_weight=self.q_b_proj.weight,
+                    kv_a_weight=self.kv_a_proj.weight,
+                    kv_b_weight=self.kv_b_proj.weight,
+                    o_proj_weight=self.o_proj.weight,
+                    config=config,
+                )
+            except Exception:
+                self._fused_params = None  # Fall back to unfused
 
     def _fused_qkv_forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused Q/KV projection for decode.
@@ -218,6 +235,16 @@ class TrellisMLAttention(nn.Module):
 
         # Optim for batch=1 decode: fuse q_a and kv_a projections
         is_decode = batch_size == 1 and seq_len == 1
+
+        # Fused decode path: single kernel for Q/KV proj + RoPE + attention + output proj
+        if is_decode and self.use_fused_decode and hasattr(self, '_fused_params'):
+            return mla_fused_attention_decode(
+                hidden_states=hidden_states,
+                kv_cache=kv_cache,
+                params=self._fused_params,
+                layer_idx=layer_idx,
+            )
+
         can_fuse = (
             is_decode and
             self.q_a_proj is not None and isinstance(self.q_a_proj, TrellisLinear) and
@@ -289,34 +316,62 @@ class TrellisMLAttention(nn.Module):
             )
             total_seq_len = compressed_kv_full.shape[1]
 
-            # Split full sequence into latent and rope components
-            k_latent_full, k_rope_full = torch.split(
+            # From the full compressed sequence, we only need the rope component.
+            # The latent component is not used because we perform incremental
+            # decompression of only the *new* tokens, not the full history.
+            _, k_rope_full = torch.split(
                 compressed_kv_full, [self.kv_lora_rank,
                                      self.qk_rope_head_dim], dim=-1
             )
 
-            # Apply layernorm to latent part (after retrieval from cache)
+            # Optimization for decode: cache the decompressed k_nope and v states.
+            # This avoids re-decompressing the entire KV history at each step,
+            # which would be an O(T^2) operation over the course of generation.
+            if hasattr(kv_cache, "init_decompressed_cache") and kv_cache.k_nope_cache is None:
+                # Initialize the cache for decompressed k_nope and v states.
+                # If this fails due to OOM, it will now raise an exception,
+                # preventing silent performance degradation from falling back
+                # to the slow O(T^2) legacy path.
+                kv_cache.init_decompressed_cache(
+                    num_kv_heads=self.num_kv_heads,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    v_head_dim=self.v_head_dim
+                )
+
+            # === Optimized Path: Decompress only NEW tokens ===
+            
+            # Split NEW tokens into latent and rope
+            k_latent_new, _ = torch.split(
+                compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            
+            # Apply layernorm to latent part
             if self.kv_a_layernorm is not None:
-                k_latent_full = self.kv_a_layernorm(k_latent_full)
-
-            # Decompress to get k_nope and V
-            kv_decompressed = self.kv_b_proj(
-                k_latent_full
-            )  # [batch, total_seq, num_kv_heads * (qk_nope + v)]
-
-            # Reshape: [batch, total_seq, num_kv_heads * (nope + v)] -> [batch, num_kv_heads, total_seq, nope + v]
-            kv_decompressed = kv_decompressed.view(
+                k_latent_new = self.kv_a_layernorm(k_latent_new)
+                
+            # Decompress ONLY new tokens
+            # [batch, seq_len_new, num_kv_heads * (qk_nope + v)]
+            kv_decompressed_new = self.kv_b_proj(k_latent_new)
+            
+            # Reshape: [batch, heads, seq, dim]
+            kv_decompressed_new = kv_decompressed_new.view(
                 batch_size,
-                total_seq_len,
+                seq_len, # This is the new seq len
                 self.num_kv_heads,
                 self.qk_nope_head_dim + self.v_head_dim,
             ).transpose(1, 2)
-
+            
             # Split into k_nope and V
-            k_nope, v = torch.split(
-                kv_decompressed, [self.qk_nope_head_dim,
-                                  self.v_head_dim], dim=-1
+            k_nope_new, v_new = torch.split(
+                kv_decompressed_new, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
+            
+            # Update decompressed cache and get the full sequence of k_nope and v
+            k_nope, v = kv_cache.update_decompressed(
+                layer_idx, k_nope_new, v_new
+            )
+            
+            # k_nope and v are now [batch, heads, total_seq, dim]
 
             # Reshape k_rope: [batch, total_seq, rope_dim] -> [batch, 1, total_seq, rope_dim]
             k_rope_for_attn = k_rope_full.view(

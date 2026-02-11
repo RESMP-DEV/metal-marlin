@@ -396,7 +396,7 @@ def main() -> int:
         if loaded is not None:
             bench_cfg = loaded
 
-    default_model = str(_ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4")
+    default_model = str(_ROOT / "models" / "GLM-4.7-Flash-Trellis-MM")
     model_path = _pick_str(
         args.model_path,
         ["MIXED_BPW_MODEL_PATH", "METAL_MARLIN_MODEL_PATH", "MODEL_PATH"],
