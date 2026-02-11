@@ -668,6 +668,175 @@ def main() -> int:
         "mr_gptq_layer_stream" if hessian_collection_mode == "layer_stream" else "mr_gptq_calibration"
     )
 
+    from metal_marlin.mr_gptq import HessianCollector
+
+    # Implementation of Extreme Streaming for low-RAM systems (30GB RAM / 24GB VRAM)
+    if hessian_collection_mode == "layer_stream" and system_ram_gb < 64.0:
+        if verbose:
+            print("\n" + "=" * 72)
+            print("ENTERING EXTREME STREAMING CALIBRATION (Low-RAM Optimization)")
+            print("=" * 72)
+            print("Collecting Hessians layer-by-layer without loading full model...")
+
+        checkpoint_dir = output_path / "checkpoints"
+        hessian_path = checkpoint_dir / "hessians"
+        hessian_path.mkdir(parents=True, exist_ok=True)
+
+        from metal_marlin.hf_loader import load_layer_weights, load_non_layer_weights
+        from transformers import AutoConfig, AutoModelForCausalLM
+        import torch.nn as nn
+        from accelerate import init_empty_weights
+
+        # Load config only
+        config = AutoConfig.from_pretrained(
+            str(model_path), trust_remote_code=True)
+
+        # Determine weight map for sharded models
+        index_path = model_path / "model.safetensors.index.json"
+        weight_map = None
+        if index_path.exists():
+            with open(index_path) as f:
+                weight_map = json.load(f).get("weight_map")
+
+        # 1. Process Embeddings and compute initial activations
+        if verbose:
+            print("Processing embeddings...")
+
+        embed_weights = load_non_layer_weights(model_path, "embed", weight_map)
+        # Find exact embedding key
+        embed_key = next((k for k in embed_weights.keys()
+                         if "embed" in k), "model.embed_tokens.weight")
+        embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        embed_tokens.weight.data.copy_(
+            torch.from_numpy(embed_weights[embed_key]))
+        embed_tokens.to(device="cuda", dtype=torch.bfloat16)
+        del embed_weights
+
+        # Pre-tokenize and embed all calibration samples
+        hidden_states_list = []
+        with torch.no_grad():
+            samples = list(calibration.samples)
+            for i in range(0, calibration_count, args.batch_size):
+                batch_texts = samples[i:i+args.batch_size]
+                inputs = tokenizer(
+                    batch_texts, return_tensors="pt", truncation=True,
+                    max_length=args.max_seq_len, padding=True
+                ).to("cuda")
+                hs = embed_tokens(inputs.input_ids)
+                # Keep on CPU for RAM management
+                hidden_states_list.append(hs.cpu())
+                if verbose and (i // args.batch_size + 1) % 10 == 0:
+                    batches_done = i // args.batch_size + 1
+                    total_batches = (calibration_count +
+                                     args.batch_size - 1) // args.batch_size
+                    print(
+                        f"  Embedded batch {batches_done}/{total_batches}...")
+
+        del embed_tokens
+        torch.cuda.empty_cache()
+        gc.collect()
+
+        # 2. Iterate layers and collect Hessians
+        num_target_layers = args.max_layers or NUM_LAYERS
+
+        # Get RoPE embeddings once
+        with init_empty_weights():
+            temp_model = AutoModelForCausalLM.from_config(
+                config, trust_remote_code=True)
+            rotary_emb = temp_model.model.rotary_emb.to_empty(device="cuda")
+            # Qwen3 RoPE usually doesn't have weights, just buffers that are initialized on moving
+
+        for layer_idx in range(num_target_layers):
+            safe_name_prefix = f"model_layers_{layer_idx}_"
+            # Check if all Hessians for this layer exist
+            check_pat = f"{safe_name_prefix}*"
+            if list(hessian_path.glob(check_pat)) and not args.force_calibration:
+                if verbose:
+                    print(f"Layer {layer_idx}: Hessians found in checkpoint.")
+
+            if verbose:
+                print(
+                    f"\nForward path + Hessian collection for Layer {layer_idx}/{num_target_layers}...")
+
+            # Load layer module
+            with init_empty_weights():
+                temp_model_layer = AutoModelForCausalLM.from_config(
+                    config, trust_remote_code=True)
+                try:
+                    layer_module = temp_model_layer.model.layers[layer_idx]
+                except AttributeError:
+                    layer_module = next(
+                        m for m in temp_model_layer.modules() if f".{layer_idx}" in str(m))
+
+            # Move to CUDA and populate weights
+            layer_module = layer_module.to_empty(device="cuda")
+            l_weights = load_layer_weights(model_path, layer_idx, weight_map)
+
+            # Map weights to module
+            sd = {}
+            for k, v in l_weights.items():
+                layer_part = f"layers.{layer_idx}."
+                short_k = k.split(layer_part)[-1] if layer_part in k else k
+                sd[short_k] = torch.from_numpy(v).to(
+                    device="cuda", dtype=torch.bfloat16)
+
+            layer_module.load_state_dict(sd, strict=False)
+            layer_module.eval()
+            del l_weights, sd
+
+            # Register collector hooks
+            collector = HessianCollector(
+                damp_ratio=args.percdamp,
+                accumulator_dtype=hessian_dtype,
+                # We are tracking a single layer, so we don't need global patterns.
+                # All Linear layers in this module are target layers.
+                layer_patterns=None
+            )
+            collector.register_hooks(layer_module)
+
+            # Apply layer and collect
+            new_hidden_states = []
+            with torch.no_grad():
+                for batch_idx, hs in enumerate(hidden_states_list):
+                    hs_cuda = hs.to("cuda", dtype=torch.bfloat16)
+                    seq_len = hs_cuda.shape[1]
+
+                    # Compute position embeddings (RoPE)
+                    position_ids = torch.arange(
+                        seq_len, device="cuda").unsqueeze(0)
+                    # Qwen3 rotary_emb usually returns (cos, sin)
+                    pos_emb = rotary_emb(hs_cuda, position_ids)
+
+                    # Forward pass
+                    # Signature: (hidden_states, position_embeddings, attention_mask=None, ...)
+                    output = layer_module(hs_cuda, pos_emb)
+
+                    if isinstance(output, tuple):
+                        out_hs = output[0]
+                    else:
+                        out_hs = output
+
+                    new_hidden_states.append(out_hs.cpu())
+                    if verbose and (batch_idx + 1) % 20 == 0:
+                        print(
+                            f"  Processed batch {batch_idx + 1}/{len(hidden_states_list)}...")
+
+            # Save Hessians for this layer
+            collector.save_checkpoint(
+                hessian_path, prefix=f"model.layers.{layer_idx}.")
+
+            # Cleanup
+            hidden_states_list = new_hidden_states
+            collector.remove_hooks()
+            del layer_module, collector, temp_model_layer
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        del rotary_emb
+        if verbose:
+            print(
+                "\nExpert-level Hessian collection complete. Transitions to Quantization phase.")
+
     try:
         # If max_layers is passed, we construct a filter pattern or stop the loop.
         # Since AcceleratedMRGPTQQuantizer processes all st_files, we use
@@ -694,13 +863,13 @@ def main() -> int:
             hessian_dtype=hessian_dtype,
             hessian_exclude_patterns=args.hessian_exclude_pattern,
             hessian_collection_mode=hessian_collection_mode,
-            # For 80B model, always use float16 and low-memory settings
-            model_load_dtype="float16",
+            # For 80B model, use bfloat16 as it's the model's native dtype
+            model_load_dtype="bfloat16",
             model_device_map="auto",
             model_low_cpu_mem_usage=True,
-            model_offload_dir=(
-                output_path / "offload_model" if hessian_collection_mode == "layer_stream" else None
-            ),
+            # DISABLE offload folder as we've already collected Hessians streaming
+            # or we want to avoid disk pressure during the weight-only quantization phase.
+            model_offload_dir=None,
             resume=not args.no_resume,
             verbose=verbose,
         )
