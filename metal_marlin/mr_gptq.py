@@ -1423,9 +1423,13 @@ class MRGPTQQuantizer:
                         return (0, int(parts[2]))
                 return (1, group_name)
 
-            def _hessian_npz_path(layer_name: str) -> Path:
+            def _hessian_checkpoint_path(layer_name: str) -> Path:
                 safe_name = layer_name.replace("/", "_").replace(".", "_")
-                return hessian_checkpoint_path / f"{safe_name}.npz"
+                npz = hessian_checkpoint_path / f"{safe_name}.npz"
+                if npz.exists():
+                    return npz
+                pt = hessian_checkpoint_path / f"{safe_name}.pt"
+                return pt
 
             groups = sorted(group_to_layers.keys(), key=_group_sort_key)
             total_groups = len(groups)
@@ -1440,7 +1444,7 @@ class MRGPTQQuantizer:
             for idx, group in enumerate(groups, start=1):
                 layers = group_to_layers[group]
                 done_layers = sum(
-                    1 for ln in layers if _hessian_npz_path(ln).exists())
+                    1 for ln in layers if _hessian_checkpoint_path(ln).exists())
 
                 if resume and done_layers == len(layers):
                     if verbose:
@@ -1515,21 +1519,32 @@ class MRGPTQQuantizer:
 
         hessian_cache: dict[str, NDArray[np.float32]] = {}
 
-        def _hessian_npz_path(layer_name: str) -> Path:
+        def _hessian_checkpoint_path(layer_name: str) -> Path:
             safe_name = layer_name.replace("/", "_").replace(".", "_")
-            return hessian_checkpoint_path / f"{safe_name}.npz"
+            npz = hessian_checkpoint_path / f"{safe_name}.npz"
+            if npz.exists():
+                return npz
+            pt = hessian_checkpoint_path / f"{safe_name}.pt"
+            return pt
 
         def _load_hessian_from_checkpoint(layer_name: str) -> NDArray[np.float32] | None:
             if layer_name in hessian_cache:
                 return hessian_cache[layer_name]
 
-            npz_path = _hessian_npz_path(layer_name)
-            if not npz_path.exists():
+            ckpt_path = _hessian_checkpoint_path(layer_name)
+            if not ckpt_path.exists():
                 return None
 
-            with np.load(npz_path, allow_pickle=True) as data:
-                H_sum = data["H_sum"]
-                n_samples = int(data["n_samples"][0])
+            if ckpt_path.suffix == ".npz":
+                with np.load(ckpt_path, allow_pickle=True) as data:
+                    H_sum = data["H_sum"]
+                    n_samples = int(data["n_samples"][0])
+            else:
+                # Load torch .pt
+                data = torch.load(
+                    ckpt_path, map_location="cpu", weights_only=True)
+                H_sum = data["H_sum"].numpy()
+                n_samples = data["n_samples"]
 
             if n_samples <= 0:
                 return None
@@ -2057,6 +2072,32 @@ class HessianCollector:
 
         return results
 
+    def save_checkpoint(self, path: Path | str, prefix: str = "") -> None:
+        """Save collected Hessians to disk.
+
+        Args:
+            path: Directory to save Hessian files (.pt).
+            prefix: Optional prefix for filenames.
+        """
+        import torch
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+
+        for name, (H_sum, n_samples) in self._hessians.items():
+            # Use safe filenames
+            safe_name = name.replace(".", "_")
+            if prefix:
+                filename = f"{prefix}{safe_name}.pt"
+            else:
+                filename = f"{safe_name}.pt"
+
+            data = {
+                "H_sum": torch.from_numpy(H_sum),
+                "n_samples": n_samples,
+                "accumulator_dtype": str(self.accumulator_dtype),
+            }
+            torch.save(data, path / filename)
+
     def get_single_hessian(self, layer_name: str, apply_damping: bool = True) -> HessianInfo | None:
         """Get Hessian for a single layer.
 
@@ -2099,39 +2140,6 @@ class HessianCollector:
                          dtype=self.accumulator_dtype),
                 0,
             )
-
-    def save_checkpoint(self, path: Path) -> None:
-        """Save accumulated Hessians to disk for resume capability."""
-        path = Path(path)
-        path.mkdir(parents=True, exist_ok=True)
-
-        for name, (H_sum, n_samples) in self._hessians.items():
-            # Sanitize layer name for filename
-            safe_name = name.replace("/", "_").replace(".", "_")
-            np.savez_compressed(
-                path / f"{safe_name}.npz",
-                H_sum=H_sum,
-                n_samples=np.array([n_samples]),
-                layer_name=name,
-            )
-
-    def load_checkpoint(self, path: Path) -> None:
-        """Load Hessians from checkpoint directory."""
-        path = Path(path)
-        if not path.exists():
-            return
-
-        for npz_file in path.glob("*.npz"):
-            data = np.load(npz_file, allow_pickle=True)
-            layer_name = str(data["layer_name"])
-            H_sum = data["H_sum"]
-            n_samples = int(data["n_samples"][0])
-
-            self._hessians[layer_name] = (
-                H_sum.astype(self.accumulator_dtype, copy=False),
-                n_samples,
-            )
-            self._layer_dims[layer_name] = H_sum.shape[0]
 
     @property
     def skipped_due_limit(self) -> int:
