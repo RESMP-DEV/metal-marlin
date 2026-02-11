@@ -19,6 +19,15 @@ import torch
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+try:
+    from metal_marlin.paged.mla_paged_adapter import (
+        paged_attention_mla_int4,
+        quantize_kv_int4,
+    )
+    HAS_PAGED_INT4 = True
+except ImportError:
+    HAS_PAGED_INT4 = False
+
 
 class TrellisKVCache:
     """Trellis-oriented KV cache with optional paged attention support.
@@ -92,6 +101,7 @@ class TrellisKVCache:
         self._kv_cache: torch.Tensor | None = None
         self._paged_cache: Any = None
         self._seq_lens: torch.Tensor | None = None
+        self._compressed: bool = False
 
         if use_paged:
             self._init_paged_cache()
@@ -333,3 +343,47 @@ class TrellisKVCache:
             PagedKVCache instance if use_paged=True, else None.
         """
         return self._paged_cache
+
+    def get_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Get K and V tensors for a layer.
+
+        Args:
+            layer_idx: Layer index.
+
+        Returns:
+            Tuple of (k, v) tensors.
+        """
+        kv = self.get(layer_idx)
+        if kv is None:
+            raise ValueError(f"No KV cache for layer {layer_idx}")
+        # Split the compressed KV into K and V components
+        # For MLA: kv_lora_rank + qk_rope_head_dim = cache_dim
+        k = kv[..., : self.kv_lora_rank]
+        v = kv[..., self.kv_lora_rank :]
+        return k, v
+
+    def compress_to_int4(self, threshold_seq_len: int = 256) -> None:
+        """Compress KV cache to INT4 when sequence exceeds threshold.
+
+        MLA already compresses KV 8.9× via low-rank projection.
+        INT4 reduces storage another 4×, giving 35.6× total compression.
+        """
+        # Import HAS_PAGED_INT4 and quantize_kv_int4
+        try:
+            from ..quant.int4 import HAS_PAGED_INT4, quantize_kv_int4
+        except ImportError:
+            return
+
+        if not HAS_PAGED_INT4:
+            return
+        if self.seq_len < threshold_seq_len:
+            return
+        if self._compressed:
+            return
+
+        # Quantize existing KV tensors
+        for layer_idx in range(self.num_layers):
+            k, v = self.get_kv(layer_idx)
+            self.k_cache[layer_idx] = quantize_kv_int4(k)
+            self.v_cache[layer_idx] = quantize_kv_int4(v)
+        self._compressed = True

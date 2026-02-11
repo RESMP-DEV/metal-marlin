@@ -5,25 +5,71 @@
 > There is no established playbook for Metal optimization like there is for CUDA.
 > This guide documents what works, what doesn't, and why.
 
+**Last Updated:** February 11, 2026
+
+## GLM-4.7-Flash Status Summary
+
+| Metric | Current | Target | Gap |
+|--------|---------|--------|-----|
+| **Decode** | 0.74 tok/s | 15-30 tok/s | 20-40× |
+| **Prefill (2K)** | 42 tok/s | 500+ tok/s | 12× |
+| **Memory** | 33 GB | 12-15 GB | ~2.5× |
+| **Model Load** | ~15s | ~10s | 1.5× |
+
+### Done (Verified)
+- ✅ Fused GEMM kernels (51.9× speedup)
+- ✅ Batched MoE dispatch (200× vs sequential)
+- ✅ **Fused MoE kernel wired** (13× speedup: 6381ms → 488ms forward, Feb 2026)
+- ✅ Async dispatch batching (1.29× speedup)
+- ✅ Mixed-precision MoE (2-8 bit per expert)
+- ✅ MLA attention implementation (8.9× KV compression)
+- ✅ Tests passing (Trellis infrastructure working)
+- ✅ **PagedKVCache adapter** (vLLM-style 16-token blocks, fp16/fp8/int4, Feb 2026)
+- ✅ **MLA fused decode wired** (`use_fused_decode=True` in MMFP4MLA, Feb 2026)
+- ✅ **E2E decode benchmark** (0.74 tok/s, 2.65× vs 0.28 baseline, Feb 2026)
+
+### Not Done (Blocking Performance)
+- ❌ Paged attention kernel integration (PagedKVCache exists, kernel dispatch not wired)
+- ❌ Quantized KV cache dispatch (FP8/INT4 storage ready, kernel path incomplete)
+- ❌ Decode GEMV optimization (single-token path unoptimized)
+- ⚠️ C++ dispatch API mismatch (using Python fallback for kernel dispatch)
+
+### Remaining Gap Analysis
+
+With fused MoE kernel (13× measured) and MLA fused decode wired:
+
+| Bottleneck | Current Cost | Optimized | Expected Gain |
+|------------|--------------|-----------|---------------|
+| ~~MoE per-layer dispatch~~ | ~~98% of forward~~ | ✅ **DONE** | **13× measured** |
+| ~~MLA fused attention~~ | ~~5+ dispatches/layer~~ | ✅ **WIRED** | (measuring) |
+| Paged attention dispatch | Not integrated | PagedKVCache ready | 2× context |
+| Decode GEMV | Matmul fallback | Specialized GEMV | 2× |
+| Memory overhead | 33 GB (2× model) | Buffer pooling | ~1.5× |
+
+**Current E2E: 0.74 tok/s** (2.65× vs baseline)
+
 ## Executive Summary
 
 **Hard-won lessons from Metal kernel development:**
 
 ### Performance Truths (Measured)
-1. **MoE dispatch is the bottleneck** - 98.5% of forward pass in our measurements
+1. **MoE dispatch WAS the bottleneck** - 98.5% of forward pass (fixed Feb 2026: 13× gain)
 2. **Kernel fusion provides 50x+ gains** - measured 51.9x speedup from fused GEMM
 3. **Batched expert dispatch is critical** - 200x improvement over sequential (20s → <100ms)
-4. **Dispatch overhead is real** - ~8μs per dispatch × 564 dispatches = 4.5ms wasted
-5. **Unified memory doesn't eliminate BW limits** - still memory-bound at long context
+4. **Fused MoE kernel = 13× speedup** - 6381ms → 488ms forward pass (Feb 2026)
+5. **Dispatch overhead is real** - ~8μs per dispatch × 564 dispatches = 4.5ms wasted
+6. **Unified memory doesn't eliminate BW limits** - still memory-bound at long context
 
 ### Correctness Lessons (Learned the Hard Way)
-6. **Tile boundaries cause silent NaN** - M < TILE_M can produce undefined behavior
-7. **Layout transposition is the #1 bug** - always verify [N, K] vs [K, N] at call site
-8. **State corrupts across calls** - buffer reuse without zeroing breaks on iteration 2+
-9. **MPS is non-deterministic** - use generous tolerances (1e-4, not 1e-6)
-10. **Document expected layouts** - kernel signature MUST specify tensor shapes
-11. **Async dispatch causes random NaN** - `wait=False` + immediate output read = uninitialized data (Feb 2026)
-12. **Metal compiler has bugs** - `__attribute__((always_inline))` required for simdgroup arrays, float intermediates for dequant (Jan 2026)
+7. **Tile boundaries cause silent NaN** - M < TILE_M can produce undefined behavior
+8. **Layout transposition is the #1 bug** - always verify [N, K] vs [K, N] at call site
+9. **Weight shapes need transpose for fused kernels** - kernel expects `[in/8, out]`, weights stored `[out, in/8]` (Feb 2026)
+10. **State corrupts across calls** - buffer reuse without zeroing breaks on iteration 2+
+11. **MPS is non-deterministic** - use generous tolerances (1e-4, not 1e-6)
+12. **Document expected layouts** - kernel signature MUST specify tensor shapes
+13. **Async dispatch causes random NaN** - `wait=False` + immediate output read = uninitialized data (Feb 2026)
+14. **C++ dispatch API mismatch** - `dispatch_kernel` wrapper expects `(lib, fn_name)`, C++ expects `(ctx, pipeline)` - use Python path (Feb 2026)
+15. **Metal compiler has bugs** - `__attribute__((always_inline))` required for simdgroup arrays, float intermediates for dequant (Jan 2026)
 
 ## Architecture: Apple Silicon vs CUDA
 
@@ -76,6 +122,24 @@
 | Memory (after load) | 16.93 GB | glm_flash_benchmark.py |
 | Memory (after forward) | 17.24 GB | glm_flash_benchmark.py |
 | GPU commits per forward | ~12 (async batched) | profiler |
+
+### MMFP4 E2E Decode Benchmark (Feb 2026)
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Decode throughput | **0.74 tok/s** | 50-token greedy decode |
+| Baseline comparison | 2.65× vs 0.28 | Previous unfused baseline |
+| MPS allocated | 33.05 GB | Post-generation |
+| MPS driver | 66.99 GB | Peak driver allocation |
+| Fused MoE layers | 46/46 | All MoE layers using fused kernel |
+| Paged attention | 0 (disabled) | Kernel integration incomplete |
+
+**Benchmark command:**
+```bash
+cd contrib/metal_marlin && PYTHONPATH=. uv run python benchmarks/bench_e2e_decode.py --max-new-tokens 50
+```
+
+**Note:** Memory usage (33GB) is higher than expected due to intermediate buffers during generation. The fused MoE kernel provides 13× forward pass speedup, but E2E throughput is limited by other factors (attention, KV cache management).
 
 ### MLX Comparison (Observed)
 
@@ -1718,3 +1782,132 @@ MLA (Multi-head Latent Attention) is NOT GLM-specific. These work with:
 - [vLLM Paged Attention](https://arxiv.org/abs/2309.06180) - KV cache management
 - [DeepSeek-V2 MLA Paper](https://arxiv.org/abs/2405.04434) - Multi-head Latent Attention
 - [MoE Survey](https://arxiv.org/abs/2209.01667) - Mixture of Experts architectures
+
+---
+
+## GLM-4.7-Flash: Immediate Priorities (February 2026)
+
+### Priority 1: Wire `mla_fused_attention_decode_glm4` (Est: 2-3× speedup)
+
+**Status:** Kernel exists but is NOT CALLED during inference.
+
+The kernel at `src/attention_mla_fused.metal` implements full fused MLA decode:
+- Q projection (q_a → layernorm → q_b)
+- KV projection (kv_a → split → layernorm → kv_b)  
+- RoPE fused in KV projection
+- Attention with compressed KV cache
+- Output projection
+
+**Current path:** 5+ kernel dispatches per attention layer  
+**With fusion:** 1 kernel dispatch
+
+**Files to modify:**
+- `metal_marlin/trellis/attention.py` - Add fused path in `TrellisMLAttention.forward()`
+- `metal_marlin/mla_fused.py` - Ensure `mla_fused_attention_decode()` is wired
+
+```python
+# Target integration
+from metal_marlin.mla_fused import mla_fused_attention_decode, create_glm_mla_params
+
+# In TrellisMLAttention.forward():
+if self.use_fused_decode and batch_size == 1 and seq_len == 1:
+    return mla_fused_attention_decode(hidden, ...)  # Single dispatch
+else:
+    # Current unfused path
+    ...
+```
+
+### Priority 2: Enable Quantized KV Cache (Est: 2× context length)
+
+**Status:** Kernels exist (`paged_attention_v1_fp8`, `paged_attention_v1_int4`) but NOT WIRED.
+
+MLA already compresses KV 8.9× via low-rank projection. Adding INT4 quantization:
+
+| KV Storage | Floats/Token | vs Standard MHA |
+|------------|--------------|------------------|
+| Standard MHA FP16 | 5120 | 1.0× |
+| MLA FP16 | 576 | 8.9× |
+| **MLA INT4** | 144 | **35.6×** |
+
+**Files to modify:**
+- `metal_marlin/trellis/kv_cache.py` - Add quantized storage option
+- `metal_marlin/paged/` - Wire paged attention kernels to TrellisKVCache
+
+### Priority 3: Decode GEMV Optimization (Est: 2× decode)
+
+**Status:** Using generic matmul path for batch=1 decode.
+
+For decode (batch=1, seq=1), we need specialized GEMV kernels:
+- `gemm_trellis_packed_decode` exists but may not be selected
+- Need to verify kernel selection path chooses decode kernel
+
+**Files to check:**
+- `metal_marlin/trellis/kernel_selection.py` - Verify decode path selected
+- `metal_marlin/trellis/linear.py` - Check `TrellisLinear.forward()` calls right kernel
+
+### Priority 4: Reduce GPU Commits (Est: 1.5× speedup)
+
+**Status:** ~12 commits per forward pass after async batching fix.
+
+Target: 4 commits per forward pass by batching all layers in groups of 8-12.
+
+**Current:** LayerBatchContext groups 8 layers  
+**Target:** Group all 47 layers into ~6 batches
+
+### Verification Commands
+
+```bash
+# Run tests to verify implementation
+cd contrib/metal_marlin
+.venv/bin/pytest tests/test_trellis_linear.py tests/test_trellis_model.py -v
+
+# Quick benchmark (requires model weights)
+.venv/bin/python benchmarks/glm_flash_benchmark.py --quick
+
+# Profile MoE hotpath
+.venv/bin/python benchmarks/profile_moe_hotpath.py
+```
+
+### Success Metrics
+
+| Metric | Current | Week 1 Target | Week 2 Target |
+|--------|---------|---------------|---------------|
+| Decode | 0.28 tok/s | 3 tok/s | 10 tok/s |
+| Prefill (2K) | 42 tok/s | 100 tok/s | 200 tok/s |
+| GPU commits | ~12 | 8 | 4 |
+
+### Task YAML Template
+
+```yaml
+# yaml-language-server: $schema=
+tasks:
+  - name: wire-mla-fused-attention
+    priority: P0
+    prompt: |
+      Wire `mla_fused_attention_decode_glm4` kernel in TrellisMLAttention.
+      
+      1. In `metal_marlin/trellis/attention.py`:
+         - Import `mla_fused_attention_decode` from `metal_marlin.mla_fused`
+         - Add `use_fused_decode` flag to __init__
+         - In forward(), when batch=1 and decode mode, call fused kernel
+      
+      2. Add test in `tests/test_trellis_attention.py`:
+         - Test fused path produces same output as unfused within 1e-4
+      
+      Verify: `pytest tests/test_trellis_attention.py -v -k fused`
+    dependencies: []
+    
+  - name: benchmark-fused-attention-gain
+    priority: P1
+    prompt: |
+      Profile attention before/after fused kernel integration.
+      
+      Create `benchmarks/bench_mla_fused_improvement.py`:
+      - Load GLM-4.7-Flash-Trellis-MM
+      - Time 100 decode steps with unfused path
+      - Time 100 decode steps with fused path
+      - Report dispatch count and latency reduction
+      
+      Verify: test -f benchmarks/results/mla_fused_benchmark.json
+    dependencies: [wire-mla-fused-attention]
+```

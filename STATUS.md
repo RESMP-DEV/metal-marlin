@@ -237,7 +237,7 @@ transformer layers into a single Metal command buffer.
 | Module | Purpose | Status |
 |--------|---------|--------|
 | `AsyncCommandBufferManager` | Batches kernel dispatches into shared command buffer | ✅ Working |
-| `LayerBatchContext` | Groups N layers per commit (default: 4) | ✅ Working |
+| `LayerBatchContext` | Groups N layers per commit (default: 8) | ✅ Working |
 | `MixedBPWMoEDispatcher` | Grouped dispatch for mixed-precision experts | ✅ Working |
 | `dispatch_immediate()` | Fallback unbatched dispatch | ✅ Working |
 | `ensure_batch_active()` | Recovers batch state if lost | ✅ Working |
@@ -275,7 +275,7 @@ transformer layers into a single Metal command buffer.
 **Notes:**
 - Fast path uses `moe_trellis_swiglu` kernel with batched expert dispatch via `AsyncCommandBufferManager`
 - `MixedBPWMoEDispatcher` groups experts by BPW (2/3/4-bit) and dispatches in batched Metal command buffers
-- `LayerBatchContext` accumulates dispatches across 4 consecutive MoE layers before committing
+- `LayerBatchContext` accumulates dispatches across 8 consecutive MoE layers before committing
 - MoE compute remains ~98.5% of forward-pass time — kernel fusion is the next optimization frontier
 - Memory usage dominated by model weights (~15 GB for 3 BPW), constant across context lengths
 

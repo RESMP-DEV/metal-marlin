@@ -209,10 +209,10 @@ public:
 
     ~MetalContext() {
         // Clear pipelines
-        for (auto& pair : pipelines_) {
+        for (auto& pair : pipeline_cache_) {
             pair.second->release();
         }
-        pipelines_.clear();
+        pipeline_cache_.clear();
 
         // Clear libraries
         for (auto& pair : libraries_) {
@@ -255,15 +255,18 @@ public:
         libraries_[path] = lib;
     }
 
-    // Get or create pipeline state
-    MTL::ComputePipelineState* get_pipeline(const std::string& function_name,
-                                            const std::string& metallib_path = "") {
-        std::string cache_key = metallib_path + "::" + function_name;
+    // Get or create pipeline state from a specific library key.
+    // If lib is empty, search all loaded libraries.
+    MTL::ComputePipelineState* get_or_create_pipeline(
+        const std::string& lib,
+        const std::string& function_name
+    ) {
+        std::string cache_key = lib + "::" + function_name;
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto it = pipelines_.find(cache_key);
-            if (it != pipelines_.end()) {
+            auto it = pipeline_cache_.find(cache_key);
+            if (it != pipeline_cache_.end()) {
                 return it->second;
             }
         }
@@ -273,17 +276,17 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            NS::String* name = NS::String::string(function_name.c_str(), NS::UTF8StringEncoding);
 
-            if (!metallib_path.empty()) {
-                auto lib_it = libraries_.find(metallib_path);
-                if (lib_it != libraries_.end()) {
-                    NS::String* name = NS::String::string(function_name.c_str(), NS::UTF8StringEncoding);
-                    function = lib_it->second->newFunction(name);
+            if (!lib.empty()) {
+                auto lib_it = libraries_.find(lib);
+                if (lib_it == libraries_.end()) {
+                    throw std::runtime_error("Metal library not loaded: " + lib);
                 }
+                function = lib_it->second->newFunction(name);
             } else {
                 // Search all libraries
                 for (auto& pair : libraries_) {
-                    NS::String* name = NS::String::string(function_name.c_str(), NS::UTF8StringEncoding);
                     function = pair.second->newFunction(name);
                     if (function) break;
                 }
@@ -308,10 +311,22 @@ public:
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pipelines_[cache_key] = pipeline;
+            auto [it, inserted] = pipeline_cache_.emplace(cache_key, pipeline);
+            if (!inserted) {
+                pipeline->release();
+                return it->second;
+            }
         }
 
         return pipeline;
+    }
+
+    // Backward-compatible pipeline lookup API
+    MTL::ComputePipelineState* get_pipeline(
+        const std::string& function_name,
+        const std::string& metallib_path = ""
+    ) {
+        return get_or_create_pipeline(metallib_path, function_name);
     }
 
     // Compile Metal source at runtime (for testing/development)
@@ -360,7 +375,7 @@ private:
     std::unique_ptr<BufferPool> buffer_pool_;
     mutable std::mutex mutex_;
     std::unordered_map<std::string, MTL::Library*> libraries_;
-    std::unordered_map<std::string, MTL::ComputePipelineState*> pipelines_;
+    std::unordered_map<std::string, MTL::ComputePipelineState*> pipeline_cache_;
 };
 
 // -----------------------------------------------------------------------------
@@ -438,6 +453,27 @@ void dispatch_kernel(
     if (wait) {
         cmd->waitUntilCompleted();
     }
+}
+
+MTL::ComputePipelineState* get_or_create_pipeline(
+    MetalContext& ctx,
+    const std::string& lib,
+    const std::string& function_name
+) {
+    return ctx.get_or_create_pipeline(lib, function_name);
+}
+
+void dispatch_kernel(
+    MetalContext& ctx,
+    const std::string& lib,
+    const std::string& function_name,
+    std::tuple<uint32_t, uint32_t, uint32_t> grid,
+    std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
+    const std::vector<ManagedBuffer*>& buffers,
+    bool wait = true
+) {
+    MTL::ComputePipelineState* pipeline = get_or_create_pipeline(ctx, lib, function_name);
+    dispatch_kernel(ctx, pipeline, grid, threadgroup, buffers, wait);
 }
 
 // Batch dispatch for multiple kernels
@@ -591,6 +627,9 @@ PYBIND11_MODULE(_cpp_ext, m) {
         .def(py::init<>())
         .def("load_metallib", &MetalContext::load_metallib)
         .def("compile_source", &MetalContext::compile_source)
+        .def("get_or_create_pipeline", &MetalContext::get_or_create_pipeline,
+             py::arg("lib"),
+             py::arg("function_name"))
         .def("get_pipeline", &MetalContext::get_pipeline,
              py::arg("function_name"),
              py::arg("metallib_path") = "")
@@ -628,7 +667,15 @@ PYBIND11_MODULE(_cpp_ext, m) {
     py::class_<MTL::ComputePipelineState>(m, "Pipeline");
 
     // Free functions
-    m.def("dispatch_kernel", &dispatch_kernel,
+    m.def(
+          "dispatch_kernel",
+          py::overload_cast<
+              MetalContext&,
+              MTL::ComputePipelineState*,
+              std::tuple<uint32_t, uint32_t, uint32_t>,
+              std::tuple<uint32_t, uint32_t, uint32_t>,
+              const std::vector<ManagedBuffer*>&,
+              bool>(&dispatch_kernel),
           py::arg("ctx"),
           py::arg("pipeline"),
           py::arg("grid"),
@@ -636,6 +683,24 @@ PYBIND11_MODULE(_cpp_ext, m) {
           py::arg("buffers"),
           py::arg("wait") = true,
           "Dispatch a Metal compute kernel");
+    m.def(
+          "dispatch_kernel",
+          py::overload_cast<
+              MetalContext&,
+              const std::string&,
+              const std::string&,
+              std::tuple<uint32_t, uint32_t, uint32_t>,
+              std::tuple<uint32_t, uint32_t, uint32_t>,
+              const std::vector<ManagedBuffer*>&,
+              bool>(&dispatch_kernel),
+          py::arg("ctx"),
+          py::arg("lib"),
+          py::arg("function_name"),
+          py::arg("grid"),
+          py::arg("threadgroup"),
+          py::arg("buffers"),
+          py::arg("wait") = true,
+          "Dispatch a Metal compute kernel by library and function name");
 
     m.def("create_buffer", &create_buffer,
           py::arg("ctx"),

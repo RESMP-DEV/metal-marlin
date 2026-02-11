@@ -245,7 +245,7 @@ class AsyncCommandBufferManager:
 class LayerBatchContext:
     """Batch command buffers across multiple MoE layers."""
 
-    def __init__(self, model: "TrellisModel", batch_size: int = 4):
+    def __init__(self, model: "TrellisModel", batch_size: int = 8):
         if not HAS_METAL:
             # Return a dummy context manager when Metal is not available
             class DummyContext:

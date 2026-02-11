@@ -75,6 +75,12 @@ TRELLIS_PUBLIC_API_SYMBOLS: tuple[str, ...] = (
 )
 
 
+# Batch size for MoE layer command buffer commits.
+# Increasing this from 4 to 12 reduces GPU command buffer commits from ~12 to ~4
+# for a typical 48-layer MoE model, improving forward pass latency.
+LAYERS_PER_BATCH = 8  # Was 4, reduces commits from ~12 to ~6
+
+
 @torch.compile(mode="reduce-overhead", fullgraph=True)
 def _compiled_router_forward(
     x: torch.Tensor, router: nn.Module, top_k: int
@@ -3577,10 +3583,10 @@ class TrellisModel(nn.Module):
 
         # Use LayerBatchContext for decode speedup (batch_size=1)
         # This batches multiple layer MoE dispatches into a single command buffer,
-        # reducing from 46 commits to ~12 commits.
+        # reducing from 46 commits to ~6 commits.
         use_batch_ctx = (batch_size == 1 and HAS_METAL and lib is not None)
         batch_mgr = LayerBatchContext(
-            self, batch_size=4) if use_batch_ctx else nullcontext()
+            self, batch_size=LAYERS_PER_BATCH) if use_batch_ctx else nullcontext()
         with batch_mgr as batch_ctx:
             # Determine activation buffer strategy
             if use_ping_pong:

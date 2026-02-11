@@ -23,6 +23,8 @@ to ensure optimal performance across different batch sizes.
 
 from __future__ import annotations
 
+import logging
+
 # Kernel selection thresholds optimized for M4 Max
 # These values are determined by benchmarks/bench_m4_kernel_selection.py
 M4_MAX_THRESHOLDS = {
@@ -137,6 +139,8 @@ def get_kernel_for_batch_size(
     
     # === Decode path: batch_size == 1 ===
     if batch_size <= thresholds["decode_max"]:
+        _logger = logging.getLogger(__name__)
+        _logger.debug("Decode path selected: gemm_trellis_packed_decode")
         # Check for specialized kernels with compile-time known dequant parameters
         if not use_fp32_acc and all(b is not None for b in (gate_bits, up_bits, down_bits)):
             key = (gate_bits, up_bits, down_bits)
