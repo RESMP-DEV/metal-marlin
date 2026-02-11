@@ -320,6 +320,12 @@ def parse_args() -> argparse.Namespace:
         help="Cap number of layers tracked for Hessians (None = unlimited)",
     )
     parser.add_argument(
+        "--max-layers",
+        type=int,
+        default=None,
+        help="Limit number of layers to quantize (None = all)",
+    )
+    parser.add_argument(
         "--expert-batch-size",
         type=int,
         default=EXPERT_VRAM_BATCH_SIZE,
@@ -453,14 +459,17 @@ def configure_runtime_profile(
             args.max_seq_len = LOW_VRAM_MAX_SEQ_LEN
             profile_applied = True
         if args.max_hessian_layers is None:
-            args.max_hessian_layers = LOW_VRAM_MAX_HESSIAN_LAYERS
+            args.max_hessian_layers = args.max_layers or LOW_VRAM_MAX_HESSIAN_LAYERS
             profile_applied = True
 
-        # Exclude experts from Hessian tracking by default (512 experts per layer)
-        exclude_patterns = {p.lower() for p in args.hessian_exclude_pattern}
-        if "experts" not in exclude_patterns:
-            args.hessian_exclude_pattern.append("experts")
-            profile_applied = True
+        # Exclude experts from Hessian tracking by default IF NOT in layer-stream mode.
+        # Layer streaming handles the memory pressure of 512 experts by processing one layer at a time.
+        if not force_layer_stream:
+            exclude_patterns = {p.lower()
+                                for p in args.hessian_exclude_pattern}
+            if "experts" not in exclude_patterns:
+                args.hessian_exclude_pattern.append("experts")
+                profile_applied = True
 
     if args.hessian_dtype == "auto":
         # Use float32 for large models to save memory
@@ -636,6 +645,8 @@ def main() -> int:
         print(f"Max sequence length: {args.max_seq_len}")
         print(f"Hessian dtype: {hessian_dtype}")
         print(f"Max Hessian layers: {args.max_hessian_layers or 'unlimited'}")
+        if args.max_layers:
+            print(f"Max layers to quantize: {args.max_layers}")
         print(f"Hessian collection mode: {hessian_collection_mode}")
         if args.hessian_exclude_pattern:
             print(f"Hessian excludes: {args.hessian_exclude_pattern}")
@@ -658,6 +669,18 @@ def main() -> int:
     )
 
     try:
+        # If max_layers is passed, we construct a filter pattern or stop the loop.
+        # Since AcceleratedMRGPTQQuantizer processes all st_files, we use
+        # layers_to_quantize to limit processed components.
+        layers_to_quantize = None
+        if args.max_layers:
+            # Simple heuristic: quantize only first N layers
+            layers_to_quantize = [
+                f"model.layers.{i}." for i in range(args.max_layers)]
+            # Also include non-layer linear weights if they come before
+            layers_to_quantize.extend(
+                ["input_layernorm", "post_attention_layernorm"])
+
         report = quantizer.quantize_model_with_calibration(
             model_path=model_path,
             calibration=calibration,
@@ -667,6 +690,7 @@ def main() -> int:
             batch_size=args.batch_size,
             max_seq_len=args.max_seq_len,
             max_hessian_layers=args.max_hessian_layers,
+            layers_to_quantize=layers_to_quantize,
             hessian_dtype=hessian_dtype,
             hessian_exclude_patterns=args.hessian_exclude_pattern,
             hessian_collection_mode=hessian_collection_mode,
