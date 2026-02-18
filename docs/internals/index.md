@@ -18,6 +18,7 @@ Low-level documentation for Metal shader development and optimization.
 
 ## Implementation Details
 
+- [**Fast Dispatch (C++ Ext)**](fast_dispatch.md) — 5-10x faster kernel dispatch via C++ extension
 - [**AWQ Implementation**](awq_implementation.md) — Technical AWQ details
 - [**Async Dispatch**](async_dispatch.md) — GPU command execution pipeline
 - [**Metal ASR**](metal_asr.md) — Conformer/Parakeet ASR backend

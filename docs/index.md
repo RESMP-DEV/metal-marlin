@@ -1,6 +1,6 @@
 # Metal Marlin Documentation
 
-Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
+Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac at 70+ tok/s.
 
 ---
 
@@ -9,31 +9,42 @@ Quantized GEMM kernels for Apple Silicon. Run large language models on your Mac.
 | Guide | Description |
 |-------|-------------|
 | [**Getting Started**](guides/getting_started.md) | Install, quantize, run a model in 5 minutes |
+| [**Trellis Inference**](inference/trellis.md) | Run GLM-4.7-Flash at 70+ tok/s |
 | [**Serving Models**](guides/serving.md) | OpenAI-compatible API server |
 | [**CLI Reference**](guides/cli.md) | Command-line tools and options |
-| [**Troubleshooting**](guides/troubleshooting.md) | Common issues and solutions |
 
 ---
 
 ## 📚 Documentation Sections
 
+### [Inference](inference/)
+How to run models with Metal Marlin.
+
+- [Trellis Inference](inference/trellis.md) — GLM-4.7-Flash at 70+ tok/s
+- [MMFP4 Inference](inference/mmfp4.md) — MMFP4-quantized models
+
+### [Quantization](quantization/)
+How to quantize models for efficient inference.
+
+- [Quantization Guide](quantization/quantization.md) — FP4/Trellis quantization
+
 ### [User Guides](guides/index.md)
-Step-by-step tutorials and workflows for using Metal Marlin.
+Step-by-step tutorials and workflows.
 
 - [Getting Started](guides/getting_started.md) — Quick installation and first model
-- [Building from Source](guides/building.md) — Compilation and dependencies
-- [Development Setup](guides/development_setup.md) — Local environment and tooling
+- [Building from Source](guides/building.md) — Compilation and C++ extension
+- [Serving Models](guides/serving.md) — OpenAI-compatible API server
 - [CLI Reference](guides/cli.md) — Command-line tools
-- [Optimization Guide](guides/optimization.md) — Comprehensive performance tuning
-- [Mixed BPW Autotuning](guides/autotune_mixed_bpw.md) — Auto-tuning workflow for mixed bit-width trellis kernels
-- [Mixed BPW Inference](guides/mixed_bpw_inference.md) — Developer workflow for mixed bit-width inference
-- [BF16 Optimization Guide](guides/bf16_optimization.md) — BF16 kernel variants and strategy
-- [Performance Analysis](reports/performance_analysis.md) — Benchmarking and latency analysis
-- [Calibration Guide](guides/calibration.md) — Custom calibration for quality
 - [Troubleshooting](guides/troubleshooting.md) — Fix common problems
-- [MMFP4 Troubleshooting](guides/mmfp4_troubleshooting.md) — MMFP4 debugging and workarounds
-- [MMFP4 Inference](guides/mmfp4_inference.md) — MMFP4 quantized model inference
-- [Metallib Troubleshooting](guides/metallib_troubleshooting.md) — Precompiled shader diagnostics
+
+### [Metal Kernel Internals](internals/index.md)
+Low-level documentation for kernel developers.
+
+- [Fast Dispatch (C++ Ext)](internals/fast_dispatch.md) — 5-10x faster kernel dispatch
+- [CUDA to Metal Mapping](internals/cuda_metal_mapping.md) — Translating concepts
+- [Tile Sizing](internals/tile_sizing.md) — Choosing dimensions
+- [Memory Access Patterns](internals/memory_access_patterns.md) — Coalesced access
+- [Metallib Architecture](internals/metallib_architecture.md) — Precompiled shaders
 
 ### [API Reference](reference/index.md)
 Technical reference for APIs, models, and integrations.
@@ -70,12 +81,11 @@ Optional features and extensions.
 ### [Metal Kernel Internals](internals/index.md)
 Low-level documentation for kernel developers.
 
+- [Fast Dispatch (C++ Ext)](internals/fast_dispatch.md) — 5-10x faster kernel dispatch
 - [CUDA to Metal Mapping](internals/cuda_metal_mapping.md) — Translating concepts
-- [Porting Guide](internals/porting_guide.md) — Adding new kernels
-- [Compressed KV Cache (MLA)](internals/compressed_kv_cache_mla.md) — Cache compression and Metal-side optimization details
-- [Fast Router Dispatcher](internals/fast_router_dispatcher.md) — CPU-side MoE router dispatch optimization
 - [Tile Sizing](internals/tile_sizing.md) — Choosing dimensions
 - [Memory Access Patterns](internals/memory_access_patterns.md) — Coalesced access
+- [Metallib Architecture](internals/metallib_architecture.md) — Precompiled shaders
 
 ### [Technical Audits](audits/index.md)
 Investigation reports and bug analyses.
