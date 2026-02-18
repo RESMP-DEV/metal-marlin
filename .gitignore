@@ -106,3 +106,6 @@ tests/test_debug_*.py
 # Documentation artifacts
 docs/api/
 *.html
+
+# Metal shader archives (compiled)
+*.air

@@ -39,6 +39,8 @@ dependencies = [
     "transformers>=5.0.0",
     "huggingface-hub[cli]>=1.3.7",
     "pandas>=2.0.0",
+    "uvicorn>=0.40.0",
+    "fastapi>=0.128.0",
 ]
 
 [project.optional-dependencies]

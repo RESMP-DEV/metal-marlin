@@ -1,6 +1,6 @@
 # Metal Marlin Status
 
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-02-18
 
 ## Summary
 
@@ -8,12 +8,14 @@
 |-----------|--------|
 | Test Suite | **5427 tests collected** ✅ |
 | GEMM Kernel | **Working + Optimized** ✅ (2.4x speedup) |
+| **Fast Decode Path** | **Complete** ✅ (**~196x speedup**, 56-74 tok/s) |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
 | **Trellis Inference** | **Complete** ✅ (11 modules, 3500 LOC, fused GEMM ~50x speedup) |
 | **Async Dispatch Batching** | **Complete** ✅ (LayerBatchContext, 1.29x speedup) |
+| **Perplexity Evaluation** | **Complete** ✅ (API endpoint + Prometheus metrics) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
-| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working, ~0.28 tok/s) |
+| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working, **56-74 tok/s**) |
 | OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
@@ -23,6 +25,99 @@
 | Ruff Linting | **101 warnings** ⚠️ |
 | Pyright Errors | **0 errors, 215 warnings** ✅ |
 | **C++ Extension** | ✅ **Working** (needs HeapAllocator bindings) |
+
+---
+
+## Fast Decode Path (NEW)
+
+**Status:** ✅ Complete (2026-02-18)
+
+Single-token decode optimization using pre-dequantized weights with native PyTorch MPS operations.
+
+### Problem
+
+Custom Metal kernel dispatch via PyObjC had ~3.7ms overhead per layer:
+- 47 layers × 3.7ms = ~174ms per token → ~5.7 tok/s theoretical
+- Actual performance was ~0.38 tok/s (even worse due to additional overhead)
+
+### Solution
+
+For M=1 (decode), pre-dequantize FP4 → FP16 weights and use native `torch.nn.functional.linear()`:
+
+```python
+# In MetalQuantizedLinear._ensure_dequant_weight():
+# Transpose + dequantize packed weights
+dequant = _fast_dequant(packed_t, scales_t, group_size)  # [N, K] fp16
+self._dequant_weight = dequant
+
+# In forward(), M=1 fast path:
+result = torch.nn.functional.linear(x_2d.half(), self._dequant_weight, self.bias)
+```
+
+### Performance
+
+| Metric | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Per-layer latency | ~3.7ms | **0.15ms** | **25x faster** |
+| Per-token latency | ~2.6s | **13-18ms** | **~196x faster** |
+| Decode throughput | ~0.38 tok/s | **56-74 tok/s** | **~196x faster** |
+
+### Components
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `inference_metal.py` | Fast path in `forward()` | ✅ |
+| `_ensure_dequant_weight()` | Lazy weight dequantization | ✅ |
+| `_fast_dequant()` | Optimized dequant from `mmfp4_linear.py` | ✅ |
+
+---
+
+## Perplexity Evaluation (NEW)
+
+**Status:** ✅ Complete (2026-02-18)
+
+Perplexity measures how well a language model predicts the next token.
+Lower perplexity = better prediction (model is less "surprised").
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/perplexity` | POST | Evaluate perplexity of text |
+| `/v1/perplexity/stats` | GET | Get aggregated perplexity statistics |
+| `/metrics` | GET | Prometheus metrics (now includes perplexity) |
+
+### Usage
+
+```bash
+# Evaluate perplexity
+curl -X POST http://localhost:8000/v1/perplexity \
+  -H "Content-Type: application/json" \
+  -d '{"text": "The quick brown fox jumps over the lazy dog."}'
+
+# Response:
+# {"perplexity": 15.2, "tokens": 9, "loss": 2.72}
+```
+
+### Prometheus Metrics
+
+```
+metal_marlin_perplexity_mean 15.2
+metal_marlin_perplexity_median 14.95
+metal_marlin_perplexity_min 11.9
+metal_marlin_perplexity_max 19.3
+metal_marlin_perplexity_samples 10
+metal_marlin_perplexity_tokens_total 1660
+```
+
+### Components
+
+| Module | Purpose | Status |
+|--------|---------|--------|
+| `serving/perplexity.py` | Perplexity computation and tracking | ✅ |
+| `PerplexityTracker` | Running statistics for monitoring | ✅ |
+| `compute_perplexity()` | Full evaluation on text | ✅ |
+| `serving/server.py` | API endpoints + metrics integration | ✅ |
 
 ---
 

@@ -25,14 +25,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .metal_dispatch import (
-    MetalKernelLibrary,
-    dispatch_gemm_fp4,
-    dispatch_gemm_fp8,
-    dispatch_gemm_int2,
-    get_default_library,
-    mps_tensor_to_metal_buffer,
-)
+from .metal_dispatch import (MetalKernelLibrary, dispatch_gemm_fp4,
+                             dispatch_gemm_fp8, dispatch_gemm_int2,
+                             get_default_library, mps_tensor_to_metal_buffer)
 
 # ---------------------------------------------------------------------------
 # Check MPS availability
@@ -58,7 +53,8 @@ def _mps_buffer(tensor: torch.Tensor, device: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 _E2M1_VALUES = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -
+        0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
     dtype=torch.float16,
 )
 
@@ -94,6 +90,7 @@ class MetalQuantizedLinear(nn.Module):
         bits: Literal[2, 4, 8] = 4,
         group_size: int = 128,
         bias: bool = False,
+        max_batch_size: int = 1,
     ):
         super().__init__()
         require_mps()
@@ -102,6 +99,7 @@ class MetalQuantizedLinear(nn.Module):
         self.out_features = out_features
         self.bits = bits
         self.group_size = group_size
+        self.max_batch_size = max_batch_size
 
         # Compute pack factor based on bit width
         if bits == 4:
@@ -126,7 +124,8 @@ class MetalQuantizedLinear(nn.Module):
         # Pad out_features to next multiple of pack_factor if needed (for dispatch padding)
         self._needs_output_slice = out_features % self.pack_factor != 0
         self._padded_out_features = (
-            ((out_features + self.pack_factor - 1) // self.pack_factor) * self.pack_factor
+            ((out_features + self.pack_factor - 1) //
+             self.pack_factor) * self.pack_factor
             if self._needs_output_slice
             else out_features
         )
@@ -161,8 +160,46 @@ class MetalQuantizedLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
 
+        # Lazily populated dequantized weights for native MPS decode path (10x faster than PyObjC)
+        self._dequant_weight: torch.Tensor | None = None
+
         # Cache the Metal library reference
         self._lib: MetalKernelLibrary | None = None
+
+        # Preallocate output buffer for max batch size to avoid allocations in forward
+        self._output_buffer = torch.zeros(
+            (max_batch_size, self._padded_out_features),
+            dtype=torch.float16,
+            device="mps",
+        )
+
+    def _ensure_dequant_weight(self) -> torch.Tensor:
+        """Lazily dequantize FP4 weights to FP16 for fast decode path.
+
+        This is ONLY used for decode (M=1) where PyObjC overhead dominates.
+        For batched inputs, the custom Metal kernel is more efficient.
+        """
+        if self._dequant_weight is not None:
+            return self._dequant_weight
+
+        # Import optimized dequant function from mmfp4_linear
+        from .layers.mmfp4_linear import _fast_dequant
+
+        # weight_packed shape: [K // 8, N] uint32 (K-dim packing)
+        # Transpose to [N, K // 8] for _fast_dequant which expects [out, in // 8]
+        packed_t = self.weight_packed.t().contiguous()  # [N, K // 8]
+
+        # scales shape: [K // group_size, N] fp16
+        # Transpose to [N, K // group_size] for _fast_dequant
+        scales_t = self.scales.t().contiguous()  # [N, K // group_size]
+
+        # Dequantize: [N, K // 8] -> [N, K] fp16
+        dequant = _fast_dequant(
+            packed_t, scales_t, self.group_size)  # [N, K] fp16
+
+        # Store for future use (N, K layout for torch.nn.functional.linear)
+        self._dequant_weight = dequant
+        return self._dequant_weight
 
     @property
     def lib(self) -> MetalKernelLibrary:
@@ -186,9 +223,36 @@ class MetalQuantizedLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         M = x_2d.shape[0]
 
+        # FALLBACK PATH: For decode (M=1), use native MPS matmul on dequantized weights
+        # PyObjC dispatch has ~3.7ms overhead vs 0.4ms native MPS = 9x faster
+        if M == 1:
+            # Lazily dequantize weights on first decode call
+            if self._dequant_weight is None:
+                self._ensure_dequant_weight()
+
+            # Use pre-dequantized weights with native MPS matmul
+            result = torch.nn.functional.linear(
+                x_2d.half(), self._dequant_weight, self.bias)
+            if self._needs_output_slice:
+                result = result[..., : self.out_features]
+            out_shape = list(orig_shape[:-1]) + [self.out_features]
+            return result.reshape(out_shape).to(orig_dtype)
+
+        # Reallocate buffer if batch size exceeds max (grows to accommodate larger batches)
+        if M > self._output_buffer.shape[0]:
+            self.max_batch_size = M
+            self._output_buffer = torch.zeros(
+                (M, self._padded_out_features),
+                dtype=torch.float16,
+                device="mps",
+            )
+
+        # Slice preallocated buffer for current batch size
+        out = self._output_buffer[:M]
+
         # Dispatch to appropriate Metal GEMM kernel (use padded dimensions)
         if self.bits == 4:
-            out = dispatch_gemm_fp4(
+            dispatch_gemm_fp4(
                 self.lib,
                 x_2d,
                 self.weight_packed,
@@ -197,9 +261,10 @@ class MetalQuantizedLinear(nn.Module):
                 N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
+                out=out,
             )
         elif self.bits == 8:
-            out = dispatch_gemm_fp8(
+            dispatch_gemm_fp8(
                 self.lib,
                 x_2d,
                 self.weight_packed,
@@ -208,9 +273,10 @@ class MetalQuantizedLinear(nn.Module):
                 N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
+                out=out,
             )
         elif self.bits == 2:
-            out = dispatch_gemm_int2(
+            dispatch_gemm_int2(
                 self.lib,
                 x_2d,
                 self.weight_packed,
@@ -219,6 +285,7 @@ class MetalQuantizedLinear(nn.Module):
                 N=self._padded_out_features,
                 K=self.in_features,
                 group_size=self.group_size,
+                out=out,
             )
 
         # Slice to original out_features if we used padding
@@ -273,7 +340,8 @@ class MetalQuantizedLinear(nn.Module):
         weight = linear.weight.detach().float()
         if layer._needs_output_slice:
             pad_cols = layer._padded_out_features - out_features
-            weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_cols), value=0.0)
+            weight = torch.nn.functional.pad(
+                weight, (0, 0, 0, pad_cols), value=0.0)
 
         if bits == 4:
             packed, scales = cls._quantize_fp4(weight, group_size)
@@ -374,7 +442,8 @@ class MetalQuantizedLinear(nn.Module):
         w_grouped = w.reshape(n_groups, group_size, N)
 
         abs_max = w_grouped.abs().amax(dim=1, keepdim=True).clamp(min=1e-8)
-        scales = abs_max.squeeze(1) / 1.5  # INT2 symmetric: {-1.5, -0.5, 0.5, 1.5}
+        # INT2 symmetric: {-1.5, -0.5, 0.5, 1.5}
+        scales = abs_max.squeeze(1) / 1.5
 
         w_scaled = w_grouped / abs_max * 1.5
         w_scaled = w_scaled.clamp(-1.5, 1.5)
@@ -454,7 +523,8 @@ class MetalRoPE(nn.Module):
 
         # Precompute inverse frequencies with rope_ratio scaling
         half_dim = dim // 2
-        inv_freq = rope_ratio / (base ** (torch.arange(0, half_dim).float() * 2 / dim))
+        inv_freq = rope_ratio / \
+            (base ** (torch.arange(0, half_dim).float() * 2 / dim))
         self.register_buffer("inv_freq", inv_freq)
 
         # Precompute cos/sin cache
@@ -474,7 +544,8 @@ class MetalRoPE(nn.Module):
             Tensor with RoPE applied
         """
         seq_len = x.shape[-2]
-        positions = torch.arange(position_offset, position_offset + seq_len, device=x.device)
+        positions = torch.arange(
+            position_offset, position_offset + seq_len, device=x.device)
 
         cos = self.cos_cache[positions]  # [seq_len, dim/2]
         sin = self.sin_cache[positions]
@@ -549,11 +620,12 @@ class MetalKVCache:
         end_pos = self.seq_len + new_seq_len
 
         if end_pos > self.config.max_seq_len:
-            raise ValueError(f"Sequence length {end_pos} exceeds max {self.config.max_seq_len}")
+            raise ValueError(
+                f"Sequence length {end_pos} exceeds max {self.config.max_seq_len}")
 
         # Store new values
-        self.k_cache[layer_idx][:, :, self.seq_len : end_pos, :] = k_new
-        self.v_cache[layer_idx][:, :, self.seq_len : end_pos, :] = v_new
+        self.k_cache[layer_idx][:, :, self.seq_len: end_pos, :] = k_new
+        self.v_cache[layer_idx][:, :, self.seq_len: end_pos, :] = v_new
 
         # Return full sequence
         return (
@@ -632,14 +704,16 @@ class MetalMoELayer(nn.Module):
             [batch, seq, hidden_size]
         """
         batch_size, seq_len, hidden_size = hidden_states.shape
-        hidden_flat = hidden_states.view(-1, hidden_size)  # [batch*seq, hidden]
+        # [batch*seq, hidden]
+        hidden_flat = hidden_states.view(-1, hidden_size)
 
         # Router logits
         router_logits = self.router(hidden_flat)  # [batch*seq, num_experts]
         router_probs = F.softmax(router_logits, dim=-1)
 
         # Top-k selection
-        top_k_probs, top_k_indices = torch.topk(router_probs, self.top_k, dim=-1)
+        top_k_probs, top_k_indices = torch.topk(
+            router_probs, self.top_k, dim=-1)
         top_k_probs = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
 
         # Simple loop over experts (optimized version would batch by expert)
@@ -661,7 +735,8 @@ class MetalMoELayer(nn.Module):
 
             # Get weights for this expert
             weight_mask = top_k_indices[expert_mask] == expert_idx
-            weights = (top_k_probs[expert_mask] * weight_mask.float()).sum(dim=-1, keepdim=True)
+            weights = (top_k_probs[expert_mask] *
+                       weight_mask.float()).sum(dim=-1, keepdim=True)
 
             # Accumulate weighted output
             output[expert_mask] += weights * expert_output
@@ -778,7 +853,8 @@ class MetalTransformerBlock(nn.Module):
             max_seq_len=max_position_embeddings,
         )
 
-        self.post_attention_layernorm = MetalRMSNorm(hidden_size, eps=rms_norm_eps)
+        self.post_attention_layernorm = MetalRMSNorm(
+            hidden_size, eps=rms_norm_eps)
         self.mlp = MetalMLP(
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
@@ -834,9 +910,12 @@ class MetalTransformerBlock(nn.Module):
         k = self.attn_k_proj(hidden_states)
         v = self.attn_v_proj(hidden_states)
 
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        q = q.view(batch_size, seq_len, self.num_heads,
+                   self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_kv_heads,
+                   self.head_dim).transpose(1, 2)
+        v = v.view(batch_size, seq_len, self.num_kv_heads,
+                   self.head_dim).transpose(1, 2)
 
         position_offset = kv_cache.seq_len if kv_cache else 0
         q = self.attn_rope(q, position_offset)
@@ -855,14 +934,17 @@ class MetalTransformerBlock(nn.Module):
 
         is_causal = attention_mask is None and q.shape[2] == k.shape[2] and q.shape[2] > 1
         if is_causal:
-            attn_output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v, is_causal=True)
         elif attention_mask is not None:
-            attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask=attention_mask)
+            attn_output = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask)
         else:
             attn_output = F.scaled_dot_product_attention(q, k, v)
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.head_dim)
+        attn_output = attn_output.view(
+            batch_size, seq_len, self.num_heads * self.head_dim)
         return self.attn_o_proj(attn_output)
 
 
@@ -901,7 +983,8 @@ class MetalMLAAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         # GLM-4 uses separate nope/rope dims; fallback to hidden_size/num_heads
-        self.qk_nope_head_dim = qk_nope_head_dim or (hidden_size // num_heads - qk_rope_head_dim)
+        self.qk_nope_head_dim = qk_nope_head_dim or (
+            hidden_size // num_heads - qk_rope_head_dim)
         self.v_head_dim = v_head_dim or (hidden_size // num_heads)
         # head_dim for queries = qk_nope + qk_rope
         self.head_dim = head_dim or (self.qk_nope_head_dim + qk_rope_head_dim)
@@ -968,7 +1051,8 @@ class MetalMLAAttention(nn.Module):
         # Output projection - input is num_heads * v_head_dim
         # Uses separate o_proj_group_size (checkpoint often uses larger gs for o_proj)
         o_proj_in_dim = num_heads * self.v_head_dim
-        actual_o_proj_group_size = _compatible_group_size(o_proj_in_dim, o_proj_group_size)
+        actual_o_proj_group_size = _compatible_group_size(
+            o_proj_in_dim, o_proj_group_size)
         self.o_proj = MetalQuantizedLinear(
             o_proj_in_dim,
             hidden_size,
@@ -1012,7 +1096,7 @@ class MetalMLAAttention(nn.Module):
         # KV path
         kv_compressed = self.kv_a_proj(hidden_states)
         c_kv = kv_compressed[..., : self.kv_lora_rank]
-        k_pe = kv_compressed[..., self.kv_lora_rank :]
+        k_pe = kv_compressed[..., self.kv_lora_rank:]
 
         # RoPE
         position_offset = kv_cache.seq_len if kv_cache else 0
@@ -1023,10 +1107,11 @@ class MetalMLAAttention(nn.Module):
         kv_full = self.kv_b_proj(c_kv)
         # kv_b outputs [qk_nope_head_dim + v_head_dim] per head
         kv_dim_per_head = self.qk_nope_head_dim + self.v_head_dim
-        kv_full = kv_full.view(batch_size, seq_len, self.num_heads, kv_dim_per_head)
+        kv_full = kv_full.view(batch_size, seq_len,
+                               self.num_heads, kv_dim_per_head)
         # Split into k_nope and v
         k_nope = kv_full[..., : self.qk_nope_head_dim]
-        v = kv_full[..., self.qk_nope_head_dim :]
+        v = kv_full[..., self.qk_nope_head_dim:]
 
         # Concatenate k_nope with k_pe to form full key [qk_nope + qk_rope = head_dim]
         # k_pe shape: [B, S, qk_rope] -> expand to [B, S, H, qk_rope]
@@ -1050,5 +1135,6 @@ class MetalMLAAttention(nn.Module):
         # Output projection
         attn_output = attn_output.transpose(1, 2).contiguous()
         # Output dimension is num_heads * v_head_dim
-        attn_output = attn_output.view(batch_size, seq_len, self.num_heads * self.v_head_dim)
+        attn_output = attn_output.view(
+            batch_size, seq_len, self.num_heads * self.v_head_dim)
         return self.o_proj(attn_output)

@@ -107,7 +107,8 @@ class MetalQuantizedMoE(nn.Module):
         shared_expert_weight: float | None = None,
     ) -> torch.Tensor:
         if not self.has_shared_expert:
-            raise RuntimeError("MetalQuantizedMoE has no shared expert weights")
+            raise RuntimeError(
+                "MetalQuantizedMoE has no shared expert weights")
 
         from .kernels import moe_shared_expert_fp4
 
@@ -256,7 +257,8 @@ def quantize_linear_layer(
         raise ValueError(f"Unsupported bits: {bits}. Use 2, 4, or 8.")
     fmt = format.lower()
     if fmt not in _SUPPORTED_FORMATS:
-        raise ValueError(f"Unsupported format: {format}. Use one of {_SUPPORTED_FORMATS}.")
+        raise ValueError(
+            f"Unsupported format: {format}. Use one of {_SUPPORTED_FORMATS}.")
 
     if bits != 4:
         if fmt != "fp4":
@@ -339,10 +341,12 @@ def quantize_moe_experts(
         MetalQuantizedMoE container with packed weights and scales.
     """
     if bits != 4:
-        raise ValueError("MoE expert quantization currently supports only 4-bit weights.")
+        raise ValueError(
+            "MoE expert quantization currently supports only 4-bit weights.")
     fmt = format.lower()
     if fmt not in _SUPPORTED_FORMATS:
-        raise ValueError(f"Unsupported format: {format}. Use one of {_SUPPORTED_FORMATS}.")
+        raise ValueError(
+            f"Unsupported format: {format}. Use one of {_SUPPORTED_FORMATS}.")
 
     experts = getattr(moe_layer, "experts", None)
     if experts is None:
@@ -353,17 +357,20 @@ def quantize_moe_experts(
     gate_weight = _resolve_moe_weight(gate_up)
     down_weight = _resolve_moe_weight(down)
     if gate_weight is None or down_weight is None:
-        raise AttributeError("MoE experts must expose gate_up_proj/down_proj weights.")
+        raise AttributeError(
+            "MoE experts must expose gate_up_proj/down_proj weights.")
 
     if gate_weight.ndim != 3 or down_weight.ndim != 3:
-        raise ValueError("MoE expert weights must be 3D tensors [num_experts, out, in].")
+        raise ValueError(
+            "MoE expert weights must be 3D tensors [num_experts, out, in].")
     if gate_weight.shape[0] != down_weight.shape[0]:
         raise ValueError("MoE gate_up/down weights disagree on num_experts.")
 
     _validate_moe_weight_shape(gate_weight, group_size)
     _validate_moe_weight_shape(down_weight, group_size)
 
-    use_hadamard = _extract_use_hadamard(experts) or _extract_use_hadamard(moe_layer)
+    use_hadamard = _extract_use_hadamard(
+        experts) or _extract_use_hadamard(moe_layer)
     layer_name = getattr(moe_layer, "_metal_marlin_layer_name", "")
 
     # Use parallel quantization (GPTQ if hessians provided, else RTN)
@@ -396,14 +403,18 @@ def quantize_moe_experts(
     shared_down_scales_t: torch.Tensor | None = None
     shared_expert_weight = getattr(moe_layer, "shared_expert_weight", 1.0)
     if isinstance(shared_expert_weight, torch.Tensor):
-        shared_expert_weight = float(shared_expert_weight.detach().cpu().item())
+        shared_expert_weight = float(
+            shared_expert_weight.detach().cpu().item())
     else:
         shared_expert_weight = float(shared_expert_weight)
 
-    shared_gate_weight, shared_down_weight = _resolve_shared_expert_weights(moe_layer, experts)
+    shared_gate_weight, shared_down_weight = _resolve_shared_expert_weights(
+        moe_layer, experts)
     if shared_gate_weight is not None and shared_down_weight is not None:
-        _validate_shared_weight_shape(shared_gate_weight, group_size, name="shared_gate_up")
-        _validate_shared_weight_shape(shared_down_weight, group_size, name="shared_down")
+        _validate_shared_weight_shape(
+            shared_gate_weight, group_size, name="shared_gate_up")
+        _validate_shared_weight_shape(
+            shared_down_weight, group_size, name="shared_down")
 
         # Shared expert uses RTN (single expert, not worth GPTQ overhead)
         shared_gate_packed, shared_gate_scales = _quantize_moe_weight_single_fast(
@@ -415,10 +426,14 @@ def quantize_moe_experts(
             group_size,
         )
 
-        shared_gate_packed_t = torch.from_numpy(shared_gate_packed).to(torch.uint32).to("mps")
-        shared_gate_scales_t = torch.from_numpy(shared_gate_scales).to(torch.float16).to("mps")
-        shared_down_packed_t = torch.from_numpy(shared_down_packed).to(torch.uint32).to("mps")
-        shared_down_scales_t = torch.from_numpy(shared_down_scales).to(torch.float16).to("mps")
+        shared_gate_packed_t = torch.from_numpy(
+            shared_gate_packed).to(torch.uint32).to("mps")
+        shared_gate_scales_t = torch.from_numpy(
+            shared_gate_scales).to(torch.float16).to("mps")
+        shared_down_packed_t = torch.from_numpy(
+            shared_down_packed).to(torch.uint32).to("mps")
+        shared_down_scales_t = torch.from_numpy(
+            shared_down_scales).to(torch.float16).to("mps")
 
     return MetalQuantizedMoE(
         gate_packed_t,
@@ -444,6 +459,7 @@ def replace_linear_layers(
     format: str = "fp4",
     skip_patterns: list[str] | None = None,
     layer_config: dict[str, dict] | None = None,
+    prequantized: bool = False,
 ) -> dict[str, Any]:
     """Replace nn.Linear layers with MetalQuantizedLinear in-place.
 
@@ -456,6 +472,9 @@ def replace_linear_layers(
         layer_config: Per-layer config overrides, matched by exact layer name.
             Supports keys: "bits", "group_size", "format", "skip", "hessian",
             and "use_hadamard".
+        prequantized: If True, create empty quantized layers without running
+            RTN quantization. Use this for loading pre-quantized models where
+            packed weights will be loaded from safetensors afterwards.
 
     Returns:
         Dict with replacement statistics:
@@ -501,12 +520,27 @@ def replace_linear_layers(
         setattr(module, "_metal_marlin_layer_name", name)
 
         try:
-            quantized = quantize_linear_layer(
-                module,
-                bits=layer_bits,
-                group_size=layer_group_size,
-                format=layer_format,
-            )
+            if prequantized:
+                # Create empty quantized layer - weights will be loaded from safetensors
+                out_features, in_features = module.weight.shape
+                has_bias = module.bias is not None
+                quantized = MetalQuantizedLinear(
+                    in_features=in_features,
+                    out_features=out_features,
+                    bits=layer_bits,
+                    group_size=layer_group_size,
+                    bias=has_bias,
+                )
+                if has_bias:
+                    # Copy bias from original layer (biases aren't quantized)
+                    quantized.bias.copy_(module.bias.detach().half().to("mps"))
+            else:
+                quantized = quantize_linear_layer(
+                    module,
+                    bits=layer_bits,
+                    group_size=layer_group_size,
+                    format=layer_format,
+                )
         except Exception:
             skipped_count += 1
             _cleanup_layer_overrides(module)
@@ -567,10 +601,13 @@ def replace_moe_layers(
     expert_hessians: dict[str, dict[int, np.ndarray]] = {}
     if calibration_inputs is not None and use_gptq:
         if verbose:
-            print(f"Collecting Hessians from {len(calibration_inputs)} calibration samples...")
-        expert_hessians = collect_moe_expert_hessians(model, calibration_inputs, device=device)
+            print(
+                f"Collecting Hessians from {len(calibration_inputs)} calibration samples...")
+        expert_hessians = collect_moe_expert_hessians(
+            model, calibration_inputs, device=device)
         if verbose:
-            print(f"  Collected Hessians for {len(expert_hessians)} MoE layers")
+            print(
+                f"  Collected Hessians for {len(expert_hessians)} MoE layers")
 
     replacements: list[tuple[str, MoEModule]] = []
     skipped_count = 0
@@ -586,7 +623,8 @@ def replace_moe_layers(
 
     for name, module in replacements:
         experts = getattr(module, "experts", None)
-        gate_weight = _resolve_moe_weight(getattr(experts, "gate_up_proj", None))
+        gate_weight = _resolve_moe_weight(
+            getattr(experts, "gate_up_proj", None))
         down_weight = _resolve_moe_weight(getattr(experts, "down_proj", None))
         if gate_weight is None or down_weight is None:
             skipped_count += 1
@@ -679,10 +717,12 @@ def _resolve_moe_weight(value: Any) -> torch.Tensor | None:
 
 def _validate_moe_weight_shape(weight: torch.Tensor, group_size: int) -> None:
     if weight.ndim != 3:
-        raise ValueError("MoE expert weights must be 3D tensors [num_experts, out, in].")
+        raise ValueError(
+            "MoE expert weights must be 3D tensors [num_experts, out, in].")
     _num_experts, _out_features, in_features = weight.shape
     if in_features % 8 != 0:
-        raise ValueError(f"in_features ({in_features}) must be divisible by 8 for MoE packing")
+        raise ValueError(
+            f"in_features ({in_features}) must be divisible by 8 for MoE packing")
     if in_features % group_size != 0:
         raise ValueError(
             f"in_features ({in_features}) must be divisible by group_size ({group_size})"
@@ -699,7 +739,8 @@ def _validate_shared_weight_shape(
         raise ValueError(f"{name} weight must be 2D [out, in]")
     _out_features, in_features = weight.shape
     if in_features % 8 != 0:
-        raise ValueError(f"{name} in_features ({in_features}) must be divisible by 8")
+        raise ValueError(
+            f"{name} in_features ({in_features}) must be divisible by 8")
     if in_features % group_size != 0:
         raise ValueError(
             f"{name} in_features ({in_features}) must be divisible by group_size ({group_size})"
@@ -716,7 +757,8 @@ def _quantize_moe_weight_stack(
     weight_np = weight.detach().float().cpu().numpy()
     num_experts, out_features, in_features = weight_np.shape
 
-    packed_all = np.zeros((num_experts, in_features // 8, out_features), dtype=np.uint32)
+    packed_all = np.zeros((num_experts, in_features // 8,
+                          out_features), dtype=np.uint32)
     scales_all = np.zeros(
         (num_experts, in_features // quantizer.group_size, out_features), dtype=np.float16
     )
@@ -783,10 +825,13 @@ def _quantize_moe_weight_stack_parallel(
 
         gb_per_expert = bytes_per_expert / (1024**3)
         # Use 70% of available RAM - for GPTQ, numpy releases GIL so we can exceed CPU count
-        max_workers = max(1, min(num_experts, int(available_gb * 0.7 / gb_per_expert)))
+        max_workers = max(1, min(num_experts, int(
+            available_gb * 0.7 / gb_per_expert)))
 
-    packed_all = np.zeros((num_experts, in_features // 8, out_features), dtype=np.uint32)
-    scales_all = np.zeros((num_experts, in_features // group_size, out_features), dtype=np.float16)
+    packed_all = np.zeros((num_experts, in_features // 8,
+                          out_features), dtype=np.uint32)
+    scales_all = np.zeros(
+        (num_experts, in_features // group_size, out_features), dtype=np.float16)
 
     if use_gptq and hessians is not None:
         # GPTQ with Hessians - CPU-bound, use ProcessPoolExecutor
@@ -813,7 +858,8 @@ def _quantize_moe_weight_stack_parallel(
             args_list = [
                 (idx, weight_np[idx], hessians.get(idx), group_size) for idx in range(num_experts)
             ]
-            futures = [executor.submit(quantize_expert_gptq, args) for args in args_list]
+            futures = [executor.submit(quantize_expert_gptq, args)
+                       for args in args_list]
             for future in as_completed(futures):
                 idx, packed, scales = future.result()
                 packed_all[idx] = packed
@@ -824,11 +870,13 @@ def _quantize_moe_weight_stack_parallel(
 
         def quantize_expert_rtn(idx: int) -> tuple[int, np.ndarray, np.ndarray]:
             expert_weight = weight_np[idx]
-            packed, scales = quantize_fp4(expert_weight, group_size=group_size, marlin_layout=True)
+            packed, scales = quantize_fp4(
+                expert_weight, group_size=group_size, marlin_layout=True)
             return idx, packed, scales
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(quantize_expert_rtn, idx) for idx in range(num_experts)]
+            futures = [executor.submit(quantize_expert_rtn, idx)
+                       for idx in range(num_experts)]
             for future in as_completed(futures):
                 idx, packed, scales = future.result()
                 packed_all[idx] = packed
@@ -876,7 +924,8 @@ def collect_moe_expert_hessians(
 
         def hook(module, inputs, output):
             # Get router output to determine which tokens go to which experts
-            router = getattr(module, "gate", None) or getattr(module, "router", None)
+            router = getattr(module, "gate", None) or getattr(
+                module, "router", None)
             if router is None:
                 return
 
@@ -895,7 +944,8 @@ def collect_moe_expert_hessians(
                         elif isinstance(router_logits, tuple):
                             topk_indices = router_logits[0]
                         else:
-                            _, topk_indices = torch.topk(router_logits, k=2, dim=-1)
+                            _, topk_indices = torch.topk(
+                                router_logits, k=2, dim=-1)
 
                     # Accumulate Hessian per expert
                     x_np = x_flat.cpu().numpy().astype(np.float64)
@@ -905,9 +955,11 @@ def collect_moe_expert_hessians(
                         for expert_idx in indices_np[token_idx]:
                             expert_idx = int(expert_idx)
                             h_sum, count = hessian_accumulators[layer_name][expert_idx]
-                            token_vec = x_np[token_idx : token_idx + 1]  # [1, hidden]
+                            # [1, hidden]
+                            token_vec = x_np[token_idx: token_idx + 1]
                             h_sum += token_vec.T @ token_vec
-                            hessian_accumulators[layer_name][expert_idx] = (h_sum, count + 1)
+                            hessian_accumulators[layer_name][expert_idx] = (
+                                h_sum, count + 1)
 
         return hook
 
@@ -926,7 +978,8 @@ def collect_moe_expert_hessians(
             continue
 
         num_experts, out_features, in_features = weight.shape
-        hook = moe.register_forward_hook(make_expert_hook(name, num_experts, in_features))
+        hook = moe.register_forward_hook(
+            make_expert_hook(name, num_experts, in_features))
         hooks.append(hook)
 
     # Run calibration forward passes
@@ -954,7 +1007,8 @@ def collect_moe_expert_hessians(
             else:
                 # No samples routed to this expert - use identity
                 in_features = h_sum.shape[0]
-                result[layer_name][expert_idx] = np.eye(in_features, dtype=np.float32)
+                result[layer_name][expert_idx] = np.eye(
+                    in_features, dtype=np.float32)
 
     return result
 
@@ -993,7 +1047,8 @@ def _quantize_moe_weight_single_fast(
     from .quantize_fp4 import quantize_fp4
 
     weight_np = weight.detach().float().cpu().numpy()
-    packed, scales = quantize_fp4(weight_np, group_size=group_size, marlin_layout=True)
+    packed, scales = quantize_fp4(
+        weight_np, group_size=group_size, marlin_layout=True)
     return packed, scales
 
 
@@ -1079,12 +1134,14 @@ def collect_single_layer_hessians(
     moe = moe_layers[target_layer_name]
     experts = getattr(moe, "experts", None)
     if experts is None:
-        raise ValueError(f"Layer '{target_layer_name}' has no 'experts' attribute")
+        raise ValueError(
+            f"Layer '{target_layer_name}' has no 'experts' attribute")
 
     gate_up = getattr(experts, "gate_up_proj", None)
     weight = _resolve_moe_weight(gate_up)
     if weight is None or weight.ndim != 3:
-        raise ValueError(f"Layer '{target_layer_name}' has invalid weight shape")
+        raise ValueError(
+            f"Layer '{target_layer_name}' has invalid weight shape")
 
     num_experts, out_features, in_features = weight.shape
 
@@ -1096,7 +1153,8 @@ def collect_single_layer_hessians(
 
     def expert_hook(module, inputs, output):
         """Accumulate Hessians based on expert routing."""
-        router = getattr(module, "gate", None) or getattr(module, "router", None)
+        router = getattr(module, "gate", None) or getattr(
+            module, "router", None)
         if router is None:
             return
 
@@ -1113,7 +1171,8 @@ def collect_single_layer_hessians(
                     elif isinstance(router_logits, tuple):
                         topk_indices = router_logits[0]
                     else:
-                        _, topk_indices = torch.topk(router_logits, k=2, dim=-1)
+                        _, topk_indices = torch.topk(
+                            router_logits, k=2, dim=-1)
 
                 x_np = x_flat.cpu().numpy().astype(np.float64)
                 indices_np = topk_indices.cpu().numpy()
@@ -1122,7 +1181,7 @@ def collect_single_layer_hessians(
                     for expert_idx in indices_np[token_idx]:
                         expert_idx = int(expert_idx)
                         h_sum, count = hessian_accumulators[expert_idx]
-                        token_vec = x_np[token_idx : token_idx + 1]
+                        token_vec = x_np[token_idx: token_idx + 1]
                         h_sum += token_vec.T @ token_vec
                         hessian_accumulators[expert_idx] = (h_sum, count + 1)
 
@@ -1206,9 +1265,11 @@ def replace_moe_layers_streaming(
         replacements.append((name, module))
 
     if verbose:
-        print(f"Found {len(replacements)} MoE layers to quantize (streaming mode)")
+        print(
+            f"Found {len(replacements)} MoE layers to quantize (streaming mode)")
         if calibration_inputs is not None and use_gptq:
-            print(f"  Using {len(calibration_inputs)} calibration samples for GPTQ")
+            print(
+                f"  Using {len(calibration_inputs)} calibration samples for GPTQ")
 
     # Phase 1: Collect Hessians and quantize each layer, storing results
     # (keep original model intact for forward passes)
@@ -1220,7 +1281,8 @@ def replace_moe_layers_streaming(
 
     for layer_idx, (name, module) in enumerate(replacements):
         experts = getattr(module, "experts", None)
-        gate_weight = _resolve_moe_weight(getattr(experts, "gate_up_proj", None))
+        gate_weight = _resolve_moe_weight(
+            getattr(experts, "gate_up_proj", None))
         down_weight = _resolve_moe_weight(getattr(experts, "down_proj", None))
         if gate_weight is None or down_weight is None:
             skipped_count += 1
@@ -1232,7 +1294,8 @@ def replace_moe_layers_streaming(
         layer_hessians: dict[int, np.ndarray] | None = None
         if calibration_inputs is not None and use_gptq:
             if verbose:
-                print(f"  [{layer_idx + 1}/{len(replacements)}] Collecting Hessians for {name}...")
+                print(
+                    f"  [{layer_idx + 1}/{len(replacements)}] Collecting Hessians for {name}...")
             layer_hessians = collect_single_layer_hessians(
                 model, name, calibration_inputs, device=device
             )
@@ -1276,7 +1339,8 @@ def replace_moe_layers_streaming(
 
     # Phase 2: Replace all layers now that calibration is complete
     if verbose:
-        print(f"\n  Replacing {len(quantized_results)} layers with quantized weights...")
+        print(
+            f"\n  Replacing {len(quantized_results)} layers with quantized weights...")
 
     for name, (quantized, layer_params, method) in quantized_results.items():
         # Get the module again

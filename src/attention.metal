@@ -1231,7 +1231,7 @@ kernel void attention_block_sparse_fused_qkv(
         
         while (mask_word != 0) {
             // Find first set bit
-            uint b = ctz(mask_word);
+            uint b = ctz64(mask_word);
             // Clear the bit
             mask_word &= ~(1ULL << b);
             

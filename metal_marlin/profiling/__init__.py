@@ -1,4 +1,11 @@
-"""Profiling and memory analysis tools for Metal Marlin kernels."""
+"""Profiling and memory analysis tools for Metal Marlin kernels.
+
+This package provides GPU profiling capabilities including:
+- MetalProfiler: GPU timestamp-based kernel profiling with Chrome trace export
+- GPUCounters: Hardware performance counter access
+- MemoryAuditor: Memory access pattern analysis
+- OccupancyAnalyzer: GPU occupancy optimization
+"""
 
 from .gpu_counters import (
     GPUCounters,
@@ -48,10 +55,14 @@ from .roofline import (
     RooflineConfig,
     quick_roofline,
 )
+from .metal_profiler import MetalProfiler, ProfileEvent, ProfileRegion
 from .trace import ChromeTrace, TraceEvent
 
 __all__ = [
     "AccessPattern",
+    "MetalProfiler",
+    "ProfileEvent",
+    "ProfileRegion",
     "AppleSiliconGPU",
     "BandwidthMeasurement",
     "ChromeTrace",

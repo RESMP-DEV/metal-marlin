@@ -11,7 +11,8 @@ using namespace metal;
 // Count trailing zeros - returns the number of consecutive 0 bits starting
 // from the least significant bit (position 0).
 // Used by block-sparse attention kernels to iterate over set bits in masks.
-inline uint ctz(uint64_t x) {
+// Named ctz64 to avoid ambiguity with Metal's built-in ctz(ulong).
+inline uint ctz64(uint64_t x) {
     // Metal 3.0+ has built-in ctz, but for compatibility we provide a fallback
     // implementation using bit manipulation.
     if (x == 0) return 64;

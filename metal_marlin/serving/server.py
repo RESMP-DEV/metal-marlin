@@ -5,22 +5,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .engine import EngineConfig, ServingEngine
-from .errors import (
-    ModelNotFoundError,
-    ModelNotLoadedError,
-    ServingError,
-)
+from .errors import ModelNotFoundError, ModelNotLoadedError, ServingError
 from .metrics import MetricsCollector
-from .openai_schemas import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    CompletionResponse,
-    ModelInfo,
-    ModelList,
-)
+from .openai_schemas import (ChatCompletionRequest, CompletionRequest,
+                             CompletionResponse, ModelInfo, ModelList)
+from .perplexity import PerplexityTracker, compute_perplexity
 
 engine: ServingEngine | None = None
 metrics = MetricsCollector()
+perplexity_tracker = PerplexityTracker()
 
 
 @asynccontextmanager
@@ -69,7 +62,8 @@ async def general_error_handler(request: Request, exc: Exception):
 
 def configure(model_path: str, device: str = "mps", **kwargs):
     global engine
-    engine = ServingEngine(EngineConfig(model_path=model_path, device=device, **kwargs))
+    engine = ServingEngine(EngineConfig(
+        model_path=model_path, device=device, **kwargs))
 
     def get_queue_depth() -> int:
         if engine and engine.scheduler:
@@ -91,7 +85,8 @@ async def get_model_info(model_id: str):
     if engine is None:
         raise ModelNotLoadedError()
     if model_id != engine.model_name:
-        raise ModelNotFoundError(f"Model '{model_id}' not found. Loaded: {engine.model_name}")
+        raise ModelNotFoundError(
+            f"Model '{model_id}' not found. Loaded: {engine.model_name}")
     return engine.get_model_info()
 
 
@@ -153,17 +148,79 @@ async def health():
     return {"status": "ok", "model_loaded": engine is not None}
 
 
+@app.post("/v1/perplexity")
+async def evaluate_perplexity(request: Request):
+    """Evaluate perplexity of text under the loaded model.
+
+    Request body:
+        {
+            "text": "The text to evaluate",
+            "chunk_size": 100,
+            "include_token_ppls": false
+        }
+
+    Returns:
+        PerplexityResult with overall perplexity and optional chunk-level analysis
+    """
+    if engine is None:
+        raise ModelNotLoadedError()
+
+    body = await request.json()
+    text = body.get("text")
+    if not text:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": "Missing 'text' field",
+                               "type": "invalid_request", "code": 400}},
+        )
+
+    chunk_size = body.get("chunk_size", 100)
+    include_token_ppls = body.get("include_token_ppls", False)
+
+    try:
+        result = compute_perplexity(
+            engine.pipeline,
+            text,
+            chunk_size=chunk_size,
+            include_token_ppls=include_token_ppls,
+        )
+
+        # Track perplexity for monitoring
+        perplexity_tracker.add(result.perplexity, result.tokens, "api")
+
+        return {
+            "perplexity": result.perplexity,
+            "tokens": result.tokens,
+            "loss": result.loss,
+            "chunk_perplexities": result.chunk_ppls,
+            "chunk_size": result.chunk_size,
+        }
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"message": str(
+                e), "type": "evaluation_error", "code": 500}},
+        )
+
+
+@app.get("/v1/perplexity/stats")
+async def get_perplexity_stats():
+    """Get aggregated perplexity statistics."""
+    return perplexity_tracker.get_stats()
+
+
 @app.get("/metrics")
 async def get_metrics():
     from fastapi.responses import PlainTextResponse
 
     from ..trellis.metrics import moe_metrics
 
-    # Combine serving metrics with MoE metrics
+    # Combine serving metrics with MoE metrics and perplexity
     serving_metrics = metrics.to_prometheus()
     moe_metrics_output = moe_metrics.to_prometheus()
+    perplexity_metrics = perplexity_tracker.to_prometheus()
 
-    combined = serving_metrics + "\n" + moe_metrics_output
+    combined = serving_metrics + "\n" + moe_metrics_output + "\n" + perplexity_metrics
     return PlainTextResponse(content=combined, media_type="text/plain")
 
 
@@ -209,21 +266,26 @@ def run_server(
     if metrics_port:
         def run_metrics_server():
             metrics_app = FastAPI(title="Prometheus Metrics Exporter")
-            
+
             @metrics_app.get("/metrics")
             async def metrics_endpoint():
                 from fastapi.responses import PlainTextResponse
 
                 from ..trellis.metrics import moe_metrics
-                
+
+                # Combine serving metrics with MoE metrics and perplexity
                 serving_metrics = metrics.to_prometheus()
                 moe_metrics_output = moe_metrics.to_prometheus()
-                combined = serving_metrics + "\n" + moe_metrics_output
+                perplexity_metrics = perplexity_tracker.to_prometheus()
+
+                combined = serving_metrics + "\n" + moe_metrics_output + "\n" + perplexity_metrics
                 return PlainTextResponse(content=combined, media_type="text/plain")
-            
-            uvicorn.run(metrics_app, host=host, port=metrics_port, log_level="warning")
-        
-        metrics_thread = threading.Thread(target=run_metrics_server, daemon=True)
+
+            uvicorn.run(metrics_app, host=host,
+                        port=metrics_port, log_level="warning")
+
+        metrics_thread = threading.Thread(
+            target=run_metrics_server, daemon=True)
         metrics_thread.start()
         print(f"Prometheus metrics: http://{host}:{metrics_port}/metrics")
 
@@ -238,7 +300,8 @@ def run_server(
     print(f"Model: {model_path}")
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
-    print(f"Continuous batching: {'enabled' if enable_batching else 'disabled'}")
+    print(
+        f"Continuous batching: {'enabled' if enable_batching else 'disabled'}")
     if not metrics_port:
         print(f"Metrics: http://{host}:{port}/metrics")
     print("Press Ctrl+C to stop")
