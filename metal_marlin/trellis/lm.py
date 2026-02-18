@@ -27,9 +27,9 @@ import torch.nn.functional as F
 from ..kv_cache import TrellisKVCache
 from ..metal_dispatch import MetalKernelLibrary
 from .config import TrellisModelConfig
+
 # Import from model for backward compatibility and usage
-from .model import (TrellisDecoderLayer, TrellisModel, TrellisMoEMLP,
-                    WorkspaceBufferPool)
+from .model import TrellisDecoderLayer, TrellisModel, TrellisMoEMLP, WorkspaceBufferPool
 from .moe_dispatch import MoEBufferPool
 
 # Import LayerBatchContext for batching command buffers across layers
@@ -446,6 +446,7 @@ class TrellisForCausalLM(nn.Module):
         # Use LayerBatchContext for MoE dispatch batching (reduces commits from ~46 to ~6)
         # This is separate from lib.batch_dispatch() which handles attention kernel batching.
         from contextlib import nullcontext
+
         from .model import LAYERS_PER_BATCH
         use_layer_batch = (
             batch_size == 1 and HAS_METAL and LayerBatchContext is not None)
@@ -533,9 +534,9 @@ class TrellisForCausalLM(nn.Module):
         # Initialize MLA KV cache for efficient generation
         # MLA caches compressed representation (kv_lora_rank + qk_rope_head_dim)
         # instead of full K,V tensors, reducing cache size by ~8x
+        # Note: TrellisKVCache now defaults to use_paged=True for vLLM-style blocks
         kv_cache = TrellisKVCache(
             num_layers=self.config.num_hidden_layers,
-            batch_size=batch_size,
             max_seq_len=seq_len + max_new_tokens,
             kv_lora_rank=self.config.kv_lora_rank,
             qk_rope_head_dim=self.config.qk_rope_head_dim,

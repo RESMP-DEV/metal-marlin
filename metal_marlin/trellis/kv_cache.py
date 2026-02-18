@@ -17,13 +17,10 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
+    pass
 
 try:
-    from metal_marlin.paged.mla_paged_adapter import (
-        paged_attention_mla_int4,
-        quantize_kv_int4,
-    )
+    from metal_marlin.paged.mla_paged_adapter import paged_attention_mla_int4, quantize_kv_int4
     HAS_PAGED_INT4 = True
 except ImportError:
     HAS_PAGED_INT4 = False
@@ -70,7 +67,7 @@ class TrellisKVCache:
         qk_rope_head_dim: int,
         dtype: torch.dtype = torch.float16,
         device: str | torch.device = "mps",
-        use_paged: bool = False,
+        use_paged: bool = True,
         block_size: int = 16,
     ):
         """Initialize TrellisKVCache.
@@ -121,22 +118,34 @@ class TrellisKVCache:
 
     def _init_paged_cache(self) -> None:
         """Initialize paged block-based cache."""
-        from ..paged.attention import paged_attention_v1, PagedKVCache
+        from ..paged.attention import paged_attention_v1
+        from ..paged.cache_manager import PagedKVCache
         from ..paged.kv_block import KVBlockConfig
 
         # Store the paged_attention_v1 function for later use
         self._paged_attention_fn = paged_attention_v1
 
         # Create KV block config for paged cache
+        # Convert torch dtype to numpy dtype
+        import numpy as np
+        if self.dtype == torch.float16:
+            np_dtype = np.dtype(np.float16)
+        elif self.dtype == torch.bfloat16:
+            # Numpy doesn't have bfloat16, use float16
+            np_dtype = np.dtype(np.float16)
+        else:
+            np_dtype = np.dtype(np.float32)
+
         config = KVBlockConfig(
             block_size=self.block_size,
             num_heads=1,  # MLA stores compressed representation
             head_dim=self.cache_dim,
-            dtype=self.dtype,
+            dtype=np_dtype,
         )
 
         # Calculate number of blocks needed
-        num_blocks = (self.max_seq_len + self.block_size - 1) // self.block_size
+        num_blocks = (self.max_seq_len + self.block_size -
+                      1) // self.block_size
         num_blocks *= self.num_layers  # Blocks per layer
 
         # Create the paged cache
@@ -219,12 +228,13 @@ class TrellisKVCache:
         for i in range(seq_len):
             # Create dummy key/value from compressed representation
             # In practice, these would be decompressed properly
-            key = compressed_np[i : i + 1, np.newaxis, :]  # [1, 1, cache_dim]
+            key = compressed_np[i: i + 1, np.newaxis, :]  # [1, 1, cache_dim]
             value = key.copy()
 
             success = self._paged_cache.append_kv(seq_id, key, value)
             if not success:
-                raise RuntimeError(f"Failed to append KV to paged cache for layer {layer_idx}")
+                raise RuntimeError(
+                    f"Failed to append KV to paged cache for layer {layer_idx}")
 
         self._seq_lens[layer_idx] += seq_len
 
@@ -359,7 +369,7 @@ class TrellisKVCache:
         # Split the compressed KV into K and V components
         # For MLA: kv_lora_rank + qk_rope_head_dim = cache_dim
         k = kv[..., : self.kv_lora_rank]
-        v = kv[..., self.kv_lora_rank :]
+        v = kv[..., self.kv_lora_rank:]
         return k, v
 
     def compress_to_int4(self, threshold_seq_len: int = 256) -> None:
