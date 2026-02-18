@@ -7,6 +7,15 @@ The Hadamard transform is self-inverse (H = H^T = H^-1 up to scaling), so it can
 be fused as a preprocessing step before quantized matrix multiplication:
     y = (H @ W) @ (H^T @ x) = W @ x  (mathematically equivalent)
 
+Supported block sizes:
+    - Power-of-2: 32, 64, 128 (standard sizes)
+    - Non-power-of-2: 96, 160, 192 (via block-diagonal decomposition)
+
+Non-power-of-2 decomposition:
+    - 96  = 64 + 32: Intermediate dimensions
+    - 160 = 128 + 32: Custom model dimensions  
+    - 192 = 128 + 64: Multi-head attention (24 heads x 8)
+
 Example:
     >>> from metal_marlin.hadamard_metal import hadamard_transform_metal
     >>> import torch
@@ -14,6 +23,10 @@ Example:
     >>> y = hadamard_transform_metal(x, block_size=64, normalize=True)
     >>> # Apply twice to recover original (H @ H = I for normalized H)
     >>> x_recovered = hadamard_transform_metal(y, block_size=64, normalize=True)
+    
+    >>> # Non-power-of-2 sizes work too
+    >>> x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
+    >>> y96 = hadamard_transform_metal(x96, block_size=96, normalize=True)
 """
 
 from __future__ import annotations
@@ -192,6 +205,263 @@ kernel void hadamard_128(
     out[base + lane_id * 4 + 2] = half(val.z);
     out[base + lane_id * 4 + 3] = half(val.w);
 }
+
+// ============================================================================
+// Non-power-of-2 Hadamard transforms via block-diagonal decomposition
+// ============================================================================
+//
+// For non-power-of-2 sizes, decompose into independent power-of-2 blocks:
+//   H_96  = diag(H_64, H_32)  - used for intermediate dimensions
+//   H_160 = diag(H_128, H_32) - used for custom model dimensions  
+//   H_192 = diag(H_128, H_64) - used for multi-head attention (24 heads x 8)
+//
+// Each block is transformed independently, exploiting the block-diagonal
+// structure for maximum throughput and parallelization.
+// ============================================================================
+
+/// Hadamard transform for block_size = 96 (64 + 32 decomposition)
+/// Grid: (N, 1, 1) - one threadgroup per vector
+/// Each threadgroup processes both 64-block and 32-block sequentially
+kernel void hadamard_96(
+    device const half* input [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    device const HadamardParams* params [[buffer(2)]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint threadgroup_position_in_grid [[threadgroup_position_in_grid]]
+) {
+    uint lane_id = thread_index_in_simdgroup;
+    uint tg_idx = threadgroup_position_in_grid;
+    const uint N = params->N;
+    const bool NORMALIZE = params->normalize != 0;
+
+    if (tg_idx >= N) return;
+
+    uint base = tg_idx * 96;
+    
+    // === Process first 64 elements (same as hadamard_64) ===
+    {
+        float2 val;
+        val.x = float(input[base + lane_id * 2]);
+        val.y = float(input[base + lane_id * 2 + 1]);
+
+        // Stage 0: intra-lane
+        {
+            float sum = val.x + val.y;
+            float diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+
+        // Stages 1-5: inter-lane shuffle
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step2_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.125f;  // 1/sqrt(64)
+        }
+
+        out[base + lane_id * 2] = half(val.x);
+        out[base + lane_id * 2 + 1] = half(val.y);
+    }
+    
+    // === Process next 32 elements (same as hadamard_32) ===
+    // Only lanes 0-31 participate
+    if (lane_id < 32) {
+        uint base32 = base + 64;
+        float val = float(input[base32 + lane_id]);
+
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.1767766953f;  // 1/sqrt(32)
+        }
+
+        out[base32 + lane_id] = half(val);
+    }
+}
+
+/// Hadamard transform for block_size = 160 (128 + 32 decomposition)
+kernel void hadamard_160(
+    device const half* input [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    device const HadamardParams* params [[buffer(2)]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint threadgroup_position_in_grid [[threadgroup_position_in_grid]]
+) {
+    uint lane_id = thread_index_in_simdgroup;
+    uint tg_idx = threadgroup_position_in_grid;
+    const uint N = params->N;
+    const bool NORMALIZE = params->normalize != 0;
+
+    if (tg_idx >= N) return;
+
+    uint base = tg_idx * 160;
+    
+    // === Process first 128 elements (same as hadamard_128) ===
+    {
+        float4 val;
+        val.x = float(input[base + lane_id * 4]);
+        val.y = float(input[base + lane_id * 4 + 1]);
+        val.z = float(input[base + lane_id * 4 + 2]);
+        val.w = float(input[base + lane_id * 4 + 3]);
+
+        // Stage 0: intra-register
+        {
+            float sum0 = val.x + val.y;
+            float diff0 = val.x - val.y;
+            float sum1 = val.z + val.w;
+            float diff1 = val.z - val.w;
+            val = float4(sum0, diff0, sum1, diff1);
+        }
+
+        // Stage 1: inter-pair within register
+        {
+            float sum0 = val.x + val.z;
+            float diff0 = val.x - val.z;
+            float sum1 = val.y + val.w;
+            float diff1 = val.y - val.w;
+            val = float4(sum0, sum1, diff0, diff1);
+        }
+
+        // Stages 2-6: inter-lane shuffle
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step4_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.0883883476f;  // 1/sqrt(128)
+        }
+
+        out[base + lane_id * 4] = half(val.x);
+        out[base + lane_id * 4 + 1] = half(val.y);
+        out[base + lane_id * 4 + 2] = half(val.z);
+        out[base + lane_id * 4 + 3] = half(val.w);
+    }
+    
+    // === Process next 32 elements (same as hadamard_32) ===
+    if (lane_id < 32) {
+        uint base32 = base + 128;
+        float val = float(input[base32 + lane_id]);
+
+        for (uint stage = 0; stage < 5; ++stage) {
+            uint stride = 1u << stage;
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.1767766953f;  // 1/sqrt(32)
+        }
+
+        out[base32 + lane_id] = half(val);
+    }
+}
+
+/// Hadamard transform for block_size = 192 (128 + 64 decomposition)
+kernel void hadamard_192(
+    device const half* input [[buffer(0)]],
+    device half* out [[buffer(1)]],
+    device const HadamardParams* params [[buffer(2)]],
+    uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
+    uint threadgroup_position_in_grid [[threadgroup_position_in_grid]]
+) {
+    uint lane_id = thread_index_in_simdgroup;
+    uint tg_idx = threadgroup_position_in_grid;
+    const uint N = params->N;
+    const bool NORMALIZE = params->normalize != 0;
+
+    if (tg_idx >= N) return;
+
+    uint base = tg_idx * 192;
+    
+    // === Process first 128 elements (same as hadamard_128) ===
+    {
+        float4 val;
+        val.x = float(input[base + lane_id * 4]);
+        val.y = float(input[base + lane_id * 4 + 1]);
+        val.z = float(input[base + lane_id * 4 + 2]);
+        val.w = float(input[base + lane_id * 4 + 3]);
+
+        // Stage 0: intra-register
+        {
+            float sum0 = val.x + val.y;
+            float diff0 = val.x - val.y;
+            float sum1 = val.z + val.w;
+            float diff1 = val.z - val.w;
+            val = float4(sum0, diff0, sum1, diff1);
+        }
+
+        // Stage 1: inter-pair within register
+        {
+            float sum0 = val.x + val.z;
+            float diff0 = val.x - val.z;
+            float sum1 = val.y + val.w;
+            float diff1 = val.y - val.w;
+            val = float4(sum0, sum1, diff0, diff1);
+        }
+
+        // Stages 2-6: inter-lane shuffle
+        for (uint stage = 2; stage < 7; ++stage) {
+            uint stride = 1u << (stage - 2);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step4_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.0883883476f;  // 1/sqrt(128)
+        }
+
+        out[base + lane_id * 4] = half(val.x);
+        out[base + lane_id * 4 + 1] = half(val.y);
+        out[base + lane_id * 4 + 2] = half(val.z);
+        out[base + lane_id * 4 + 3] = half(val.w);
+    }
+    
+    // === Process next 64 elements (same as hadamard_64) ===
+    {
+        uint base64 = base + 128;
+        float2 val;
+        val.x = float(input[base64 + lane_id * 2]);
+        val.y = float(input[base64 + lane_id * 2 + 1]);
+
+        // Stage 0: intra-lane
+        {
+            float sum = val.x + val.y;
+            float diff = val.x - val.y;
+            val.x = sum;
+            val.y = diff;
+        }
+
+        // Stages 1-5: inter-lane shuffle
+        for (uint stage = 1; stage < 6; ++stage) {
+            uint stride = 1u << (stage - 1);
+            uint partner = lane_id ^ stride;
+            bool is_upper = (lane_id & stride) != 0;
+            val = butterfly_step2_f(val, partner, is_upper);
+        }
+
+        if (NORMALIZE) {
+            val *= 0.125f;  // 1/sqrt(64)
+        }
+
+        out[base64 + lane_id * 2] = half(val.x);
+        out[base64 + lane_id * 2 + 1] = half(val.y);
+    }
+}
 """
     return _KERNEL_SOURCE
 
@@ -215,6 +485,14 @@ def hadamard_transform_metal(
 ):
     """Apply Walsh-Hadamard transform using Metal GPU acceleration.
 
+    Supports both power-of-2 sizes (32, 64, 128) and non-power-of-2 sizes
+    (96, 160, 192) via block-diagonal decomposition for optimal performance.
+
+    Non-power-of-2 decomposition:
+        - 96  = 64 + 32: Intermediate dimensions
+        - 160 = 128 + 32: Custom model dimensions
+        - 192 = 128 + 64: Multi-head attention (24 heads x 8)
+
     Args:
         x: Input tensor [..., block_size] on MPS device.
         block_size: Size of each Hadamard block. Must be 32, 64, 96, 128, 160, or 192.
@@ -234,6 +512,10 @@ def hadamard_transform_metal(
         >>> y = hadamard_transform_metal(x, block_size=64, normalize=True)
         >>> # H @ H = I for normalized transform
         >>> x_recovered = hadamard_transform_metal(y, block_size=64, normalize=True)
+        
+        >>> # Non-power-of-2 sizes work too
+        >>> x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
+        >>> y96 = hadamard_transform_metal(x96, block_size=96, normalize=True)
     """
     import torch
 
@@ -242,14 +524,6 @@ def hadamard_transform_metal(
 
     if block_size not in (32, 64, 96, 128, 160, 192):
         raise ValueError(f"block_size must be 32, 64, 96, 128, 160, or 192, got {block_size}")
-    
-    # Non-power-of-2 sizes require precompiled kernels from src/hadamard.metal
-    if block_size in (96, 160, 192):
-        raise NotImplementedError(
-            f"block_size={block_size} requires precompiled library from src/hadamard.metal. "
-            "This feature is available in the full C++ build. "
-            "For pure Python usage, use power-of-2 sizes: 32, 64, or 128."
-        )
 
     if x.shape[-1] != block_size:
         raise ValueError(
@@ -298,6 +572,9 @@ class HadamardMetal:
     This class provides a convenient interface for applying Hadamard transforms
     using Metal GPU acceleration. It's designed for use in quantization pipelines
     where activation rotation (QuIP#, HQQ) is needed.
+    
+    Supports both power-of-2 sizes (32, 64, 128) and non-power-of-2 sizes
+    (96, 160, 192) via block-diagonal decomposition.
 
     Example:
         >>> from metal_marlin.hadamard_metal import HadamardMetal
@@ -305,6 +582,10 @@ class HadamardMetal:
         >>> handler = HadamardMetal()
         >>> x = torch.randn(16, 64, device="mps", dtype=torch.float16)
         >>> y = handler.transform(x, normalize=True)
+        
+        >>> # Non-power-of-2 sizes work too
+        >>> x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
+        >>> y96 = handler.transform(x96, block_size=96, normalize=True)
     """
 
     def __init__(self):
@@ -328,7 +609,7 @@ class HadamardMetal:
 
         Args:
             x: Input tensor [..., block_size] on MPS device.
-            block_size: Size of each Hadamard block. Must be 32, 64, or 128.
+            block_size: Size of each Hadamard block. Must be 32, 64, 96, 128, 160, or 192.
             normalize: If True, normalize by 1/sqrt(block_size).
 
         Returns:
@@ -348,7 +629,7 @@ class HadamardMetal:
 
         Args:
             x: Input array [..., block_size] as numpy float32.
-            block_size: Size of each Hadamard block. Must be 32, 64, or 128.
+            block_size: Size of each Hadamard block. Must be 32, 64, 96, 128, 160, or 192.
             normalize: If True, normalize by 1/sqrt(block_size).
 
         Returns:

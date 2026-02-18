@@ -7,6 +7,7 @@ logical token positions are mapped to physical blocks via per-sequence tables.
 Supported storage formats:
 - ``fp16``: full-precision KV values.
 - ``fp8``: byte KV values plus FP16 scales.
+- ``int8``: signed INT8 KV values plus FP16 scales (symmetric quantization).
 - ``int4``: packed INT4 KV values (8 values per uint32) plus FP16 scales.
 """
 
@@ -19,7 +20,9 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-KVCacheDType = Literal["fp16", "fp8", "int4"]
+from .fp8_utils import _compute_fp8_e4m3_codebook
+
+KVCacheDType = Literal["fp16", "fp8", "fp8_e5m2", "FP8-E5M2", "int8", "int4"]
 
 
 @dataclass(frozen=True)
@@ -43,11 +46,14 @@ class PagedKVCache:
         num_blocks: Total number of physical blocks in the cache pool.
         num_kv_heads: Number of KV heads per token.
         head_dim: KV head dimension.
-        dtype: Storage format. One of ``"fp16"``, ``"fp8"``, ``"int4"``.
+        dtype: Storage format. One of ``"fp16"``, ``"fp8"``, ``"fp8_e5m2"``, ``"int8"``, ``"int4"``.
         block_size: Tokens per block. Must be 16.
     """
 
     BLOCK_SIZE = 16
+
+    # INT8 symmetric quantization constants
+    INT8_MAX = 127.0
 
     def __init__(
         self,
@@ -103,11 +109,16 @@ class PagedKVCache:
             "float16": "fp16",
             "half": "fp16",
             "e4m3": "fp8",
+            "e5m2": "fp8_e5m2",
+            "fp8-e5m2": "fp8_e5m2",
+            "int8_sym": "int8",
+            "i8": "int8",
             "int4_sym": "int4",
+            "i4": "int4",
         }
         key = aliases.get(key, key)
-        if key not in {"fp16", "fp8", "int4"}:
-            raise ValueError("dtype must be one of: fp16, fp8, int4")
+        if key not in {"fp16", "fp8", "fp8_e5m2", "int8", "int4"}:
+            raise ValueError("dtype must be one of: fp16, fp8, fp8_e5m2, int8, int4")
         return key  # type: ignore[return-value]
 
     def _resolve_layout(self) -> _StorageLayout:
@@ -127,7 +138,22 @@ class PagedKVCache:
                 scale_dtype=None,
             )
 
-        if self.dtype == "fp8":
+        if self.dtype in ("fp8", "fp8_e5m2"):
+            # Per-block scales (one scale per head per block)
+            scale_shape = (
+                self.num_blocks,
+                self.num_kv_heads,
+                1,
+            )
+            return _StorageLayout(
+                value_shape=dense_shape,
+                value_dtype=np.dtype(np.uint8),
+                scale_shape=scale_shape,
+                scale_dtype=np.dtype(np.float16),
+            )
+
+        if self.dtype == "int8":
+            # INT8 symmetric quantization: values stored as int8, scales as fp16
             scale_shape = (
                 self.num_blocks,
                 self.block_size,
@@ -136,7 +162,7 @@ class PagedKVCache:
             )
             return _StorageLayout(
                 value_shape=dense_shape,
-                value_dtype=np.dtype(np.uint8),
+                value_dtype=np.dtype(np.int8),
                 scale_shape=scale_shape,
                 scale_dtype=np.dtype(np.float16),
             )
@@ -312,8 +338,117 @@ class PagedKVCache:
             if self.v_scales is not None:
                 self.v_scales[block_indices, block_offsets] = v_scales.astype(np.float16)
 
+        elif self.dtype == "fp8_e5m2":
+            # E5M2 quantization (max finite value 57344.0)
+            # Wider dynamic range than E4M3, better for training compatibility
+            # Scale = max(abs(x)) / 57344.0
+            MAX_E5M2 = 57344.0
+
+            # Compute scales [num_tokens, num_heads, 1]
+            k_abs_max = np.max(np.abs(k), axis=-1, keepdims=True)
+            v_abs_max = np.max(np.abs(v), axis=-1, keepdims=True)
+
+            k_scales = k_abs_max / MAX_E5M2
+            v_scales = v_abs_max / MAX_E5M2
+
+            # Avoid division by zero
+            k_scales[k_scales == 0] = 1.0
+            v_scales[v_scales == 0] = 1.0
+
+            # Quantize
+            # Map [-57344, 57344] to [0, 255] centered at 128
+            # Note: E5M2 can represent Inf/NaN, but we clamp to finite range
+            scaled_k = k / k_scales
+            k_q = np.round(scaled_k / MAX_E5M2 * 127.0 + 128.0)
+            k_q = np.clip(k_q, 0, 255).astype(np.uint8)
+
+            scaled_v = v / v_scales
+            v_q = np.round(scaled_v / MAX_E5M2 * 127.0 + 128.0)
+            v_q = np.clip(v_q, 0, 255).astype(np.uint8)
+
+            # Store quantized values
+            self.k_blocks[block_indices, block_offsets] = k_q
+            self.v_blocks[block_indices, block_offsets] = v_q
+
+            # Store scales
+            if self.k_scales is not None:
+                self.k_scales[block_indices, block_offsets] = k_scales.astype(np.float16)
+            if self.v_scales is not None:
+                self.v_scales[block_indices, block_offsets] = v_scales.astype(np.float16)
+
+        elif self.dtype == "int8":
+            # INT8 symmetric quantization
+            # Maps values to [-127, 127] range with per-token-head scales
+            INT8_MAX = 127.0
+
+            # Compute scales [num_tokens, num_heads, 1]
+            k_abs_max = np.max(np.abs(k), axis=-1, keepdims=True)
+            v_abs_max = np.max(np.abs(v), axis=-1, keepdims=True)
+
+            k_scales = k_abs_max / INT8_MAX
+            v_scales = v_abs_max / INT8_MAX
+
+            # Avoid division by zero
+            k_scales[k_scales == 0] = 1.0
+            v_scales[v_scales == 0] = 1.0
+
+            # Quantize: map to [-127, 127] then cast to int8
+            scaled_k = k / k_scales
+            k_q = np.round(np.clip(scaled_k, -INT8_MAX, INT8_MAX)).astype(np.int8)
+
+            scaled_v = v / v_scales
+            v_q = np.round(np.clip(scaled_v, -INT8_MAX, INT8_MAX)).astype(np.int8)
+
+            # Store quantized values
+            self.k_blocks[block_indices, block_offsets] = k_q
+            self.v_blocks[block_indices, block_offsets] = v_q
+
+            # Store scales
+            if self.k_scales is not None:
+                self.k_scales[block_indices, block_offsets] = k_scales.astype(np.float16)
+            if self.v_scales is not None:
+                self.v_scales[block_indices, block_offsets] = v_scales.astype(np.float16)
+
         elif self.dtype == "int4":
             raise NotImplementedError("int4 quantization not implemented in Python yet")
+
+    def get_kv(self, seq_id: int) -> tuple[NDArray, NDArray]:
+        """Retrieve the full KV cache for a sequence.
+
+        Args:
+            seq_id: Sequence identifier.
+
+        Returns:
+            Tuple of (k, v) tensors of shape ``[seq_len, num_heads, head_dim]``.
+            For 'fp8' and 'int8' storage, values are dequantized to 'fp16'.
+        """
+        if seq_id not in self._block_tables:
+            raise ValueError(f"Sequence {seq_id} not found")
+
+        seq_len = self._context_lens[seq_id]
+        if seq_len == 0:
+            return (
+                np.empty((0, self.num_kv_heads, self.head_dim), dtype=np.float16),
+                np.empty((0, self.num_kv_heads, self.head_dim), dtype=np.float16),
+            )
+
+        blocks = self._block_tables[seq_id]
+        blocks_arr = np.array(blocks, dtype=np.int32)
+
+        logical_indices = np.arange(seq_len, dtype=np.int32)
+        block_list_indices = logical_indices // self.block_size
+        block_offsets = logical_indices % self.block_size
+
+        physical_block_indices = blocks_arr[block_list_indices]
+        slot_mapping = physical_block_indices * self.block_size + block_offsets
+
+        # Wire FP8 dequantization
+        if self.dtype == "fp8":
+            k, v = self.dequantize_kv(slot_mapping)
+            return k.astype(np.float16), v.astype(np.float16)
+
+        k, v = self.dequantize_kv(slot_mapping)
+        return k.astype(np.float16), v.astype(np.float16)
 
     def dequantize_kv(
         self,
@@ -355,6 +490,46 @@ class PagedKVCache:
             
             v_reconstructed_scaled = (v_stored.astype(np.float32) - 128.0) / 127.0 * MAX_E4M3
             v = v_reconstructed_scaled * v_scales
+            
+            return k, v
+
+        elif self.dtype == "fp8_e5m2":
+            k_stored = self.k_blocks[block_indices, block_offsets]
+            v_stored = self.v_blocks[block_indices, block_offsets]
+            
+            # Retrieve scales
+            if self.k_scales is None or self.v_scales is None:
+                raise RuntimeError("FP8_E5M2 cache missing scales")
+                
+            k_scales = self.k_scales[block_indices, block_offsets].astype(np.float32)
+            v_scales = self.v_scales[block_indices, block_offsets].astype(np.float32)
+
+            # Dequantize (simulated)
+            MAX_E5M2 = 57344.0
+            
+            # Map [0, 255] back to [-57344, 57344]
+            k_reconstructed_scaled = (k_stored.astype(np.float32) - 128.0) / 127.0 * MAX_E5M2
+            k = k_reconstructed_scaled * k_scales
+            
+            v_reconstructed_scaled = (v_stored.astype(np.float32) - 128.0) / 127.0 * MAX_E5M2
+            v = v_reconstructed_scaled * v_scales
+            
+            return k, v
+
+        elif self.dtype == "int8":
+            k_stored = self.k_blocks[block_indices, block_offsets]
+            v_stored = self.v_blocks[block_indices, block_offsets]
+            
+            # Retrieve scales
+            if self.k_scales is None or self.v_scales is None:
+                raise RuntimeError("INT8 cache missing scales")
+                
+            k_scales = self.k_scales[block_indices, block_offsets].astype(np.float32)
+            v_scales = self.v_scales[block_indices, block_offsets].astype(np.float32)
+
+            # Dequantize: cast int8 to float32 then multiply by scale
+            k = k_stored.astype(np.float32) * k_scales
+            v = v_stored.astype(np.float32) * v_scales
             
             return k, v
 

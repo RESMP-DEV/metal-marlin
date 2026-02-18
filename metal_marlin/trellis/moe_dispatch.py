@@ -14,6 +14,7 @@ single batched kernel that processes all experts in parallel.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import struct
 import sys
@@ -33,6 +34,11 @@ from ..metal_dispatch import (
     require_mps,
 )
 from .kernel_selection import get_kernel_for_batch_size
+
+try:
+    from metal_marlin._cpp_ext import ExpertBufferPool
+except ImportError:
+    ExpertBufferPool = None
 
 if "metal_marlin.moe_dispatch" not in sys.modules:
     from metal_marlin import moe_dispatch as _parent_moe_dispatch
@@ -692,6 +698,54 @@ def create_cached_weight_buffers_from_cpu(
         ensure_half_cpu(down_sv),
         ensure_half_cpu(grid),
     ]
+
+    # Try using ExpertBufferPool if available
+    if ExpertBufferPool is not None and ExpertBufferPool.instance().is_initialized():
+        try:
+            import objc
+            pool = ExpertBufferPool.instance()
+            pool_buffers = []
+            
+            # Configure ctypes capsule handling if needed
+            if not hasattr(ctypes.pythonapi, "PyCapsule_GetPointer"):
+                 # Should exist in standard python, but type hints might be needed
+                 pass
+            
+            ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
+            ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+            
+            for tensor in tensors:
+                size = tensor.numel() * tensor.element_size()
+                handle = pool.allocate_weight(size)
+                if handle is None:
+                    raise RuntimeError("ExpertBufferPool allocation failed")
+                
+                # Copy data
+                ptr = ctypes.pythonapi.PyCapsule_GetPointer(handle.contents(), b"buffer_contents")
+                ctypes.memmove(ptr, tensor.data_ptr(), size)
+                
+                # Get MTLBuffer object
+                buf_ptr = ctypes.pythonapi.PyCapsule_GetPointer(handle.buffer(), b"mtlbuffer")
+                mtl_buf = objc.objc_object(c_void_p=buf_ptr)
+                pool_buffers.append(mtl_buf)
+                
+            return CachedWeightBuffers(
+                gate_weights=pool_buffers[0],
+                gate_scales=pool_buffers[1],
+                up_weights=pool_buffers[2],
+                up_scales=pool_buffers[3],
+                down_weights=pool_buffers[4],
+                down_scales=pool_buffers[5],
+                gate_su=pool_buffers[6],
+                gate_sv=pool_buffers[7],
+                up_su=pool_buffers[8],
+                up_sv=pool_buffers[9],
+                down_su=pool_buffers[10],
+                down_sv=pool_buffers[11],
+                grid=pool_buffers[12],
+            )
+        except Exception as e:
+            logger.warning(f"ExpertBufferPool failed: {e}, falling back to standard allocation")
 
     # Batch create all buffers in a single call
     buffers = cpu_tensors_to_metal_buffers(tensors, device)

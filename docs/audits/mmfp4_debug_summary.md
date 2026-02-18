@@ -98,26 +98,42 @@ Following the debugging and root cause analysis, the following optimizations wer
 
 | Component | Before | After | Status |
 |-----------|--------|-------|--------|
-| MLA Attention | Multiple dispatches (q_proj, k_proj, v_proj, attention, o_proj) | `mla_fused_attention_decode_glm4` | Fused |
-| MoE Expert Compute | Sequential expert loops | `moe_trellis_swiglu` batched dispatch | Fused |
-| GEMM + Dequant | Separate dequantize + matmul | `mmfp4_gemm` fused kernel | Fused |
+| MLA Attention | Multiple dispatches (q_proj, k_proj, v_proj, attention, o_proj) | `mla_fused_attention_decode_glm4` | **Fused** |
+| MoE Expert Compute | Sequential expert loops | `moe_trellis_swiglu` batched dispatch | **Fused** |
+| GEMM + Dequant | Separate dequantize + matmul | `mmfp4_gemm` fused kernel | **Fused** |
+
+**Sequential (unchanged):**
+
+| Component | Status | Reason |
+|-----------|--------|--------|
+| Input/Output projections | Sequential | Already optimal for prefill shapes |
+| LayerNorm | Sequential | Low compute cost |
+| LM Head | Sequential | Only called once per sequence |
 
 #### 2. Async Dispatch Fix
 
 **Critical fix:** Changed kernel dispatch from `wait=False` to `wait=True` in `kernels.py` to prevent race conditions that caused non-deterministic NaN for sequences >= 5 tokens.
+
+**Files modified:**
+- `metal_marlin/kernels.py` - Changed `wait=False` to `wait=True` in dispatch calls
 
 #### 3. Numerical Stability Improvements
 
 - Changed accumulator from `half` to `float` in `mmfp4_gemm.metal` to prevent overflow
 - Added per-simdgroup staging buffers to eliminate race conditions
 
+**Files modified:**
+- `metal_marlin/shaders/mmfp4_gemm.metal` - Float accumulation, per-simdgroup staging
+
 ### Pending Benchmarks
 
-**Note:** Performance benchmarks should be re-run manually to measure the impact of these optimizations.
+**Note:** Performance benchmarks should be re-run manually to measure the impact of these optimizations. **DO NOT run benchmarks in automated tasks.**
 
+Benchmarks to run manually:
 - Compare pre-optimization vs post-optimization throughput
 - Verify correctness is maintained after fusion
 - Measure dispatch overhead reduction
+- Profile end-to-end decode with fused kernels
 
 **Status:** Performance numbers pending measurement - DO NOT include extrapolated or estimated values.
 

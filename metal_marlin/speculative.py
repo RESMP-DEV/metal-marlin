@@ -72,7 +72,8 @@ def generate_speculative(
     draft_worker = SmallModelDraft(
         draft_model,
         max_speculative=config.num_speculative_tokens,
-        device=device
+        device=device,
+        cache=draft_cache,
     )
 
     engine = SpeculativeEngine(

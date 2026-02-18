@@ -20,14 +20,339 @@ Usage:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .kv_cache import KVCache
 from .layers import MarlinLinear
+
+
+@dataclass
+class BlockSparseMask:
+    """
+    Block-sparse attention mask configuration.
+
+    Block-sparse attention divides the attention matrix into blocks of size
+    (block_q x block_k) and only computes attention for active blocks.
+    This reduces both memory and computation for sparse attention patterns
+    like those used in BigBird, Longformer, and sliding window attention.
+
+    The mask is stored as a list of uint64 bitsets, where each bit represents
+    one K block. This compact representation enables efficient GPU processing.
+
+    Attributes:
+        mask_bits: List of uint64 bitsets, one per Q block. Bit j in mask_bits[i]
+                   is 1 if Q block i can attend to K block j.
+        block_q: Block size in query dimension (rows per block)
+        block_k: Block size in key dimension (columns per block)
+        num_q_blocks: Total number of query blocks
+        num_k_blocks: Total number of key blocks
+        seq_q: Query sequence length
+        seq_k: Key sequence length
+
+    Example:
+        # Create a block-sparse mask for sliding window attention
+        mask = BlockSparseMask.create_sliding_window(
+            seq_len=4096,
+            window_size=1024,
+            block_size=64,
+        )
+    """
+
+    mask_bits: torch.Tensor  # [num_q_blocks, num_mask_words] uint64 tensor
+    block_q: int
+    block_k: int
+    num_q_blocks: int
+    num_k_blocks: int
+    seq_q: int
+    seq_k: int
+
+    @staticmethod
+    def create_sliding_window(
+        seq_len: int,
+        window_size: int,
+        block_size: int = 64,
+        device: torch.device | None = None,
+    ) -> BlockSparseMask:
+        """
+        Create a block-sparse mask for sliding window + causal attention.
+
+        Each query position can only attend to positions within the window
+        and before it (causal constraint).
+
+        Args:
+            seq_len: Sequence length (assumes seq_q == seq_k)
+            window_size: Maximum distance to attend to (in tokens)
+            block_size: Block size for both Q and K dimensions
+            device: Device to create mask on
+
+        Returns:
+            BlockSparseMask configured for sliding window attention
+        """
+        if device is None:
+            device = _get_device()
+
+        num_blocks = (seq_len + block_size - 1) // block_size
+        num_mask_words = (num_blocks + 63) // 64
+        
+        # Create mask on CPU (MPS doesn't support uint64 bitwise ops)
+        mask_bits_cpu = torch.zeros((num_blocks, num_mask_words), dtype=torch.uint64)
+
+        for q_block_idx in range(num_blocks):
+            q_start = q_block_idx * block_size
+            q_end = min(q_start + block_size, seq_len)
+
+            # For each query position in this block, find valid K blocks
+            # The window extends from max(0, q_end - window_size) to q_end
+            window_start = max(0, q_end - window_size)
+            k_block_start = window_start // block_size
+            k_block_end = q_block_idx + 1  # Causal: can only attend to <= q_block
+
+            # Set bits for all valid K blocks
+            for k_block_idx in range(k_block_start, min(k_block_end, num_blocks)):
+                word_idx = k_block_idx // 64
+                bit_idx = k_block_idx % 64
+                mask_bits_cpu[q_block_idx, word_idx] |= (1 << bit_idx)
+
+        # Move to target device
+        mask_bits = mask_bits_cpu.to(device)
+
+        return BlockSparseMask(
+            mask_bits=mask_bits,
+            block_q=block_size,
+            block_k=block_size,
+            num_q_blocks=num_blocks,
+            num_k_blocks=num_blocks,
+            seq_q=seq_len,
+            seq_k=seq_len,
+        )
+
+    @staticmethod
+    def create_bigbird(
+        seq_len: int,
+        num_random_blocks: int = 3,
+        num_global_blocks: int = 2,
+        window_size: int = 256,
+        block_size: int = 64,
+        device: torch.device | None = None,
+    ) -> BlockSparseMask:
+        """
+        Create a block-sparse mask for BigBird-style attention.
+
+        BigBird combines:
+        - Local sliding window attention
+        - Random global blocks (visible to all positions)
+        - Fixed global blocks at sequence start
+
+        Args:
+            seq_len: Sequence length
+            num_random_blocks: Number of random global blocks
+            num_global_blocks: Number of fixed global blocks at start
+            window_size: Sliding window size
+            block_size: Block size for both Q and K dimensions
+            device: Device to create mask on
+
+        Returns:
+            BlockSparseMask configured for BigBird attention
+        """
+        if device is None:
+            device = _get_device()
+
+        num_blocks = (seq_len + block_size - 1) // block_size
+        num_mask_words = (num_blocks + 63) // 64
+        
+        # Create mask on CPU (MPS doesn't support uint64 bitwise ops)
+        mask_bits_cpu = torch.zeros((num_blocks, num_mask_words), dtype=torch.uint64)
+
+        # Fixed global blocks (first num_global_blocks blocks)
+        global_mask_bits = [0] * num_mask_words
+        for g in range(min(num_global_blocks, num_blocks)):
+            word_idx = g // 64
+            bit_idx = g % 64
+            global_mask_bits[word_idx] |= (1 << bit_idx)
+
+        # Random global blocks
+        if num_random_blocks > 0 and num_blocks > num_global_blocks:
+            torch.manual_seed(42)  # For reproducibility
+            random_blocks = torch.randperm(num_blocks - num_global_blocks)[:num_random_blocks]
+            for r in random_blocks:
+                idx = r.item() + num_global_blocks
+                word_idx = idx // 64
+                bit_idx = idx % 64
+                global_mask_bits[word_idx] |= (1 << bit_idx)
+
+        # Sliding window blocks
+        window_blocks = window_size // block_size
+
+        for q_block_idx in range(num_blocks):
+            # Start with global mask
+            for w in range(num_mask_words):
+                mask_bits_cpu[q_block_idx, w] = global_mask_bits[w]
+
+            # Add sliding window blocks
+            window_start = max(0, q_block_idx - window_blocks)
+            window_end = min(num_blocks, q_block_idx + window_blocks + 1)
+
+            for k_block_idx in range(window_start, window_end):
+                word_idx = k_block_idx // 64
+                bit_idx = k_block_idx % 64
+                mask_bits_cpu[q_block_idx, word_idx] |= (1 << bit_idx)
+
+            # Apply causal constraint (only attend to past)
+            # Mask out any bits > q_block_idx
+            q_word_idx = q_block_idx // 64
+            q_bit_idx = q_block_idx % 64
+            
+            # For words completely after q_block, clear all bits
+            for w in range(q_word_idx + 1, num_mask_words):
+                mask_bits_cpu[q_block_idx, w] = 0
+            
+            # For the word containing q_block, mask out higher bits
+            causal_mask = (1 << (q_bit_idx + 1)) - 1
+            mask_bits_cpu[q_block_idx, q_word_idx] &= causal_mask
+
+        # Move to target device
+        mask_bits = mask_bits_cpu.to(device)
+
+        return BlockSparseMask(
+            mask_bits=mask_bits,
+            block_q=block_size,
+            block_k=block_size,
+            num_q_blocks=num_blocks,
+            num_k_blocks=num_blocks,
+            seq_q=seq_len,
+            seq_k=seq_len,
+        )
+
+    @staticmethod
+    def create_longformer(
+        seq_len: int,
+        window_size: int = 256,
+        num_global_tokens: int = 16,
+        block_size: int = 64,
+        device: torch.device | None = None,
+    ) -> BlockSparseMask:
+        """
+        Create a block-sparse mask for Longformer-style attention.
+
+        Longformer uses:
+        - Fixed-size sliding window (dilated)
+        - Global attention on specific tokens (e.g., [CLS])
+
+        Args:
+            seq_len: Sequence length
+            window_size: Sliding window size on each side
+            num_global_tokens: Number of tokens with global attention
+            block_size: Block size for both Q and K dimensions
+            device: Device to create mask on
+
+        Returns:
+            BlockSparseMask configured for Longformer attention
+        """
+        if device is None:
+            device = _get_device()
+
+        num_blocks = (seq_len + block_size - 1) // block_size
+        num_mask_words = (num_blocks + 63) // 64
+        global_blocks = (num_global_tokens + block_size - 1) // block_size
+
+        # Create mask on CPU using numpy to avoid overflow issues
+        mask_bits_np = np.zeros((num_blocks, num_mask_words), dtype=np.uint64)
+
+        window_blocks = window_size // block_size
+
+        for q_block_idx in range(num_blocks):
+            # Global blocks (visible to all, within causal constraint)
+            for g in range(min(global_blocks, num_blocks)):
+                if q_block_idx >= g:  # Causal check
+                    word_idx = g // 64
+                    bit_idx = g % 64
+                    mask_bits_np[q_block_idx, word_idx] |= (np.uint64(1) << bit_idx)
+
+            # Sliding window (within causal constraint)
+            window_start = max(global_blocks, q_block_idx - window_blocks)
+            window_end = min(num_blocks, q_block_idx + 1)  # Causal: only up to q_block_idx
+
+            for k_block_idx in range(window_start, window_end):
+                word_idx = k_block_idx // 64
+                bit_idx = k_block_idx % 64
+                mask_bits_np[q_block_idx, word_idx] |= (np.uint64(1) << bit_idx)
+
+        # Convert to torch tensor
+        mask_bits = torch.from_numpy(mask_bits_np).to(device)
+
+        return BlockSparseMask(
+            mask_bits=mask_bits,
+            block_q=block_size,
+            block_k=block_size,
+            num_q_blocks=num_blocks,
+            num_k_blocks=num_blocks,
+            seq_q=seq_len,
+            seq_k=seq_len,
+        )
+
+    @staticmethod
+    def from_dense_mask(
+        dense_mask: torch.Tensor,
+        block_q: int = 64,
+        block_k: int = 64,
+    ) -> BlockSparseMask:
+        """
+        Convert a dense attention mask to block-sparse format.
+
+        Args:
+            dense_mask: Dense mask tensor [seq_q, seq_k] where True/0 means attend
+            block_q: Block size in query dimension
+            block_k: Block size in key dimension
+
+        Returns:
+            BlockSparseMask representing the same mask pattern
+        """
+        seq_q, seq_k = dense_mask.shape
+        device = dense_mask.device
+
+        num_q_blocks = (seq_q + block_q - 1) // block_q
+        num_k_blocks = (seq_k + block_k - 1) // block_k
+        num_mask_words = (num_k_blocks + 63) // 64
+
+        # Create mask on CPU using numpy to avoid overflow issues
+        mask_bits_np = np.zeros((num_q_blocks, num_mask_words), dtype=np.uint64)
+
+        # Move dense mask to CPU for processing
+        dense_mask_cpu = dense_mask.cpu()
+
+        for q_block_idx in range(num_q_blocks):
+            q_start = q_block_idx * block_q
+            q_end = min(q_start + block_q, seq_q)
+
+            for k_block_idx in range(num_k_blocks):
+                k_start = k_block_idx * block_k
+                k_end = min(k_start + block_k, seq_k)
+
+                # Check if any position in this block is unmasked
+                block = dense_mask_cpu[q_start:q_end, k_start:k_end]
+                if block.any():
+                    word_idx = k_block_idx // 64
+                    bit_idx = k_block_idx % 64
+                    mask_bits_np[q_block_idx, word_idx] |= (np.uint64(1) << bit_idx)
+
+        # Convert to torch tensor and move to device
+        mask_bits = torch.from_numpy(mask_bits_np).to(device)
+
+        return BlockSparseMask(
+            mask_bits=mask_bits,
+            block_q=block_q,
+            block_k=block_k,
+            num_q_blocks=num_q_blocks,
+            num_k_blocks=num_k_blocks,
+            seq_q=seq_q,
+            seq_k=seq_k,
+        )
 
 if TYPE_CHECKING:
     pass
@@ -177,7 +502,7 @@ class MarlinAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,  # [batch, seq_len, hidden_size]
-        attention_mask: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | BlockSparseMask | None = None,
         position_ids: torch.Tensor | None = None,
         kv_cache: KVCache | None = None,
         layer_idx: int = 0,
@@ -187,7 +512,7 @@ class MarlinAttention(nn.Module):
 
         Args:
             hidden_states: Input tensor [batch, seq_len, hidden_size]
-            attention_mask: Optional attention mask
+            attention_mask: Optional attention mask (Tensor or BlockSparseMask)
             position_ids: Optional position IDs for RoPE
             kv_cache: Optional KV cache for autoregressive generation
             layer_idx: Layer index for KV cache
@@ -225,34 +550,45 @@ class MarlinAttention(nn.Module):
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        # Optimized causal mask handling
-        # Decode (seq_len == 1): Skip mask computation, hardcode causal constraint
-        # Prefill (seq_len > 1): Use efficient bitmask or standard causal mask
-        if attention_mask is None:
-            if seq_len == 1:
-                # Decode: No mask needed, rely on is_causal=True
-                is_causal = True
-                attn_mask = None
-            else:
-                # Prefill: Create causal mask if none provided
-                kv_seq_len = k.shape[-2]
-                attn_mask = create_causal_mask(
-                    seq_len, kv_seq_len, device=q.device)
-                is_causal = False
+        # Handle Block-Sparse Attention
+        if isinstance(attention_mask, BlockSparseMask):
+            attn_output = block_sparse_attention_metal(
+                q,
+                k,
+                v,
+                block_sparse_mask=attention_mask,
+                scale=self.scale,
+                causal=False,  # Mask handles causal logic if constructed that way
+            )
         else:
-            attn_mask = attention_mask
-            is_causal = False
+            # Optimized causal mask handling
+            # Decode (seq_len == 1): Skip mask computation, hardcode causal constraint
+            # Prefill (seq_len > 1): Use efficient bitmask or standard causal mask
+            if attention_mask is None:
+                if seq_len == 1:
+                    # Decode: No mask needed, rely on is_causal=True
+                    is_causal = True
+                    attn_mask = None
+                else:
+                    # Prefill: Create causal mask if none provided
+                    kv_seq_len = k.shape[-2]
+                    attn_mask = create_causal_mask(
+                        seq_len, kv_seq_len, device=q.device)
+                    is_causal = False
+            else:
+                attn_mask = attention_mask
+                is_causal = False
 
-        # Use Metal-optimized attention via scaled_dot_product_attention
-        # This will use the MPS backend's optimized attention implementation
-        attn_output = scaled_dot_product_attention_metal(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            scale=self.scale,
-            is_causal=is_causal,
-        )
+            # Use Metal-optimized attention via scaled_dot_product_attention
+            # This will use the MPS backend's optimized attention implementation
+            attn_output = scaled_dot_product_attention_metal(
+                q,
+                k,
+                v,
+                attn_mask=attn_mask,
+                scale=self.scale,
+                is_causal=is_causal,
+            )
 
         # Reshape and project output
         attn_output = (
@@ -540,6 +876,233 @@ def create_causal_mask(
     return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]
 
 
+def block_sparse_attention_metal(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_sparse_mask: BlockSparseMask,
+    scale: float | None = None,
+    causal: bool = False,
+) -> torch.Tensor:
+    """
+    Block-sparse attention computation using optimized Metal kernels.
+
+    Computes attention only for active blocks specified by the block_sparse_mask,
+    significantly reducing memory bandwidth and computation for sparse patterns.
+
+    Args:
+        q: Query tensor [batch, num_heads, seq_q, head_dim], MPS device
+        k: Key tensor [batch, num_heads, seq_k, head_dim], MPS device
+        v: Value tensor [batch, num_heads, seq_k, head_dim], MPS device
+        block_sparse_mask: BlockSparseMask defining active attention blocks
+        scale: Optional attention scale factor (default: 1/sqrt(head_dim))
+        causal: Whether to apply causal masking within active blocks
+
+    Returns:
+        Output tensor [batch, num_heads, seq_q, head_dim], MPS device
+
+    Example:
+        # Create block-sparse mask for sliding window attention
+        mask = BlockSparseMask.create_sliding_window(
+            seq_len=4096,
+            window_size=1024,
+            block_size=64,
+        )
+
+        # Compute block-sparse attention
+        output = block_sparse_attention_metal(q, k, v, mask, causal=True)
+
+    Note:
+        This function dispatches to the attention_block_sparse_fused_qkv Metal kernel
+        which provides optimized memory access patterns for sparse attention.
+    """
+    from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
+
+    if not HAS_TORCH or torch is None:
+        raise RuntimeError("Block-sparse attention requires PyTorch")
+    if not HAS_MPS:
+        raise RuntimeError("Block-sparse attention requires MPS backend (Apple Silicon)")
+    if not HAS_PYOBJC_METAL:
+        raise RuntimeError(
+            "Block-sparse attention requires PyObjC Metal. Install with:\n"
+            "  pip install pyobjc-framework-Metal pyobjc-framework-MetalPerformanceShaders"
+        )
+
+    batch, num_heads, seq_q, head_dim = q.shape
+    _, _, seq_k, _ = k.shape
+
+    if scale is None:
+        scale = head_dim**-0.5
+
+    # Validate dimensions match mask
+    if seq_q != block_sparse_mask.seq_q or seq_k != block_sparse_mask.seq_k:
+        raise ValueError(
+            f"Sequence length mismatch: q={seq_q}, k={seq_k}, "
+            f"mask=({block_sparse_mask.seq_q}, {block_sparse_mask.seq_k})"
+        )
+
+    # Ensure tensors are on MPS and contiguous
+    q = q.to(device="mps", dtype=torch.float16).contiguous()
+    k = k.to(device="mps", dtype=torch.float16).contiguous()
+    v = v.to(device="mps", dtype=torch.float16).contiguous()
+
+    # Import Metal libraries
+    import Metal
+    import numpy as np
+    from pathlib import Path
+
+    # Load and compile the attention kernel
+    kernel_path = Path(__file__).parent.parent / "src" / "attention.metal"
+    if not kernel_path.exists():
+        raise FileNotFoundError(f"Metal kernel not found: {kernel_path}")
+
+    # Create Metal device and compile kernel
+    device = Metal.MTLCreateSystemDefaultDevice()
+    if device is None:
+        raise RuntimeError("No Metal device available")
+
+    # Read kernel source with includes
+    source = kernel_path.read_text()
+    include_path = kernel_path.parent / "reduction_helpers.metal"
+    if include_path.exists():
+        include_source = include_path.read_text()
+        source = source.replace('#include "reduction_helpers.metal"', include_source)
+
+    # Compile options
+    options = Metal.MTLCompileOptions.new()
+    options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
+
+    library, err = device.newLibraryWithSource_options_error_(source, options, None)
+    if err is not None:
+        raise RuntimeError(f"Metal compilation error: {err}")
+
+    # Get the kernel function
+    func = library.newFunctionWithName_("attention_block_sparse_fused_qkv")
+    if func is None:
+        raise RuntimeError("Kernel 'attention_block_sparse_fused_qkv' not found")
+
+    pipeline, err = device.newComputePipelineStateWithFunction_error_(func, None)
+    if err is not None:
+        raise RuntimeError(f"Pipeline creation error: {err}")
+
+    # Allocate output tensor
+    output = torch.empty(
+        (batch, num_heads, seq_q, head_dim), dtype=torch.float16, device="mps"
+    )
+
+    # Helper to create Metal buffers from tensors
+    def _tensor_to_buffer(tensor: torch.Tensor) -> Any:
+        storage = tensor.untyped_storage()
+        ptr = storage.data_ptr()
+        size = storage.nbytes()
+
+        # Try zero-copy first
+        try:
+            buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
+                ptr, size, Metal.MTLResourceStorageModeShared, None
+            )
+            if buffer is not None:
+                return buffer
+        except (TypeError, ValueError):
+            pass
+
+        # Fallback to copy-based approach
+        import ctypes
+
+        arr_type = ctypes.c_uint8 * size
+        arr = arr_type.from_address(ptr)
+        data = bytes(arr)
+        return device.newBufferWithBytes_length_options_(
+            data, len(data), Metal.MTLResourceStorageModeShared
+        )
+
+    def _make_uint32_buffer(val: int):
+        data = np.array([val], dtype=np.uint32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    def _make_float_buffer(val: float):
+        data = np.array([val], dtype=np.float32)
+        return device.newBufferWithBytes_length_options_(
+            data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
+        )
+
+    # Create buffers
+    q_buf = _tensor_to_buffer(q)
+    k_buf = _tensor_to_buffer(k)
+    v_buf = _tensor_to_buffer(v)
+    o_buf = _tensor_to_buffer(output)
+
+    # Mask bits buffer (uint64)
+    mask_bits_np = block_sparse_mask.mask_bits.cpu().numpy().astype(np.uint64)
+    mask_buf = device.newBufferWithBytes_length_options_(
+        mask_bits_np.tobytes(),
+        mask_bits_np.nbytes,
+        Metal.MTLResourceStorageModeShared,
+    )
+
+    # Calculate number of mask words per Q block (ceil(num_k_blocks / 64))
+    num_mask_words = (block_sparse_mask.num_k_blocks + 63) // 64
+
+    # Constant buffers
+    batch_buf = _make_uint32_buffer(batch)
+    num_heads_buf = _make_uint32_buffer(num_heads)
+    seq_q_buf = _make_uint32_buffer(seq_q)
+    seq_k_buf = _make_uint32_buffer(seq_k)
+    head_dim_buf = _make_uint32_buffer(head_dim)
+    scale_buf = _make_float_buffer(scale)
+    block_q_buf = _make_uint32_buffer(block_sparse_mask.block_q)
+    block_k_buf = _make_uint32_buffer(block_sparse_mask.block_k)
+    num_q_blocks_buf = _make_uint32_buffer(block_sparse_mask.num_q_blocks)
+    num_k_blocks_buf = _make_uint32_buffer(block_sparse_mask.num_k_blocks)
+    num_mask_words_buf = _make_uint32_buffer(num_mask_words)
+    causal_buf = _make_uint32_buffer(1 if causal else 0)
+
+    # Create command queue and buffer
+    command_queue = device.newCommandQueue()
+    command_buffer = command_queue.commandBuffer()
+    encoder = command_buffer.computeCommandEncoder()
+
+    # Set pipeline and buffers
+    encoder.setComputePipelineState_(pipeline)
+    encoder.setBuffer_offset_atIndex_(q_buf, 0, 0)
+    encoder.setBuffer_offset_atIndex_(k_buf, 0, 1)
+    encoder.setBuffer_offset_atIndex_(v_buf, 0, 2)
+    encoder.setBuffer_offset_atIndex_(mask_buf, 0, 3)
+    encoder.setBuffer_offset_atIndex_(o_buf, 0, 4)
+    encoder.setBuffer_offset_atIndex_(batch_buf, 0, 5)
+    encoder.setBuffer_offset_atIndex_(num_heads_buf, 0, 6)
+    encoder.setBuffer_offset_atIndex_(seq_q_buf, 0, 7)
+    encoder.setBuffer_offset_atIndex_(seq_k_buf, 0, 8)
+    encoder.setBuffer_offset_atIndex_(head_dim_buf, 0, 9)
+    encoder.setBuffer_offset_atIndex_(scale_buf, 0, 10)
+    encoder.setBuffer_offset_atIndex_(block_q_buf, 0, 11)
+    encoder.setBuffer_offset_atIndex_(block_k_buf, 0, 12)
+    encoder.setBuffer_offset_atIndex_(num_q_blocks_buf, 0, 13)
+    encoder.setBuffer_offset_atIndex_(num_k_blocks_buf, 0, 14)
+    encoder.setBuffer_offset_atIndex_(num_mask_words_buf, 0, 15)
+    encoder.setBuffer_offset_atIndex_(causal_buf, 0, 16)
+
+    # Dispatch: one threadgroup per (batch, head, q_block)
+    grid_x = block_sparse_mask.num_q_blocks
+    grid_y = num_heads
+    grid_z = batch
+
+    threadgroup_size = 128  # THREADS_PER_TG_ATT from shader
+
+    encoder.dispatchThreadgroups_threadsPerThreadgroup_(
+        Metal.MTLSizeMake(grid_x, grid_y, grid_z),
+        Metal.MTLSizeMake(threadgroup_size, 1, 1),
+    )
+
+    encoder.endEncoding()
+    command_buffer.commit()
+    command_buffer.waitUntilCompleted()
+
+    return output
+
+
 def create_sliding_window_mask(
     seq_len: int,
     window_size: int,
@@ -595,3 +1158,17 @@ def create_sliding_window_mask(
     )
 
     return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, kv_seq_len]
+
+
+__all__ = [
+    "MarlinAttention",
+    "RoPE",
+    "BlockSparseMask",
+    "scaled_dot_product_attention_metal",
+    "flash_attention_metal",
+    "sliding_window_attention_metal",
+    "block_sparse_attention_metal",
+    "create_causal_mask",
+    "create_causal_bitmask",
+    "create_sliding_window_mask",
+]

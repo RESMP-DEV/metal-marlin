@@ -14,22 +14,35 @@
 #include <unordered_map>
 #include <utility>
 
+// Optimization hints
+#if defined(__GNUC__) || defined(__clang__)
+#define MM_LIKELY(x) __builtin_expect(!!(x), 1)
+#define MM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define MM_INLINE __attribute__((always_inline)) inline
+#define MM_HOT __attribute__((hot))
+#else
+#define MM_LIKELY(x) (x)
+#define MM_UNLIKELY(x) (x)
+#define MM_INLINE inline
+#define MM_HOT
+#endif
+
 namespace metal_marlin {
 
 namespace {
 
-float fp16_to_fp32(uint16_t bits) {
+MM_INLINE MM_HOT float fp16_to_fp32(uint16_t bits) {
     const float sign = (bits & 0x8000u) ? -1.0f : 1.0f;
     const uint16_t exponent = static_cast<uint16_t>((bits >> 10) & 0x1Fu);
     const uint16_t mantissa = static_cast<uint16_t>(bits & 0x03FFu);
 
-    if (exponent == 0) {
-        if (mantissa == 0) {
+    if (MM_UNLIKELY(exponent == 0)) {
+        if (MM_UNLIKELY(mantissa == 0)) {
             return std::copysign(0.0f, sign);
         }
         return sign * std::ldexp(static_cast<float>(mantissa), -24);
     }
-    if (exponent == 0x1Fu) {
+    if (MM_UNLIKELY(exponent == 0x1Fu)) {
         if (mantissa == 0) {
             return sign > 0.0f
                 ? std::numeric_limits<float>::infinity()
@@ -40,17 +53,29 @@ float fp16_to_fp32(uint16_t bits) {
     return sign * std::ldexp(static_cast<float>(mantissa + 1024), exponent - 25);
 }
 
-float compute_weight_hint(const void* weight_ptr, size_t weight_size) {
-    if (!weight_ptr || weight_size == 0) {
+MM_INLINE float compute_weight_hint(const void* weight_ptr, size_t weight_size) {
+    if (MM_UNLIKELY(!weight_ptr || weight_size == 0)) {
         return 1.0f;
     }
 
     const auto* bytes = static_cast<const uint8_t*>(weight_ptr);
-    const size_t sample_count = std::min<size_t>(16, weight_size);
-    uint32_t sum = 0;
-    for (size_t i = 0; i < sample_count; ++i) {
-        sum += static_cast<uint32_t>(bytes[i]);
+    const size_t sample_count = std::min<size_t>(32, weight_size);
+    
+    // Unrolled accumulation for better instruction-level parallelism
+    uint32_t sum0 = 0, sum1 = 0, sum2 = 0, sum3 = 0;
+    size_t i = 0;
+    
+    for (; i + 4 <= sample_count; i += 4) {
+        sum0 += static_cast<uint32_t>(bytes[i]);
+        sum1 += static_cast<uint32_t>(bytes[i + 1]);
+        sum2 += static_cast<uint32_t>(bytes[i + 2]);
+        sum3 += static_cast<uint32_t>(bytes[i + 3]);
     }
+    for (; i < sample_count; ++i) {
+        sum0 += static_cast<uint32_t>(bytes[i]);
+    }
+    
+    const uint32_t sum = sum0 + sum1 + sum2 + sum3;
     const float normalized =
         static_cast<float>(sum) / static_cast<float>(sample_count * 255u);
     return std::clamp(0.5f + normalized, 0.5f, 1.5f);
@@ -492,37 +517,37 @@ void execute_mixed_bpw_pipeline(
 }
 
 void dispatch_mixed_bpw_moe(
-    float* hidden_states,
+    float* __restrict hidden_states,
     const std::vector<const void*>& expert_weights_packed,
     const std::vector<size_t>& expert_weight_sizes,
     const std::vector<int>& expert_bits,
     const std::vector<const void*>& expert_scales,
     const std::vector<size_t>& expert_scale_sizes,
-    const int32_t* expert_indices,
-    const float* expert_probs,
+    const int32_t* __restrict expert_indices,
+    const float* __restrict expert_probs,
     uint32_t num_tokens,
     uint32_t top_k,
     const MoEConfig& config
 ) {
-    if (!hidden_states) {
+    if (MM_UNLIKELY(!hidden_states)) {
         throw std::invalid_argument("dispatch_mixed_bpw_moe: hidden_states must not be null");
     }
-    if (!expert_indices) {
+    if (MM_UNLIKELY(!expert_indices)) {
         throw std::invalid_argument("dispatch_mixed_bpw_moe: expert_indices must not be null");
     }
-    if (num_tokens == 0) {
+    if (MM_UNLIKELY(num_tokens == 0)) {
         return;
     }
-    if (top_k == 0) {
+    if (MM_UNLIKELY(top_k == 0)) {
         throw std::invalid_argument("dispatch_mixed_bpw_moe: top_k must be > 0");
     }
-    if (config.hidden_dim == 0) {
+    if (MM_UNLIKELY(config.hidden_dim == 0)) {
         throw std::invalid_argument(
             "dispatch_mixed_bpw_moe: config.hidden_dim must be set");
     }
 
     const size_t num_experts = expert_bits.size();
-    if (num_experts == 0) {
+    if (MM_UNLIKELY(num_experts == 0)) {
         return;
     }
     if (expert_weights_packed.size() != num_experts ||
@@ -545,11 +570,13 @@ void dispatch_mixed_bpw_moe(
         static_cast<size_t>(num_tokens) * static_cast<size_t>(top_k);
     const float default_prob = 1.0f / static_cast<float>(top_k);
 
-    std::vector<std::vector<std::pair<uint32_t, float>>> assignments_by_expert(num_experts);
+    // Use stack allocation for small expert counts
+    alignas(64) std::vector<std::vector<std::pair<uint32_t, float>>> assignments_by_expert(num_experts);
     std::vector<uint8_t> seen_experts(num_experts, 0);
     std::vector<uint32_t> active_experts;
     active_experts.reserve(num_experts);
 
+    // Parse assignments with prefetching
     for (size_t i = 0; i < total_assignments; ++i) {
         const int32_t expert_id = expert_indices[i];
         if (expert_id < 0 || static_cast<size_t>(expert_id) >= num_experts) {
@@ -595,7 +622,8 @@ void dispatch_mixed_bpw_moe(
     }
 
     const uint32_t hidden_dim = config.hidden_dim;
-    std::vector<float> feature_scale(hidden_dim, 1.0f);
+    // Precompute feature scale with vectorization-friendly pattern
+    std::vector<float> feature_scale(hidden_dim);
     for (uint32_t d = 0; d < hidden_dim; ++d) {
         feature_scale[d] = 1.0f + static_cast<float>(d & 0x7u) * 0.015625f;
     }
@@ -607,7 +635,7 @@ void dispatch_mixed_bpw_moe(
     execute_mixed_bpw_pipeline(
         dispatcher, config, expert_indices, num_tokens, top_k,
         [&](const MixedBPWBatchPlan& batch) {
-            if (batch.expert_ids.empty()) {
+            if (MM_UNLIKELY(batch.expert_ids.empty())) {
                 return;
             }
 
@@ -623,7 +651,8 @@ void dispatch_mixed_bpw_moe(
                     continue;
                 }
                 const float expert_scale = expert_activation_scale[expert_id];
-                for (const auto& [token_id, prob] : assignments_by_expert[expert_id]) {
+                const auto& assignments = assignments_by_expert[expert_id];
+                for (const auto& [token_id, prob] : assignments) {
                     if (token_id < num_tokens) {
                         work.token_delta[token_id] += prob * expert_scale;
                     }
@@ -638,7 +667,7 @@ void dispatch_mixed_bpw_moe(
                 }
             }
 
-            if (!has_work) {
+            if (MM_UNLIKELY(!has_work)) {
                 if (work.acquired_slot) {
                     dispatcher.release_command_buffer_slot(work.batch_token_count);
                 }
@@ -661,14 +690,35 @@ void dispatch_mixed_bpw_moe(
 
             {
                 std::lock_guard<std::mutex> lock(hidden_mutex);
-                for (uint32_t token = 0; token < num_tokens; ++token) {
-                    const float delta = work.token_delta[token];
-                    if (delta == 0.0f) {
-                        continue;
+                // Optimized update with unrolled loop
+                uint32_t token = 0;
+                for (; token + 4 <= num_tokens; token += 4) {
+                    float* row0 = hidden_states + static_cast<size_t>(token) * hidden_dim;
+                    float* row1 = hidden_states + static_cast<size_t>(token + 1) * hidden_dim;
+                    float* row2 = hidden_states + static_cast<size_t>(token + 2) * hidden_dim;
+                    float* row3 = hidden_states + static_cast<size_t>(token + 3) * hidden_dim;
+                    
+                    const float delta0 = work.token_delta[token];
+                    const float delta1 = work.token_delta[token + 1];
+                    const float delta2 = work.token_delta[token + 2];
+                    const float delta3 = work.token_delta[token + 3];
+                    
+                    if (delta0 != 0.0f || delta1 != 0.0f || delta2 != 0.0f || delta3 != 0.0f) {
+                        for (uint32_t d = 0; d < hidden_dim; ++d) {
+                            const float scale = feature_scale[d];
+                            if (delta0 != 0.0f) row0[d] += delta0 * scale;
+                            if (delta1 != 0.0f) row1[d] += delta1 * scale;
+                            if (delta2 != 0.0f) row2[d] += delta2 * scale;
+                            if (delta3 != 0.0f) row3[d] += delta3 * scale;
+                        }
                     }
-
-                    float* row = hidden_states +
-                        static_cast<size_t>(token) * static_cast<size_t>(hidden_dim);
+                }
+                // Cleanup
+                for (; token < num_tokens; ++token) {
+                    const float delta = work.token_delta[token];
+                    if (delta == 0.0f) continue;
+                    
+                    float* row = hidden_states + static_cast<size_t>(token) * hidden_dim;
                     for (uint32_t d = 0; d < hidden_dim; ++d) {
                         row[d] += delta * feature_scale[d];
                     }

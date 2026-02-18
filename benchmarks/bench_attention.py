@@ -3,11 +3,12 @@ import sys
 import time
 from collections.abc import Callable
 from typing import Any
+from pathlib import Path
 
 import torch
 
 # Add current directory to sys.path to allow importing metal_marlin
-sys.path.append(os.getcwd())
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from metal_marlin.attention import scaled_dot_product_attention_metal
 from metal_marlin.flash_attention_v2 import flash_attention_v2

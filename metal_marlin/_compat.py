@@ -4,9 +4,11 @@ This module provides:
 - Feature flags (HAS_TORCH, HAS_MPS, HAS_PYOBJC_METAL) for runtime detection
 - Typed module references that work with type checkers
 - Array conversion utilities for numpy/torch
+- Shared FP4 E2M1 dequantization lookup table
 
 Usage:
     from metal_marlin._compat import HAS_TORCH, HAS_MPS, torch, to_numpy
+    from metal_marlin._compat import E2M1_VALUES, E2M1_VALUES_TORCH, dequantize_e2m1
 """
 
 from __future__ import annotations
@@ -248,3 +250,99 @@ def require_backend(backend: str, feature: str = "this operation") -> None:
         pass  # Always available
     else:
         raise ValueError(f"Unknown backend: {backend}. Use 'torch' or 'numpy'.")
+
+
+# =============================================================================
+# Shared FP4 E2M1 Dequantization Constants and Utilities
+# =============================================================================
+
+# E2M1 lookup table: 4-bit indices (0-15) to float32 values
+# Format: 1 sign bit, 2 exponent bits (bias=1), 1 mantissa bit
+# Representable values: ±{0, 0.5, 1, 1.5, 2, 3, 4, 6}
+E2M1_VALUES: NDArray[np.float32] = np.array(
+    [
+        0.0,   # 0000: +0
+        0.5,   # 0001: +0.5 (subnormal)
+        1.0,   # 0010: +1.0
+        1.5,   # 0011: +1.5
+        2.0,   # 0100: +2.0
+        3.0,   # 0101: +3.0
+        4.0,   # 0110: +4.0
+        6.0,   # 0111: +6.0
+        -0.0,  # 1000: -0 (treat as 0)
+        -0.5,  # 1001: -0.5
+        -1.0,  # 1010: -1.0
+        -1.5,  # 1011: -1.5
+        -2.0,  # 1100: -2.0
+        -3.0,  # 1101: -3.0
+        -4.0,  # 1110: -4.0
+        -6.0,  # 1111: -6.0
+    ],
+    dtype=np.float32,
+)
+
+# Positive values only (for quantization: finding nearest value)
+E2M1_POSITIVE: NDArray[np.float32] = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32
+)
+
+# PyTorch tensor version (lazy initialization to avoid import-time torch dependency)
+_E2M1_VALUES_TORCH: Any = None
+
+
+def get_e2m1_torch_table() -> Any:
+    """Get E2M1 values as PyTorch tensor (lazy initialization).
+    
+    This is the canonical way to access the E2M1 lookup table as a torch tensor.
+    The table is created on first call and cached for subsequent accesses.
+    
+    Returns:
+        torch.Tensor of shape (16,) with dtype float32 containing E2M1 values.
+        
+    Example:
+        >>> from metal_marlin._compat import get_e2m1_torch_table
+        >>> table = get_e2m1_torch_table()
+        >>> values = table[torch.tensor([0, 1, 15])]  # [0.0, 0.5, -6.0]
+    """
+    global _E2M1_VALUES_TORCH
+    if _E2M1_VALUES_TORCH is None:
+        if not HAS_TORCH or torch is None:
+            raise RuntimeError("PyTorch is required for E2M1 torch table")
+        _E2M1_VALUES_TORCH = torch.tensor(E2M1_VALUES, dtype=torch.float32)
+    return _E2M1_VALUES_TORCH
+
+
+# Alias for convenience - same function, exported as E2M1_VALUES_TORCH
+E2M1_VALUES_TORCH = get_e2m1_torch_table
+
+
+if TYPE_CHECKING:
+    import torch
+
+
+def dequantize_e2m1(indices: "torch.Tensor") -> "torch.Tensor":
+    """Dequantize 4-bit indices to E2M1 values (unscaled) using PyTorch.
+
+    This is the canonical dequantization implementation used across metal_marlin.
+    Both fp4_metal.py and mmfp4_linear.py should import from here.
+
+    Args:
+        indices: Tensor of integer indices (0-15).
+
+    Returns:
+        Tensor of float values with same shape as indices.
+
+    Example:
+        >>> indices = torch.tensor([0, 1, 8, 9], dtype=torch.uint8)
+        >>> values = dequantize_e2m1(indices)
+        >>> print(values)  # [0.0, 0.5, -0.0, -0.5]
+    """
+    if not HAS_TORCH or torch is None:
+        raise RuntimeError("PyTorch is required for dequantize_e2m1")
+
+    # Ensure indices are long for indexing
+    idx = indices.to(torch.long)
+
+    # Get table and move to same device as indices
+    table = get_e2m1_torch_table().to(device=indices.device)
+    return table[idx]

@@ -66,8 +66,8 @@ constant constexpr uint KV_TILE_FUSED = 16;   // KV vectors per tile in fused va
 constant constexpr uint O_PER_THREAD = (HEAD_DIM_MAX + THREADS_PER_TG_ATT - 1) / THREADS_PER_TG_ATT;
 
 // Block-sparse configuration constants
-constant constexpr uint BLOCK_Q_DEFAULT = 16;  // Default block size in Q dimension
-constant constexpr uint BLOCK_K_DEFAULT = 16;  // Default block size in K dimension
+constant constexpr uint BLOCK_Q_DEFAULT = 32;  // Default block size in Q dimension
+constant constexpr uint BLOCK_K_DEFAULT = 32;  // Default block size in K dimension
 constant constexpr uint BLOCKS_PER_TG = 8;    // Number of K blocks processed per threadgroup iteration
 
 // ---------------------------------------------------------------------------
@@ -84,12 +84,13 @@ constant constexpr uint BLOCKS_PER_TG = 8;    // Number of K blocks processed pe
 //   float result = scratch[0];
 // ---------------------------------------------------------------------------
 
-// Phase 1: Each simdgroup reduces locally and leader writes to scratch
+// Phase 1: Each simdgroup reduces locally using hardware simd_max and leader writes to scratch
 inline void parallel_reduce_max_phase1(
     threadgroup float* scratch,
     float value,
     uint tid
 ) {
+    // Use hardware simd_max for single-instruction reduction within simdgroup
     float sg_max = simd_max(value);
     uint sg_id = tid / 32;
     uint lane = tid % 32;
@@ -99,7 +100,7 @@ inline void parallel_reduce_max_phase1(
     // Caller must call threadgroup_barrier after this
 }
 
-// Phase 2: First simdgroup reduces across all simdgroups
+// Phase 2: First simdgroup reduces across all simdgroups using simd_max
 inline void parallel_reduce_max_phase2(
     threadgroup float* scratch,
     uint tid
@@ -108,6 +109,7 @@ inline void parallel_reduce_max_phase2(
     uint lane = tid % 32;
     if (sg_id == 0) {
         float v = (lane < SIMDGROUPS_ATT) ? scratch[lane] : -INFINITY;
+        // Use hardware simd_max for cross-simdgroup reduction
         float result = simd_max(v);
         if (lane == 0) {
             scratch[0] = result;
@@ -116,12 +118,13 @@ inline void parallel_reduce_max_phase2(
     // Caller must call threadgroup_barrier after this
 }
 
-// Phase 1: Each simdgroup reduces locally and leader writes to scratch
+// Phase 1: Each simdgroup reduces locally using hardware simd_sum and leader writes to scratch
 inline void parallel_reduce_sum_phase1(
     threadgroup float* scratch,
     float value,
     uint tid
 ) {
+    // Use hardware simd_sum for single-instruction reduction within simdgroup
     float sg_sum = simd_sum(value);
     uint sg_id = tid / 32;
     uint lane = tid % 32;
@@ -131,7 +134,7 @@ inline void parallel_reduce_sum_phase1(
     // Caller must call threadgroup_barrier after this
 }
 
-// Phase 2: First simdgroup reduces across all simdgroups
+// Phase 2: First simdgroup reduces across all simdgroups using simd_sum
 inline void parallel_reduce_sum_phase2(
     threadgroup float* scratch,
     uint tid
@@ -140,6 +143,7 @@ inline void parallel_reduce_sum_phase2(
     uint lane = tid % 32;
     if (sg_id == 0) {
         float v = (lane < SIMDGROUPS_ATT) ? scratch[lane] : 0.0f;
+        // Use hardware simd_sum for cross-simdgroup reduction
         float result = simd_sum(v);
         if (lane == 0) {
             scratch[0] = result;
@@ -1139,7 +1143,7 @@ kernel void attention_block_sparse_fused_qkv(
     device const half* Q          [[buffer(0)]],   // [batch, heads, seq_q, head_dim]
     device const half* K          [[buffer(1)]],   // [batch, heads, seq_k, head_dim]
     device const half* V          [[buffer(2)]],   // [batch, heads, seq_k, head_dim]
-    device const uint64_t* mask_bits [[buffer(3)]], // [num_q_blocks] - bitset of active K blocks per Q block
+    device const uint64_t* mask_bits [[buffer(3)]], // [num_q_blocks * num_mask_words] - bitset of active K blocks per Q block
     device half* O                [[buffer(4)]],   // [batch, heads, seq_q, head_dim]
     constant uint& batch          [[buffer(5)]],
     constant uint& num_heads      [[buffer(6)]],
@@ -1151,7 +1155,8 @@ kernel void attention_block_sparse_fused_qkv(
     constant uint& block_k        [[buffer(12)]],
     constant uint& num_q_blocks   [[buffer(13)]],
     constant uint& num_k_blocks   [[buffer(14)]],
-    constant uint& causal         [[buffer(15)]],   // Causal masking flag
+    constant uint& num_mask_words [[buffer(15)]],  // Words per Q block row
+    constant uint& causal         [[buffer(16)]],  // Causal masking flag
     uint3 tgid                    [[threadgroup_position_in_grid]],
     uint tid                      [[thread_index_in_threadgroup]]
 ) {
@@ -1165,7 +1170,16 @@ kernel void attention_block_sparse_fused_qkv(
     uint q_end = min(q_start + block_q, seq_q);
     uint q_block_len = q_end - q_start;
 
-    uint64_t active_mask = mask_bits[q_block_idx];
+    device const uint64_t* active_mask_ptr = mask_bits + q_block_idx * num_mask_words;
+
+    // Check if any block is active for this Q block (quick check)
+    bool any_active = false;
+    for (uint w = 0; w < num_mask_words; ++w) {
+        if (active_mask_ptr[w] != 0) {
+            any_active = true;
+            break;
+        }
+    }
 
     // Initialize output to zero (all query rows in this block)
     for (uint q_local = 0; q_local < q_block_len; ++q_local) {
@@ -1176,7 +1190,7 @@ kernel void attention_block_sparse_fused_qkv(
         }
     }
 
-    if (active_mask == 0) return;
+    if (!any_active) return;
 
     uint q_base = (batch_idx * num_heads + head) * seq_q * head_dim;
     uint k_base = (batch_idx * num_heads + head) * seq_k * head_dim;
@@ -1212,101 +1226,108 @@ kernel void attention_block_sparse_fused_qkv(
     }
 
     // Process each K block
-    for (uint k_block_idx = 0; k_block_idx < num_k_blocks; ++k_block_idx) {
-        bool is_active = (active_mask & (1ULL << k_block_idx)) != 0;
+    for (uint w = 0; w < num_mask_words; ++w) {
+        uint64_t mask_word = active_mask_ptr[w];
+        
+        while (mask_word != 0) {
+            // Find first set bit
+            uint b = ctz(mask_word);
+            // Clear the bit
+            mask_word &= ~(1ULL << b);
+            
+            uint k_block_idx = w * 64 + b;
+            if (k_block_idx >= num_k_blocks) continue;
 
-        if (!is_active) continue;
+            uint k_start = k_block_idx * block_k;
+            uint k_end = min(k_start + block_k, seq_k);
+            uint k_block_len = k_end - k_start;
 
-        uint k_start = k_block_idx * block_k;
-        uint k_end = min(k_start + block_k, seq_k);
-        uint k_block_len = k_end - k_start;
-
-        // Load K and V tiles
-        for (uint k_local = 0; k_local < k_block_len; ++k_local) {
-            uint k_idx = k_start + k_local;
-            uint k_offset = k_base + k_idx * head_dim;
-            uint v_offset = v_base + k_idx * head_dim;
-            for (uint d = tid; d < head_dim; d += THREADS_PER_TG_ATT) {
-                K_cache[k_local][d] = K[k_offset + d];
-                V_cache[k_local][d] = V[v_offset + d];
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // Process each query row in this block
-        for (uint q_local = 0; q_local < q_block_len; ++q_local) {
-            uint q_row = q_start + q_local;
-
-            // Compute scores for all K in this block
-            // All threads need all scores for V accumulation, so we cooperatively
-            // compute and store in threadgroup memory
-            float tile_max = -INFINITY;
-
-            for (uint k_local = tid; k_local < k_block_len; k_local += THREADS_PER_TG_ATT) {
-                uint k_idx = k_start + k_local;
-                float score = -INFINITY;
-
-                // Apply causal mask if enabled
-                if (causal && k_idx > q_row) {
-                    score = -INFINITY;
-                } else {
-                    float dot = 0.0f;
-                    for (uint d = 0; d < head_dim; ++d) {
-                        dot += float(Q_cache[q_local][d]) * float(K_cache[k_local][d]);
-                    }
-                    score = dot * scale;
-                }
-
-                tile_scores[k_local] = score;
-                if (score > tile_max) {
-                    tile_max = score;
-                }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-
-            // Efficiently find max in this tile using SIMD group functions
-            float local_max = (tid < k_block_len) ? tile_scores[tid] : -INFINITY;
-            float global_tile_max = simd_max(local_max);
-
-            // Broadcast tile max to all threads
-            if (tid == 0) {
-                tile_scores[0] = global_tile_max;
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            tile_max = tile_scores[0];
-
-            // Update running max and rescale
-            float prev_max = running_max[q_local];
-            running_max[q_local] = max(running_max[q_local], tile_max);
-
-            if (prev_max > -INFINITY) {
-                float rescale = exp(prev_max - running_max[q_local]);
-                running_sum[q_local] *= rescale;
-                for (uint i = 0; i < O_PER_THREAD; ++i) {
-                    o_accum[q_local][i] *= rescale;
-                }
-            }
-
-            // Accumulate weighted V for all K in this block
+            // Load K and V tiles
             for (uint k_local = 0; k_local < k_block_len; ++k_local) {
                 uint k_idx = k_start + k_local;
-                float score = tile_scores[k_local];
+                uint k_offset = k_base + k_idx * head_dim;
+                uint v_offset = v_base + k_idx * head_dim;
+                for (uint d = tid; d < head_dim; d += THREADS_PER_TG_ATT) {
+                    K_cache[k_local][d] = K[k_offset + d];
+                    V_cache[k_local][d] = V[v_offset + d];
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
 
-                if (score <= -INFINITY) continue;
+            // Process each query row in this block
+            for (uint q_local = 0; q_local < q_block_len; ++q_local) {
+                uint q_row = q_start + q_local;
 
-                float w = exp(score - running_max[q_local]);
-                running_sum[q_local] += w;
+                // Compute scores for all K in this block
+                // All threads need all scores for V accumulation, so we cooperatively
+                // compute and store in threadgroup memory
+                float tile_max = -INFINITY;
 
-                for (uint i = 0; i < O_PER_THREAD; ++i) {
-                    uint d = tid + i * THREADS_PER_TG_ATT;
-                    if (d < head_dim) {
-                        o_accum[q_local][i] += w * float(V_cache[k_local][d]);
+                for (uint k_local = tid; k_local < k_block_len; k_local += THREADS_PER_TG_ATT) {
+                    uint k_idx = k_start + k_local;
+                    float score = -INFINITY;
+
+                    // Apply causal mask if enabled
+                    if (causal && k_idx > q_row) {
+                        score = -INFINITY;
+                    } else {
+                        float dot = 0.0f;
+                        for (uint d = 0; d < head_dim; ++d) {
+                            dot += float(Q_cache[q_local][d]) * float(K_cache[k_local][d]);
+                        }
+                        score = dot * scale;
+                    }
+
+                    tile_scores[k_local] = score;
+                    if (score > tile_max) {
+                        tile_max = score;
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                // Efficiently find max in this tile using SIMD group functions
+                float local_max = (tid < k_block_len) ? tile_scores[tid] : -INFINITY;
+                float global_tile_max = simd_max(local_max);
+
+                // Broadcast tile max to all threads
+                if (tid == 0) {
+                    tile_scores[0] = global_tile_max;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                tile_max = tile_scores[0];
+
+                // Update running max and rescale
+                float prev_max = running_max[q_local];
+                running_max[q_local] = max(running_max[q_local], tile_max);
+
+                if (prev_max > -INFINITY) {
+                    float rescale = exp(prev_max - running_max[q_local]);
+                    running_sum[q_local] *= rescale;
+                    for (uint i = 0; i < O_PER_THREAD; ++i) {
+                        o_accum[q_local][i] *= rescale;
+                    }
+                }
+
+                // Accumulate weighted V for all K in this block
+                for (uint k_local = 0; k_local < k_block_len; ++k_local) {
+                    uint k_idx = k_start + k_local;
+                    float score = tile_scores[k_local];
+
+                    if (score <= -INFINITY) continue;
+
+                    float w = exp(score - running_max[q_local]);
+                    running_sum[q_local] += w;
+
+                    for (uint i = 0; i < O_PER_THREAD; ++i) {
+                        uint d = tid + i * THREADS_PER_TG_ATT;
+                        if (d < head_dim) {
+                            o_accum[q_local][i] += w * float(V_cache[k_local][d]);
+                        }
                     }
                 }
             }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     // Normalize and write output

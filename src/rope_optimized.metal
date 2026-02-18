@@ -46,12 +46,13 @@ inline half2 lookup_sincos_texture(
     uint pair_idx,
     uint half_dim
 ) {
-    // Use normalized coordinates for texture lookup
-    float u = (float)(pair_idx) / (float)half_dim;
-    float v = (float)position;
+    // Use pixel coordinates for texture lookup
+    // Center of pixel is at integer + 0.5
+    float u = (float)pair_idx + 0.5f;
+    float v = (float)position + 0.5f;
     
     // Sample from texture (nearest neighbor, no interpolation)
-    constexpr sampler texture_sampler(coord::normalized,
+    constexpr sampler texture_sampler(coord::pixel,
                                       address::clamp_to_edge,
                                       filter::nearest);
     
@@ -497,6 +498,300 @@ kernel void rope_precompute_sincos_yarn(
     
     uint idx = pos_idx * half_dim + dim_idx;
     sincos_out[idx] = half2(sin_val, cos_val);
+}
+
+// ============================================================================
+// Fused RoPE + Attention Kernels
+// ============================================================================
+
+/**
+ * _fused_rope_attention - Inline RoPE with attention computation.
+ *
+ * Optimized to pre-rotate Q before iterating over K.
+ * Handles split NOPE (non-RoPE) and RoPE dimensions.
+ */
+kernel void _fused_rope_attention(
+    device const half* q_nope      [[buffer(0)]],
+    device const half* q_rope      [[buffer(1)]],
+    device const half* k_nope      [[buffer(2)]],
+    device const half* k_rope      [[buffer(3)]],
+    device const half* v_input     [[buffer(4)]],
+    texture2d<half, access::sample> tex_sincos [[texture(0)]],
+    device half* attn_out          [[buffer(5)]],
+    constant uint& batch_size      [[buffer(6)]],
+    constant uint& seq_q           [[buffer(7)]],
+    constant uint& seq_k           [[buffer(8)]],
+    constant uint& num_heads       [[buffer(9)]],
+    constant uint& num_kv_heads    [[buffer(10)]],
+    constant uint& nope_dim        [[buffer(11)]],
+    constant uint& rope_dim        [[buffer(12)]],
+    constant uint& v_head_dim      [[buffer(13)]],
+    constant float& scale          [[buffer(14)]],
+    constant uint& q_offset        [[buffer(15)]],
+    constant uint& k_offset        [[buffer(16)]],
+    uint3 gid                      [[thread_position_in_grid]],
+    uint lane_id                   [[thread_index_in_simdgroup]]
+) {
+    // Grid: (seq_q, num_heads, batch_size)
+    uint seq_idx = gid.x;
+    uint head_idx = gid.y;
+    uint batch_idx = gid.z;
+    
+    if (seq_idx >= seq_q || head_idx >= num_heads || batch_idx >= batch_size) return;
+    
+    uint half_rope_dim = rope_dim >> 1;
+    uint kv_head_idx = head_idx / (num_heads / num_kv_heads);  // GQA mapping
+    
+    // Position for RoPE lookup
+    uint q_position = seq_idx + q_offset;
+    
+    // Pre-calculate Q rotation for all pairs assigned to this lane
+    // Assuming rope_dim <= 256
+    half q_rot_x_reg[8];
+    half q_rot_y_reg[8];
+    
+    // Pre-load and rotate Q_rope
+    uint reg_cnt = 0;
+    for (uint pair = lane_id; pair < half_rope_dim; pair += ROPE_SIMDGROUP_SIZE) {
+        uint q_base = ((batch_idx * seq_q + seq_idx) * num_heads + head_idx) * rope_dim;
+        half q_x = q_rope[q_base + (pair << 1)];
+        half q_y = q_rope[q_base + (pair << 1) + 1];
+        
+        half2 sincos_q = lookup_sincos_texture(tex_sincos, q_position, pair, half_rope_dim);
+        
+        if (reg_cnt < 8) {
+            q_rot_x_reg[reg_cnt] = q_x * sincos_q.y - q_y * sincos_q.x;
+            q_rot_y_reg[reg_cnt] = q_x * sincos_q.x + q_y * sincos_q.y;
+            reg_cnt++;
+        }
+    }
+    
+    // Online Softmax Accumulators
+    float m_prev = -INFINITY;
+    float sum_exp = 0.0f;
+    float acc_v[8] = {0.0f}; // Accumulate up to 256 v_head_dim per lane (8 * 32)
+    
+    // Iterate over K/V
+    for (uint k_tile = 0; k_tile < seq_k; k_tile += 1) {
+        uint k_position = k_tile + k_offset;
+        float score = 0.0f;
+        
+        // 1. NOPE part dot product
+        for (uint i = lane_id; i < nope_dim; i += ROPE_SIMDGROUP_SIZE) {
+            uint q_base = ((batch_idx * seq_q + seq_idx) * num_heads + head_idx) * nope_dim;
+            uint k_base = ((batch_idx * seq_k + k_tile) * num_kv_heads + kv_head_idx) * nope_dim;
+            
+            half q_val = q_nope[q_base + i];
+            half k_val = k_nope[k_base + i];
+            
+            score += float(q_val * k_val);
+        }
+
+        // 2. RoPE part dot product (with rotation)
+        reg_cnt = 0;
+        for (uint pair = lane_id; pair < half_rope_dim; pair += ROPE_SIMDGROUP_SIZE) {
+            half q_rot_x = q_rot_x_reg[reg_cnt];
+            half q_rot_y = q_rot_y_reg[reg_cnt];
+            reg_cnt++;
+            
+            // Load K values
+            uint k_base = ((batch_idx * seq_k + k_tile) * num_kv_heads + kv_head_idx) * rope_dim;
+            half k_x = k_rope[k_base + (pair << 1)];
+            half k_y = k_rope[k_base + (pair << 1) + 1];
+            
+            // Lookup RoPE sin/cos for K position
+            half2 sincos_k = lookup_sincos_texture(tex_sincos, k_position, pair, half_rope_dim);
+            
+            // Apply RoPE rotation to K
+            half k_rot_x = k_x * sincos_k.y - k_y * sincos_k.x;
+            half k_rot_y = k_x * sincos_k.x + k_y * sincos_k.y;
+            
+            // Accumulate dot product
+            score += float(q_rot_x * k_rot_x + q_rot_y * k_rot_y);
+        }
+        
+        // Reduce score across simdgroup
+        for (uint offset = ROPE_SIMDGROUP_SIZE >> 1; offset > 0; offset >>= 1) {
+            score += simd_shuffle_down(score, offset);
+        }
+        // Broadcast score from lane 0 to all lanes
+        score = simd_broadcast(score, 0);
+        
+        // Apply scale
+        score *= scale;
+        
+        // Online Softmax Update
+        float m_curr = max(m_prev, score);
+        float exp_score = exp(score - m_curr);
+        float correction = exp(m_prev - m_curr);
+        
+        sum_exp = sum_exp * correction + exp_score;
+        m_prev = m_curr;
+        
+        // Accumulate V (distribute across lanes)
+        for (uint v_idx = 0; v_idx < 8; ++v_idx) {
+            uint v = lane_id + v_idx * ROPE_SIMDGROUP_SIZE;
+            if (v < v_head_dim) {
+                uint v_base = ((batch_idx * seq_k + k_tile) * num_kv_heads + kv_head_idx) * v_head_dim;
+                float v_val = float(v_input[v_base + v]);
+                acc_v[v_idx] = acc_v[v_idx] * correction + exp_score * v_val;
+            }
+        }
+    }
+    
+    // Final normalization and write output
+    for (uint v_idx = 0; v_idx < 8; ++v_idx) {
+        uint v = lane_id + v_idx * ROPE_SIMDGROUP_SIZE;
+        if (v < v_head_dim) {
+            uint out_base = ((batch_idx * seq_q + seq_idx) * num_heads + head_idx) * v_head_dim;
+            attn_out[out_base + v] = half(acc_v[v_idx] / sum_exp);
+        }
+    }
+}
+
+/**
+ * _fused_rope_attention_decode - Optimized version for decode (seq_q = 1).
+ *
+ * Uses shared memory for Q rotation and robust softmax reduction.
+ * Handles split NOPE (non-RoPE) and RoPE dimensions.
+ */
+kernel void _fused_rope_attention_decode(
+    device const half* q_nope      [[buffer(0)]],
+    device const half* q_rope      [[buffer(1)]],
+    device const half* k_nope      [[buffer(2)]],
+    device const half* k_rope      [[buffer(3)]],
+    device const half* v_cache     [[buffer(4)]],
+    texture2d<half, access::sample> tex_sincos [[texture(0)]],
+    device half* attn_out          [[buffer(5)]],
+    constant uint& batch_size      [[buffer(6)]],
+    constant uint& seq_k           [[buffer(7)]],
+    constant uint& num_heads       [[buffer(8)]],
+    constant uint& num_kv_heads    [[buffer(9)]],
+    constant uint& nope_dim        [[buffer(10)]],
+    constant uint& rope_dim        [[buffer(11)]],
+    constant uint& v_head_dim      [[buffer(12)]],
+    constant float& scale          [[buffer(13)]],
+    constant uint& q_position      [[buffer(14)]],
+    constant uint& k_offset        [[buffer(15)]],
+    uint3 gid                      [[thread_position_in_grid]],
+    uint lane_id                   [[thread_index_in_simdgroup]]
+) {
+    // Grid: (num_heads, batch_size, 1)
+    uint head_idx = gid.x;
+    uint batch_idx = gid.y;
+    
+    if (head_idx >= num_heads || batch_idx >= batch_size) return;
+    
+    uint half_rope_dim = rope_dim >> 1;
+    uint kv_head_idx = head_idx / (num_heads / num_kv_heads);
+    
+    // Load Q_nope into registers/shared?
+    // nope_dim is usually small (e.g. 128-512).
+    // Let's just load it per thread in the loop or pre-load if possible.
+    // For decode, batch=1, seq=1 usually.
+    
+    // Load and rotate Q_rope once (shared across all K positions)
+    // Flattened shared memory: [rope_dim]
+    threadgroup half q_rot_shared[256]; 
+    
+    for (uint pair = lane_id; pair < half_rope_dim; pair += ROPE_SIMDGROUP_SIZE) {
+        uint q_base = (batch_idx * num_heads + head_idx) * rope_dim;
+        half q_x = q_rope[q_base + (pair << 1)];
+        half q_y = q_rope[q_base + (pair << 1) + 1];
+        
+        half2 sincos_q = lookup_sincos_texture(tex_sincos, q_position, pair, half_rope_dim);
+        
+        q_rot_shared[pair << 1] = q_x * sincos_q.y - q_y * sincos_q.x;
+        q_rot_shared[(pair << 1) + 1] = q_x * sincos_q.x + q_y * sincos_q.y;
+    }
+    
+    // Load Q_nope into shared memory as well for faster access
+    threadgroup half q_nope_shared[512]; // Assume nope_dim <= 512
+    
+    for (uint i = lane_id; i < nope_dim; i += ROPE_SIMDGROUP_SIZE) {
+        uint q_base = (batch_idx * num_heads + head_idx) * nope_dim;
+        q_nope_shared[i] = q_nope[q_base + i];
+    }
+    
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    
+    // Per-lane accumulators
+    half local_max = -INFINITY;
+    half local_sum = 0.0h;
+    
+    // Accumulate V (distribute v_head_dim across lanes)
+    // We only need to store the subset of V that this lane is responsible for
+    // Max v_head_dim = 256 => 256/32 = 8 elements per lane
+    half local_acc_v[8] = {0.0h};
+    
+    // Loop over K
+    for (uint k = 0; k < seq_k; ++k) {
+        uint k_position = k + k_offset;
+        
+        half score = 0.0h;
+        
+        // 1. NOPE dot product
+        for (uint i = lane_id; i < nope_dim; i += ROPE_SIMDGROUP_SIZE) {
+            uint k_base = ((batch_idx * seq_k + k) * num_kv_heads + kv_head_idx) * nope_dim;
+            half k_val = k_nope[k_base + i];
+            score += q_nope_shared[i] * k_val;
+        }
+        
+        // 2. RoPE dot product
+        for (uint pair = lane_id; pair < half_rope_dim; pair += ROPE_SIMDGROUP_SIZE) {
+            uint k_base = ((batch_idx * seq_k + k) * num_kv_heads + kv_head_idx) * rope_dim;
+            half k_x = k_rope[k_base + (pair << 1)];
+            half k_y = k_rope[k_base + (pair << 1) + 1];
+            
+            half2 sincos_k = lookup_sincos_texture(tex_sincos, k_position, pair, half_rope_dim);
+            
+            half k_rot_x = k_x * sincos_k.y - k_y * sincos_k.x;
+            half k_rot_y = k_x * sincos_k.x + k_y * sincos_k.y;
+            
+            score += q_rot_shared[pair << 1] * k_rot_x + 
+                     q_rot_shared[(pair << 1) + 1] * k_rot_y;
+        }
+        
+        // Reduce within lane (actually reduction happens across lanes for the dot product?)
+        // Wait, the loops above:
+        // `score` is accumulated per thread. Each thread handles subset of dimensions.
+        // So we need to sum `score` across all threads in simdgroup to get total dot product.
+        
+        for (uint offset = ROPE_SIMDGROUP_SIZE >> 1; offset > 0; offset >>= 1) {
+            score += simd_shuffle_down(score, offset);
+        }
+        // Broadcast total score to all threads
+        score = simd_broadcast(score, 0);
+        
+        score *= half(scale);
+        
+        // Update online softmax
+        half m_prev = local_max;
+        local_max = max(local_max, score);
+        half exp_score = exp(score - local_max);
+        half factor = (m_prev == -INFINITY) ? 0.0h : exp(m_prev - local_max);
+        
+        local_sum = local_sum * factor + exp_score;
+        
+        // Accumulate V
+        for (uint v_idx = 0; v_idx < 8; ++v_idx) {
+            uint v = lane_id + v_idx * ROPE_SIMDGROUP_SIZE;
+            if (v < v_head_dim) {
+                uint v_base = ((batch_idx * seq_k + k) * num_kv_heads + kv_head_idx) * v_head_dim;
+                half v_val = v_cache[v_base + v];
+                local_acc_v[v_idx] = local_acc_v[v_idx] * factor + exp_score * v_val;
+            }
+        }
+    }
+    
+    // Final normalization
+    for (uint v_idx = 0; v_idx < 8; ++v_idx) {
+        uint v = lane_id + v_idx * ROPE_SIMDGROUP_SIZE;
+        if (v < v_head_dim) {
+            uint out_base = (batch_idx * num_heads + head_idx) * v_head_dim;
+            attn_out[out_base + v] = local_acc_v[v_idx] / local_sum;
+        }
+    }
 }
 
 // ============================================================================

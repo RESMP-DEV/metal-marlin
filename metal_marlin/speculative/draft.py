@@ -119,11 +119,15 @@ class SmallModelDraft(DraftModel):
     """
 
     def __init__(
-        self, model: CausalLMDraft, max_speculative: int = 4, device: torch.device | None = None
+        self,
+        model: CausalLMDraft,
+        max_speculative: int = 4,
+        device: torch.device | None = None,
+        cache: KVCache | None = None,
     ):
         self.model = model
         self.max_speculative = max_speculative
-        self._cache: KVCache | None = None
+        self._cache: KVCache | None = cache
         self._cache_seq_len: int = 0
         self.device = device or torch.device("cpu")
 
@@ -167,55 +171,72 @@ class SmallModelDraft(DraftModel):
         """
         num_tokens = min(num_tokens, self.max_speculative)
         batch_size = input_ids.shape[0]
+        device = input_ids.device
 
         # Initialize draft cache if needed
         if self._cache is None:
             self._cache = self.model.create_kv_cache()
 
-        tokens: list[Tensor] = []
-        probs: list[Tensor] = []
+        # Get vocab size for pre-allocation (cache on first call)
+        vocab_size: int
+        if hasattr(self.model, "vocab_size"):
+            vocab_size = self.model.vocab_size  # type: ignore[union-attr]
+        else:
+            # Infer from first forward pass
+            with torch.inference_mode():
+                first_logits = self.model(input_ids, kv_cache=self._cache)
+                vocab_size = first_logits.shape[-1]
+
+        # Pre-allocate output tensors on the correct device for better performance
+        # Avoids repeated list append and torch.stack overhead
+        tokens = torch.zeros((batch_size, num_tokens), dtype=torch.long, device=device)
+        probs = torch.zeros((batch_size, num_tokens, vocab_size), dtype=torch.float32, device=device)
+
+        # Pre-allocate input buffer for next token to avoid repeated allocations
+        next_input = torch.empty((batch_size, 1), dtype=torch.long, device=device)
 
         # === DRAFT MODEL GENERATION LOOP ===
         # Autoregressive loop: generate K tokens one at a time using draft model
+        # Use inference_mode for maximum performance (disables all gradient-related tracking)
         current_ids = input_ids
-        for step in range(num_tokens):
-            # Step 1: Forward pass through draft model
-            # Returns logits [batch, current_seq_len, vocab_size]
-            logits = self.model(current_ids, kv_cache=self._cache)
-            
-            # Step 2: Extract logits for last position (predicting next token)
-            # Shape: [batch, vocab_size]
-            last_logits = logits[:, -1, :]
+        with torch.inference_mode():
+            for step in range(num_tokens):
+                # Step 1: Forward pass through draft model
+                # Returns logits [batch, current_seq_len, vocab_size]
+                logits = self.model(current_ids, kv_cache=self._cache)
+                
+                # Step 2: Extract logits for last position (predicting next token)
+                # Shape: [batch, vocab_size]
+                last_logits = logits[:, -1, :]
 
-            # Step 3: Convert logits to probability distribution
-            next_probs = torch.softmax(last_logits, dim=-1)
-            
-            # Step 4: Greedy selection for maximum acceptance rate
-            # Shape: [batch]
-            next_token = torch.argmax(next_probs, dim=-1)
+                # Step 3: Convert logits to probability distribution
+                # Use in-place softmax when possible for memory efficiency
+                next_probs = torch.softmax(last_logits, dim=-1)
+                
+                # Step 4: Greedy selection for maximum acceptance rate
+                # Shape: [batch]
+                next_token = torch.argmax(next_probs, dim=-1)
 
-            # Store token and its probability distribution for verification
-            tokens.append(next_token)
-            probs.append(next_probs)
+                # Store results directly into pre-allocated tensors
+                tokens[:, step] = next_token
+                probs[:, step, :] = next_probs
 
-            # Step 5: Advance draft model's KV cache to include processed positions
-            self._cache.advance(current_ids.shape[1])
-            
-            # Step 6: Prepare input for next iteration (the just-generated token)
-            # Shape: [batch, 1]
-            current_ids = next_token.reshape(batch_size, 1)
+                # Step 5: Advance draft model's KV cache to include processed positions
+                self._cache.advance(current_ids.shape[1])
+                
+                # Step 6: Prepare input for next iteration using pre-allocated buffer
+                # Copy token into pre-allocated buffer to avoid new tensor creation
+                next_input.copy_(next_token.unsqueeze(1))
+                current_ids = next_input
         # === END GENERATION LOOP ===
 
-        return DraftOutput(
-            tokens=torch.stack(tokens, dim=1),  # [batch, num_tokens]
-            probs=torch.stack(probs, dim=1),  # [batch, num_tokens, vocab]
-        )
+        return DraftOutput(tokens=tokens, probs=probs)
 
     def reset(self) -> None:
         """Reset the draft model's KV cache for a new sequence."""
         if self._cache is not None:
             self._cache.reset()
-        self._cache = None
+            self._cache = None
         self._cache_seq_len = 0
 
     def sync_after_accept(self, accepted_tokens: Tensor) -> None:

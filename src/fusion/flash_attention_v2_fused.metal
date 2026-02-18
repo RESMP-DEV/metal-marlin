@@ -26,7 +26,7 @@
 //   Output: [batch, seq_q, hidden_size]
 
 #include <metal_stdlib>
-#include "bf16_compat.metal"
+#include "../bf16_compat.metal"
 using namespace metal;
 
 #ifdef USE_BF16_INPUTS

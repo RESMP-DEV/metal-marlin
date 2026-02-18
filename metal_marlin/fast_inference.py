@@ -399,3 +399,51 @@ def fast_dispatch_available() -> bool:
         True if C++ extension is available and initialized.
     """
     return get_fast_context().available
+
+
+class BatchDispatchContext:
+    """Context for batched kernel dispatch.
+
+    Accumulates multiple kernel launches into a single command buffer
+    for reduced CPU overhead and better GPU utilization.
+    
+    Example:
+        >>> ctx = get_fast_context()
+        >>> batch = BatchDispatchContext(ctx)
+        >>> batch.add_kernel("kernel1", grid1, tg1, bufs1)
+        >>> batch.add_kernel("kernel2", grid2, tg2, bufs2)
+        >>> batch.commit()
+    """
+
+    def __init__(self, ctx: FastInferenceContext):
+        if not ctx.available:
+            raise RuntimeError("Fast inference context not available")
+        self._ctx = ctx
+        # _ctx._ctx is the MetalContext C++ object
+        self._batch = _metal_dispatch_ext.BatchDispatch(ctx._ctx)
+
+    def add_kernel(
+        self,
+        kernel_name: str,
+        grid: tuple[int, int, int],
+        threadgroup: tuple[int, int, int],
+        buffers: list[Any],
+    ) -> None:
+        """Add a kernel to the batch.
+        
+        Args:
+            kernel_name: Name of the kernel function.
+            grid: Grid dimensions (threadgroups).
+            threadgroup: Threadgroup dimensions (threads).
+            buffers: List of ManagedBuffer objects.
+        """
+        pipeline = self._ctx.get_pipeline(kernel_name)
+        self._batch.add_kernel(pipeline, grid, threadgroup, buffers)
+
+    def commit(self, wait: bool = True) -> None:
+        """Commit the batch.
+        
+        Args:
+            wait: If True, wait for batch completion.
+        """
+        self._batch.commit(wait)

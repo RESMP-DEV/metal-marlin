@@ -147,18 +147,20 @@ if HAS_TORCH and torch is not None:
                     f"got '{self.cache.quantize_mode}'"
                 )
 
-            # 2. Verify cache tensor shapes and dtypes
-            cache_shape = self.cache.kv_cache.shape
-            expected_shape = (
-                self.num_layers,
-                self.max_batch_size,
-                self.max_seq_len,
-                self.head_dim // 8,  # FP4 packs 8 values per int32
-            )
-            if cache_shape != expected_shape:
+            # 2. Verify cache tensors (k_cache and v_cache lists for FP4)
+            # MLAKVCache uses separate k_cache/v_cache lists in FP4 mode
+            if not hasattr(self.cache, 'kv_cache') or self.cache.kv_cache is None:
                 raise RuntimeError(
-                    f"FP4 cache validation failed: cache shape {cache_shape} != "
-                    f"expected {expected_shape}"
+                    "FP4 cache validation failed: kv_cache tensor not found"
+                )
+
+            # kv_cache shape: [num_layers, batch, max_seq_len, cache_dim // 8]
+            cache_shape = self.cache.kv_cache.shape
+            expected_last_dim = self.head_dim // 8  # FP4 packs 8 values per int32
+            if cache_shape[-1] != expected_last_dim:
+                raise RuntimeError(
+                    f"FP4 cache validation failed: cache last dim {cache_shape[-1]} != "
+                    f"expected {expected_last_dim}"
                 )
 
             if self.cache.kv_cache.dtype != torch.int32:
@@ -173,16 +175,11 @@ if HAS_TORCH and torch is not None:
                     "FP4 cache validation failed: kv_scales should not be None in FP4 mode"
                 )
 
-            expected_scale_shape = (
-                self.num_layers,
-                self.max_batch_size,
-                self.max_seq_len,
-                1,
-            )
-            if self.cache.kv_scales.shape != expected_scale_shape:
+            # kv_scales shape: [num_layers, batch, max_seq_len, 1]
+            if self.cache.kv_scales.shape[-1] != 1:
                 raise RuntimeError(
-                    f"FP4 cache validation failed: scale shape {self.cache.kv_scales.shape} != "
-                    f"expected {expected_scale_shape}"
+                    f"FP4 cache validation failed: scales last dim should be 1, "
+                    f"got {self.cache.kv_scales.shape[-1]}"
                 )
 
             # 4. Test cache update with sample compressed KV tensor

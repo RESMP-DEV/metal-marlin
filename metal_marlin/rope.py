@@ -440,6 +440,7 @@ class YaRNRoPE:
             self.device,
             self.dtype,
         )
+        self._cached_seq_len = self.max_seq_len
 
     def apply(
         self,
@@ -919,9 +920,12 @@ class YaRNRoPEMetal(YaRNRoPE):
         config: YaRNConfig | None = None,
         device: str = "mps",
         dtype: Any = None,
+        rope_ratio: float = 1.0,
     ):
         super().__init__(dim, max_seq_len, base, config, device, dtype)
 
+        # Store rope_ratio for API compatibility with _RotaryEmbedding
+        self.rope_ratio = rope_ratio
         self._lib: Any | None = None
         if HAS_METAL_DISPATCH:
             try:
@@ -970,6 +974,8 @@ class YaRNRoPEMetal(YaRNRoPE):
             return super().apply(x, offset)
 
         try:
+            # Ensure offset is non-negative for uint32 conversion
+            offset = max(0, offset)
             output = dispatch_rope_yarn_forward(
                 self._lib,
                 x_transposed,
@@ -1029,6 +1035,185 @@ class YaRNRoPEMetal(YaRNRoPE):
             )
         except Exception:
             return super().apply(q, offset), super().apply(k, offset)
+
+
+def dispatch_fused_rope_attention(
+    lib: Any,
+    q_nope: Any,
+    q_rope: Any,
+    k_nope: Any,
+    k_rope: Any,
+    v: Any,
+    cos_cache: Any,
+    sin_cache: Any,
+    attention_scale: float,
+    q_offset: int = 0,
+    k_offset: int = 0,
+) -> Any:
+    """Dispatch fused RoPE + attention kernel on Metal.
+    
+    This kernel fuses RoPE application with attention computation to reduce
+    memory bandwidth. Instead of applying RoPE to Q/K separately then computing
+    attention, the rotation is done inline during the attention score calculation.
+    
+    Args:
+        lib: MetalKernelLibrary instance
+        q_nope: Query non-RoPE part [batch, seq_q, num_heads, nope_dim], MPS tensor
+        q_rope: Query RoPE part [batch, seq_q, num_heads, rope_dim], MPS tensor
+        k_nope: Key non-RoPE part [batch, seq_k, num_kv_heads, nope_dim], MPS tensor
+        k_rope: Key RoPE part [batch, seq_k, num_kv_heads, rope_dim], MPS tensor
+        v: Value tensor [batch, seq_k, num_kv_heads, v_head_dim], MPS tensor
+        cos_cache: Precomputed cos cache [max_seq, rope_dim/2], MPS tensor
+        sin_cache: Precomputed sin cache [max_seq, rope_dim/2], MPS tensor
+        attention_scale: YaRN attention scaling factor (mscale)
+        q_offset: Query position offset
+        k_offset: Key position offset (for KV cache continuation)
+        
+    Returns:
+        Attention output tensor [batch, seq_q, num_heads, v_head_dim]
+    """
+    require_torch("dispatch_fused_rope_attention")
+    
+    if not HAS_METAL_DISPATCH:
+        raise RuntimeError("Metal dispatch not available")
+    
+    import Metal
+    import numpy as np
+    
+    device = lib.device
+    
+    batch_size, seq_q, num_heads, nope_dim = q_nope.shape
+    _, _, _, rope_dim = q_rope.shape
+    _, seq_k, num_kv_heads, _ = k_nope.shape
+    _, _, _, v_head_dim = v.shape
+    
+    head_dim = nope_dim + rope_dim
+    half_rope_dim = rope_dim // 2
+    
+    # Ensure fp16 and contiguous
+    q_nope_fp16 = q_nope.half().contiguous()
+    q_rope_fp16 = q_rope.half().contiguous()
+    k_nope_fp16 = k_nope.half().contiguous()
+    k_rope_fp16 = k_rope.half().contiguous()
+    v_fp16 = v.half().contiguous()
+    cos_fp16 = cos_cache.half().contiguous()
+    sin_fp16 = sin_cache.half().contiguous()
+    
+    # Allocate output
+    output = torch.empty(
+        (batch_size, seq_q, num_heads, v_head_dim),
+        dtype=torch.float16,
+        device=q_nope.device,
+    )
+    
+    # Convert to Metal buffers
+    q_nope_buf = mps_tensor_to_metal_buffer(q_nope_fp16, device)
+    q_rope_buf = mps_tensor_to_metal_buffer(q_rope_fp16, device)
+    k_nope_buf = mps_tensor_to_metal_buffer(k_nope_fp16, device)
+    k_rope_buf = mps_tensor_to_metal_buffer(k_rope_fp16, device)
+    v_buf = mps_tensor_to_metal_buffer(v_fp16, device)
+    
+    # Create texture from cos/sin cache
+    # Pack sin/cos as half2 in texture
+    sincos_packed = torch.stack([sin_fp16, cos_fp16], dim=-1).flatten(0, 1)
+    tex_desc = Metal.MTLTextureDescriptor.texture2DDescriptorWithPixelFormat_width_height_mipmapped_(
+        Metal.MTLPixelFormatRG16Float, half_rope_dim, cos_cache.shape[0], False
+    )
+    tex_desc.setUsage_(Metal.MTLTextureUsageShaderRead)
+    sincos_buf = mps_tensor_to_metal_buffer(sincos_packed, device)
+    tex_sincos = sincos_buf.newTextureWithDescriptor_offset_bytesPerRow_(tex_desc, 0, half_rope_dim * 4)
+    
+    out_buf = mps_tensor_to_metal_buffer(output, device)
+    
+    # Create constant buffers
+    batch_buf = device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    seq_q_buf = device.newBufferWithBytes_length_options_(
+        np.array([seq_q], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    seq_k_buf = device.newBufferWithBytes_length_options_(
+        np.array([seq_k], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    heads_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    kv_heads_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_kv_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    nope_dim_buf = device.newBufferWithBytes_length_options_(
+        np.array([nope_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    rope_dim_buf = device.newBufferWithBytes_length_options_(
+        np.array([rope_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    v_dim_buf = device.newBufferWithBytes_length_options_(
+        np.array([v_head_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    scale_buf = device.newBufferWithBytes_length_options_(
+        np.array([1.0 / (head_dim ** 0.5) * attention_scale], dtype=np.float32).tobytes(),
+        4,
+        Metal.MTLResourceStorageModeShared,
+    )
+    q_off_buf = device.newBufferWithBytes_length_options_(
+        np.array([q_offset], dtype=np.uint32).tobytes(),
+        4,
+        Metal.MTLResourceStorageModeShared,
+    )
+    k_off_buf = device.newBufferWithBytes_length_options_(
+        np.array([k_offset], dtype=np.uint32).tobytes(),
+        4,
+        Metal.MTLResourceStorageModeShared,
+    )
+    
+    # Choose kernel based on sequence length
+    if seq_q == 1:
+        # Use decode-optimized kernel
+        kernel_name = "_fused_rope_attention_decode"
+        grid = (num_heads, batch_size, 1)
+        threadgroup = (32, 1, 1)
+        
+        # For decode, pass q_position directly
+        q_pos_buf = device.newBufferWithBytes_length_options_(
+            np.array([q_offset], dtype=np.uint32).tobytes(),
+            4,
+            Metal.MTLResourceStorageModeShared,
+        )
+        
+        dispatch_kernel(
+            lib,
+            function_name=kernel_name,
+            grid=grid,
+            threadgroup=threadgroup,
+            buffers=[
+                q_nope_buf, q_rope_buf, k_nope_buf, k_rope_buf, v_buf, out_buf,
+                batch_buf, seq_k_buf, heads_buf, kv_heads_buf,
+                nope_dim_buf, rope_dim_buf, v_dim_buf, scale_buf, q_pos_buf, k_off_buf,
+            ],
+            textures=[tex_sincos],
+            wait=True,
+        )
+    else:
+        # Use general kernel
+        kernel_name = "_fused_rope_attention"
+        grid = (seq_q, num_heads, batch_size)
+        threadgroup = (32, 1, 1)
+        
+        dispatch_kernel(
+            lib,
+            function_name=kernel_name,
+            grid=grid,
+            threadgroup=threadgroup,
+            buffers=[
+                q_nope_buf, q_rope_buf, k_nope_buf, k_rope_buf, v_buf, out_buf,
+                batch_buf, seq_q_buf, seq_k_buf, heads_buf, kv_heads_buf,
+                nope_dim_buf, rope_dim_buf, v_dim_buf, scale_buf, q_off_buf, k_off_buf,
+            ],
+            textures=[tex_sincos],
+            wait=True,
+        )
+    
+    return output
 
 
 class YaRNRoPELatent(YaRNRoPE):

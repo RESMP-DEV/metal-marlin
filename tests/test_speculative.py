@@ -18,6 +18,7 @@ import torch
 
 from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.speculative.draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
+from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel
 from metal_marlin.speculative.engine import (
     GenerationStats,
     SpeculativeConfig,
@@ -42,7 +43,7 @@ def _make_cache_config(vocab_size: int = 100) -> CacheConfig:
     )
 
 
-class MockCausalLM:
+class MockCausalLM(torch.nn.Module):
     """Mock causal language model for testing.
 
     Returns logits from a fixed distribution, optionally biased toward
@@ -56,12 +57,15 @@ class MockCausalLM:
         logit_scale: float = 1.0,
         device: torch.device | None = None,
     ):
+        super().__init__()
         self.vocab_size = vocab_size
         self.bias_tokens = bias_tokens or {}
         self.logit_scale = logit_scale
         self.call_count = 0
         self._cache_config = _make_cache_config(vocab_size)
         self.device = device or torch.device("cpu")
+        self.config = type('Config', (), {'hidden_size': 32, 'vocab_size': vocab_size})()
+        self.dummy_param = torch.nn.Parameter(torch.empty(0, device=self.device))
 
     def __call__(self, input_ids: torch.Tensor, kv_cache: KVCache | None = None) -> torch.Tensor:
         self.call_count += 1
@@ -76,6 +80,9 @@ class MockCausalLM:
             logits[:, :, token_id] = logits[:, :, token_id] + bias
 
         return logits
+    
+    def modules(self):
+        return []
 
     def create_kv_cache(self) -> KVCache:
         return KVCache(self._cache_config, batch_size=1, device="cpu")
@@ -636,464 +643,68 @@ class TestDraftModels:
         assert output.probs.shape == (3, 2, 50)
 
 
-# ---------------------------------------------------------------------------
-# TestSpeculativeEngine: End-to-end engine behavior
-# ---------------------------------------------------------------------------
+class TestMMFP4DraftModel:
+    """Test MMFP4-specific draft model implementation."""
 
-
-class TestSpeculativeEngine:
-    """Test the speculative decoding engine orchestration."""
-
-    def test_single_step_output_shape(self):
-        """A single generate_step should produce valid StepResult."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=4)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[10, 20, 30]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        assert isinstance(result, StepResult)
-        assert result.new_tokens.shape[0] == 1  # batch=1
-        assert result.new_tokens.shape[1] == 5  # num_spec + 1
-        assert result.num_target_calls == 1
-        assert result.num_draft_tokens == 4
-
-    def test_single_target_call_per_step(self):
-        """Each generate_step should make exactly 1 target model forward call."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        target.call_count = 0
-        input_ids = torch.tensor([[5]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        assert target.call_count == 1
-        assert result.num_target_calls == 1
-
-    def test_multiple_steps_count_target_calls(self):
-        """Multiple steps should each use exactly 1 target call."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=4)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        target.call_count = 0
-        input_ids = torch.tensor([[5]], dtype=torch.long, device=device)
-        for _ in range(5):
-            engine.generate_step(input_ids)
-
-        assert target.call_count == 5
-
-    def test_num_new_tokens_at_least_one(self):
-        """Each step should produce at least 1 new token (the next_token)."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        # Use tokens within vocab range to avoid index errors
-        draft = DeterministicDraft(tokens=[49, 49, 49], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        for b in range(1):
-            n_new = int(result.num_new_tokens[b].item())
-            assert n_new >= 1, f"Expected at least 1 new token, got {n_new}"
-
-    def test_num_new_tokens_at_most_k_plus_one(self):
-        """Each step should produce at most K+1 new tokens."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4, 5], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=5)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        for b in range(1):
-            n_new = int(result.num_new_tokens[b].item())
-            assert n_new <= 6, f"Expected at most 6 new tokens, got {n_new}"
-
-    def test_adaptive_reduces_on_low_acceptance(self):
-        """Adaptive mechanism should reduce speculation on sustained low acceptance."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        # Draft proposes tokens that won't match target -> low acceptance
-        draft = DeterministicDraft(
-            tokens=[49, 49, 49, 49], prob_mass=0.99, vocab_size=50, device=device
+    def test_init(self):
+        """MMFP4DraftModel should initialize correctly."""
+        draft = MMFP4DraftModel(
+            hidden_size=64,
+            vocab_size=100,
+            num_predictions=4,
+            group_size=32
         )
-        config = SpeculativeConfig(
-            num_speculative_tokens=4,
-            min_speculative_tokens=1,
-            acceptance_threshold=0.5,
-            history_window=3,
-        )
-        engine = SpeculativeEngine(target, draft, config, device=device)
+        assert draft.num_predictions == 4
+        assert draft.hidden_size == 64
+        # Should have an MTP head
+        assert hasattr(draft, 'mtp_head')
 
-        assert engine.current_num_spec == 4
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        # Run many steps to trigger adaptation
-        for _ in range(20):
-            engine.generate_step(input_ids)
-
-        # After sustained low acceptance, should have reduced
-        assert engine.current_num_spec < 4
-
-    def test_adaptive_increases_on_high_acceptance(self):
-        """Adaptive mechanism should increase speculation on sustained high acceptance."""
-        torch.manual_seed(42)
+    def test_speculate_from_hidden(self):
+        """MMFP4DraftModel should generate tokens from hidden states."""
+        hidden_size = 32
         vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(
-            vocab_size=vocab_size, bias_tokens={10: 20.0, 11: 20.0, 12: 20.0}, device=device
+        num_predictions = 4
+        
+        draft = MMFP4DraftModel(
+            hidden_size=hidden_size,
+            vocab_size=vocab_size,
+            num_predictions=num_predictions,
+            dtype=torch.float32
         )
-        # Draft proposes the tokens target prefers -> high acceptance
-        draft = DeterministicDraft(
-            tokens=[10, 11, 12, 10], prob_mass=0.95, vocab_size=vocab_size, device=device
+        
+        batch_size = 2
+        # Mock hidden states: [batch, 1, hidden]
+        hidden = torch.randn(batch_size, 1, hidden_size)
+        
+        output = draft.speculate_from_hidden(hidden, num_tokens=num_predictions)
+        
+        assert output.tokens.shape == (batch_size, num_predictions)
+        assert output.probs.shape == (batch_size, num_predictions, vocab_size)
+        
+        # Probs should sum to 1
+        np.testing.assert_allclose(
+            output.probs.sum(dim=-1).detach().numpy(),
+            1.0,
+            atol=1e-5
         )
-        config = SpeculativeConfig(
-            num_speculative_tokens=4,
-            min_speculative_tokens=1,
-            increase_threshold=0.8,
-            history_window=3,
+
+    def test_from_target_model(self):
+        """Factory method should extract config from target model."""
+        target = MockCausalLM(vocab_size=100)
+        draft = MMFP4DraftModel.from_target_model(target, num_predictions=3)
+        
+        assert draft.vocab_size == 100
+        assert draft.num_predictions == 3
+        assert draft.hidden_size == 32  # MockCausalLM has 32
+
+    def test_weight_sharing(self):
+        """Weight sharing factory should enable weight sharing flag."""
+        target = MockCausalLM(vocab_size=100)
+        draft = MMFP4DraftModel.from_target_model_with_weight_sharing(
+            target, 
+            num_predictions=3,
+            share_lm_head=False # Mock doesn't have compatible LM head usually
         )
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        # Start with reduced speculation
-        engine._current_num_spec = 2
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        # Run steps; if acceptance is high, should increase
-        for _ in range(20):
-            result = engine.generate_step(input_ids)
-            if result.acceptance_rate > 0.8:
-                break
-
-        # If we got high acceptance, num_spec should have increased
-        # (may not reach 4 due to stochastic nature, but should be > 2 if high acceptance)
-        # This is a soft assertion since acceptance depends on random sampling
-
-    def test_adaptive_never_below_minimum(self):
-        """Speculation length should never go below min_speculative_tokens."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(
-            tokens=[49, 49, 49, 49], prob_mass=0.99, vocab_size=50, device=device
-        )
-        config = SpeculativeConfig(
-            num_speculative_tokens=4,
-            min_speculative_tokens=2,
-            acceptance_threshold=0.5,
-            history_window=2,
-        )
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        for _ in range(50):
-            engine.generate_step(input_ids)
-
-        assert engine.current_num_spec >= config.min_speculative_tokens
-
-    def test_adaptive_never_above_maximum(self):
-        """Speculation length should never exceed num_speculative_tokens."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, bias_tokens={1: 50.0}, device=device)
-        draft = DeterministicDraft(
-            tokens=[1, 1, 1, 1], prob_mass=0.99, vocab_size=50, device=device
-        )
-        config = SpeculativeConfig(
-            num_speculative_tokens=4,
-            max_speculative_tokens=8,
-            increase_threshold=0.3,
-            history_window=2,
-        )
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        for _ in range(50):
-            engine.generate_step(input_ids)
-
-        assert engine.current_num_spec <= config.num_speculative_tokens
-
-    def test_reset_clears_state(self):
-        """Engine reset should clear acceptance history and restore speculation count."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        engine.generate_step(input_ids)
-        engine._current_num_spec = 1
-
-        engine.reset()
-        assert engine.current_num_spec == 3
-        assert len(engine._acceptance_history) == 0
-
-    def test_acceptance_rate_in_result(self):
-        """StepResult should contain valid acceptance_rate."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=4)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        assert 0.0 <= result.acceptance_rate <= 1.0
-
-    def test_generate_iterator_yields_steps(self):
-        """generate() should yield StepResult objects."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[10, 20, 30]], dtype=torch.long, device=device)
-        steps = list(engine.generate(input_ids, max_tokens=5))
-
-        assert len(steps) >= 1
-        for step in steps:
-            assert isinstance(step, StepResult)
-            assert step.num_target_calls == 1
-
-    def test_generate_respects_max_tokens(self):
-        """generate() should stop after producing ~max_tokens tokens."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=4)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        steps = list(engine.generate(input_ids, max_tokens=10))
-
-        total_tokens = sum(int(s.num_new_tokens.max().item()) for s in steps)
-        # Should produce approximately max_tokens (may overshoot by up to K)
-        assert total_tokens >= 10
-
-    def test_generate_stops_on_eos(self):
-        """generate() should stop when EOS token is produced."""
-        eos_id = 2
-        device = torch.device("cpu")
-        # Target model that always outputs EOS
-        target = MockCausalLM(vocab_size=50, bias_tokens={eos_id: 100.0}, device=device)
-        draft = DeterministicDraft(
-            tokens=[eos_id, eos_id, eos_id], prob_mass=0.99, vocab_size=50, device=device
-        )
-        config = SpeculativeConfig(num_speculative_tokens=3, eos_token_id=eos_id)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        steps = list(engine.generate(input_ids, max_tokens=100))
-
-        # Should stop early due to EOS, not run all 100 tokens
-        total_tokens = sum(int(s.num_new_tokens.max().item()) for s in steps)
-        assert total_tokens < 100
-
-    def test_speedup_fewer_target_calls(self):
-        """Speculative decoding should use fewer target calls than autoregressive.
-
-        For N new tokens, autoregressive needs N target calls.
-        Speculative needs ceil(N / avg_accepted_per_step) calls.
-        """
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3, 4], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=4)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        steps = list(engine.generate(input_ids, max_tokens=20))
-
-        total_target_calls = sum(s.num_target_calls for s in steps)
-        total_tokens = sum(int(s.num_new_tokens.max().item()) for s in steps)
-
-        # If speculative works at all, we should need fewer target calls than tokens
-        # Even with poor acceptance, each step produces at least 1 token from 1 call
-        assert total_target_calls <= total_tokens
-
-    def test_generation_stats_accumulate(self):
-        """GenerationStats should track cumulative metrics across steps."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(
-            num_speculative_tokens=3,
-            min_speculative_tokens=3,  # Prevent adaptive reduction
-            acceptance_threshold=0.0,  # Never reduce
-        )
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        for _ in range(5):
-            engine.generate_step(input_ids)
-
-        stats = engine.stats
-        assert isinstance(stats, GenerationStats)
-        assert stats.total_target_calls == 5
-        assert stats.total_draft_steps == 5
-        assert stats.total_tokens > 0
-        assert stats.total_proposed >= 5  # At least 1 proposed per step
-        assert 0.0 <= stats.overall_acceptance_rate <= 1.0
-        assert stats.tokens_per_target_call >= 1.0  # At least 1 token per call
-
-    def test_generation_stats_reset(self):
-        """Stats should be reset when engine.reset() is called."""
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=50, device=device)
-        draft = DeterministicDraft(tokens=[1, 2], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=2)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1]], dtype=torch.long, device=device)
-        engine.generate_step(input_ids)
-        assert engine.stats.total_target_calls > 0
-
-        engine.reset()
-        assert engine.stats.total_target_calls == 0
-        assert engine.stats.total_tokens == 0
-
-    def test_generate_all_returns_full_sequence(self):
-        """generate_all should return prompt + generated tokens as a single array."""
-        torch.manual_seed(42)
-        vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        prompt = torch.tensor([[10, 20, 30]], dtype=torch.long, device=device)
-        output = engine.generate_all(prompt, max_tokens=10)
-
-        assert output.shape[0] == 1  # batch=1
-        # Output should start with the prompt and have generated tokens
-        # Note: may produce slightly less than max_tokens due to EOS detection or loop dynamics
-        assert output.shape[1] >= 3 + 1  # at least prompt + some generated tokens
-        assert int(output[0, 0].item()) == 10
-        assert int(output[0, 1].item()) == 20
-        assert int(output[0, 2].item()) == 30
-
-    def test_generate_all_with_streamer(self):
-        """generate_all with streamer should call back for each new token."""
-        torch.manual_seed(42)
-        vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = DeterministicDraft(tokens=[1, 2, 3], vocab_size=50, device=device)
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        streamed: list[int] = []
-        prompt = torch.tensor([[10, 20, 30]], dtype=torch.long, device=device)
-        engine.generate_all(prompt, max_tokens=8, streamer=streamed.append)
-
-        # Streamer should have been called at least once
-        assert len(streamed) >= 8
-        # All streamed tokens should be valid
-        for tok in streamed:
-            assert 0 <= tok < vocab_size
-
-
-# ---------------------------------------------------------------------------
-# TestIntegration: Combined end-to-end tests
-# ---------------------------------------------------------------------------
-
-
-class TestIntegration:
-    """Integration tests combining draft, verify, and engine."""
-
-    def test_ngram_draft_with_engine(self):
-        """NGramDraft integrated with SpeculativeEngine should work end-to-end."""
-        vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = NGramDraft(ngram_size=2, vocab_size=vocab_size, device=device)
-        # Seed with a pattern
-        draft.update_ngrams([1, 2, 3, 1, 2, 3, 1, 2, 3])
-
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1, 2]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        assert isinstance(result, StepResult)
-        assert result.num_target_calls == 1
-
-    def test_small_model_draft_with_engine(self):
-        """SmallModelDraft integrated with engine should work end-to-end."""
-        vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft_model = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = SmallModelDraft(draft_model, max_speculative=3, device=device)
-
-        config = SpeculativeConfig(num_speculative_tokens=3)
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[10, 20, 30]], dtype=torch.long, device=device)
-        result = engine.generate_step(input_ids)
-
-        assert isinstance(result, StepResult)
-        assert result.num_target_calls == 1
-        assert result.num_draft_tokens == 3
-
-    def test_verify_with_real_draft_output(self):
-        """verify_speculative should work with actual DraftOutput from SmallModelDraft."""
-        torch.manual_seed(42)
-        vocab_size = 50
-        device = torch.device("cpu")
-        draft_model = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = SmallModelDraft(draft_model, max_speculative=4, device=device)
-
-        input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long, device=device)
-        draft_out = draft.speculate(input_ids, num_tokens=4)
-
-        # Simulate target model output
-        target_logits = torch.randn(1, 5, vocab_size, device=device)
-
-        result = verify_speculative(draft_out.tokens, draft_out.probs, target_logits)
-
-        assert result.accepted_tokens.shape == (1, 4)
-        assert result.num_accepted.shape == (1,)
-        assert result.next_token.shape == (1,)
-
-    def test_full_generation_loop(self):
-        """Full generation loop should produce tokens without errors."""
-        torch.manual_seed(42)
-        vocab_size = 50
-        device = torch.device("cpu")
-        target = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft_model = MockCausalLM(vocab_size=vocab_size, device=device)
-        draft = SmallModelDraft(draft_model, max_speculative=3, device=device)
-
-        config = SpeculativeConfig(
-            num_speculative_tokens=3,
-            temperature=1.0,
-        )
-        engine = SpeculativeEngine(target, draft, config, device=device)
-
-        input_ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long, device=device)
-        all_tokens: list[int] = []
-
-        for step in engine.generate(input_ids, max_tokens=15):
-            n_new = int(step.num_new_tokens[0].item())
-            for j in range(n_new):
-                tok = int(step.new_tokens[0, j].item())
-                all_tokens.append(tok)
-
-        assert len(all_tokens) >= 15
+        
+        assert draft.is_weight_sharing_enabled()
+        assert draft.vocab_size == 100

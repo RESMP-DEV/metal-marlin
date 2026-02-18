@@ -5,6 +5,40 @@
 using namespace metal;
 
 // ---------------------------------------------------------------------------
+// Bit manipulation helpers
+// ---------------------------------------------------------------------------
+
+// Count trailing zeros - returns the number of consecutive 0 bits starting
+// from the least significant bit (position 0).
+// Used by block-sparse attention kernels to iterate over set bits in masks.
+inline uint ctz(uint64_t x) {
+    // Metal 3.0+ has built-in ctz, but for compatibility we provide a fallback
+    // implementation using bit manipulation.
+    if (x == 0) return 64;
+    
+    // Count trailing zeros using bit manipulation
+    // This is a classic algorithm that works on all Metal versions
+    uint count = 0;
+    
+    // Check lower 32 bits first
+    uint32_t low = uint32_t(x);
+    if (low == 0) {
+        count += 32;
+        low = uint32_t(x >> 32);
+    }
+    
+    // Now count trailing zeros in the 32-bit value
+    // Use binary search approach
+    if ((low & 0x0000FFFF) == 0) { count += 16; low >>= 16; }
+    if ((low & 0x000000FF) == 0) { count += 8;  low >>= 8;  }
+    if ((low & 0x0000000F) == 0) { count += 4;  low >>= 4;  }
+    if ((low & 0x00000003) == 0) { count += 2;  low >>= 2;  }
+    if ((low & 0x00000001) == 0) { count += 1; }
+    
+    return count;
+}
+
+// ---------------------------------------------------------------------------
 // SIMDgroup-level reduction intrinsics
 //
 // These use Metal's simd_sum/simd_max intrinsics for fast within-SIMD
@@ -14,13 +48,55 @@ using namespace metal;
 // Performance: O(1) within simdgroup vs O(log N) tree reduction
 // ---------------------------------------------------------------------------
 
-// Fast simdgroup sum using hardware intrinsics
+// Fast simdgroup sum using hardware intrinsics (single instruction)
 inline float simd_sum_reduction(float val) {
     return simd_sum(val);
 }
 
-// Fast simdgroup max using hardware intrinsics
+// Fast simdgroup max using hardware intrinsics (single instruction)
 inline float simd_max_reduction(float val) {
+    return simd_max(val);
+}
+
+// ---------------------------------------------------------------------------
+// SIMDgroup-level normalization helpers for Attention
+//
+// These functions provide fast normalization for attention softmax,
+// using hardware-accelerated simd_sum for the reduction.
+//
+// Usage in attention kernels:
+//   float max_score = simd_max_reduction(thread_max);
+//   float sum_exp = simd_sum_reduction(exp(score - max_score));
+//   float prob = exp(score - max_score) / sum_exp;
+// ---------------------------------------------------------------------------
+
+// Fast simdgroup softmax normalization
+// Returns normalized probability for this thread's score
+inline float simdgroup_softmax_normalize(float score, float max_score) {
+    float exp_val = exp(score - max_score);
+    float sum_exp = simd_sum(exp_val);
+    return exp_val / sum_exp;
+}
+
+// Online softmax update with simd_sum for faster reduction
+// Updates running max and sum with new score values
+inline void simdgroup_online_softmax_update(
+    float score,
+    thread float& running_max,
+    thread float& running_sum
+) {
+    float new_max = max(running_max, score);
+    running_sum = running_sum * exp(running_max - new_max) + exp(score - new_max);
+    running_max = new_max;
+}
+
+// Reduce sum across all threads in a simdgroup using simd_sum
+inline float simdgroup_reduce_sum(float val) {
+    return simd_sum(val);
+}
+
+// Reduce max across all threads in a simdgroup using simd_max  
+inline float simdgroup_reduce_max(float val) {
     return simd_max(val);
 }
 

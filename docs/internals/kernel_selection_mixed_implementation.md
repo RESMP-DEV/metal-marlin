@@ -239,7 +239,7 @@ Tests cover:
 Run the standalone test script:
 
 ```bash
-cd /Users/kearm/AlphaHENG
+cd /path/to/AlphaHENG
 python3 test_kernel_selection_mixed.py
 ```
 

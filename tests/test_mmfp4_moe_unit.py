@@ -1,31 +1,43 @@
-
 import sys
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.nn as nn
 
-# Mock dependencies
-mock_dispatch = MagicMock()
-sys.modules["metal_marlin.moe_dispatch"] = mock_dispatch
-
+# Import the module under test
+from metal_marlin.layers import mmfp4_moe
 from metal_marlin.layers.mmfp4_moe import MMFP4Expert, MMFP4MoE
 
 
 class TestMMFP4MoEUnit:
     @pytest.fixture
-    def mock_dispatch_module(self):
-        with patch("metal_marlin.layers.mmfp4_moe._get_dispatch_module") as mock:
-            dispatch = MagicMock()
-            mock.return_value = dispatch
-            yield dispatch
+    def mock_dispatch(self):
+        """Mock the dispatch module."""
+        mock = MagicMock()
+        # Patch the global variable in mmfp4_moe that caches the module
+        with patch.object(mmfp4_moe, '_moe_dispatch_module', mock):
+            yield mock
+
+    @pytest.fixture(autouse=True)
+    def setup_router_mock(self):
+        """Setup router mock before each test."""
+        # Setup default fused router mock
+        def mock_fused_router(hidden, gate, top_k, **kwargs):
+            batch_size = hidden.shape[0]
+            return (
+                torch.ones(batch_size, top_k) * 0.5,  # topk_weights
+                torch.randint(0, 4, (batch_size, top_k)),  # topk_indices
+            )
+        
+        # Patch the function where it is imported in mmfp4_moe
+        with patch('metal_marlin.layers.mmfp4_moe._fused_router_topk', side_effect=mock_fused_router):
+            yield
 
     @pytest.fixture
     def moe_layer(self):
-        # Create a small MoE layer
-        return MMFP4MoE(
+        """Create a small MoE layer for testing."""
+        layer = MMFP4MoE(
             n_experts=4,
             n_experts_per_tok=2,
             hidden_size=32,
@@ -33,123 +45,109 @@ class TestMMFP4MoEUnit:
             group_size=32,
             has_shared_expert=True
         )
+        return layer
 
-    def test_forward_expert_inputs_dtype(self, moe_layer, mock_dispatch_module):
-        # Setup inputs
-        batch_size = 2
-        seq_len = 4
-        hidden_size = 32
-        x = torch.randn(batch_size, seq_len, hidden_size, dtype=torch.float32) # Input as float32 to test conversion
+    def test_decode_path_uses_optimized_forward(self, moe_layer, mock_dispatch):
+        """Test that single-token input uses _forward_decode_optimized path.
         
-        # Setup mock dispatch behaviors
-        # group_tokens_by_expert_full returns dispatch_info
-        dispatch_info = MagicMock()
-        # expert_offsets needs to be valid for active_indices logic
-        # 4 experts. Offsets: [0, 2, 4, 6, 8] -> 2 tokens per expert
-        expert_offsets = torch.tensor([0, 2, 4, 6, 8], dtype=torch.int32)
-        dispatch_info.expert_offsets = expert_offsets
-        mock_dispatch_module.group_tokens_by_expert_full.return_value = dispatch_info
+        This is the _moe_decode_optimized path - it should:
+        1. Skip expensive sort/gather/scatter operations
+        2. Use the fused decode kernel directly (via moe_dispatch)
+        """
+        x = torch.randn(1, 32)  # Single token triggers decode path
         
-        # gather_for_experts returns expert_inputs
-        # Create inputs as float16 (since hidden_f16 is passed to gather)
-        # The gather function usually returns float16 if input is float16
-        # But wait, logic in forward:
-        # hidden_f16 = hidden_flat.to(torch.float16)
-        # expert_inputs = dispatch.gather_for_experts(hidden_f16, dispatch_info)
-        # So expert_inputs should be float16 coming out of gather.
+        # Configure the mock dispatch function to return a tensor of correct shape
+        mock_dispatch.decode_optimized_expert_combine_fused.return_value = torch.randn(1, 32)
         
-        # However, let's verify that we are indeed using the tensor that WAS converted
-        # (or re-converted if we had the bug where we converted inside loop).
-        
-        # Actually, the optimization was:
-        # Before:
-        #   for ...
-        #      chunk = expert_inputs[start:end]
-        #      expert(chunk.to(float16))  <-- repeated conversion if expert_inputs wasn't float16?
-        #      # Wait, gathering from hidden_f16 means expert_inputs IS float16.
-        #      # The comment says: "expert_inputs is already float16 as it's gathered from hidden_f16"
-        #      # BUT the removed code was: chunk = chunk.to(torch.float16)
-        #      # So previous code WAS doing redundant conversion on already float16 data?
-        #      # OR expert_inputs was somehow not float16?
-        
-        # Let's look at the file content I read earlier.
-        # L235: expert_inputs = dispatch.gather_for_experts(hidden_f16, dispatch_info)
-        # hidden_f16 is float16.
-        # So expert_inputs is float16.
-        # The removed code:
-        #   chunk = expert_inputs[start:end]
-        #   chunk = chunk.to(torch.float16)
-        
-        # Yes, it was a redundant conversion if it was already float16,
-        # or maybe it was intended to ensure it.
-        # The new code:
-        #   expert_inputs_f16 = expert_inputs.to(torch.float16)
-        #   for ...
-        #     chunk_out = expert(expert_inputs_f16[start:end])
-        
-        # If expert_inputs is ALREADY float16, .to(float16) is a no-op (check).
-        # But if it's a no-op, then moving it outside doesn't save much unless __getitem__ does something?
-        # Or maybe gather_for_experts returns something else in some cases?
-        
-        # Regardless, the task was to move it.
-        # To verify, I should check that the expert receives a float16 tensor.
-        
-        # Mock gather to return a tensor.
-        expert_inputs = torch.randn(8, hidden_size, dtype=torch.float16)
-        mock_dispatch_module.gather_for_experts.return_value = expert_inputs
-        
-        # Mock scatter
-        mock_dispatch_module.scatter_expert_outputs.return_value = torch.randn(batch_size * seq_len, hidden_size, dtype=torch.float16)
-
-        # Mock experts
-        for expert in moe_layer.experts:
-            expert.forward = MagicMock(return_value=torch.randn(2, hidden_size, dtype=torch.float16)) # 2 tokens
-        
-        # Run forward
         output = moe_layer(x)
         
-        # Check that experts were called
-        # And check the input passed to them
-        assert moe_layer.experts[0].forward.called
+        # Verify output shape
+        assert output.shape == (1, 32)
         
-        # Get arguments passed to expert 0
-        args, _ = moe_layer.experts[0].forward.call_args
-        input_tensor = args[0]
+        # Verify that the fused decode function was called
+        # This confirms we are using the optimized path which delegates to the fused implementation
+        mock_dispatch.decode_optimized_expert_combine_fused.assert_called_once()
         
-        assert input_tensor.dtype == torch.float16
+        # Verify arguments
+        call_args = mock_dispatch.decode_optimized_expert_combine_fused.call_args
+        assert call_args is not None
+        kwargs = call_args.kwargs
         
-    def test_active_indices_optimization(self, moe_layer, mock_dispatch_module):
-        # Test that we only iterate active experts
-        batch_size = 1
-        seq_len = 1
-        hidden_size = 32
-        x = torch.randn(batch_size, seq_len, hidden_size)
+        # Check that we passed the correct experts and routing info
+        assert kwargs['experts'] is moe_layer.experts
+        assert kwargs['shared_expert'] is moe_layer.shared_experts
         
-        dispatch_info = MagicMock()
-        # 4 experts.
-        # expert 0: 0->0 (count 0)
-        # expert 1: 0->2 (count 2) - ACTIVE
-        # expert 2: 2->2 (count 0)
-        # expert 3: 2->4 (count 2) - ACTIVE
-        expert_offsets = torch.tensor([0, 0, 2, 2, 4], dtype=torch.int32)
-        dispatch_info.expert_offsets = expert_offsets
-        mock_dispatch_module.group_tokens_by_expert_full.return_value = dispatch_info
-        
-        mock_dispatch_module.gather_for_experts.return_value = torch.randn(4, hidden_size, dtype=torch.float16)
-        mock_dispatch_module.scatter_expert_outputs.return_value = torch.randn(1, hidden_size, dtype=torch.float16)
+        # Verify topk_indices and topk_weights have correct shape and properties
+        assert kwargs['topk_indices'].shape == (1, 2)  # [batch, top_k]
+        assert kwargs['topk_weights'].shape == (1, 2)  # [batch, top_k]
+        assert kwargs['topk_indices'].dtype == torch.int64
+        # _minimal_routing_overhead: Weights should already be normalized (sum to 1)
+        weights_sum = kwargs['topk_weights'].sum(dim=-1)
+        assert torch.allclose(weights_sum, torch.ones_like(weights_sum), atol=1e-5)
 
-        # Mock experts
-        for expert in moe_layer.experts:
-            expert.forward = MagicMock(return_value=torch.randn(2, hidden_size, dtype=torch.float16))
-
-        moe_layer(x)
+    def test_decode_path_skips_group_tokens(self, moe_layer, mock_dispatch):
+        """Verify decode path avoids expensive token grouping operations.
         
-        # Expert 0 should NOT be called
-        assert not moe_layer.experts[0].forward.called
-        # Expert 1 SHOULD be called
-        assert moe_layer.experts[1].forward.called
-        # Expert 2 should NOT be called
-        assert not moe_layer.experts[2].forward.called
-        # Expert 3 SHOULD be called
-        assert moe_layer.experts[3].forward.called
+        The _moe_decode_optimized path should NOT call:
+        - group_tokens_by_expert_full
+        - gather_for_experts  
+        - scatter_expert_outputs
+        """
+        x = torch.randn(1, 32)
+        
+        # Configure mock return value
+        mock_dispatch.decode_optimized_expert_combine_fused.return_value = torch.randn(1, 32)
+        
+        output = moe_layer(x)
+        
+        # Verify output
+        assert output.shape == (1, 32)
+        
+        # In decode path, these should NOT be called
+        mock_dispatch.group_tokens_by_expert_full.assert_not_called()
+        mock_dispatch.gather_for_experts.assert_not_called()
+        mock_dispatch.scatter_expert_outputs.assert_not_called()
 
+    def test_batch_path_not_decode(self, moe_layer, mock_dispatch):
+        """Test that batch input (>1 token) does NOT use decode optimized path.
+        
+        Batch inputs should take the standard dispatch path, not the
+        _moe_decode_optimized single-token fast path.
+        """
+        # Use a shape that results in >1 tokens after reshape
+        x = torch.randn(2, 2, 32)  # 4 tokens total
+        
+        # Configure mocks for batch path
+        mock_dispatch.group_tokens_by_expert_full.return_value = MagicMock()
+        mock_dispatch.gather_for_experts.return_value = torch.randn(4, 32)
+        mock_dispatch.dispatch_experts_batched_dynamic.return_value = torch.randn(4, 32)
+        mock_dispatch.scatter_expert_outputs.return_value = torch.randn(4, 32)
+        
+        # Verify that hidden_flat.shape[0] will be > 1 (batch path)
+        hidden_flat = x.reshape(-1, 32)
+        assert hidden_flat.shape[0] == 4 > 1
+        
+        output = moe_layer(x)
+        
+        # Verify decode path was NOT used
+        mock_dispatch.decode_optimized_expert_combine_fused.assert_not_called()
+        
+        # Verify batch path WAS used
+        mock_dispatch.group_tokens_by_expert_full.assert_called_once()
+        mock_dispatch.gather_for_experts.assert_called_once()
+        mock_dispatch.dispatch_experts_batched_dynamic.assert_called_once()
+        mock_dispatch.scatter_expert_outputs.assert_called_once()
+
+    def test_forward_decode_optimized_exists(self):
+        """Verify _forward_decode_optimized method exists and is callable."""
+        layer = MMFP4MoE(n_experts=4, n_experts_per_tok=2, hidden_size=32)
+        assert hasattr(layer, '_forward_decode_optimized')
+        assert callable(getattr(layer, '_forward_decode_optimized'))
+
+    def test_decode_optimized_docstring(self):
+        """Verify _forward_decode_optimized has proper documentation."""
+        layer = MMFP4MoE(n_experts=4, n_experts_per_tok=2, hidden_size=32)
+        docstring = layer._forward_decode_optimized.__doc__
+        assert docstring is not None
+        assert 'decode' in docstring.lower()
+        assert '_moe_decode_optimized' in docstring

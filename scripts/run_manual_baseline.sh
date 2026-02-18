@@ -5,7 +5,7 @@
 # Benchmarks load large models and can spike to 120GB+ memory.
 #
 # Usage:
-#   cd /Users/kearm/AlphaHENG/contrib/metal_marlin
+#   cd contrib/metal_marlin
 #   ./scripts/run_manual_baseline.sh [--quick] [--skip-heavy]
 
 set -euo pipefail

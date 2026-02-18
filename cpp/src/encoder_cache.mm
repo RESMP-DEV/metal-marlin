@@ -120,7 +120,7 @@ void EncoderCache::commit_encoder(id<MTLComputeCommandEncoder> encoder) {
       // Track in-flight buffers
       size_t idx = inflight_count_.load(std::memory_order_relaxed);
       if (idx < inflight_buffers_.size()) {
-        inflight_buffers_[idx] = entry.command_buffer;
+        inflight_buffers_[idx] = (__bridge void*)entry.command_buffer;
         inflight_count_.fetch_add(1, std::memory_order_release);
       }
 
@@ -165,7 +165,7 @@ void EncoderCache::wait_all() {
   size_t count = inflight_count_.load(std::memory_order_acquire);
   for (size_t i = 0; i < count; ++i) {
     if (inflight_buffers_[i]) {
-      [inflight_buffers_[i] waitUntilCompleted];
+      [(__bridge id<MTLCommandBuffer>)inflight_buffers_[i] waitUntilCompleted];
       inflight_buffers_[i] = nil;
     }
   }
@@ -179,7 +179,7 @@ void EncoderCache::wait_for(size_t count) {
       std::min(count, inflight_count_.load(std::memory_order_acquire));
   for (size_t i = 0; i < actual_count; ++i) {
     if (inflight_buffers_[i]) {
-      [inflight_buffers_[i] waitUntilCompleted];
+      [(__bridge id<MTLCommandBuffer>)inflight_buffers_[i] waitUntilCompleted];
       inflight_buffers_[i] = nil;
     }
   }

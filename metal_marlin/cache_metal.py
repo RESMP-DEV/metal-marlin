@@ -244,9 +244,28 @@ class MetalKVCache:
                 self.v_cache[layer_idx][:, :, :end, :],
             )
 
-        # Gather specific positions using index_select
-        k = torch.index_select(self.k_cache[layer_idx], dim=2, index=positions)
-        v = torch.index_select(self.v_cache[layer_idx], dim=2, index=positions)
+        # Use optimized direct indexing instead of index_select
+        return self._direct_kv_index(layer_idx, positions)
+
+    def _direct_kv_index(
+        self, layer_idx: int, positions: torch_typing.Tensor
+    ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        """Optimized KV indexing using direct tensor indexing.
+
+        Avoids torch.index_select which causes GPU->CPU synchronization on MPS.
+        Uses direct indexing: cache[..., positions, :] which is fully parallel.
+
+        Args:
+            layer_idx: Which transformer layer.
+            positions: Positions to retrieve [num_positions].
+
+        Returns:
+            Tuple of (key, value) tensors indexed at specified positions.
+        """
+        # Direct indexing is faster than index_select on MPS
+        # Shape: [batch, num_kv_heads, num_positions, head_dim]
+        k = self.k_cache[layer_idx][..., positions, :]
+        v = self.v_cache[layer_idx][..., positions, :]
         return k, v
 
     @property
@@ -865,10 +884,11 @@ class MetalQuantizedKVCache:
                 self.v_scales[layer_idx][:, :, :end, :],
             )
         else:
-            k_quant = torch.index_select(self.k_cache[layer_idx], dim=2, index=positions)
-            v_quant = torch.index_select(self.v_cache[layer_idx], dim=2, index=positions)
-            k_scale = torch.index_select(self.k_scales[layer_idx], dim=2, index=positions)
-            v_scale = torch.index_select(self.v_scales[layer_idx], dim=2, index=positions)
+            # Use direct indexing instead of index_select for better MPS performance
+            k_quant = self.k_cache[layer_idx][..., positions, :]
+            v_quant = self.v_cache[layer_idx][..., positions, :]
+            k_scale = self.k_scales[layer_idx][..., positions, :]
+            v_scale = self.v_scales[layer_idx][..., positions, :]
             k = self._dequantize(k_quant, k_scale)
             v = self._dequantize(v_quant, v_scale)
 

@@ -1,3 +1,17 @@
+/**
+ * @file direct_access.hpp
+ * @brief Zero-overhead direct MTLBuffer access for Metal Marlin
+ *
+ * This module provides the fastest possible access to Metal buffer memory
+ * by using direct Objective-C property access and pointer caching.
+ *
+ * Key optimizations:
+ * - Direct property access (buffer.contents) instead of methodForSelector
+ * - No IMP caching overhead for simple property reads
+ * - Inline hot paths for single-instruction access
+ * - Zero-copy MPS tensor integration
+ */
+
 #pragma once
 
 #ifdef __OBJC__
@@ -11,8 +25,41 @@ typedef NSUInteger MTLResourceOptions;
 
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace metal_marlin::direct_access {
+
+// =============================================================================
+// Inline helper functions - Fastest access path
+// =============================================================================
+
+#ifdef __OBJC__
+/**
+ * @brief Get buffer contents pointer - inline hot path
+ * Uses direct property access for minimal overhead
+ */
+inline void* buffer_contents(id<MTLBuffer> buffer) noexcept {
+    return buffer.contents;
+}
+
+/**
+ * @brief Get buffer length - inline hot path
+ */
+inline size_t buffer_length(id<MTLBuffer> buffer) noexcept {
+    return static_cast<size_t>(buffer.length);
+}
+
+/**
+ * @brief Get both pointer and length in one call
+ */
+inline std::pair<void*, size_t> buffer_ptr_len(id<MTLBuffer> buffer) noexcept {
+    return {buffer.contents, static_cast<size_t>(buffer.length)};
+}
+#endif
+
+// =============================================================================
+// BufferPtr - Smart pointer for MTLBuffer with cached contents
+// =============================================================================
 
 class BufferPtr {
 public:
@@ -38,10 +85,19 @@ public:
 
     template<typename T>
     T* as() const noexcept { return reinterpret_cast<T*>(contents()); }
+    
+    template<typename T>
+    T* as_at(size_t byte_offset) const noexcept {
+        return reinterpret_cast<T*>(static_cast<uint8_t*>(contents()) + byte_offset);
+    }
 
 private:
     std::unique_ptr<Impl> impl_;
 };
+
+// =============================================================================
+// MetalDeviceDirect - Direct device access
+// =============================================================================
 
 class MetalDeviceDirect {
 public:
@@ -81,5 +137,37 @@ private:
 };
 
 MetalDeviceDirect& get_default_device();
+
+// =============================================================================
+// Fast buffer operations - Inline implementations
+// =============================================================================
+
+/**
+ * @brief Prefetch buffer for reading
+ */
+inline void prefetch_read(void* ptr) noexcept {
+    __builtin_prefetch(ptr, 0, 3);
+}
+
+/**
+ * @brief Prefetch buffer for writing
+ */
+inline void prefetch_write(void* ptr) noexcept {
+    __builtin_prefetch(ptr, 1, 3);
+}
+
+/**
+ * @brief Fast memcpy using builtin
+ */
+inline void fast_copy(void* dst, const void* src, size_t size) noexcept {
+    __builtin_memcpy(dst, src, size);
+}
+
+/**
+ * @brief Fast memset using builtin
+ */
+inline void fast_zero(void* ptr, size_t size) noexcept {
+    __builtin_memset(ptr, 0, size);
+}
 
 } // namespace metal_marlin::direct_access

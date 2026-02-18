@@ -106,9 +106,18 @@ class MLAAttentionParams:
     use_fused_kv_proj: bool
     fuse_rope_in_kv_a: bool
     skip_kv_decompress: bool
+    # KV cache quantization parameters for attention optimization
+    kv_quant_mode: str = "none"  # "none", "fp4", "fp8", "int8"
+    kv_quant_group_size: int = 128
+    # Sliding window attention for memory-efficient long sequence processing
+    sliding_window: int = 0  # 0 = disabled, >0 = window size
     
     def to_struct(self) -> np.ndarray:
         """Convert to numpy array for Metal buffer binding."""
+        # Map kv_quant_mode to integer for Metal
+        kv_quant_mode_map = {"none": 0, "fp4": 1, "fp8": 2, "int8": 3}
+        kv_quant_mode_int = kv_quant_mode_map.get(self.kv_quant_mode, 0)
+        
         return np.array([
             self.batch, self.seq_q, self.seq_k, self.hidden_size,
             self.num_heads, self.head_dim, self.kv_lora_rank, self.q_lora_rank,
@@ -123,6 +132,8 @@ class MLAAttentionParams:
             self.cache_len, self.max_cache_len,
             int(self.use_fused_q_proj), int(self.use_fused_kv_proj),
             int(self.fuse_rope_in_kv_a), int(self.skip_kv_decompress),
+            kv_quant_mode_int, self.kv_quant_group_size,  # KV quantization params
+            self.sliding_window,  # Sliding window attention (0 = disabled)
         ], dtype=np.float32)
 
 
@@ -376,14 +387,19 @@ def mla_fused_attention_prefill(
     o_weights_packed: torch.Tensor,
     o_scales: torch.Tensor,
     params: MLAAttentionParams,
+    k_scales: torch.Tensor | None = None,
+    v_scales: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch MLA fused attention prefill kernel via Metal.
     
     Optimized for prefill phase with multiple tokens and full context.
+    Supports quantized KV caches (FP4/FP8/INT8) for reduced memory bandwidth.
     
     Args:
         Same as mla_fused_attention_decode, except cache formats differ
         (full FP16 for prefill vs compressed FP8 for decode).
+        k_scales: Optional K cache scales for quantization [cache_len, n_groups]
+        v_scales: Optional V cache scales for quantization [cache_len, n_groups]
         
     Returns:
         output: Attention output [batch, seq_q, hidden_size]
@@ -423,6 +439,16 @@ def mla_fused_attention_prefill(
     kv_b_scales_buf = kv_b_scales._mps._get_metal_buffer_ptr()
     k_cache_buf = k_cache._mps._get_metal_buffer_ptr()
     v_cache_buf = v_cache._mps._get_metal_buffer_ptr()
+    
+    # Handle optional scale buffers for quantized KV cache
+    if k_scales is not None and v_scales is not None:
+        k_scales_buf = k_scales._mps._get_metal_buffer_ptr()
+        v_scales_buf = v_scales._mps._get_metal_buffer_ptr()
+    else:
+        # Create dummy scale buffers if not provided (for non-quantized case)
+        k_scales_buf = 0
+        v_scales_buf = 0
+    
     o_buf = o_weights_packed._mps._get_metal_buffer_ptr()
     o_scales_buf = o_scales._mps._get_metal_buffer_ptr()
     
@@ -437,7 +463,8 @@ def mla_fused_attention_prefill(
     buffers = [
         hidden_buf, q_a_buf, q_a_scales_buf, q_b_buf, q_b_scales_buf, q_bias_buf,
         kv_a_buf, kv_a_scales_buf, kv_b_buf, kv_b_scales_buf,
-        k_cache_buf, v_cache_buf, o_buf, o_scales_buf,
+        k_cache_buf, v_cache_buf, k_scales_buf, v_scales_buf,
+        o_buf, o_scales_buf,
         output_buf, params_buffer,
     ]
     
@@ -449,6 +476,200 @@ def mla_fused_attention_prefill(
 # ---------------------------------------------------------------------------
 # Convenience functions for GLM-4.7-Flash style MLA
 # ---------------------------------------------------------------------------
+
+def mla_chunked_prefill_attention(
+    hidden: torch.Tensor,
+    q_a_weights_packed: torch.Tensor,
+    q_a_scales: torch.Tensor,
+    q_b_weights_packed: torch.Tensor,
+    q_b_scales: torch.Tensor,
+    q_bias: torch.Tensor | None,
+    kv_a_weights_packed: torch.Tensor,
+    kv_a_scales: torch.Tensor,
+    kv_b_weights_packed: torch.Tensor,
+    kv_b_scales: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    o_weights_packed: torch.Tensor,
+    o_scales: torch.Tensor,
+    params: MLAAttentionParams,
+    chunk_size: int = 2048,
+) -> torch.Tensor:
+    """Chunked prefill attention that processes long sequences in chunks.
+    
+    This reduces peak memory usage during prefill by processing the sequence
+    in smaller chunks while maintaining the same final output. Each chunk
+    is processed with full attention to all previous tokens (cached + current chunk).
+    
+    Args:
+        hidden: Input hidden states [batch, seq_q, hidden_size]
+        q_a_weights_packed: Q projection A weights (FP4 packed)
+        q_a_scales: Q projection A scales
+        q_b_weights_packed: Q projection B weights (FP4 packed)
+        q_b_scales: Q projection B scales
+        q_bias: Q projection bias or None
+        kv_a_weights_packed: KV projection A weights (FP4 packed)
+        kv_a_scales: KV projection A scales
+        kv_b_weights_packed: KV projection B weights (FP4 packed)
+        kv_b_scales: KV projection B scales
+        k_cache: K cache buffer [cache_len + seq_q, kv_lora_rank]
+        v_cache: V cache buffer [cache_len + seq_q, kv_lora_rank]
+        o_weights_packed: Output projection weights (FP4 packed)
+        o_scales: Output projection scales
+        params: MLAAttentionParams configuration
+        chunk_size: Size of each chunk for processing (default: 2048)
+        
+    Returns:
+        output: Attention output [batch, seq_q, hidden_size]
+    """
+    _require_mps()
+    
+    batch_size, seq_len, hidden_size = hidden.shape
+    
+    # For small sequences, use regular prefill
+    if seq_len <= chunk_size:
+        return mla_fused_attention_prefill(
+            hidden, q_a_weights_packed, q_a_scales,
+            q_b_weights_packed, q_b_scales, q_bias,
+            kv_a_weights_packed, kv_a_scales,
+            kv_b_weights_packed, kv_b_scales,
+            k_cache, v_cache, o_weights_packed, o_scales,
+            params,
+        )
+    
+    import Metal
+    from metal_marlin.metal_dispatch import dispatch_kernel
+    
+    lib = _get_metal_library()
+    
+    # Get chunked prefill kernel
+    kernel_name = "mla_chunked_prefill_attention"
+    kernel = lib.get_function(kernel_name)
+    
+    # Process in chunks
+    outputs = []
+    cache_len = params.cache_len
+    
+    # Get write_kv kernel
+    write_kv_kernel_name = "mla_write_kv_cache"
+    write_kv_kernel = lib.get_function(write_kv_kernel_name)
+    
+    for chunk_start in range(0, seq_len, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, seq_len)
+        chunk_len = chunk_end - chunk_start
+        
+        # Extract chunk
+        hidden_chunk = hidden[:, chunk_start:chunk_end, :].contiguous()
+        
+        # Update params for this chunk
+        chunk_params = MLAAttentionParams(
+            batch=params.batch,
+            seq_q=chunk_len,
+            seq_k=cache_len + chunk_len,  # Previous cache + current chunk
+            hidden_size=params.hidden_size,
+            num_heads=params.num_heads,
+            head_dim=params.head_dim,
+            kv_lora_rank=params.kv_lora_rank,
+            q_lora_rank=params.q_lora_rank,
+            rope_dim=params.rope_dim,
+            scale=params.scale,
+            is_causal=params.is_causal,
+            q_a_group_size=params.q_a_group_size,
+            q_b_group_size=params.q_b_group_size,
+            kv_a_group_size=params.kv_a_group_size,
+            kv_b_group_size=params.kv_b_group_size,
+            o_group_size=params.o_group_size,
+            rope_theta=params.rope_theta,
+            rope_ratio=params.rope_ratio,
+            rope_base_seq_len=params.rope_base_seq_len,
+            cache_start_pos=cache_len,  # Start after existing cache
+            cache_len=cache_len,
+            max_cache_len=params.max_cache_len,
+            use_fused_q_proj=params.use_fused_q_proj,
+            use_fused_kv_proj=params.use_fused_kv_proj,
+            fuse_rope_in_kv_a=params.fuse_rope_in_kv_a,
+            skip_kv_decompress=params.skip_kv_decompress,
+            kv_quant_mode=params.kv_quant_mode,
+            kv_quant_group_size=params.kv_quant_group_size,
+            sliding_window=params.sliding_window,
+        )
+        
+        # Prepare parameters buffer
+        params_np = chunk_params.to_struct()
+        params_buffer = lib.new_buffer(bytes(params_np.tobytes()))
+        
+        # Get Metal buffers for chunk
+        hidden_buf = hidden_chunk._mps._get_metal_buffer_ptr()
+        
+        # 1. Dispatch KV Cache Write Kernel
+        # Grid: (ceil(chunk_len / TILE_Q), batch, 1) - One threadgroup per tile of tokens
+        grid_kv_x = (chunk_len + 31) // 32 
+        grid_kv = (grid_kv_x, chunk_params.batch, 1)
+        threadgroup_kv = (128, 1, 1) # 4 simds
+        
+        buffers_kv = [
+            hidden_buf, 
+            kv_a_weights_packed._mps._get_metal_buffer_ptr(),
+            kv_a_scales._mps._get_metal_buffer_ptr(),
+            k_cache._mps._get_metal_buffer_ptr(),
+            params_buffer
+        ]
+        
+        dispatch_kernel(lib, write_kv_kernel_name, grid_kv, threadgroup_kv, buffers_kv)
+        
+        # 2. Dispatch Attention Kernel
+        # Grid dimensions for this chunk
+        # One threadgroup per HEAD per TILE of queries
+        grid_x = chunk_params.num_heads
+        grid_y = (chunk_len + TILE_Q - 1) // TILE_Q
+        grid_z = chunk_params.batch
+        
+        grid = (grid_x, grid_y, grid_z)
+        threadgroup = (NUM_SIMDGROUPS * SIMD_SIZE, 1, 1)
+        
+        # Get Metal buffers
+        q_a_buf = q_a_weights_packed._mps._get_metal_buffer_ptr()
+        q_a_scales_buf = q_a_scales._mps._get_metal_buffer_ptr()
+        q_b_buf = q_b_weights_packed._mps._get_metal_buffer_ptr()
+        q_b_scales_buf = q_b_scales._mps._get_metal_buffer_ptr()
+        # kv_a/b not needed for attention part if cached, but might be used for on-the-fly?
+        # We assume strict cache usage for chunked prefill to avoid re-computation
+        # But we pass them to keep signature compatible if needed, or we clean up.
+        # We'll pass them but kernel will ignore.
+        kv_a_buf = kv_a_weights_packed._mps._get_metal_buffer_ptr()
+        kv_a_scales_buf = kv_a_scales._mps._get_metal_buffer_ptr()
+        kv_b_buf = kv_b_weights_packed._mps._get_metal_buffer_ptr()
+        kv_b_scales_buf = kv_b_scales._mps._get_metal_buffer_ptr()
+        k_cache_buf = k_cache._mps._get_metal_buffer_ptr()
+        v_cache_buf = v_cache._mps._get_metal_buffer_ptr()
+        o_buf = o_weights_packed._mps._get_metal_buffer_ptr()
+        o_scales_buf = o_scales._mps._get_metal_buffer_ptr()
+        
+        # Prepare output tensor for this chunk
+        output_chunk = torch.empty_like(hidden_chunk)
+        output_buf = output_chunk._mps._get_metal_buffer_ptr()
+        
+        # Prepare buffers for bias
+        q_bias_buf = 0 if q_bias is None else q_bias._mps._get_metal_buffer_ptr()
+        
+        # Dispatch kernel
+        buffers = [
+            hidden_buf, q_a_buf, q_a_scales_buf, q_b_buf, q_b_scales_buf, q_bias_buf,
+            kv_a_buf, kv_a_scales_buf, kv_b_buf, kv_b_scales_buf,
+            k_cache_buf, v_cache_buf, o_buf, o_scales_buf,
+            output_buf, params_buffer,
+        ]
+        
+        dispatch_kernel(lib, kernel_name, grid, threadgroup, buffers)
+        
+        outputs.append(output_chunk)
+        
+        # Update cache length for next chunk
+        cache_len += chunk_len
+    
+    # Concatenate all chunk outputs
+    return torch.cat(outputs, dim=1)
+
 
 def create_glm_mla_params(
     batch: int,
@@ -463,6 +684,9 @@ def create_glm_mla_params(
     cache_start_pos: int = 0,
     cache_len: int = 0,
     group_size: int = 64,
+    kv_quant_mode: str = "none",
+    kv_quant_group_size: int = 128,
+    sliding_window: int = 0,
 ) -> MLAAttentionParams:
     """Create MLAAttentionParams for GLM-4.7-Flash.
     
@@ -479,6 +703,8 @@ def create_glm_mla_params(
         cache_start_pos: Starting position in cache (default: 0)
         cache_len: Current cache length (default: 0)
         group_size: Quantization group size (default: 64)
+        kv_quant_mode: KV cache quantization mode (default: "none")
+        kv_quant_group_size: KV quantization group size (default: 128)
         
     Returns:
         MLAAttentionParams configured for GLM-4.7-Flash
@@ -513,4 +739,7 @@ def create_glm_mla_params(
         use_fused_kv_proj=True,
         fuse_rope_in_kv_a=True,
         skip_kv_decompress=False,
+        kv_quant_mode=kv_quant_mode,
+        kv_quant_group_size=kv_quant_group_size,
+        sliding_window=sliding_window,
     )

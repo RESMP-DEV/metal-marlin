@@ -363,16 +363,20 @@ def benchmark_context_lengths(
             # Run forward pass
             with torch.inference_mode():
                 if prefill_batch:
-                    # Stack prefill batch
-                    stacked_prefill = torch.cat(prefill_batch, dim=0)
+                    # Run prefill for each request
+                    for i, input_ids in enumerate(prefill_batch):
+                        req = prefill_seqs[i]
+                        output_tensor = model.forward(input_ids, kv_cache=kv_cache)
 
-                    # Run prefill for each request (simplified)
-                    for input_ids in prefill_batch:
-                        _ = model.forward(input_ids, kv_cache=kv_cache)
+                        # Sample first token
+                        next_logits = output_tensor.logits[0, -1, :]
+                        next_token = int(torch.argmax(next_logits, dim=-1).item())
+
+                        req.output_tokens.append(next_token)
+                        total_tokens += 1
 
                         # Mark as done with prefill
-                        for req in prefill_seqs:
-                            req.status = RequestStatus.RUNNING
+                        req.status = RequestStatus.RUNNING
 
                 if decode_batch:
                     # Stack decode batch
@@ -387,7 +391,7 @@ def benchmark_context_lengths(
                         next_token = int(torch.argmax(next_logits, dim=-1).item())
 
                         if not req.output_tokens:
-                            req.first_token_time = time()
+                            req.first_token_time = time.time()
 
                         req.output_tokens.append(next_token)
                         total_tokens += 1
@@ -395,7 +399,7 @@ def benchmark_context_lengths(
                         # Update request status
                         if req.is_finished:
                             req.status = RequestStatus.FINISHED
-                            req.completion_time = time()
+                            req.completion_time = time.time()
 
             # Free finished requests
             scheduler.free_finished()

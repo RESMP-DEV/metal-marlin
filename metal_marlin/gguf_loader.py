@@ -69,10 +69,17 @@ GGUF_META_BLOCK_COUNT = "general.block_count"
 GGUF_META_FEED_FORWARD_LENGTH = "general.feed_forward_length"
 GGUF_META_ATTENTION_HEAD_COUNT = "general.attention.head_count"
 GGUF_META_ATTENTION_HEAD_COUNT_KV = "general.attention.head_count_kv"
+GGUF_META_ATTENTION_CLAMP_KQV = "general.attention.clamp_kqv"
+GGUF_META_ATTENTION_KEY_LENGTH = "general.attention.key_length"
+GGUF_META_ATTENTION_VALUE_LENGTH = "general.attention.value_length"
+GGUF_META_ATTENTION_LAYERNORM_EPS = "general.attention.layer_norm_epsilon"
+GGUF_META_ATTENTION_LAYERNORM_RMS_EPS = "general.attention.layer_norm_rms_epsilon"
 GGUF_META_ROPE_DIMENSION_COUNT = "general.rope.dimension_count"
 GGUF_META_ROPE_FREQ_BASE = "general.rope.freq_base"
 GGUF_META_ROPE_SCALING_TYPE = "general.rope.scaling.type"
 GGUF_META_ROPE_SCALING_FACTOR = "general.rope.scaling.factor"
+GGUF_META_ROPE_SCALING_ORIG_CTX = "general.rope.scaling.original_context_length"
+GGUF_META_ROPE_SCALING_FINETUNED = "general.rope.scaling.finetuned"
 GGUF_META_USE_PARALLEL_RESIDUAL = "general.use_parallel_residual"
 GGUF_META_TENSOR_DATA_LAYOUT = "general.tensor_data_layout"
 GGUF_META_MAX_ALIBI_BIAS = "general.max_alibi_bias"
@@ -87,6 +94,38 @@ GGUF_META_MOE_WEIGHTS = "general.moe_weights"
 GGUF_META_EXPERT_NORM_SCALE = "general.expert_norm_scale"
 GGUF_META_EXPERT_NORM_EPSILON = "general.expert_norm_epsilon"
 GGUF_META_ALIGNMENT = "general.alignment"
+
+# Normalization configuration
+GGUF_META_LAYERNORM_EPS = "general.layer_norm_epsilon"
+GGUF_META_LAYERNORM_RMS_EPS = "general.layer_norm_rms_epsilon"
+
+# Architecture-specific metadata keys (prefixed by architecture name)
+# Llama architecture
+GGUF_META_LLAMA_ATTENTION_LAYERS = "llama.attention.layer_norm_rms_epsilon"
+GGUF_META_LLAMA_ROPE_FREQ_BASE = "llama.rope.freq_base"
+GGUF_META_LLAMA_ROPE_DIMENSION_COUNT = "llama.rope.dimension_count"
+GGUF_META_LLAMA_ROPE_SCALING_TYPE = "llama.rope.scaling.type"
+GGUF_META_LLAMA_ROPE_SCALING_FACTOR = "llama.rope.scaling.factor"
+
+# Qwen2 architecture
+GGUF_META_QWEN2_ATTENTION_LAYERS = "qwen2.attention.layer_norm_rms_epsilon"
+GGUF_META_QWEN2_ROPE_FREQ_BASE = "qwen2.rope.freq_base"
+GGUF_META_QWEN2_ROPE_DIMENSION_COUNT = "qwen2.rope.dimension_count"
+GGUF_META_QWEN2_ROPE_SCALING_TYPE = "qwen2.rope.scaling.type"
+GGUF_META_QWEN2_ROPE_SCALING_FACTOR = "qwen2.rope.scaling.factor"
+
+# Gemma architecture
+GGUF_META_GEMMA_ATTENTION_LAYERS = "gemma.attention.layer_norm_rms_epsilon"
+GGUF_META_GEMMA_ROPE_FREQ_BASE = "gemma.rope.freq_base"
+GGUF_META_GEMMA_ROPE_DIMENSION_COUNT = "gemma.rope.dimension_count"
+
+# Mistral architecture
+GGUF_META_MISTRAL_ATTENTION_LAYERS = "mistral.attention.layer_norm_rms_epsilon"
+GGUF_META_MISTRAL_ROPE_FREQ_BASE = "mistral.rope.freq_base"
+GGUF_META_MISTRAL_ROPE_DIMENSION_COUNT = "mistral.rope.dimension_count"
+GGUF_META_MISTRAL_SLIDING_WINDOW = "mistral.sliding_window"
+
+# Tokenizer
 GGUF_META_TOKENIZER_MODEL = "tokenizer.ggml.model"
 GGUF_META_TOKENIZER_LIST = "tokenizer.ggml.tokens"
 GGUF_META_TOKENIZER_MERGES = "tokenizer.ggml.merges"
@@ -99,6 +138,66 @@ GGUF_META_TOKENIZER_HF_JSON = "tokenizer.huggingface.json"
 GGUF_META_TOKENIZER_RWKV_VOCAB = "tokenizer.rwkv.vocab"
 GGUF_META_TOKENIZER_RWKV_HEAD = "tokenizer.rwkv.head"
 GGUF_META_TOKENIZER_RWKV_EMBEDDINGS = "tokenizer.rwkv.embeddings"
+GGUF_META_TOKENIZER_SCORES = "tokenizer.ggml.scores"
+GGUF_META_TOKENIZER_TOKEN_TYPE = "tokenizer.ggml.token_type"
+GGUF_META_TOKENIZER_ADD_BOS = "tokenizer.ggml.add_bos_token"
+GGUF_META_TOKENIZER_ADD_EOS = "tokenizer.ggml.add_eos_token"
+
+# Additional GGUF metadata keys for better config parity
+# General metadata
+GGUF_META_AUTHOR = "general.author"
+GGUF_META_VERSION = "general.version"
+GGUF_META_ORGANIZATION = "general.organization"
+GGUF_META_BPE_PRETOKENIZER = "general.bpe_pre_tokenizer"
+GGUF_META_FINETUNE = "general.finetune"
+GGUF_META_BASENAME = "general.basename"
+GGUF_META_DESCRIPTION = "general.description"
+GGUF_META_QUANTIZED_BY = "general.quantized_by"
+GGUF_META_SIZE_LABEL = "general.size_label"
+GGUF_META_LICENSE = "general.license"
+GGUF_META_LICENSE_NAME = "general.license.name"
+GGUF_META_LICENSE_LINK = "general.license.link"
+GGUF_META_URL = "general.url"
+GGUF_META_TAGS = "general.tags"
+GGUF_META_LANGUAGES = "general.languages"
+GGUF_META_DATASET = "general.dataset"
+
+# Extended RoPE metadata
+GGUF_META_ROPE_SCALING_ORIG_CTX_LEN = "general.rope.scaling.original_context_length"
+GGUF_META_ROPE_SCALING_FINETUNED = "general.rope.scaling.finetuned"
+GGUF_META_ROPE_SCALING_ATTN_FACTOR = "general.rope.scaling.attn_factor"
+GGUF_META_ROPE_SCALING_BETA_FAST = "general.rope.scaling.beta_fast"
+GGUF_META_ROPE_SCALING_BETA_SLOW = "general.rope.scaling.beta_slow"
+
+# Extended attention metadata
+GGUF_META_ATTENTION_MAX_ALIBI_BIAS = "general.attention.max_alibi_bias"
+GGUF_META_ATTENTION_CAUSAL = "general.attention.causal"
+
+# SSM (State Space Model) metadata - for Mamba architectures
+GGUF_META_SSM_CONV_KERNEL = "general.ssm.conv_kernel"
+GGUF_META_SSM_INNER_SIZE = "general.ssm.inner_size"
+GGUF_META_SSM_STATE_SIZE = "general.ssm.state_size"
+GGUF_META_SSM_TIME_STEP_RANK = "general.ssm.time_step_rank"
+
+# Extended MoE metadata
+GGUF_META_EXPERT_GATING_FUNC = "general.expert_gating_func"
+
+# Extended tokenizer metadata
+GGUF_META_TOKENIZER_CHAT_TEMPLATE = "tokenizer.chat_template"
+GGUF_META_TOKENIZER_PRE = "tokenizer.ggml.pre"
+GGUF_META_TOKENIZER_SUFFIX_ID = "tokenizer.ggml.suffix_token_id"
+GGUF_META_TOKENIZER_MIDDLE_ID = "tokenizer.ggml.middle_token_id"
+GGUF_META_TOKENIZER_EOT_ID = "tokenizer.ggml.eot_token_id"
+GGUF_META_TOKENIZER_EOS_TOKEN = "tokenizer.ggml.eos_token"
+GGUF_META_TOKENIZER_PREFIX_ID = "tokenizer.ggml.prefix_token_id"
+GGUF_META_TOKENIZER_TOKEN_TYPE_COUNT = "tokenizer.ggml.token_type_count"
+GGUF_META_TOKENIZER_CHAT_TEMPLATE_N = "tokenizer.chat_template.N"
+
+# Split/Sharding metadata
+GGUF_META_SPLIT_NO = "split.no"
+GGUF_META_SPLIT_COUNT = "split.count"
+GGUF_META_SPLIT_TENSORS_COUNT = "split.tensors.count"
+GGUF_META_SPLIT_TENSORS_ALL_COUNT = "split.tensors.all.count"
 
 # Architecture names
 ARCH_LLAMA = "llama"
@@ -123,6 +222,48 @@ ARCH_ORION = "orion"
 ARCH_INTERNLM2 = "internlm2"
 ARCH_MINCPM = "minicpm"
 ARCH_GEMMA = "gemma"
+
+# Additional architecture support
+ARCH_LLAMA3 = "llama3"
+ARCH_PHI3 = "phi3"
+ARCH_PHI4 = "phi4"
+ARCH_COHERE = "cohere"
+ARCH_COHERE2 = "cohere2"
+ARCH_FALCON = "falcon"
+ARCH_FALCON3 = "falcon3"
+ARCH_STARCODER2 = "starcoder2"
+ARCH_GPTNEO = "gptneo"
+ARCH_MAMBA = "mamba"
+ARCH_XVERSE = "xverse"
+ARCH_COMMAND_R = "command-r"
+ARCH_DBRX = "dbrx"
+ARCH_JAIS = "jais"
+ARCH_WAVENET = "wavenet"
+ARCH_BAICHUAN = "baichuan"
+ARCH_YI = "yi"
+ARCH_DEEPSEEK = "deepseek"
+ARCH_DEEPSEEK2 = "deepseek2"
+ARCH_NEMOTRON = "nemotron"
+ARCH_EXAONE = "exaone"
+ARCH_GRANITE = "granite"
+ARCH_GTE = "gte"
+ARCH_GTE2 = "gte2"
+ARCH_QWEN = "qwen"
+ARCH_QWEN2MOE = "qwen2moe"
+ARCH_ARCTIC = "arctic"
+ARCH_T5 = "t5"
+ARCH_T5ENCODER = "t5encoder"
+ARCH_JASMUINE = "jasmuine"
+ARCH_ROBERTA = "roberta"
+ARCH_BLOOM = "bloom"
+ARCH_SAM = "sam"
+ARCH_OLMO = "olmo"
+ARCH_OLMO2 = "olmo2"
+ARCH_OLMoe = "olmoe"
+ARCH_OPENELM = "openelm"
+ARCH_GPTJ = "gptj"
+ARCH_RWKV = "rwkv"
+ARCH_MPT = "mpt"
 
 # File type constants (quantization level)
 FILE_TYPE_ALL_F32 = 0
@@ -1351,22 +1492,113 @@ class GGUFMetadata:
     @property
     def rope_dim(self) -> int | None:
         """RoPE (rotary position embedding) dimension."""
+        # Try architecture-specific first, then general
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.rope.dimension_count"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
         return self._metadata.get(GGUF_META_ROPE_DIMENSION_COUNT)
 
     @property
-    def rope_freq_base(self) -> int | None:
+    def rope_freq_base(self) -> float | None:
         """RoPE frequency base (usually 10000 or 1000000)."""
+        # Try architecture-specific first, then general
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.rope.freq_base"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
         return self._metadata.get(GGUF_META_ROPE_FREQ_BASE)
 
     @property
     def rope_scaling_type(self) -> str | None:
         """RoPE scaling type ('linear', 'yarn', 'ntk', etc.)."""
+        # Try architecture-specific first, then general
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.rope.scaling.type"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
         return self._metadata.get(GGUF_META_ROPE_SCALING_TYPE)
 
     @property
     def rope_scaling_factor(self) -> float | None:
         """RoPE scaling factor."""
+        # Try architecture-specific first, then general
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.rope.scaling.factor"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
         return self._metadata.get(GGUF_META_ROPE_SCALING_FACTOR)
+
+    @property
+    def rope_scaling_original_context(self) -> int | None:
+        """RoPE scaling original context length."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_ORIG_CTX)
+
+    @property
+    def rope_scaling_finetuned(self) -> bool | None:
+        """Whether RoPE scaling was finetuned."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_FINETUNED)
+
+    @property
+    def head_dim(self) -> int | None:
+        """Attention head dimension (hidden_size / num_attention_heads)."""
+        if self.hidden_size is not None and self.num_attention_heads is not None:
+            return self.hidden_size // self.num_attention_heads
+        return None
+
+    @property
+    def kv_head_dim(self) -> int | None:
+        """Key/value head dimension."""
+        if self.hidden_size is not None and self.num_key_value_heads is not None:
+            return self.hidden_size // self.num_key_value_heads
+        return None
+
+    @property
+    def rms_norm_eps(self) -> float | None:
+        """RMS normalization epsilon."""
+        # Try architecture-specific first, then general
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.attention.layer_norm_rms_epsilon"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
+            # Some models use different key pattern
+            arch_key2 = f"{arch}.rope.scaling.attention.layer_norm_rms_epsilon"
+            if arch_key2 in self._metadata:
+                return self._metadata[arch_key2]
+        # Try general keys
+        for key in [GGUF_META_LAYERNORM_RMS_EPS, GGUF_META_ATTENTION_LAYERNORM_RMS_EPS]:
+            if key in self._metadata:
+                return self._metadata[key]
+        return None
+
+    @property
+    def layer_norm_eps(self) -> float | None:
+        """Layer normalization epsilon."""
+        for key in [GGUF_META_LAYERNORM_EPS, GGUF_META_ATTENTION_LAYERNORM_EPS]:
+            if key in self._metadata:
+                return self._metadata[key]
+        return None
+
+    @property
+    def attention_clamp_kqv(self) -> float | None:
+        """Attention clamp value for K, Q, V."""
+        return self._metadata.get(GGUF_META_ATTENTION_CLAMP_KQV)
+
+    @property
+    def sliding_window(self) -> int | None:
+        """Sliding window attention size (for Mistral, Mixtral, etc.)."""
+        # Try architecture-specific first
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.sliding_window"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
+        return self._metadata.get(GGUF_META_MISTRAL_SLIDING_WINDOW)
 
     @property
     def use_parallel_residual(self) -> bool | None:
@@ -1485,6 +1717,221 @@ class GGUFMetadata:
         """HuggingFace tokenizer config (JSON string)."""
         return self._metadata.get(GGUF_META_TOKENIZER_HF_JSON)
 
+    @property
+    def prefix_token_id(self) -> int | None:
+        """Prefix token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_PREFIX_ID)
+
+    @property
+    def suffix_token_id(self) -> int | None:
+        """Suffix token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_SUFFIX_ID)
+
+    @property
+    def middle_token_id(self) -> int | None:
+        """Middle token ID (for fill-in-the-middle)."""
+        return self._metadata.get(GGUF_META_TOKENIZER_MIDDLE_ID)
+
+    @property
+    def eot_token_id(self) -> int | None:
+        """End-of-turn token ID."""
+        return self._metadata.get(GGUF_META_TOKENIZER_EOT_ID)
+
+    @property
+    def chat_template(self) -> str | None:
+        """Chat template string."""
+        return self._metadata.get(GGUF_META_TOKENIZER_CHAT_TEMPLATE)
+
+    # Extended RoPE properties
+    @property
+    def rope_scaling_beta_fast(self) -> int | None:
+        """RoPE scaling beta_fast parameter (for YaRN)."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_BETA_FAST)
+
+    @property
+    def rope_scaling_beta_slow(self) -> int | None:
+        """RoPE scaling beta_slow parameter (for YaRN)."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_BETA_SLOW)
+
+    @property
+    def rope_scaling_attn_factor(self) -> float | None:
+        """RoPE scaling attention factor."""
+        return self._metadata.get(GGUF_META_ROPE_SCALING_ATTN_FACTOR)
+
+    @property
+    def attention_causal(self) -> bool | None:
+        """Whether attention is causal."""
+        val = self._metadata.get(GGUF_META_ATTENTION_CAUSAL)
+        return bool(val) if val is not None else None
+
+    @property
+    def expert_gating_func(self) -> str | None:
+        """Expert gating function (for MoE models)."""
+        return self._metadata.get(GGUF_META_EXPERT_GATING_FUNC)
+
+    @property
+    def tokenizer_scores(self) -> list[float] | None:
+        """Tokenizer scores/probabilities for each token."""
+        return self._metadata.get(GGUF_META_TOKENIZER_SCORES)
+
+    @property
+    def add_bos_token(self) -> bool | None:
+        """Whether to add BOS token."""
+        val = self._metadata.get(GGUF_META_TOKENIZER_ADD_BOS)
+        return bool(val) if val is not None else None
+
+    @property
+    def add_eos_token(self) -> bool | None:
+        """Whether to add EOS token."""
+        val = self._metadata.get(GGUF_META_TOKENIZER_ADD_EOS)
+        return bool(val) if val is not None else None
+
+    # Extended metadata properties
+    @property
+    def author(self) -> str | None:
+        """Model author."""
+        return self._metadata.get(GGUF_META_AUTHOR)
+
+    @property
+    def model_version(self) -> str | None:
+        """Model version string (from general.version metadata)."""
+        return self._metadata.get(GGUF_META_VERSION)
+
+    @property
+    def organization(self) -> str | None:
+        """Model organization."""
+        return self._metadata.get(GGUF_META_ORGANIZATION)
+
+    @property
+    def finetune(self) -> str | None:
+        """Finetune name/description."""
+        return self._metadata.get(GGUF_META_FINETUNE)
+
+    @property
+    def basename(self) -> str | None:
+        """Model base name."""
+        return self._metadata.get(GGUF_META_BASENAME)
+
+    @property
+    def description(self) -> str | None:
+        """Model description."""
+        return self._metadata.get(GGUF_META_DESCRIPTION)
+
+    @property
+    def quantized_by(self) -> str | None:
+        """Who/what quantized the model."""
+        return self._metadata.get(GGUF_META_QUANTIZED_BY)
+
+    @property
+    def size_label(self) -> str | None:
+        """Model size label (e.g., '7B', '13B')."""
+        return self._metadata.get(GGUF_META_SIZE_LABEL)
+
+    @property
+    def license(self) -> str | None:
+        """Model license identifier."""
+        return self._metadata.get(GGUF_META_LICENSE) or self._metadata.get(GGUF_META_LICENSE_NAME)
+
+    @property
+    def license_link(self) -> str | None:
+        """Link to license text."""
+        return self._metadata.get(GGUF_META_LICENSE_LINK)
+
+    @property
+    def url(self) -> str | None:
+        """Model URL."""
+        return self._metadata.get(GGUF_META_URL)
+
+    @property
+    def tags(self) -> list[str] | None:
+        """Model tags."""
+        return self._metadata.get(GGUF_META_TAGS)
+
+    @property
+    def languages(self) -> list[str] | None:
+        """Model languages."""
+        return self._metadata.get(GGUF_META_LANGUAGES)
+
+    @property
+    def dataset(self) -> str | None:
+        """Training dataset information."""
+        return self._metadata.get(GGUF_META_DATASET)
+
+    # SSM (Mamba) properties
+    @property
+    def ssm_conv_kernel(self) -> int | None:
+        """SSM convolution kernel size."""
+        return self._metadata.get(GGUF_META_SSM_CONV_KERNEL)
+
+    @property
+    def ssm_inner_size(self) -> int | None:
+        """SSM inner dimension size."""
+        return self._metadata.get(GGUF_META_SSM_INNER_SIZE)
+
+    @property
+    def ssm_state_size(self) -> int | None:
+        """SSM state size."""
+        return self._metadata.get(GGUF_META_SSM_STATE_SIZE)
+
+    @property
+    def ssm_time_step_rank(self) -> int | None:
+        """SSM time step rank."""
+        return self._metadata.get(GGUF_META_SSM_TIME_STEP_RANK)
+
+    # Split/sharding properties
+    @property
+    def split_no(self) -> int | None:
+        """Split number for sharded models."""
+        return self._metadata.get(GGUF_META_SPLIT_NO)
+
+    @property
+    def split_count(self) -> int | None:
+        """Total number of splits."""
+        return self._metadata.get(GGUF_META_SPLIT_COUNT)
+
+    @property
+    def split_tensors_count(self) -> int | None:
+        """Number of tensors in this split."""
+        return self._metadata.get(GGUF_META_SPLIT_TENSORS_COUNT)
+
+    @property
+    def split_tensors_all_count(self) -> int | None:
+        """Total number of tensors across all splits."""
+        return self._metadata.get(GGUF_META_SPLIT_TENSORS_ALL_COUNT)
+
+    # Utility methods
+    def get_arch_key(self, key_suffix: str) -> Any:
+        """Get an architecture-specific metadata key.
+
+        Args:
+            key_suffix: The key suffix after the architecture prefix
+                      (e.g., 'attention.layer_norm_rms_epsilon').
+
+        Returns:
+            The metadata value or None if not found.
+        """
+        arch = self.architecture
+        if arch:
+            arch_key = f"{arch}.{key_suffix}"
+            if arch_key in self._metadata:
+                return self._metadata[arch_key]
+        return None
+
+    def is_architecture(self, *arch_names: str) -> bool:
+        """Check if the model matches any of the given architectures.
+
+        Args:
+            arch_names: Architecture names to check (case-insensitive).
+
+        Returns:
+            True if the model's architecture matches any of the given names.
+        """
+        model_arch = self.architecture
+        if model_arch is None:
+            return False
+        model_arch_lower = model_arch.lower()
+        return any(model_arch_lower == name.lower() for name in arch_names)
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get any metadata value by key.
 
@@ -1517,6 +1964,24 @@ class GGUFMetadata:
             f"  Architecture: {self.architecture or 'unknown'}",
             f"  Model name: {self.model_name or 'unknown'}",
             f"  File type: {self.file_type_name or 'unknown'}",
+        ]
+
+        # Add extended metadata if available
+        if self.author or self.organization:
+            lines.extend([
+                "",
+                "Origin:",
+            ])
+            if self.author:
+                lines.append(f"  Author: {self.author}")
+            if self.organization:
+                lines.append(f"  Organization: {self.organization}")
+            if self.license:
+                lines.append(f"  License: {self.license}")
+            if self.url:
+                lines.append(f"  URL: {self.url}")
+
+        lines.extend([
             "",
             "Model dimensions:",
             f"  Vocab size: {self.vocab_size or 'unknown'}",
@@ -1526,24 +1991,68 @@ class GGUFMetadata:
             f"  Num attention heads: {self.num_attention_heads or 'unknown'}",
             f"  Num KV heads: {self.num_key_value_heads or 'unknown'}",
             f"  Context length: {self.context_length or 'unknown'}",
+        ])
+
+        # Add sliding window if present
+        if self.sliding_window:
+            lines.append(f"  Sliding window: {self.sliding_window}")
+
+        lines.extend([
             "",
             "Positional encoding:",
             f"  RoPE dimension: {self.rope_dim or 'unknown'}",
             f"  RoPE freq base: {self.rope_freq_base or 'unknown'}",
             f"  RoPE scaling type: {self.rope_scaling_type or 'none'}",
-            "",
-            "MoE configuration:",
-            f"  Num experts: {self.num_experts or 'N/A'}",
-            f"  Num shared experts: {self.num_shared_experts or 'N/A'}",
-            f"  Active experts: {self.num_active_experts or 'N/A'}",
-            f"  MoE top-k: {self.moe_top_k or 'N/A'}",
+        ])
+
+        # Add extended RoPE if present
+        if self.rope_scaling_beta_fast or self.rope_scaling_beta_slow:
+            lines.append(f"  RoPE beta (fast/slow): {self.rope_scaling_beta_fast or 'N/A'}/{self.rope_scaling_beta_slow or 'N/A'}")
+
+        # Add SSM if present
+        if self.ssm_conv_kernel:
+            lines.extend([
+                "",
+                "SSM (Mamba) configuration:",
+                f"  Conv kernel: {self.ssm_conv_kernel}",
+                f"  Inner size: {self.ssm_inner_size or 'N/A'}",
+                f"  State size: {self.ssm_state_size or 'N/A'}",
+                f"  Time step rank: {self.ssm_time_step_rank or 'N/A'}",
+            ])
+
+        # Add MoE if present
+        if self.num_experts:
+            lines.extend([
+                "",
+                "MoE configuration:",
+                f"  Num experts: {self.num_experts or 'N/A'}",
+                f"  Num shared experts: {self.num_shared_experts or 'N/A'}",
+                f"  Active experts: {self.num_active_experts or 'N/A'}",
+                f"  MoE top-k: {self.moe_top_k or 'N/A'}",
+            ])
+
+        lines.extend([
             "",
             "Tokenizer:",
             f"  Model type: {self.tokenizer_model or 'unknown'}",
             f"  BOS ID: {self.bos_token_id or 'unknown'}",
             f"  EOS ID: {self.eos_token_id or 'unknown'}",
             f"  UNK ID: {self.unk_token_id or 'unknown'}",
-        ]
+        ])
+
+        # Add chat template if present
+        if self.chat_template:
+            template_preview = self.chat_template[:50] + "..." if len(self.chat_template) > 50 else self.chat_template
+            lines.append(f"  Chat template: {template_preview}")
+
+        # Add split info if present
+        if self.split_count:
+            lines.extend([
+                "",
+                "Sharding:",
+                f"  Split: {self.split_no + 1 if self.split_no is not None else '?'}/{self.split_count}",
+            ])
+
         return "\n".join(lines)
 
     def extract_config(self) -> dict[str, Any]:
@@ -1574,6 +2083,36 @@ class GGUFMetadata:
             config["file_type"] = self.file_type
         if self.file_type_name is not None:
             config["file_type_name"] = self.file_type_name
+
+        # Extended metadata (for config parity)
+        if self.author is not None:
+            config["author"] = self.author
+        if self.model_version is not None:
+            config["model_version"] = self.model_version
+        if self.organization is not None:
+            config["organization"] = self.organization
+        if self.finetune is not None:
+            config["finetune"] = self.finetune
+        if self.basename is not None:
+            config["basename"] = self.basename
+        if self.description is not None:
+            config["description"] = self.description
+        if self.quantized_by is not None:
+            config["quantized_by"] = self.quantized_by
+        if self.size_label is not None:
+            config["size_label"] = self.size_label
+        if self.license is not None:
+            config["license"] = self.license
+        if self.license_link is not None:
+            config["license_link"] = self.license_link
+        if self.url is not None:
+            config["url"] = self.url
+        if self.tags is not None:
+            config["tags"] = self.tags
+        if self.languages is not None:
+            config["languages"] = self.languages
+        if self.dataset is not None:
+            config["dataset"] = self.dataset
 
         # Model dimensions
         if self.vocab_size is not None:
@@ -1607,6 +2146,16 @@ class GGUFMetadata:
             config["rope_scaling_type"] = self.rope_scaling_type
         if self.rope_scaling_factor is not None:
             config["rope_scaling_factor"] = self.rope_scaling_factor
+        if self.rope_scaling_original_context is not None:
+            config["rope_scaling_original_context"] = self.rope_scaling_original_context
+        if self.rope_scaling_finetuned is not None:
+            config["rope_scaling_finetuned"] = self.rope_scaling_finetuned
+        if self.rope_scaling_beta_fast is not None:
+            config["rope_scaling_beta_fast"] = self.rope_scaling_beta_fast
+        if self.rope_scaling_beta_slow is not None:
+            config["rope_scaling_beta_slow"] = self.rope_scaling_beta_slow
+        if self.rope_scaling_attn_factor is not None:
+            config["rope_scaling_attn_factor"] = self.rope_scaling_attn_factor
 
         # MoE configuration
         if self.num_experts is not None:
@@ -1620,6 +2169,26 @@ class GGUFMetadata:
             config["expert_used_count"] = self.num_active_experts
         if self.moe_top_k is not None:
             config["moe_top_k"] = self.moe_top_k
+        if self.expert_gating_func is not None:
+            config["expert_gating_func"] = self.expert_gating_func
+
+        # SSM (Mamba) configuration
+        if self.ssm_conv_kernel is not None:
+            config["ssm_conv_kernel"] = self.ssm_conv_kernel
+        if self.ssm_inner_size is not None:
+            config["ssm_inner_size"] = self.ssm_inner_size
+        if self.ssm_state_size is not None:
+            config["ssm_state_size"] = self.ssm_state_size
+        if self.ssm_time_step_rank is not None:
+            config["ssm_time_step_rank"] = self.ssm_time_step_rank
+
+        # Normalization
+        if self.rms_norm_eps is not None:
+            config["rms_norm_eps"] = self.rms_norm_eps
+        if self.layer_norm_eps is not None:
+            config["layer_norm_eps"] = self.layer_norm_eps
+        if self.attention_clamp_kqv is not None:
+            config["attention_clamp_kqv"] = self.attention_clamp_kqv
 
         # Tokenizer
         if self.tokenizer_model is not None:
@@ -1632,6 +2201,40 @@ class GGUFMetadata:
             config["unk_token_id"] = self.unk_token_id
         if self.pad_token_id is not None:
             config["pad_token_id"] = self.pad_token_id
+        if self.chat_template is not None:
+            config["chat_template"] = self.chat_template
+        if self.add_bos_token is not None:
+            config["add_bos_token"] = self.add_bos_token
+        if self.add_eos_token is not None:
+            config["add_eos_token"] = self.add_eos_token
+        if self.prefix_token_id is not None:
+            config["prefix_token_id"] = self.prefix_token_id
+        if self.suffix_token_id is not None:
+            config["suffix_token_id"] = self.suffix_token_id
+        if self.middle_token_id is not None:
+            config["middle_token_id"] = self.middle_token_id
+        if self.eot_token_id is not None:
+            config["eot_token_id"] = self.eot_token_id
+
+        # Split/sharding metadata
+        if self.split_no is not None:
+            config["split_no"] = self.split_no
+        if self.split_count is not None:
+            config["split_count"] = self.split_count
+        if self.split_tensors_count is not None:
+            config["split_tensors_count"] = self.split_tensors_count
+        if self.split_tensors_all_count is not None:
+            config["split_tensors_all_count"] = self.split_tensors_all_count
+
+        # Architecture-specific properties
+        if self.sliding_window is not None:
+            config["sliding_window"] = self.sliding_window
+        if self.use_parallel_residual is not None:
+            config["use_parallel_residual"] = self.use_parallel_residual
+        if self.logit_scale is not None:
+            config["logit_scale"] = self.logit_scale
+        if self.attention_causal is not None:
+            config["attention_causal"] = self.attention_causal
 
         return config
 

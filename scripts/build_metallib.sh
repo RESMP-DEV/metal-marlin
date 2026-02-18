@@ -54,7 +54,7 @@ AIR_FILES=""
 
 # Also include metal files from metal_marlin subdirectories
 METAL_MARLIN_DIR="$PROJECT_ROOT/metal_marlin"
-for subdir in distributed vision; do
+for subdir in distributed vision shaders src; do
     if [ -d "$METAL_MARLIN_DIR/$subdir" ]; then
         EXTRA_METALS=$(find "$METAL_MARLIN_DIR/$subdir" -name "*.metal" -type f 2>/dev/null || true)
         if [ -n "$EXTRA_METALS" ]; then
@@ -62,14 +62,6 @@ for subdir in distributed vision; do
         fi
     fi
 done
-
-# Also include src/metal_marlin if it exists
-if [ -d "$METAL_MARLIN_DIR/src" ]; then
-    EXTRA_METALS=$(find "$METAL_MARLIN_DIR/src" -name "*.metal" -type f 2>/dev/null || true)
-    if [ -n "$EXTRA_METALS" ]; then
-        METAL_FILES="$METAL_FILES $EXTRA_METALS"
-    fi
-fi
 
 # Exclude header-only files (no kernels, only inline helpers)
 # These are #included by other shaders

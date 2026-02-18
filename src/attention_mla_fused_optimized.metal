@@ -25,6 +25,7 @@
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 #include "dequant_helpers.metal"
+#include "dequant_int8.metal"
 #include "bf16_compat.metal"
 
 using namespace metal;
@@ -108,6 +109,18 @@ struct MLAAttentionParams {
     // Optimization flags
     uint fuse_rope_in_kv_a; // Fuse RoPE in kv_a projection
     uint skip_kv_decompress; // Skip KV decompression for compute
+    
+    // KV cache quantization parameters
+    uint kv_quant_mode;        // 0=none, 1=fp4, 2=fp8, 3=int8
+    uint kv_quant_group_size;
+    
+    // Sliding window attention
+    uint sliding_window;       // 0 = disabled
+    
+    // Block-Sparse Support
+    uint use_block_sparse;
+    uint block_size;
+    uint num_blocks;
 };
 
 // ---------------------------------------------------------------------------
@@ -289,17 +302,17 @@ inline void fused_q_projection_glm4(
         half acc = half(0.0h);
         
         // Process q_latent in chunks
-        uint lat_packs = (q_lora_rank + FP4_PER_UINT - 1) / FP4_PER_UINT;
+        uint q_packs = (q_lora_rank + FP4_PER_UINT - 1) / FP4_PER_UINT;
         
-        for (uint lat_pack = 0; lat_pack < lat_packs; ++lat_pack) {
-            uint lat_base = lat_pack * FP4_PER_UINT;
+        for (uint q_pack = 0; q_pack < q_packs; ++q_pack) {
+            uint lat_base = q_pack * FP4_PER_UINT;
             uint scale_lat = lat_base / q_b_group_size;
             
             // Load scale
             half s = q_b_scales[scale_lat * (params.num_heads * head_dim) + col_idx];
             
             // Load packed weights
-            uint32_t packed = q_b_weights_packed[lat_pack * (params.num_heads * head_dim) + col_idx];
+            uint32_t packed = q_b_weights_packed[q_pack * (params.num_heads * head_dim) + col_idx];
             
             // Dequantize weights
             half w_vals[FP4_PER_UINT];
@@ -419,22 +432,22 @@ inline void fused_kv_projection_glm4(
         
         // Process latent dimension in chunks
         // First process kv_lora_rank portion (no RoPE)
-        uint lat_packs_kv = (kv_lora_rank + FP4_PER_UINT - 1) / FP4_PER_UINT;
+        uint kv_packs = (kv_lora_rank + FP4_PER_UINT - 1) / FP4_PER_UINT;
         
-        for (uint lat_pack = 0; lat_pack < lat_packs_kv; ++lat_pack) {
-            uint lat_base = lat_pack * FP4_PER_UINT;
+        for (uint kv_pack = 0; kv_pack < kv_packs; ++kv_pack) {
+            uint lat_base = kv_pack * FP4_PER_UINT;
             uint scale_lat = lat_base / kv_b_group_size;
             
             // K projection
             half s_k = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
-            uint32_t packed_k = kv_b_weights_packed[lat_pack * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
+            uint32_t packed_k = kv_b_weights_packed[kv_pack * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
             
             half w_k_vals[FP4_PER_UINT];
             dequant_fp4x8(packed_k, s_k, w_k_vals);
             
             // V projection
             half s_v = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
-            uint32_t packed_v = kv_b_weights_packed[lat_pack * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
+            uint32_t packed_v = kv_b_weights_packed[kv_pack * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
             
             half w_v_vals[FP4_PER_UINT];
             dequant_fp4x8(packed_v, s_v, w_v_vals);
@@ -458,7 +471,7 @@ inline void fused_kv_projection_glm4(
                 
                 // K projection
                 half s_k = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
-                uint32_t packed_k = kv_b_weights_packed[(lat_packs_kv + rope_pack) * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
+                uint32_t packed_k = kv_b_weights_packed[rope_pack * (params.num_heads * head_dim * 2) + (k_head_offset + head_start + d)];
                 
                 half w_k_vals[FP4_PER_UINT];
                 dequant_fp4x8(packed_k, s_k, w_k_vals);
@@ -481,7 +494,7 @@ inline void fused_kv_projection_glm4(
                 
                 // V projection (no RoPE for V)
                 half s_v = kv_b_scales[scale_lat * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
-                uint32_t packed_v = kv_b_weights_packed[(lat_packs_kv + rope_pack) * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
+                uint32_t packed_v = kv_b_weights_packed[rope_pack * (params.num_heads * head_dim * 2) + (v_head_offset + head_start + d)];
                 
                 half w_v_vals[FP4_PER_UINT];
                 dequant_fp4x8(packed_v, s_v, w_v_vals);
@@ -537,6 +550,9 @@ inline void fused_kv_projection_glm4(
     
     // Parameters
     constant MLAAttentionParams& params         [[buffer(17)]],
+    
+    // Block-Sparse Mask
+    device const int* block_mask                [[buffer(18)]], // [batch, num_heads, num_blocks]
     
     // Thread/group IDs
     uint tid_x                                 [[thread_index_in_threadgroup]], // Fixed: matches helper function signature
@@ -610,6 +626,18 @@ inline void fused_kv_projection_glm4(
     
     for (uint tile = 0; tile < cache_tiles; ++tile) {
         uint kv_start = tile * TILE_KV_DECODE;
+        
+        // Block-Sparse Check
+        if (params.use_block_sparse) {
+            uint block_idx = kv_start / params.block_size;
+            if (block_idx < params.num_blocks) {
+                uint mask_idx = batch_idx * params.num_heads * params.num_blocks + 
+                                head_idx * params.num_blocks + 
+                                block_idx;
+                if (block_mask[mask_idx] == 0) continue;
+            }
+        }
+        
         uint kv_len = min(uint(TILE_KV_DECODE), params.cache_len - kv_start);
         
         // Load K cache tile and compute QK^T scores
@@ -631,19 +659,44 @@ inline void fused_kv_projection_glm4(
             for (uint d = 0; d < params.head_dim; d += SIMD_SIZE) {
                 half q_val = Q_head[d + tid_x % SIMD_SIZE];
                 
-                // Load compressed K from cache
-                uint scale_d = d / params.kv_b_group_size;
-                half s_k = K_scales[cache_pos * (params.kv_lora_rank / params.kv_b_group_size) + scale_d];
+                // Determine scale index based on group size
+                // Use params.kv_quant_group_size for cache reading
+                // Default to kv_b_group_size if 0 (legacy behavior)
+                uint group_size = params.kv_quant_group_size > 0 ? params.kv_quant_group_size : params.kv_b_group_size;
+                uint thread_d = d + tid_x % SIMD_SIZE;
+                uint scale_d = thread_d / group_size;
+                uint scale_idx = cache_pos * (params.kv_lora_rank / group_size) + scale_d;
                 
-                uint32_t packed_k = *reinterpret_cast<device const uint32_t*>(
-                    &K_cache[cache_base + (d / FP4_PER_UINT)]
-                );
+                half k_val_dequant = 0.0h;
                 
-                half k_vals[FP4_PER_UINT];
-                dequant_fp4x8(packed_k, s_k, k_vals);
+                if (params.kv_quant_mode == 3) { // INT8
+                    // 1 byte per value
+                    uint total_item_idx = cache_base + thread_d;
+                    int8_t val = ((device const int8_t*)K_cache)[total_item_idx];
+                    half s_k = K_scales[scale_idx];
+                    k_val_dequant = half(float(val) * float(s_k));
+                } else if (params.kv_quant_mode == 1) { // FP4
+                    // 0.5 bytes per value (packed)
+                    uint total_item_idx = cache_base + thread_d;
+                    uint packed_idx = total_item_idx / FP4_PER_UINT;
+                    uint nibble_idx = total_item_idx % FP4_PER_UINT;
+                    
+                    uint32_t packed_k = ((device const uint32_t*)K_cache)[packed_idx];
+                    half s_k = K_scales[scale_idx];
+                    
+                    // Extract nibble
+                    uint nibble = (packed_k >> (nibble_idx * 4)) & 0xF;
+                    k_val_dequant = dequant_fp4(nibble, s_k);
+                } else { // FP16/BF16 (assume unpacked half if mode 0) or fallback
+                     // Assuming half for now if not quantized
+                     // Adjust cache_base to half* index if needed, but K_cache is uint8_t*
+                     // If mode 0, cache_base is in items (halves).
+                     // K_cache points to bytes. We need to cast to half*.
+                     uint total_item_idx = cache_base + thread_d;
+                     k_val_dequant = ((device const half*)K_cache)[total_item_idx];
+                }
                 
-                uint offset = d % FP4_PER_UINT;
-                score += float(q_val) * float(k_vals[offset]);
+                score += float(q_val) * float(k_val_dequant);
             }
             
             // Reduce across threadgroup
@@ -658,18 +711,33 @@ inline void fused_kv_projection_glm4(
             uint v_cache_base = cache_pos * params.kv_lora_rank;
             
             for (uint d = 0; d < params.head_dim; ++d) {
-                uint scale_d = d / params.kv_b_group_size;
-                half s_v = V_scales[cache_pos * (params.kv_lora_rank / params.kv_b_group_size) + scale_d];
+                uint group_size = params.kv_quant_group_size > 0 ? params.kv_quant_group_size : params.kv_b_group_size;
+                uint scale_d = d / group_size;
+                uint scale_idx = cache_pos * (params.kv_lora_rank / group_size) + scale_d;
                 
-                uint32_t packed_v = *reinterpret_cast<device const uint32_t*>(
-                    &V_cache[v_cache_base + (d / FP4_PER_UINT)]
-                );
+                half v_val_dequant = 0.0h;
                 
-                half v_vals[FP4_PER_UINT];
-                dequant_fp4x8(packed_v, s_v, v_vals);
+                if (params.kv_quant_mode == 3) { // INT8
+                    uint total_item_idx = v_cache_base + d;
+                    int8_t val = ((device const int8_t*)V_cache)[total_item_idx];
+                    half s_v = V_scales[scale_idx];
+                    v_val_dequant = half(float(val) * float(s_v));
+                } else if (params.kv_quant_mode == 1) { // FP4
+                    uint total_item_idx = v_cache_base + d;
+                    uint packed_idx = total_item_idx / FP4_PER_UINT;
+                    uint nibble_idx = total_item_idx % FP4_PER_UINT;
+                    
+                    uint32_t packed_v = ((device const uint32_t*)V_cache)[packed_idx];
+                    half s_v = V_scales[scale_idx];
+                    
+                    uint nibble = (packed_v >> (nibble_idx * 4)) & 0xF;
+                    v_val_dequant = dequant_fp4(nibble, s_v);
+                } else { // FP16
+                    uint total_item_idx = v_cache_base + d;
+                    v_val_dequant = ((device const half*)V_cache)[total_item_idx];
+                }
                 
-                uint offset = d % FP4_PER_UINT;
-                attention_acc[d] += exp_score * float(v_vals[offset]);
+                attention_acc[d] += exp_score * float(v_val_dequant);
             }
         }
     }

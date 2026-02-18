@@ -26,6 +26,13 @@ from metal_marlin.moe.expert_grouping import (
     GroupDispatchInfo,
     GroupedMoEDispatcher,
 )
+from metal_marlin.moe.gpu_grouping import (
+    GPUExpertGrouping,
+    GPUGroupingResult,
+    group_tokens_by_expert_auto,
+    group_tokens_by_expert_fast,
+    group_tokens_by_expert_gpu_optimized,
+)
 from metal_marlin.moe.expert_memory_pool import (
     BitWidthPool,
     ExpertMemoryPool,
@@ -73,6 +80,11 @@ from metal_marlin.moe.sparse_dispatch import (
     SparseRouterOnly,
     enable_sparse_routing,
 )
+from metal_marlin.moe.fused_router import (
+    FusedMoERouter,
+    FusedRouterOutput,
+    dispatch_fused_router_sorted,
+)
 from metal_marlin.moe.sparse_routing import (
     CooccurrenceEnhancer,
     SparseExpertPredictor,
@@ -81,10 +93,17 @@ from metal_marlin.moe.sparse_routing import (
     SparseRoutingStats,
     create_sparse_router_from_profiler,
 )
+from metal_marlin.moe.entropy_regularization import (
+    EntropyRegularizationOutput,
+    EntropyRegularizer,
+    MoEGateWithEntropy,
+    compute_entropy_regularization,
+)
 from metal_marlin.moe_dispatch import (
     FusedMoEDispatcher,
     MoEDispatcher,
     MoEDispatchInfo,
+    TopKExpertGrouping,
     compute_expert_load,
     compute_load_balancing_loss,
     gather_for_experts,
@@ -98,6 +117,10 @@ from metal_marlin.moe_dispatch import (
 __all__ = [
     "AsyncExpertLoader",
     "AsyncExpertCommandBuffer",
+    "EntropyRegularizationOutput",
+    "EntropyRegularizer",
+    "MoEGateWithEntropy",
+    "compute_entropy_regularization",
     "AsyncMoEExecutor",
     "BatchedExpertDispatch",
     "CooccurrenceEnhancer",
@@ -119,6 +142,8 @@ __all__ = [
     "ExpertPrefetcher",
     "ExpertWorkItem",
     "FusedMoEDispatcher",
+    "FusedMoERouter",
+    "FusedRouterOutput",
     "GroupDispatchInfo",
     "GroupedMoEDispatcher",
     "MetalBatchedDispatch",
@@ -138,6 +163,7 @@ __all__ = [
     "SparseRouterOnly",
     "SparseRoutingConfig",
     "SparseRoutingStats",
+    "TopKExpertGrouping",
     "async_load_experts",
     "batched_expert_forward",
     "compute_expert_load",
@@ -145,6 +171,7 @@ __all__ = [
     "create_expert_constant_buffer",
     "create_scatter_indices",
     "create_sparse_router_from_profiler",
+    "dispatch_fused_router_sorted",
     "dispatch_single_expert_async",
     "enable_sparse_routing",
     "execute_experts_parallel",

@@ -156,15 +156,26 @@ constant constexpr uint Q_ROWS_PER_SG = TILE_Q_SG / SIMDGROUPS_ATT_SG;  // 8
 constant constexpr uint K_TILES_HD [[maybe_unused]] = HEAD_DIM_MAX_SG / 8;
 
 // ---------------------------------------------------------------------------
-// Utility: thread-local sum for float values
+// Utility: SIMDgroup-level reduction using hardware simd_sum
 // ---------------------------------------------------------------------------
 
+// Fast reduction using Metal's native simd_sum intrinsic (single instruction)
 inline float simd_sum_fast(float val) {
-    #pragma unroll
-    for (uint offset = 16; offset >= 1; offset >>= 1) {
-        val += simd_shuffle_xor(val, offset);
-    }
-    return val;
+    return simd_sum(val);
+}
+
+// Fast max reduction using Metal's native simd_max intrinsic (single instruction)
+inline float simd_max_fast(float val) {
+    return simd_max(val);
+}
+
+// SIMDgroup-level normalization for attention softmax
+// Combines simd_max and simd_sum for efficient online softmax
+inline float simdgroup_softmax_sum(float val, thread float& max_val) {
+    float sg_max = simd_max(val);
+    max_val = sg_max;
+    float exp_val = exp(val - sg_max);
+    return simd_sum(exp_val);
 }
 
 // ---------------------------------------------------------------------------

@@ -146,7 +146,6 @@ def model_path() -> str:
     # Default search paths: check project-local models, server convention, and user home
     default_paths = [
         Path(__file__).parent.parent / "models" / "GLM-4.7-Flash-Trellis-3bpw",
-        Path("/models/GLM-4.7-Flash-Trellis-3bpw"),  # Server convention for model storage
         Path.home() / "models" / "GLM-4.7-Flash-Trellis-3bpw",
     ]
 
@@ -155,7 +154,7 @@ def model_path() -> str:
             return str(path)
 
     pytest.skip(
-        "GLM-4.7-Flash-3bpw model not found. Set PERF_MODEL_PATH or place model in /models/ or ~/models/"
+        "GLM-4.7-Flash-3bpw model not found. Set PERF_MODEL_PATH or place model in project-local models/ or ~/models/"
     )
 
 

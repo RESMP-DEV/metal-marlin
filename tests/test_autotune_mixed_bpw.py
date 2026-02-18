@@ -482,9 +482,10 @@ class TestMixedBPWAutoTuner:
             assert loaded_config.tile_size_m == config.tile_size_m
             assert loaded_config.tile_size_n == config.tile_size_n
 
-    def test_get_statistics(self):
+    def test_get_statistics(self, tmp_path):
         """Test getting tuner statistics."""
-        tuner = MixedBPWAutoTuner(device_name="M4 Max", config_path="/tmp/test.json")
+        config_file = tmp_path / "test.json"
+        tuner = MixedBPWAutoTuner(device_name="M4 Max", config_path=str(config_file))
 
         # Populate some state
         config = KernelConfig(

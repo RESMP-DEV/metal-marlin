@@ -446,11 +446,12 @@ class TrellisForCausalLM(nn.Module):
         # Use LayerBatchContext for MoE dispatch batching (reduces commits from ~46 to ~6)
         # This is separate from lib.batch_dispatch() which handles attention kernel batching.
         from contextlib import nullcontext
+        from .model import LAYERS_PER_BATCH
         use_layer_batch = (
             batch_size == 1 and HAS_METAL and LayerBatchContext is not None)
         layer_batch_mgr = (
             LayerBatchContext(
-                self.model, batch_size=8) if use_layer_batch else nullcontext()
+                self.model, batch_size=LAYERS_PER_BATCH) if use_layer_batch else nullcontext()
         )
 
         # Batch all layer dispatches into single command buffer

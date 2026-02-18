@@ -142,6 +142,36 @@ cd contrib/metal_marlin && PYTHONPATH=. uv run python benchmarks/bench_e2e_decod
 
 **Note:** Memory usage (33GB) is higher than expected due to intermediate buffers during generation. The fused MoE kernel provides 13× forward pass speedup, but E2E throughput is limited by other factors (attention, KV cache management).
 
+### MMFP4 Fused Dispatch Migration (Feb 2026)
+
+The MMFP4 inference stack was migrated from sequential dispatches to fused kernels:
+
+| Operation | Previous (Sequential) | Optimized (Fused) | Status |
+|-----------|----------------------|-------------------|--------|
+| MLA Attention | 5+ dispatches (QKV → attn → O) | 1 dispatch (`mla_fused_attention_decode_glm4`) | **Fused** |
+| MoE Expert Compute | Sequential expert iteration | Batched `moe_trellis_swiglu` | **Fused** |
+| GEMM + Dequant | Dequantize + matmul separate | `mmfp4_gemm` fused | **Fused** |
+
+**Remaining sequential operations:**
+
+| Operation | Status | Notes |
+|-----------|--------|-------|
+| Input projections | Sequential | Prefill-optimized, low dispatch count |
+| LayerNorm/RoPE | Sequential | Already minimal overhead |
+| LM Head | Sequential | Single call per sequence |
+
+**Key correctness fixes applied:**
+1. **Async dispatch fix**: Changed `wait=False` to `wait=True` in kernel dispatch to prevent race conditions
+2. **Numerical stability**: Float accumulation in GEMM kernels instead of half
+3. **Per-simdgroup staging**: Eliminated shared staging buffer race conditions
+
+**Performance status:**
+- Pre-optimization decode: 0.27 tok/s (baseline)
+- Post-optimization decode: pending measurement
+- Expected improvement from dispatch overhead reduction
+
+> **Note:** Benchmarks should be re-run manually to measure the impact of fused dispatches. DO NOT include extrapolated numbers.
+
 ### MLX Comparison (Observed)
 
 | Backend | Decode Performance | Notes |
@@ -494,7 +524,7 @@ The 93% BF16 efficiency proves the hardware CAN achieve near-roofline performanc
 
 ### MMFP4 GLM-4.7-Flash Benchmarks (Measured Feb 2026)
 
-> **Note:** Benchmarks below reflect measurements BEFORE the fused dispatch optimization. Post-optimization benchmarks pending.
+> **Note (historical):** Benchmarks in this section were collected in Feb 2026 *before* the fused dispatch optimization and are preserved for historical comparison only. They do **not** represent current, optimized performance.
 
 #### Optimization: Fused Dispatch Migration (Applied)
 

@@ -37,11 +37,13 @@ if TYPE_CHECKING:
 # Metal dispatch requires both PyTorch MPS and PyObjC Metal framework
 HAS_METAL_DISPATCH: bool = HAS_MPS and HAS_PYOBJC_METAL
 
-# Path to kernel source
+# Path to kernel sources
 _KERNEL_SOURCE_PATH = Path(__file__).parent.parent.parent / "src" / "rwkv_wkv.metal"
+_KERNEL_SOURCE_PATH_V6 = Path(__file__).parent.parent.parent / "src" / "rwkv_wkv_v6.metal"
 
 # Lazy-loaded Metal library
 _metal_lib: Any = None
+_metal_lib_v6: Any = None
 
 MAX_HEAD_DIM = 128
 THREADS_PER_TG = 128
@@ -58,6 +60,19 @@ def _get_metal_library() -> Any:
         source = _KERNEL_SOURCE_PATH.read_text()
         _metal_lib.compile_source("rwkv_wkv", source)
     return _metal_lib
+
+
+def _get_metal_library_v6() -> Any:
+    """Get or create the Metal kernel library with RWKV v6 kernels compiled."""
+    global _metal_lib_v6
+    if _metal_lib_v6 is None:
+        from ..metal_dispatch import MetalKernelLibrary
+
+        _metal_lib_v6 = MetalKernelLibrary()
+        # Compile the RWKV WKV v6 kernel
+        source = _KERNEL_SOURCE_PATH_V6.read_text()
+        _metal_lib_v6.compile_source("rwkv_wkv_v6", source)
+    return _metal_lib_v6
 
 
 def _dispatch_wkv_single_token(
@@ -217,6 +232,230 @@ def _dispatch_wkv_batched(
     return output, final_state, final_denom
 
 
+def _dispatch_wkv_single_token_v6(
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    state: torch.Tensor,
+    batch_size: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch single-token WKV v6 kernel via Metal.
+    
+    v6 differences from v5:
+    - Has gate parameter g
+    - State is matrix-valued [batch, heads, head_dim, head_dim]
+    - No state_denom (different formulation)
+    """
+    import Metal
+
+    from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
+
+    lib = _get_metal_library_v6()
+    device = lib.device
+
+    # Allocate outputs
+    output = torch.empty((batch_size, num_heads, head_dim), dtype=torch.float16, device="mps")
+    new_state = torch.empty_like(state, dtype=torch.float32, device="mps")
+
+    # Convert tensors to Metal buffers
+    r_buf = mps_tensor_to_metal_buffer(r.half().contiguous(), device)
+    k_buf = mps_tensor_to_metal_buffer(k.half().contiguous(), device)
+    v_buf = mps_tensor_to_metal_buffer(v.half().contiguous(), device)
+    g_buf = mps_tensor_to_metal_buffer(g.half().contiguous(), device)
+    w_buf = mps_tensor_to_metal_buffer(w.float().contiguous(), device)
+    u_buf = mps_tensor_to_metal_buffer(u.float().contiguous(), device)
+    state_buf = mps_tensor_to_metal_buffer(state.float().contiguous(), device)
+    output_buf = mps_tensor_to_metal_buffer(output, device)
+    new_state_buf = mps_tensor_to_metal_buffer(new_state, device)
+
+    # Create constant buffers
+    bs_buf = device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    nh_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hd_buf = device.newBufferWithBytes_length_options_(
+        np.array([head_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    # Dispatch
+    dispatch_kernel(
+        lib,
+        function_name="rwkv_wkv_v6_single_token",
+        grid=(batch_size, num_heads, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[
+            r_buf,
+            k_buf,
+            v_buf,
+            g_buf,
+            w_buf,
+            u_buf,
+            state_buf,
+            output_buf,
+            new_state_buf,
+            bs_buf,
+            nh_buf,
+            hd_buf,
+        ],
+        wait=True,
+    )
+
+    return output, new_state
+
+
+def _dispatch_wkv_batched_v6(
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    state: torch.Tensor,
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch batched WKV v6 kernel for prefill via Metal."""
+    import Metal
+
+    from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
+
+    lib = _get_metal_library_v6()
+    device = lib.device
+
+    # Allocate outputs
+    output = torch.empty(
+        (batch_size, seq_len, num_heads, head_dim), dtype=torch.float16, device="mps"
+    )
+    final_state = torch.empty_like(state, dtype=torch.float32, device="mps")
+
+    # Convert tensors to Metal buffers
+    r_buf = mps_tensor_to_metal_buffer(r.half().contiguous(), device)
+    k_buf = mps_tensor_to_metal_buffer(k.half().contiguous(), device)
+    v_buf = mps_tensor_to_metal_buffer(v.half().contiguous(), device)
+    g_buf = mps_tensor_to_metal_buffer(g.half().contiguous(), device)
+    w_buf = mps_tensor_to_metal_buffer(w.float().contiguous(), device)
+    u_buf = mps_tensor_to_metal_buffer(u.float().contiguous(), device)
+    state_buf = mps_tensor_to_metal_buffer(state.float().contiguous(), device)
+    output_buf = mps_tensor_to_metal_buffer(output, device)
+    final_state_buf = mps_tensor_to_metal_buffer(final_state, device)
+
+    # Create constant buffers
+    bs_buf = device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    sl_buf = device.newBufferWithBytes_length_options_(
+        np.array([seq_len], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    nh_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hd_buf = device.newBufferWithBytes_length_options_(
+        np.array([head_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    # Dispatch
+    dispatch_kernel(
+        lib,
+        function_name="rwkv_wkv_v6_batched",
+        grid=(batch_size, num_heads, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[
+            r_buf,
+            k_buf,
+            v_buf,
+            g_buf,
+            w_buf,
+            u_buf,
+            state_buf,
+            output_buf,
+            final_state_buf,
+            bs_buf,
+            sl_buf,
+            nh_buf,
+            hd_buf,
+        ],
+        wait=True,
+    )
+
+    return output, final_state
+
+
+def rwkv_wkv_single_token_v6(
+    r: Any,
+    k: Any,
+    v: Any,
+    g: Any,
+    w: Any,
+    u: Any,
+    state: Any,
+    output_dtype: Any | None = None,
+) -> tuple[Any, Any]:
+    """Dispatch single-token WKV v6 kernel.
+
+    Args:
+        r, k, v, g: [batch, heads, head_dim] (float16)
+        w, u: [heads, head_dim] (float32)
+        state: [batch, heads, head_dim, head_dim] (float32) - matrix-valued state
+        output_dtype: Optional output dtype (torch.float16 default)
+
+    Returns:
+        (output, new_state)
+    """
+    if HAS_METAL_DISPATCH and torch is not None:
+        # Ensure inputs are on MPS
+        if not isinstance(r, torch.Tensor):
+            r = torch.from_numpy(np.asarray(r)).to("mps")
+        elif not r.is_mps:
+            r = r.to("mps")
+
+        if not isinstance(k, torch.Tensor):
+            k = torch.from_numpy(np.asarray(k)).to("mps")
+        elif not k.is_mps:
+            k = k.to("mps")
+
+        if not isinstance(v, torch.Tensor):
+            v = torch.from_numpy(np.asarray(v)).to("mps")
+        elif not v.is_mps:
+            v = v.to("mps")
+
+        if not isinstance(g, torch.Tensor):
+            g = torch.from_numpy(np.asarray(g)).to("mps")
+        elif not g.is_mps:
+            g = g.to("mps")
+
+        if not isinstance(w, torch.Tensor):
+            w = torch.from_numpy(np.asarray(w)).to("mps")
+        elif not w.is_mps:
+            w = w.to("mps")
+
+        if not isinstance(u, torch.Tensor):
+            u = torch.from_numpy(np.asarray(u)).to("mps")
+        elif not u.is_mps:
+            u = u.to("mps")
+
+        if not isinstance(state, torch.Tensor):
+            state = torch.from_numpy(np.asarray(state)).to("mps")
+        elif not state.is_mps:
+            state = state.to("mps")
+
+        batch_size, num_heads, head_dim = r.shape
+        if head_dim > MAX_HEAD_DIM:
+            raise ValueError(f"head_dim {head_dim} exceeds MAX_HEAD_DIM {MAX_HEAD_DIM}")
+
+        return _dispatch_wkv_single_token_v6(
+            r, k, v, g, w, u, state, batch_size, num_heads, head_dim
+        )
+
+
 def rwkv_wkv_single_token(
     r: Any,
     k: Any,
@@ -361,6 +600,317 @@ def rwkv_wkv_batched(
     # NumPy fallback
     raise RuntimeError(
         "RWKV WKV kernel requires PyTorch MPS and PyObjC Metal.\n"
+        "Install with: pip install torch pyobjc-framework-Metal"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Metal kernel dispatch for RWKV v6 (with matrix-valued state)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_wkv_v6_single_token(
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    state: torch.Tensor,
+    batch_size: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch single-token WKV v6 kernel via Metal.
+
+    RWKV v6 uses matrix-valued state with gate mechanism.
+    State format: [batch, heads, head_dim, head_dim]
+    """
+    import Metal
+
+    from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
+
+    lib = _get_metal_library_v6()
+    device = lib.device
+
+    # Allocate outputs
+    output = torch.empty((batch_size, num_heads, head_dim), dtype=torch.float16, device="mps")
+    new_state = torch.empty_like(state, dtype=torch.float32, device="mps")
+
+    # Convert tensors to Metal buffers
+    r_buf = mps_tensor_to_metal_buffer(r.half().contiguous(), device)
+    k_buf = mps_tensor_to_metal_buffer(k.half().contiguous(), device)
+    v_buf = mps_tensor_to_metal_buffer(v.half().contiguous(), device)
+    g_buf = mps_tensor_to_metal_buffer(g.half().contiguous(), device)
+    w_buf = mps_tensor_to_metal_buffer(w.float().contiguous(), device)
+    u_buf = mps_tensor_to_metal_buffer(u.float().contiguous(), device)
+    state_buf = mps_tensor_to_metal_buffer(state.float().contiguous(), device)
+    output_buf = mps_tensor_to_metal_buffer(output, device)
+    new_state_buf = mps_tensor_to_metal_buffer(new_state, device)
+
+    # Create constant buffers
+    bs_buf = device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    nh_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hd_buf = device.newBufferWithBytes_length_options_(
+        np.array([head_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    # Dispatch kernel (buffer order matches Metal kernel signature)
+    dispatch_kernel(
+        lib,
+        function_name="rwkv_wkv_v6_single_token",
+        grid=(batch_size, num_heads, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[
+            r_buf,      # buffer(0)
+            k_buf,      # buffer(1)
+            v_buf,      # buffer(2)
+            g_buf,      # buffer(3) - gate (v6 only)
+            w_buf,      # buffer(4)
+            u_buf,      # buffer(5)
+            state_buf,  # buffer(6)
+            output_buf, # buffer(7)
+            new_state_buf,  # buffer(8)
+            bs_buf,     # buffer(9)
+            nh_buf,     # buffer(10)
+            hd_buf,     # buffer(11)
+        ],
+        wait=True,
+    )
+
+    return output, new_state
+
+
+def _dispatch_wkv_v6_batched(
+    r: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    w: torch.Tensor,
+    u: torch.Tensor,
+    state: torch.Tensor,
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Dispatch batched WKV v6 kernel for prefill via Metal.
+
+    RWKV v6 processes sequences with matrix-valued state.
+    """
+    import Metal
+
+    from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
+
+    lib = _get_metal_library_v6()
+    device = lib.device
+
+    # Allocate outputs
+    output = torch.empty(
+        (batch_size, seq_len, num_heads, head_dim), dtype=torch.float16, device="mps"
+    )
+    final_state = torch.empty_like(state, dtype=torch.float32, device="mps")
+
+    # Convert tensors to Metal buffers
+    r_buf = mps_tensor_to_metal_buffer(r.half().contiguous(), device)
+    k_buf = mps_tensor_to_metal_buffer(k.half().contiguous(), device)
+    v_buf = mps_tensor_to_metal_buffer(v.half().contiguous(), device)
+    g_buf = mps_tensor_to_metal_buffer(g.half().contiguous(), device)
+    w_buf = mps_tensor_to_metal_buffer(w.float().contiguous(), device)
+    u_buf = mps_tensor_to_metal_buffer(u.float().contiguous(), device)
+    state_buf = mps_tensor_to_metal_buffer(state.float().contiguous(), device)
+    output_buf = mps_tensor_to_metal_buffer(output, device)
+    final_state_buf = mps_tensor_to_metal_buffer(final_state, device)
+
+    # Create constant buffers
+    bs_buf = device.newBufferWithBytes_length_options_(
+        np.array([batch_size], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    sl_buf = device.newBufferWithBytes_length_options_(
+        np.array([seq_len], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    nh_buf = device.newBufferWithBytes_length_options_(
+        np.array([num_heads], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+    hd_buf = device.newBufferWithBytes_length_options_(
+        np.array([head_dim], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
+    )
+
+    # Dispatch kernel
+    dispatch_kernel(
+        lib,
+        function_name="rwkv_wkv_v6_forward",
+        grid=(batch_size, num_heads, 1),
+        threadgroup=(THREADS_PER_TG, 1, 1),
+        buffers=[
+            r_buf,           # buffer(0)
+            k_buf,           # buffer(1)
+            v_buf,           # buffer(2)
+            g_buf,           # buffer(3) - gate (v6 only)
+            w_buf,           # buffer(4)
+            u_buf,           # buffer(5)
+            state_buf,       # buffer(6)
+            output_buf,      # buffer(7)
+            final_state_buf, # buffer(8)
+            bs_buf,          # buffer(9)
+            sl_buf,          # buffer(10)
+            nh_buf,          # buffer(11)
+            hd_buf,          # buffer(12)
+        ],
+        wait=True,
+    )
+
+    return output, final_state
+
+
+def rwkv_wkv_v6_single_token(
+    r: Any,
+    k: Any,
+    v: Any,
+    g: Any,
+    w: Any,
+    u: Any,
+    state: Any,
+    output_dtype: Any | None = None,
+) -> tuple[Any, Any]:
+    """Dispatch single-token WKV v6 kernel.
+
+    Args:
+        r, k, v, g: [batch, heads, head_dim] (float16)
+                     g is the gate parameter (v6 addition)
+        w, u: [heads, head_dim] (float32)
+        state: [batch, heads, head_dim, head_dim] (float32)
+        output_dtype: Optional output dtype (torch.float16 default)
+
+    Returns:
+        (output, new_state) - v6 doesn't use state_denom
+    """
+    if HAS_METAL_DISPATCH and torch is not None:
+        # Ensure inputs are on MPS
+        if not isinstance(r, torch.Tensor):
+            r = torch.from_numpy(np.asarray(r)).to("mps")
+        elif not r.is_mps:
+            r = r.to("mps")
+
+        if not isinstance(k, torch.Tensor):
+            k = torch.from_numpy(np.asarray(k)).to("mps")
+        elif not k.is_mps:
+            k = k.to("mps")
+
+        if not isinstance(v, torch.Tensor):
+            v = torch.from_numpy(np.asarray(v)).to("mps")
+        elif not v.is_mps:
+            v = v.to("mps")
+
+        if not isinstance(g, torch.Tensor):
+            g = torch.from_numpy(np.asarray(g)).to("mps")
+        elif not g.is_mps:
+            g = g.to("mps")
+
+        if not isinstance(w, torch.Tensor):
+            w = torch.from_numpy(np.asarray(w)).to("mps")
+        elif not w.is_mps:
+            w = w.to("mps")
+
+        if not isinstance(u, torch.Tensor):
+            u = torch.from_numpy(np.asarray(u)).to("mps")
+        elif not u.is_mps:
+            u = u.to("mps")
+
+        if not isinstance(state, torch.Tensor):
+            state = torch.from_numpy(np.asarray(state)).to("mps")
+        elif not state.is_mps:
+            state = state.to("mps")
+
+        batch_size, num_heads, head_dim = r.shape
+        if head_dim > MAX_HEAD_DIM:
+            raise ValueError(f"head_dim {head_dim} exceeds MAX_HEAD_DIM {MAX_HEAD_DIM}")
+
+        return _dispatch_wkv_v6_single_token(
+            r, k, v, g, w, u, state, batch_size, num_heads, head_dim
+        )
+
+    # NumPy fallback
+    raise RuntimeError(
+        "RWKV v6 WKV kernel requires PyTorch MPS and PyObjC Metal.\n"
+        "Install with: pip install torch pyobjc-framework-Metal"
+    )
+
+
+def rwkv_wkv_v6_batched(
+    r: Any,
+    k: Any,
+    v: Any,
+    g: Any,
+    w: Any,
+    u: Any,
+    state: Any,
+    output_dtype: Any | None = None,
+) -> tuple[Any, Any]:
+    """Dispatch batched WKV v6 kernel for prefill.
+
+    Args:
+        r, k, v, g: [batch, seq_len, heads, head_dim] (float16)
+                     g is the gate parameter (v6 addition)
+        w, u: [heads, head_dim] (float32)
+        state: [batch, heads, head_dim, head_dim] (float32)
+        output_dtype: Optional output dtype (torch.float16 default)
+
+    Returns:
+        (output, final_state) - v6 doesn't use state_denom
+    """
+    if HAS_METAL_DISPATCH and torch is not None:
+        # Ensure inputs are on MPS
+        if not isinstance(r, torch.Tensor):
+            r = torch.from_numpy(np.asarray(r)).to("mps")
+        elif not r.is_mps:
+            r = r.to("mps")
+
+        if not isinstance(k, torch.Tensor):
+            k = torch.from_numpy(np.asarray(k)).to("mps")
+        elif not k.is_mps:
+            k = k.to("mps")
+
+        if not isinstance(v, torch.Tensor):
+            v = torch.from_numpy(np.asarray(v)).to("mps")
+        elif not v.is_mps:
+            v = v.to("mps")
+
+        if not isinstance(g, torch.Tensor):
+            g = torch.from_numpy(np.asarray(g)).to("mps")
+        elif not g.is_mps:
+            g = g.to("mps")
+
+        if not isinstance(w, torch.Tensor):
+            w = torch.from_numpy(np.asarray(w)).to("mps")
+        elif not w.is_mps:
+            w = w.to("mps")
+
+        if not isinstance(u, torch.Tensor):
+            u = torch.from_numpy(np.asarray(u)).to("mps")
+        elif not u.is_mps:
+            u = u.to("mps")
+
+        if not isinstance(state, torch.Tensor):
+            state = torch.from_numpy(np.asarray(state)).to("mps")
+        elif not state.is_mps:
+            state = state.to("mps")
+
+        batch_size, seq_len, num_heads, head_dim = r.shape
+        if head_dim > MAX_HEAD_DIM:
+            raise ValueError(f"head_dim {head_dim} exceeds MAX_HEAD_DIM {MAX_HEAD_DIM}")
+
+        return _dispatch_wkv_v6_batched(
+            r, k, v, g, w, u, state, batch_size, seq_len, num_heads, head_dim
+        )
+
+    # NumPy fallback
+    raise RuntimeError(
+        "RWKV v6 WKV kernel requires PyTorch MPS and PyObjC Metal.\n"
         "Install with: pip install torch pyobjc-framework-Metal"
     )
 

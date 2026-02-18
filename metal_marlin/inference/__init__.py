@@ -60,7 +60,7 @@ from .decode import (
     quantized_kv_attention,
     select_decode_kernel,
 )
-from .mmfp4_pipeline import MMFP4Pipeline
+from .mmfp4_pipeline import MMFP4Pipeline, StreamingOutput
 from .pipeline import (
     GenerationConfig,
     MarlinModel,
@@ -101,6 +101,7 @@ __all__ = [
     # Pipeline exports (high-level API)
     "GenerationConfig",
     "MMFP4Pipeline",
+    "StreamingOutput",
     "MarlinModel",
     "MarlinPipeline",
     "MetalMarlinModel",

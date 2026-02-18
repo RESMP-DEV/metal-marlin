@@ -7,7 +7,7 @@
 //   1. LUT-based dequant with register-resident tables
 //   2. Vectorized half4/half8 output for coalesced stores
 //   3. Scale factor caching in registers (small working set)
-//   4. No threadgroup memory staging (A is a single row)
+//   4. Optional threadgroup memory staging for A-vector caching
 //   5. K-streaming with prefetch for latency hiding
 //
 // Key insight: For M=1, the operation is C[1,N] = A[1,K] @ dequant(B[K/8,N]).
@@ -30,6 +30,17 @@
 //   - Processing multiple columns per thread (amortize A reads)
 //   - Vectorized B loads (uint4 = 128-bit loads)
 //   - Scale caching (same scale reused for group_size K elements)
+//
+// Kernels provided:
+//   - dequant_fp4_decode_bulk: Standalone weight dequantization (no GEMM)
+//   - dequant_fp4_decode_gemv: General-purpose M=1 GEMV with safe bounds checking
+//   - dequant_fp4_decode_gemv_epilogue: GEMV with fused bias + activation
+//   - dequant_fp4_decode_gemv_fast: Maximum bandwidth variant (aligned only)
+//   - dequant_fp4_decode_gemv_tg_cached: Threadgroup A-vector caching
+//   - dequant_fp4_decode_gemv_transposed_scales: For [N,K/gs] scale layout
+//   - dequant_fp4_decode_gemv_prefetch: Software prefetching for large K
+//   - dequant_fp4_decode_gemv_aligned: Fast-path with no bounds checking
+//   - dequant_fp4_decode_gemv_streamed: Minimal register pressure for very large K
 
 #include <metal_stdlib>
 #include <metal_simdgroup>
@@ -571,6 +582,492 @@ kernel void dequant_fp4_decode_gemv_fast(
     // Store as half4
     uint out_idx = (tgid_x * DECODE_FAST_THREADS + tid);
     C_vec[out_idx] = half4(half(acc[0]), half(acc[1]), half(acc[2]), half(acc[3]));
+}
+
+// ============================================================================
+// Optimized M=1 Decode with Threadgroup A-Vector Caching
+// ============================================================================
+//
+// For M=1, the A vector is loaded K times (once per output column).
+// This kernel uses threadgroup memory to cache A, reducing global memory
+// bandwidth by ~Nx for the A input.
+//
+// Layout: A is cached in threadgroup memory, all threads in threadgroup
+// read from shared cache instead of global memory.
+// ============================================================================
+
+constant constexpr uint DECODE_TG_CACHE_SIZE = 256u;  // Must be multiple of 8
+
+kernel void dequant_fp4_decode_gemv_tg_cached(
+    device const half *A           [[buffer(0)]],  // [1, K] activation vector
+    device const uint32_t *B       [[buffer(1)]],  // [K/8, N] packed FP4 weights
+    device const half *scales      [[buffer(2)]],  // [K/group_size, N] per-group scales
+    device half *C                 [[buffer(3)]],  // [1, N] output vector
+    constant uint &K               [[buffer(4)]],
+    constant uint &N               [[buffer(5)]],
+    constant uint &group_size      [[buffer(6)]],
+    uint tgid_x                    [[threadgroup_position_in_grid]],
+    uint tid                       [[thread_position_in_threadgroup]]
+) {
+    // Threadgroup cache for A vector
+    threadgroup half a_cache[DECODE_TG_CACHE_SIZE];
+    
+    const uint col_base = tgid_x * DECODE_FAST_TILE_N + tid * DECODE_FAST_COLS_PER_THREAD;
+    if (col_base >= N) return;
+    
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool valid[4];
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        valid[c] = (col_base + c) < N;
+    }
+    
+    half cached_scales[4];
+    uint cached_group_idx = ~0u;
+    
+    // Process K in chunks that fit in threadgroup cache
+    for (uint k_chunk = 0; k_chunk < K; k_chunk += DECODE_TG_CACHE_SIZE) {
+        uint k_chunk_end = min(k_chunk + DECODE_TG_CACHE_SIZE, K);
+        uint chunk_size = k_chunk_end - k_chunk;
+        
+        // Cooperative load of A into threadgroup cache
+        // Each thread loads multiple elements
+        #pragma unroll 4
+        for (uint i = tid; i < DECODE_TG_CACHE_SIZE; i += DECODE_FAST_THREADS) {
+            uint k_idx = k_chunk + i;
+            a_cache[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+        }
+        
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        
+        // Process this K chunk
+        for (uint k_sub = 0; k_sub < chunk_size; k_sub += 8u) {
+            uint k_base = k_chunk + k_sub;
+            uint pack_idx = k_base / 8u;
+            uint group_idx = k_base / group_size;
+            
+            // Load A from threadgroup cache (fast)
+            half a_vals[8];
+            #pragma unroll
+            for (uint i = 0; i < 8; ++i) {
+                a_vals[i] = a_cache[k_sub + i];
+            }
+            
+            // Update scale cache if group changed
+            if (group_idx != cached_group_idx) {
+                cached_group_idx = group_idx;
+                #pragma unroll
+                for (uint c = 0; c < 4; ++c) {
+                    if (valid[c]) {
+                        cached_scales[c] = scales[group_idx * N + col_base + c];
+                    }
+                }
+            }
+            
+            // Process 4 columns
+            #pragma unroll
+            for (uint c = 0; c < 4; ++c) {
+                if (valid[c]) {
+                    uint col = col_base + c;
+                    uint32_t packed = B[pack_idx * N + col];
+                    dequant_fp4_fused_dot8(packed, a_vals, cached_scales[c], acc[c]);
+                }
+            }
+        }
+        
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    
+    // Store results
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        if (valid[c]) {
+            C[col_base + c] = half(acc[c]);
+        }
+    }
+}
+
+// ============================================================================
+// M=1 Decode with Transposed Scale Layout
+// ============================================================================
+//
+// Alternative kernel for when scales are stored as [N, K/group_size] instead
+// of [K/group_size, N]. This provides better memory coalescing when each
+// thread accesses scales for the same group index across different columns.
+//
+// Use this when: scales_layout == 'transposed'
+// ============================================================================
+
+kernel void dequant_fp4_decode_gemv_transposed_scales(
+    device const half *A           [[buffer(0)]],
+    device const uint32_t *B       [[buffer(1)]],
+    device const half *scales      [[buffer(2)]],  // [N, K/group_size] layout
+    device half *C                 [[buffer(3)]],
+    constant uint &K               [[buffer(4)]],
+    constant uint &N               [[buffer(5)]],
+    constant uint &group_size      [[buffer(6)]],
+    uint tgid_x                    [[threadgroup_position_in_grid]],
+    uint tid                       [[thread_position_in_threadgroup]]
+) {
+    const uint col_base = tgid_x * DECODE_FAST_TILE_N + tid * DECODE_FAST_COLS_PER_THREAD;
+    if (col_base >= N) return;
+    
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool valid[4];
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        valid[c] = (col_base + c) < N;
+    }
+    
+    const uint n_groups = (K + group_size - 1u) / group_size;
+    
+    // Main K-reduction loop
+    for (uint k_base = 0; k_base < K; k_base += 8u) {
+        uint pack_idx = k_base / 8u;
+        uint group_idx = k_base / group_size;
+        
+        // Load A values
+        half a_vals[8];
+        #pragma unroll
+        for (uint i = 0; i < 8; ++i) {
+            uint k_idx = k_base + i;
+            a_vals[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+        }
+        
+        // Load scales for this group (transposed layout: [N, n_groups])
+        half local_scales[4];
+        #pragma unroll
+        for (uint c = 0; c < 4; ++c) {
+            if (valid[c]) {
+                uint col = col_base + c;
+                local_scales[c] = scales[col * n_groups + group_idx];
+            }
+        }
+        
+        // Process columns
+        #pragma unroll
+        for (uint c = 0; c < 4; ++c) {
+            if (valid[c]) {
+                uint col = col_base + c;
+                uint32_t packed = B[pack_idx * N + col];
+                dequant_fp4_fused_dot8(packed, a_vals, local_scales[c], acc[c]);
+            }
+        }
+    }
+    
+    // Store results
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        if (valid[c]) {
+            C[col_base + c] = half(acc[c]);
+        }
+    }
+}
+
+// ============================================================================
+// M=1 Decode GEMV with Prefetch Hints
+// ============================================================================
+//
+// Uses Metal's prefetch hint intrinsics to hide memory latency.
+// Optimal for large K where memory bandwidth is the bottleneck.
+//
+// Prefetch strategy:
+//   - Prefetch B for next K iteration while computing current
+//   - Scale values prefetched into registers ahead of use
+// ============================================================================
+
+kernel void dequant_fp4_decode_gemv_prefetch(
+    device const half *A           [[buffer(0)]],
+    device const uint32_t *B       [[buffer(1)]],
+    device const half *scales      [[buffer(2)]],
+    device half *C                 [[buffer(3)]],
+    constant uint &K               [[buffer(4)]],
+    constant uint &N               [[buffer(5)]],
+    constant uint &group_size      [[buffer(6)]],
+    uint tgid_x                    [[threadgroup_position_in_grid]],
+    uint tid                       [[thread_position_in_threadgroup]]
+) {
+    const uint col_base = tgid_x * DECODE_FAST_TILE_N + tid * DECODE_FAST_COLS_PER_THREAD;
+    if (col_base >= N) return;
+    
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    bool valid[4];
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        valid[c] = (col_base + c) < N;
+    }
+    
+    half cached_scales[4];
+    uint cached_group_idx = ~0u;
+    
+    const uint k_packs = (K + 7u) / 8u;
+    
+    // Prefetch first iteration's data
+    half a_vals_prefetch[8];
+    #pragma unroll
+    for (uint i = 0; i < 8; ++i) {
+        a_vals_prefetch[i] = (i < K) ? A[i] : half(0.0h);
+    }
+    
+    // Main loop with prefetch
+    for (uint pack_idx = 0; pack_idx < k_packs; ++pack_idx) {
+        uint k_base = pack_idx * 8u;
+        uint group_idx = k_base / group_size;
+        
+        // Use prefetched A values
+        half a_vals[8];
+        #pragma unroll
+        for (uint i = 0; i < 8; ++i) {
+            a_vals[i] = a_vals_prefetch[i];
+        }
+        
+        // Prefetch next A values
+        uint next_k_base = (pack_idx + 1u) * 8u;
+        if (next_k_base < K) {
+            #pragma unroll
+            for (uint i = 0; i < 8; ++i) {
+                uint k_idx = next_k_base + i;
+                a_vals_prefetch[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+            }
+        }
+        
+        // Update scale cache
+        if (group_idx != cached_group_idx) {
+            cached_group_idx = group_idx;
+            #pragma unroll
+            for (uint c = 0; c < 4; ++c) {
+                if (valid[c]) {
+                    cached_scales[c] = scales[group_idx * N + col_base + c];
+                }
+            }
+        }
+        
+        // Process columns
+        if (pack_idx < k_packs) {
+            #pragma unroll
+            for (uint c = 0; c < 4; ++c) {
+                if (valid[c]) {
+                    uint col = col_base + c;
+                    uint32_t packed = B[pack_idx * N + col];
+                    
+                    // Inline dequant for better instruction scheduling
+                    half4 b_lo = half4(
+                        FP4_DECODE_LUT[(packed >>  0) & 0xFu],
+                        FP4_DECODE_LUT[(packed >>  4) & 0xFu],
+                        FP4_DECODE_LUT[(packed >>  8) & 0xFu],
+                        FP4_DECODE_LUT[(packed >> 12) & 0xFu]
+                    ) * cached_scales[c];
+                    
+                    half4 b_hi = half4(
+                        FP4_DECODE_LUT[(packed >> 16) & 0xFu],
+                        FP4_DECODE_LUT[(packed >> 20) & 0xFu],
+                        FP4_DECODE_LUT[(packed >> 24) & 0xFu],
+                        FP4_DECODE_LUT[(packed >> 28) & 0xFu]
+                    ) * cached_scales[c];
+                    
+                    acc[c] += float(a_vals[0]) * float(b_lo.x);
+                    acc[c] += float(a_vals[1]) * float(b_lo.y);
+                    acc[c] += float(a_vals[2]) * float(b_lo.z);
+                    acc[c] += float(a_vals[3]) * float(b_lo.w);
+                    acc[c] += float(a_vals[4]) * float(b_hi.x);
+                    acc[c] += float(a_vals[5]) * float(b_hi.y);
+                    acc[c] += float(a_vals[6]) * float(b_hi.z);
+                    acc[c] += float(a_vals[7]) * float(b_hi.w);
+                }
+            }
+        }
+    }
+    
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        if (valid[c]) {
+            C[col_base + c] = half(acc[c]);
+        }
+    }
+}
+
+// ============================================================================
+// M=1 Decode GEMV Streamed (Minimal Register Pressure)
+// ============================================================================
+//
+// Optimized for very large K (>8192) where register pressure matters.
+// Uses streaming accumulation with periodic reduction to minimize register use.
+//
+// Strategy:
+//   - Process K in chunks of 1024 to keep intermediate results in registers
+//   - Stream through K dimension with minimal live values
+// ============================================================================
+
+constant constexpr uint STREAM_CHUNK_K = 1024u;
+
+kernel void dequant_fp4_decode_gemv_streamed(
+    device const half *A           [[buffer(0)]],
+    device const uint32_t *B       [[buffer(1)]],
+    device const half *scales      [[buffer(2)]],
+    device half *C                 [[buffer(3)]],
+    constant uint &K               [[buffer(4)]],
+    constant uint &N               [[buffer(5)]],
+    constant uint &group_size      [[buffer(6)]],
+    uint tgid_x                    [[threadgroup_position_in_grid]],
+    uint tid                       [[thread_position_in_threadgroup]]
+) {
+    const uint col_base = tgid_x * DECODE_FAST_TILE_N + tid * DECODE_FAST_COLS_PER_THREAD;
+    if (col_base >= N) return;
+    
+    // Track validity of columns
+    bool valid[4];
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        valid[c] = (col_base + c) < N;
+    }
+    
+    // Main accumulator - only 4 floats live across entire K dimension
+    float total_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    // Process in chunks to manage register pressure
+    for (uint chunk_start = 0; chunk_start < K; chunk_start += STREAM_CHUNK_K) {
+        uint chunk_end = min(chunk_start + STREAM_CHUNK_K, K);
+        
+        // Chunk-local accumulators
+        float chunk_acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        half cached_scales[4];
+        uint cached_group_idx = ~0u;
+        
+        // Process this chunk
+        for (uint k_base = chunk_start; k_base < chunk_end; k_base += 8u) {
+            uint pack_idx = k_base / 8u;
+            uint group_idx = k_base / group_size;
+            
+            // Load A values
+            half a_vals[8];
+            #pragma unroll
+            for (uint i = 0; i < 8; ++i) {
+                uint k_idx = k_base + i;
+                a_vals[i] = (k_idx < K) ? A[k_idx] : half(0.0h);
+            }
+            
+            // Update scales if group changed
+            if (group_idx != cached_group_idx) {
+                cached_group_idx = group_idx;
+                #pragma unroll
+                for (uint c = 0; c < 4; ++c) {
+                    if (valid[c]) {
+                        cached_scales[c] = scales[group_idx * N + col_base + c];
+                    }
+                }
+            }
+            
+            // Process columns with fused dequant
+            #pragma unroll
+            for (uint c = 0; c < 4; ++c) {
+                if (valid[c]) {
+                    uint col = col_base + c;
+                    uint32_t packed = B[pack_idx * N + col];
+                    
+                    // Unrolled dequant + dot product
+                    chunk_acc[c] += float(a_vals[0]) * float(FP4_DECODE_LUT[(packed >>  0) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[1]) * float(FP4_DECODE_LUT[(packed >>  4) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[2]) * float(FP4_DECODE_LUT[(packed >>  8) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[3]) * float(FP4_DECODE_LUT[(packed >> 12) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[4]) * float(FP4_DECODE_LUT[(packed >> 16) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[5]) * float(FP4_DECODE_LUT[(packed >> 20) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[6]) * float(FP4_DECODE_LUT[(packed >> 24) & 0xFu] * cached_scales[c]);
+                    chunk_acc[c] += float(a_vals[7]) * float(FP4_DECODE_LUT[(packed >> 28) & 0xFu] * cached_scales[c]);
+                }
+            }
+        }
+        
+        // Accumulate chunk result
+        #pragma unroll
+        for (uint c = 0; c < 4; ++c) {
+            total_acc[c] += chunk_acc[c];
+        }
+    }
+    
+    // Store final results
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        if (valid[c]) {
+            C[col_base + c] = half(total_acc[c]);
+        }
+    }
+}
+
+// ============================================================================
+// M=1 Decode GEMV Fast-Path (Assumes aligned dimensions)
+// ============================================================================
+//
+// Maximum performance variant that assumes:
+//   - N is multiple of 512
+//   - K is multiple of 8
+//   - group_size is multiple of 8
+//   - All buffers are 16-byte aligned
+//
+// No bounds checking in inner loops - use only when preconditions are met.
+// ============================================================================
+
+kernel void dequant_fp4_decode_gemv_aligned(
+    device const half *A           [[buffer(0)]],
+    device const uint32_t *B       [[buffer(1)]],
+    device const half *scales      [[buffer(2)]],
+    device half *C                 [[buffer(3)]],
+    constant uint &K               [[buffer(4)]],
+    constant uint &N               [[buffer(5)]],
+    constant uint &group_size      [[buffer(6)]],
+    uint tgid_x                    [[threadgroup_position_in_grid]],
+    uint tid                       [[thread_position_in_threadgroup]]
+) {
+    const uint col_base = tgid_x * DECODE_FAST_TILE_N + tid * DECODE_FAST_COLS_PER_THREAD;
+    
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    
+    half cached_scales[4];
+    uint cached_group_idx = ~0u;
+    
+    const uint k_packs = K / 8u;
+    
+    // Unrolled main loop - no bounds checking
+    for (uint pack_idx = 0; pack_idx < k_packs; ++pack_idx) {
+        uint k_base = pack_idx * 8u;
+        uint group_idx = k_base / group_size;
+        
+        // Load A values (vectorized)
+        half4 a_lo = *((device const half4 *)(A + k_base));
+        half4 a_hi = *((device const half4 *)(A + k_base + 4u));
+        
+        // Update scales if group changed
+        if (group_idx != cached_group_idx) {
+            cached_group_idx = group_idx;
+            #pragma unroll
+            for (uint c = 0; c < 4; ++c) {
+                uint col = col_base + c;
+                cached_scales[c] = scales[group_idx * N + col];
+            }
+        }
+        
+        // Process 4 columns with fused dequant
+        #pragma unroll
+        for (uint c = 0; c < 4; ++c) {
+            uint col = col_base + c;
+            uint32_t packed = B[pack_idx * N + col];
+            
+            half scale = cached_scales[c];
+            acc[c] += float(a_lo.x) * float(FP4_DECODE_LUT[(packed >>  0) & 0xFu] * scale);
+            acc[c] += float(a_lo.y) * float(FP4_DECODE_LUT[(packed >>  4) & 0xFu] * scale);
+            acc[c] += float(a_lo.z) * float(FP4_DECODE_LUT[(packed >>  8) & 0xFu] * scale);
+            acc[c] += float(a_lo.w) * float(FP4_DECODE_LUT[(packed >> 12) & 0xFu] * scale);
+            acc[c] += float(a_hi.x) * float(FP4_DECODE_LUT[(packed >> 16) & 0xFu] * scale);
+            acc[c] += float(a_hi.y) * float(FP4_DECODE_LUT[(packed >> 20) & 0xFu] * scale);
+            acc[c] += float(a_hi.z) * float(FP4_DECODE_LUT[(packed >> 24) & 0xFu] * scale);
+            acc[c] += float(a_hi.w) * float(FP4_DECODE_LUT[(packed >> 28) & 0xFu] * scale);
+        }
+    }
+    
+    // Store results
+    #pragma unroll
+    for (uint c = 0; c < 4; ++c) {
+        C[col_base + c] = half(acc[c]);
+    }
 }
 
 // ============================================================================

@@ -128,6 +128,28 @@ class TestHadamardTransformMetal:
         y = hadamard_transform_metal(x, block_size=128, normalize=True)
         assert y.shape == x.shape
 
+    # Non-power-of-2 sizes
+    def test_transform_shape_96(self):
+        """Transform should preserve shape with block_size=96 (non-power-of-2)."""
+        batch = 16
+        x = torch.randn(batch, 96, device="mps", dtype=torch.float16)
+        y = hadamard_transform_metal(x, block_size=96, normalize=True)
+        assert y.shape == x.shape
+
+    def test_transform_shape_160(self):
+        """Transform should preserve shape with block_size=160 (non-power-of-2)."""
+        batch = 16
+        x = torch.randn(batch, 160, device="mps", dtype=torch.float16)
+        y = hadamard_transform_metal(x, block_size=160, normalize=True)
+        assert y.shape == x.shape
+
+    def test_transform_shape_192(self):
+        """Transform should preserve shape with block_size=192 (non-power-of-2)."""
+        batch = 16
+        x = torch.randn(batch, 192, device="mps", dtype=torch.float16)
+        y = hadamard_transform_metal(x, block_size=192, normalize=True)
+        assert y.shape == x.shape
+
     def test_transform_3d(self):
         """Should handle 3D input."""
         x = torch.randn(2, 5, 64, device="mps", dtype=torch.float16)
@@ -222,6 +244,46 @@ class TestSelfInverse:
 
         np.testing.assert_allclose(unnorm_np, norm_np * scale, rtol=1e-2, atol=1e-2)
 
+    # Non-power-of-2 self-inverse tests
+    def test_inverse_normalized_96(self):
+        """Normalized transform applied twice should equal identity (block_size=96)."""
+        torch.manual_seed(42)
+        batch = 8
+        x = torch.randn(batch, 96, device="mps", dtype=torch.float32)
+        x_np = x.cpu().float().numpy()
+
+        y = hadamard_transform_metal(x, block_size=96, normalize=True)
+        z = hadamard_transform_metal(y, block_size=96, normalize=True)
+
+        z_np = z.cpu().float().numpy()
+        np.testing.assert_allclose(z_np, x_np, rtol=5e-2, atol=5e-2)
+
+    def test_inverse_normalized_160(self):
+        """Normalized transform applied twice should equal identity (block_size=160)."""
+        torch.manual_seed(42)
+        batch = 8
+        x = torch.randn(batch, 160, device="mps", dtype=torch.float32)
+        x_np = x.cpu().float().numpy()
+
+        y = hadamard_transform_metal(x, block_size=160, normalize=True)
+        z = hadamard_transform_metal(y, block_size=160, normalize=True)
+
+        z_np = z.cpu().float().numpy()
+        np.testing.assert_allclose(z_np, x_np, rtol=5e-2, atol=5e-2)
+
+    def test_inverse_normalized_192(self):
+        """Normalized transform applied twice should equal identity (block_size=192)."""
+        torch.manual_seed(42)
+        batch = 8
+        x = torch.randn(batch, 192, device="mps", dtype=torch.float32)
+        x_np = x.cpu().float().numpy()
+
+        y = hadamard_transform_metal(x, block_size=192, normalize=True)
+        z = hadamard_transform_metal(y, block_size=192, normalize=True)
+
+        z_np = z.cpu().float().numpy()
+        np.testing.assert_allclose(z_np, x_np, rtol=5e-2, atol=5e-2)
+
 
 @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 class TestHadamardMetalClass:
@@ -293,6 +355,55 @@ class TestEnergyPreservation:
         # For unnormalized transform, energy is scaled by block_size
         np.testing.assert_allclose(energy_after, energy_before * 64, rtol=5e-2)
 
+    # Non-power-of-2 energy preservation tests
+    def test_energy_preserved_normalized_96(self):
+        """Normalized transform preserves energy for block_size=96."""
+        torch.manual_seed(42)
+        batch = 16
+        x = torch.randn(batch, 96, device="mps", dtype=torch.float32)
+
+        result = hadamard_transform_metal(x, block_size=96, normalize=True)
+
+        x_np = x.cpu().float().numpy()
+        result_np = result.cpu().float().numpy()
+
+        energy_before = np.sum(x_np ** 2)
+        energy_after = np.sum(result_np ** 2)
+
+        np.testing.assert_allclose(energy_before, energy_after, rtol=5e-2)
+
+    def test_energy_preserved_normalized_160(self):
+        """Normalized transform preserves energy for block_size=160."""
+        torch.manual_seed(42)
+        batch = 16
+        x = torch.randn(batch, 160, device="mps", dtype=torch.float32)
+
+        result = hadamard_transform_metal(x, block_size=160, normalize=True)
+
+        x_np = x.cpu().float().numpy()
+        result_np = result.cpu().float().numpy()
+
+        energy_before = np.sum(x_np ** 2)
+        energy_after = np.sum(result_np ** 2)
+
+        np.testing.assert_allclose(energy_before, energy_after, rtol=5e-2)
+
+    def test_energy_preserved_normalized_192(self):
+        """Normalized transform preserves energy for block_size=192."""
+        torch.manual_seed(42)
+        batch = 16
+        x = torch.randn(batch, 192, device="mps", dtype=torch.float32)
+
+        result = hadamard_transform_metal(x, block_size=192, normalize=True)
+
+        x_np = x.cpu().float().numpy()
+        result_np = result.cpu().float().numpy()
+
+        energy_before = np.sum(x_np ** 2)
+        energy_after = np.sum(result_np ** 2)
+
+        np.testing.assert_allclose(energy_before, energy_after, rtol=5e-2)
+
 
 class TestNumpyReference:
     """Test Metal results against numpy reference implementation."""
@@ -311,6 +422,66 @@ class TestNumpyReference:
         orig_shape = x.shape
         x_2d = x.reshape(-1, block_size)
         result = x_2d @ H.T
+        return result.reshape(orig_shape)
+
+    def _reference_hadamard_transform_npow2(
+        self,
+        x: np.ndarray,
+        block_size: int,
+        normalize: bool = True
+    ) -> np.ndarray:
+        """Reference implementation for non-power-of-2 sizes using block-diagonal decomposition.
+        
+        Decomposition:
+            - 96  = 64 + 32
+            - 160 = 128 + 32
+            - 192 = 128 + 64
+        """
+        orig_shape = x.shape
+        x_2d = x.reshape(-1, block_size)
+        
+        if block_size == 96:
+            # 96 = 64 + 32
+            result = np.zeros_like(x_2d)
+            # First 64 elements
+            H64 = _generate_hadamard_matrix(64)
+            if normalize:
+                H64 = H64 / np.sqrt(64)
+            result[:, :64] = x_2d[:, :64] @ H64.T
+            # Next 32 elements
+            H32 = _generate_hadamard_matrix(32)
+            if normalize:
+                H32 = H32 / np.sqrt(32)
+            result[:, 64:] = x_2d[:, 64:] @ H32.T
+        elif block_size == 160:
+            # 160 = 128 + 32
+            result = np.zeros_like(x_2d)
+            # First 128 elements
+            H128 = _generate_hadamard_matrix(128)
+            if normalize:
+                H128 = H128 / np.sqrt(128)
+            result[:, :128] = x_2d[:, :128] @ H128.T
+            # Next 32 elements
+            H32 = _generate_hadamard_matrix(32)
+            if normalize:
+                H32 = H32 / np.sqrt(32)
+            result[:, 128:] = x_2d[:, 128:] @ H32.T
+        elif block_size == 192:
+            # 192 = 128 + 64
+            result = np.zeros_like(x_2d)
+            # First 128 elements
+            H128 = _generate_hadamard_matrix(128)
+            if normalize:
+                H128 = H128 / np.sqrt(128)
+            result[:, :128] = x_2d[:, :128] @ H128.T
+            # Next 64 elements
+            H64 = _generate_hadamard_matrix(64)
+            if normalize:
+                H64 = H64 / np.sqrt(64)
+            result[:, 128:] = x_2d[:, 128:] @ H64.T
+        else:
+            raise ValueError(f"Unsupported block_size: {block_size}")
+        
         return result.reshape(orig_shape)
 
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
@@ -360,6 +531,55 @@ class TestNumpyReference:
 
         x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
         result = hadamard_transform_metal(x_torch, block_size=128, normalize=True)
+        result_np = result.cpu().float().numpy()
+
+        np.testing.assert_allclose(result_np, expected, rtol=2e-2, atol=2e-2)
+
+    # Non-power-of-2 accuracy tests
+    @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
+    def test_accuracy_block_96(self):
+        """Metal result should match numpy reference (block_size=96, non-power-of-2)."""
+        torch.manual_seed(42)
+        np.random.seed(42)
+        batch = 8
+        x_np = np.random.randn(batch, 96).astype(np.float32)
+
+        expected = self._reference_hadamard_transform_npow2(x_np, block_size=96, normalize=True)
+
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform_metal(x_torch, block_size=96, normalize=True)
+        result_np = result.cpu().float().numpy()
+
+        np.testing.assert_allclose(result_np, expected, rtol=2e-2, atol=2e-2)
+
+    @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
+    def test_accuracy_block_160(self):
+        """Metal result should match numpy reference (block_size=160, non-power-of-2)."""
+        torch.manual_seed(42)
+        np.random.seed(42)
+        batch = 8
+        x_np = np.random.randn(batch, 160).astype(np.float32)
+
+        expected = self._reference_hadamard_transform_npow2(x_np, block_size=160, normalize=True)
+
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform_metal(x_torch, block_size=160, normalize=True)
+        result_np = result.cpu().float().numpy()
+
+        np.testing.assert_allclose(result_np, expected, rtol=2e-2, atol=2e-2)
+
+    @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
+    def test_accuracy_block_192(self):
+        """Metal result should match numpy reference (block_size=192, non-power-of-2)."""
+        torch.manual_seed(42)
+        np.random.seed(42)
+        batch = 8
+        x_np = np.random.randn(batch, 192).astype(np.float32)
+
+        expected = self._reference_hadamard_transform_npow2(x_np, block_size=192, normalize=True)
+
+        x_torch = torch.tensor(x_np, device="mps", dtype=torch.float16)
+        result = hadamard_transform_metal(x_torch, block_size=192, normalize=True)
         result_np = result.cpu().float().numpy()
 
         np.testing.assert_allclose(result_np, expected, rtol=2e-2, atol=2e-2)

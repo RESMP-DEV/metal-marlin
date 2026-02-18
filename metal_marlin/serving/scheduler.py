@@ -820,6 +820,15 @@ class BatchScheduler(FCFSScheduler):
         super().add_request(request)
         self._insertion_stats["total_inserted"] += 1
 
+    def _add_request_no_stats(self, request: GenerationRequest) -> None:
+        """Add request without updating stats (for batch insertion use)."""
+        if not self._check_queue_capacity():
+            raise QueueFullError(
+                f"Cannot add request {request.request_id}: "
+                f"waiting queue full ({len(self.waiting)} >= {self.max_queue_size})"
+            )
+        super().add_request(request)
+
     def insert_batch(
         self,
         requests: list[GenerationRequest],
@@ -845,7 +854,7 @@ class BatchScheduler(FCFSScheduler):
             case InsertionPolicy.ENQUEUE:
                 for req in requests:
                     if self._check_queue_capacity():
-                        self.add_request(req)
+                        self._add_request_no_stats(req)
                         inserted += 1
                     else:
                         self._insertion_stats["total_dropped"] += 1

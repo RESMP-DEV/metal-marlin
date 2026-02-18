@@ -76,9 +76,9 @@ TRELLIS_PUBLIC_API_SYMBOLS: tuple[str, ...] = (
 
 
 # Batch size for MoE layer command buffer commits.
-# Increasing this from 4 to 12 reduces GPU command buffer commits from ~12 to ~4
+# Increasing this to 12 reduces GPU command buffer commits from ~12 to ~4
 # for a typical 48-layer MoE model, improving forward pass latency.
-LAYERS_PER_BATCH = 8  # Was 4, reduces commits from ~12 to ~6
+LAYERS_PER_BATCH = 12  # Was 4, reduces commits from ~12 to ~4
 
 
 @torch.compile(mode="reduce-overhead", fullgraph=True)

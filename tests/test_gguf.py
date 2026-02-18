@@ -578,6 +578,257 @@ class TestQ4KIntegration:
             os.unlink(gguf_path)
 
 
+# ============================================================================
+# Test: GGUF Metadata Extraction
+# ============================================================================
+
+
+class TestGGUFMetadataExtraction:
+    """Test GGUF metadata extraction for config parity."""
+
+    def test_basic_metadata_properties(self):
+        """Test basic metadata property access."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "llama",
+            "general.name": "Test Model",
+            "general.file_type": 12,  # Q4_K
+        }, version=3, tensor_count=10)
+
+        assert meta.architecture == "llama"
+        assert meta.model_name == "Test Model"
+        assert meta.file_type == 12
+        assert meta.file_type_name == "MOSTLY_Q4_K_M"
+        assert meta.tensor_count == 10
+        # version property returns GGUF format version
+        assert meta.version == 3
+
+    def test_extended_metadata_properties(self):
+        """Test extended metadata properties for config parity."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.author": "Test Author",
+            "general.organization": "Test Org",
+            "general.version": "1.0.0",
+            "general.description": "A test model",
+            "general.license": "MIT",
+            "general.license.link": "https://opensource.org/licenses/MIT",
+            "general.url": "https://example.com/model",
+            "general.tags": ["test", "llm", "quantized"],
+            "general.languages": ["en"],
+            "general.dataset": "test-dataset",
+            "general.basename": "test-model",
+            "general.finetune": "test-finetune",
+            "general.quantized_by": "llama.cpp",
+            "general.size_label": "7B",
+        }, version=3, tensor_count=5)
+
+        assert meta.author == "Test Author"
+        assert meta.organization == "Test Org"
+        assert meta.model_version == "1.0.0"
+        assert meta.description == "A test model"
+        assert meta.license == "MIT"
+        assert meta.license_link == "https://opensource.org/licenses/MIT"
+        assert meta.url == "https://example.com/model"
+        assert meta.tags == ["test", "llm", "quantized"]
+        assert meta.languages == ["en"]
+        assert meta.dataset == "test-dataset"
+        assert meta.basename == "test-model"
+        assert meta.finetune == "test-finetune"
+        assert meta.quantized_by == "llama.cpp"
+        assert meta.size_label == "7B"
+
+    def test_rope_scaling_properties(self):
+        """Test extended RoPE scaling properties."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.rope.freq_base": 10000.0,
+            "general.rope.scaling.type": "yarn",
+            "general.rope.scaling.factor": 8.0,
+            "general.rope.scaling.original_context_length": 4096,
+            "general.rope.scaling.finetuned": True,
+            "general.rope.scaling.beta_fast": 32,
+            "general.rope.scaling.beta_slow": 1,
+            "general.rope.scaling.attn_factor": 1.0,
+        }, version=3, tensor_count=1)
+
+        assert meta.rope_freq_base == 10000.0
+        assert meta.rope_scaling_type == "yarn"
+        assert meta.rope_scaling_factor == 8.0
+        assert meta.rope_scaling_original_context == 4096
+        assert meta.rope_scaling_finetuned is True
+        assert meta.rope_scaling_beta_fast == 32
+        assert meta.rope_scaling_beta_slow == 1
+        assert meta.rope_scaling_attn_factor == 1.0
+
+    def test_ssm_properties(self):
+        """Test SSM (Mamba) metadata properties."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "mamba",
+            "general.ssm.conv_kernel": 4,
+            "general.ssm.inner_size": 64,
+            "general.ssm.state_size": 16,
+            "general.ssm.time_step_rank": 16,
+        }, version=3, tensor_count=10)
+
+        assert meta.architecture == "mamba"
+        assert meta.ssm_conv_kernel == 4
+        assert meta.ssm_inner_size == 64
+        assert meta.ssm_state_size == 16
+        assert meta.ssm_time_step_rank == 16
+
+    def test_split_metadata_properties(self):
+        """Test split/sharding metadata properties."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "split.no": 0,
+            "split.count": 2,
+            "split.tensors.count": 50,
+            "split.tensors.all.count": 100,
+        }, version=3, tensor_count=50)
+
+        assert meta.split_no == 0
+        assert meta.split_count == 2
+        assert meta.split_tensors_count == 50
+        assert meta.split_tensors_all_count == 100
+
+    def test_extended_tokenizer_properties(self):
+        """Test extended tokenizer metadata properties."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "tokenizer.ggml.model": "gpt2",
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.ggml.eos_token_id": 2,
+            "tokenizer.ggml.add_bos_token": True,
+            "tokenizer.ggml.add_eos_token": False,
+            "tokenizer.chat_template": "{% for message in messages %}{{ message.content }}{% endfor %}",
+            "tokenizer.ggml.prefix_token_id": 3,
+            "tokenizer.ggml.suffix_token_id": 4,
+            "tokenizer.ggml.middle_token_id": 5,
+            "tokenizer.ggml.eot_token_id": 6,
+        }, version=3, tensor_count=1)
+
+        assert meta.tokenizer_model == "gpt2"
+        assert meta.bos_token_id == 1
+        assert meta.eos_token_id == 2
+        assert meta.add_bos_token is True
+        assert meta.add_eos_token is False
+        assert meta.chat_template == "{% for message in messages %}{{ message.content }}{% endfor %}"
+        assert meta.prefix_token_id == 3
+        assert meta.suffix_token_id == 4
+        assert meta.middle_token_id == 5
+        assert meta.eot_token_id == 6
+
+    def test_extract_config_includes_all_fields(self):
+        """Test that extract_config includes all metadata fields."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "llama",
+            "general.name": "Test Model",
+            "general.author": "Test Author",
+            "general.license": "MIT",
+            "general.vocab_size": 32000,
+            "general.embedding_length": 4096,
+            "general.block_count": 32,
+            "general.context_length": 8192,
+            "general.rope.scaling.beta_fast": 32,
+            "general.ssm.conv_kernel": 4,
+            "tokenizer.ggml.bos_token_id": 1,
+            "tokenizer.chat_template": "test template",
+        }, version=3, tensor_count=100)
+
+        config = meta.extract_config()
+
+        # Verify basic fields
+        assert config["architecture"] == "llama"
+        assert config["name"] == "Test Model"
+        assert config["vocab_size"] == 32000
+
+        # Verify extended metadata fields
+        assert config["author"] == "Test Author"
+        assert config["license"] == "MIT"
+
+        # Verify RoPE fields
+        assert config["rope_scaling_beta_fast"] == 32
+
+        # Verify SSM fields
+        assert config["ssm_conv_kernel"] == 4
+
+        # Verify tokenizer fields
+        assert config["bos_token_id"] == 1
+        assert config["chat_template"] == "test template"
+
+        # Verify GGUF metadata
+        assert config["GGUF"]["version"] == 3
+        assert config["GGUF"]["tensor_count"] == 100
+
+    def test_summary_includes_extended_metadata(self):
+        """Test that summary includes extended metadata when available."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "mamba",
+            "general.name": "Test Mamba",
+            "general.author": "Test Author",
+            "general.license": "Apache-2.0",
+            "general.ssm.conv_kernel": 4,
+            "tokenizer.chat_template": "test template",
+        }, version=3, tensor_count=50)
+
+        summary = meta.summary()
+
+        # Check that extended metadata appears in summary
+        assert "Test Author" in summary
+        assert "Apache-2.0" in summary
+        assert "SSM (Mamba) configuration" in summary
+        assert "Conv kernel: 4" in summary
+        assert "Chat template:" in summary
+
+    def test_is_architecture_helper(self):
+        """Test the is_architecture helper method."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "llama",
+        }, version=3, tensor_count=1)
+
+        assert meta.is_architecture("llama") is True
+        assert meta.is_architecture("LLaMA") is True  # Case insensitive
+        assert meta.is_architecture("Llama") is True
+        assert meta.is_architecture("mistral") is False
+        assert meta.is_architecture("llama", "mistral") is True  # Multiple options
+
+    def test_get_arch_key_helper(self):
+        """Test the get_arch_key helper method."""
+        from metal_marlin.gguf_loader import GGUFMetadata
+
+        meta = GGUFMetadata({
+            "general.architecture": "llama",
+            "llama.rope.freq_base": 500000.0,
+            "general.rope.freq_base": 10000.0,  # Fallback
+        }, version=3, tensor_count=1)
+
+        # Should find architecture-specific key
+        assert meta.get_arch_key("rope.freq_base") == 500000.0
+
+        # Should return None for non-existent key
+        assert meta.get_arch_key("nonexistent.key") is None
+
+        # Should fallback to general if no architecture
+        meta_no_arch = GGUFMetadata({
+            "general.rope.freq_base": 10000.0,
+        }, version=3, tensor_count=1)
+        assert meta_no_arch.get_arch_key("rope.freq_base") is None
+
+
 if __name__ == "__main__":
     # Run tests with pytest
     import sys

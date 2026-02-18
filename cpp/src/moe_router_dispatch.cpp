@@ -12,16 +12,36 @@
 
 #if defined(__ARM_NEON)
 #include <arm_neon.h>
+// Additional ARM headers for optimization hints
+#if defined(__APPLE__)
+#include <os/lock.h>
+#endif
 #elif defined(__SSE2__)
 #include <immintrin.h>
 #endif
 
+// Compiler optimization hints
+#if defined(__GNUC__) || defined(__clang__)
+#define MM_LIKELY(x) __builtin_expect(!!(x), 1)
+#define MM_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#define MM_INLINE __attribute__((always_inline)) inline
+#define MM_HOT __attribute__((hot))
+#define MM_PREFETCH(addr, rw, locality) __builtin_prefetch(addr, rw, locality)
+#else
+#define MM_LIKELY(x) (x)
+#define MM_UNLIKELY(x) (x)
+#define MM_INLINE inline
+#define MM_HOT
+#define MM_PREFETCH(addr, rw, locality)
+#endif
+
 namespace {
 
-inline float max4_simd(const float* values) {
+MM_INLINE MM_HOT float max4_simd(const float* values) {
 #if defined(__ARM_NEON)
 #if defined(__aarch64__)
-    return vmaxvq_f32(vld1q_f32(values));
+    const float32x4_t v = vld1q_f32(values);
+    return vmaxvq_f32(v);
 #else
     const float32x4_t v = vld1q_f32(values);
     float32x2_t m = vmax_f32(vget_low_f32(v), vget_high_f32(v));
@@ -38,12 +58,15 @@ inline float max4_simd(const float* values) {
 #endif
 }
 
-inline void bf16_row_to_float(const uint16_t* bf16_row,
-                              float* fp32_row,
+MM_INLINE MM_HOT void bf16_row_to_float(const uint16_t* bf16_row,
+                              float* __restrict fp32_row,
                               int32_t hidden_dim) {
 #if defined(__ARM_NEON)
     int32_t d = 0;
+    // Main loop: 16 elements at a time with prefetching
     for (; d + 16 <= hidden_dim; d += 16) {
+        MM_PREFETCH(bf16_row + d + 64, 0, 3);
+        
         const uint16x8_t p0 = vld1q_u16(bf16_row + d);
         const uint16x8_t p1 = vld1q_u16(bf16_row + d + 8);
         
@@ -57,6 +80,7 @@ inline void bf16_row_to_float(const uint16_t* bf16_row,
         vst1q_f32(fp32_row + d + 8, vreinterpretq_f32_u32(l1));
         vst1q_f32(fp32_row + d + 12, vreinterpretq_f32_u32(h1));
     }
+    // Secondary loop: 8 elements
     for (; d + 8 <= hidden_dim; d += 8) {
         const uint16x8_t packed = vld1q_u16(bf16_row + d);
         const uint32x4_t low = vshll_n_u16(vget_low_u16(packed), 16);
@@ -64,33 +88,56 @@ inline void bf16_row_to_float(const uint16_t* bf16_row,
         vst1q_f32(fp32_row + d, vreinterpretq_f32_u32(low));
         vst1q_f32(fp32_row + d + 4, vreinterpretq_f32_u32(high));
     }
+    // Cleanup loop
     for (; d < hidden_dim; ++d) {
-        fp32_row[d] =
-            std::bit_cast<float>(static_cast<uint32_t>(bf16_row[d]) << 16);
+        uint32_t val = static_cast<uint32_t>(bf16_row[d]) << 16;
+        std::memcpy(&fp32_row[d], &val, sizeof(float));
     }
 #else
     for (int32_t d = 0; d < hidden_dim; ++d) {
-        fp32_row[d] =
-            std::bit_cast<float>(static_cast<uint32_t>(bf16_row[d]) << 16);
+        uint32_t val = static_cast<uint32_t>(bf16_row[d]) << 16;
+        std::memcpy(&fp32_row[d], &val, sizeof(float));
     }
 #endif
 }
 
-inline float dot_product_simd(const float* lhs,
-                              const float* rhs,
+MM_INLINE MM_HOT float dot_product_simd(const float* __restrict lhs,
+                              const float* __restrict rhs,
                               int32_t hidden_dim) {
 #if defined(__ARM_NEON)
     float32x4_t acc0 = vdupq_n_f32(0.0f);
     float32x4_t acc1 = vdupq_n_f32(0.0f);
+    float32x4_t acc2 = vdupq_n_f32(0.0f);
+    float32x4_t acc3 = vdupq_n_f32(0.0f);
     int32_t d = 0;
-    for (; d + 8 <= hidden_dim; d += 8) {
-        acc0 = vmlaq_f32(acc0, vld1q_f32(lhs + d), vld1q_f32(rhs + d));
-        acc1 = vmlaq_f32(acc1, vld1q_f32(lhs + d + 4), vld1q_f32(rhs + d + 4));
+    
+    // Unrolled 16-element loop with prefetching
+    for (; d + 16 <= hidden_dim; d += 16) {
+        MM_PREFETCH(lhs + d + 64, 0, 3);
+        MM_PREFETCH(rhs + d + 64, 0, 3);
+        
+        acc0 = vfmaq_f32(acc0, vld1q_f32(lhs + d), vld1q_f32(rhs + d));
+        acc1 = vfmaq_f32(acc1, vld1q_f32(lhs + d + 4), vld1q_f32(rhs + d + 4));
+        acc2 = vfmaq_f32(acc2, vld1q_f32(lhs + d + 8), vld1q_f32(rhs + d + 8));
+        acc3 = vfmaq_f32(acc3, vld1q_f32(lhs + d + 12), vld1q_f32(rhs + d + 12));
     }
-    float32x4_t acc = vaddq_f32(acc0, acc1);
-    float32x2_t reduced = vadd_f32(vget_low_f32(acc), vget_high_f32(acc));
-    reduced = vpadd_f32(reduced, reduced);
-    float out = vget_lane_f32(reduced, 0);
+    // 8-element loop
+    for (; d + 8 <= hidden_dim; d += 8) {
+        acc0 = vfmaq_f32(acc0, vld1q_f32(lhs + d), vld1q_f32(rhs + d));
+        acc1 = vfmaq_f32(acc1, vld1q_f32(lhs + d + 4), vld1q_f32(rhs + d + 4));
+    }
+    // 4-element loop
+    for (; d + 4 <= hidden_dim; d += 4) {
+        acc0 = vfmaq_f32(acc0, vld1q_f32(lhs + d), vld1q_f32(rhs + d));
+    }
+    
+    // Horizontal reduction
+    float32x4_t acc01 = vaddq_f32(acc0, acc1);
+    float32x4_t acc23 = vaddq_f32(acc2, acc3);
+    float32x4_t acc = vaddq_f32(acc01, acc23);
+    float out = vaddvq_f32(acc);
+    
+    // Cleanup
     for (; d < hidden_dim; ++d) {
         out += lhs[d] * rhs[d];
     }
@@ -98,12 +145,27 @@ inline float dot_product_simd(const float* lhs,
 #elif defined(__SSE2__)
     __m128 acc0 = _mm_setzero_ps();
     __m128 acc1 = _mm_setzero_ps();
+    __m128 acc2 = _mm_setzero_ps();
+    __m128 acc3 = _mm_setzero_ps();
     int32_t d = 0;
+    
+    for (; d + 16 <= hidden_dim; d += 16) {
+        acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_loadu_ps(lhs + d), _mm_loadu_ps(rhs + d)));
+        acc1 = _mm_add_ps(acc1, _mm_mul_ps(_mm_loadu_ps(lhs + d + 4), _mm_loadu_ps(rhs + d + 4)));
+        acc2 = _mm_add_ps(acc2, _mm_mul_ps(_mm_loadu_ps(lhs + d + 8), _mm_loadu_ps(rhs + d + 8)));
+        acc3 = _mm_add_ps(acc3, _mm_mul_ps(_mm_loadu_ps(lhs + d + 12), _mm_loadu_ps(rhs + d + 12)));
+    }
     for (; d + 8 <= hidden_dim; d += 8) {
         acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_loadu_ps(lhs + d), _mm_loadu_ps(rhs + d)));
         acc1 = _mm_add_ps(acc1, _mm_mul_ps(_mm_loadu_ps(lhs + d + 4), _mm_loadu_ps(rhs + d + 4)));
     }
-    __m128 acc = _mm_add_ps(acc0, acc1);
+    for (; d + 4 <= hidden_dim; d += 4) {
+        acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_loadu_ps(lhs + d), _mm_loadu_ps(rhs + d)));
+    }
+    
+    __m128 acc01 = _mm_add_ps(acc0, acc1);
+    __m128 acc23 = _mm_add_ps(acc2, acc3);
+    __m128 acc = _mm_add_ps(acc01, acc23);
     __m128 sum = _mm_add_ps(acc, _mm_movehl_ps(acc, acc));
     sum = _mm_add_ss(sum, _mm_shuffle_ps(sum, sum, 0x55));
     float out = _mm_cvtss_f32(sum);
@@ -241,28 +303,29 @@ void FastRouterDispatcher::reserve_batch_output_buffers(RouterBatchOutput* outpu
     output->dispatch_info.expert_offsets.resize(static_cast<size_t>(num_experts_) + 1U, 0);
 }
 
-void FastRouterDispatcher::compute_logits_batch(const uint16_t* token_activations_bf16,
+void FastRouterDispatcher::compute_logits_batch(const uint16_t* __restrict token_activations_bf16,
                                                 int32_t num_tokens,
-                                                const float* router_weights,
-                                                const float* router_bias,
-                                                float* out_logits) const {
-    // Decode path optimization: batch a small number of tokens to reuse each
-    // expert weight row across multiple dot products before cache eviction.
-    constexpr int32_t kTokenBlock = 4;
+                                                const float* __restrict router_weights,
+                                                const float* __restrict router_bias,
+                                                float* __restrict out_logits) const {
+    // Decode path optimization: batch tokens to reuse expert weight rows in cache
+    // Increased block size for better cache utilization on modern CPUs
+    constexpr int32_t kTokenBlock = 8;
 
     thread_local std::vector<float> token_block_fp32;
     const size_t required =
         static_cast<size_t>(kTokenBlock) * static_cast<size_t>(hidden_dim_);
-    if (token_block_fp32.size() < required) {
+    if (MM_UNLIKELY(token_block_fp32.size() < required)) {
         token_block_fp32.resize(required);
     }
 
-    std::array<const float*, kTokenBlock> token_rows{};
-    std::array<float*, kTokenBlock> logits_rows{};
+    alignas(64) std::array<const float*, kTokenBlock> token_rows{};
+    alignas(64) std::array<float*, kTokenBlock> logits_rows{};
 
     for (int32_t token_base = 0; token_base < num_tokens; token_base += kTokenBlock) {
         const int32_t block_tokens = std::min(kTokenBlock, num_tokens - token_base);
 
+        // Phase 1: Convert BF16 to FP32 for all tokens in block
         for (int32_t local_token = 0; local_token < block_tokens; ++local_token) {
             const int32_t token = token_base + local_token;
             const uint16_t* token_row =
@@ -276,12 +339,34 @@ void FastRouterDispatcher::compute_logits_batch(const uint16_t* token_activation
                 out_logits + static_cast<size_t>(token) * num_experts_;
         }
 
+        // Phase 2: Compute dot products with weight rows
+        // Process experts in chunks to improve weight cache locality
         for (int32_t expert = 0; expert < num_experts_; ++expert) {
             const float* weight_row =
                 router_weights + static_cast<size_t>(expert) * hidden_dim_;
             const float bias = router_bias ? router_bias[expert] : 0.0f;
 
-            for (int32_t local_token = 0; local_token < block_tokens; ++local_token) {
+            // Prefetch next expert's weights
+            if (MM_LIKELY(expert + 1 < num_experts_)) {
+                MM_PREFETCH(router_weights + static_cast<size_t>(expert + 1) * hidden_dim_, 0, 1);
+            }
+
+            // Unrolled loop for common small block sizes
+            int32_t local_token = 0;
+            
+            // Handle 4 tokens at a time (common for top-k=4)
+            for (; local_token + 4 <= block_tokens; local_token += 4) {
+                logits_rows[local_token][expert] =
+                    bias + dot_product_simd(token_rows[local_token], weight_row, hidden_dim_);
+                logits_rows[local_token + 1][expert] =
+                    bias + dot_product_simd(token_rows[local_token + 1], weight_row, hidden_dim_);
+                logits_rows[local_token + 2][expert] =
+                    bias + dot_product_simd(token_rows[local_token + 2], weight_row, hidden_dim_);
+                logits_rows[local_token + 3][expert] =
+                    bias + dot_product_simd(token_rows[local_token + 3], weight_row, hidden_dim_);
+            }
+            // Handle remaining tokens
+            for (; local_token < block_tokens; ++local_token) {
                 logits_rows[local_token][expert] =
                     bias + dot_product_simd(token_rows[local_token], weight_row, hidden_dim_);
             }
@@ -289,41 +374,82 @@ void FastRouterDispatcher::compute_logits_batch(const uint16_t* token_activation
     }
 }
 
-void FastRouterDispatcher::select_top2_for_token_simd(const float* token_logits,
+void FastRouterDispatcher::select_top2_for_token_simd(const float* __restrict token_logits,
                                                       TopKCandidate* topk) const {
     const float neg_inf = -std::numeric_limits<float>::infinity();
 
+    // Use vectorized comparison where possible
+#if defined(__ARM_NEON) && defined(__aarch64__)
+    // Initialize with first two elements
+    float best0 = token_logits[0];
+    float best1 = token_logits[1];
+    int32_t idx0 = 0;
+    int32_t idx1 = 1;
+    
+    if (best1 > best0) {
+        std::swap(best0, best1);
+        std::swap(idx0, idx1);
+    }
+
+    int32_t expert = 2;
+    
+    // Process 4 experts at a time using SIMD
+    for (; expert + 4 <= num_experts_; expert += 4) {
+        float32x4_t vals = vld1q_f32(token_logits + expert);
+        
+        // Extract and compare each value
+        float v[4];
+        vst1q_f32(v, vals);
+        
+        for (int i = 0; i < 4; ++i) {
+            const float value = v[i];
+            if (value > best0) {
+                best1 = best0;
+                idx1 = idx0;
+                best0 = value;
+                idx0 = expert + i;
+            } else if (value > best1) {
+                best1 = value;
+                idx1 = expert + i;
+            }
+        }
+    }
+    // Process remaining experts
+    for (; expert < num_experts_; ++expert) {
+        const float value = token_logits[expert];
+        if (value > best0) {
+            best1 = best0;
+            idx1 = idx0;
+            best0 = value;
+            idx0 = expert;
+        } else if (value > best1) {
+            best1 = value;
+            idx1 = expert;
+        }
+    }
+#else
+    // Scalar implementation with branch prediction hints
     float best0 = neg_inf;
     float best1 = neg_inf;
     int32_t idx0 = -1;
     int32_t idx1 = -1;
 
-    auto update_top2 = [&](float value, int32_t expert_id) {
-        if (value > best0) {
+    for (int32_t expert = 0; expert < num_experts_; ++expert) {
+        const float value = token_logits[expert];
+        if (MM_LIKELY(value <= best1)) {
+            continue;
+        }
+        if (MM_LIKELY(value > best0)) {
             best1 = best0;
             idx1 = idx0;
             best0 = value;
-            idx0 = expert_id;
-        } else if (value > best1) {
+            idx0 = expert;
+        } else {
             best1 = value;
-            idx1 = expert_id;
+            idx1 = expert;
         }
-    };
-
-    int32_t expert = 0;
-    for (; expert + 4 <= num_experts_; expert += 4) {
-        const float block_max = max4_simd(token_logits + expert);
-        if (block_max <= best1) {
-            continue;
-        }
-        update_top2(token_logits[expert], expert);
-        update_top2(token_logits[expert + 1], expert + 1);
-        update_top2(token_logits[expert + 2], expert + 2);
-        update_top2(token_logits[expert + 3], expert + 3);
     }
-    for (; expert < num_experts_; ++expert) {
-        update_top2(token_logits[expert], expert);
-    }
+#endif
 
     topk[0].value = best0;
     topk[0].expert_id = idx0;

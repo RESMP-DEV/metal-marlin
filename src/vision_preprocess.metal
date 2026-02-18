@@ -849,9 +849,8 @@ constant constexpr uint TILE_PIXELS = TILE_SIZE * TILE_SIZE;
 // ============================================================================
 
 /// Tile-based bilinear resize for large images (1024x1024+).
-/// Each threadgroup loads a tile of input, processes all output pixels that
-/// map to that tile, then writes results. Reduces global memory accesses by
-/// exploiting spatial locality.
+/// Each threadgroup processes a TILE_SIZE x TILE_SIZE tile of output.
+/// Uses thread ID to determine pixel within tile, avoiding redundant loops.
 ///
 /// @param input       Input image [N, H_in, W_in, C]
 /// @param output      Output image [N, H_out, W_out, C]
@@ -872,73 +871,47 @@ kernel void image_resize_bilinear_tiled(
     uint channels = params[5];
     bool nhwc = params[6] != 0;
 
-    // Each threadgroup processes a TILE_SIZE x TILE_SIZE region of output
     uint tile_x = tgid.x * TILE_SIZE;
     uint tile_y = tgid.y * TILE_SIZE;
     uint n = tgid.z;
 
     if (n >= batch_size) return;
 
-    // Precompute scale factors
-    float scale_x = float(W_in - 1) / float(W_out - 1);
-    float scale_y = float(H_in - 1) / float(H_out - 1);
+    // Use local thread ID for pixel within tile
+    uint ty = lid.y;
+    uint tx = lid.x;
+
+    uint y_out = tile_y + ty;
+    uint x_out = tile_x + tx;
+
+    if (y_out >= H_out || x_out >= W_out) return;
+
+    float u = (float(x_out) + 0.5f) / float(W_out);
+    float v = (float(y_out) + 0.5f) / float(H_out);
 
     uint input_offset = n * H_in * W_in * channels;
+    uint output_offset = n * H_out * W_out * channels;
 
-    // Process pixels in this tile
-    for (uint ty = 0; ty < TILE_SIZE; ++ty) {
-        uint y_out = tile_y + ty;
-        if (y_out >= H_out) continue;
+    float4 sampled = sample_bilinear(
+        input + input_offset,
+        u, v,
+        W_in, H_in, channels, nhwc
+    );
 
-        float py = float(y_out) * scale_y;
-        uint y0 = uint(py);
-        uint y1 = min(y0 + 1, H_in - 1);
-        float fy = py - float(y0);
-
-        for (uint tx = 0; tx < TILE_SIZE; ++tx) {
-            uint x_out = tile_x + tx;
-            if (x_out >= W_out) continue;
-
-            float px = float(x_out) * scale_x;
-            uint x0 = uint(px);
-            uint x1 = min(x0 + 1, W_in - 1);
-            float fx = px - float(x0);
-
-            uint output_offset = n * H_out * W_out * channels;
-
-            for (uint c = 0; c < channels; ++c) {
-                float v00, v01, v10, v11;
-
-                if (nhwc) {
-                    v00 = input[input_offset + y0 * W_in * channels + x0 * channels + c];
-                    v01 = input[input_offset + y0 * W_in * channels + x1 * channels + c];
-                    v10 = input[input_offset + y1 * W_in * channels + x0 * channels + c];
-                    v11 = input[input_offset + y1 * W_in * channels + x1 * channels + c];
-                } else {
-                    v00 = input[input_offset + c * H_in * W_in + y0 * W_in + x0];
-                    v01 = input[input_offset + c * H_in * W_in + y0 * W_in + x1];
-                    v10 = input[input_offset + c * H_in * W_in + y1 * W_in + x0];
-                    v11 = input[input_offset + c * H_in * W_in + y1 * W_in + x1];
-                }
-
-                float top = mix(v00, v01, fx);
-                float bot = mix(v10, v11, fx);
-                float result = mix(top, bot, fy);
-
-                uint out_idx;
-                if (nhwc) {
-                    out_idx = output_offset + y_out * W_out * channels + x_out * channels + c;
-                } else {
-                    out_idx = output_offset + c * H_out * W_out + y_out * W_out + x_out;
-                }
-                output[out_idx] = result;
-            }
+    for (uint c = 0; c < channels; ++c) {
+        uint out_idx;
+        if (nhwc) {
+            out_idx = output_offset + y_out * W_out * channels + x_out * channels + c;
+        } else {
+            out_idx = output_offset + c * H_out * W_out + y_out * W_out + x_out;
         }
+        output[out_idx] = sampled[c];
     }
 }
 
 /// Threadgroup memory variant of tile-based resize.
-/// Loads input tile into threadgroup memory for faster repeated access.
+/// Optimizes for cases where input reuse is high (e.g. upscaling or slight downscaling).
+/// Limits: Only supports up to 4 channels (RGBA).
 kernel void image_resize_bilinear_tiled_shared(
     device const float* input   [[buffer(0)]],
     device float* output        [[buffer(1)]],
@@ -947,7 +920,8 @@ kernel void image_resize_bilinear_tiled_shared(
     uint3 tgid                  [[threadgroup_position_in_grid]],
     uint3 lid                   [[thread_position_in_threadgroup]]
 ) {
-    threadgroup float shared_input[TILE_SIZE + 2][TILE_SIZE + 2];
+    // Support up to 4 channels in shared memory (float4)
+    threadgroup float4 shared_input[TILE_SIZE + 2][TILE_SIZE + 2];
 
     uint batch_size = params[0];
     uint H_in = params[1];
@@ -956,6 +930,8 @@ kernel void image_resize_bilinear_tiled_shared(
     uint W_out = params[4];
     uint channels = params[5];
     bool nhwc = params[6] != 0;
+
+    if (channels > 4) return; // Fallback or fail for >4 channels
 
     uint tile_x = tgid.x * TILE_SIZE;
     uint tile_y = tgid.y * TILE_SIZE;
@@ -966,21 +942,38 @@ kernel void image_resize_bilinear_tiled_shared(
     float scale_x = float(W_in) / float(W_out);
     float scale_y = float(H_in) / float(H_out);
 
+    // Calculate input tile boundaries
+    // We map the output tile to input coordinates to find what to load
+    int in_tile_x = int(float(tile_x) * scale_x);
+    int in_tile_y = int(float(tile_y) * scale_y);
+
     // Load input tile into shared memory (with 1-pixel boundary)
+    // Parallel loading: each thread loads one pixel if possible
+    // Since TILE_SIZE is small (16), we can just loop or map threads
     for (uint i = lid.y; i < TILE_SIZE + 2; i += TILE_SIZE) {
         for (uint j = lid.x; j < TILE_SIZE + 2; j += TILE_SIZE) {
-            int y_in = int(tile_y * scale_y) + int(i) - 1;
-            int x_in = int(tile_x * scale_x) + int(j) - 1;
+            int y_in = in_tile_y + int(i) - 1;
+            int x_in = in_tile_x + int(j) - 1;
+            
             y_in = clamp(y_in, 0, int(H_in) - 1);
             x_in = clamp(x_in, 0, int(W_in) - 1);
 
             uint input_offset = n * H_in * W_in * channels;
-            // Load first channel (RGB images share same spatial coords)
+            
+            float4 val = float4(0.0f);
             if (nhwc) {
-                shared_input[i][j] = input[input_offset + y_in * W_in * channels + x_in * channels];
+                // Load contiguous channels
+                uint idx = input_offset + y_in * W_in * channels + x_in * channels;
+                for (uint c = 0; c < channels; ++c) {
+                    val[c] = input[idx + c];
+                }
             } else {
-                shared_input[i][j] = input[input_offset + 0 * H_in * W_in + y_in * W_in + x_in];
+                // Load planar channels
+                for (uint c = 0; c < channels; ++c) {
+                    val[c] = input[input_offset + c * H_in * W_in + y_in * W_in + x_in];
+                }
             }
+            shared_input[i][j] = val;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -988,6 +981,7 @@ kernel void image_resize_bilinear_tiled_shared(
     // Process output pixels
     uint local_y = lid.y;
     uint local_x = lid.x;
+    
     if (local_y < TILE_SIZE && local_x < TILE_SIZE) {
         uint y_out = tile_y + local_y;
         uint x_out = tile_x + local_x;
@@ -998,57 +992,44 @@ kernel void image_resize_bilinear_tiled_shared(
 
             float px = u * float(W_in - 1);
             float py = v * float(H_in - 1);
+            
+            // Map to shared memory coordinates relative to loaded tile
+            float sx = px - float(in_tile_x) + 1.0f;
+            float sy = py - float(in_tile_y) + 1.0f;
+            
+            int x0 = int(sx);
+            int y0 = int(sy);
+            int x1 = x0 + 1;
+            int y1 = y0 + 1;
+            
+            float fx = sx - float(x0);
+            float fy = sy - float(y0);
+            
+            // Clamp to shared memory bounds
+            x0 = clamp(x0, 0, int(TILE_SIZE + 1));
+            y0 = clamp(y0, 0, int(TILE_SIZE + 1));
+            x1 = clamp(x1, 0, int(TILE_SIZE + 1));
+            y1 = clamp(y1, 0, int(TILE_SIZE + 1));
 
-            float fx = px - floor(px);
-            float fy = py - floor(py);
+            float4 v00 = shared_input[y0][x0];
+            float4 v01 = shared_input[y0][x1];
+            float4 v10 = shared_input[y1][x0];
+            float4 v11 = shared_input[y1][x1];
 
-            uint x0 = uint(floor(px)) - uint(tile_x * scale_x) + 1;
-            uint y0 = uint(floor(py)) - uint(tile_y * scale_y) + 1;
+            float4 top = mix(v00, v01, fx);
+            float4 bot = mix(v10, v11, fx);
+            float4 result = mix(top, bot, fy);
 
-            uint input_offset = n * H_out * W_out * channels;
             uint output_offset = n * H_out * W_out * channels;
 
             for (uint c = 0; c < channels; ++c) {
-                // Sample from shared memory with boundary checks
-                uint x0_safe = min(max(x0, 1u), TILE_SIZE);
-                uint y0_safe = min(max(y0, 1u), TILE_SIZE);
-                uint x1_safe = min(x0_safe + 1, TILE_SIZE + 1);
-                uint y1_safe = min(y0_safe + 1, TILE_SIZE + 1);
-
-                // For accurate sampling, we need to load from global memory
-                // at the exact coordinates since shared memory approximation
-                // loses precision at tile boundaries
-                uint gx0 = min(uint(px), W_in - 1);
-                uint gy0 = min(uint(py), H_in - 1);
-                uint gx1 = min(gx0 + 1, W_in - 1);
-                uint gy1 = min(gy0 + 1, H_in - 1);
-
-                uint in_offset = n * H_in * W_in * channels;
-                float v00, v01, v10, v11;
-
-                if (nhwc) {
-                    v00 = input[in_offset + gy0 * W_in * channels + gx0 * channels + c];
-                    v01 = input[in_offset + gy0 * W_in * channels + gx1 * channels + c];
-                    v10 = input[in_offset + gy1 * W_in * channels + gx0 * channels + c];
-                    v11 = input[in_offset + gy1 * W_in * channels + gx1 * channels + c];
-                } else {
-                    v00 = input[in_offset + c * H_in * W_in + gy0 * W_in + gx0];
-                    v01 = input[in_offset + c * H_in * W_in + gy0 * W_in + gx1];
-                    v10 = input[in_offset + c * H_in * W_in + gy1 * W_in + gx0];
-                    v11 = input[in_offset + c * H_in * W_in + gy1 * W_in + gx1];
-                }
-
-                float top = mix(v00, v01, fx);
-                float bot = mix(v10, v11, fx);
-                float result = mix(top, bot, fy);
-
                 uint out_idx;
                 if (nhwc) {
                     out_idx = output_offset + y_out * W_out * channels + x_out * channels + c;
                 } else {
                     out_idx = output_offset + c * H_out * W_out + y_out * W_out + x_out;
                 }
-                output[out_idx] = result;
+                output[out_idx] = result[c];
             }
         }
     }

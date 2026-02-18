@@ -53,22 +53,19 @@ constant constexpr uint FP4_PER_UINT = 8;
 // Utility
 // ---------------------------------------------------------------------------
 
-inline float simd_max_f32(float val, uint lane_id [[thread_index_in_simdgroup]]) {
-    val = max(val, simd_shuffle_xor(val, 16));
-    val = max(val, simd_shuffle_xor(val, 8));
-    val = max(val, simd_shuffle_xor(val, 4));
-    val = max(val, simd_shuffle_xor(val, 2));
-    val = max(val, simd_shuffle_xor(val, 1));
-    return val;
+// SIMDgroup-level reduction using hardware-accelerated intrinsics
+// simd_sum/simd_max use dedicated reduction hardware on Apple Silicon
+// These are significantly faster than manual shuffle_xor trees:
+// - Single instruction vs 5 dependent instructions
+// - Lower latency and energy consumption
+// - No cross-lane communication overhead
+
+inline float simd_max_f32(float val) {
+    return simd_max(val);
 }
 
 inline float simd_sum_f32(float val) {
-    val += simd_shuffle_xor(val, 16);
-    val += simd_shuffle_xor(val, 8);
-    val += simd_shuffle_xor(val, 4);
-    val += simd_shuffle_xor(val, 2);
-    val += simd_shuffle_xor(val, 1);
-    return val;
+    return simd_sum(val);
 }
 
 // ---------------------------------------------------------------------------

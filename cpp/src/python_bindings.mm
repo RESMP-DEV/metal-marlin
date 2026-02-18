@@ -36,6 +36,8 @@
 #import <Metal/Metal.h> // ObjC Metal types for native API calls
 
 #include "buffer_pool.hpp"
+#include "buffer_manager.hpp"
+#include "expert_buffer_pool.hpp"
 #include "direct_access.hpp"
 #include "encoder_cache.hpp"
 #include "gemm_dispatch.hpp"
@@ -43,8 +45,14 @@
 #include "metal_device.hpp"
 #include "moe_manager.hpp"
 #include "moe_router_dispatch.hpp"
+#include "pipeline.hpp"
+#include "norm_ops.hpp"
+#include "mla_attention.hpp"
+#include "weights_ops.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -62,124 +70,206 @@ using namespace metal_marlin::direct_access;
 // C++ Extension Compatibility Layer (_cpp_ext emulation)
 // =============================================================================
 
-/**
- * @brief ManagedBuffer wrapper for _cpp_ext compatibility.
- * Wraps direct_access::BufferPtr and provides Python interface.
- */
-class ManagedBuffer {
-public:
-  explicit ManagedBuffer(BufferPtr ptr) : ptr_(std::move(ptr)) {}
+#include "python_types.hpp"
+#include "batch_dispatch.hpp"
 
-  size_t length() const { return ptr_.length(); }
-  uintptr_t data_ptr() const {
-    return reinterpret_cast<uintptr_t>(ptr_.contents());
-  }
-
-  BufferPtr &ptr() { return ptr_; }
-
-private:
-  BufferPtr ptr_;
-};
+// =============================================================================
+// Serving Mode Context (_cpp_ext.serving_cpp compatibility)
+// =============================================================================
 
 /**
- * @brief MetalContext wrapper for _cpp_ext compatibility.
- * Consolidates device, queues, and library management.
+ * @brief ServingContext for high-performance serving mode dispatch.
+ * 
+ * This class provides a serving-optimized interface that:
+ * - Pre-creates and caches command encoders for low-latency dispatch
+ * - Provides async/sync dispatch modes for prefill/decode
+ * - Tracks serving metrics (queue depth, latency)
  */
-class MetalContext {
+class ServingContext {
 public:
-  MetalContext() : device_(get_default_device()) {}
+  explicit ServingContext(MetalContext &ctx) : ctx_(ctx), 
+      dispatch_count_(0), total_dispatch_us_(0) {}
 
-  void load_metallib(const std::string &path) {
-    // Use LibraryManager for caching, but also expose raw library via
-    // direct_access
-    LibraryManager::instance().load_metallib(path);
-  }
+  // Synchronous dispatch for decode (low latency path)
+  void dispatch_sync(const std::string &kernel_name,
+                     std::tuple<uint32_t, uint32_t, uint32_t> grid,
+                     std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
+                     const std::vector<uintptr_t> &buffer_ptrs) {
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    id<MTLCommandBuffer> cmd = 
+        [(id)ctx_.device().primary_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
 
-  nb::object get_pipeline(const std::string &kernel_name,
-                          const std::string &metallib_path = "") {
-    MTL::Library *lib = nullptr;
-    if (!metallib_path.empty()) {
-      lib = LibraryManager::instance().load_metallib(metallib_path);
+    // Get or create pipeline
+    id<MTLComputePipelineState> pipeline = get_pipeline(kernel_name);
+    [encoder setComputePipelineState:pipeline];
+
+    // Bind buffers
+    for (size_t i = 0; i < buffer_ptrs.size(); ++i) {
+      id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(void*)buffer_ptrs[i];
+      [encoder setBuffer:buf offset:0 atIndex:i];
     }
 
-    MTL::Function *func =
-        LibraryManager::instance().get_kernel(kernel_name, lib);
+    MTLSize grid_size = MTLSizeMake(std::get<0>(grid), std::get<1>(grid), std::get<2>(grid));
+    MTLSize tg_size = MTLSizeMake(std::get<0>(threadgroup), std::get<1>(threadgroup), 
+                                  std::get<2>(threadgroup));
+    [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+
+    [encoder endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    auto end = std::chrono::high_resolution_clock::now();
+    total_dispatch_us_ += std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    dispatch_count_++;
+  }
+
+  // Async dispatch for prefill (throughput path)
+  nb::object dispatch_async(const std::string &kernel_name,
+                            std::tuple<uint32_t, uint32_t, uint32_t> grid,
+                            std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
+                            const std::vector<uintptr_t> &buffer_ptrs) {
+    id<MTLCommandBuffer> cmd = 
+        [(id)ctx_.device().primary_queue() commandBuffer];
+    id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+
+    id<MTLComputePipelineState> pipeline = get_pipeline(kernel_name);
+    [encoder setComputePipelineState:pipeline];
+
+    for (size_t i = 0; i < buffer_ptrs.size(); ++i) {
+      id<MTLBuffer> buf = (__bridge id<MTLBuffer>)(void*)buffer_ptrs[i];
+      [encoder setBuffer:buf offset:0 atIndex:i];
+    }
+
+    MTLSize grid_size = MTLSizeMake(std::get<0>(grid), std::get<1>(grid), std::get<2>(grid));
+    MTLSize tg_size = MTLSizeMake(std::get<0>(threadgroup), std::get<1>(threadgroup), 
+                                  std::get<2>(threadgroup));
+    [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+
+    [encoder endEncoding];
+    [cmd commit];
+
+    // Return a handle that can be waited on
+    void *cmd_handle = (__bridge_retained void *)cmd;
+    return nb::capsule(cmd_handle, "MTLCommandBuffer", [](void *ptr) noexcept {
+      if (ptr) (void)CFBridgingRelease(ptr);
+    });
+  }
+
+  // Wait for async dispatch to complete
+  void wait(nb::object handle) {
+    if (nb::isinstance<nb::capsule>(handle)) {
+      auto capsule = nb::cast<nb::capsule>(handle);
+      id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)capsule.data();
+      [cmd waitUntilCompleted];
+    }
+  }
+
+  // Check if async dispatch is complete (non-blocking)
+  bool is_complete(nb::object handle) {
+    if (nb::isinstance<nb::capsule>(handle)) {
+      auto capsule = nb::cast<nb::capsule>(handle);
+      id<MTLCommandBuffer> cmd = (__bridge id<MTLCommandBuffer>)capsule.data();
+      return cmd.status == MTLCommandBufferStatusCompleted;
+    }
+    return false;
+  }
+
+  // Get serving metrics
+  nb::dict metrics() const {
+    nb::dict m;
+    m["dispatch_count"] = dispatch_count_.load();
+    m["total_dispatch_us"] = total_dispatch_us_.load();
+    m["avg_dispatch_us"] = dispatch_count_.load() > 0 
+        ? total_dispatch_us_.load() / dispatch_count_.load() : 0;
+    return m;
+  }
+
+  void reset_metrics() {
+    dispatch_count_ = 0;
+    total_dispatch_us_ = 0;
+  }
+
+  // Get underlying MetalContext
+  MetalContext &metal_context() { return ctx_; }
+
+private:
+  id<MTLComputePipelineState> get_pipeline(const std::string &kernel_name) {
+    auto it = pipelines_.find(kernel_name);
+    if (it != pipelines_.end()) {
+      return it->second;
+    }
+    
+    // Create pipeline
+    MTL::Function *func = LibraryManager::instance().get_kernel(kernel_name, nullptr);
     if (!func) {
-      throw std::runtime_error("Kernel function not found: " + kernel_name);
+      throw std::runtime_error("Kernel not found: " + kernel_name);
     }
-
+    
     NSError *error = nullptr;
-    id<MTLComputePipelineState> pipeline =
-        [device_.device() newComputePipelineStateWithFunction:(__bridge id<MTLFunction>)func
-                                                        error:&error];
-
+    id<MTLComputePipelineState> pipeline = 
+        [ctx_.device().device() newComputePipelineStateWithFunction:(__bridge id<MTLFunction>)func
+                                                               error:&error];
     if (!pipeline) {
-      std::string msg = "Failed to create pipeline";
-      if (error) {
-        msg += ": " + std::string([[error localizedDescription] UTF8String]);
-      }
-      throw std::runtime_error(msg);
+      throw std::runtime_error("Failed to create pipeline for " + kernel_name);
     }
-
-    void *pipeline_ptr = (__bridge_retained void *)pipeline;
-    return nb::capsule(
-        pipeline_ptr, "Pipeline", [](void *ptr) noexcept {
-          if (ptr != nullptr) {
-            (void)CFBridgingRelease(ptr);
-          }
-        });
+    
+    pipelines_[kernel_name] = pipeline;
+    return pipeline;
   }
 
-  MetalDeviceDirect &device() { return device_; }
-
-private:
-  MetalDeviceDirect &device_;
-};
-
-/**
- * @brief BatchDispatch for _cpp_ext compatibility.
- */
-class BatchDispatch {
-public:
-  explicit BatchDispatch(MetalContext &ctx) : ctx_(ctx) {
-    cmd_ =
-        (id<MTLCommandBuffer>)[(id)ctx_.device().primary_queue() commandBuffer];
-    encoder_ = [cmd_ computeCommandEncoder];
-  }
-
-  void add_kernel(nb::capsule pipeline_capsule,
-                  std::tuple<uint32_t, uint32_t, uint32_t> grid,
-                  std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
-                  const std::vector<ManagedBuffer *> &buffers) {
-    id<MTLComputePipelineState> pipeline =
-        (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
-    [encoder_ setComputePipelineState:pipeline];
-
-    for (size_t i = 0; i < buffers.size(); ++i) {
-      [encoder_ setBuffer:buffers[i]->ptr().buffer() offset:0 atIndex:i];
-    }
-
-    MTLSize grid_size =
-        MTLSizeMake(std::get<0>(grid), std::get<1>(grid), std::get<2>(grid));
-    MTLSize tg_size =
-        MTLSizeMake(std::get<0>(threadgroup), std::get<1>(threadgroup),
-                    std::get<2>(threadgroup));
-    [encoder_ dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
-  }
-
-  void commit(bool wait = true) {
-    [encoder_ endEncoding];
-    [cmd_ commit];
-    if (wait) {
-      [cmd_ waitUntilCompleted];
-    }
-  }
-
-private:
   MetalContext &ctx_;
-  id<MTLCommandBuffer> cmd_;
-  id<MTLComputeCommandEncoder> encoder_;
+  std::unordered_map<std::string, id<MTLComputePipelineState>> pipelines_;
+  std::atomic<uint64_t> dispatch_count_;
+  std::atomic<uint64_t> total_dispatch_us_;
 };
+
+// =============================================================================
+// Buffer Manager Bindings
+// =============================================================================
+
+void bind_buffer_manager(nb::module_ &m) {
+  nb::class_<MPSBuffer>(m, "MPSBuffer")
+      .def("size", &MPSBuffer::size)
+      .def("allocated_size", &MPSBuffer::allocated_size)
+      .def("contents",
+           [](MPSBuffer &self) -> nb::object {
+             void *ptr = self.contents();
+             if (!ptr)
+               return nb::none();
+             return nb::capsule(ptr, "buffer_contents");
+           })
+      .def("gpu_address", &MPSBuffer::gpu_address)
+      .def("is_valid", &MPSBuffer::is_valid)
+      .def("retain", &MPSBuffer::retain)
+      .def("release", &MPSBuffer::release)
+      .def("did_modify_range", &MPSBuffer::did_modify_range);
+
+  nb::class_<BufferManager>(m, "BufferManager")
+      .def("__init__", [](BufferManager *self, void *device_ptr) {
+             new (self) BufferManager(static_cast<MTL::Device *>(device_ptr));
+           })
+      .def("wrap_mps_tensor", &BufferManager::wrap_mps_tensor,
+           nb::arg("data_ptr"), nb::arg("size"))
+      .def("allocate", &BufferManager::allocate, nb::arg("size"))
+      .def("create_shared_buffer", &BufferManager::create_shared_buffer,
+           nb::arg("size"))
+      .def("create_private_buffer", &BufferManager::create_private_buffer,
+           nb::arg("size"))
+      .def("create_managed_buffer", &BufferManager::create_managed_buffer,
+           nb::arg("size"))
+      .def("pool_hit_rate", &BufferManager::pool_hit_rate)
+      .def("pool_hits", &BufferManager::pool_hits)
+      .def("pool_misses", &BufferManager::pool_misses)
+      .def("pool_size", &BufferManager::pool_size)
+      .def("pooled_count", &BufferManager::pooled_count)
+      .def("clear_pool", &BufferManager::clear_pool)
+      // Aliases for BufferPool-compatible interface
+      .def("hits", &BufferManager::pool_hits, "Alias for pool_hits()")
+      .def("misses", &BufferManager::pool_misses, "Alias for pool_misses()")
+      .def("hit_rate", &BufferManager::pool_hit_rate, "Alias for pool_hit_rate()");
+}
 
 // =============================================================================
 // Buffer Pool Bindings
@@ -297,9 +387,21 @@ void bind_buffer_pool(nb::module_ &m) {
 
   // TransientRingBuffer class
   nb::class_<TransientRingBuffer>(m, "TransientRingBuffer")
-      .def(nb::init<void *, size_t, StorageMode>(), nb::arg("device_ptr"),
-           nb::arg("capacity") = 100 * 1024 * 1024,
-           nb::arg("storage_mode") = StorageMode::SHARED)
+      .def(
+          "__init__",
+          [](TransientRingBuffer *self, nb::capsule device_capsule, size_t capacity,
+             StorageMode storage_mode) {
+            void *device_ptr =
+                PyCapsule_GetPointer(device_capsule.ptr(), "mtldevice");
+            if (!device_ptr) {
+              throw std::runtime_error(
+                  "Invalid device capsule - expected 'mtldevice' capsule");
+            }
+            new (self) TransientRingBuffer(device_ptr, capacity, storage_mode);
+          },
+          nb::arg("device"), nb::arg("capacity") = 100 * 1024 * 1024,
+          nb::arg("storage_mode") = StorageMode::SHARED,
+          "Create a TransientRingBuffer from a Metal device capsule")
       .def(
           "allocate",
           [](TransientRingBuffer &rb, size_t size) -> nb::object {
@@ -376,6 +478,40 @@ void bind_buffer_pool(nb::module_ &m) {
       .def("allocated_bytes", &HeapAllocator::allocated_bytes)
       .def("available_bytes", &HeapAllocator::available_bytes);
 #endif
+}
+
+// =============================================================================
+// Expert Buffer Pool Bindings
+// =============================================================================
+
+void bind_expert_buffer_pool(nb::module_ &m) {
+  nb::class_<ExpertBufferPool>(m, "ExpertBufferPool")
+      .def_static("instance", &ExpertBufferPool::instance,
+                  nb::rv_policy::reference,
+                  "Get the singleton ExpertBufferPool instance")
+      .def("initialize",
+           [](ExpertBufferPool &pool, nb::capsule device_capsule, size_t heap_size) {
+             void *device_ptr = PyCapsule_GetPointer(device_capsule.ptr(), "mtldevice");
+             if (!device_ptr) {
+               throw std::runtime_error("Invalid device capsule - expected 'mtldevice'");
+             }
+             pool.initialize(device_ptr, heap_size);
+           },
+           nb::arg("device"), nb::arg("heap_size") = 1024 * 1024 * 1024,
+           "Initialize the pool with a Metal device capsule")
+      .def("is_initialized", &ExpertBufferPool::is_initialized)
+      .def("get_pool", &ExpertBufferPool::get_pool,
+           nb::rv_policy::reference, "Get underlying BufferPool")
+      .def("allocate_weight",
+           [](ExpertBufferPool &pool, size_t size) -> nb::object {
+             auto result = pool.allocate_weight(size);
+             if (!result)
+               return nb::none();
+             return nb::cast(*result);
+           },
+           nb::arg("size"), "Allocate pinned expert weight buffer")
+      .def("clear", &ExpertBufferPool::clear)
+      .def("metrics", &ExpertBufferPool::metrics, nb::rv_policy::reference_internal);
 }
 
 // =============================================================================
@@ -1020,6 +1156,10 @@ void bind_mixed_bpw_dispatch(nb::module_ &m) {
 // Module Definition
 // =============================================================================
 
+void bind_norm_ops(nb::module_ &m);
+void bind_weights_ops(nb::module_ &m);
+void bind_attention_ops(nb::module_ &m);
+
 // =============================================================================
 // Module Definition
 // =============================================================================
@@ -1035,42 +1175,239 @@ NB_MODULE(_cpp_ext, m) {
 
   // Constants
   m.attr("CACHE_LINE_BYTES") = 128;
+  m.attr("CACHE_LINE_SIZE") = 128;
   m.attr("PAGE_SIZE_BYTES") = 16384;
+  m.attr("PAGE_SIZE") = 16384;
   m.attr("LARGE_BUFFER_THRESHOLD") = 65536;
   m.attr("DEFAULT_MAX_TOKENS") = moe::kDefaultMaxTokens;
   m.attr("DEFAULT_MAX_TOP_K") = moe::kDefaultMaxTopK;
 
   // Bind all components
+  bind_buffer_manager(m);
   bind_buffer_pool(m);
+  bind_expert_buffer_pool(m);
   bind_encoder_cache(m);
   bind_moe_manager(m);
   bind_router_dispatcher(m);
   bind_metal_device(m);
   bind_library_manager(m);
   bind_mixed_bpw_dispatch(m);
+  bind_attention_ops(m);
+  bind_weights_ops(m);
 
   // Bind _cpp_ext compatibility layer
   nb::class_<ManagedBuffer>(m, "ManagedBuffer")
       .def("length", &ManagedBuffer::length)
-      .def("data_ptr", &ManagedBuffer::data_ptr);
+      .def("data_ptr", &ManagedBuffer::data_ptr)
+      .def("__del__", [](ManagedBuffer *self) { delete self; });
 
   nb::class_<MetalContext>(m, "MetalContext")
       .def(nb::init<>())
       .def("load_metallib", &MetalContext::load_metallib)
+      .def("compile_source", &MetalContext::compile_source, nb::arg("lib_name"), nb::arg("source"))
       .def("get_pipeline", &MetalContext::get_pipeline, nb::arg("kernel_name"),
-           nb::arg("metallib_path") = "");
+           nb::arg("metallib_path") = "")
+      .def("device_name", &MetalContext::device_name, "Get device name")
+      .def("gpu_family", &MetalContext::gpu_family, "Get GPU family (7=M1, 8=M2, 9=M3+)")
+      .def_prop_ro("buffer_pool", [](MetalContext &ctx) -> BufferManager& { return ctx.buffer_pool(); },
+                   nb::rv_policy::reference_internal, "Get the buffer pool");
 
-  nb::class_<BatchDispatch>(m, "BatchDispatch")
+  nb::class_<BatchDispatchCPP>(m, "BatchDispatch")
       .def(nb::init<MetalContext &>())
-      .def("add_kernel", &BatchDispatch::add_kernel)
-      .def("commit", &BatchDispatch::commit, nb::arg("wait") = true);
+      .def("add_kernel", &BatchDispatchCPP::add_kernel)
+      .def("add_mmfp4_gemm", &BatchDispatchCPP::add_mmfp4_gemm,
+           nb::arg("pipeline"),
+           nb::arg("A"), nb::arg("B"), nb::arg("S"), nb::arg("C"),
+           nb::arg("M"), nb::arg("N"), nb::arg("K"), nb::arg("group_size"))
+      .def("add_int4_gemm", &BatchDispatchCPP::add_int4_gemm,
+           nb::arg("pipeline"),
+           nb::arg("A"), nb::arg("B"), nb::arg("S"), nb::arg("Z"), nb::arg("C"),
+           nb::arg("M"), nb::arg("N"), nb::arg("K"), nb::arg("group_size"))
+      .def("commit", &BatchDispatchCPP::commit, nb::arg("wait") = true);
+
+  // ServingContext for high-performance serving mode
+  nb::class_<ServingContext>(m, "ServingContext")
+      .def(nb::init<MetalContext &>())
+      .def("dispatch_sync", &ServingContext::dispatch_sync,
+           nb::arg("kernel_name"), nb::arg("grid"), nb::arg("threadgroup"), nb::arg("buffer_ptrs"),
+           "Synchronous kernel dispatch for low-latency decode")
+      .def("dispatch_async", &ServingContext::dispatch_async,
+           nb::arg("kernel_name"), nb::arg("grid"), nb::arg("threadgroup"), nb::arg("buffer_ptrs"),
+           "Asynchronous kernel dispatch for throughput-optimized prefill")
+      .def("wait", &ServingContext::wait, nb::arg("handle"),
+           "Wait for async dispatch to complete")
+      .def("is_complete", &ServingContext::is_complete, nb::arg("handle"),
+           "Check if async dispatch is complete (non-blocking)")
+      .def("metrics", &ServingContext::metrics, "Get serving metrics")
+      .def("reset_metrics", &ServingContext::reset_metrics, "Reset serving metrics")
+      .def("metal_context", &ServingContext::metal_context, nb::rv_policy::reference_internal,
+           "Get underlying MetalContext");
+
+  m.def(
+      "mmfp4_gemm",
+      [](MetalContext &ctx, nb::capsule pipeline_capsule,
+         ManagedBuffer *A, ManagedBuffer *B, ManagedBuffer *S, ManagedBuffer *C,
+         uint32_t M, uint32_t N, uint32_t K, uint32_t group_size,
+         bool wait = true) {
+        
+        // Helper to create temp param buffer
+        auto create_param_buf = [&](uint32_t val) {
+            return ctx.device().create_buffer_from_bytes(&val, sizeof(uint32_t), MTLResourceStorageModeShared);
+        };
+        
+        auto m_buf = create_param_buf(M);
+        auto n_buf = create_param_buf(N);
+        auto k_buf = create_param_buf(K);
+        auto gs_buf = create_param_buf(group_size);
+        
+        id<MTLCommandBuffer> cmd = [(id)ctx.device().primary_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+
+        id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
+        [encoder setComputePipelineState:pipeline];
+
+        [encoder setBuffer:A->get_buffer() offset:0 atIndex:0];
+        [encoder setBuffer:B->get_buffer() offset:0 atIndex:1];
+        [encoder setBuffer:S->get_buffer() offset:0 atIndex:2];
+        [encoder setBuffer:C->get_buffer() offset:0 atIndex:3];
+        
+        [encoder setBuffer:m_buf.buffer() offset:0 atIndex:4];
+        [encoder setBuffer:n_buf.buffer() offset:0 atIndex:5];
+        [encoder setBuffer:k_buf.buffer() offset:0 atIndex:6];
+        [encoder setBuffer:gs_buf.buffer() offset:0 atIndex:7];
+
+        // TILE_M=64, TILE_N=64
+        MTLSize grid_size = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
+        MTLSize tg_size = MTLSizeMake(128, 1, 1); // THREADS_PER_TG = 128
+        
+        [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+
+        [encoder endEncoding];
+        [cmd commit];
+        
+        if (wait)
+          [cmd waitUntilCompleted];
+      },
+      nb::arg("ctx"), nb::arg("pipeline"),
+      nb::arg("A"), nb::arg("B"), nb::arg("S"), nb::arg("C"),
+      nb::arg("M"), nb::arg("N"), nb::arg("K"), nb::arg("group_size"),
+      nb::arg("wait") = true,
+      "Dispatch MMFP4 GEMM kernel"
+  );
+
+  m.def(
+      "int4_gemm",
+      [](MetalContext &ctx, nb::capsule pipeline_capsule,
+         ManagedBuffer *A, ManagedBuffer *B, ManagedBuffer *S, ManagedBuffer *Z, ManagedBuffer *C,
+         uint32_t M, uint32_t N, uint32_t K, uint32_t group_size,
+         bool wait = true) {
+        
+        // Helper to create temp param buffer
+        auto create_param_buf = [&](uint32_t val) {
+            return ctx.device().create_buffer_from_bytes(&val, sizeof(uint32_t), MTLResourceStorageModeShared);
+        };
+        
+        auto m_buf = create_param_buf(M);
+        auto n_buf = create_param_buf(N);
+        auto k_buf = create_param_buf(K);
+        auto gs_buf = create_param_buf(group_size);
+        
+        id<MTLCommandBuffer> cmd = [(id)ctx.device().primary_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+
+        id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
+        [encoder setComputePipelineState:pipeline];
+
+        [encoder setBuffer:A->get_buffer() offset:0 atIndex:0];
+        [encoder setBuffer:B->get_buffer() offset:0 atIndex:1];
+        [encoder setBuffer:S->get_buffer() offset:0 atIndex:2];
+        [encoder setBuffer:Z->get_buffer() offset:0 atIndex:3];
+        [encoder setBuffer:C->get_buffer() offset:0 atIndex:4];
+        
+        [encoder setBuffer:m_buf.buffer() offset:0 atIndex:5];
+        [encoder setBuffer:n_buf.buffer() offset:0 atIndex:6];
+        [encoder setBuffer:k_buf.buffer() offset:0 atIndex:7];
+        [encoder setBuffer:gs_buf.buffer() offset:0 atIndex:8];
+
+        // TILE_M=64, TILE_N=64
+        MTLSize grid_size = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
+        MTLSize tg_size = MTLSizeMake(128, 1, 1); // THREADS_PER_TG = 128
+        
+        [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+
+        [encoder endEncoding];
+        [cmd commit];
+        
+        if (wait)
+          [cmd waitUntilCompleted];
+      },
+      nb::arg("ctx"), nb::arg("pipeline"),
+      nb::arg("A"), nb::arg("B"), nb::arg("S"), nb::arg("Z"), nb::arg("C"),
+      nb::arg("M"), nb::arg("N"), nb::arg("K"), nb::arg("group_size"),
+      nb::arg("wait") = true,
+      "Dispatch INT4 GEMM kernel"
+  );
+
+  m.def(
+      "int2_gemm",
+      [](MetalContext &ctx, nb::capsule pipeline_capsule,
+         ManagedBuffer *A, ManagedBuffer *B, ManagedBuffer *S, ManagedBuffer *C,
+         uint32_t M, uint32_t N, uint32_t K, uint32_t group_size,
+         bool wait = true) {
+        
+        // Helper to create temp param buffer
+        auto create_param_buf = [&](uint32_t val) {
+            return ctx.device().create_buffer_from_bytes(&val, sizeof(uint32_t), MTLResourceStorageModeShared);
+        };
+        
+        auto m_buf = create_param_buf(M);
+        auto n_buf = create_param_buf(N);
+        auto k_buf = create_param_buf(K);
+        auto gs_buf = create_param_buf(group_size);
+        
+        id<MTLCommandBuffer> cmd = [(id)ctx.device().primary_queue() commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
+
+        id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)pipeline_capsule.data();
+        [encoder setComputePipelineState:pipeline];
+
+        [encoder setBuffer:A->get_buffer() offset:0 atIndex:0];
+        [encoder setBuffer:B->get_buffer() offset:0 atIndex:1];
+        [encoder setBuffer:S->get_buffer() offset:0 atIndex:2];
+        [encoder setBuffer:C->get_buffer() offset:0 atIndex:3];
+        
+        [encoder setBuffer:m_buf.buffer() offset:0 atIndex:4];
+        [encoder setBuffer:n_buf.buffer() offset:0 atIndex:5];
+        [encoder setBuffer:k_buf.buffer() offset:0 atIndex:6];
+        [encoder setBuffer:gs_buf.buffer() offset:0 atIndex:7];
+
+        // TILE_M=64, TILE_N=64
+        MTLSize grid_size = MTLSizeMake((N + 63) / 64, (M + 63) / 64, 1);
+        MTLSize tg_size = MTLSizeMake(128, 1, 1); // THREADS_PER_TG = 128
+        
+        [encoder dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+
+        [encoder endEncoding];
+        [cmd commit];
+        
+        if (wait)
+          [cmd waitUntilCompleted];
+      },
+      nb::arg("ctx"), nb::arg("pipeline"),
+      nb::arg("A"), nb::arg("B"), nb::arg("S"), nb::arg("C"),
+      nb::arg("M"), nb::arg("N"), nb::arg("K"), nb::arg("group_size"),
+      nb::arg("wait") = true,
+      "Dispatch INT2 GEMM kernel"
+  );
 
   m.def(
       "dispatch_kernel",
       [](MetalContext &ctx, nb::capsule pipeline_capsule,
          std::tuple<uint32_t, uint32_t, uint32_t> grid,
          std::tuple<uint32_t, uint32_t, uint32_t> threadgroup,
-         const std::vector<ManagedBuffer *> &buffers, bool wait = true) {
+         const std::vector<ManagedBuffer *> &buffers, 
+         bool wait,
+         const std::vector<size_t> &offsets) {
         id<MTLCommandBuffer> cmd =
             [(id)ctx.device().primary_queue() commandBuffer];
         id<MTLComputeCommandEncoder> encoder = [cmd computeCommandEncoder];
@@ -1080,7 +1417,8 @@ NB_MODULE(_cpp_ext, m) {
         [encoder setComputePipelineState:pipeline];
 
         for (size_t i = 0; i < buffers.size(); ++i) {
-          [encoder setBuffer:buffers[i]->ptr().buffer() offset:0 atIndex:i];
+          size_t offset = (i < offsets.size()) ? offsets[i] : 0;
+          [encoder setBuffer:buffers[i]->get_buffer() offset:offset atIndex:i];
         }
 
         MTLSize grid_size = MTLSizeMake(std::get<0>(grid), std::get<1>(grid),
@@ -1096,17 +1434,24 @@ NB_MODULE(_cpp_ext, m) {
           [cmd waitUntilCompleted];
       },
       nb::arg("ctx"), nb::arg("pipeline"), nb::arg("grid"),
-      nb::arg("threadgroup"), nb::arg("buffers"), nb::arg("wait") = true);
+      nb::arg("threadgroup"), nb::arg("buffers"), nb::arg("wait") = true,
+      nb::arg("offsets") = std::vector<size_t>());
 
   m.def(
       "create_buffer",
       [](MetalContext &ctx, size_t size, bool use_pool) -> ManagedBuffer * {
-        // use_pool is ignored for now or simple implementation
-        auto ptr =
-            ctx.device().create_buffer(size, MTLResourceStorageModeShared);
-        return new ManagedBuffer(std::move(ptr));
+        if (use_pool) {
+          // Use BufferManager for pooled allocation
+          MPSBuffer buf = ctx.buffer_pool().allocate(size);
+          return new ManagedBuffer(std::move(buf));
+        } else {
+          // Direct allocation without pooling
+          auto ptr = ctx.device().create_buffer(size, MTLResourceStorageModeShared);
+          return new ManagedBuffer(std::move(ptr));
+        }
       },
-      nb::arg("ctx"), nb::arg("size"), nb::arg("use_pool") = true);
+      nb::arg("ctx"), nb::arg("size"), nb::arg("use_pool") = true,
+      "Create a buffer, optionally from the pool");
 
   m.def("create_buffer_from_numpy", [](MetalContext &ctx, nb::ndarray<> arr) {
       void* data = arr.data();
@@ -1124,4 +1469,240 @@ NB_MODULE(_cpp_ext, m) {
         return new ManagedBuffer(std::move(buf_ptr));
       },
       nb::arg("ctx"), nb::arg("ptr"), nb::arg("size"));
+
+  m.def(
+      "create_buffer_from_bytes",
+      [](MetalContext &ctx, nb::bytes data, bool use_pool) -> ManagedBuffer * {
+        size_t size = data.size();
+        auto ptr = ctx.device().create_buffer_from_bytes(data.data(), size, MTLResourceStorageModeShared);
+        return new ManagedBuffer(std::move(ptr));
+      },
+      nb::arg("ctx"), nb::arg("data"), nb::arg("use_pool") = false);
+
+  m.def("align_buffer_size", [](size_t size) {
+      if (size >= 65536) { // LARGE_BUFFER_THRESHOLD
+          return (size + 16384 - 1) & ~(16384 - 1); // PAGE_SIZE_BYTES
+      }
+      return (size + 128 - 1) & ~(128 - 1); // CACHE_LINE_BYTES
+  });
+}
+
+// =============================================================================
+// Attention Operations Bindings
+// =============================================================================
+
+void bind_attention_ops(nb::module_ &m) {
+  // MLA projection functions for FP4 quantized attention
+  m.def("mla_proj_fp4",
+        [](MetalContext &ctx,
+           nb::bytes A,
+           nb::bytes B_packed,
+           nb::bytes scales,
+           nb::bytes C,
+           uint32_t M,
+           uint32_t N,
+           uint32_t K,
+           uint32_t group_size,
+           bool wait) {
+          mla_proj_fp4(ctx, A, B_packed, scales, C, M, N, K, group_size, wait);
+        },
+        nb::arg("ctx"), nb::arg("A"), nb::arg("B_packed"), nb::arg("scales"),
+        nb::arg("C"), nb::arg("M"), nb::arg("N"), nb::arg("K"),
+        nb::arg("group_size"), nb::arg("wait") = true,
+        "MLA projection with FP4 quantized weights (prefill phase)");
+
+  m.def("mla_decode_proj_fp4",
+        [](MetalContext &ctx,
+           nb::bytes x,
+           nb::bytes W_packed,
+           nb::bytes scales,
+           nb::bytes out,
+           uint32_t K,
+           uint32_t N,
+           uint32_t group_size,
+           bool wait) {
+          mla_decode_proj_fp4(ctx, x, W_packed, scales, out, K, N, group_size, wait);
+        },
+        nb::arg("ctx"), nb::arg("x"), nb::arg("W_packed"), nb::arg("scales"),
+        nb::arg("out"), nb::arg("K"), nb::arg("N"), nb::arg("group_size"),
+        nb::arg("wait") = true,
+        "MLA decode projection with FP4 quantized weights (single token)");
+
+  m.def("mla_fused_kv_proj_fp4",
+        [](MetalContext &ctx,
+           nb::bytes hidden,
+           nb::bytes W_a_packed,
+           nb::bytes scales_a,
+           nb::bytes W_b_packed,
+           nb::bytes scales_b,
+           nb::bytes out,
+           uint32_t M,
+           uint32_t K_hidden,
+           uint32_t K_latent,
+           uint32_t N_out,
+           uint32_t group_size_a,
+           uint32_t group_size_b,
+           bool wait) {
+          mla_fused_kv_proj_fp4(ctx, hidden, W_a_packed, scales_a, W_b_packed, scales_b,
+                                out, M, K_hidden, K_latent, N_out, group_size_a, group_size_b, wait);
+        },
+        nb::arg("ctx"), nb::arg("hidden"), nb::arg("W_a_packed"), nb::arg("scales_a"),
+        nb::arg("W_b_packed"), nb::arg("scales_b"), nb::arg("out"),
+        nb::arg("M"), nb::arg("K_hidden"), nb::arg("K_latent"), nb::arg("N_out"),
+        nb::arg("group_size_a"), nb::arg("group_size_b"), nb::arg("wait") = true,
+        "Fused MLA kv_a + kv_b projection with FP4 quantized weights");
+}
+
+// =============================================================================
+// Norm Operations Bindings
+// =============================================================================
+
+void bind_norm_ops(nb::module_ &m) {
+  // NormResult
+  nb::class_<metal_marlin::NormResult>(m, "NormResult")
+      .def_ro("output", &metal_marlin::NormResult::output)
+      .def_ro("residual", &metal_marlin::NormResult::residual)
+      .def_ro("success", &metal_marlin::NormResult::success)
+      .def_ro("error_msg", &metal_marlin::NormResult::error_msg);
+
+  // LayerNormConfig
+  nb::class_<metal_marlin::LayerNormConfig>(m, "LayerNormConfig")
+      .def(nb::init<>())
+      .def_rw("num_tokens", &metal_marlin::LayerNormConfig::num_tokens)
+      .def_rw("hidden_dim", &metal_marlin::LayerNormConfig::hidden_dim)
+      .def_rw("eps", &metal_marlin::LayerNormConfig::eps)
+      .def_rw("use_fused", &metal_marlin::LayerNormConfig::use_fused);
+
+  // LayerNormOp
+  nb::class_<metal_marlin::LayerNormOp>(m, "LayerNormOp")
+      .def(nb::init<const metal_marlin::LayerNormConfig&>())
+      .def("forward", &metal_marlin::LayerNormOp::forward)
+      .def("config", &metal_marlin::LayerNormOp::config);
+
+  // RMSNormConfig
+  nb::class_<metal_marlin::RMSNormConfig>(m, "RMSNormConfig")
+      .def(nb::init<>())
+      .def_rw("num_tokens", &metal_marlin::RMSNormConfig::num_tokens)
+      .def_rw("hidden_dim", &metal_marlin::RMSNormConfig::hidden_dim)
+      .def_rw("eps", &metal_marlin::RMSNormConfig::eps)
+      .def_rw("use_fused", &metal_marlin::RMSNormConfig::use_fused);
+
+  // RMSNormOp
+  nb::class_<metal_marlin::RMSNormOp>(m, "RMSNormOp")
+      .def(nb::init<const metal_marlin::RMSNormConfig&>())
+      .def("forward", &metal_marlin::RMSNormOp::forward)
+      .def("forward_fused", &metal_marlin::RMSNormOp::forward_fused)
+      .def("config", &metal_marlin::RMSNormOp::config);
+
+  // norm_utils submodule
+  nb::module_ norm_utils = m.def_submodule("norm_utils", "Utility functions for norm operations");
+  norm_utils.def("compute_mean", &metal_marlin::norm_utils::compute_mean);
+  norm_utils.def("compute_variance", &metal_marlin::norm_utils::compute_variance);
+  norm_utils.def("compute_rms", &metal_marlin::norm_utils::compute_rms);
+  norm_utils.def("is_hidden_dim_supported", &metal_marlin::norm_utils::is_hidden_dim_supported);
+  norm_utils.def("get_recommended_threadgroup_size", &metal_marlin::norm_utils::get_recommended_threadgroup_size);
+}
+
+// =============================================================================
+// Weights Operations Bindings
+// =============================================================================
+
+void bind_weights_ops(nb::module_ &m) {
+  // Prune2to4Result
+  nb::class_<metal_marlin::Prune2to4Result>(m, "Prune2to4Result")
+      .def_ro("sparse_weights", &metal_marlin::Prune2to4Result::sparse_weights)
+      .def_ro("metadata", &metal_marlin::Prune2to4Result::metadata)
+      .def_ro("K", &metal_marlin::Prune2to4Result::K)
+      .def_ro("N", &metal_marlin::Prune2to4Result::N)
+      .def_ro("success", &metal_marlin::Prune2to4Result::success)
+      .def_ro("error_msg", &metal_marlin::Prune2to4Result::error_msg);
+
+  // Unprune2to4Result
+  nb::class_<metal_marlin::Unprune2to4Result>(m, "Unprune2to4Result")
+      .def_ro("dense_weights", &metal_marlin::Unprune2to4Result::dense_weights)
+      .def_ro("K", &metal_marlin::Unprune2to4Result::K)
+      .def_ro("N", &metal_marlin::Unprune2to4Result::N)
+      .def_ro("success", &metal_marlin::Unprune2to4Result::success)
+      .def_ro("error_msg", &metal_marlin::Unprune2to4Result::error_msg);
+
+  // PruningMetrics
+  nb::class_<metal_marlin::PruningMetrics>(m, "PruningMetrics")
+      .def_ro("mse", &metal_marlin::PruningMetrics::mse)
+      .def_ro("rmse", &metal_marlin::PruningMetrics::rmse)
+      .def_ro("relative_error", &metal_marlin::PruningMetrics::relative_error)
+      .def_ro("sparsity", &metal_marlin::PruningMetrics::sparsity)
+      .def_ro("max_abs_error", &metal_marlin::PruningMetrics::max_abs_error);
+
+  // Weights operations submodule
+  nb::module_ weights_ops = m.def_submodule("weights_ops", "2:4 structured sparsity weight operations");
+
+  // prune_to_2_4 - accepts numpy array
+  weights_ops.def(
+      "prune_to_2_4",
+      [](nb::ndarray<nb::numpy, uint16_t, nb::ndim<2>, nb::c_contig> weights) {
+        size_t K = static_cast<size_t>(weights.shape(0));
+        size_t N = static_cast<size_t>(weights.shape(1));
+        return metal_marlin::prune_to_2_4(weights.data(), K, N);
+      },
+      nb::arg("weights"),
+      "Prune weights to 2:4 structured sparsity. "
+      "Input: [K, N] uint16 (FP16 bits). K must be divisible by 4. "
+      "Returns Prune2to4Result with sparse_weights [K/2, N] and metadata [K/4, N]");
+
+  // unprune_2_4 - accepts numpy arrays
+  weights_ops.def(
+      "unprune_2_4",
+      [](nb::ndarray<nb::numpy, uint16_t, nb::ndim<2>, nb::c_contig> sparse_weights,
+         nb::ndarray<nb::numpy, uint8_t, nb::ndim<2>, nb::c_contig> metadata) {
+        size_t half_K = static_cast<size_t>(sparse_weights.shape(0));
+        size_t N = static_cast<size_t>(sparse_weights.shape(1));
+        return metal_marlin::unprune_2_4(sparse_weights.data(), metadata.data(), half_K, N);
+      },
+      nb::arg("sparse_weights"),
+      nb::arg("metadata"),
+      "Reconstruct dense weights from 2:4 sparse format. "
+      "Input: sparse_weights [K/2, N], metadata [K/4, N]. "
+      "Returns Unprune2to4Result with dense_weights [K, N]");
+
+  // measure_pruning_loss
+  weights_ops.def(
+      "measure_pruning_loss",
+      [](nb::ndarray<nb::numpy, uint16_t, nb::ndim<2>, nb::c_contig> original,
+         nb::ndarray<nb::numpy, uint16_t, nb::ndim<2>, nb::c_contig> pruned) {
+        size_t K = static_cast<size_t>(original.shape(0));
+        size_t N = static_cast<size_t>(original.shape(1));
+        return metal_marlin::measure_pruning_loss(original.data(), pruned.data(), K, N);
+      },
+      nb::arg("original"),
+      nb::arg("pruned"),
+      "Measure information loss from 2:4 structured pruning. "
+      "Input: original [K, N], pruned [K, N] as uint16 (FP16 bits). "
+      "Returns PruningMetrics with mse, rmse, relative_error, sparsity, max_abs_error");
+
+  // FP16 conversion utilities
+  weights_ops.def(
+      "fp16_to_fp32",
+      [](nb::ndarray<nb::numpy, uint16_t, nb::c_contig> fp16_array) {
+        size_t n = fp16_array.size();
+        std::vector<float> result(n);
+        for (size_t i = 0; i < n; ++i) {
+          result[i] = metal_marlin::fp16_to_fp32(fp16_array.data()[i]);
+        }
+        return result;
+      },
+      nb::arg("fp16_array"),
+      "Convert FP16 bits to float32 values");
+
+  weights_ops.def(
+      "fp32_to_fp16",
+      [](nb::ndarray<nb::numpy, float, nb::c_contig> fp32_array) {
+        size_t n = fp32_array.size();
+        std::vector<uint16_t> result(n);
+        for (size_t i = 0; i < n; ++i) {
+          result[i] = metal_marlin::fp32_to_fp16(fp32_array.data()[i]);
+        }
+        return result;
+      },
+      nb::arg("fp32_array"),
+      "Convert float32 values to FP16 bits");
 }

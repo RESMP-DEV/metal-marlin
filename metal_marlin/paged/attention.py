@@ -200,7 +200,8 @@ def paged_attention(
         # For prefill, query positions map to the last seq_len positions
         # of the context (positions context_len-seq_len through context_len-1)
         q_positions = np.arange(seq_len)[None, None, :, None]  # [1, 1, seq_len, 1]
-        kv_pos_expanded = kv_positions[None, None, None, :]  # [1, 1, 1, max_context]
+        # kv_positions is [1, max_context], expand to [1, 1, 1, max_context] for broadcasting
+        kv_pos_expanded = kv_positions[None, None, :]  # [1, 1, max_context]
 
         # Each query at position q_pos can attend to kv_pos where:
         # kv_pos <= (context_len - seq_len + q_pos)

@@ -49,3 +49,17 @@ class TestMMFP4FusedDecode:
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         output = glm47_expert(x)
         assert output.shape == (1, 2048)
+
+    def test_fused_batch_8(self, glm47_expert):
+        """Verify fused kernel with batch size 8."""
+        x = torch.randn(8, 2048, dtype=torch.float16, device="mps")
+        
+        # Fused path
+        glm47_expert.use_fused = True
+        fused_out = glm47_expert(x).clone()
+        
+        # Standard path
+        glm47_expert.use_fused = False
+        standard_out = glm47_expert(x)
+        
+        torch.testing.assert_close(fused_out, standard_out, rtol=1e-2, atol=1e-2)

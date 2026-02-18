@@ -821,7 +821,485 @@ class VisionMetal:
         if Metal is None:
             raise RuntimeError("Metal is not available")
 
-        command_buffer = self._command_queue.commandQueue().commandBuffer()
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
+
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
+        tg_size = Metal.MTLSizeMake(16, 16, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    # ============================================================================
+    # Large Resolution Methods (1024x1024+)
+    # ============================================================================
+
+    def resize_bilinear_tiled(
+        self,
+        input: Tensor | NDArray[Any],
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> Tensor:
+        """Tile-based bilinear resize optimized for large images (1024x1024+).
+
+        Uses 16x16 tile processing to improve memory locality and reduce
+        global memory bandwidth. Best for memory-constrained scenarios or
+        very large images where cache efficiency matters.
+
+        Args:
+            input: Input image tensor [N, C, H_in, W_in] (NCHW) or [N, H_in, W_in, C] (NHWC)
+            target_size: Target (height, width)
+            nhwc: If True, input is in NHWC format. Default is NCHW.
+
+        Returns:
+            Resized image [N, C, H_out, W_out] (NCHW) or [N, H_out, W_out, C] (NHWC)
+
+        Example:
+            >>> image = torch.randn(1, 3, 2048, 2048, device="mps")  # Large image
+            >>> resized = vision.resize_bilinear_tiled(image, (1024, 1024))
+            >>> print(resized.shape)
+            torch.Size([1, 3, 1024, 1024])
+        """
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        h_out, w_out = target_size
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
+        params_buffer = self._create_buffer(params_bytes)
+        input_buffer = self._tensor_to_buffer(input_tensor)
+
+        pipeline = self._get_pipeline("image_resize_bilinear_tiled")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
+
+        # Tile-based grid: each threadgroup processes a 16x16 tile
+        tile_size = 16
+        grid_size = Metal.MTLSizeMake(
+            (w_out + tile_size - 1) // tile_size,
+            (h_out + tile_size - 1) // tile_size,
+            batch_size
+        )
+        tg_size = Metal.MTLSizeMake(tile_size, tile_size, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    def resize_bilinear_tiled_shared(
+        self,
+        input: Tensor | NDArray[Any],
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> Tensor:
+        """Shared-memory optimized tiled resize for up to 4 channels.
+
+        Loads input tiles into threadgroup memory. Most effective when
+        resizing with scale factor near 1.0 or upscaling.
+        Only supports <= 4 channels (e.g. RGB, RGBA).
+
+        Args:
+            input: Input image tensor
+            target_size: Target (height, width)
+            nhwc: If True, input is in NHWC format.
+
+        Returns:
+            Resized image
+        """
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        if channels > 4:
+            raise ValueError(f"resize_bilinear_tiled_shared only supports <= 4 channels, got {channels}")
+
+        h_out, w_out = target_size
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
+        params_buffer = self._create_buffer(params_bytes)
+        input_buffer = self._tensor_to_buffer(input_tensor)
+
+        pipeline = self._get_pipeline("image_resize_bilinear_tiled_shared")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
+
+        # Tile-based grid
+        tile_size = 16
+        grid_size = Metal.MTLSizeMake(
+            (w_out + tile_size - 1) // tile_size,
+            (h_out + tile_size - 1) // tile_size,
+            batch_size
+        )
+        tg_size = Metal.MTLSizeMake(tile_size, tile_size, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    def resize_bilinear_4pixel(
+        self,
+        input: Tensor | NDArray[Any],
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> Tensor:
+        """Vectorized bilinear resize processing 4 pixels per thread.
+
+        Reduces kernel launch overhead by processing 2x2 output blocks per thread.
+        Efficient for very large images.
+
+        Args:
+            input: Input image tensor
+            target_size: Target (height, width)
+            nhwc: If True, input is in NHWC format.
+
+        Returns:
+            Resized image
+        """
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        h_out, w_out = target_size
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
+        params_buffer = self._create_buffer(params_bytes)
+        input_buffer = self._tensor_to_buffer(input_tensor)
+
+        pipeline = self._get_pipeline("image_resize_bilinear_4pixel")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
+
+        # Grid size halved in X and Y because each thread does 2x2
+        grid_w = (w_out + 1) // 2
+        grid_h = (h_out + 1) // 2
+        
+        grid_size = Metal.MTLSizeMake(grid_w, grid_h, batch_size)
+        tg_size = Metal.MTLSizeMake(16, 16, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    def preprocess_large_image_fused(
+        self,
+        image: Tensor | NDArray[Any],
+        crop_size: tuple[int, int] | None,
+        target_size: tuple[int, int],
+        mean: tuple[float, ...] | list[float] | Tensor,
+        std: tuple[float, ...] | list[float] | Tensor,
+        nhwc: bool = False,
+    ) -> Tensor:
+        """Fused preprocessing pipeline for large images (center crop + resize + normalize).
+
+        Performs the complete preprocessing pipeline in a single kernel dispatch,
+        eliminating intermediate buffer allocations. Optimized for large resolution
+        images (1024x1024 and larger).
+
+        Args:
+            image: Input image [N, C, H_in, W_in] (NCHW) or [N, H_in, W_in, C] (NHWC)
+            crop_size: Size to center crop before resize (height, width), or None to skip crop
+            target_size: Final target size after resize (height, width)
+            mean: Per-channel mean values [C] for normalization
+            std: Per-channel standard deviation values [C] for normalization
+            nhwc: If True, input is in NHWC format. Default is NCHW.
+
+        Returns:
+            Preprocessed image [N, C, H_out, W_out] (NCHW) or [N, H_out, W_out, C] (NHWC)
+
+        Example:
+            >>> image = torch.randn(1, 3, 2048, 2048, device="mps")
+            >>> result = vision.preprocess_large_image_fused(
+            ...     image,
+            ...     crop_size=(1536, 1536),
+            ...     target_size=(224, 224),
+            ...     mean=[0.485, 0.456, 0.406],
+            ...     std=[0.229, 0.224, 0.225],
+            ... )
+            >>> print(result.shape)
+            torch.Size([1, 3, 224, 224])
+        """
+        image_tensor = self._ensure_mps_tensor(image)
+        batch_size = image_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        h_out, w_out = target_size
+
+        # Use full image size if no crop specified
+        if crop_size is None:
+            crop_size = (h_in, w_in)
+        crop_h, crop_w = crop_size
+
+        # Validate crop size
+        if crop_h > h_in or crop_w > w_in:
+            raise ValueError(
+                f"Crop size ({crop_h}, {crop_w}) cannot be larger than input size ({h_in}, {w_in})"
+            )
+
+        # Convert mean/std to numpy arrays
+        if isinstance(mean, (tuple, list)):
+            mean_np = np.array(mean, dtype=np.float32)
+        elif torch is not None and isinstance(mean, torch.Tensor):
+            mean_np = mean.detach().cpu().numpy().astype(np.float32)
+        else:
+            mean_np = np.asarray(mean, dtype=np.float32)
+
+        if isinstance(std, (tuple, list)):
+            std_np = np.array(std, dtype=np.float32)
+        elif torch is not None and isinstance(std, torch.Tensor):
+            std_np = std.detach().cpu().numpy().astype(np.float32)
+        else:
+            std_np = np.asarray(std, dtype=np.float32)
+
+        std_inv_np = 1.0 / std_np
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+        input_buffer = self._tensor_to_buffer(image_tensor)
+        mean_buffer = self._create_buffer(mean_np)
+        std_inv_buffer = self._create_buffer(std_inv_np)
+
+        # params: [batch_size, H_in, W_in, crop_h, crop_w, H_out, W_out, channels, nhwc]
+        params_bytes = struct.pack(
+            "9I", batch_size, h_in, w_in, crop_h, crop_w, h_out, w_out, channels, 1 if nhwc else 0
+        )
+        params_buffer = self._create_buffer(params_bytes)
+
+        pipeline = self._get_pipeline("preprocess_large_image_fused")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(mean_buffer, 0, 2)
+        encoder.setBuffer_offset_atIndex_(std_inv_buffer, 0, 3)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 4)
+
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
+        tg_size = Metal.MTLSizeMake(16, 16, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    def resize_bicubic_8x8(
+        self,
+        input: Tensor | NDArray[Any],
+        target_size: tuple[int, int],
+        nhwc: bool = False,
+    ) -> Tensor:
+        """High-quality bicubic resize with 8x8 Lanczos-like window.
+
+        Uses a larger 8x8 sampling window (Lanczos-3) for superior quality when
+        downscaling large images significantly (e.g., 2048x2048 -> 1024x1024).
+        Slower than standard bicubic but produces sharper results.
+
+        Args:
+            input: Input image tensor [N, C, H_in, W_in] (NCHW) or [N, H_in, W_in, C] (NHWC)
+            target_size: Target (height, width)
+            nhwc: If True, input is in NHWC format. Default is NCHW.
+
+        Returns:
+            Resized image [N, C, H_out, W_out] (NCHW) or [N, H_out, W_out, C] (NHWC)
+
+        Example:
+            >>> image = torch.randn(1, 3, 2048, 2048, device="mps")
+            >>> resized = vision.resize_bicubic_8x8(image, (1024, 1024))
+            >>> print(resized.shape)
+            torch.Size([1, 3, 1024, 1024])
+        """
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        h_out, w_out = target_size
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+
+        params_bytes = struct.pack("7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0)
+        params_buffer = self._create_buffer(params_bytes)
+        input_buffer = self._tensor_to_buffer(input_tensor)
+
+        pipeline = self._get_pipeline("image_resize_bicubic_8x8")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
+        encoder = command_buffer.computeCommandEncoder()
+
+        encoder.setComputePipelineState_(pipeline)
+        encoder.setBuffer_offset_atIndex_(input_buffer, 0, 0)
+        encoder.setBuffer_offset_atIndex_(output_buffer, 0, 1)
+        encoder.setBuffer_offset_atIndex_(params_buffer, 0, 2)
+
+        grid_size = Metal.MTLSizeMake(w_out, h_out, batch_size)
+        tg_size = Metal.MTLSizeMake(16, 16, 1)
+
+        encoder.dispatchThreadgroups_threadsPerThreadgroup_(grid_size, tg_size)
+        encoder.endEncoding()
+        command_buffer.commit()
+        command_buffer.waitUntilCompleted()
+
+        return self._buffer_to_tensor(output_buffer, output_shape)
+
+    def resize_aspect_ratio_preserve(
+        self,
+        input: Tensor | NDArray[Any],
+        target_size: tuple[int, int],
+        pad_value: float = 0.0,
+        nhwc: bool = False,
+    ) -> Tensor:
+        """Resize image while preserving aspect ratio, padding to square output.
+
+        Scales the image to fit within the target dimensions while maintaining
+        the original aspect ratio, then pads with a constant value to achieve
+        the exact target size. Common preprocessing for vision models that
+        expect square inputs (like ViT variants).
+
+        Args:
+            input: Input image tensor [N, C, H_in, W_in] (NCHW) or [N, H_in, W_in, C] (NHWC)
+            target_size: Target (height, width), typically square (e.g., (1024, 1024))
+            pad_value: Value to use for padding (default 0.0 for black)
+            nhwc: If True, input is in NHWC format. Default is NCHW.
+
+        Returns:
+            Resized and padded image [N, C, H_out, W_out] (NCHW) or [N, H_out, W_out, C] (NHWC)
+
+        Example:
+            >>> # 1920x1080 HD image preserving aspect ratio to 1024x1024
+            >>> image = torch.randn(1, 3, 1080, 1920, device="mps")
+            >>> result = vision.resize_aspect_ratio_preserve(
+            ...     image, (1024, 1024), pad_value=0.0
+            ... )
+            >>> print(result.shape)
+            torch.Size([1, 3, 1024, 1024])
+            >>> # Image scaled to 1024x576 with padding on top/bottom
+        """
+        input_tensor = self._ensure_mps_tensor(input)
+        batch_size = input_tensor.shape[0]
+
+        if nhwc:
+            h_in, w_in, channels = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, target_size[0], target_size[1], channels)
+        else:
+            channels, h_in, w_in = input_tensor.shape[1], input_tensor.shape[2], input_tensor.shape[3]
+            output_shape = (batch_size, channels, target_size[0], target_size[1])
+
+        h_out, w_out = target_size
+
+        output_np = np.empty(output_shape, dtype=np.float32)
+        output_buffer = self._create_buffer(output_np)
+
+        # Pack params: [batch_size, H_in, W_in, H_out, W_out, channels, nhwc, pad_value_as_uint]
+        # Note: pad_value is passed as bits in params[7]
+        pad_value_bits = struct.unpack("I", struct.pack("f", pad_value))[0]
+        params_bytes = struct.pack(
+            "7I", batch_size, h_in, w_in, h_out, w_out, channels, 1 if nhwc else 0
+        )
+        params_bytes += struct.pack("I", pad_value_bits)
+        params_buffer = self._create_buffer(params_bytes)
+        input_buffer = self._tensor_to_buffer(input_tensor)
+
+        pipeline = self._get_pipeline("resize_aspect_ratio_preserve")
+
+        if Metal is None:
+            raise RuntimeError("Metal is not available")
+
+        command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
 
         encoder.setComputePipelineState_(pipeline)

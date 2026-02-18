@@ -48,12 +48,14 @@ class TestMLAFused:
         # Random float16 weights
         weights = torch.randn(in_features, out_features, dtype=torch.float16, device=device)
         
-        # Quantize to FP4
-        weights_packed, scales = quantize_fp4(
-            weights, group_size=64
-        )
+        # Quantize to FP4 - use a group_size that divides in_features evenly
+        # Try 64 first, then fall back to smaller sizes
+        for group_size in [64, 32, 16, 8]:
+            if in_features % group_size == 0:
+                weights_packed, scales = quantize_fp4(weights, group_size=group_size)
+                return weights_packed, scales
         
-        return weights_packed, scales
+        raise ValueError(f"Cannot find valid group_size for in_features={in_features}")
 
     def test_params_to_struct(self):
         """Test MLAAttentionParams serialization."""
@@ -90,7 +92,7 @@ class TestMLAFused:
         struct_arr = params.to_struct()
         
         # Verify shape
-        assert struct_arr.shape == (32,)  # 32 float32 values
+        assert struct_arr.shape == (37,)  # 37 float32 values (includes KV quant params)
         
         # Verify some key values
         assert struct_arr[0] == 2.0  # batch

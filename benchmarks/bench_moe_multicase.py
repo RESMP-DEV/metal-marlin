@@ -5,14 +5,16 @@ Tests: decode (bs=1), prefill (bs=4,8), batch inference (bs=16,32)
 Memory tracking to verify we stay under budget.
 """
 
+import os
+import sys
 import resource
 import time
-
 import torch
 
 
 def get_rss_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+
 
 def benchmark_moe_forward(moe_layer, batch_sizes, hidden_dim, warmup=3, trials=10):
     results = {}
@@ -42,17 +44,15 @@ def benchmark_moe_forward(moe_layer, batch_sizes, hidden_dim, warmup=3, trials=1
 
     return results
 
+
 def main():
+    # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
+    if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
+        print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
+        print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
+        sys.exit(0)
+
     from metal_marlin.trellis.model import TrellisForCausalLM
-
-import os
-import sys
-
-# Check if running inside AlphaHENG task mode - skip to avoid memory bloat
-if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
-    print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
-    print("Run benchmarks manually outside of agent tasks to avoid memory leaks.")
-    sys.exit(0)
 
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained(
@@ -79,6 +79,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     final_rss = get_rss_mb()
     assert final_rss < 20000, f"Memory exceeded 20GB budget: {final_rss:.0f} MB"
     print(f"\nMemory budget: PASS ({final_rss:.0f} MB < 20000 MB)")
+
 
 if __name__ == '__main__':
     main()

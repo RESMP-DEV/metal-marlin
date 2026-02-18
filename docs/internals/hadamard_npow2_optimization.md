@@ -88,7 +88,7 @@ MTLFunction* kernel = [lib newFunctionWithName:@"hadamard_forward_fast_96"];
 
 ### Python API (via metal_marlin)
 
-Currently requires precompiled library for non-power-of-2:
+Non-power-of-2 sizes are now supported via inline kernel compilation:
 ```python
 from metal_marlin.hadamard_metal import hadamard_transform_metal
 
@@ -96,15 +96,13 @@ from metal_marlin.hadamard_metal import hadamard_transform_metal
 x = torch.randn(16, 64, device="mps", dtype=torch.float16)
 y = hadamard_transform_metal(x, block_size=64)
 
-# Non-power-of-2 requires full C++ build
-# x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
-# y96 = hadamard_transform_metal(x96, block_size=96)  # NotImplementedError
+# Non-power-of-2 sizes now work too!
+x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
+y96 = hadamard_transform_metal(x96, block_size=96)  # Now works!
 ```
 
-To enable non-power-of-2 in Python:
-1. Compile `src/hadamard.metal` to `.metallib`
-2. Load library via `MTLDevice.newLibraryWithFile`
-3. Update `hadamard_metal.py` to dispatch to precompiled kernels
+The implementation uses block-diagonal decomposition within a single kernel,
+sequentially processing each power-of-2 subblock.
 
 ## Normalization Factors
 
@@ -128,7 +126,7 @@ uv run pytest tests/test_hadamard.py -v -k "96 or 160 or 192"
 
 ## Future Work
 
-- [ ] Add inline compilation support for non-power-of-2 in Python API
+- [x] Add inline compilation support for non-power-of-2 in Python API
 - [ ] Benchmark throughput vs. power-of-2 equivalents
 - [ ] Support arbitrary composite sizes (e.g., 80 = 64 + 16)
 - [ ] Auto-tuning for optimal subblock decomposition

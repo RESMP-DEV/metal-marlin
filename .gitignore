@@ -29,6 +29,10 @@ cmake_install.cmake
 Makefile
 *.cpython-*.so
 
+# Generated Cython C files (regenerated from .pyx during build)
+metal_marlin/*.c
+metal_marlin/**/*.c
+
 # Virtual environments
 # Only .venv is used by uv - all others are legacy/mistakes
 .venv/

@@ -537,7 +537,10 @@ kernel void flash_attention_v2(
         uint global_q = q_start + sg_q_start + r;
         if (global_q >= seq_q) continue;
 
-        float inv_l = (l_prev[r] > 0.0f) ? (1.0f / l_prev[r]) : 0.0f;
+        // SIMDgroup-level reduction for consistent normalization
+        // Hardware-accelerated simd_sum provides O(1) reduction latency
+        float l_sum = simd_sum(l_prev[r]);
+        float inv_l = (l_sum > 0.0f) ? (1.0f / l_sum) : 0.0f;
 
         const uint o_row_base = o_base + (sg_q_start + r) * q_stride_s;
 #ifdef USE_BF16_INPUTS

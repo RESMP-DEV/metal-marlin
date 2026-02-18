@@ -182,6 +182,7 @@ class FastPath:
         grid: tuple[int, int, int],
         threadgroup: tuple[int, int, int],
         buffers: Sequence[Any],
+        offsets: Sequence[int] | None = None,
         wait: bool = True,
     ) -> None:
         """Dispatch a kernel using the fast C++ path.
@@ -191,6 +192,7 @@ class FastPath:
             grid: Grid dimensions (threadgroups in X, Y, Z).
             threadgroup: Threadgroup dimensions (threads in X, Y, Z).
             buffers: Sequence of ManagedBuffer objects from C++ extension.
+            offsets: Optional sequence of byte offsets for each buffer.
             wait: If True, wait for kernel completion.
 
         Raises:
@@ -208,6 +210,7 @@ class FastPath:
             threadgroup,
             list(buffers),
             wait,
+            list(offsets) if offsets else [],
         )
 
     def dispatch_batched(
@@ -235,6 +238,180 @@ class FastPath:
             batch.add_kernel(pipeline, grid, threadgroup, list(buffers))
 
         batch.commit(wait)
+
+    def batch_mmfp4_gemm(
+        self,
+        ops: Sequence[tuple[str, Any, Any, Any, Any, int, int, int, int]],
+        wait: bool = True,
+    ) -> None:
+        """Dispatch multiple MMFP4 GEMM kernels in a single command buffer.
+
+        Args:
+            ops: Sequence of (kernel_name, A, B, S, C, M, N, K, group_size) tuples.
+            wait: If True, wait for all kernels to complete.
+        """
+        if not self._available:
+             raise RuntimeError("FastPath not available")
+        
+        batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
+        
+        def to_mb(obj: Any) -> Any:
+            if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
+                return obj
+            if hasattr(obj, "data_ptr"):
+                return self.create_buffer_from_ptr(obj.data_ptr(), obj.nbytes)
+            raise TypeError(f"FastPath requires ManagedBuffer or Tensor, got {type(obj)}")
+
+        for op in ops:
+            kernel_name, A, B, S, C, M, N, K, group_size = op
+            pipeline = self._get_pipeline(kernel_name)
+            batch.add_mmfp4_gemm(
+                pipeline,
+                to_mb(A), to_mb(B), to_mb(S), to_mb(C),
+                M, N, K, group_size
+            )
+            
+        batch.commit(wait)
+
+    def batch_int4_gemm(
+        self,
+        ops: Sequence[tuple[str, Any, Any, Any, Any, Any, int, int, int, int]],
+        wait: bool = True,
+    ) -> None:
+        """Dispatch multiple INT4 GEMM kernels in a single command buffer.
+
+        Args:
+            ops: Sequence of (kernel_name, A, B, S, Z, C, M, N, K, group_size) tuples.
+            wait: If True, wait for all kernels to complete.
+        """
+        if not self._available:
+             raise RuntimeError("FastPath not available")
+        
+        batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
+        
+        def to_mb(obj: Any) -> Any:
+            if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
+                return obj
+            if hasattr(obj, "data_ptr"):
+                return self.create_buffer_from_ptr(obj.data_ptr(), obj.nbytes)
+            raise TypeError(f"FastPath requires ManagedBuffer or Tensor, got {type(obj)}")
+
+        for op in ops:
+            kernel_name, A, B, S, Z, C, M, N, K, group_size = op
+            pipeline = self._get_pipeline(kernel_name)
+            batch.add_int4_gemm(
+                pipeline,
+                to_mb(A), to_mb(B), to_mb(S), to_mb(Z), to_mb(C),
+                M, N, K, group_size
+            )
+            
+        batch.commit(wait)
+
+    def mmfp4_gemm(
+        self,
+        kernel_name: str,
+        A: Any,
+        B: Any,
+        S: Any,
+        C: Any,
+        M: int,
+        N: int,
+        K: int,
+        group_size: int,
+        wait: bool = True,
+    ) -> None:
+        """Dispatch MMFP4 GEMM using C++ extension."""
+        if not self._available:
+             raise RuntimeError("FastPath not available")
+        
+        pipeline = self._get_pipeline(kernel_name)
+        
+        def to_mb(obj: Any) -> Any:
+            if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
+                return obj
+            if hasattr(obj, "data_ptr"):
+                # Zero-copy wrap of tensor memory
+                return self.create_buffer_from_ptr(obj.data_ptr(), obj.nbytes)
+            raise TypeError(f"FastPath requires ManagedBuffer or Tensor, got {type(obj)}")
+
+        _metal_dispatch_ext.mmfp4_gemm(
+            self._ctx,
+            pipeline,
+            to_mb(A), to_mb(B), to_mb(S), to_mb(C),
+            M, N, K, group_size,
+            wait
+        )
+
+    def int4_gemm(
+        self,
+        kernel_name: str,
+        A: Any,
+        B: Any,
+        S: Any,
+        Z: Any,
+        C: Any,
+        M: int,
+        N: int,
+        K: int,
+        group_size: int,
+        wait: bool = True,
+    ) -> None:
+        """Dispatch INT4 GEMM using C++ extension."""
+        if not self._available:
+             raise RuntimeError("FastPath not available")
+        
+        pipeline = self._get_pipeline(kernel_name)
+        
+        def to_mb(obj: Any) -> Any:
+            if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
+                return obj
+            if hasattr(obj, "data_ptr"):
+                # Zero-copy wrap of tensor memory
+                return self.create_buffer_from_ptr(obj.data_ptr(), obj.nbytes)
+            raise TypeError(f"FastPath requires ManagedBuffer or Tensor, got {type(obj)}")
+
+        _metal_dispatch_ext.int4_gemm(
+            self._ctx,
+            pipeline,
+            to_mb(A), to_mb(B), to_mb(S), to_mb(Z), to_mb(C),
+            M, N, K, group_size,
+            wait
+        )
+
+    def int2_gemm(
+        self,
+        kernel_name: str,
+        A: Any,
+        B: Any,
+        S: Any,
+        C: Any,
+        M: int,
+        N: int,
+        K: int,
+        group_size: int,
+        wait: bool = True,
+    ) -> None:
+        """Dispatch INT2 GEMM using C++ extension."""
+        if not self._available:
+             raise RuntimeError("FastPath not available")
+        
+        pipeline = self._get_pipeline(kernel_name)
+        
+        def to_mb(obj: Any) -> Any:
+            if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
+                return obj
+            if hasattr(obj, "data_ptr"):
+                # Zero-copy wrap of tensor memory
+                return self.create_buffer_from_ptr(obj.data_ptr(), obj.nbytes)
+            raise TypeError(f"FastPath requires ManagedBuffer or Tensor, got {type(obj)}")
+
+        _metal_dispatch_ext.int2_gemm(
+            self._ctx,
+            pipeline,
+            to_mb(A), to_mb(B), to_mb(S), to_mb(C),
+            M, N, K, group_size,
+            wait
+        )
 
     def create_buffer(self, size: int, use_pool: bool = True) -> Any:
         """Create a Metal buffer using the C++ extension.
@@ -761,6 +938,7 @@ class MetalKernelLibrary:
         self._batch_mode = False
         self._batch_encoder: Any = None
         self._batch_command_buffer: Any = None
+        self._batch_copy_backs: list[Any] = []
 
         # Pipeline overlap state - tracks in-flight command buffers
         self._inflight_prefill: Any = None
@@ -813,24 +991,53 @@ class MetalKernelLibrary:
         return self._decode_queue
 
     @contextmanager
-    def batch_dispatch(self) -> Generator[None, None, None]:
+    def batch_dispatch(self, wait: bool = True) -> Generator["BatchDispatchState", None, None]:
         """Context manager for batching multiple kernel dispatches.
 
+        Reuses a single command buffer for all dispatches within the context,
+        reducing per-dispatch overhead from ~80-150μs to ~5-15μs.
+
+        Args:
+            wait: If True, waits for completion on exit. If False, returns
+                  a BatchDispatchState that can be waited on later.
+
         Usage:
+            # Synchronous - waits for all kernels on exit
             with lib.batch_dispatch():
                 dispatch_kernel(lib, ...)  # Encoded but not committed
                 dispatch_kernel(lib, ...)  # Encoded but not committed
             # All kernels committed and waited on exit
+
+            # Asynchronous - returns immediately, wait later
+            with lib.batch_dispatch(wait=False) as batch:
+                dispatch_kernel(lib, ...)
+                dispatch_kernel(lib, ...)
+            # ... do other work ...
+            batch.wait()  # Block until complete
         """
         self._batch_mode = True
         self._batch_command_buffer = self.command_queue.commandBuffer()
         self._batch_encoder = self._batch_command_buffer.computeCommandEncoder()
+        self._batch_copy_backs = []
+        
+        # Create state object for async waiting
+        batch_state = BatchDispatchState(self._batch_command_buffer)
+        
         try:
-            yield
+            yield batch_state
         finally:
             self._batch_encoder.endEncoding()
             self._batch_command_buffer.commit()
-            self._batch_command_buffer.waitUntilCompleted()
+            
+            if wait:
+                self._batch_command_buffer.waitUntilCompleted()
+                batch_state._completed = True
+                
+                # Copy back results
+                for item in self._batch_copy_backs:
+                    _copy_buffer_to_tensor(item.buffer, item.tensor)
+                self._batch_copy_backs = []
+            
             self._batch_mode = False
             self._batch_encoder = None
             self._batch_command_buffer = None
@@ -1321,6 +1528,10 @@ class MetalKernelLibrary:
             elif hasattr(arg, "textureType"):
                 encoder.setTexture_atIndex_(arg, texture_idx)
                 texture_idx += 1
+            elif hasattr(arg, "buffer"):
+                # Handle _CopyBackBuffer and similar wrappers
+                encoder.setBuffer_offset_atIndex_(arg.buffer, 0, buffer_idx)
+                buffer_idx += 1
             else:
                 encoder.setBuffer_offset_atIndex_(arg, 0, buffer_idx)
                 buffer_idx += 1
@@ -1676,6 +1887,50 @@ class BatchedDispatcher:
         self._encoder = None
         self._dispatches = 0
         return count
+
+
+class BatchDispatchState:
+    """State object for async batch dispatch operations.
+    
+    Allows waiting on a batch of dispatched kernels after the context exits,
+    enabling CPU work to overlap with GPU execution.
+    
+    Example:
+        with lib.batch_dispatch(wait=False) as batch:
+            dispatch_kernel(lib, "kernel_a", ...)
+            dispatch_kernel(lib, "kernel_b", ...)
+        
+        # GPU is executing while CPU continues here
+        do_other_work()
+        
+        # Wait for GPU to finish when needed
+        batch.wait()
+    """
+    
+    __slots__ = ("_command_buffer", "_completed")
+    
+    def __init__(self, command_buffer: Any):
+        self._command_buffer = command_buffer
+        self._completed = False
+    
+    @property
+    def completed(self) -> bool:
+        """Check if the batch has completed without blocking."""
+        if self._completed:
+            return True
+        # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed,
+        # 3=scheduled, 4=completed, 5=error
+        status = self._command_buffer.status()
+        if status >= 4:
+            self._completed = True
+            return True
+        return False
+    
+    def wait(self) -> None:
+        """Block until the batch dispatch completes."""
+        if not self._completed:
+            self._command_buffer.waitUntilCompleted()
+            self._completed = True
 
 
 # ---------------------------------------------------------------------------
@@ -2422,6 +2677,7 @@ def dispatch_kernel(
     buffers: Sequence[Any],
     wait: bool = False,
     offsets: Sequence[int] | None = None,
+    textures: Sequence[Any] | None = None,
 ) -> Any:
     """Dispatch a Metal compute kernel.
 
@@ -2436,6 +2692,7 @@ def dispatch_kernel(
         buffers: Sequence of MTLBuffer arguments (in order)
         wait: If True, wait for kernel completion
         offsets: Optional sequence of byte offsets for each buffer.
+        textures: Optional sequence of MTLTexture arguments (in order).
 
     Returns:
         None if wait=True or in batch mode, otherwise the command buffer.
@@ -2453,13 +2710,14 @@ def dispatch_kernel(
     # Try FastPath when:
     # - Not in batch mode (batch mode uses shared encoder)
     # - No copy-back buffers (requires Python-side copy after wait)
+    # - No textures (FastPath currently doesn't support textures)
     # - C++ extension available
-    if not lib._batch_mode and not has_copy_back:
+    if not lib._batch_mode and not has_copy_back and not textures:
         fast_path = get_fast_path(lib)
         if fast_path.available:
             try:
                 return fast_path.dispatch(
-                    pipeline, grid, threadgroup, buffers, offsets, wait
+                    function_name, grid, threadgroup, buffers, offsets, wait
                 )
             except Exception:
                 # Fall back to Python path on any error
@@ -2487,6 +2745,11 @@ def dispatch_kernel(
         else:
             encoder.setBuffer_offset_atIndex_(buf, offset, i)
 
+    # Bind textures
+    if textures:
+        for i, tex in enumerate(textures):
+            encoder.setTexture_atIndex_(tex, i)
+
     # Dispatch
     grid_size = Metal.MTLSizeMake(*grid)
     tg_size = Metal.MTLSizeMake(*threadgroup)
@@ -2494,6 +2757,8 @@ def dispatch_kernel(
 
     # If in batch mode, don't end/commit - the context manager handles it
     if lib._batch_mode:
+        if copy_back:
+            lib._batch_copy_backs.extend(copy_back)
         return None
 
     encoder.endEncoding()
@@ -2598,6 +2863,8 @@ def dispatch_kernel_indirect(
 
     # If in batch mode, don't end/commit - the context manager handles it
     if lib._batch_mode:
+        if copy_back:
+            lib._batch_copy_backs.extend(copy_back)
         return None
 
     encoder.endEncoding()
@@ -2725,6 +2992,106 @@ def _pad_packed_n(
     return padded
 
 
+def _dispatch_decode_gemv_fp4(
+    lib: MetalKernelLibrary,
+    A: torch.Tensor,
+    B_packed: torch.Tensor,
+    scales: torch.Tensor,
+    M: int,
+    N: int,
+    K: int,
+    group_size: int = 32,
+    enable_padding: bool | None = None,
+) -> torch.Tensor:
+    """Dispatch FP4 decode GEMV (M=1) using optimized decode kernel.
+
+    The decode_gemv_fp4_wide kernel is optimized for single-token inference:
+    - TILE_N = 512 columns per threadgroup (vs 64 for standard GEMM)
+    - 4 columns per thread for better instruction-level parallelism
+    - No wasted compute on M-padding (M is always 1)
+
+    Expected speedup vs marlin_gemm_fp4 for M=1: ~3-4x
+
+    Kernel signature:
+        decode_gemv_fp4_wide(
+            device const half* A,      // [1, K] - buffer 0
+            device const uint* B,      // [K/8, N] - buffer 1
+            device const half* scales, // [K/group_size, N] - buffer 2
+            device half* C,            // [1, N] - buffer 3
+            constant uint& M,          // buffer 4
+            constant uint& N,          // buffer 5
+            constant uint& K,          // buffer 6
+            constant uint& group_size  // buffer 7
+        )
+    """
+    device = lib.device
+    orig_N = N
+    pad_n = 0
+
+    # Decode kernel uses TILE_N = 512
+    DECODE_TILE_N = 512
+
+    if _padding_enabled(enable_padding):
+        packed_k = B_packed.shape[0] * 8
+        packed_n = B_packed.shape[1]
+        scales_k = scales.shape[0] * group_size
+        scales_n = scales.shape[1]
+
+        k_target = _round_up(max(K, packed_k, scales_k),
+                             max(_PAD_MULTIPLE, group_size))
+        n_target = _round_up(max(N, packed_n, scales_n), DECODE_TILE_N)
+
+        A, _ = _pad_tensor_to_size(A, 1, k_target)
+        B_packed = _pad_packed_fp4(B_packed, k_target, n_target)
+        scales = _pad_scales(scales, k_target, n_target, group_size)
+
+        N = n_target
+        K = k_target
+        pad_n = N - orig_N if N >= orig_N else 0
+
+    # Allocate output
+    C = torch.empty((M, N), dtype=torch.float16, device="mps")
+
+    # Convert tensors to Metal buffers
+    A_half = A.half().contiguous()
+    A_buf = _private_buffer_from_tensor(A_half, lib, device, cache=False)
+    B_packed_contig = B_packed.contiguous()
+    B_buf = _private_buffer_from_tensor(
+        B_packed_contig, lib, device, cache=True)
+    scales_half = scales if scales.dtype == torch.float16 else scales.half()
+    scales_half = scales_half.contiguous()
+    S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
+    C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
+
+    # Create param buffers for constant values
+    M_buf = _private_buffer_from_bytes(
+        lib, device, np.array([M], dtype=np.uint32).tobytes())
+    N_buf = _private_buffer_from_bytes(
+        lib, device, np.array([N], dtype=np.uint32).tobytes())
+    K_buf = _private_buffer_from_bytes(
+        lib, device, np.array([K], dtype=np.uint32).tobytes())
+    gs_buf = _private_buffer_from_bytes(
+        lib, device, np.array([group_size], dtype=np.uint32).tobytes()
+    )
+
+    # Compute grid: each threadgroup handles DECODE_TILE_N columns
+    grid_n = (N + DECODE_TILE_N - 1) // DECODE_TILE_N
+
+    # Dispatch decode kernel
+    dispatch_kernel(
+        lib,
+        function_name="decode_gemv_fp4_wide",
+        grid=(grid_n, 1, 1),
+        threadgroup=(128, 1, 1),
+        buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
+        wait=True,
+    )
+
+    if pad_n:
+        C = unpad(C, 1, pad_n)
+    return C
+
+
 def dispatch_gemm_fp4(
     lib: MetalKernelLibrary,
     A: torch.Tensor,
@@ -2755,6 +3122,16 @@ def dispatch_gemm_fp4(
     require_mps()
 
     device = lib.device
+
+    # === DECODE OPTIMIZATION: Use GEMV kernel for M=1 ===
+    # The standard marlin_gemm_fp4 kernel uses 64x64 tiles which is catastrophically
+    # inefficient for decode (M=1): 98.4% of compute is wasted on zero padding.
+    # The decode_gemv_fp4_wide kernel uses TILE_N=512 with 4 cols/thread for ~3-4x speedup.
+    if M == 1:
+        return _dispatch_decode_gemv_fp4(
+            lib, A, B_packed, scales, M, N, K, group_size, enable_padding
+        )
+
     gpu_family = get_gpu_family(device)
     if K > FP32_ACCUM_K_THRESHOLD:
         kernel_name = (
@@ -2823,14 +3200,23 @@ def dispatch_gemm_fp4(
     grid_n = (N + TILE_N - 1) // TILE_N
 
     # Dispatch
-    dispatch_kernel(
-        lib,
-        function_name=kernel_name,
-        grid=(grid_n, grid_m, 1),
-        threadgroup=(THREADS_PER_TG, 1, 1),
-        buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
-        wait=True,
-    )
+    fast_path = get_fast_path(lib)
+    if fast_path.available and hasattr(fast_path, "mmfp4_gemm"):
+        fast_path.mmfp4_gemm(
+            kernel_name,
+            A_buf, B_buf, S_buf, C_buf,
+            M, N, K, group_size,
+            wait=True
+        )
+    else:
+        dispatch_kernel(
+            lib,
+            function_name=kernel_name,
+            grid=(grid_n, grid_m, 1),
+            threadgroup=(THREADS_PER_TG, 1, 1),
+            buffers=[A_buf, B_buf, S_buf, C_buf, M_buf, N_buf, K_buf, gs_buf],
+            wait=True,
+        )
 
     if pad_m or pad_n:
         C = unpad(C, 0, pad_m)

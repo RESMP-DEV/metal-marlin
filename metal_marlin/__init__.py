@@ -75,7 +75,24 @@ from .heap_allocator import (
     HeapBufferPool,
     MetalHeapAllocator,
 )
-from .kernels import marlin_gemm_fp4, marlin_gemm_int4
+from .kernels import (
+    marlin_gemm_fp4,
+    marlin_gemm_int4,
+    mmfp4_fused_qkv,
+    mmfp4_gemm,
+    dequantize_mmfp4,
+    pack_fp4_weights
+)
+
+# Batched GEMM with variable sequence lengths (supports per-batch M dimensions)
+try:
+    from .batched_gemm_variable_seq import (
+        dispatch_batched_gemm_variable_seq,
+        dispatch_grouped_attention_variable_seq,
+    )
+except ImportError:
+    dispatch_batched_gemm_variable_seq = None  # type: ignore[assignment]
+    dispatch_grouped_attention_variable_seq = None  # type: ignore[assignment]
 # KV Cache (consolidated in kv_cache)
 from .kv_cache import (
     CacheConfig,
@@ -153,10 +170,20 @@ from .pipeline import (
     RequestState,
     generate_pipelined,
 )
-from .quantize import (  # FP8 quantization
+from .fp8_utils import (  # FP8 E4M3/E5M2 utilities for KV cache
     FP8_E4M3_MAX,
-    FP8_E4M3_VALUES,
     FP8_E5M2_MAX,
+    dequantize_fp8_e4m3,
+    dequantize_fp8_e5m2,
+    dequantize_kv_cache_fp8,
+    dequantize_kv_cache_fp8_e5m2,
+    quantize_kv_cache_fp8,
+    quantize_kv_cache_fp8_e5m2,
+    quantize_to_fp8_e4m3,
+    quantize_to_fp8_e5m2,
+)
+from .quantize import (  # FP8 weight quantization
+    FP8_E4M3_VALUES,
     FP8_E5M2_VALUES,
     compute_fp8_e4m3_values,
     compute_fp8_e5m2_values,
@@ -199,11 +226,52 @@ except ImportError:
 
 # Fast inference path (optional - requires C++ extension)
 try:
-    from .fast_inference import FastInferenceContext, fast_dispatch_available, get_fast_context
+    from .fast_inference import (
+        BatchDispatchContext,
+        FastInferenceContext,
+        fast_dispatch_available,
+        get_fast_context,
+    )
 except ImportError:
+    BatchDispatchContext = None
     FastInferenceContext = None
     fast_dispatch_available = False  # type: ignore[assignment]
     get_fast_context = None  # type: ignore[assignment]
+
+# C++ Expert Manager for high-performance MoE dispatch (optional - requires C++ extension)
+try:
+    from .expert_manager_cpp import (
+        CppDispatchInfo,
+        ExpertManagerCpp,
+        create_expert_manager,
+        is_available as expert_manager_available,
+    )
+except ImportError:
+    ExpertManagerCpp = None  # type: ignore[misc,assignment]
+    CppDispatchInfo = None  # type: ignore[misc,assignment]
+    create_expert_manager = None  # type: ignore[misc,assignment]
+    expert_manager_available = False  # type: ignore[assignment]
+
+# C++ MoE Router for high-performance MoE routing (optional - requires C++ extension)
+try:
+    from .moe_router_cpp import (
+        MoERouterCpp,
+        is_available as moe_router_available,
+    )
+except ImportError:
+    MoERouterCpp = None # type: ignore[misc,assignment]
+    moe_router_available = False # type: ignore[assignment]
+
+# C++ MLA Attention for high-performance Metal operations (optional - requires C++ extension)
+try:
+    from .mla_attention_cpp import (
+        MLAAttentionCpp,
+        is_available as _mla_cpp_is_available,
+    )
+    mla_cpp_available = _mla_cpp_is_available()
+except ImportError:
+    MLAAttentionCpp = None # type: ignore[misc,assignment]
+    mla_cpp_available = False # type: ignore[assignment]
 
 # Async transfer / compute overlap (optional - requires PyObjC Metal)
 try:
@@ -276,11 +344,33 @@ __all__ = [
     "compute_fp8_e5m2_values",
     "dequant_fp8_e4m3",
     "dequant_fp8_e5m2",
+    "dequantize_fp8_e4m3",
+    "dequantize_fp8_e5m2",
+    "dequantize_kv_cache_fp8",
+    "dequantize_kv_cache_fp8_e5m2",
     "pack_fp8_weights",
+    "quantize_kv_cache_fp8",
+    "quantize_kv_cache_fp8_e5m2",
     "quantize_to_fp8",
+    "quantize_to_fp8_e4m3",
+    "quantize_to_fp8_e5m2",
     # FP4/INT4/NF4 quantization (CPU)
+    "FP4Metal",
+    "GPTQMetal",
+    "HadamardMetal",
+    "compute_hessian_metal",
+    "dequantize_fp4_metal",
+    "hadamard_transform_metal",
+    "quantize_fp4_metal",
+    # Batched GEMM with variable sequence lengths
+    "dispatch_batched_gemm_variable_seq",
+    "dispatch_grouped_attention_variable_seq",
     "marlin_gemm_fp4",
     "marlin_gemm_int4",
+    "mmfp4_fused_qkv",
+    "mmfp4_gemm",
+    "dequantize_mmfp4",
+    "pack_fp4_weights",
     "pack_fp4_weights_cpu",
     "pack_int4_weights",
     "pack_nf4_weights",
@@ -398,6 +488,7 @@ __all__ = [
     "hadamard_transform_metal",
     "quantize_fp4_metal",
     # Fast inference path
+    "BatchDispatchContext",
     "FastInferenceContext",
     "fast_dispatch_available",
     "get_fast_context",
@@ -405,6 +496,14 @@ __all__ = [
     "AsyncTransferHandle",
     "AsyncTransferManager",
     "PipelinedLayerDispatcher",
+    # C++ Expert Manager
+    "ExpertManagerCpp",
+    "CppDispatchInfo",
+    "create_expert_manager",
+    "expert_manager_available",
+    # C++ MLA Attention
+    "MLAAttentionCpp",
+    "mla_cpp_available",
 ]
 
 # Backward compatibility aliases - these are deprecated, use CacheConfig/KVCache instead

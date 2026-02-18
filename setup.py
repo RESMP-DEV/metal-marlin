@@ -54,14 +54,34 @@ else:
 
     try:
         import nanobind
-        NANOBIND_INCLUDE = nanobind.get_include()
+        import shutil
+        NANOBIND_INCLUDE = nanobind.include_dir()
         USE_NANOBIND = True
+        NANOBIND_ROOT = Path(NANOBIND_INCLUDE).parent
+        
+        # Copy nanobind src to local dir to avoid absolute path issues
+        NANOBIND_SRC_DIR = NANOBIND_ROOT / "src"
+        LOCAL_NB_DIR = Path("cpp/nanobind_src")
+        
+        if NANOBIND_SRC_DIR.exists():
+            if not LOCAL_NB_DIR.exists():
+                print(f"Copying {NANOBIND_SRC_DIR} to {LOCAL_NB_DIR}")
+                shutil.copytree(NANOBIND_SRC_DIR, LOCAL_NB_DIR)
+            
+            NANOBIND_SRC = LOCAL_NB_DIR / "nb_combined.cpp"
+        else:
+            NANOBIND_SRC = None
+            
+        NANOBIND_EXT_INCLUDE = NANOBIND_ROOT / "ext" / "robin_map" / "include"
     except ImportError:
         NANOBIND_INCLUDE = None
         USE_NANOBIND = False
+        NANOBIND_SRC = None
+        NANOBIND_EXT_INCLUDE = None
 
     try:
         import torch
+        import torch.utils.cpp_extension
         TORCH_INCLUDE = torch.utils.cpp_extension.include_paths()
         TORCH_LIB_PATH = [torch.utils.cpp_extension.library_paths()[0]] if torch.utils.cpp_extension.library_paths() else []
         HAS_TORCH = True
@@ -86,7 +106,7 @@ else:
     HERE = Path(__file__).parent
     EXT_DIR = HERE / "metal_marlin"
 
-    extra_compile_args = ["-O3", "-ffast-math", "-std=c11", "-fobjc-arc"]
+    extra_compile_args = ["-O3", "-ffast-math", "-std=c11", "-fobjc-arc", "-march=armv8.2-a+fp16+dotprod"]
     extra_link_args = ["-framework", "Foundation", "-framework", "Metal", "-lobjc"]
 
     include_dirs = [str(EXT_DIR), str(HERE / "include"), str(HERE / "cpp/include")]
@@ -96,6 +116,8 @@ else:
         include_dirs.append(PYBIND11_INCLUDE)
     if NANOBIND_INCLUDE is not None:
         include_dirs.append(NANOBIND_INCLUDE)
+        if NANOBIND_EXT_INCLUDE and NANOBIND_EXT_INCLUDE.exists():
+            include_dirs.append(str(NANOBIND_EXT_INCLUDE))
     if TORCH_INCLUDE:
         include_dirs.extend(TORCH_INCLUDE)
 
@@ -146,16 +168,43 @@ else:
             )
         )
         if USE_NANOBIND:
+            sources = [
+                "cpp/src/python_bindings.mm", "metal_marlin/cpp/moe_dispatcher.mm",
+                "cpp/src/gemm_dispatch.cpp", "cpp/src/device.cpp", "cpp/src/device_discovery.cpp",
+                "cpp/src/library_manager.mm", "cpp/src/events.mm", "cpp/src/encoder_cache.mm",
+                "cpp/src/buffer_manager.cpp", "cpp/src/pool.cpp", "cpp/src/expert_buffer_pool.cpp",
+                "cpp/src/moe_manager.mm", "cpp/src/pipeline.mm",
+                "cpp/src/moe_router_dispatch.cpp", "cpp/src/metal_impl.cpp",
+                "cpp/src/direct_access.mm", "cpp/src/norm_ops.cpp",
+                "cpp/src/batch_dispatch.mm", "cpp/src/mla_attention.mm",
+                "cpp/src/weights_ops.cpp",
+            ]
+            if NANOBIND_SRC and NANOBIND_SRC.exists():
+                sources.append(str(NANOBIND_SRC))
+
             extensions.append(
                 Extension(
                     "metal_marlin._cpp_ext",
-                    sources=[
-                        "cpp/src/python_bindings.mm", "metal_marlin/cpp/moe_dispatcher.mm",
-                        "cpp/src/gemm_dispatch.cpp", "cpp/src/device.cpp", "cpp/src/device_discovery.cpp",
-                        "cpp/src/library_manager.mm", "cpp/src/events.mm", "cpp/src/encoder_cache.mm",
-                        "cpp/src/buffer_manager.cpp", "cpp/src/pool.cpp", "cpp/src/moe_manager.mm",
-                        "cpp/src/moe_router_dispatch.cpp",
-                    ],
+                    sources=sources,
+                    include_dirs=include_dirs,
+                    extra_compile_args=["-std=c++17", "-O3", "-fvisibility=hidden", "-fobjc-arc"],
+                    extra_link_args=["-framework", "Metal", "-framework", "Foundation", "-lobjc"],
+                    language="objc++",
+                )
+            )
+            
+            # Optimized MTLBuffer direct access bridge
+            mtl_bridge_sources = [
+                "cpp/src/mtl_buffer_bridge.mm",
+                "cpp/src/mtl_buffer_bridge_bindings.mm",
+            ]
+            if NANOBIND_SRC and NANOBIND_SRC.exists():
+                mtl_bridge_sources.append(str(NANOBIND_SRC))
+            
+            extensions.append(
+                Extension(
+                    "metal_marlin._mtl_buffer_bridge",
+                    sources=mtl_bridge_sources,
                     include_dirs=include_dirs,
                     extra_compile_args=["-std=c++17", "-O3", "-fvisibility=hidden", "-fobjc-arc"],
                     extra_link_args=["-framework", "Metal", "-framework", "Foundation", "-lobjc"],
@@ -166,7 +215,7 @@ else:
             extensions.append(
                 Extension(
                     "metal_marlin._cpp_ext",
-                    sources=["metal_marlin/cpp_extension.cpp", "metal_marlin/cpp/moe_dispatcher.mm", "cpp/src/gemm_dispatch.cpp"],
+                    sources=["metal_marlin/cpp_extension.cpp", "metal_marlin/cpp/moe_dispatcher.mm", "cpp/src/gemm_dispatch.cpp", "cpp/src/moe_router_dispatch.cpp"],
                     include_dirs=include_dirs,
                     extra_compile_args=["-std=c++17", "-O3", "-fvisibility=hidden", "-fobjc-arc"],
                     extra_link_args=["-framework", "Metal", "-framework", "Foundation", "-lobjc"],

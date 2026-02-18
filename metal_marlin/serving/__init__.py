@@ -13,6 +13,7 @@ from .continuous_batch import (
 from .continuous_batch import (
     SchedulerConfig as ContinuousSchedulerConfig,
 )
+from .mmfp4_server import KVCacheSharing, _kv_sharing
 from .request import GenerationRequest, RequestStatus, SchedulerOutput
 from .runner import BatchedModelRunner, ModelConfig
 from .scheduler import FCFSScheduler, SchedulerConfig
@@ -38,4 +39,7 @@ __all__ = [
     # Model runner
     "BatchedModelRunner",
     "ModelConfig",
+    # KV cache sharing
+    "KVCacheSharing",
+    "_kv_sharing",
 ]

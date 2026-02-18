@@ -21,23 +21,22 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from metal_marlin._compat import (
+    E2M1_VALUES,
+    E2M1_POSITIVE,
+    HAS_TORCH,
+    dequantize_e2m1,
+    torch,
+)
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
-
-try:
-    import torch
-
-    HAS_TORCH = True
-    HAS_MPS = torch.backends.mps.is_available()
-except ImportError:
-    HAS_TORCH = False
-    HAS_MPS = False
-    torch = None  # type: ignore[assignment]
 
 try:
     import Metal
@@ -47,32 +46,24 @@ except ImportError:
     HAS_METAL = False
     Metal = None  # type: ignore[assignment]
 
+HAS_MPS = False
+if HAS_TORCH and torch is not None:
+    try:
+        HAS_MPS = torch.backends.mps.is_available()
+    except AttributeError:
+        HAS_MPS = False
+
 _SHADER_DIR = Path(__file__).parent.parent / "src"
 
-# E2M1 lookup table (must match fp4_quantize.metal)
-E2M1_VALUES = np.array(
-    [
-        0.0,  # 0000: +0
-        0.5,  # 0001: +0.5 (subnormal)
-        1.0,  # 0010: +1.0
-        1.5,  # 0011: +1.5
-        2.0,  # 0100: +2.0
-        3.0,  # 0101: +3.0
-        4.0,  # 0110: +4.0
-        6.0,  # 0111: +6.0
-        -0.0,  # 1000: -0 (treat as 0)
-        -0.5,  # 1001: -0.5
-        -1.0,  # 1010: -1.0
-        -1.5,  # 1011: -1.5
-        -2.0,  # 1100: -2.0
-        -3.0,  # 1101: -3.0
-        -4.0,  # 1110: -4.0
-        -6.0,  # 1111: -6.0
-    ],
-    dtype=np.float32,
-)
+# DEPRECATED: These re-exports are kept for backward compatibility.
+# Import directly from metal_marlin._compat instead:
+#   from metal_marlin._compat import E2M1_VALUES, E2M1_POSITIVE, dequantize_e2m1
+#
+# These will be removed in a future version.
 
-E2M1_POSITIVE = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+# Re-export dequantize_e2m1 from _compat for backward compatibility
+# (this is the canonical implementation now)
+from metal_marlin._compat import dequantize_e2m1  # noqa: F401
 
 
 class FP4Metal:
@@ -107,6 +98,7 @@ class FP4Metal:
                 self._use_metal = False
 
         # Always set up the E2M1 lookup tables (used by both Metal and CPU paths)
+        # These are now imported from metal_marlin._compat (unified)
         self._e2m1_table = E2M1_VALUES
         self._e2m1_positive = E2M1_POSITIVE
 
@@ -208,38 +200,71 @@ class FP4Metal:
             Reconstructed float tensor
         """
         if HAS_TORCH and isinstance(indices, torch.Tensor):
-            idx = indices.cpu().numpy()
-            sc = scales.cpu().numpy()
-            return_torch = True
-            original_device = indices.device
+            # Use PyTorch path to avoid CPU sync
+            if scales.device != indices.device:
+                scales = scales.to(indices.device)
+            
+            # Dequantize without scaling
+            values = dequantize_e2m1(indices)
+            
+            # Apply scales
+            # Reshape for broadcasting
             original_shape = indices.shape
+            flat_values = values.reshape(-1)
+            n = flat_values.shape[0]
+            n_groups = scales.shape[0] # Assuming scales is 1D or [n_groups]
+            
+            # This logic assumes flat packing correspondence like the numpy path
+            padded_n = n_groups * group_size
+            
+            # If we need padding to match groups
+            if padded_n > n:
+                padding = torch.zeros(padded_n - n, device=values.device, dtype=values.dtype)
+                flat_values = torch.cat([flat_values, padding])
+            
+            reshaped_values = flat_values.reshape(n_groups, group_size)
+            reshaped_values = reshaped_values * scales.view(-1, 1)
+            
+            # Trim and reshape back
+            result = reshaped_values.flatten()[:n].reshape(original_shape)
+            return result
+            
         else:
-            idx = np.asarray(indices, dtype=np.uint8)
-            sc = np.asarray(scales, dtype=np.float32)
-            return_torch = False
-            original_device = None
-            original_shape = idx.shape
+            # Fallback to Numpy path
+            if HAS_TORCH and isinstance(indices, torch.Tensor):
+                # This branch shouldn't be reached if indices is Tensor, but kept for safety logic structure
+                idx = indices.cpu().numpy()
+                sc = scales.cpu().numpy()
+                return_torch = True
+                original_device = indices.device
+                original_shape = indices.shape
+            else:
+                idx = np.asarray(indices, dtype=np.uint8)
+                sc = np.asarray(scales, dtype=np.float32)
+                return_torch = False
+                original_device = None
+                original_shape = idx.shape
 
-        flat_idx = idx.flatten()
-        n = len(flat_idx)
+            flat_idx = idx.flatten()
+            n = len(flat_idx)
 
-        # Lookup E2M1 values
-        values = self._e2m1_table[flat_idx]
+            # Lookup E2M1 values
+            values = self._e2m1_table[flat_idx]
 
-        # Apply scales
-        n_groups = len(sc)
-        padded_n = n_groups * group_size
-        if padded_n > n:
-            values = np.pad(values, (0, padded_n - n), mode="constant")
+            # Apply scales
+            n_groups = len(sc)
+            padded_n = n_groups * group_size
+            if padded_n > n:
+                values = np.pad(values, (0, padded_n - n), mode="constant")
 
-        values = values.reshape(n_groups, group_size)
-        values = values * sc[:, np.newaxis]
-        values = values.flatten()[:n].reshape(original_shape)
+            values = values.reshape(n_groups, group_size)
+            values = values * sc[:, np.newaxis]
+            values = values.flatten()[:n].reshape(original_shape)
 
-        if return_torch:
-            values = torch.from_numpy(values.astype(np.float32)).to(original_device)
+            if return_torch:
+                values = torch.from_numpy(values.astype(np.float32)).to(original_device)
 
-        return values
+            return values
 
     def pack_pair(
         self,

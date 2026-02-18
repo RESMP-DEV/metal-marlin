@@ -12,15 +12,13 @@ Key Dimensions (GLM-4.7-Flash):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 
-from .._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
+from .._compat import HAS_PYOBJC_METAL
 from ..kv_cache import TrellisKVCache
 from ..trellis.attention import TrellisMLAttention
 
@@ -48,10 +46,6 @@ def _get_paged_kernel_library() -> Any:
         # Try relative to this file first
         base_path = Path(__file__).parent.parent.parent
         kernel_path = base_path / "src" / "paged_attention.metal"
-
-        if not kernel_path.exists():
-            # Fallback to current working directory based search
-            kernel_path = Path("contrib/metal_marlin/src/paged_attention.metal")
 
         if kernel_path.exists():
             source = kernel_path.read_text()

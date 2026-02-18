@@ -9,8 +9,10 @@ import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ..inference.pipeline import MarlinPipeline
+from .._compat import HAS_CPP_EXT
 from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
 from .openai_schemas import (
     ChatCompletionChunk,
@@ -21,6 +23,15 @@ from .openai_schemas import (
     Usage,
 )
 from .request import GenerationRequest, RequestStatus, RequestTimeoutError
+
+# Import C++ serving extension if available
+try:
+    from ..serving_cpp import ServingCppDispatcher, ServingCppEngineWrapper
+    HAS_SERVING_CPP = True
+except ImportError:
+    HAS_SERVING_CPP = False
+    ServingCppDispatcher = None  # type: ignore
+    ServingCppEngineWrapper = None  # type: ignore
 
 
 @dataclass
@@ -164,6 +175,7 @@ class EngineConfig:
     enable_batching: bool = False  # Start disabled for compatibility
     num_kv_blocks: int = 512
     block_size: int = 16
+    use_cpp_serving: bool = True  # Use C++ serving path when available
 
 
 class ServingEngine:
@@ -203,7 +215,8 @@ class ServingEngine:
         self._request_queue: asyncio.Queue[GenerationRequest] = asyncio.Queue()
         self._results: dict[str, asyncio.Future] = {}
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        self._latency_metrics: dict[str, RequestLatencyMetrics] = {}
+        self._active_requests: dict[str, RequestLatencyMetrics] = {}
+        self._latency_history: deque[RequestLatencyMetrics] = deque(maxlen=1000)
 
         if config.enable_batching:
             self.kv_manager = KVCacheManager(
@@ -217,6 +230,28 @@ class ServingEngine:
         else:
             self.scheduler = None
             self.kv_manager = None
+
+        # Initialize C++ serving mode if enabled and available
+        self._serving_cpp: ServingCppDispatcher | None = None
+        self._serving_cpp_wrapper: ServingCppEngineWrapper | None = None
+        if config.use_cpp_serving and HAS_SERVING_CPP:
+            try:
+                self._serving_cpp = ServingCppDispatcher()
+                if self._serving_cpp.available:
+                    self._serving_cpp_wrapper = ServingCppEngineWrapper(self)
+            except Exception:
+                pass  # Fall back to Python path
+
+    @property
+    def has_cpp_serving(self) -> bool:
+        """Return True if C++ serving path is active."""
+        return self._serving_cpp is not None and self._serving_cpp.available
+
+    def get_serving_cpp_metrics(self) -> dict[str, Any]:
+        """Get C++ serving metrics if available."""
+        if self._serving_cpp is not None and self._serving_cpp.available:
+            return self._serving_cpp.get_metrics()
+        return {"dispatch_count": 0, "total_dispatch_us": 0, "avg_dispatch_us": 0}
 
     def _load_trellis_pipeline(self, config: EngineConfig):
         """Load a Trellis-quantized model.
@@ -276,7 +311,7 @@ class ServingEngine:
     ) -> ChatCompletionResponse:
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
-        self._latency_metrics[request_id] = metrics
+        self._active_requests[request_id] = metrics
 
         gen_request = self._track_request(
             prompt,
@@ -303,6 +338,8 @@ class ServingEngine:
         except TimeoutError:
             gen_request.status = RequestStatus.FINISHED
             metrics.completion_time = time.time()
+            self._latency_history.append(metrics)
+            self._active_requests.pop(request_id, None)
             raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
         gen_request.status = RequestStatus.FINISHED
 
@@ -317,6 +354,8 @@ class ServingEngine:
         metrics.prompt_tokens = prompt_tokens
         metrics.completion_tokens = completion_tokens
         metrics.completion_time = time.time()
+        self._latency_history.append(metrics)
+        self._active_requests.pop(request_id, None)
 
         finish_reason = "stop" if stopped else "length"
         if completion_tokens < (request.max_tokens or 256):
@@ -343,7 +382,7 @@ class ServingEngine:
     async def _completion(self, request: CompletionRequest) -> CompletionResponse:
         request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
-        self._latency_metrics[request_id] = metrics
+        self._active_requests[request_id] = metrics
 
         prompts = request.prompt if isinstance(request.prompt, list) else [request.prompt]
 
@@ -380,6 +419,8 @@ class ServingEngine:
         metrics.prompt_tokens = prompt_tokens
         metrics.completion_tokens = completion_tokens
         metrics.completion_time = time.time()
+        self._latency_history.append(metrics)
+        self._active_requests.pop(request_id, None)
 
         choices = [
             {
@@ -409,7 +450,7 @@ class ServingEngine:
     ) -> AsyncIterator[ChatCompletionChunk]:
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
-        self._latency_metrics[request_id] = metrics
+        self._active_requests[request_id] = metrics
 
         gen_request = self._track_request(
             prompt,
@@ -462,6 +503,8 @@ class ServingEngine:
             if elapsed > self.config.request_timeout:
                 gen_request.status = RequestStatus.FINISHED
                 metrics.completion_time = time.time()
+                self._latency_history.append(metrics)
+                self._active_requests.pop(request_id, None)
                 raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
             piece = await queue.get()
             if piece is None:
@@ -497,6 +540,8 @@ class ServingEngine:
 
         metrics.completion_tokens = self._count_tokens(accumulated)
         metrics.completion_time = time.time()
+        self._latency_history.append(metrics)
+        self._active_requests.pop(request_id, None)
 
         yield ChatCompletionChunk(
             id=request_id,
@@ -678,7 +723,7 @@ class ServingEngine:
         Returns:
             Dictionary with p50, p95, p99 latencies and throughput metrics.
         """
-        if not self._latency_metrics:
+        if not self._latency_history:
             return {
                 "total_requests": 0,
                 "avg_ttft_ms": 0.0,
@@ -688,11 +733,11 @@ class ServingEngine:
                 "avg_tokens_per_second": 0.0,
             }
 
-        ttfts = [m.time_to_first_token for m in self._latency_metrics.values() if m.time_to_first_token]
-        prefills = [m.prefill_latency for m in self._latency_metrics.values() if m.prefill_latency]
-        decodes = [m.decode_latency for m in self._latency_metrics.values() if m.decode_latency]
-        totals = [m.total_latency for m in self._latency_metrics.values() if m.total_latency]
-        tps = [m.tokens_per_second for m in self._latency_metrics.values() if m.tokens_per_second]
+        ttfts = [m.time_to_first_token for m in self._latency_history if m.time_to_first_token]
+        prefills = [m.prefill_latency for m in self._latency_history if m.prefill_latency]
+        decodes = [m.decode_latency for m in self._latency_history if m.decode_latency]
+        totals = [m.total_latency for m in self._latency_history if m.total_latency]
+        tps = [m.tokens_per_second for m in self._latency_history if m.tokens_per_second]
 
         def percentile(data: list[float], p: float) -> float:
             if not data:
@@ -704,7 +749,7 @@ class ServingEngine:
             return sorted_data[f] + (k - f) * (sorted_data[c] - sorted_data[f])
 
         return {
-            "total_requests": len(self._latency_metrics),
+            "total_requests": len(self._latency_history),
             "ttft_p50_ms": percentile(ttfts, 50) * 1000 if ttfts else 0.0,
             "ttft_p95_ms": percentile(ttfts, 95) * 1000 if ttfts else 0.0,
             "ttft_p99_ms": percentile(ttfts, 99) * 1000 if ttfts else 0.0,
@@ -730,7 +775,7 @@ class ServingEngine:
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
-        self._latency_metrics[request_id] = metrics
+        self._active_requests[request_id] = metrics
 
         gen_request = self._track_request(
             prompt,
@@ -755,6 +800,8 @@ class ServingEngine:
             if elapsed > self.config.request_timeout:
                 self.scheduler.abort_request(gen_request.request_id)
                 metrics.completion_time = time.time()
+                self._latency_history.append(metrics)
+                self._active_requests.pop(request_id, None)
                 raise RequestTimeoutError(f"Request timed out after {self.config.request_timeout}s")
 
             if not first_token_tracked and gen_request.output_tokens:
@@ -778,6 +825,8 @@ class ServingEngine:
 
         metrics.completion_tokens = completion_token_count
         metrics.completion_time = time.time()
+        self._latency_history.append(metrics)
+        self._active_requests.pop(request_id, None)
 
         finish_reason = "stop" if stopped else "length"
         if completion_token_count < (request.max_tokens or 256):

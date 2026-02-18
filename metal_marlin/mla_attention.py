@@ -66,6 +66,13 @@ from .fused_attention_mps import fused_attention
 from .kv_cache import KVCache, MLAKVCache, TrellisKVCache
 from .layers import MarlinLinear
 
+# Import C++ MLA attention if available
+try:
+    from .mla_attention_cpp import MLAAttentionCpp, is_available as _cpp_mla_available
+    _HAS_CPP_MLA = _cpp_mla_available()
+except ImportError:
+    _HAS_CPP_MLA = False
+
 if TYPE_CHECKING:
     pass
 
@@ -271,6 +278,8 @@ class MLAAttention(nn.Module):
         self.rope_ratio = rope_ratio
         self.scale = self.q_head_dim**-0.5
         self.use_fused_attention = True
+        self.use_cpp_mla = _HAS_CPP_MLA
+        self._cpp_mla = MLAAttentionCpp() if _HAS_CPP_MLA else None
 
         # Query projections
         if q_lora_rank is not None:
@@ -505,6 +514,81 @@ class MLAAttention(nn.Module):
         output = self.o_proj(attn_output)
 
         return output
+
+    def mla_proj_fp4_cpp(
+        self,
+        ctx: Any,
+        A: bytes,
+        B_packed: bytes,
+        scales: bytes,
+        C: bytes,
+        M: int,
+        N: int,
+        K: int,
+        group_size: int,
+        wait: bool = True,
+    ) -> None:
+        """C++ MLA projection with FP4 quantized weights (prefill phase).
+        
+        This method uses the optimized C++ Metal kernel for maximum performance.
+        Falls back to Python implementation if C++ extension is not available.
+        
+        Args:
+            ctx: MetalContext from _cpp_ext
+            A: Input matrix as bytes [M, K] float16
+            B_packed: Packed FP4 weight matrix [K/2, N] uint8
+            scales: Scale factors for dequantization
+            C: Output buffer as bytes [M, N] float16
+            M: Batch size (number of tokens)
+            N: Output dimension
+            K: Input dimension
+            group_size: Quantization group size
+            wait: Whether to wait for kernel completion
+        """
+        if self._cpp_mla is not None:
+            self._cpp_mla.mla_proj_fp4(ctx, A, B_packed, scales, C, M, N, K, group_size, wait)
+        else:
+            raise RuntimeError("C++ MLA extension not available. Build with: uv pip install -e .")
+
+    def mla_decode_proj_fp4_cpp(
+        self,
+        ctx: Any,
+        x: bytes,
+        W_packed: bytes,
+        scales: bytes,
+        out: bytes,
+        K: int,
+        N: int,
+        group_size: int,
+        wait: bool = True,
+    ) -> None:
+        """C++ MLA decode projection with FP4 quantized weights (single token).
+        
+        Optimized for single-token decode phase using C++ Metal kernel.
+        
+        Args:
+            ctx: MetalContext from _cpp_ext
+            x: Input vector as bytes [K] float16
+            W_packed: Packed FP4 weight matrix [K/2, N] uint8
+            scales: Scale factors for dequantization
+            out: Output buffer as bytes [N] float16
+            K: Input dimension
+            N: Output dimension
+            group_size: Quantization group size
+            wait: Whether to wait for kernel completion
+        """
+        if self._cpp_mla is not None:
+            self._cpp_mla.mla_decode_proj_fp4(ctx, x, W_packed, scales, out, K, N, group_size, wait)
+        else:
+            raise RuntimeError("C++ MLA extension not available. Build with: uv pip install -e .")
+
+    def is_cpp_available(self) -> bool:
+        """Check if C++ MLA path is available.
+        
+        Returns:
+            True if C++ extension is available and usable.
+        """
+        return self._cpp_mla is not None
 
 
 def create_mla_from_hf_config(

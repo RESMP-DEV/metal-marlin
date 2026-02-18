@@ -54,7 +54,7 @@ WeightDType = Literal["fp16", "bf16"]
 ActivationDType = Literal["fp16", "bf16"]
 AccumulationDType = Literal["fp32"]  # Always FP32 for accuracy
 ScaleDType = Literal["fp16", "fp32"]
-KVCacheDType = Literal["fp16", "bf16", "fp8", "fp8_e5m2"]
+KVCacheDType = Literal["fp16", "bf16", "fp8", "fp8_e5m2", "FP8-E5M2"]
 
 
 @dataclass
@@ -169,6 +169,7 @@ if HAS_TORCH and torch is not None:
         "fp32": torch.float32,
         "fp8": torch.float16,  # PyTorch fp8 requires specific hardware, use fp16 fallback
         "fp8_e5m2": torch.float16,  # Training-compatible FP8-E5M2, fallback to fp16 on Metal
+        "FP8-E5M2": torch.float16,  # Training-compatible FP8-E5M2 alias
     }
 
 # Mapping from string dtype names to numpy dtypes
@@ -178,6 +179,7 @@ _STR_TO_NUMPY: dict[str, Any] = {
     "fp32": np.float32,
     "fp8": np.float16,  # use fp16 as storage format
     "fp8_e5m2": np.float16,  # training-compatible FP8-E5M2, fallback to fp16 storage
+    "FP8-E5M2": np.float16,  # training-compatible FP8-E5M2 alias
 }
 
 # Mapping from string dtype names to Metal shader type names
@@ -187,6 +189,7 @@ _STR_TO_METAL: dict[str, str] = {
     "fp32": "float",
     "fp8": "half",  # Metal doesn't have native fp8
     "fp8_e5m2": "half",  # Training-compatible FP8-E5M2, fallback to half on Metal
+    "FP8-E5M2": "half",  # Training-compatible FP8-E5M2 alias
 }
 
 # Mapping from PyTorch dtype to numpy dtype
@@ -213,7 +216,7 @@ def get_torch_dtype(dtype_str: str) -> Any:
     """Convert dtype string to PyTorch dtype.
 
     Args:
-        dtype_str: One of "fp16", "bf16", "fp32", "fp8", "fp8_e5m2"
+        dtype_str: One of "fp16", "bf16", "fp32", "fp8", "fp8_e5m2", "FP8-E5M2"
 
     Returns:
         Corresponding PyTorch dtype
@@ -235,7 +238,7 @@ def get_numpy_dtype(dtype_str: str) -> np.dtype:
     """Convert dtype string to numpy dtype.
 
     Args:
-        dtype_str: One of "fp16", "bf16", "fp32", "fp8"
+        dtype_str: One of "fp16", "bf16", "fp32", "fp8", "fp8_e5m2", "FP8-E5M2"
 
     Returns:
         Corresponding numpy dtype
@@ -254,7 +257,7 @@ def get_metal_type(dtype_str: str) -> str:
     """Convert dtype string to Metal shader type name.
 
     Args:
-        dtype_str: One of "fp16", "bf16", "fp32", "fp8"
+        dtype_str: One of "fp16", "bf16", "fp32", "fp8", "fp8_e5m2", "FP8-E5M2"
 
     Returns:
         Corresponding Metal type name (half, bfloat, float)
@@ -411,6 +414,27 @@ def memory_efficient_config() -> DTypeConfig:
         accumulation="fp32",
         scales="fp16",
         kv_cache="fp8",
+    )
+
+
+def training_compatible_config() -> DTypeConfig:
+    """Create training-compatible configuration with FP8-E5M2 KV cache.
+
+    FP8-E5M2 has wider dynamic range (57344 vs 448 max value) compared to E4M3,
+    making it more suitable for training scenarios and gradient storage.
+
+    Use this when:
+    - Training or fine-tuning models
+    - Storing gradients in FP8 format
+    - Values have very large magnitudes that would clip in E4M3
+    - Compatibility with NVIDIA/AMD FP8 training frameworks
+    """
+    return DTypeConfig(
+        weights="bf16",
+        activations="bf16",
+        accumulation="fp32",
+        scales="fp16",
+        kv_cache="fp8_e5m2",
     )
 
 

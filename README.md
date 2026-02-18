@@ -130,20 +130,6 @@ for token in model.generate_stream(input_ids, max_new_tokens=100):
     print(tokenizer.decode(token), end="", flush=True)
 ```
 
-## MMFP4 Inference (GLM-4.7-Flash)
-
-Metal Marlin supports MMFP4-quantized GLM-4.7-Flash with fused MoE kernels:
-
-```bash
-# Quick test
-metal-marlin mmfp4 generate -m models/GLM-4.7-Flash-Marlin-MMFP4 -p "Hello"
-
-# API server
-metal-marlin mmfp4 serve -m models/GLM-4.7-Flash-Marlin-MMFP4
-```
-
-See [docs/guides/mmfp4_inference.md](docs/guides/mmfp4_inference.md) for details.
-
 ## Quick Start (Transformers Integration)
 
 For other models, use HuggingFace Transformers with layer replacement:
@@ -434,6 +420,16 @@ uv run pytest tests/ -v -m smoke     # Quick smoke tests
 uv run ruff check .                  # Linting
 uv run pyright metal_marlin/         # Type checking
 ```
+
+## MMFP4 Inference (GLM-4.7-Flash)
+
+Metal Marlin supports MMFP4-quantized GLM-4.7-Flash with fused MoE kernels:
+
+Quick test: `metal-marlin mmfp4 generate -m models/GLM-4.7-Flash-Marlin-MMFP4 -p "Hello"`
+
+API server: `metal-marlin mmfp4 serve -m models/GLM-4.7-Flash-Marlin-MMFP4`
+
+See [docs/mmfp4_inference.md](docs/mmfp4_inference.md) for details.
 
 ## License
 

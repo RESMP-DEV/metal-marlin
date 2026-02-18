@@ -27,6 +27,7 @@ from torch import Tensor
 
 from ..kv_cache import KVCache
 from .draft import DraftModel, DraftOutput, EagleHead, NGramDraft, SmallModelDraft
+from .token_acceptance import TokenAcceptanceTracker, create_acceptance_report
 from .verify import VerifyResult, verify_speculative
 
 if TYPE_CHECKING:
@@ -114,6 +115,7 @@ class StepResult:
     num_draft_tokens: int
     num_accepted: Tensor  # [batch]
     acceptance_rate: float
+    acceptance_result: AcceptanceResult | None = None
 
 
 @dataclass
@@ -190,9 +192,11 @@ class SpeculativeEngine:
         self.draft = draft_model
 
         # Adaptive state
-        self._acceptance_history: list[float] = []
         self._current_num_spec = self.config.num_speculative_tokens
         self._stats = GenerationStats()
+
+        # Token acceptance tracker for detailed acceptance management
+        self._acceptance_tracker = TokenAcceptanceTracker(track_history=True)
 
         # Exponential moving average for adaptive depth
         self._ema_acceptance: float = 0.5  # Start at 50% estimate
@@ -254,11 +258,115 @@ class SpeculativeEngine:
         """Cumulative generation statistics for the current run."""
         return self._stats
 
+    @property
+    def acceptance_stats(self) -> dict:
+        """Detailed token acceptance statistics.
+
+        Returns:
+            Dictionary with acceptance metrics including:
+            - total_accepted: Total draft tokens accepted
+            - total_rejected: Total draft tokens rejected
+            - total_proposed: Total draft tokens proposed
+            - overall_acceptance_rate: Fraction of tokens accepted
+            - average_acceptance_per_step: Average tokens accepted per step
+            - recent_acceptance_rate: Acceptance rate over recent steps
+            - acceptance_trend: "improving", "declining", or "stable"
+        """
+        return create_acceptance_report(self._acceptance_tracker)
+
+    def get_accepted_sequence(self, input_ids: torch.Tensor, step_result: StepResult) -> torch.Tensor:
+        """Get the full sequence including accepted draft tokens.
+
+        Uses the TokenAcceptanceTracker to properly assemble the sequence
+        with accepted tokens from the draft model.
+
+        Args:
+            input_ids: Original input token IDs, shape [batch, seq_len].
+            step_result: Result from generate_step.
+
+        Returns:
+            Full sequence with accepted tokens appended, shape [batch, seq_len + num_new].
+        """
+        # If we have detailed acceptance result, use tracker to assemble
+        if step_result.acceptance_result is not None:
+            return self._acceptance_tracker.assemble_sequence(
+                input_ids, step_result.acceptance_result, include_next=True
+            )
+
+        # Fallback for when acceptance_result is not available (e.g. initial step)
+        # or if StepResult was created manually without it.
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+
+        # Build acceptance result from step result
+        num_accepted = step_result.num_accepted
+
+        # Extract accepted tokens from step result
+        max_accepted = int(num_accepted.max().item())
+        if max_accepted > 0:
+            # Reconstruct accepted tokens from step result
+            accepted_mask = (
+                torch.arange(step_result.new_tokens.shape[1], device=device)
+                .unsqueeze(0)
+                .expand(batch_size, -1) < num_accepted.unsqueeze(-1)
+            )
+            accepted_tokens = torch.where(
+                accepted_mask,
+                step_result.new_tokens,
+                torch.zeros_like(step_result.new_tokens),
+            )[:, :max_accepted]
+        else:
+            accepted_tokens = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
+
+        # Assemble sequence: input + accepted tokens + next token
+        output_parts: list[torch.Tensor] = [input_ids]
+
+        for b in range(batch_size):
+            n_acc = int(num_accepted[b].item())
+            if n_acc > 0:
+                output_parts.append(accepted_tokens[b:b + 1, :n_acc])
+
+        # Add next token (the last token in new_tokens for each batch element)
+        for b in range(batch_size):
+            n_new = int(step_result.num_new_tokens[b].item())
+            if n_new > 0:
+                next_tok = step_result.new_tokens[b, n_new - 1:n_new]
+                output_parts.append(next_tok.unsqueeze(0))
+
+        # Concatenate all parts per batch element
+        result_parts: list[torch.Tensor] = []
+        for b in range(batch_size):
+            parts: list[torch.Tensor] = [input_ids[b:b + 1]]
+
+            n_acc = int(num_accepted[b].item())
+            if n_acc > 0:
+                parts.append(accepted_tokens[b:b + 1, :n_acc])
+
+            n_new = int(step_result.num_new_tokens[b].item())
+            if n_new > 0:
+                next_tok = step_result.new_tokens[b, n_new - 1:n_new]
+                parts.append(next_tok.unsqueeze(0))
+
+            result_parts.append(torch.cat(parts, dim=1))
+
+        # Pad to same length and stack
+        max_len = max(r.shape[1] for r in result_parts)
+        padded_results = []
+        for r in result_parts:
+            if r.shape[1] < max_len:
+                padding = torch.zeros(
+                    r.shape[0], max_len - r.shape[1], dtype=r.dtype, device=r.device
+                )
+                r = torch.cat([r, padding], dim=1)
+            padded_results.append(r)
+
+        return torch.cat(padded_results, dim=0)
+
     def reset(self) -> None:
         """Reset engine state for a new sequence."""
-        self._acceptance_history.clear()
         self._current_num_spec = self.config.num_speculative_tokens
         self._stats = GenerationStats()
+        self._acceptance_tracker.reset()
         self.draft.reset()
 
     def generate_step(
@@ -321,7 +429,18 @@ class SpeculativeEngine:
             self.config.top_p,
         )
 
-        # 4. Assemble output: accepted_tokens + next_token per batch element
+        # 4. Compute detailed acceptance result using TokenAcceptanceTracker
+        acceptance_result = self._acceptance_tracker.compute_acceptance(
+            draft_tokens=draft_out.tokens,
+            num_accepted=result.num_accepted,
+            next_token=result.next_token,
+            num_speculative=num_spec,
+        )
+
+        # Update acceptance statistics
+        self._acceptance_tracker.update_stats(acceptance_result, num_spec)
+
+        # 5. Assemble output: accepted_tokens + next_token per batch element
         max_new = num_spec + 1
         new_tokens = torch.zeros(
             batch_size, max_new, dtype=draft_out.tokens.dtype, device=self.device
@@ -336,14 +455,14 @@ class SpeculativeEngine:
             # Append next token (correction or bonus)
             new_tokens[b, n_acc] = result.next_token[b]
 
-        # 5. Update cumulative stats
+        # 6. Update cumulative stats
         total_acc = int(result.num_accepted.sum().item())
         total_new = int(num_new_tokens.sum().item())
         self._stats.total_accepted += total_acc
         self._stats.total_proposed += batch_size * num_spec
         self._stats.total_tokens += total_new
 
-        # 6. Update adaptive speculation
+        # 7. Update adaptive speculation
         avg_accepted = float(result.num_accepted.float().mean().item())
         acceptance_rate = avg_accepted / num_spec if num_spec > 0 else 0.0
         self._update_num_spec(acceptance_rate)
@@ -355,6 +474,7 @@ class SpeculativeEngine:
             num_draft_tokens=num_spec,
             num_accepted=result.num_accepted,
             acceptance_rate=acceptance_rate,
+            acceptance_result=acceptance_result,
         )
 
     def generate(
@@ -497,12 +617,20 @@ class SpeculativeEngine:
         """
         if isinstance(self.draft, SmallModelDraft):
             # Feed accepted tokens to keep draft cache in sync
-            batch_size = step.new_tokens.shape[0]
-            for b in range(batch_size):
-                n_acc = int(step.num_accepted[b].item())
-                if n_acc > 0:
-                    accepted = step.new_tokens[b : b + 1, :n_acc]
-                    self.draft.sync_after_accept(accepted)
+            # Use tracker utility if acceptance result is available
+            if step.acceptance_result is not None:
+                sync_tokens = self._acceptance_tracker.get_draft_sync_tokens(step.acceptance_result)
+                for b, tokens in enumerate(sync_tokens):
+                    if tokens.shape[1] > 0:
+                        self.draft.sync_after_accept(tokens)
+            else:
+                # Fallback manual extraction
+                batch_size = step.new_tokens.shape[0]
+                for b in range(batch_size):
+                    n_acc = int(step.num_accepted[b].item())
+                    if n_acc > 0:
+                        accepted = step.new_tokens[b : b + 1, :n_acc]
+                        self.draft.sync_after_accept(accepted)
 
         elif isinstance(self.draft, NGramDraft):
             # Update n-gram frequency tables with produced tokens
@@ -526,7 +654,7 @@ class SpeculativeEngine:
         2. Adaptive depth (enabled via config.adaptive_depth): Uses EMA
            to smoothly track optimal speculation depth based on acceptance.
         """
-        self._acceptance_history.append(acceptance_rate)
+        # Note: self._acceptance_tracker tracks acceptance history internally
 
         effective_max = min(self.config.max_speculative_tokens, self.config.num_speculative_tokens)
 
@@ -561,20 +689,15 @@ class SpeculativeEngine:
                     self.config.min_speculative_tokens,
                 )
         else:
-            # Original windowed average approach
-            window = self._acceptance_history[-self.config.history_window :]
-            avg_rate = sum(window) / len(window)
-
-            if avg_rate < self.config.acceptance_threshold:
-                self._current_num_spec = max(
-                    self.config.min_speculative_tokens,
-                    self._current_num_spec - 1,
-                )
-            elif avg_rate > self.config.increase_threshold:
-                self._current_num_spec = min(
-                    effective_max,
-                    self._current_num_spec + 1,
-                )
+            # Use TokenAcceptanceTracker for windowed step adjustment
+            self._current_num_spec = self._acceptance_tracker.compute_speculation_length_step(
+                current_length=self._current_num_spec,
+                min_length=self.config.min_speculative_tokens,
+                max_length=effective_max,
+                decrease_threshold=self.config.acceptance_threshold,
+                increase_threshold=self.config.increase_threshold,
+                window=self.config.history_window,
+            )
 
 
 def _sample_token(logits: Tensor, temperature: float, device: torch.device) -> Tensor:

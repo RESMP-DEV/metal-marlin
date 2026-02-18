@@ -216,6 +216,74 @@ if HAS_TORCH and torch is not None:
             # Cast back to input dtype
             return out.to(x.dtype)
 
+        def batch_aware_dispatch(
+            self,
+            x: torch.Tensor,
+            lora_u: list[torch.Tensor] | torch.Tensor | None = None,
+            lora_v: list[torch.Tensor] | torch.Tensor | None = None,
+            lora_indices: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            """Dispatch batch-aware LoRA forward pass.
+
+            Computes y = x W^T + batch_lora(x, lora_u, lora_v, lora_indices).
+
+            Args:
+                x: Input tensor [batch, ..., in_features]
+                lora_u: LoRA U matrices. List of [in, rank] or packed [num_adapters, in, rank].
+                lora_v: LoRA V matrices. List of [rank, out] or packed [num_adapters, rank, out].
+                lora_indices: Tensor of shape [batch] mapping samples to adapter indices.
+                              -1 indicates no adapter.
+
+            Returns:
+                Output tensor [batch, ..., out_features]
+            """
+            # 1. Compute base output (quantized weights)
+            out = self.forward(x)
+
+            if lora_u is None or lora_v is None or lora_indices is None:
+                return out
+
+            # 2. Flatten batch dimensions for processing
+            batch_shape = x.shape[:-1]
+            flat_x = x.reshape(-1, self.in_features)
+            flat_out = out.reshape(-1, self.out_features)
+            flat_indices = lora_indices.reshape(-1)
+
+            # 3. Group samples by adapter index
+            unique_indices = torch.unique(flat_indices)
+
+            for idx in unique_indices:
+                if idx.item() == -1:
+                    continue
+
+                idx_val = int(idx.item())
+                mask = flat_indices == idx
+                
+                # Get adapter weights
+                if isinstance(lora_u, list):
+                    u = lora_u[idx_val]
+                    v = lora_v[idx_val]
+                else:
+                    u = lora_u[idx_val]
+                    v = lora_v[idx_val]
+
+                # Compute LoRA term: x @ U @ V
+                # x[mask]: [num_samples, in]
+                # u: [in, rank]
+                # v: [rank, out]
+                
+                # We need to be careful with dtypes. LoRA usually runs in higher precision (BF16/FP16)
+                # than the base quantized layer, or same precision.
+                group_x = flat_x[mask].to(u.dtype)
+                
+                delta = (group_x @ u) @ v
+                
+                # Add to output
+                flat_out[mask] += delta.to(flat_out.dtype)
+
+            # 4. Reshape back
+            return flat_out.reshape(*batch_shape, self.out_features)
+
         def _dequantize_fp4(self) -> torch.Tensor:
             """Dequantize packed FP4 weights to FP16.
 
@@ -563,7 +631,66 @@ if HAS_TORCH and torch is not None:
                         out_flat[i, j * 8 + k] = e2m1_values[nibble]
             
             return x_fp16
-        
+
+        def batch_aware_dispatch(
+            self,
+            x: torch.Tensor,
+            lora_u: list[torch.Tensor] | torch.Tensor | None = None,
+            lora_v: list[torch.Tensor] | torch.Tensor | None = None,
+            lora_indices: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            """Dispatch batch-aware LoRA forward pass.
+
+            Args:
+                x: Input tensor.
+                lora_u: LoRA U matrices. List of [in, rank] or packed [num_adapters, in, rank].
+                lora_v: LoRA V matrices. List of [rank, out] or packed [num_adapters, rank, out].
+                lora_indices: Adapter indices mapping samples to adapter IDs.
+            """
+            # Base forward
+            out = self.forward(x)
+
+            if lora_u is None or lora_v is None or lora_indices is None:
+                return out
+
+            # Flatten
+            batch_shape = x.shape[:-1]
+            # Handle flattened view correctly regardless of packing
+            flat_x = x.reshape(-1, x.shape[-1])
+
+            # Dequantize input if needed for LoRA term
+            if x.dtype == torch.uint32:
+                flat_x_dequant = self._dequantize_fp4_input(flat_x)
+            else:
+                flat_x_dequant = flat_x
+
+            flat_out = out.reshape(-1, self.out_features)
+            flat_indices = lora_indices.reshape(-1)
+
+            unique_indices = torch.unique(flat_indices)
+
+            for idx in unique_indices:
+                if idx.item() == -1:
+                    continue
+
+                idx_val = int(idx.item())
+                mask = flat_indices == idx
+
+                if isinstance(lora_u, list):
+                    u = lora_u[idx_val]
+                    v = lora_v[idx_val]
+                else:
+                    u = lora_u[idx_val]
+                    v = lora_v[idx_val]
+
+                # Compute LoRA term
+                group_x = flat_x_dequant[mask].to(u.dtype)
+                delta = (group_x @ u) @ v
+
+                flat_out[mask] += delta.to(flat_out.dtype)
+
+            return flat_out.reshape(*batch_shape, self.out_features)
+
         @staticmethod
         def from_linear(
             linear: nn.Linear,

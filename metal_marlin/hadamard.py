@@ -85,6 +85,108 @@ def hadamard_matrix(n: int) -> NDArray[np.floating[Any]]:
     return H / np.sqrt(n)
 
 
+def _is_power_of_2(n: int) -> bool:
+    """Check if n is a positive power of 2."""
+    return n > 0 and (n & (n - 1)) == 0
+
+
+def _get_block_diagonal_decomposition(n: int) -> tuple[int, ...] | None:
+    """Get power-of-2 block sizes for non-power-of-2 Hadamard decomposition.
+
+    For supported non-power-of-2 sizes, returns the tuple of power-of-2 blocks
+    that sum to n. Uses block-diagonal decomposition: H_n = diag(H_a, H_b, ...).
+
+    Uses a greedy strategy to decompose n into supported block sizes (128, 64, 32).
+
+    Args:
+        n: Target block size.
+
+    Returns:
+        Tuple of power-of-2 block sizes that sum to n, or None if not supported.
+    """
+    if n <= 0:
+        return None
+
+    # Supported base block sizes in descending order
+    # We prefer larger blocks for better utilization
+    supported_bases = [128, 64, 32]
+    
+    blocks = []
+    remaining = n
+    
+    # Greedy decomposition
+    while remaining > 0:
+        found = False
+        for base in supported_bases:
+            if remaining >= base:
+                blocks.append(base)
+                remaining -= base
+                found = True
+                break
+        
+        if not found:
+            # Remainder cannot be covered by supported blocks (e.g., 16, 8)
+            return None
+            
+    return tuple(blocks)
+
+
+def _apply_block_diagonal_hadamard(
+    w: NDArray[np.floating[Any]],
+    block_sizes: tuple[int, ...],
+    axis: int,
+) -> NDArray[np.floating[Any]]:
+    """Apply block-diagonal Hadamard transform using multiple power-of-2 blocks.
+
+    For non-power-of-2 sizes, decomposes into independent power-of-2 blocks:
+        H_96  = diag(H_64, H_32)
+        H_160 = diag(H_128, H_32)
+        H_192 = diag(H_128, H_64)
+
+    Each block is transformed independently with its own normalization factor.
+
+    Args:
+        w: Weight matrix padded to sum(block_sizes).
+        block_sizes: Tuple of power-of-2 block sizes (e.g., (64, 32) for 96).
+        axis: Axis along which to apply rotation (0 for K, 1 for N).
+
+    Returns:
+        Transformed weight matrix with block-diagonal Hadamard applied.
+    """
+    if axis == 0:
+        # Rotate along K: process each block independently
+        K, N = w.shape
+        result_blocks = []
+        offset = 0
+
+        for block_size in block_sizes:
+            H = hadamard_matrix(block_size)
+            # Extract block: [block_size, N]
+            w_block = w[offset : offset + block_size, :]
+            # Apply transform: H @ block
+            transformed = H @ w_block
+            result_blocks.append(transformed)
+            offset += block_size
+
+        return np.vstack(result_blocks)
+    else:
+        # Rotate along N: process each block independently
+        K, N = w.shape
+        result_blocks = []
+        offset = 0
+
+        for block_size in block_sizes:
+            H = hadamard_matrix(block_size)
+            # Extract block: [K, block_size]
+            w_block = w[:, offset : offset + block_size]
+            # Apply transform: block @ H.T
+            transformed = w_block @ H.T
+            result_blocks.append(transformed)
+            offset += block_size
+
+        return np.hstack(result_blocks)
+
+
 def _pad_to_multiple(
     arr: NDArray[np.floating[Any]], axis: int, multiple: int
 ) -> NDArray[np.floating[Any]]:
@@ -112,9 +214,20 @@ def apply_hadamard_rotation(
     The transformation is: W_rotated = H_block @ W_block for each block,
     where H_block is the normalized Hadamard matrix of size block_size.
 
+    Supports both power-of-2 sizes (32, 64, 128, 256) and non-power-of-2
+    sizes (96, 160, 192) via block-diagonal decomposition for optimal
+    performance on dimensions that don't align with power-of-2 boundaries.
+
+    Non-power-of-2 decomposition:
+        - 96  = 64 + 32: Intermediate dimensions
+        - 160 = 128 + 32: Custom model dimensions
+        - 192 = 128 + 64: Multi-head attention (24 heads x 8)
+
     Args:
         weights: Weight matrix [K, N] (input_features x output_features).
-        block_size: Size of Hadamard blocks. Must be power of 2.
+        block_size: Size of Hadamard blocks.
+            Power-of-2 values: 32, 64, 128, 256.
+            Non-power-of-2 values: 96, 160, 192.
             Typical values: 64 or 128 (matches quantization group size).
         axis: Axis along which to apply rotation (0 for K, 1 for N).
             Default: 0 (rotate input features).
@@ -125,7 +238,7 @@ def apply_hadamard_rotation(
             metadata: HadamardMetadata for reversing the rotation.
 
     Raises:
-        ValueError: If block_size is not a power of 2.
+        ValueError: If block_size is not a supported size.
         ValueError: If axis is not 0 or 1.
 
     Example:
@@ -136,9 +249,25 @@ def apply_hadamard_rotation(
         >>> # Max/mean ratio should decrease (outliers dispersed)
         >>> abs(W_rot).max() / abs(W_rot).mean() < abs(W).max() / abs(W).mean()
         True
+        
+        >>> # Non-power-of-2 sizes work too
+        >>> W96 = np.random.randn(192, 512).astype(np.float32)
+        >>> W96_rot, meta96 = apply_hadamard_rotation(W96, block_size=96)
     """
-    if block_size & (block_size - 1) != 0 or block_size <= 0:
-        raise ValueError(f"block_size must be a positive power of 2, got {block_size}")
+    # Check if block_size is supported (power-of-2 or decomposable)
+    # Power of 2 check
+    is_pow2 = (block_size > 0) and ((block_size & (block_size - 1)) == 0)
+    
+    if is_pow2:
+        block_decomp = None
+    else:
+        block_decomp = _get_block_diagonal_decomposition(block_size)
+        if block_decomp is None:
+             raise ValueError(
+                f"block_size {block_size} not supported. Must be power of 2 or "
+                "decomposable into 128, 64, 32 blocks."
+            )
+
     if axis not in (0, 1):
         raise ValueError(f"axis must be 0 or 1, got {axis}")
 
@@ -153,26 +282,56 @@ def apply_hadamard_rotation(
     padded_dim = w.shape[axis]
     num_blocks = padded_dim // block_size
 
-    # Generate Hadamard matrix once
-    H = hadamard_matrix(block_size)
+    # Check if we need block-diagonal decomposition for non-power-of-2
+    block_decomp = _get_block_diagonal_decomposition(block_size)
 
-    # Apply block-diagonal rotation
-    if axis == 0:
-        # Rotate along K: W_rotated[block_i] = H @ W[block_i]
-        # Shape: [K, N] -> reshape to [num_blocks, block_size, N]
-        K, N = w.shape
-        w_blocks = w.reshape(num_blocks, block_size, N)
-        # H @ each block: [block_size, block_size] @ [block_size, N] -> [block_size, N]
-        rotated_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
-        rotated = rotated_blocks.reshape(K, N)
+    if block_decomp is not None:
+        # Non-power-of-2: Use block-diagonal decomposition
+        # Process each large block as independent sub-blocks
+        if axis == 0:
+            # Rotate along K
+            K, N = w.shape
+            block_results = []
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                w_block = w[block_start:block_end, :]
+                # Apply block-diagonal Hadamard to this block
+                rotated_block = _apply_block_diagonal_hadamard(
+                    w_block, block_decomp, axis=0
+                )
+                block_results.append(rotated_block)
+            rotated = np.vstack(block_results)
+        else:
+            # Rotate along N
+            K, N = w.shape
+            block_results = []
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                w_block = w[:, block_start:block_end]
+                # Apply block-diagonal Hadamard to this block
+                rotated_block = _apply_block_diagonal_hadamard(
+                    w_block, block_decomp, axis=1
+                )
+                block_results.append(rotated_block)
+            rotated = np.hstack(block_results)
     else:
-        # Rotate along N: W_rotated[:, block_i] = W[:, block_i] @ H.T
-        # Shape: [K, N] -> reshape to [K, num_blocks, block_size]
-        K, N = w.shape
-        w_blocks = w.reshape(K, num_blocks, block_size)
-        # Each block @ H.T: [K, block_size] @ [block_size, block_size] -> [K, block_size]
-        rotated_blocks = np.einsum("bij,jk->bik", w_blocks, H.T)
-        rotated = rotated_blocks.reshape(K, N)
+        # Power-of-2: Use standard einsum approach
+        H = hadamard_matrix(block_size)
+
+        if axis == 0:
+            # Rotate along K: W_rotated[block_i] = H @ W[block_i]
+            K, N = w.shape
+            w_blocks = w.reshape(num_blocks, block_size, N)
+            rotated_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
+            rotated = rotated_blocks.reshape(K, N)
+        else:
+            # Rotate along N: W_rotated[:, block_i] = W[:, block_i] @ H.T
+            K, N = w.shape
+            w_blocks = w.reshape(K, num_blocks, block_size)
+            rotated_blocks = np.einsum("bij,jk->bik", w_blocks, H.T)
+            rotated = rotated_blocks.reshape(K, N)
 
     metadata = HadamardMetadata(
         block_size=block_size,
@@ -193,6 +352,9 @@ def inverse_hadamard_rotation(
     For normalized Hadamard matrices, H^-1 = H^T = H, so the inverse is
     simply applying the same rotation again and trimming padding.
 
+    Supports both power-of-2 and non-power-of-2 block sizes (96, 160, 192)
+    via block-diagonal decomposition.
+
     Args:
         weights: Rotated weight matrix from apply_hadamard_rotation.
         metadata: HadamardMetadata from apply_hadamard_rotation.
@@ -206,6 +368,13 @@ def inverse_hadamard_rotation(
         >>> W_recovered = inverse_hadamard_rotation(W_rot, meta)
         >>> np.allclose(W, W_recovered)
         True
+        
+        >>> # Non-power-of-2 sizes work too
+        >>> W96 = np.random.randn(192, 512).astype(np.float32)
+        >>> W96_rot, meta96 = apply_hadamard_rotation(W96, block_size=96)
+        >>> W96_recovered = inverse_hadamard_rotation(W96_rot, meta96)
+        >>> np.allclose(W96, W96_recovered)
+        True
     """
     block_size = metadata.block_size
     axis = metadata.axis
@@ -215,23 +384,59 @@ def inverse_hadamard_rotation(
     padded_dim = w.shape[axis]
     num_blocks = padded_dim // block_size
 
-    # Hadamard is self-inverse: H @ H = I (for normalized H)
-    H = hadamard_matrix(block_size)
+    # Check if we need block-diagonal decomposition for non-power-of-2
+    block_decomp = _get_block_diagonal_decomposition(block_size)
 
-    if axis == 0:
-        K, N = w.shape
-        w_blocks = w.reshape(num_blocks, block_size, N)
-        # Inverse: H.T @ each block, but H.T = H for Hadamard
-        recovered_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
-        recovered = recovered_blocks.reshape(K, N)
-        # Trim padding
-        recovered = recovered[:orig_dim, :]
+    if block_decomp is not None:
+        # Non-power-of-2: Use block-diagonal decomposition
+        # Hadamard is self-inverse, so apply same transform
+        if axis == 0:
+            K, N = w.shape
+            block_results = []
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                w_block = w[block_start:block_end, :]
+                rotated_block = _apply_block_diagonal_hadamard(
+                    w_block, block_decomp, axis=0
+                )
+                block_results.append(rotated_block)
+            recovered = np.vstack(block_results)
+            # Trim padding
+            recovered = recovered[:orig_dim, :]
+        else:
+            K, N = w.shape
+            block_results = []
+            for block_idx in range(num_blocks):
+                block_start = block_idx * block_size
+                block_end = block_start + block_size
+                w_block = w[:, block_start:block_end]
+                rotated_block = _apply_block_diagonal_hadamard(
+                    w_block, block_decomp, axis=1
+                )
+                block_results.append(rotated_block)
+            recovered = np.hstack(block_results)
+            # Trim padding
+            recovered = recovered[:, :orig_dim]
     else:
-        K, N = w.shape
-        w_blocks = w.reshape(K, num_blocks, block_size)
-        recovered_blocks = np.einsum("bij,jk->bik", w_blocks, H)
-        recovered = recovered_blocks.reshape(K, N)
-        recovered = recovered[:, :orig_dim]
+        # Power-of-2: Use standard einsum approach
+        # Hadamard is self-inverse: H @ H = I (for normalized H)
+        H = hadamard_matrix(block_size)
+
+        if axis == 0:
+            K, N = w.shape
+            w_blocks = w.reshape(num_blocks, block_size, N)
+            # Inverse: H.T @ each block, but H.T = H for Hadamard
+            recovered_blocks = np.einsum("ij,bjk->bik", H, w_blocks)
+            recovered = recovered_blocks.reshape(K, N)
+            # Trim padding
+            recovered = recovered[:orig_dim, :]
+        else:
+            K, N = w.shape
+            w_blocks = w.reshape(K, num_blocks, block_size)
+            recovered_blocks = np.einsum("bij,jk->bik", w_blocks, H)
+            recovered = recovered_blocks.reshape(K, N)
+            recovered = recovered[:, :orig_dim]
 
     return recovered
 

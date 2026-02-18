@@ -22,6 +22,17 @@ import torch.nn.functional as F
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 from metal_marlin.paged.attention import paged_attention, paged_attention_v1
+from metal_marlin.paged.validation import (
+    validate_paged_block_pool_parity,
+    validate_paged_linear_parity,
+    validate_paged_v1_parity,
+    ValidationConfig,
+)
+try:
+    from metal_marlin.kernels import paged_attention_v1 as paged_attention_v1_metal
+    HAS_KERNELS = True
+except ImportError:
+    HAS_KERNELS = False
 
 
 def _get_device() -> str:
@@ -86,7 +97,9 @@ class TestPagedLinearAttentionParity:
 
         # Create paged KV cache layout
         # v1 format: [num_blocks, block_size, num_heads, head_dim]
-        num_blocks = (seq_len + block_size - 1) // block_size
+        blocks_per_seq = (seq_len + block_size - 1) // block_size
+        num_blocks = num_seqs * blocks_per_seq
+        
         k_cache = torch.zeros(
             num_blocks, block_size, num_kv_heads, head_dim,
             dtype=torch_dtype, device=device
@@ -96,87 +109,190 @@ class TestPagedLinearAttentionParity:
             dtype=torch_dtype, device=device
         )
 
-        # Populate KV cache blocks
-        for seq_idx in range(num_seqs):
-            for token_idx in range(seq_len):
-                block_idx = token_idx // block_size
-                slot_idx = token_idx % block_size
-                k_cache[block_idx, slot_idx] = k[seq_idx, token_idx]
-                v_cache[block_idx, slot_idx] = v[seq_idx, token_idx]
+        # Block tables: maps logical blocks to physical blocks
+        block_tables = torch.zeros(
+            (num_seqs, blocks_per_seq), dtype=torch.int32, device=device
+        )
 
-        # Create block table: maps logical blocks to physical blocks
-        # For simple case, identity mapping
-        max_blocks_per_seq = num_blocks
-        block_tables = torch.arange(
-            num_blocks, dtype=torch.int32, device=device
-        ).unsqueeze(0).repeat(num_seqs, 1)
+        # Populate KV cache blocks and block tables
+        for seq_idx in range(num_seqs):
+            for blk_idx in range(blocks_per_seq):
+                phys_idx = seq_idx * blocks_per_seq + blk_idx
+                block_tables[seq_idx, blk_idx] = phys_idx
+
+            for token_idx in range(seq_len):
+                # Logical block/slot
+                local_block_idx = token_idx // block_size
+                slot_idx = token_idx % block_size
+                
+                # Physical block
+                phys_block_idx = seq_idx * blocks_per_seq + local_block_idx
+                
+                k_cache[phys_block_idx, slot_idx] = k[seq_idx, token_idx]
+                v_cache[phys_block_idx, slot_idx] = v[seq_idx, token_idx]
+
+        # Context lengths
         context_lens = torch.full((num_seqs,), seq_len, dtype=torch.int32, device=device)
 
         # Scale factor for attention
         scale = 1.0 / math.sqrt(head_dim)
 
-        # === Paged Attention (v1) ===
-        # NumPy reference implementation
-        q_np = q.cpu().numpy()
-        k_cache_np = k_cache.cpu().numpy()
-        v_cache_np = v_cache.cpu().numpy()
-        block_tables_np = block_tables.cpu().numpy()
-        context_lens_np = context_lens.cpu().numpy()
-
-        paged_output_np = paged_attention_v1(
-            query=q_np,
-            k_cache=k_cache_np,
-            v_cache=v_cache_np,
-            block_tables=block_tables_np,
-            context_lens=context_lens_np,
-            scale=scale,
+        # Validation config
+        config = ValidationConfig(
+            atol=1e-3 if dtype == "float16" else 1e-5,
+            rtol=0.02 if dtype == "float16" else 0.01,
+            verbose=False,
         )
-        paged_output = torch.from_numpy(paged_output_np).to(device=device, dtype=torch_dtype)
 
-        # === Linear Attention (PyTorch SDPA) ===
-        # Reshape Q to [num_seqs, num_heads, 1, head_dim] for SDPA
-        q_expanded = q.unsqueeze(2)  # [num_seqs, num_heads, 1, head_dim]
-        # Reshape K/V to [num_seqs, num_heads, seq_len, head_dim]
-        k_reshaped = k.transpose(1, 2)  # [num_seqs, num_kv_heads, seq_len, head_dim]
-        v_reshaped = v.transpose(1, 2)  # [num_seqs, num_kv_heads, seq_len, head_dim]
+        # Use validation utility
+        result = validate_paged_v1_parity(
+            query=q.cpu().numpy(),
+            k_cache=k_cache.cpu().numpy(),
+            v_cache=v_cache.cpu().numpy(),
+            block_tables=block_tables.cpu().numpy(),
+            context_lens=context_lens.cpu().numpy(),
+            scale=scale,
+            config=config,
+        )
 
-        # GQA expansion: repeat KV heads to match query heads
+        assert result.is_valid, (
+            f"Paged Attention v1 does not match Linear Attention\n"
+            f"  Config: seqs={num_seqs}, heads={num_heads}, "
+            f"kv_heads={num_kv_heads}, dim={head_dim}, seq_len={seq_len}\n"
+            f"  dtype={dtype}, seed={seed}, block_size={block_size}\n"
+            f"  Result: {result}"
+        )
+
+    @pytest.mark.skipif(not HAS_KERNELS, reason="Requires Metal kernels")
+    @pytest.mark.parametrize("num_seqs", [1, 2, 4])
+    @pytest.mark.parametrize("num_heads", [4, 8, 16])
+    @pytest.mark.parametrize("head_dim", [64, 96, 128])
+    @pytest.mark.parametrize("seq_len", [16, 32, 64])
+    @pytest.mark.parametrize("num_kv_heads", [None, 4, 8])  # None = same as num_heads
+    @pytest.mark.parametrize("block_size", [16])  # Kernel usually expects 16
+    @pytest.mark.parametrize("dtype", ["float16"])  # Metal kernel handles fp16
+    @pytest.mark.parametrize("seed", [42])
+    def test_metal_paged_v1_matches_linear_attention(
+        self,
+        num_seqs,
+        num_heads,
+        head_dim,
+        seq_len,
+        num_kv_heads,
+        block_size,
+        dtype,
+        seed,
+    ):
+        """Metal Paged Attention v1 matches Linear Attention for decode.
+
+        Compares outputs of:
+        - paged_attention_v1 (Metal): Metal kernel implementation
+        - F.scaled_dot_product_attention: Standard linear attention
+        """
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+
+        if num_heads % num_kv_heads != 0:
+            pytest.skip("Invalid GQA configuration")
+
+        device = _get_device()
+        if device != "mps":
+            pytest.skip("Metal tests require MPS device")
+
+        torch_dtype = torch.float16 if dtype == "float16" else torch.float32
+
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+
+        # Generate inputs
+        # Metal kernel expects Q: [num_seqs, num_heads, 1, head_dim]
+        q = torch.randn(num_seqs, num_heads, 1, head_dim, dtype=torch_dtype, device=device)
+        
+        # Raw KV for Linear Attention (SDPA)
+        k_linear = torch.randn(num_seqs, seq_len, num_kv_heads, head_dim, dtype=torch_dtype, device=device)
+        v_linear = torch.randn(num_seqs, seq_len, num_kv_heads, head_dim, dtype=torch_dtype, device=device)
+
+        # Create paged KV cache for Metal kernel
+        # Layout: [num_blocks, num_kv_heads, block_size, head_dim]
+        # We allocate separate blocks for each sequence to avoid overlap
+        blocks_per_seq = (seq_len + block_size - 1) // block_size
+        total_blocks = num_seqs * blocks_per_seq
+        
+        k_cache = torch.zeros(
+            total_blocks, num_kv_heads, block_size, head_dim,
+            dtype=torch_dtype, device=device
+        )
+        v_cache = torch.zeros(
+            total_blocks, num_kv_heads, block_size, head_dim,
+            dtype=torch_dtype, device=device
+        )
+        
+        block_tables = torch.zeros(
+            (num_seqs, blocks_per_seq), dtype=torch.int32, device=device
+        )
+        
+        for seq_idx in range(num_seqs):
+            for blk_idx in range(blocks_per_seq):
+                phys_idx = seq_idx * blocks_per_seq + blk_idx
+                block_tables[seq_idx, blk_idx] = phys_idx
+                
+            for token_idx in range(seq_len):
+                local_block_idx = token_idx // block_size
+                slot_idx = token_idx % block_size
+                phys_block_idx = seq_idx * blocks_per_seq + local_block_idx
+                
+                k_val = k_linear[seq_idx, token_idx]
+                v_val = v_linear[seq_idx, token_idx]
+                
+                k_cache[phys_block_idx, :, slot_idx, :] = k_val
+                v_cache[phys_block_idx, :, slot_idx, :] = v_val
+
+        context_lens = torch.full((num_seqs,), seq_len, dtype=torch.int32, device=device)
+        scale = 1.0 / math.sqrt(head_dim)
+
+        # === Metal Paged Attention ===
+        try:
+            paged_output = paged_attention_v1_metal(
+                q, k_cache, v_cache, block_tables, context_lens, scale
+            )
+            # Output is [num_seqs, num_heads, 1, head_dim]
+            paged_output = paged_output.squeeze(2)
+        except Exception as e:
+            pytest.fail(f"Metal kernel execution failed: {e}")
+
+        # === Linear Attention (SDPA) ===
+        # Q: [num_seqs, num_heads, 1, head_dim]
+        # K, V: [num_seqs, seq_len, num_kv_heads, head_dim] -> transpose -> [num_seqs, num_kv_heads, seq_len, head_dim]
+        k_reshaped = k_linear.transpose(1, 2)
+        v_reshaped = v_linear.transpose(1, 2)
+
         if num_kv_heads < num_heads:
             repeat_factor = num_heads // num_kv_heads
             k_reshaped = k_reshaped.repeat_interleave(repeat_factor, dim=1)
             v_reshaped = v_reshaped.repeat_interleave(repeat_factor, dim=1)
 
-        # Linear attention using PyTorch SDPA
-        # For decode: single Q token, no causal mask needed
         linear_output = F.scaled_dot_product_attention(
-            q_expanded, k_reshaped, v_reshaped,
+            q, k_reshaped, v_reshaped,
             is_causal=False,
             scale=scale
+        ).squeeze(2)
+
+        # === Compare ===
+        # Convert to numpy for validation utility
+        paged_np = paged_output.float().cpu().numpy()
+        linear_np = linear_output.float().cpu().numpy()
+
+        config = ValidationConfig(
+            atol=5e-3,
+            rtol=5e-2,
+            verbose=False,
         )
-        linear_output = linear_output.squeeze(2)  # [num_seqs, num_heads, head_dim]
 
-        # === Compare outputs ===
-        # Move to CPU for comparison
-        paged_cpu = paged_output.float().cpu()
-        linear_cpu = linear_output.float().cpu()
+        result = validate_paged_linear_parity(paged_np, linear_np, config)
 
-        max_diff = (paged_cpu - linear_cpu).abs().max().item()
-        mean_diff = (paged_cpu - linear_cpu).abs().mean().item()
-
-        # Tolerance based on dtype (more lenient for FP16)
-        atol = 1e-3 if dtype == "float16" else 1e-5
-        rtol = 0.02 if dtype == "float16" else 0.01
-
-        # Assert closeness
-        assert torch.allclose(
-            paged_cpu, linear_cpu, atol=atol, rtol=rtol
-        ), (
-            f"Paged Attention v1 does not match Linear Attention\n"
-            f"  Config: seqs={num_seqs}, heads={num_heads}, "
-            f"kv_heads={num_kv_heads}, dim={head_dim}, seq_len={seq_len}\n"
-            f"  dtype={dtype}, seed={seed}, block_size={block_size}\n"
-            f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}\n"
-            f"  atol={atol}, rtol={rtol}"
+        assert result.is_valid, (
+            f"Metal Paged Attention v1 does not match Linear Attention\n"
+            f"  Result: {result}"
         )
 
     @pytest.mark.parametrize("num_seqs", [1, 2, 4])
@@ -268,86 +384,25 @@ class TestPagedLinearAttentionParity:
         # Scale factor
         scale = 1.0 / math.sqrt(head_dim)
 
-        # === Paged Attention (block pool) ===
-        q_np = q.cpu().numpy()
-        block_pool_np = block_pool.cpu().numpy()
-        block_tables_np = block_tables.cpu().numpy()
-        context_lens_np = context_lens.cpu().numpy()
+        config = ValidationConfig(
+            atol=1e-3 if dtype == "float16" else 1e-5,
+            rtol=0.02 if dtype == "float16" else 0.01,
+        )
 
-        paged_output_np = paged_attention(
-            query=q_np,
-            block_pool=block_pool_np,
-            block_tables=block_tables_np,
-            context_lens=context_lens_np,
+        result = validate_paged_block_pool_parity(
+            query=q.cpu().numpy(),
+            block_pool=block_pool.cpu().numpy(),
+            block_tables=block_tables.cpu().numpy(),
+            context_lens=context_lens.cpu().numpy(),
             scale=scale,
             num_kv_heads=num_kv_heads,
             block_size=block_size,
-        )
-        paged_output = torch.from_numpy(paged_output_np).to(device=device, dtype=torch_dtype)
-
-        # === Linear Attention ===
-        # Reshape for SDPA: [num_seqs, num_heads, seq_len, head_dim] is already correct
-        # Need K/V: [num_seqs, num_heads, seq_len, head_dim]
-
-        # Gather KV from block pool for linear attention
-        # Simulating contiguous cache layout
-        k_gathered = []
-        v_gathered = []
-        for seq_idx in range(num_seqs):
-            k_seq = []
-            v_seq = []
-            for blk in range(num_needed_blocks):
-                phys_block = int(block_tables_np[seq_idx, blk])
-                k_seq.append(block_pool_np[phys_block, 0])
-                v_seq.append(block_pool_np[phys_block, 1])
-            k_concat = np.concatenate(k_seq, axis=0)[:seq_len]
-            v_concat = np.concatenate(v_seq, axis=0)[:seq_len]
-            k_gathered.append(k_concat)
-            v_gathered.append(v_concat)
-
-        k_np = np.stack(k_gathered, axis=0)  # [num_seqs, seq_len, num_kv_heads, head_dim]
-        v_np = np.stack(v_gathered, axis=0)
-
-        k = torch.from_numpy(k_np).to(device=device, dtype=torch_dtype)
-        v = torch.from_numpy(v_np).to(device=device, dtype=torch_dtype)
-
-        # Transpose to [num_seqs, num_heads, seq_len, head_dim]
-        k_reshaped = k.transpose(1, 2)
-        v_reshaped = v.transpose(1, 2)
-
-        # GQA expansion
-        if num_kv_heads < num_heads:
-            repeat_factor = num_heads // num_kv_heads
-            k_reshaped = k_reshaped.repeat_interleave(repeat_factor, dim=1)
-            v_reshaped = v_reshaped.repeat_interleave(repeat_factor, dim=1)
-
-        # Linear attention
-        linear_output = F.scaled_dot_product_attention(
-            q, k_reshaped, v_reshaped,
-            is_causal=True,  # Prefill requires causal masking
-            scale=scale
+            config=config,
         )
 
-        # === Compare outputs ===
-        paged_cpu = paged_output.float().cpu()
-        linear_cpu = linear_output.float().cpu()
-
-        max_diff = (paged_cpu - linear_cpu).abs().max().item()
-        mean_diff = (paged_cpu - linear_cpu).abs().mean().item()
-
-        # Tolerance
-        atol = 1e-3 if dtype == "float16" else 1e-5
-        rtol = 0.02 if dtype == "float16" else 0.01
-
-        assert torch.allclose(
-            paged_cpu, linear_cpu, atol=atol, rtol=rtol
-        ), (
+        assert result.is_valid, (
             f"Paged Attention (block pool) does not match Linear Attention\n"
-            f"  Config: seqs={num_seqs}, heads={num_heads}, "
-            f"kv_heads={num_kv_heads}, dim={head_dim}, seq_len={seq_len}\n"
-            f"  dtype={dtype}, block_size={block_size}\n"
-            f"  Max diff: {max_diff:.6f}, Mean diff: {mean_diff:.6f}\n"
-            f"  atol={atol}, rtol={rtol}"
+            f"  Result: {result}"
         )
 
 
@@ -397,38 +452,18 @@ def test_paged_v1_smoke(num_heads, head_dim, seq_len, num_kv_heads, block_size):
 
     scale = 1.0 / math.sqrt(head_dim)
 
-    # Paged attention
-    paged_output_np = paged_attention_v1(
+    # Use validation utility
+    result = validate_paged_v1_parity(
         query=q.cpu().numpy(),
         k_cache=k_cache.cpu().numpy(),
         v_cache=v_cache.cpu().numpy(),
         block_tables=block_tables.cpu().numpy(),
         context_lens=context_lens.cpu().numpy(),
         scale=scale,
+        config=ValidationConfig(atol=1e-3, rtol=0.02),
     )
-    paged_output = torch.from_numpy(paged_output_np).to(device=device, dtype=dtype)
 
-    # Linear attention
-    q_expanded = q.unsqueeze(2)
-    k_reshaped = k.transpose(1, 2)
-    v_reshaped = v.transpose(1, 2)
-
-    if num_kv_heads < num_heads:
-        repeat_factor = num_heads // num_kv_heads
-        k_reshaped = k_reshaped.repeat_interleave(repeat_factor, dim=1)
-        v_reshaped = v_reshaped.repeat_interleave(repeat_factor, dim=1)
-
-    linear_output = F.scaled_dot_product_attention(
-        q_expanded, k_reshaped, v_reshaped,
-        is_causal=False, scale=scale
-    ).squeeze(2)
-
-    # Verify parity
-    assert torch.allclose(
-        paged_output.float().cpu(),
-        linear_output.float().cpu(),
-        atol=1e-3, rtol=0.02
-    ), f"Smoke test failed: heads={num_heads}, kv_heads={num_kv_heads}, dim={head_dim}, seq_len={seq_len}"
+    assert result.is_valid, f"Smoke test failed: {result}"
 
 
 @pytest.mark.smoke

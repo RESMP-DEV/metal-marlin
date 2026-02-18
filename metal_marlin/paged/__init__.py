@@ -47,6 +47,22 @@ from .mla_cache import (
     mla_attention,
 )
 from .page_table import PageTable, SequenceState
+from .parity_validation import (
+    ParityConfig,
+    ParityResult,
+    run_comprehensive_parity_suite,
+    run_paged_v1_parity_test,
+    validate_parity,
+)
+from .validation import (
+    ParityValidationResult,
+    ParityValidator,
+    ValidationConfig,
+    compute_linear_attention,
+    validate_paged_block_pool_parity,
+    validate_paged_linear_parity,
+    validate_paged_v1_parity,
+)
 
 __all__ = [
     # Core allocator
@@ -81,4 +97,18 @@ __all__ = [
     "MLACacheConfig",
     "compare_memory_usage",
     "mla_attention",
+    # Validation utilities
+    "ParityValidationResult",
+    "ParityValidator",
+    "ValidationConfig",
+    "validate_paged_linear_parity",
+    "validate_paged_v1_parity",
+    "validate_paged_block_pool_parity",
+    "compute_linear_attention",
+    # Enhanced parity validation
+    "ParityConfig",
+    "ParityResult",
+    "validate_parity",
+    "run_paged_v1_parity_test",
+    "run_comprehensive_parity_suite",
 ]

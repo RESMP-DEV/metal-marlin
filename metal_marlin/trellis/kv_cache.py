@@ -368,12 +368,6 @@ class TrellisKVCache:
         MLA already compresses KV 8.9× via low-rank projection.
         INT4 reduces storage another 4×, giving 35.6× total compression.
         """
-        # Import HAS_PAGED_INT4 and quantize_kv_int4
-        try:
-            from ..quant.int4 import HAS_PAGED_INT4, quantize_kv_int4
-        except ImportError:
-            return
-
         if not HAS_PAGED_INT4:
             return
         if self.seq_len < threshold_seq_len:
@@ -384,6 +378,5 @@ class TrellisKVCache:
         # Quantize existing KV tensors
         for layer_idx in range(self.num_layers):
             k, v = self.get_kv(layer_idx)
-            self.k_cache[layer_idx] = quantize_kv_int4(k)
-            self.v_cache[layer_idx] = quantize_kv_int4(v)
+            self._kv_cache[layer_idx] = quantize_kv_int4(k)
         self._compressed = True

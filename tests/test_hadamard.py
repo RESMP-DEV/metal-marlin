@@ -120,10 +120,34 @@ class TestApplyHadamardRotation:
         assert meta.padded_k == 256  # Next multiple of 64
         assert meta.axis == 0
 
+    @pytest.mark.parametrize("block_size", [96, 160, 192])
+    def test_roundtrip_non_power_of_2(self, block_size: int) -> None:
+        """Rotation should work for non-power-of-2 block sizes via decomposition."""
+        K, N = block_size * 4, 128
+        W = np.random.randn(K, N).astype(np.float32)
+
+        W_rot, meta = apply_hadamard_rotation(W, block_size=block_size)
+        W_recovered = inverse_hadamard_rotation(W_rot, meta)
+
+        np.testing.assert_allclose(W, W_recovered, rtol=1e-5, atol=1e-6)
+        assert meta.block_size == block_size
+
+    @pytest.mark.parametrize("block_size", [96, 160, 192])
+    def test_roundtrip_non_power_of_2_needs_padding(self, block_size: int) -> None:
+        """Non-power-of-2 rotation should handle padding correctly."""
+        # K not divisible by block_size
+        K, N = block_size * 3 + 7, 128
+        W = np.random.randn(K, N).astype(np.float32)
+
+        W_rot, meta = apply_hadamard_rotation(W, block_size=block_size)
+        W_recovered = inverse_hadamard_rotation(W_rot, meta)
+
+        np.testing.assert_allclose(W, W_recovered, rtol=1e-5, atol=1e-6)
+
     def test_invalid_block_size(self) -> None:
-        """Should raise ValueError for non-power-of-2 block_size."""
+        """Should raise ValueError for unsupported block_size."""
         W = np.random.randn(128, 128).astype(np.float32)
-        with pytest.raises(ValueError, match="power of 2"):
+        with pytest.raises(ValueError, match="block_size must be"):
             apply_hadamard_rotation(W, block_size=100)
 
     def test_invalid_axis(self) -> None:

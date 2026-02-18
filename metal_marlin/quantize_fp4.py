@@ -167,6 +167,8 @@ def quantize_fp4(
         return _fp4_metal.quantize(weight, group_size=group_size, marlin_layout=marlin_layout)
 
     # Fall back to NumPy for calibration-aware quantization
+    if hasattr(weight, "cpu"):
+        weight = weight.cpu().numpy()
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 

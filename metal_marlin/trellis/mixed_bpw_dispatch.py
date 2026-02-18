@@ -26,11 +26,156 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import torch
+
+
+class _BufferPool:
+    """LRU buffer pool for reusing intermediate tensors.
+    
+    Reduces memory allocation overhead by caching and reusing tensors
+    of the same shape, dtype, and device. Implements LRU eviction when
+    total pool size exceeds 1GB.
+    
+    Attributes:
+        max_size_bytes: Maximum pool size in bytes (default 4GB).
+        _pool: Dict mapping (shape, dtype, device) -> list of (tensor, last_access_time).
+        _current_size: Current total size of pooled tensors in bytes.
+        _access_counter: Monotonically increasing counter for LRU tracking.
+    """
+    
+    def __init__(self, max_size_bytes: int = 4 * 1024 * 1024 * 1024) -> None:
+        """Initialize buffer pool.
+        
+        Args:
+            max_size_bytes: Maximum pool size in bytes (default 4GB).
+        """
+        self.max_size_bytes = max_size_bytes
+        self._pool: dict[tuple[tuple[int, ...], torch.dtype, torch.device], list[tuple[torch.Tensor, int]]] = defaultdict(list)
+        self._current_size = 0
+        self._access_counter = 0
+    
+    def _get_tensor_size(self, shape: tuple[int, ...], dtype: torch.dtype) -> int:
+        """Calculate tensor size in bytes."""
+        elem_size = torch.tensor([], dtype=dtype).element_size()
+        num_elements = 1
+        for dim in shape:
+            num_elements *= dim
+        return num_elements * elem_size
+    
+    def _evict_if_needed(self, required_bytes: int = 0) -> None:
+        """Evict least recently used buffers until we have room.
+        
+        Args:
+            required_bytes: Additional bytes needed (evict until we have this much room).
+        """
+        while (self._current_size + required_bytes > self.max_size_bytes and 
+               self._current_size > 0):
+            # Find the least recently used tensor across all pools
+            lru_key = None
+            lru_idx = -1
+            lru_time = float('inf')
+            
+            for key, tensor_list in self._pool.items():
+                for idx, (_, access_time) in enumerate(tensor_list):
+                    if access_time < lru_time:
+                        lru_time = access_time
+                        lru_key = key
+                        lru_idx = idx
+            
+            if lru_key is None or lru_idx < 0:
+                break
+            
+            # Remove the LRU tensor
+            tensor, _ = self._pool[lru_key].pop(lru_idx)
+            tensor_size = tensor.numel() * tensor.element_size()
+            self._current_size -= tensor_size
+            
+            # Clean up empty lists
+            if not self._pool[lru_key]:
+                del self._pool[lru_key]
+    
+    def get_buffer(
+        self, 
+        shape: tuple[int, ...], 
+        dtype: torch.dtype, 
+        device: torch.device | str
+    ) -> torch.Tensor:
+        """Get a buffer from the pool or create a new one.
+        
+        Args:
+            shape: Desired tensor shape.
+            dtype: Desired tensor dtype.
+            device: Desired tensor device.
+        
+        Returns:
+            A tensor with the specified shape, dtype, and device.
+            If available, returns a cached tensor; otherwise creates a new one.
+        """
+        if isinstance(device, str):
+            device = torch.device(device)
+        
+        key = (shape, dtype, device)
+        
+        if key in self._pool and self._pool[key]:
+            # Return the most recently used buffer from this pool (LIFO for cache locality)
+            tensor, _ = self._pool[key].pop()
+            tensor_size = tensor.numel() * tensor.element_size()
+            self._current_size -= tensor_size
+            self._access_counter += 1
+            return tensor
+        
+        # No cached buffer available, create a new one
+        self._access_counter += 1
+        return torch.empty(shape, dtype=dtype, device=device)
+    
+    def return_buffer(self, tensor: torch.Tensor) -> None:
+        """Return a tensor to the pool for reuse.
+        
+        Args:
+            tensor: The tensor to return to the pool.
+        """
+        if tensor is None:
+            return
+        
+        tensor_size = tensor.numel() * tensor.element_size()
+        
+        # Check if adding this tensor would exceed the limit
+        if self._current_size + tensor_size > self.max_size_bytes:
+            self._evict_if_needed(tensor_size)
+        
+        key = (tuple(tensor.shape), tensor.dtype, tensor.device)
+        self._access_counter += 1
+        self._pool[key].append((tensor, self._access_counter))
+        self._current_size += tensor_size
+    
+    def clear(self) -> None:
+        """Clear all buffers from the pool."""
+        self._pool.clear()
+        self._current_size = 0
+    
+    def get_stats(self) -> dict[str, Any]:
+        """Get pool statistics.
+        
+        Returns:
+            Dict with pool statistics (current_size_bytes, max_size_bytes, num_buffers).
+        """
+        total_buffers = sum(len(bufs) for bufs in self._pool.values())
+        return {
+            'current_size_bytes': self._current_size,
+            'max_size_bytes': self.max_size_bytes,
+            'num_buffers': total_buffers,
+            'num_unique_shapes': len(self._pool),
+        }
+
+
+# Global buffer pool instance for MixedBPWMoEDispatcher
+_global_buffer_pool = _BufferPool()
 
 from .moe_dispatch import (
     CachedWeightBuffers,
@@ -243,6 +388,9 @@ class MixedBPWMoEDispatcher:
         # Instance-level cache for pre-stacked weights per bit-width
         self._bit_width_caches: dict[int, _BitWidthCache] = {}
 
+        # Buffer pool for intermediate tensors (reduces memory allocations)
+        self._buffer_pool = _global_buffer_pool
+
     def _build_bit_width_groups(self) -> None:
         """Build groups of experts by bit-width."""
         self.bit_width_groups: dict[int, list[int]] = defaultdict(list)
@@ -330,62 +478,65 @@ class MixedBPWMoEDispatcher:
         up_size = hidden_dim * intermediate_dim
         down_size = intermediate_dim * hidden_dim
 
-        all_gate_weights = []
-        all_up_weights = []
-        all_down_weights = []
-        all_gate_scales = []
-        all_up_scales = []
-        all_down_scales = []
+        # Calculate output shapes for buffer pooling
+        num_experts_in_group = len(expert_ids)
+        ref_device = ref_weight.device
+        ref_dtype = ref_weight.dtype
+        
+        # Pre-allocate stacked tensors from buffer pool
+        gate_shape = (num_experts_in_group, ref_weight.shape[0], gate_size)
+        up_shape = (num_experts_in_group, ref_weight.shape[0], up_size)
+        down_shape = (num_experts_in_group, ref_weight.shape[0], down_size)
+        
+        gate_weights_stacked = self._buffer_pool.get_buffer(gate_shape, ref_dtype, ref_device)
+        up_weights_stacked = self._buffer_pool.get_buffer(up_shape, ref_dtype, ref_device)
+        down_weights_stacked = self._buffer_pool.get_buffer(down_shape, ref_dtype, ref_device)
 
-        for expert_id in expert_ids:
+        # Track first scale to determine if we need scales
+        first_scale = expert_scales.get(expert_ids[0])
+        has_scales = first_scale is not None
+        
+        if has_scales:
+            scale_dtype = first_scale.dtype
+            gate_scales_stacked = self._buffer_pool.get_buffer(gate_shape, scale_dtype, ref_device)
+            up_scales_stacked = self._buffer_pool.get_buffer(up_shape, scale_dtype, ref_device)
+            down_scales_stacked = self._buffer_pool.get_buffer(down_shape, scale_dtype, ref_device)
+        else:
+            # Create dummy scales (all ones) - small tensors, no need to pool
+            gate_scales_stacked = torch.ones(
+                num_experts_in_group,
+                gate_size,
+                dtype=torch.float16,
+                device=ref_device,
+            )
+            up_scales_stacked = torch.ones(
+                num_experts_in_group,
+                up_size,
+                dtype=torch.float16,
+                device=ref_device,
+            )
+            down_scales_stacked = torch.ones(
+                num_experts_in_group,
+                down_size,
+                dtype=torch.float16,
+                device=ref_device,
+            )
+
+        # Fill stacked tensors by copying splits
+        for idx, expert_id in enumerate(expert_ids):
             w = expert_weights[expert_id]
             s = expert_scales.get(expert_id)
 
-            # Split packed weights into (gate, up, down)
-            all_gate_weights.append(w[:, :gate_size])
-            all_up_weights.append(w[:, gate_size : gate_size + up_size])
-            all_down_weights.append(w[:, gate_size + up_size :])
+            # Split packed weights into (gate, up, down) and copy to stacked buffers
+            gate_weights_stacked[idx].copy_(w[:, :gate_size])
+            up_weights_stacked[idx].copy_(w[:, gate_size : gate_size + up_size])
+            down_weights_stacked[idx].copy_(w[:, gate_size + up_size :])
 
             # Split scales similarly
-            if s is not None:
-                all_gate_scales.append(s[:, :gate_size])
-                all_up_scales.append(s[:, gate_size : gate_size + up_size])
-                all_down_scales.append(s[:, gate_size + up_size :])
-            else:
-                all_gate_scales.append(None)
-                all_up_scales.append(None)
-                all_down_scales.append(None)
-
-        # Stack weights: [num_experts, ...]
-        gate_weights_stacked = torch.stack(all_gate_weights, dim=0)
-        up_weights_stacked = torch.stack(all_up_weights, dim=0)
-        down_weights_stacked = torch.stack(all_down_weights, dim=0)
-
-        # Handle scales
-        if all_gate_scales[0] is not None:
-            gate_scales_stacked = torch.stack(all_gate_scales, dim=0)
-            up_scales_stacked = torch.stack(all_up_scales, dim=0)
-            down_scales_stacked = torch.stack(all_down_scales, dim=0)
-        else:
-            # Create dummy scales (all ones)
-            gate_scales_stacked = torch.ones(
-                gate_weights_stacked.shape[0],
-                gate_size,
-                dtype=torch.float16,
-                device=ref_weight.device,
-            )
-            up_scales_stacked = torch.ones(
-                up_weights_stacked.shape[0],
-                up_size,
-                dtype=torch.float16,
-                device=ref_weight.device,
-            )
-            down_scales_stacked = torch.ones(
-                down_weights_stacked.shape[0],
-                down_size,
-                dtype=torch.float16,
-                device=ref_weight.device,
-            )
+            if s is not None and has_scales:
+                gate_scales_stacked[idx].copy_(s[:, :gate_size])
+                up_scales_stacked[idx].copy_(s[:, gate_size : gate_size + up_size])
+                down_scales_stacked[idx].copy_(s[:, gate_size + up_size :])
 
         # Create dummy su/sv and grid (required by CachedWeightBuffers)
         device_mps = ref_weight.device
@@ -421,13 +572,15 @@ class MixedBPWMoEDispatcher:
                 cached_weight_buffers = None
 
         # Create and store cache
+        # Note: We use the stacked tensors directly; they become owned by the cache
+        # and are not returned to the pool since they're kept for reuse
         cache = _BitWidthCache(
             gate_weights=gate_weights_stacked,
             up_weights=up_weights_stacked,
             down_weights=down_weights_stacked,
-            gate_scales=gate_scales_stacked if all_gate_scales[0] is not None else None,
-            up_scales=up_scales_stacked if all_up_scales[0] is not None else None,
-            down_scales=down_scales_stacked if all_down_scales[0] is not None else None,
+            gate_scales=gate_scales_stacked if has_scales else None,
+            up_scales=up_scales_stacked if has_scales else None,
+            down_scales=down_scales_stacked if has_scales else None,
             cached_weight_buffers=cached_weight_buffers,
             expert_ids=expert_ids.copy(),
             weight_shape=ref_shape,
@@ -528,28 +681,84 @@ class MixedBPWMoEDispatcher:
             Metal.MTLResourceStorageModeShared,
         )
 
-        # Create buffers
-        gate_weights_cat = torch.cat(gate_weights_list, dim=0).contiguous()
-        up_weights_cat = torch.cat(up_weights_list, dim=0).contiguous()
-        down_weights_cat = torch.cat(down_weights_list, dim=0).contiguous()
+        # Create buffers - use buffer pool for concatenated weights to reduce allocations
+        # Calculate total sizes for pre-allocation
+        gate_total_size = sum(w.numel() for w in gate_weights_list)
+        up_total_size = sum(w.numel() for w in up_weights_list)
+        down_total_size = sum(w.numel() for w in down_weights_list)
+        
+        ref_device = hidden_states.device if 'hidden_states' in locals() else list(expert_weights.values())[0].device
+        
+        # Get buffers from pool for concatenated weights
+        gate_weights_cat = self._buffer_pool.get_buffer((gate_total_size,), gate_weights_list[0].dtype, ref_device)
+        up_weights_cat = self._buffer_pool.get_buffer((up_total_size,), up_weights_list[0].dtype, ref_device)
+        down_weights_cat = self._buffer_pool.get_buffer((down_total_size,), down_weights_list[0].dtype, ref_device)
+        
+        # Fill concatenated buffers
+        gate_offset = 0
+        for w in gate_weights_list:
+            gate_weights_cat[gate_offset:gate_offset + w.numel()].copy_(w.reshape(-1))
+            gate_offset += w.numel()
+        
+        up_offset = 0
+        for w in up_weights_list:
+            up_weights_cat[up_offset:up_offset + w.numel()].copy_(w.reshape(-1))
+            up_offset += w.numel()
+        
+        down_offset = 0
+        for w in down_weights_list:
+            down_weights_cat[down_offset:down_offset + w.numel()].copy_(w.reshape(-1))
+            down_offset += w.numel()
 
         gate_weights_buf = mps_tensor_to_metal_buffer(gate_weights_cat, device)
         up_weights_buf = mps_tensor_to_metal_buffer(up_weights_cat, device)
         down_weights_buf = mps_tensor_to_metal_buffer(down_weights_cat, device)
 
         if gate_scales_list:
-            gate_scales_cat = torch.cat(gate_scales_list, dim=0).contiguous().half()
-            up_scales_cat = torch.cat(up_scales_list, dim=0).contiguous().half()
-            down_scales_cat = torch.cat(down_scales_list, dim=0).contiguous().half()
+            gate_scales_total = sum(s.numel() for s in gate_scales_list)
+            up_scales_total = sum(s.numel() for s in up_scales_list)
+            down_scales_total = sum(s.numel() for s in down_scales_list)
+            
+            # Get buffers from pool for concatenated scales
+            gate_scales_cat = self._buffer_pool.get_buffer((gate_scales_total,), torch.float16, ref_device)
+            up_scales_cat = self._buffer_pool.get_buffer((up_scales_total,), torch.float16, ref_device)
+            down_scales_cat = self._buffer_pool.get_buffer((down_scales_total,), torch.float16, ref_device)
+            
+            # Fill concatenated scale buffers
+            gate_scale_offset = 0
+            for s in gate_scales_list:
+                gate_scales_cat[gate_scale_offset:gate_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                gate_scale_offset += s.numel()
+            
+            up_scale_offset = 0
+            for s in up_scales_list:
+                up_scales_cat[up_scale_offset:up_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                up_scale_offset += s.numel()
+            
+            down_scale_offset = 0
+            for s in down_scales_list:
+                down_scales_cat[down_scale_offset:down_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                down_scale_offset += s.numel()
+            
             gate_scales_buf = mps_tensor_to_metal_buffer(gate_scales_cat, device)
             up_scales_buf = mps_tensor_to_metal_buffer(up_scales_cat, device)
             down_scales_buf = mps_tensor_to_metal_buffer(down_scales_cat, device)
+            
+            # Return concatenated buffers to pool (they've been copied to Metal buffers)
+            self._buffer_pool.return_buffer(gate_scales_cat)
+            self._buffer_pool.return_buffer(up_scales_cat)
+            self._buffer_pool.return_buffer(down_scales_cat)
         else:
-            # Create dummy scale buffers (all ones)
+            # Create dummy scale buffers (all ones) - small, no need to pool
             dummy_scales = torch.ones(1, dtype=torch.float16, device="mps")
             gate_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
             up_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
             down_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
+        
+        # Return concatenated weight buffers to pool (they've been copied to Metal buffers)
+        self._buffer_pool.return_buffer(gate_weights_cat)
+        self._buffer_pool.return_buffer(up_weights_cat)
+        self._buffer_pool.return_buffer(down_weights_cat)
 
         cache = _MixedKernelCache(
             gate_weights_buf=gate_weights_buf,
@@ -638,7 +847,9 @@ class MixedBPWMoEDispatcher:
         )
 
         # Prepare output buffer (fp32 for accumulation, then convert to fp16)
-        output_tensor = torch.zeros(n, hidden_dim, dtype=torch.float32, device="mps")
+        # Use buffer pool for output tensor to reduce memory allocations
+        output_tensor = self._buffer_pool.get_buffer((n, hidden_dim), torch.float32, hidden_states.device)
+        output_tensor.zero_()
         output_buf = mps_tensor_to_metal_buffer(output_tensor, device, copy_back=True)
 
         # Create grid buffer (codebook) - dummy for now, should come from trellis config
@@ -648,13 +859,18 @@ class MixedBPWMoEDispatcher:
         ]
         max_bits = max(expert_bits_list)
         grid_size = 1 << max_bits
-        grid_tensor = torch.arange(grid_size, dtype=torch.float16, device="mps")
+        # Use buffer pool for grid tensor
+        grid_tensor = self._buffer_pool.get_buffer((grid_size,), torch.float16, hidden_states.device)
+        torch.arange(grid_size, dtype=torch.float16, device=hidden_states.device, out=grid_tensor)
         grid_buf = mps_tensor_to_metal_buffer(grid_tensor, device)
 
         # Create su/sv buffers (sign vectors) - dummy for now
         su_size = max(num_experts * max(self.hidden_dim, intermediate_dim), 1)
-        su_tensor = torch.ones(su_size, dtype=torch.float16, device="mps")
-        sv_tensor = torch.ones(su_size, dtype=torch.float16, device="mps")
+        # Use buffer pool for su/sv tensors
+        su_tensor = self._buffer_pool.get_buffer((su_size,), torch.float16, hidden_states.device)
+        sv_tensor = self._buffer_pool.get_buffer((su_size,), torch.float16, hidden_states.device)
+        su_tensor.fill_(1.0)
+        sv_tensor.fill_(1.0)
         gate_su_buf = mps_tensor_to_metal_buffer(su_tensor, device)
         gate_sv_buf = mps_tensor_to_metal_buffer(sv_tensor, device)
         up_su_buf = mps_tensor_to_metal_buffer(su_tensor, device)
@@ -730,12 +946,23 @@ class MixedBPWMoEDispatcher:
         # Convert output to fp16 and un-sort to original token order
         output_fp16 = output_tensor.half()
 
-        # Unsort: restore original token order
-        output_unsorted = torch.zeros_like(output_fp16)
+        # Return output_tensor to buffer pool (we have output_fp16 now)
+        self._buffer_pool.return_buffer(output_tensor)
+
+        # Unsort: restore original token order - use buffer pool
+        output_unsorted = self._buffer_pool.get_buffer(output_fp16.shape, output_fp16.dtype, hidden_states.device)
         output_unsorted[token_indices] = output_fp16
 
         # Sum over top_k slots to get final output [batch, hidden_dim]
         output_combined = output_unsorted.view(batch_size, top_k, hidden_dim).sum(dim=1)
+
+        # Return output_unsorted to buffer pool after view/sum
+        self._buffer_pool.return_buffer(output_unsorted)
+
+        # Return intermediate tensors to buffer pool
+        self._buffer_pool.return_buffer(grid_tensor)
+        self._buffer_pool.return_buffer(su_tensor)
+        self._buffer_pool.return_buffer(sv_tensor)
 
         # Update stats
         _global_mixed_bpw_stats.mixed_kernel_success += 1
@@ -884,7 +1111,11 @@ class MixedBPWMoEDispatcher:
         # Gather tokens assigned to this bit-width group
         if len(token_indices) == 0:
             # No tokens assigned to this bit-width
-            return torch.zeros(0, self.hidden_dim, device=hidden_states.device)
+            return self._buffer_pool.get_buffer(
+                (0, self.hidden_dim),
+                torch.float16,
+                hidden_states.device
+            )
 
         top_k = self.config.num_experts_per_tok
         if sorted_indices is not None:
@@ -899,9 +1130,10 @@ class MixedBPWMoEDispatcher:
         num_experts_in_group = len(expert_ids)
 
         if num_experts_in_group == 0:
-            return torch.zeros(
-                len(token_indices), self.hidden_dim,
-                device=hidden_states.device, dtype=torch.float16
+            return self._buffer_pool.get_buffer(
+                (len(token_indices), self.hidden_dim),
+                torch.float16,
+                hidden_states.device
             )
 
         batch_size = gathered_states.shape[0]
@@ -1019,17 +1251,20 @@ class MixedBPWMoEDispatcher:
                 "Batched Metal dispatch not available for %d-bit group: %s. Using fallback.",
                 bit_width, e
             )
-            # Fallback: simple averaging
-            expert_outputs = torch.zeros(
-                batch_size, self.hidden_dim,
-                device=hidden_states.device, dtype=torch.float16
+            # Fallback: simple averaging - use buffer pool for output
+            expert_outputs = self._buffer_pool.get_buffer(
+                (batch_size, self.hidden_dim),
+                torch.float16,
+                hidden_states.device
             )
+            expert_outputs.zero_()
+            
             for i, expert_id in enumerate(expert_ids):
                 # Simple average of input states as placeholder
-                expert_outputs += gathered_states.float().mean(dim=0, keepdim=True).half()
+                expert_outputs.add_(gathered_states.float().mean(dim=0, keepdim=True).half())
             
             if num_experts_in_group > 0:
-                expert_outputs = expert_outputs / num_experts_in_group
+                expert_outputs.div_(num_experts_in_group)
 
         logger.debug(
             "Dispatched %d tokens to %d experts at %d-bit",
@@ -1093,6 +1328,7 @@ class MixedBPWMoEDispatcher:
 
         # Dispatch per bit-width group
         all_outputs = []
+        total_tokens = 0
         for bit_width in self.unique_bit_widths:
             token_indices = bit_width_token_indices[bit_width]
 
@@ -1116,17 +1352,49 @@ class MixedBPWMoEDispatcher:
             )
 
             all_outputs.append(group_output)
+            total_tokens += group_output.shape[0]
 
-        # Combine outputs
+        # Combine outputs - use buffer pool for intermediate tensors
         if not all_outputs:
             return torch.zeros(batch_size, self.hidden_dim, device=device)
 
-        combined = torch.cat(all_outputs, dim=0)
-        # Unsort to restore original token order
-        unsorted = combined[inverse_indices]
+        # Concatenate outputs - use buffer pool for combined tensor
+        if len(all_outputs) == 1:
+            combined = all_outputs[0]
+        else:
+            # Pre-allocate combined tensor from pool
+            combined = self._buffer_pool.get_buffer(
+                (total_tokens, self.hidden_dim),
+                all_outputs[0].dtype,
+                device
+            )
+            # Copy each group's output into combined
+            offset = 0
+            for group_output in all_outputs:
+                num_tokens = group_output.shape[0]
+                combined[offset:offset + num_tokens].copy_(group_output)
+                # Return group output buffer to pool if it's from the pool
+                self._buffer_pool.return_buffer(group_output)
+                offset += num_tokens
+        
+        # Unsort to restore original token order - use buffer pool
+        unsorted = self._buffer_pool.get_buffer(
+            (total_tokens, self.hidden_dim),
+            combined.dtype,
+            device
+        )
+        unsorted[inverse_indices] = combined
+        
+        # Return combined buffer to pool
+        self._buffer_pool.return_buffer(combined)
 
         # Reshape and sum over top_k to get [batch, hidden_dim]
-        return unsorted.view(batch_size, top_k, self.hidden_dim).sum(dim=1)
+        result = unsorted.view(batch_size, top_k, self.hidden_dim).sum(dim=1)
+        
+        # Return unsorted buffer to pool after view/sum
+        self._buffer_pool.return_buffer(unsorted)
+        
+        return result
 
     def dispatch(
         self,

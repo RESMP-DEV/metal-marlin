@@ -60,6 +60,10 @@ EXTENDED_DECODE_KERNELS = {
     (6, 2, 4): "moe_trellis_swiglu_decode_6_2_4",
 }
 
+# Flag to enable/disable GEMV decode kernel (M=1 optimization)
+# Can be disabled for A/B testing or if stability issues arise
+USE_DECODE_GEMV = True
+
 
 def get_kernel_for_batch_size(
     batch_size: int,
@@ -78,6 +82,7 @@ def get_kernel_for_batch_size(
     2. FP32 accumulation: Some kernels have FP32 accumulator variants
     3. Bit-width specialization: Decode can use specialized kernels for
        common quantization patterns
+    4. GEMV optimization: For batch=1, use GEMV kernel if available
 
     Args:
         batch_size: Number of tokens in the batch (>= 1)
@@ -141,6 +146,12 @@ def get_kernel_for_batch_size(
     if batch_size <= thresholds["decode_max"]:
         _logger = logging.getLogger(__name__)
         _logger.debug("Decode path selected: gemm_trellis_packed_decode")
+        
+        # GEMV optimization for M=1 (if enabled and available)
+        # This is generally faster than GEMM-based decode for single token
+        if USE_DECODE_GEMV and available_kernels and "moe_trellis_swiglu_decode_gemv" in available_kernels:
+            return "moe_trellis_swiglu_decode_gemv", TILE_SIZES["decode"]
+
         # Check for specialized kernels with compile-time known dequant parameters
         if not use_fp32_acc and all(b is not None for b in (gate_bits, up_bits, down_bits)):
             key = (gate_bits, up_bits, down_bits)

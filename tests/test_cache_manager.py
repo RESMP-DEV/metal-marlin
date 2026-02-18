@@ -40,8 +40,12 @@ class TestPagedKVCacheBasics:
         cache = PagedKVCache(num_blocks=2)
         assert cache.add_sequence(0)
         assert cache.add_sequence(1)
-        # Third should fail
-        assert not cache.add_sequence(2)
+        # Third should succeed by evicting LRU (seq 0)
+        assert cache.add_sequence(2)
+        assert cache.num_sequences == 2
+        assert not cache.has_sequence(0)
+        assert cache.has_sequence(1)
+        assert cache.has_sequence(2)
 
     def test_remove_sequence(self):
         cache = PagedKVCache(num_blocks=10)

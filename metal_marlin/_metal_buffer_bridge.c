@@ -8,7 +8,8 @@
             "-O3",
             "-ffast-math",
             "-std=c11",
-            "-fobjc-arc"
+            "-fobjc-arc",
+            "-march=armv8.2-a+fp16+dotprod"
         ],
         "extra_link_args": [
             "-framework",
@@ -18,11 +19,11 @@
             "-lobjc"
         ],
         "include_dirs": [
-            "/home/kearm/AlphaHENG/contrib/metal_marlin/metal_marlin",
-            "/home/kearm/AlphaHENG/contrib/metal_marlin/include",
-            "/home/kearm/AlphaHENG/contrib/metal_marlin/cpp/include",
-            "/home/kearm/.cache/uv/builds-v0/.tmp9NxKIK/lib/python3.12/site-packages/numpy/_core/include",
-            "/home/kearm/.cache/uv/builds-v0/.tmp9NxKIK/lib/python3.12/site-packages/pybind11/include"
+            "/Users/kearm/AlphaHENG/contrib/metal_marlin/metal_marlin",
+            "/Users/kearm/AlphaHENG/contrib/metal_marlin/include",
+            "/Users/kearm/AlphaHENG/contrib/metal_marlin/cpp/include",
+            "/Users/kearm/.cache/uv/builds-v0/.tmpEv7eQd/lib/python3.12/site-packages/numpy/_core/include",
+            "/Users/kearm/.cache/uv/builds-v0/.tmpEv7eQd/lib/python3.12/site-packages/pybind11/include"
         ],
         "language": "c",
         "name": "metal_marlin._metal_buffer_bridge",
