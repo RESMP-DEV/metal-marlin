@@ -222,6 +222,7 @@ if HAS_TORCH and torch is not None:
             self.use_fused_qkv = use_fused_qkv
             self.use_paged_attention = use_paged_attention
             self.use_fused_decode = use_fused_decode
+            self.prefer_glm4_fused_kernel = False
             self.use_memory_efficient_attention = use_memory_efficient_attention
             self.use_fused_rope_attention = use_fused_rope_attention
             self._paged_adapter: Any = None
@@ -562,6 +563,7 @@ if HAS_TORCH and torch is not None:
                 o_weights_packed=o_packed,
                 o_scales=o_scales,
                 params=params,
+                prefer_glm4_kernel=self.prefer_glm4_fused_kernel,
             )
 
         def _forward_fused_decode(
@@ -797,6 +799,7 @@ if HAS_TORCH and torch is not None:
                 o_weights_packed=o_packed,
                 o_scales=o_scales,
                 params=params,
+                prefer_glm4_kernel=self.prefer_glm4_fused_kernel,
             )
 
         def _forward_fused_prefill(

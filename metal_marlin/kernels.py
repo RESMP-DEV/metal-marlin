@@ -35,10 +35,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 import numpy as np
 
 from .metal_dispatch import HAS_METAL, HAS_MPS, HAS_TORCH, MetalKernelLibrary
+from .metal_dispatch import dispatch_kernel
 from .metal_dispatch import dispatch_kernel as _dispatch_kernel_python
 from .metal_dispatch import (get_default_library, get_shader_source,
                              mps_tensor_to_metal_buffer, require_mps)
-from .metal_dispatch import dispatch_kernel
 from .utils.padding import pad_torch_2d, round_up
 
 try:
@@ -57,11 +57,10 @@ def dispatch_kernel(
     if gpu_event:
         gpu_event.wait()
 
-    if HAS_CPP_EXT:
-        return _cpp_ext.dispatch_kernel_by_name(
-            lib, function_name, grid, threadgroup, buffers, **kwargs
-        )
-
+    # NOTE: C++ extension's dispatch_kernel has a different signature
+    # (requires MetalContext, pipeline capsule, ManagedBuffer objects).
+    # For Python-level dispatch with library + function_name, use Python path.
+    # C++ _cpp_ext.mmfp4_gemm is used directly by the kernels module.
     return _dispatch_kernel_python(lib, function_name, grid, threadgroup, buffers, **kwargs)
 
 
@@ -70,6 +69,14 @@ if HAS_TORCH:
 
 if TYPE_CHECKING:
     import torch
+
+
+if HAS_TORCH:
+    def _cache_key(tensor: torch.Tensor) -> tuple[int, int, int]:
+        return (tensor.data_ptr(), tensor.storage_offset(), id(tensor.untyped_storage()))
+else:
+    def _cache_key(tensor: Any) -> tuple[int, int, int]:
+        raise ImportError("torch is required for tensor cache keys")
 
 
 class _MpsTensorToMetalBuffer(Protocol):
@@ -115,6 +122,7 @@ if not HAS_METAL or not HAS_MPS:
     # Paged attention
     paged_attention_v1 = _metal_required
     paged_attention_fp4 = _metal_required
+    quantized_kv_attention_decode = _metal_required
 
     # MoE kernels
     moe_expert_gemm_fp4 = _metal_required
@@ -133,6 +141,7 @@ if not HAS_METAL or not HAS_MPS:
     mmfp4_gemm = _metal_required
     dequantize_mmfp4 = _metal_required
     mmfp4_fused_qkv = _metal_required
+    mmfp4_fused_gate_up = _metal_required
     mmfp4_softmax_topk = _metal_required
 
     # Batch execution utilities
@@ -195,6 +204,17 @@ if not HAS_METAL or not HAS_MPS:
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             return _metal_required(A, Wq_packed, Wq_scales, Wk_packed, Wk_scales, Wv_packed, Wv_scales, group_size)
 
+        def mmfp4_fused_gate_up(
+            self,
+            x: torch.Tensor,
+            gate_packed: torch.Tensor,
+            gate_scales: torch.Tensor,
+            up_packed: torch.Tensor,
+            up_scales: torch.Tensor,
+            group_size: int = 128,
+        ) -> torch.Tensor:
+            return _metal_required(x, gate_packed, gate_scales, up_packed, up_scales, group_size)
+
         def mmfp4_softmax_topk(
             self,
             logits: torch.Tensor,
@@ -230,14 +250,25 @@ using namespace metal;
 
 // --- FP4 E2M1 branchless dequant (pure ALU, no LUT) ---
 inline half dequant_fp4_scalar(uint nibble) {
-    uint sign_bit = (nibble >> 3) & 1;
-    uint exp_bits = (nibble >> 1) & 0x3;
-    uint man_bit  = nibble & 1;
-
-    half sub_mag = half(man_bit) * half(0.5h);
-    half norm_mag = half(1u << (exp_bits - 1)) * (half(1.0h) + half(man_bit) * half(0.5h));
-    half magnitude = select(norm_mag, sub_mag, exp_bits == 0);
-    return select(magnitude, -magnitude, bool(sign_bit));
+    // E2M1 FP4: explicit switch to avoid Metal half-precision arithmetic bugs
+    switch (nibble & 0xFu) {
+        case 0:  return  0.0h;
+        case 1:  return  0.5h;
+        case 2:  return  1.0h;
+        case 3:  return  1.5h;
+        case 4:  return  2.0h;
+        case 5:  return  3.0h;
+        case 6:  return  4.0h;
+        case 7:  return  6.0h;
+        case 8:  return -0.0h;
+        case 9:  return -0.5h;
+        case 10: return -1.0h;
+        case 11: return -1.5h;
+        case 12: return -2.0h;
+        case 13: return -3.0h;
+        case 14: return -4.0h;
+        default: return -6.0h;
+    }
 }
 
 // NOTE: Uses float scale to work around Metal compiler bug where
@@ -356,8 +387,10 @@ inline void dequant_int3x10_unrolled(uint32_t packed, half scale, thread half *o
         uint code = (packed >> ((idx) * 3u)) & 0x7u; \\
         out[idx] = (half)((float(code) - 3.5f) * 0.2857f * fscale); \\
     }
-    DEQUANT_INT3(0); DEQUANT_INT3(1); DEQUANT_INT3(2); DEQUANT_INT3(3); DEQUANT_INT3(4);
-    DEQUANT_INT3(5); DEQUANT_INT3(6); DEQUANT_INT3(7); DEQUANT_INT3(8); DEQUANT_INT3(9);
+    DEQUANT_INT3(0); DEQUANT_INT3(1); DEQUANT_INT3(
+        2); DEQUANT_INT3(3); DEQUANT_INT3(4);
+    DEQUANT_INT3(5); DEQUANT_INT3(6); DEQUANT_INT3(
+        7); DEQUANT_INT3(8); DEQUANT_INT3(9);
     #undef DEQUANT_INT3
 }
 
@@ -480,8 +513,8 @@ kernel void marlin_gemm_fp4(
 
                         if (b_col < N && k_pack_idx < k_packs) {
                             uint32_t packed = B_packed[k_pack_idx * N + b_col];
-                            half scale = scales[group_idx * N + b_col];
-                            dequant_fp4x8(packed, scale, dequant_vals);
+                            float scale = scales[group_idx * N + b_col];
+                            dequant_u4x8(packed, scale, dequant_vals);
                         } else {
                             for (uint v = 0; v < 8; ++v)
                                 dequant_vals[v] = half(0.0h);
@@ -536,7 +569,7 @@ kernel void marlin_gemm_fp4(
 # INT4 fused dequant-GEMM kernel (with zero points)
 # ---------------------------------------------------------------------------
 
-_INT4_GEMM_KERNEL = (
+_INT4_GEMM_KERNEL=(
     _GEMM_HEADER
     + """
 struct GemmParamsInt4 {
@@ -687,7 +720,7 @@ kernel void marlin_gemm_int4(
 # Standalone dequant kernel (FP4 -> FP16)
 # ---------------------------------------------------------------------------
 
-_DEQUANT_FP4_KERNEL = (
+_DEQUANT_FP4_KERNEL=(
     _GEMM_HEADER
     + """
 struct DequantParams {
@@ -737,7 +770,7 @@ kernel void dequant_fp4(
 # Decode GEMV kernel (optimized for M=1)
 # ---------------------------------------------------------------------------
 
-_DECODE_GEMV_FP4_KERNEL = (
+_DECODE_GEMV_FP4_KERNEL=(
     _GEMM_HEADER
     + """
 struct DecodeParams {
@@ -833,7 +866,7 @@ kernel void decode_gemv_fp4(
 # Softmax + TopK Kernel
 # ---------------------------------------------------------------------------
 
-_MMFP4_SOFTMAX_TOPK_KERNEL = """
+_MMFP4_SOFTMAX_TOPK_KERNEL="""
 #include <metal_stdlib>
 #include <metal_simdgroup>
 
@@ -920,21 +953,21 @@ kernel void mmfp4_softmax_topk(
 
     uint num_experts = params.num_experts;
     uint top_k = params.top_k;
-    
+
     device const half* row_logits = logits + batch_idx * num_experts;
-    
+
     // 1. Find Max
     float local_max = -INFINITY;
     for (uint i = tid; i < num_experts; i += TG_SIZE) {
         local_max = max(local_max, float(row_logits[i]));
     }
     local_max = simd_max_reduce(local_max);
-    
+
     threadgroup float tg_max[8]; // 256 threads / 32 = 8 simdgroups
     uint simd_id = tid / 32;
     if (lane == 0) tg_max[simd_id] = local_max;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
+
     float global_max = -INFINITY;
     if (tid == 0) {
         for (uint i = 0; i < 8; i++) global_max = max(global_max, tg_max[i]);
@@ -942,18 +975,18 @@ kernel void mmfp4_softmax_topk(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     global_max = tg_max[0];
-    
+
     // 2. Compute Sum
     float local_sum = 0.0f;
     for (uint i = tid; i < num_experts; i += TG_SIZE) {
         local_sum += safe_exp(float(row_logits[i]), global_max);
     }
     local_sum = simd_sum_reduce(local_sum);
-    
+
     threadgroup float tg_sum[8];
     if (lane == 0) tg_sum[simd_id] = local_sum;
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
+
     float global_sum = 0.0f;
     if (tid == 0) {
         for (uint i = 0; i < 8; i++) global_sum += tg_sum[i];
@@ -962,7 +995,7 @@ kernel void mmfp4_softmax_topk(
     threadgroup_barrier(mem_flags::mem_threadgroup);
     global_sum = tg_sum[0];
     float inv_sum = 1.0f / global_sum;
-    
+
     // 3. Top-K Selection
     float local_topk_vals[MAX_TOP_K];
     uint local_topk_ids[MAX_TOP_K];
@@ -970,54 +1003,54 @@ kernel void mmfp4_softmax_topk(
         local_topk_vals[k] = -INFINITY;
         local_topk_ids[k] = 0;
     }
-    
+
     for (uint i = tid; i < num_experts; i += TG_SIZE) {
         float prob = safe_exp(float(row_logits[i]), global_max) * inv_sum;
         insert_topk<MAX_TOP_K>(local_topk_vals, local_topk_ids, prob, i);
     }
-    
+
     // Use threadgroup memory to gather results for sorting
-    // Since we only need top_k, and MAX_TOP_K is small (16), 
+    // Since we only need top_k, and MAX_TOP_K is small (16),
     // each thread has 16 candidates. Total 256 * 16 = 4096 candidates.
     // We can use a parallel reduction or just let thread 0 merge.
     // Merging 4096 items on one thread is slow (O(N log K)).
-    
+
     // Better: SIMD reduction of top-k.
     // Each SIMD group (32 threads) reduces to one top-k list.
     // Then threadgroup reduces 8 lists to 1.
-    
-    // But for simplicity and to match moe_fused_router logic which relies on 
+
+    // But for simplicity and to match moe_fused_router logic which relies on
     // tg_logits being in shared memory (which we avoided due to size),
     // let's assume we can use shared memory for the *reduction*.
-    
+
     // Actually, `moe_fused_router.metal` logic:
     // "Step 3: Top-k selection (thread 0 does this)"
     // Thread 0 scans ALL experts from `tg_logits` in shared memory.
     // This implies `num_experts <= ROUTER_MAX_EXPERTS` (256).
-    
+
     // If we want to support > 256 experts, we can't use that simple logic.
     // But `moe_fused_router.metal` has `ROUTER_MAX_EXPERTS = 256`.
     // So let's stick to that constraint if it simplifies things, or add a loop.
-    
+
     // My implementation above does `insert_topk` per thread.
     // Now we need to reduce `local_topk_vals` across threads.
-    
+
     // Let's use shared memory to exchange.
     // `threadgroup float tg_topk_vals[256][MAX_TOP_K]` would be too big (16KB).
     // `threadgroup uint tg_topk_ids[256][MAX_TOP_K]` would be another 16KB.
     // Total 32KB fits in 32KB shared memory limit of M1/M2/M3 (actually it's 32KB usually).
     // But standard limit is often 32KB.
-    
+
     // Let's assume we can do it.
     threadgroup float tg_topk_vals[TG_SIZE * MAX_TOP_K];
     threadgroup uint tg_topk_ids[TG_SIZE * MAX_TOP_K];
-    
+
     for (uint k=0; k<MAX_TOP_K; ++k) {
         tg_topk_vals[tid * MAX_TOP_K + k] = local_topk_vals[k];
         tg_topk_ids[tid * MAX_TOP_K + k] = local_topk_ids[k];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    
+
     // Thread 0 merges all
     if (tid == 0) {
         float final_vals[MAX_TOP_K];
@@ -1026,7 +1059,7 @@ kernel void mmfp4_softmax_topk(
             final_vals[k] = -INFINITY;
             final_ids[k] = 0;
         }
-        
+
         for (uint t=0; t<TG_SIZE; ++t) {
             for (uint k=0; k<MAX_TOP_K; ++k) {
                 float val = tg_topk_vals[t * MAX_TOP_K + k];
@@ -1036,11 +1069,11 @@ kernel void mmfp4_softmax_topk(
                 }
             }
         }
-        
+
         // Write output
         device half* out_probs = probs + batch_idx * top_k;
         device uint* out_ids = indices + batch_idx * top_k;
-        
+
         for (uint k=0; k<top_k; ++k) {
             if (k < MAX_TOP_K) {
                 out_probs[k] = half(final_vals[k]);
@@ -1058,7 +1091,7 @@ kernel void mmfp4_softmax_topk(
 # Hadamard Transform kernels
 # ---------------------------------------------------------------------------
 
-_HADAMARD_KERNEL = """
+_HADAMARD_KERNEL="""
 #include <metal_stdlib>
 using namespace metal;
 
@@ -1225,23 +1258,23 @@ kernel void hadamard_128(
 # Kernel library management
 # ---------------------------------------------------------------------------
 
-_compiled_libraries: dict[str, bool] = {}
+_compiled_libraries: dict[str, bool]={}
 
 
 def _ensure_kernel_compiled(lib: MetalKernelLibrary, name: str, source: str) -> None:
     """Ensure a kernel source is compiled in the library."""
     if name not in _compiled_libraries:
         lib.compile_source(name, source)
-        _compiled_libraries[name] = True
+        _compiled_libraries[name]=True
 
 
 # ---------------------------------------------------------------------------
 # INT2 and INT3 constants
 # ---------------------------------------------------------------------------
 
-INT2_PER_UINT = 16  # 32 bits / 2 bits = 16 values per uint32
+INT2_PER_UINT=16  # 32 bits / 2 bits = 16 values per uint32
 # 30 bits used / 3 bits = 10 values per uint32 (2 bits unused)
-INT3_PER_UINT = 10
+INT3_PER_UINT=10
 
 
 # ---------------------------------------------------------------------------
@@ -1256,38 +1289,35 @@ if HAS_METAL and HAS_MPS:
     from .moe_dispatch import (gather_for_experts, group_tokens_by_expert_full,
                                scatter_expert_outputs)
 
-    _STAGING_POOLS: dict[int, MetalBufferPool] = {}
+    _STAGING_POOLS: dict[int, MetalBufferPool]={}
 
-    _WEIGHT_BUFFER_CACHE: dict[tuple[int, int, int], Any] = {}
-
-    def _cache_key(tensor: torch.Tensor) -> tuple[int, int, int]:
-        return (tensor.data_ptr(), tensor.storage_offset(), id(tensor.untyped_storage()))
+    _WEIGHT_BUFFER_CACHE: dict[tuple[int, int, int, int], Any]={}
 
     class MarlinGemmDispatcher:
         """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
 
-        def __init__(self, lib: MetalKernelLibrary | None = None) -> None:
+        def __init__(self, lib: MetalKernelLibrary | None=None) -> None:
             require_mps()
-            self._lib = lib or get_default_library()
+            self._lib=lib or get_default_library()
             self._compiled: dict[tuple[str,
-                                       tuple[str, ...] | None], Any | None] = {}
-            self._gemm_fp16: Any | None = None
-            self._gemm_bf16_fp32acc: Any | None = None
+                                       tuple[str, ...] | None], Any | None]={}
+            self._gemm_fp16: Any | None=None
+            self._gemm_bf16_fp32acc: Any | None=None
             self._compile_gemm_kernels()
 
-        @staticmethod
+        @ staticmethod
         def _apply_compile_options(source: str, compile_options: list[str] | None) -> str:
             if not compile_options:
                 return source
-            defines: list[str] = []
+            defines: list[str]=[]
             for opt in compile_options:
                 if not opt.startswith("-D"):
                     continue
-                define = opt[2:]
+                define=opt[2:]
                 if "=" in define:
-                    name, value = define.split("=", 1)
+                    name, value=define.split("=", 1)
                 else:
-                    name, value = define, "1"
+                    name, value=define, "1"
                 defines.append(f"#define {name} {value}")
             if not defines:
                 return source
@@ -1297,47 +1327,47 @@ if HAS_METAL and HAS_MPS:
             self,
             function_name: str,
             *,
-            source_name: str = "marlin_gemm",
-            compile_options: list[str] | None = None,
+            source_name: str="marlin_gemm",
+            compile_options: list[str] | None=None,
         ) -> Any | None:
-            key = (function_name, tuple(compile_options)
+            key=(function_name, tuple(compile_options)
                    if compile_options else None)
             if key in self._compiled:
                 return self._compiled[key]
 
             try:
                 if compile_options:
-                    source = get_shader_source(source_name)
-                    source = self._apply_compile_options(
+                    source=get_shader_source(source_name)
+                    source=self._apply_compile_options(
                         source, compile_options)
-                    tag = "_".join(
+                    tag="_".join(
                         opt.replace("-", "").replace("=", "_") for opt in compile_options
                     )
-                    library_name = f"{source_name}:{function_name}:{tag}"
+                    library_name=f"{source_name}:{function_name}:{tag}"
                     self._lib.compile_source(library_name, source)
-                    pipeline = self._lib.get_pipeline(
+                    pipeline=self._lib.get_pipeline(
                         function_name, library_name)
                 else:
                     try:
-                        pipeline = self._lib.get_pipeline(
+                        pipeline=self._lib.get_pipeline(
                             function_name, source_name)
                     except KeyError:
-                        source = get_shader_source(source_name)
+                        source=get_shader_source(source_name)
                         self._lib.compile_source(source_name, source)
-                        pipeline = self._lib.get_pipeline(
+                        pipeline=self._lib.get_pipeline(
                             function_name, source_name)
             except Exception:
-                pipeline = None
+                pipeline=None
 
-            self._compiled[key] = pipeline
+            self._compiled[key]=pipeline
             return pipeline
 
         def _compile_gemm_kernels(self) -> None:
-            self._gemm_fp16 = self._compile_kernel("marlin_gemm_fp16")
+            self._gemm_fp16=self._compile_kernel("marlin_gemm_fp16")
             if self._gemm_fp16 is None:
-                self._gemm_fp16 = self._compile_kernel(
+                self._gemm_fp16=self._compile_kernel(
                     "marlin_gemm_fp16_pipelined")
-            self._gemm_bf16_fp32acc = self._compile_kernel(
+            self._gemm_bf16_fp32acc=self._compile_kernel(
                 "marlin_gemm_fp32acc",
                 compile_options=["-DUSE_BF16_INPUTS=1"],
             )
@@ -1350,7 +1380,7 @@ if HAS_METAL and HAS_MPS:
             N: int,
             K: int,
             *,
-            activation_dtype: str = "fp16",
+            activation_dtype: str="fp16",
         ) -> torch.Tensor:
             if activation_dtype == "bf16" and self._gemm_bf16_fp32acc is not None:
                 return self._dispatch_bf16_path(A, B, M, N, K)
@@ -1379,19 +1409,19 @@ if HAS_METAL and HAS_MPS:
             if kernel is None:
                 raise RuntimeError("GEMM kernel pipeline is unavailable.")
 
-            A_contig = A.to(dtype=dtype).contiguous()
-            B_contig = B.to(dtype=dtype).contiguous()
-            output = torch.empty((M, N), dtype=dtype, device="mps")
+            A_contig=A.to(dtype=dtype).contiguous()
+            B_contig=B.to(dtype=dtype).contiguous()
+            output=torch.empty((M, N), dtype=dtype, device="mps")
 
-            device = self._lib.device
-            A_buf = _private_buffer_from_tensor(
+            device=self._lib.device
+            A_buf=_private_buffer_from_tensor(
                 A_contig, self._lib, device, cache=False)
-            B_buf = _private_buffer_from_tensor(
+            B_buf=_private_buffer_from_tensor(
                 B_contig, self._lib, device, cache=True)
-            C_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+            C_buf=mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
-            grid_m = (M + TILE_M - 1) // TILE_M
-            grid_n = (N + TILE_N - 1) // TILE_N
+            grid_m=(M + TILE_M - 1) // TILE_M
+            grid_n=(N + TILE_N - 1) // TILE_N
 
             self._lib._dispatch(
                 kernel,
@@ -1407,16 +1437,16 @@ if HAS_METAL and HAS_MPS:
             return output
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
-        pool = _STAGING_POOLS.get(id(device))
+        pool=_STAGING_POOLS.get(id(device))
         if pool is None:
-            pool = MetalBufferPool(
+            pool=MetalBufferPool(
                 device, storage_mode=Metal.MTLResourceStorageModeManaged)
-            _STAGING_POOLS[id(device)] = pool
+            _STAGING_POOLS[id(device)]=pool
         return pool
 
     def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
-        command_buffer = lib.command_queue.commandBuffer()
-        blit = command_buffer.blitCommandEncoder()
+        command_buffer=lib.command_queue.commandBuffer()
+        blit=command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
             source, 0, destination, 0, size
         )
@@ -1425,14 +1455,14 @@ if HAS_METAL and HAS_MPS:
         command_buffer.waitUntilCompleted()
 
     def _private_buffer_from_bytes(lib: MetalKernelLibrary, device: Any, data: bytes) -> Any:
-        size = len(data)
-        staging = _get_staging_pool(device).get(size)
-        contents = staging.contents()
-        view = memoryview(contents.as_buffer(staging.length()))
-        view[:size] = data
+        size=len(data)
+        staging=_get_staging_pool(device).get(size)
+        contents=staging.contents()
+        view=memoryview(contents.as_buffer(staging.length()))
+        view[:size]=data
         staging.didModifyRange_(Foundation.NSMakeRange(0, size))
 
-        private_buf = device.newBufferWithLength_options_(
+        private_buf=device.newBufferWithLength_options_(
             size, Metal.MTLResourceStorageModePrivate)
         _blit_copy(lib, staging, private_buf, size)
         _get_staging_pool(device).release(staging)
@@ -1443,39 +1473,39 @@ if HAS_METAL and HAS_MPS:
         lib: MetalKernelLibrary,
         device: Any,
         *,
-        cache: bool = True,
+        cache: bool=True,
     ) -> Any:
         if not tensor.is_contiguous():
-            tensor = tensor.contiguous()
+            tensor=tensor.contiguous()
 
-        cache_key = _cache_key(tensor)
+        cache_key=_cache_key(tensor)
         if cache and cache_key in _WEIGHT_BUFFER_CACHE:
             return _WEIGHT_BUFFER_CACHE[cache_key]
 
         if tensor.is_mps:
-            staging = mps_tensor_to_metal_buffer(tensor, device)
-            size = staging.length()
-            private_buf = device.newBufferWithLength_options_(
+            staging=mps_tensor_to_metal_buffer(tensor, device)
+            size=staging.length()
+            private_buf=device.newBufferWithLength_options_(
                 size, Metal.MTLResourceStorageModePrivate
             )
             _blit_copy(lib, staging, private_buf, size)
         else:
-            data = tensor.detach().cpu().numpy().tobytes()
-            private_buf = _private_buffer_from_bytes(lib, device, data)
+            data=tensor.detach().cpu().numpy().tobytes()
+            private_buf=_private_buffer_from_bytes(lib, device, data)
 
         if cache:
-            _WEIGHT_BUFFER_CACHE[cache_key] = private_buf
+            _WEIGHT_BUFFER_CACHE[cache_key]=private_buf
         return private_buf
 
     def _params_buffer(lib: MetalKernelLibrary, device: Any, params: np.ndarray) -> Any:
-        data = params.tobytes()
+        data=params.tobytes()
         return device.newBufferWithBytes_length_options_(
             data, len(data), Metal.MTLResourceStorageModeShared
         )
 
     def pack_fp4_weights(
         weight: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Pack FP16/BF16 weights into FP4 E2M1 format for the fused GEMM kernels.
@@ -1494,8 +1524,8 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/8, N] uint32, scales [K/group_size, N]).
         """
-        w = weight.T.to(torch.float16)  # [K, N]
-        K, N = w.shape
+        w=weight.T.to(torch.float16)  # [K, N]
+        K, N=w.shape
 
         if K % FP4_PER_UINT != 0:
             raise ValueError(f"K ({K}) must be divisible by {FP4_PER_UINT}")
@@ -1504,55 +1534,55 @@ if HAS_METAL and HAS_MPS:
                 f"K ({K}) must be divisible by group_size ({group_size})")
 
         # Per-group scales along K: max abs value in each group
-        w_grouped = w.reshape(K // group_size, group_size, N)
-        scales = w_grouped.abs().amax(dim=1)
-        scales = scales.clamp(min=1e-7)
+        w_grouped=w.reshape(K // group_size, group_size, N)
+        scales=w_grouped.abs().amax(dim=1)
+        scales=scales.clamp(min=1e-7)
 
         # E2M1 representable values (positive): 0, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
         # Max magnitude = 6.0
-        MAX_E2M1 = 6.0
+        MAX_E2M1=6.0
 
         # Normalize by group scale and clamp to E2M1 range
-        scales_expanded = scales.repeat_interleave(group_size, dim=0)  # [K, N]
-        w_norm = w / scales_expanded
-        w_norm = w_norm.clamp(-MAX_E2M1, MAX_E2M1)
+        scales_expanded=scales.repeat_interleave(group_size, dim=0)  # [K, N]
+        w_norm=w / scales_expanded
+        w_norm=w_norm.clamp(-MAX_E2M1, MAX_E2M1)
 
         # Build E2M1 lookup table for nearest-value quantization
-        e2m1_lut = np.zeros(16, dtype=np.float32)
+        e2m1_lut=np.zeros(16, dtype=np.float32)
         for nibble in range(16):
-            s = (nibble >> 3) & 1
-            e = (nibble >> 1) & 3
-            m = nibble & 1
+            s=(nibble >> 3) & 1
+            e=(nibble >> 1) & 3
+            m=nibble & 1
             if e == 0 and m == 0:
-                val = 0.0
+                val=0.0
             elif e == 0 and m == 1:
-                val = 0.25  # subnormal: m * 0.25
+                val=0.25  # subnormal: m * 0.25
             else:
-                val = (1.0 + m * 0.5) * (2.0 ** (e - 1))
-            e2m1_lut[nibble] = -val if s else val
+                val=(1.0 + m * 0.5) * (2.0 ** (e - 1))
+            e2m1_lut[nibble]=-val if s else val
 
         # Quantize to nearest E2M1 nibble
-        w_np = w_norm.cpu().float().numpy()
-        k_packs = K // FP4_PER_UINT
-        packed = np.zeros((k_packs, N), dtype=np.uint32)
+        w_np=w_norm.cpu().float().numpy()
+        k_packs=K // FP4_PER_UINT
+        packed=np.zeros((k_packs, N), dtype=np.uint32)
 
         for k_pack in range(k_packs):
-            k_base = k_pack * FP4_PER_UINT
+            k_base=k_pack * FP4_PER_UINT
             for bit_pos in range(FP4_PER_UINT):
-                row_vals = w_np[k_base + bit_pos, :]  # [N]
+                row_vals=w_np[k_base + bit_pos, :]  # [N]
                 # Find nearest E2M1 nibble for each element
-                dists = np.abs(row_vals[:, None] -
+                dists=np.abs(row_vals[:, None] -
                                e2m1_lut[None, :])  # [N, 16]
-                nibbles = np.argmin(dists, axis=1).astype(np.uint32)  # [N]
+                nibbles=np.argmin(dists, axis=1).astype(np.uint32)  # [N]
                 packed[k_pack, :] |= nibbles << (bit_pos * 4)
 
-        weight_packed = torch.from_numpy(packed).to("mps")
-        scales_out = scales.to("mps")
+        weight_packed=torch.from_numpy(packed).to("mps")
+        scales_out=scales.to("mps")
         return weight_packed, scales_out
 
     def pack_int2_weights(
         weight: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Pack FP16/BF16 weights into INT2 format.
@@ -1566,8 +1596,8 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/16, N] uint32, scales [K/group_size, N]).
         """
-        w = weight.T.to(torch.float16)  # [K, N]
-        K, N = w.shape
+        w=weight.T.to(torch.float16)  # [K, N]
+        K, N=w.shape
 
         if K % INT2_PER_UINT != 0:
             raise ValueError(f"K ({K}) must be divisible by {INT2_PER_UINT}")
@@ -1576,37 +1606,37 @@ if HAS_METAL and HAS_MPS:
                 f"K ({K}) must be divisible by group_size ({group_size})")
 
         # Per-group scales along K
-        w_grouped = w.reshape(K // group_size, group_size, N)
-        scales = w_grouped.abs().amax(dim=1)
-        scales = scales.clamp(min=1e-7)
+        w_grouped=w.reshape(K // group_size, group_size, N)
+        scales=w_grouped.abs().amax(dim=1)
+        scales=scales.clamp(min=1e-7)
 
         # Normalize and clip
-        scales_expanded = scales.repeat_interleave(group_size, dim=0)
-        w_norm = w / scales_expanded
-        w_norm = w_norm.clamp(-1.0, 1.0)
+        scales_expanded=scales.repeat_interleave(group_size, dim=0)
+        w_norm=w / scales_expanded
+        w_norm=w_norm.clamp(-1.0, 1.0)
 
         # INT2 codebook: {-1.0, -0.333, 0.333, 1.0} -> codes {0, 1, 2, 3}
-        int2_lut = np.array([-1.0, -0.333, 0.333, 1.0], dtype=np.float32)
+        int2_lut=np.array([-1.0, -0.333, 0.333, 1.0], dtype=np.float32)
 
-        w_np = w_norm.cpu().float().numpy()
-        k_packs = K // INT2_PER_UINT
-        packed = np.zeros((k_packs, N), dtype=np.uint32)
+        w_np=w_norm.cpu().float().numpy()
+        k_packs=K // INT2_PER_UINT
+        packed=np.zeros((k_packs, N), dtype=np.uint32)
 
         for k_pack in range(k_packs):
-            k_base = k_pack * INT2_PER_UINT
+            k_base=k_pack * INT2_PER_UINT
             for bit_pos in range(INT2_PER_UINT):
-                row_vals = w_np[k_base + bit_pos, :]
-                dists = np.abs(row_vals[:, None] - int2_lut[None, :])
-                codes = np.argmin(dists, axis=1).astype(np.uint32)
+                row_vals=w_np[k_base + bit_pos, :]
+                dists=np.abs(row_vals[:, None] - int2_lut[None, :])
+                codes=np.argmin(dists, axis=1).astype(np.uint32)
                 packed[k_pack, :] |= codes << (bit_pos * 2)
 
-        weight_packed = torch.from_numpy(packed).to("mps")
-        scales_out = scales.to("mps")
+        weight_packed=torch.from_numpy(packed).to("mps")
+        scales_out=scales.to("mps")
         return weight_packed, scales_out
 
     def pack_int3_weights(
         weight: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Pack FP16/BF16 weights into INT3 format.
@@ -1620,8 +1650,8 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/10, N] uint32, scales [K/group_size, N]).
         """
-        w = weight.T.to(torch.float16)  # [K, N]
-        K, N = w.shape
+        w=weight.T.to(torch.float16)  # [K, N]
+        K, N=w.shape
 
         if K % INT3_PER_UINT != 0:
             raise ValueError(f"K ({K}) must be divisible by {INT3_PER_UINT}")
@@ -1630,33 +1660,33 @@ if HAS_METAL and HAS_MPS:
                 f"K ({K}) must be divisible by group_size ({group_size})")
 
         # Per-group scales
-        w_grouped = w.reshape(K // group_size, group_size, N)
-        scales = w_grouped.abs().amax(dim=1)
-        scales = scales.clamp(min=1e-7)
+        w_grouped=w.reshape(K // group_size, group_size, N)
+        scales=w_grouped.abs().amax(dim=1)
+        scales=scales.clamp(min=1e-7)
 
         # Normalize and clip
-        scales_expanded = scales.repeat_interleave(group_size, dim=0)
-        w_norm = w / scales_expanded
-        w_norm = w_norm.clamp(-1.0, 1.0)
+        scales_expanded=scales.repeat_interleave(group_size, dim=0)
+        w_norm=w / scales_expanded
+        w_norm=w_norm.clamp(-1.0, 1.0)
 
         # INT3 codebook: 8 levels from -1.0 to 1.0
-        int3_lut = np.array(
+        int3_lut=np.array(
             [(i - 3.5) / 3.5 for i in range(8)], dtype=np.float32)
 
-        w_np = w_norm.cpu().float().numpy()
-        k_packs = K // INT3_PER_UINT
-        packed = np.zeros((k_packs, N), dtype=np.uint32)
+        w_np=w_norm.cpu().float().numpy()
+        k_packs=K // INT3_PER_UINT
+        packed=np.zeros((k_packs, N), dtype=np.uint32)
 
         for k_pack in range(k_packs):
-            k_base = k_pack * INT3_PER_UINT
+            k_base=k_pack * INT3_PER_UINT
             for bit_pos in range(INT3_PER_UINT):
-                row_vals = w_np[k_base + bit_pos, :]
-                dists = np.abs(row_vals[:, None] - int3_lut[None, :])
-                codes = np.argmin(dists, axis=1).astype(np.uint32)
+                row_vals=w_np[k_base + bit_pos, :]
+                dists=np.abs(row_vals[:, None] - int3_lut[None, :])
+                codes=np.argmin(dists, axis=1).astype(np.uint32)
                 packed[k_pack, :] |= codes << (bit_pos * 3)
 
-        weight_packed = torch.from_numpy(packed).to("mps")
-        scales_out = scales.to("mps")
+        weight_packed=torch.from_numpy(packed).to("mps")
+        scales_out=scales.to("mps")
         return weight_packed, scales_out
 
     def dispatch_gemm_fp4(
@@ -1684,48 +1714,48 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output tensor [M, N] float16.
         """
-        device = lib.device
+        device=lib.device
 
         # Ensure contiguous and correct dtype
-        A_contig = A.contiguous()
-        B_packed_contig = B_packed.contiguous()
-        scales_half = (
+        A_contig=A.contiguous()
+        B_packed_contig=B_packed.contiguous()
+        scales_half=(
             scales.half().contiguous() if scales.dtype != torch.float16 else scales.contiguous()
         )
 
         # Create output tensor
-        C = torch.empty((M, N), dtype=torch.float16, device="mps")
+        C=torch.empty((M, N), dtype=torch.float16, device="mps")
 
         # Get Metal buffers
-        A_buf = _private_buffer_from_tensor(A_contig, lib, device, cache=True)
-        B_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(A_contig, lib, device, cache=True)
+        B_buf=_private_buffer_from_tensor(
             B_packed_contig, lib, device, cache=True)
-        S_buf = _private_buffer_from_tensor(
+        S_buf=_private_buffer_from_tensor(
             scales_half, lib, device, cache=True)
-        C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
+        C_buf=mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
         # Metal kernel expects 4 SEPARATE scalar buffers at indices 4-7:
         #   buffer(4): constant uint& M
         #   buffer(5): constant uint& N
         #   buffer(6): constant uint& K
         #   buffer(7): constant uint& group_size
-        M_buf = _params_buffer(lib, device, np.array([M], dtype=np.uint32))
-        N_buf = _params_buffer(lib, device, np.array([N], dtype=np.uint32))
-        K_buf = _params_buffer(lib, device, np.array([K], dtype=np.uint32))
-        gs_buf = _params_buffer(lib, device, np.array(
+        M_buf=_params_buffer(lib, device, np.array([M], dtype=np.uint32))
+        N_buf=_params_buffer(lib, device, np.array([N], dtype=np.uint32))
+        K_buf=_params_buffer(lib, device, np.array([K], dtype=np.uint32))
+        gs_buf=_params_buffer(lib, device, np.array(
             [group_size], dtype=np.uint32))
 
         # Tile sizes matching marlin_gemm.metal
-        TILE_M = 64
-        TILE_N = 64
-        THREADS_PER_TG = 128
+        TILE_M=64
+        TILE_N=64
+        THREADS_PER_TG=128
 
-        grid_m = (M + TILE_M - 1) // TILE_M
-        grid_n = (N + TILE_N - 1) // TILE_N
+        grid_m=(M + TILE_M - 1) // TILE_M
+        grid_n=(N + TILE_N - 1) // TILE_N
 
-        kernel_name = "marlin_gemm_fp4_single_stage"
+        kernel_name="marlin_gemm_fp4_single_stage"
         if K > FP32_ACCUM_K_THRESHOLD:
-            kernel_name = "marlin_gemm_fp4_fp32acc"
+            kernel_name="marlin_gemm_fp4_fp32acc"
 
         dispatch_kernel(
             lib,
@@ -1742,7 +1772,7 @@ if HAS_METAL and HAS_MPS:
         A: torch.Tensor,
         B_packed: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """
         FP4 fused dequant-GEMM: C = A @ dequant(B_packed, scales).
@@ -1759,25 +1789,25 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        orig_shape = A.shape
-        K = orig_shape[-1]
-        M = 1
+        orig_shape=A.shape
+        K=orig_shape[-1]
+        M=1
         for d in orig_shape[:-1]:
             M *= d
 
         # For small K (e.g., stability test with K=256), a torch fallback with FP32 accum
         # matches reference more tightly than the half-accum Metal kernel.
         if K <= 512:
-            A_2d = A.reshape(M, K).to(torch.float32)
-            device = A.device
-            K_packed, N = B_packed.shape
-            K_full = K_packed * 8
+            A_2d=A.reshape(M, K).to(torch.float32)
+            device=A.device
+            K_packed, N=B_packed.shape
+            K_full=K_packed * 8
             if K_full != K:
                 raise ValueError(
                     f"Packed K {K_full} does not match activations K {K}")
 
             # FP4 E2M1 lookup table (matches tests/FP4_E2M1_TABLE)
-            fp4_table = torch.tensor(
+            fp4_table=torch.tensor(
                 [
                     0.0,
                     0.5,
@@ -1800,37 +1830,37 @@ if HAS_METAL and HAS_MPS:
                 dtype=torch.float32,
             )
 
-            scales_f = scales.to(torch.float32)
-            scales_exp = scales_f.repeat_interleave(group_size, dim=0)
+            scales_f=scales.to(torch.float32)
+            scales_exp=scales_f.repeat_interleave(group_size, dim=0)
 
-            B_full = torch.empty((K, N), device=device, dtype=torch.float32)
+            B_full=torch.empty((K, N), device=device, dtype=torch.float32)
             for j in range(8):
-                nibbles = ((B_packed >> (j * 4)) & 0xF).to(torch.int64)
-                vals = fp4_table[nibbles]
-                rows = torch.arange(j, K, 8, device=device)
-                B_full[rows, :] = vals * scales_exp[rows, :]
+                nibbles=((B_packed >> (j * 4)) & 0xF).to(torch.int64)
+                vals=fp4_table[nibbles]
+                rows=torch.arange(j, K, 8, device=device)
+                B_full[rows, :]=vals * scales_exp[rows, :]
 
-            out = (A_2d @ B_full).to(torch.float16)
-            out_shape = list(orig_shape[:-1]) + [N]
+            out=(A_2d @ B_full).to(torch.float16)
+            out_shape=list(orig_shape[:-1]) + [N]
             return out.reshape(out_shape)
 
-        lib = get_default_library()
+        lib=get_default_library()
         _ensure_kernel_compiled(lib, "fp4_gemm", _FP4_GEMM_KERNEL)
 
-        A_2d = A.reshape(M, K).half().contiguous()
-        N = B_packed.shape[1]
+        A_2d=A.reshape(M, K).half().contiguous()
+        N=B_packed.shape[1]
 
         # The fused kernel's partial-tile stores are still sensitive for small M.
         # Pad to full TILE_M so the kernel only sees complete tiles, then slice back.
-        M_dispatch = round_up(M, TILE_M)
+        M_dispatch=round_up(M, TILE_M)
         if M_dispatch != M:
-            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=TILE_M, cols_multiple=1)
+            A_2d, _=pad_torch_2d(A_2d, rows_multiple=TILE_M, cols_multiple=1)
 
         # Use shared dispatch path to select the most stable kernel variant.
         # Keep padding disabled here since M is already padded above.
         from . import metal_dispatch as _metal_dispatch
 
-        C = _metal_dispatch.dispatch_gemm_fp4(
+        C=_metal_dispatch.dispatch_gemm_fp4(
             lib,
             A_2d,
             B_packed,
@@ -1842,15 +1872,15 @@ if HAS_METAL and HAS_MPS:
             enable_padding=False,
         )
         if M_dispatch != M:
-            C = C[:M, :]
-        out_shape = list(orig_shape[:-1]) + [N]
+            C=C[:M, :]
+        out_shape=list(orig_shape[:-1]) + [N]
         return C.reshape(out_shape)
 
     def marlin_gemm_fp4_tuned(
         A: torch.Tensor,
         B_packed: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """FP4 fused dequant-GEMM (alias for marlin_gemm_fp4)."""
         return marlin_gemm_fp4(A, B_packed, scales, group_size)
@@ -1859,7 +1889,7 @@ if HAS_METAL and HAS_MPS:
         A: torch.Tensor,
         B_packed: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """Alias for marlin_gemm_fp4; preserves fused kernel naming."""
         return marlin_gemm_fp4(A, B_packed, scales, group_size)
@@ -1869,7 +1899,7 @@ if HAS_METAL and HAS_MPS:
         B_packed: torch.Tensor,
         scales: torch.Tensor,
         zeros: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """
         INT4 fused dequant-GEMM with asymmetric quantization (scale + zero point).
@@ -1886,75 +1916,76 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        orig_shape = A.shape
-        K = orig_shape[-1]
-        M = 1
+        orig_shape=A.shape
+        K=orig_shape[-1]
+        M=1
         for d in orig_shape[:-1]:
             M *= d
 
         # Torch fallback for correctness (uses float accum on MPS). Ensures test parity.
         if True:
-            A_2d = A.reshape(M, K).to(torch.float32)
+            A_2d=A.reshape(M, K).to(torch.float32)
             # Dequantize weights on MPS
-            device = A.device
-            K_packed, N = B_packed.shape
-            K_full = K_packed * 8
+            device=A.device
+            K_packed, N=B_packed.shape
+            K_full=K_packed * 8
             if K_full != K:
                 raise ValueError(
                     f"Packed K {K_full} does not match activations K {K}")
 
             # Expand scales/zeros to full K dimension
-            scales_f = scales.to(torch.float32)
-            zeros_f = zeros.to(torch.float32)
-            scales_exp = scales_f.repeat_interleave(group_size, dim=0)
-            zeros_exp = zeros_f.repeat_interleave(group_size, dim=0)
+            scales_f=scales.to(torch.float32)
+            zeros_f=zeros.to(torch.float32)
+            scales_exp=scales_f.repeat_interleave(group_size, dim=0)
+            zeros_exp=zeros_f.repeat_interleave(group_size, dim=0)
 
             # Unpack B to [K, N] float32
-            B_full = torch.empty((K, N), device=device, dtype=torch.float32)
+            B_full=torch.empty((K, N), device=device, dtype=torch.float32)
             for i in range(8):
-                nibbles = ((B_packed >> (i * 4)) & 0xF).to(torch.int64)
-                rows = torch.arange(i, K, 8, device=device)
-                gathered = nibbles.to(torch.float32)
-                scale_slice = scales_exp[rows]
-                zero_slice = zeros_exp[rows]
-                B_full[rows, :] = (gathered - zero_slice) * scale_slice
+                nibbles=((B_packed >> (i * 4)) & 0xF).to(torch.int64)
+                rows=torch.arange(i, K, 8, device=device)
+                gathered=nibbles.to(torch.float32)
+                scale_slice=scales_exp[rows]
+                zero_slice=zeros_exp[rows]
+                B_full[rows, :]=(gathered - zero_slice) * scale_slice
 
-            out = (A_2d @ B_full).to(torch.float16)
-            out_shape = list(orig_shape[:-1]) + [N]
+            out=(A_2d @ B_full).to(torch.float16)
+            out_shape=list(orig_shape[:-1]) + [N]
             return out.reshape(out_shape)
 
         # Metal path (kept for potential future use)
-        lib = get_default_library()
+        lib=get_default_library()
         _ensure_kernel_compiled(lib, "int4_gemm", _INT4_GEMM_KERNEL)
 
-        A_2d = A.reshape(M, K).half().contiguous()
-        N = B_packed.shape[1]
+        A_2d=A.reshape(M, K).half().contiguous()
+        N=B_packed.shape[1]
 
-        M_dispatch = round_up(M, 8)
+        M_dispatch=round_up(M, 8)
         if M_dispatch != M:
-            A_2d, _ = pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
+            A_2d, _=pad_torch_2d(A_2d, rows_multiple=8, cols_multiple=1)
 
-        C = torch.empty((M_dispatch, N), dtype=torch.float16, device="mps")
+        C=torch.empty((M_dispatch, N), dtype=torch.float16, device="mps")
 
-        device = lib.device
+        device=lib.device
 
-        A_buf = _private_buffer_from_tensor(A_2d, lib, device, cache=False)
-        B_packed_contig = B_packed.contiguous()
-        B_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(A_2d, lib, device, cache=False)
+        B_packed_contig=B_packed.contiguous()
+        B_buf=_private_buffer_from_tensor(
             B_packed_contig, lib, device, cache=True)
-        scales_f = scales if scales.dtype == torch.float32 else scales.float()
-        scales_f = scales_f.contiguous()
-        S_buf = _private_buffer_from_tensor(scales_f, lib, device, cache=True)
-        zeros_f = zeros if zeros.dtype == torch.float32 else zeros.float()
-        zeros_f = zeros_f.contiguous()
-        Z_buf = _private_buffer_from_tensor(zeros_f, lib, device, cache=True)
-        C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
+        scales_f=scales if scales.dtype == torch.float32 else scales.half()
+        scales_f=scales_f.contiguous()
+        S_buf=_private_buffer_from_tensor(
+            scales_f, lib, device, cache=True)
+        zeros_f=zeros if zeros.dtype == torch.float32 else zeros.half()
+        zeros_f=zeros_f.contiguous()
+        Z_buf=_private_buffer_from_tensor(zeros_f, lib, device, cache=True)
+        C_buf=mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
-        params = np.array([M_dispatch, N, K, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params=np.array([M_dispatch, N, K, group_size], dtype=np.uint32)
+        params_buf=_params_buffer(lib, device, params)
 
-        grid_m = (M_dispatch + TILE_M - 1) // TILE_M
-        grid_n = (N + TILE_N - 1) // TILE_N
+        grid_m=(M_dispatch + TILE_M - 1) // TILE_M
+        grid_n=(N + TILE_N - 1) // TILE_N
 
         dispatch_kernel(
             lib,
@@ -1966,9 +1997,9 @@ if HAS_METAL and HAS_MPS:
         )
 
         if M_dispatch != M:
-            C = C[:M, :]
+            C=C[:M, :]
 
-        out_shape = list(orig_shape[:-1]) + [N]
+        out_shape=list(orig_shape[:-1]) + [N]
         return C.reshape(out_shape)
 
     def marlin_gemm_fused_u4(
@@ -1976,7 +2007,7 @@ if HAS_METAL and HAS_MPS:
         B_packed: torch.Tensor,
         scales: torch.Tensor,
         zeros: torch.Tensor,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """Alias for marlin_gemm_int4; preserves fused kernel naming."""
         return marlin_gemm_int4(A, B_packed, scales, zeros, group_size)
@@ -1986,7 +2017,7 @@ if HAS_METAL and HAS_MPS:
         scales: torch.Tensor,
         K: int,
         N: int,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """
         Standalone FP4 dequantization: unpack FP4 weights to float.
@@ -2003,27 +2034,27 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        lib = get_default_library()
+        lib=get_default_library()
         _ensure_kernel_compiled(lib, "dequant_fp4", _DEQUANT_FP4_KERNEL)
 
-        k_blocks = (K + 7) // 8
+        k_blocks=(K + 7) // 8
 
-        out = torch.empty((K, N), dtype=torch.float16, device="mps")
+        out=torch.empty((K, N), dtype=torch.float16, device="mps")
 
-        device = lib.device
+        device=lib.device
 
-        B_packed_contig = B_packed.contiguous()
-        B_buf = _private_buffer_from_tensor(
+        B_packed_contig=B_packed.contiguous()
+        B_buf=_private_buffer_from_tensor(
             B_packed_contig, lib, device, cache=True)
-        scales_half = scales if scales.dtype == torch.float16 else scales.half()
-        scales_half = scales_half.contiguous()
-        S_buf = _private_buffer_from_tensor(
+        scales_half=scales if scales.dtype == torch.float16 else scales.half()
+        scales_half=scales_half.contiguous()
+        S_buf=_private_buffer_from_tensor(
             scales_half, lib, device, cache=True)
         # Use copy-back for outputs in case zero-copy MPS interop is unavailable.
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        params = np.array([K, N, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params=np.array([K, N, group_size], dtype=np.uint32)
+        params_buf=_params_buffer(lib, device, params)
 
         dispatch_kernel(
             lib,
@@ -2042,7 +2073,7 @@ if HAS_METAL and HAS_MPS:
         scales: torch.Tensor,
         K: int,
         N: int,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         M=1 FP4 decode GEMV: C[1,N] = A[1,K] @ dequant(B[K/8,N], scales).
@@ -2066,32 +2097,36 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
         # Ensure contiguous and correct dtype
-        A_contig = A.contiguous().half()
-        B_packed_contig = B_packed.contiguous()
-        scales_half = scales.half().contiguous() if scales.dtype != torch.float16 else scales.contiguous()
+        A_contig=A.contiguous().half()
+        B_packed_contig=B_packed.contiguous()
+        scales_half=scales.half().contiguous(
+        ) if scales.dtype != torch.float16 else scales.contiguous()
 
         # Create output tensor
-        C = torch.empty((N,), dtype=torch.float16, device="mps")
+        C=torch.empty((N,), dtype=torch.float16, device="mps")
 
         # Get Metal buffers
-        A_buf = _private_buffer_from_tensor(A_contig, lib, device, cache=False)
-        B_buf = _private_buffer_from_tensor(B_packed_contig, lib, device, cache=True)
-        S_buf = _private_buffer_from_tensor(scales_half, lib, device, cache=True)
-        C_buf = mps_tensor_to_metal_buffer(C, device, copy_back=True)
+        A_buf=_private_buffer_from_tensor(A_contig, lib, device, cache=False)
+        B_buf=_private_buffer_from_tensor(
+            B_packed_contig, lib, device, cache=True)
+        S_buf=_private_buffer_from_tensor(
+            scales_half, lib, device, cache=True)
+        C_buf=mps_tensor_to_metal_buffer(C, device, copy_back=True)
 
         # Kernel parameters
-        K_buf = _params_buffer(lib, device, np.array([K], dtype=np.uint32))
-        N_buf = _params_buffer(lib, device, np.array([N], dtype=np.uint32))
-        gs_buf = _params_buffer(lib, device, np.array([group_size], dtype=np.uint32))
+        K_buf=_params_buffer(lib, device, np.array([K], dtype=np.uint32))
+        N_buf=_params_buffer(lib, device, np.array([N], dtype=np.uint32))
+        gs_buf=_params_buffer(lib, device, np.array(
+            [group_size], dtype=np.uint32))
 
         # Grid dimensions: ceil(N / 512) threadgroups
         # Each threadgroup handles 512 columns (128 threads * 4 cols/thread)
-        DECODE_FAST_TILE_N = 512
-        grid_x = (N + DECODE_FAST_TILE_N - 1) // DECODE_FAST_TILE_N
+        DECODE_FAST_TILE_N=512
+        grid_x=(N + DECODE_FAST_TILE_N - 1) // DECODE_FAST_TILE_N
 
         dispatch_kernel(
             lib,
@@ -2116,8 +2151,8 @@ if HAS_METAL and HAS_MPS:
             1-D tensor of same length with float16, each element = float(input_element).
         """
         # Simple CPU implementation for debugging
-        packed_np = packed.cpu().numpy().astype(np.uint8)
-        out_np = packed_np.astype(np.float16)
+        packed_np=packed.cpu().numpy().astype(np.uint8)
+        out_np=packed_np.astype(np.float16)
         return torch.from_numpy(out_np).to("mps")
 
     def dequant_int2(
@@ -2125,7 +2160,7 @@ if HAS_METAL and HAS_MPS:
         scales: torch.Tensor,
         K: int,
         N: int,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """
         Standalone INT2 dequantization: unpack INT2 weights to float.
@@ -2141,21 +2176,21 @@ if HAS_METAL and HAS_MPS:
             Dequantized weights [K, N] as float16 MPS tensor.
         """
         # CPU fallback implementation
-        B_np = B_packed.cpu().numpy()
-        S_np = scales.cpu().numpy()
+        B_np=B_packed.cpu().numpy()
+        S_np=scales.cpu().numpy()
 
-        out = np.zeros((K, N), dtype=np.float16)
-        int2_vals = np.array([-1.0, -0.333, 0.333, 1.0], dtype=np.float32)
+        out=np.zeros((K, N), dtype=np.float16)
+        int2_vals=np.array([-1.0, -0.333, 0.333, 1.0], dtype=np.float32)
 
-        k_packs = K // INT2_PER_UINT
+        k_packs=K // INT2_PER_UINT
         for k_pack in range(k_packs):
-            k_base = k_pack * INT2_PER_UINT
-            group_idx = k_base // group_size
+            k_base=k_pack * INT2_PER_UINT
+            group_idx=k_base // group_size
             for bit_pos in range(INT2_PER_UINT):
                 for n in range(N):
-                    code = (B_np[k_pack, n] >> (bit_pos * 2)) & 0x3
-                    scale = S_np[group_idx, n]
-                    out[k_base + bit_pos, n] = int2_vals[code] * scale
+                    code=(B_np[k_pack, n] >> (bit_pos * 2)) & 0x3
+                    scale=S_np[group_idx, n]
+                    out[k_base + bit_pos, n]=int2_vals[code] * scale
 
         return torch.from_numpy(out).to("mps")
 
@@ -2164,7 +2199,7 @@ if HAS_METAL and HAS_MPS:
         scales: torch.Tensor,
         K: int,
         N: int,
-        group_size: int = 32,
+        group_size: int=32,
     ) -> torch.Tensor:
         """
         Standalone INT3 dequantization: unpack INT3 weights to float.
@@ -2180,21 +2215,21 @@ if HAS_METAL and HAS_MPS:
             Dequantized weights [K, N] as float16 MPS tensor.
         """
         # CPU fallback implementation
-        B_np = B_packed.cpu().numpy()
-        S_np = scales.cpu().numpy()
+        B_np=B_packed.cpu().numpy()
+        S_np=scales.cpu().numpy()
 
-        out = np.zeros((K, N), dtype=np.float16)
+        out=np.zeros((K, N), dtype=np.float16)
 
-        k_packs = K // INT3_PER_UINT
+        k_packs=K // INT3_PER_UINT
         for k_pack in range(k_packs):
-            k_base = k_pack * INT3_PER_UINT
-            group_idx = k_base // group_size
+            k_base=k_pack * INT3_PER_UINT
+            group_idx=k_base // group_size
             for bit_pos in range(INT3_PER_UINT):
                 for n in range(N):
-                    code = (B_np[k_pack, n] >> (bit_pos * 3)) & 0x7
-                    scale = S_np[group_idx, n]
-                    dequant = (code - 3.5) / 3.5
-                    out[k_base + bit_pos, n] = dequant * scale
+                    code=(B_np[k_pack, n] >> (bit_pos * 3)) & 0x7
+                    scale=S_np[group_idx, n]
+                    dequant=(code - 3.5) / 3.5
+                    out[k_base + bit_pos, n]=dequant * scale
 
         return torch.from_numpy(out).to("mps")
 
@@ -2225,24 +2260,25 @@ if HAS_METAL and HAS_MPS:
         require_mps()
 
         # Extract dimensions
-        batch, num_heads_q, seq_len, head_dim = q.shape
-        num_blocks, num_kv_heads, block_size, _ = k_cache.shape
-        max_blocks_per_seq = block_tables.shape[1]
+        batch, num_heads_q, seq_len, head_dim=q.shape
+        num_blocks, num_kv_heads, block_size, _=k_cache.shape
+        max_blocks_per_seq=block_tables.shape[1]
 
         # Reshape Q to [batch, num_heads_q, head_dim] (remove seq_len=1 dim)
-        q_flat = q.reshape(batch, num_heads_q, head_dim).half().contiguous()
+        q_flat=q.reshape(batch, num_heads_q, head_dim).half().contiguous()
 
         # Prepare output tensor [batch, num_heads_q, head_dim]
-        output = torch.empty((batch, num_heads_q, head_dim), dtype=torch.float16, device="mps")
+        output=torch.empty((batch, num_heads_q, head_dim),
+                             dtype=torch.float16, device="mps")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
         # Load and compile paged_attention.metal shader
-        shader_path = Path(__file__).parent / "src" / "paged_attention.metal"
+        shader_path=Path(__file__).parent / "src" / "paged_attention.metal"
         if not shader_path.exists():
             raise FileNotFoundError(f"Shader file not found: {shader_path}")
-        
+
         _ensure_kernel_compiled(
             lib,
             "paged_attention",
@@ -2250,27 +2286,37 @@ if HAS_METAL and HAS_MPS:
         )
 
         # Create Metal buffers
-        q_buf = _private_buffer_from_tensor(q_flat, lib, device, cache=False)
-        k_buf = _private_buffer_from_tensor(k_cache.half().contiguous(), lib, device, cache=True)
-        v_buf = _private_buffer_from_tensor(v_cache.half().contiguous(), lib, device, cache=True)
-        
+        q_buf=_private_buffer_from_tensor(q_flat, lib, device, cache=False)
+        k_buf=_private_buffer_from_tensor(
+            k_cache.half().contiguous(), lib, device, cache=True)
+        v_buf=_private_buffer_from_tensor(
+            v_cache.half().contiguous(), lib, device, cache=True)
+
         # Ensure block_tables and context_lens are int32
         if block_tables.dtype != torch.int32:
-            block_tables = block_tables.to(torch.int32)
+            block_tables=block_tables.to(torch.int32)
         if context_lens.dtype != torch.int32:
-            context_lens = context_lens.to(torch.int32)
-            
-        block_tables_buf = _private_buffer_from_tensor(block_tables.contiguous(), lib, device, cache=False)
-        context_lens_buf = _private_buffer_from_tensor(context_lens.contiguous(), lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
+            context_lens=context_lens.to(torch.int32)
+
+        block_tables_buf=_private_buffer_from_tensor(
+            block_tables.contiguous(), lib, device, cache=False)
+        context_lens_buf=_private_buffer_from_tensor(
+            context_lens.contiguous(), lib, device, cache=False)
+        out_buf=mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
         # Scalar parameters
-        num_seqs_buf = _params_buffer(lib, device, np.array([batch], dtype=np.uint32))
-        num_heads_q_buf = _params_buffer(lib, device, np.array([num_heads_q], dtype=np.uint32))
-        num_kv_heads_buf = _params_buffer(lib, device, np.array([num_kv_heads], dtype=np.uint32))
-        head_dim_buf = _params_buffer(lib, device, np.array([head_dim], dtype=np.uint32))
-        max_blocks_buf = _params_buffer(lib, device, np.array([max_blocks_per_seq], dtype=np.uint32))
-        scale_buf = _params_buffer(lib, device, np.array([scale], dtype=np.float32))
+        num_seqs_buf=_params_buffer(
+            lib, device, np.array([batch], dtype=np.uint32))
+        num_heads_q_buf=_params_buffer(
+            lib, device, np.array([num_heads_q], dtype=np.uint32))
+        num_kv_heads_buf=_params_buffer(
+            lib, device, np.array([num_kv_heads], dtype=np.uint32))
+        head_dim_buf=_params_buffer(
+            lib, device, np.array([head_dim], dtype=np.uint32))
+        max_blocks_buf=_params_buffer(lib, device, np.array(
+            [max_blocks_per_seq], dtype=np.uint32))
+        scale_buf=_params_buffer(
+            lib, device, np.array([scale], dtype=np.float32))
 
         # Dispatch: [num_seqs, num_heads_q, 1] threadgroups, 128 threads per threadgroup
         dispatch_kernel(
@@ -2288,6 +2334,304 @@ if HAS_METAL and HAS_MPS:
 
         # Reshape output to [batch, num_heads_q, 1, head_dim]
         return output.reshape(batch, num_heads_q, 1, head_dim)
+
+    _QUANTIZED_KV_ATTN_DECODE_KERNEL = """
+#include <metal_stdlib>
+using namespace metal;
+
+constant constexpr uint THREADS_PER_TG = 128;
+constant constexpr uint NUM_SIMDGROUPS = THREADS_PER_TG / 32;
+
+inline float reduce_sum_tg(threadgroup float* scratch, float value, uint tid) {
+    float sg_sum = simd_sum(value);
+    uint lane = tid & 31u;
+    uint sg_id = tid >> 5u;
+    if (lane == 0u) {
+        scratch[sg_id] = sg_sum;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg_id == 0u) {
+        float v = (lane < NUM_SIMDGROUPS) ? scratch[lane] : 0.0f;
+        float total = simd_sum(v);
+        if (lane == 0u) {
+            scratch[0] = total;
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return scratch[0];
+}
+
+inline half load_quantized_kv(
+    device const uint8_t* cache,
+    device const half* scales,
+    uint seq_idx,
+    uint kv_head,
+    uint dim_idx,
+    uint num_kv_heads,
+    uint head_dim,
+    uint num_scale_groups,
+    uint group_size,
+    uint quant_mode
+) {
+    uint group_idx = dim_idx / max(group_size, 1u);
+    if (group_idx >= num_scale_groups) {
+        group_idx = num_scale_groups - 1u;
+    }
+    uint scale_idx = (seq_idx * num_kv_heads + kv_head) * num_scale_groups + group_idx;
+    float s = float(scales[scale_idx]);
+
+    if (quant_mode == 1u) {
+        // FP4 packed, 2 values per byte.
+        uint packed_dim = (head_dim + 1u) / 2u;
+        uint base = (seq_idx * num_kv_heads + kv_head) * packed_dim;
+        uint8_t packed = cache[base + (dim_idx >> 1u)];
+        uint8_t nibble = (dim_idx & 1u) ? ((packed >> 4u) & 0xFu) : (packed & 0xFu);
+        float q = float(int(nibble) - 8);
+        return half(q * s);
+    }
+
+    // INT8 symmetric stored as uint8 with +128 offset.
+    uint base = (seq_idx * num_kv_heads + kv_head) * head_dim;
+    uint8_t raw = cache[base + dim_idx];
+    float q = float(int(raw) - 128);
+    return half(q * s);
+}
+
+kernel void quantized_kv_attention_decode(
+    device const half* q                [[buffer(0)]],   // [num_heads_q, head_dim]
+    device const uint8_t* k_cache       [[buffer(1)]],   // [seq_len, num_kv_heads, packed_or_head_dim]
+    device const uint8_t* v_cache       [[buffer(2)]],   // [seq_len, num_kv_heads, packed_or_head_dim]
+    device const half* k_scales         [[buffer(3)]],   // [seq_len, num_kv_heads, num_scale_groups]
+    device const half* v_scales         [[buffer(4)]],   // [seq_len, num_kv_heads, num_scale_groups]
+    device half* out                    [[buffer(5)]],   // [num_heads_q, head_dim]
+    constant uint& seq_len              [[buffer(6)]],
+    constant uint& num_heads_q          [[buffer(7)]],
+    constant uint& num_kv_heads         [[buffer(8)]],
+    constant uint& head_dim             [[buffer(9)]],
+    constant uint& group_size           [[buffer(10)]],
+    constant uint& num_scale_groups     [[buffer(11)]],
+    constant uint& quant_mode           [[buffer(12)]],  // 1=fp4, 2=int8
+    constant float& attn_scale          [[buffer(13)]],
+    uint3 tgid                          [[threadgroup_position_in_grid]],
+    uint tid                            [[thread_index_in_threadgroup]]
+) {
+    uint head_q = tgid.x;
+    if (head_q >= num_heads_q || num_kv_heads == 0u || num_scale_groups == 0u) return;
+    uint kv_head = head_q % num_kv_heads;
+
+    threadgroup float scratch[NUM_SIMDGROUPS];
+    threadgroup float running_max;
+    threadgroup float running_sum;
+    threadgroup float alpha_shared;
+    threadgroup float beta_shared;
+
+    if (tid == 0u) {
+        running_max = -INFINITY;
+        running_sum = 0.0f;
+        alpha_shared = 0.0f;
+        beta_shared = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float qv = (tid < head_dim) ? float(q[head_q * head_dim + tid]) : 0.0f;
+    float out_acc = 0.0f;
+
+    for (uint t = 0u; t < seq_len; ++t) {
+        float kv = 0.0f;
+        if (tid < head_dim) {
+            kv = float(load_quantized_kv(
+                k_cache, k_scales, t, kv_head, tid,
+                num_kv_heads, head_dim, num_scale_groups, group_size, quant_mode
+            ));
+        }
+
+        float dot = qv * kv;
+        float dot_sum = reduce_sum_tg(scratch, dot, tid);
+
+        if (tid == 0u) {
+            float score = dot_sum * attn_scale;
+            float new_max = max(running_max, score);
+            float alpha = exp(running_max - new_max);
+            float beta = exp(score - new_max);
+            running_sum = running_sum * alpha + beta;
+            running_max = new_max;
+            alpha_shared = alpha;
+            beta_shared = beta;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (tid < head_dim) {
+            float vv = float(load_quantized_kv(
+                v_cache, v_scales, t, kv_head, tid,
+                num_kv_heads, head_dim, num_scale_groups, group_size, quant_mode
+            ));
+            out_acc = out_acc * alpha_shared + beta_shared * vv;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid < head_dim) {
+        float denom = max(running_sum, 1e-8f);
+        out[head_q * head_dim + tid] = half(out_acc / denom);
+    }
+}
+"""
+
+    def quantized_kv_attention_decode(
+        query: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
+        num_heads_q: int | None = None,
+        num_kv_heads: int | None = None,
+        head_dim: int | None = None,
+        quant_dtype: str = "fp4",
+        group_size: int = 128,
+        scale: float | None = None,
+    ) -> torch.Tensor:
+        """Fused decode attention over FP4/INT8 KV cache.
+
+        This dispatches a Metal kernel that dequantizes K/V on-the-fly and computes
+        online-softmax attention in a single pass for a single decode query.
+
+        Args:
+            query: Query tensor ``[num_heads_q, head_dim]``.
+            k_cache: Quantized keys ``[seq_len, num_kv_heads, packed_or_head_dim]``.
+            v_cache: Quantized values with same shape as ``k_cache``.
+            k_scales: Key scales ``[seq_len, num_kv_heads, num_scale_groups]``.
+            v_scales: Value scales ``[seq_len, num_kv_heads, num_scale_groups]``.
+            num_heads_q: Optional number of query heads (inferred from ``query``).
+            num_kv_heads: Optional KV head count (inferred from ``k_cache``).
+            head_dim: Optional head dimension (inferred from ``query``).
+            quant_dtype: ``\"fp4\"`` or ``\"int8\"``.
+            group_size: Quantization group size used by scales.
+            scale: Optional attention scale, defaults to ``1 / sqrt(head_dim)``.
+
+        Returns:
+            Tensor ``[num_heads_q, head_dim]`` on MPS.
+        """
+        require_mps()
+
+        if quant_dtype not in {"fp4", "int8"}:
+            raise ValueError(f"quant_dtype must be 'fp4' or 'int8', got {quant_dtype!r}")
+        if group_size <= 0:
+            raise ValueError("group_size must be > 0")
+
+        if query.ndim == 3 and query.shape[0] == 1:
+            query = query.squeeze(0)
+        if query.ndim != 2:
+            raise ValueError(f"query must have shape [heads, head_dim], got {tuple(query.shape)}")
+
+        inferred_heads_q, inferred_head_dim = query.shape
+        if num_heads_q is None:
+            num_heads_q = int(inferred_heads_q)
+        if head_dim is None:
+            head_dim = int(inferred_head_dim)
+        if num_heads_q != inferred_heads_q or head_dim != inferred_head_dim:
+            raise ValueError(
+                "query shape does not match provided num_heads_q/head_dim: "
+                f"query={tuple(query.shape)}, num_heads_q={num_heads_q}, head_dim={head_dim}"
+            )
+
+        if k_cache.ndim != 3 or v_cache.ndim != 3:
+            raise ValueError(
+                "k_cache and v_cache must have shape [seq_len, num_kv_heads, packed_or_head_dim]"
+            )
+        if k_scales.ndim != 3 or v_scales.ndim != 3:
+            raise ValueError(
+                "k_scales and v_scales must have shape [seq_len, num_kv_heads, num_scale_groups]"
+            )
+
+        seq_len = int(k_cache.shape[0])
+        if seq_len == 0:
+            return torch.zeros((num_heads_q, head_dim), dtype=torch.float16, device=query.device)
+
+        if num_kv_heads is None:
+            num_kv_heads = int(k_cache.shape[1])
+        if num_kv_heads <= 0:
+            raise ValueError("num_kv_heads must be > 0")
+
+        if tuple(k_cache.shape[:2]) != (seq_len, num_kv_heads) or tuple(v_cache.shape[:2]) != (
+            seq_len,
+            num_kv_heads,
+        ):
+            raise ValueError("k_cache/v_cache leading dimensions must match [seq_len, num_kv_heads]")
+
+        if tuple(k_scales.shape[:2]) != (seq_len, num_kv_heads) or tuple(v_scales.shape[:2]) != (
+            seq_len,
+            num_kv_heads,
+        ):
+            raise ValueError("k_scales/v_scales leading dimensions must match [seq_len, num_kv_heads]")
+
+        num_scale_groups = int(k_scales.shape[2])
+        if num_scale_groups <= 0:
+            raise ValueError("num_scale_groups must be > 0")
+
+        expected_cache_last = (head_dim + 1) // 2 if quant_dtype == "fp4" else head_dim
+        if int(k_cache.shape[2]) != expected_cache_last or int(v_cache.shape[2]) != expected_cache_last:
+            raise ValueError(
+                f"Expected cache last dim {expected_cache_last} for {quant_dtype}, got "
+                f"k={k_cache.shape[2]}, v={v_cache.shape[2]}"
+            )
+
+        if scale is None:
+            scale = float(head_dim) ** -0.5
+
+        q = query.to(device="mps", dtype=torch.float16).contiguous()
+        k = k_cache.to(device="mps", dtype=torch.uint8).contiguous()
+        v = v_cache.to(device="mps", dtype=torch.uint8).contiguous()
+        ks = k_scales.to(device="mps", dtype=torch.float16).contiguous()
+        vs = v_scales.to(device="mps", dtype=torch.float16).contiguous()
+        out = torch.empty((num_heads_q, head_dim), dtype=torch.float16, device="mps")
+
+        lib = get_default_library()
+        device = lib.device
+        _ensure_kernel_compiled(lib, "quantized_kv_attention", _QUANTIZED_KV_ATTN_DECODE_KERNEL)
+
+        q_buf = _private_buffer_from_tensor(q, lib, device, cache=False)
+        k_buf = _private_buffer_from_tensor(k, lib, device, cache=False)
+        v_buf = _private_buffer_from_tensor(v, lib, device, cache=False)
+        ks_buf = _private_buffer_from_tensor(ks, lib, device, cache=False)
+        vs_buf = _private_buffer_from_tensor(vs, lib, device, cache=False)
+        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+        seq_len_buf = _params_buffer(lib, device, np.array([seq_len], dtype=np.uint32))
+        heads_q_buf = _params_buffer(lib, device, np.array([num_heads_q], dtype=np.uint32))
+        heads_kv_buf = _params_buffer(lib, device, np.array([num_kv_heads], dtype=np.uint32))
+        head_dim_buf = _params_buffer(lib, device, np.array([head_dim], dtype=np.uint32))
+        group_size_buf = _params_buffer(lib, device, np.array([group_size], dtype=np.uint32))
+        num_groups_buf = _params_buffer(lib, device, np.array([num_scale_groups], dtype=np.uint32))
+        quant_mode = 1 if quant_dtype == "fp4" else 2
+        quant_mode_buf = _params_buffer(lib, device, np.array([quant_mode], dtype=np.uint32))
+        scale_buf = _params_buffer(lib, device, np.array([scale], dtype=np.float32))
+
+        dispatch_kernel(
+            lib,
+            function_name="quantized_kv_attention_decode",
+            grid=(num_heads_q, 1, 1),
+            threadgroup=(128, 1, 1),
+            buffers=[
+                q_buf,
+                k_buf,
+                v_buf,
+                ks_buf,
+                vs_buf,
+                out_buf,
+                seq_len_buf,
+                heads_q_buf,
+                heads_kv_buf,
+                head_dim_buf,
+                group_size_buf,
+                num_groups_buf,
+                quant_mode_buf,
+                scale_buf,
+            ],
+            wait=True,
+        )
+
+        return out
 
     def paged_attention_fp4(
         query: torch.Tensor,
@@ -2316,81 +2660,81 @@ if HAS_METAL and HAS_MPS:
             Attention output [num_seqs, num_heads, seq_len, head_dim].
         """
         # PyTorch fallback implementation
-        num_seqs, num_heads, seq_len, head_dim = query.shape
-        device = query.device
+        num_seqs, num_heads, seq_len, head_dim=query.shape
+        device=query.device
 
         # Get cache dimensions from key_cache
         # key_cache: [num_blocks, 2, block_size, num_kv_heads, head_dim]
-        _, _, block_size, num_kv_heads, _ = key_cache.shape
-        max_blocks = block_tables.shape[1]
-        max_context = max_blocks * block_size
+        _, _, block_size, num_kv_heads, _=key_cache.shape
+        max_blocks=block_tables.shape[1]
+        max_context=max_blocks * block_size
 
         # Gather K and V from block pool for each sequence
         # [num_seqs * max_blocks]
-        flat_indices = block_tables.reshape(-1).long()
+        flat_indices=block_tables.reshape(-1).long()
 
         # Gather: [num_seqs * max_blocks, 2, block_size, num_kv_heads, head_dim]
-        gathered = key_cache[flat_indices]
+        gathered=key_cache[flat_indices]
 
         # Reshape to [num_seqs, max_blocks * block_size, num_kv_heads, head_dim]
-        gathered = gathered.view(num_seqs, max_blocks,
+        gathered=gathered.view(num_seqs, max_blocks,
                                  2, block_size, num_kv_heads, head_dim)
         # [num_seqs, 2, max_blocks, block_size, ...]
-        gathered = gathered.permute(0, 2, 1, 3, 4, 5)
-        gathered = gathered.reshape(
+        gathered=gathered.permute(0, 2, 1, 3, 4, 5)
+        gathered=gathered.reshape(
             num_seqs, 2, max_context, num_kv_heads, head_dim)
 
         # Split K and V: each [num_seqs, max_context, num_kv_heads, head_dim]
         # [num_seqs, max_context, num_kv_heads, head_dim]
-        keys = gathered[:, 0]
+        keys=gathered[:, 0]
         # [num_seqs, max_context, num_kv_heads, head_dim]
-        values = gathered[:, 1]
+        values=gathered[:, 1]
 
         # Transpose to [num_seqs, num_kv_heads, max_context, head_dim]
-        keys = keys.permute(0, 2, 1, 3)
-        values = values.permute(0, 2, 1, 3)
+        keys=keys.permute(0, 2, 1, 3)
+        values=values.permute(0, 2, 1, 3)
 
         # GQA expansion: repeat KV heads to match query heads
         if num_kv_heads < num_heads:
-            repeat_factor = num_heads // num_kv_heads
-            keys = keys.repeat_interleave(repeat_factor, dim=1)
-            values = values.repeat_interleave(repeat_factor, dim=1)
+            repeat_factor=num_heads // num_kv_heads
+            keys=keys.repeat_interleave(repeat_factor, dim=1)
+            values=values.repeat_interleave(repeat_factor, dim=1)
 
         # Compute attention scores: [num_seqs, num_heads, seq_len, max_context]
-        attn_weights = (query @ keys.transpose(-2, -1)) * scale
+        attn_weights=(query @ keys.transpose(-2, -1)) * scale
 
         # Build validity mask from context_lens
-        kv_positions = torch.arange(max_context, device=device)[
+        kv_positions=torch.arange(max_context, device=device)[
             None, :]  # [1, max_context]
-        context_lens_2d = context_lens[:, None].long()  # [num_seqs, 1]
-        valid_mask = kv_positions < context_lens_2d  # [num_seqs, max_context]
+        context_lens_2d=context_lens[:, None].long()  # [num_seqs, 1]
+        valid_mask=kv_positions < context_lens_2d  # [num_seqs, max_context]
 
         # Expand for broadcasting: [num_seqs, 1, 1, max_context]
-        valid_mask = valid_mask[:, None, None, :]
-        attn_weights = torch.where(
+        valid_mask=valid_mask[:, None, None, :]
+        attn_weights=torch.where(
             valid_mask, attn_weights, torch.tensor(
                 float("-inf"), device=device)
         )
 
         # Causal mask for prefill (seq_len > 1)
         if seq_len > 1:
-            q_positions = torch.arange(seq_len, device=device)[
+            q_positions=torch.arange(seq_len, device=device)[
                 None, None, :, None
             ]  # [1, 1, seq_len, 1]
             # [1, 1, 1, max_context]
-            kv_pos_expanded = kv_positions[None, None, None, :]
+            kv_pos_expanded=kv_positions[None, None, None, :]
 
-            offsets = context_lens_2d[:, None, None, :] - seq_len + q_positions
-            causal_mask = kv_pos_expanded <= offsets
-            attn_weights = torch.where(
+            offsets=context_lens_2d[:, None, None, :] - seq_len + q_positions
+            causal_mask=kv_pos_expanded <= offsets
+            attn_weights=torch.where(
                 causal_mask, attn_weights, torch.tensor(
                     float("-inf"), device=device)
             )
 
-        attn_weights = torch.softmax(attn_weights, dim=-1)
+        attn_weights=torch.softmax(attn_weights, dim=-1)
 
         # Compute output: [num_seqs, num_heads, seq_len, head_dim]
-        output = attn_weights @ values
+        output=attn_weights @ values
 
         return output
 
@@ -2401,8 +2745,8 @@ if HAS_METAL and HAS_MPS:
         K_scales: torch.Tensor,
         V_scales: torch.Tensor,
         scale: float,
-        num_heads_q: int | None = None,
-        num_heads_k: int | None = None,
+        num_heads_q: int | None=None,
+        num_heads_k: int | None=None,
     ) -> torch.Tensor:
         """
         Flash Attention with FP4-quantized KV cache.
@@ -2430,16 +2774,16 @@ if HAS_METAL and HAS_MPS:
             head_dim: int,
         ) -> torch.Tensor:
             """CPU fallback dequantization for FP4 KV cache with per-row scales."""
-            packed_cpu = packed.detach().cpu()
-            scales_cpu = scales.detach().cpu()
+            packed_cpu=packed.detach().cpu()
+            scales_cpu=scales.detach().cpu()
             if scales_cpu.dim() == 4 and scales_cpu.shape[-1] == 1:
-                scales_cpu = scales_cpu[..., 0]
+                scales_cpu=scales_cpu[..., 0]
 
             if packed_cpu.dtype != torch.uint32:
-                packed_cpu = packed_cpu.to(torch.uint32)
+                packed_cpu=packed_cpu.to(torch.uint32)
 
-            batch, heads, seq, packed_dim = packed_cpu.shape
-            unpacked_dim = packed_dim * FP4_PER_UINT
+            batch, heads, seq, packed_dim=packed_cpu.shape
+            unpacked_dim=packed_dim * FP4_PER_UINT
             if unpacked_dim < head_dim:
                 raise ValueError(
                     f"Packed FP4 head_dim too small: packed_dim={packed_dim} "
@@ -2447,7 +2791,7 @@ if HAS_METAL and HAS_MPS:
                 )
 
             # E2M1 lookup table (matches Metal dequant_fp4_scalar).
-            fp4_table = torch.tensor(
+            fp4_table=torch.tensor(
                 [
                     0.0,
                     0.25,
@@ -2469,33 +2813,33 @@ if HAS_METAL and HAS_MPS:
                 dtype=torch.float32,
             )
 
-            packed_i64 = packed_cpu.to(torch.int64)
-            scales_expanded = scales_cpu.to(torch.float32).unsqueeze(-1)
-            out = torch.empty(
+            packed_i64=packed_cpu.to(torch.int64)
+            scales_expanded=scales_cpu.to(torch.float32).unsqueeze(-1)
+            out=torch.empty(
                 (batch, heads, seq, unpacked_dim), dtype=torch.float32)
 
             for i in range(FP4_PER_UINT):
-                nibbles = (packed_i64 >> (i * 4)) & 0xF
-                vals = fp4_table[nibbles]
-                out[..., i::FP4_PER_UINT] = vals * scales_expanded
+                nibbles=(packed_i64 >> (i * 4)) & 0xF
+                vals=fp4_table[nibbles]
+                out[..., i::FP4_PER_UINT]=vals * scales_expanded
 
-            out = out[..., :head_dim].to(torch.float16)
+            out=out[..., :head_dim].to(torch.float16)
             return out.to(packed.device)
 
-        head_dim = Q.shape[-1]
-        K = _dequantize_fp4_blockscaled(K_packed, K_scales, head_dim)
-        V = _dequantize_fp4_blockscaled(V_packed, V_scales, head_dim)
+        head_dim=Q.shape[-1]
+        K=_dequantize_fp4_blockscaled(K_packed, K_scales, head_dim)
+        V=_dequantize_fp4_blockscaled(V_packed, V_scales, head_dim)
 
-        heads_q = num_heads_q if num_heads_q is not None else Q.shape[1]
-        heads_k = num_heads_k if num_heads_k is not None else K.shape[1]
+        heads_q=num_heads_q if num_heads_q is not None else Q.shape[1]
+        heads_k=num_heads_k if num_heads_k is not None else K.shape[1]
         if heads_q != heads_k:
             if heads_k <= 0 or heads_q % heads_k != 0:
                 raise ValueError(
                     f"Invalid GQA head counts: num_heads_q={heads_q}, num_heads_k={heads_k}"
                 )
-            repeat_factor = heads_q // heads_k
-            K = K.repeat_interleave(repeat_factor, dim=1)
-            V = V.repeat_interleave(repeat_factor, dim=1)
+            repeat_factor=heads_q // heads_k
+            K=K.repeat_interleave(repeat_factor, dim=1)
+            V=V.repeat_interleave(repeat_factor, dim=1)
 
         return torch.nn.functional.scaled_dot_product_attention(Q, K, V, scale=scale)
 
@@ -2505,14 +2849,14 @@ if HAS_METAL and HAS_MPS:
         if hidden_states.dim() < 2:
             raise ValueError(
                 "hidden_states must be at least 2D [tokens, hidden]")
-        orig_shape = hidden_states.shape
-        hidden_dim = orig_shape[-1]
-        num_tokens = 1
+        orig_shape=hidden_states.shape
+        hidden_dim=orig_shape[-1]
+        num_tokens=1
         for d in orig_shape[:-1]:
             num_tokens *= d
-        hidden_2d = hidden_states.reshape(num_tokens, hidden_dim)
+        hidden_2d=hidden_states.reshape(num_tokens, hidden_dim)
         if hidden_2d.dtype != torch.float16:
-            hidden_2d = hidden_2d.half()
+            hidden_2d=hidden_2d.half()
         return hidden_2d.contiguous(), num_tokens, hidden_dim, orig_shape
 
     def moe_shared_expert_fused(
@@ -2537,7 +2881,7 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         if shared_expert_w.dim() != 2:
@@ -2545,7 +2889,7 @@ if HAS_METAL and HAS_MPS:
         if shared_expert_w.shape[0] != hidden_dim:
             raise ValueError("shared_expert_w hidden dim mismatch")
 
-        intermediate_dim = shared_expert_w.shape[1]
+        intermediate_dim=shared_expert_w.shape[1]
 
         if routed_expert_w.dim() != 3:
             raise ValueError(
@@ -2558,68 +2902,70 @@ if HAS_METAL and HAS_MPS:
         if router_indices.dim() != 2 or router_indices.shape[0] != num_tokens:
             raise ValueError("router_indices must be [tokens, top_k]")
 
-        top_k = int(router_probs.shape[1])
+        top_k=int(router_probs.shape[1])
         if router_indices.shape[1] != top_k:
             raise ValueError(
                 "router_probs and router_indices must have same top_k")
 
-        num_experts = int(routed_expert_w.shape[0])
+        num_experts=int(routed_expert_w.shape[0])
 
-        shared_w = (
+        shared_w=(
             shared_expert_w.half().contiguous()
             if shared_expert_w.dtype != torch.float16
             else shared_expert_w.contiguous()
         )
-        routed_w = (
+        routed_w=(
             routed_expert_w.half().contiguous()
             if routed_expert_w.dtype != torch.float16
             else routed_expert_w.contiguous()
         )
-        probs = (
+        probs=(
             router_probs.half().contiguous()
             if router_probs.dtype != torch.float16
             else router_probs.contiguous()
         )
         if router_indices.dtype not in (torch.int32, torch.uint32):
-            indices = router_indices.to(torch.int32).contiguous()
+            indices=router_indices.to(torch.int32).contiguous()
         else:
-            indices = router_indices.contiguous()
+            indices=router_indices.contiguous()
 
-        out = torch.empty((num_tokens, intermediate_dim),
+        out=torch.empty((num_tokens, intermediate_dim),
                           dtype=torch.float16, device="mps")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
-        A_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(
             hidden_2d, lib, device, cache=False)
-        shared_buf = _private_buffer_from_tensor(
+        shared_buf=_private_buffer_from_tensor(
             shared_w, lib, device, cache=True)
-        routed_buf = _private_buffer_from_tensor(
+        routed_buf=_private_buffer_from_tensor(
             routed_w, lib, device, cache=True)
-        probs_buf = _private_buffer_from_tensor(
+        probs_buf=_private_buffer_from_tensor(
             probs, lib, device, cache=False)
-        indices_buf = _private_buffer_from_tensor(
+        indices_buf=_private_buffer_from_tensor(
             indices, lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        num_tokens_buf = _params_buffer(
+        num_tokens_buf=_params_buffer(
             lib, device, np.array([num_tokens], dtype=np.uint32))
-        hidden_buf = _params_buffer(
+        hidden_buf=_params_buffer(
             lib, device, np.array([hidden_dim], dtype=np.uint32))
-        intermediate_buf = _params_buffer(
+        intermediate_buf=_params_buffer(
             lib, device, np.array([intermediate_dim], dtype=np.uint32)
         )
-        topk_buf = _params_buffer(
+        topk_buf=_params_buffer(
             lib, device, np.array([top_k], dtype=np.uint32))
-        num_experts_buf = _params_buffer(
+        num_experts_buf=_params_buffer(
             lib, device, np.array([num_experts], dtype=np.uint32))
+        group_buf=_params_buffer(
+            lib, device, np.array([group_size], dtype=np.uint32))
 
-        tile_m = 64
-        tile_n = 64
-        threads_per_tg = 128
-        grid_x = (intermediate_dim + tile_n - 1) // tile_n
-        grid_y = (num_tokens + tile_m - 1) // tile_m
+        tile_m=64
+        tile_n=64
+        threads_per_tg=128
+        grid_x=(intermediate_dim + tile_n - 1) // tile_n
+        grid_y=(num_tokens + tile_m - 1) // tile_m
 
         dispatch_kernel(
             lib,
@@ -2638,11 +2984,12 @@ if HAS_METAL and HAS_MPS:
                 intermediate_buf,
                 topk_buf,
                 num_experts_buf,
+                group_buf,
             ],
             wait=True,
         )
 
-        out = out.reshape(*orig_shape[:-1], intermediate_dim)
+        out=out.reshape(*orig_shape[:-1], intermediate_dim)
         return out
 
     def moe_shared_expert_fused_fp4(
@@ -2653,7 +3000,7 @@ if HAS_METAL and HAS_MPS:
         routed_expert_scales: torch.Tensor,
         router_probs: torch.Tensor,
         router_indices: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         Fused shared + routed expert aggregation with FP4-quantized weights.
@@ -2673,7 +3020,7 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         if hidden_dim % FP4_PER_UINT != 0:
@@ -2687,12 +3034,12 @@ if HAS_METAL and HAS_MPS:
         if shared_expert_packed.dim() != 2:
             raise ValueError(
                 "shared_expert_packed must be [hidden/8, intermediate]")
-        packed_k = shared_expert_packed.shape[0]
+        packed_k=shared_expert_packed.shape[0]
         if packed_k * FP4_PER_UINT != hidden_dim:
             raise ValueError("shared_expert_packed hidden dim mismatch")
 
-        intermediate_dim = int(shared_expert_packed.shape[1])
-        scale_rows = hidden_dim // group_size
+        intermediate_dim=int(shared_expert_packed.shape[1])
+        scale_rows=hidden_dim // group_size
         if shared_expert_scales.shape != (scale_rows, intermediate_dim):
             raise ValueError("shared_expert_scales shape mismatch")
 
@@ -2720,76 +3067,76 @@ if HAS_METAL and HAS_MPS:
         if router_indices.dim() != 2 or router_indices.shape[0] != num_tokens:
             raise ValueError("router_indices must be [tokens, top_k]")
 
-        top_k = int(router_probs.shape[1])
+        top_k=int(router_probs.shape[1])
         if router_indices.shape[1] != top_k:
             raise ValueError(
                 "router_probs and router_indices must have same top_k")
 
-        num_experts = int(routed_expert_packed.shape[0])
+        num_experts=int(routed_expert_packed.shape[0])
 
-        shared_packed = shared_expert_packed.contiguous()
-        shared_scales = (
+        shared_packed=shared_expert_packed.contiguous()
+        shared_scales=(
             shared_expert_scales.half().contiguous()
             if shared_expert_scales.dtype != torch.float16
             else shared_expert_scales.contiguous()
         )
-        routed_packed = routed_expert_packed.contiguous()
-        routed_scales = (
+        routed_packed=routed_expert_packed.contiguous()
+        routed_scales=(
             routed_expert_scales.half().contiguous()
             if routed_expert_scales.dtype != torch.float16
             else routed_expert_scales.contiguous()
         )
-        probs = (
+        probs=(
             router_probs.half().contiguous()
             if router_probs.dtype != torch.float16
             else router_probs.contiguous()
         )
         if router_indices.dtype not in (torch.int32, torch.uint32):
-            indices = router_indices.to(torch.int32).contiguous()
+            indices=router_indices.to(torch.int32).contiguous()
         else:
-            indices = router_indices.contiguous()
+            indices=router_indices.contiguous()
 
-        out = torch.empty((num_tokens, intermediate_dim),
+        out=torch.empty((num_tokens, intermediate_dim),
                           dtype=torch.float16, device="mps")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
-        A_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(
             hidden_2d, lib, device, cache=False)
-        shared_packed_buf = _private_buffer_from_tensor(
+        shared_packed_buf=_private_buffer_from_tensor(
             shared_packed, lib, device, cache=True)
-        shared_scales_buf = _private_buffer_from_tensor(
+        shared_scales_buf=_private_buffer_from_tensor(
             shared_scales, lib, device, cache=True)
-        routed_packed_buf = _private_buffer_from_tensor(
+        routed_packed_buf=_private_buffer_from_tensor(
             routed_packed, lib, device, cache=True)
-        routed_scales_buf = _private_buffer_from_tensor(
+        routed_scales_buf=_private_buffer_from_tensor(
             routed_scales, lib, device, cache=True)
-        probs_buf = _private_buffer_from_tensor(
+        probs_buf=_private_buffer_from_tensor(
             probs, lib, device, cache=False)
-        indices_buf = _private_buffer_from_tensor(
+        indices_buf=_private_buffer_from_tensor(
             indices, lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        num_tokens_buf = _params_buffer(
+        num_tokens_buf=_params_buffer(
             lib, device, np.array([num_tokens], dtype=np.uint32))
-        hidden_buf = _params_buffer(
+        hidden_buf=_params_buffer(
             lib, device, np.array([hidden_dim], dtype=np.uint32))
-        intermediate_buf = _params_buffer(
+        intermediate_buf=_params_buffer(
             lib, device, np.array([intermediate_dim], dtype=np.uint32)
         )
-        topk_buf = _params_buffer(
+        topk_buf=_params_buffer(
             lib, device, np.array([top_k], dtype=np.uint32))
-        num_experts_buf = _params_buffer(
+        num_experts_buf=_params_buffer(
             lib, device, np.array([num_experts], dtype=np.uint32))
-        group_buf = _params_buffer(
+        group_buf=_params_buffer(
             lib, device, np.array([group_size], dtype=np.uint32))
 
-        tile_m = 64
-        tile_n = 64
-        threads_per_tg = 128
-        grid_x = (intermediate_dim + tile_n - 1) // tile_n
-        grid_y = (num_tokens + tile_m - 1) // tile_m
+        tile_m=64
+        tile_n=64
+        threads_per_tg=128
+        grid_x=(intermediate_dim + tile_n - 1) // tile_n
+        grid_y=(num_tokens + tile_m - 1) // tile_m
 
         dispatch_kernel(
             lib,
@@ -2815,7 +3162,7 @@ if HAS_METAL and HAS_MPS:
             wait=True,
         )
 
-        out = out.reshape(*orig_shape[:-1], intermediate_dim)
+        out=out.reshape(*orig_shape[:-1], intermediate_dim)
         return out
 
     def moe_shared_expert_scatter(
@@ -2832,7 +3179,7 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         if shared_expert_w.dim() != 2:
@@ -2840,7 +3187,7 @@ if HAS_METAL and HAS_MPS:
         if shared_expert_w.shape[0] != hidden_dim:
             raise ValueError("shared_expert_w hidden dim mismatch")
 
-        intermediate_dim = shared_expert_w.shape[1]
+        intermediate_dim=shared_expert_w.shape[1]
 
         if routed_expert_w.dim() != 3:
             raise ValueError(
@@ -2853,64 +3200,64 @@ if HAS_METAL and HAS_MPS:
         if router_indices.dim() != 2 or router_indices.shape[0] != num_tokens:
             raise ValueError("router_indices must be [tokens, top_k]")
 
-        top_k = int(router_probs.shape[1])
+        top_k=int(router_probs.shape[1])
         if router_indices.shape[1] != top_k:
             raise ValueError(
                 "router_probs and router_indices must have same top_k")
 
-        num_experts = int(routed_expert_w.shape[0])
+        num_experts=int(routed_expert_w.shape[0])
 
-        shared_w = (
+        shared_w=(
             shared_expert_w.half().contiguous()
             if shared_expert_w.dtype != torch.float16
             else shared_expert_w.contiguous()
         )
-        routed_w = (
+        routed_w=(
             routed_expert_w.half().contiguous()
             if routed_expert_w.dtype != torch.float16
             else routed_expert_w.contiguous()
         )
-        probs = (
+        probs=(
             router_probs.half().contiguous()
             if router_probs.dtype != torch.float16
             else router_probs.contiguous()
         )
         if router_indices.dtype not in (torch.int32, torch.uint32):
-            indices = router_indices.to(torch.int32).contiguous()
+            indices=router_indices.to(torch.int32).contiguous()
         else:
-            indices = router_indices.contiguous()
+            indices=router_indices.contiguous()
 
-        out = torch.empty((num_tokens, intermediate_dim),
+        out=torch.empty((num_tokens, intermediate_dim),
                           dtype=torch.float16, device="mps")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
-        A_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(
             hidden_2d, lib, device, cache=False)
-        shared_buf = _private_buffer_from_tensor(
+        shared_buf=_private_buffer_from_tensor(
             shared_w, lib, device, cache=True)
-        routed_buf = _private_buffer_from_tensor(
+        routed_buf=_private_buffer_from_tensor(
             routed_w, lib, device, cache=True)
-        probs_buf = _private_buffer_from_tensor(
+        probs_buf=_private_buffer_from_tensor(
             probs, lib, device, cache=False)
-        indices_buf = _private_buffer_from_tensor(
+        indices_buf=_private_buffer_from_tensor(
             indices, lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        num_tokens_buf = _params_buffer(
+        num_tokens_buf=_params_buffer(
             lib, device, np.array([num_tokens], dtype=np.uint32))
-        hidden_buf = _params_buffer(
+        hidden_buf=_params_buffer(
             lib, device, np.array([hidden_dim], dtype=np.uint32))
-        intermediate_buf = _params_buffer(
+        intermediate_buf=_params_buffer(
             lib, device, np.array([intermediate_dim], dtype=np.uint32)
         )
-        topk_buf = _params_buffer(
+        topk_buf=_params_buffer(
             lib, device, np.array([top_k], dtype=np.uint32))
-        num_experts_buf = _params_buffer(
+        num_experts_buf=_params_buffer(
             lib, device, np.array([num_experts], dtype=np.uint32))
 
-        threads_per_tg = 128
+        threads_per_tg=128
         dispatch_kernel(
             lib,
             function_name="moe_shared_expert_scatter",
@@ -2932,7 +3279,7 @@ if HAS_METAL and HAS_MPS:
             wait=True,
         )
 
-        out = out.reshape(*orig_shape[:-1], intermediate_dim)
+        out=out.reshape(*orig_shape[:-1], intermediate_dim)
         return out
 
     def moe_shared_expert_fp4(
@@ -2941,13 +3288,13 @@ if HAS_METAL and HAS_MPS:
         gate_up_scales: torch.Tensor,  # [hidden/group, 2*intermediate]
         down_packed: torch.Tensor,  # [intermediate/8, hidden]
         down_scales: torch.Tensor,  # [intermediate/group, hidden]
-        group_size: int = 128,
-        shared_prob: float = 1.0,
+        group_size: int=128,
+        shared_prob: float=1.0,
     ) -> torch.Tensor:
         """Shared expert forward pass with FP4 quantized weights."""
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         if hidden_dim % FP4_PER_UINT != 0:
@@ -2964,18 +3311,18 @@ if HAS_METAL and HAS_MPS:
         if gate_up_packed.shape[0] * FP4_PER_UINT != hidden_dim:
             raise ValueError("gate_up_packed hidden dim mismatch")
 
-        gate_up_out = int(gate_up_packed.shape[1])
+        gate_up_out=int(gate_up_packed.shape[1])
         if gate_up_out % 2 != 0:
             raise ValueError(
                 "gate_up_packed output dim must be even (gate+up)")
-        intermediate = gate_up_out // 2
+        intermediate=gate_up_out // 2
 
         if intermediate % group_size != 0:
             raise ValueError(
                 f"intermediate ({intermediate}) must be divisible by group_size ({group_size})"
             )
 
-        scale_rows = hidden_dim // group_size
+        scale_rows=hidden_dim // group_size
         if gate_up_scales.shape != (scale_rows, gate_up_out):
             raise ValueError("gate_up_scales shape mismatch")
 
@@ -2986,12 +3333,12 @@ if HAS_METAL and HAS_MPS:
         if down_packed.shape[1] != hidden_dim:
             raise ValueError("down_packed output dim mismatch")
 
-        down_scale_rows = intermediate // group_size
+        down_scale_rows=intermediate // group_size
         if down_scales.shape != (down_scale_rows, hidden_dim):
             raise ValueError("down_scales shape mismatch")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
         def _dispatch_shared_gemm(
             activations: torch.Tensor,
@@ -3002,33 +3349,33 @@ if HAS_METAL and HAS_MPS:
             out_dim: int,
             prob: float,
         ) -> torch.Tensor:
-            out = torch.zeros((num_tokens, out_dim),
+            out=torch.zeros((num_tokens, out_dim),
                               dtype=torch.float16, device="mps")
 
-            A_buf = _private_buffer_from_tensor(
+            A_buf=_private_buffer_from_tensor(
                 activations, lib, device, cache=False)
-            W_buf = _private_buffer_from_tensor(
+            W_buf=_private_buffer_from_tensor(
                 weights, lib, device, cache=True)
-            S_buf = _private_buffer_from_tensor(
+            S_buf=_private_buffer_from_tensor(
                 scales, lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-            batch_buf = _params_buffer(
+            batch_buf=_params_buffer(
                 lib, device, np.array([num_tokens], dtype=np.uint32))
-            hidden_buf = _params_buffer(
+            hidden_buf=_params_buffer(
                 lib, device, np.array([k_dim], dtype=np.uint32))
-            out_buf_param = _params_buffer(
+            out_buf_param=_params_buffer(
                 lib, device, np.array([out_dim], dtype=np.uint32))
-            group_buf = _params_buffer(
+            group_buf=_params_buffer(
                 lib, device, np.array([group_size], dtype=np.uint32))
-            prob_buf = _params_buffer(
+            prob_buf=_params_buffer(
                 lib, device, np.array([prob], dtype=np.float16))
 
-            tile_m = 64
-            tile_n = 64
-            threads_per_tg = 128
-            grid_x = (out_dim + tile_n - 1) // tile_n
-            grid_y = (num_tokens + tile_m - 1) // tile_m
+            tile_m=64
+            tile_n=64
+            threads_per_tg=128
+            grid_x=(out_dim + tile_n - 1) // tile_n
+            grid_y=(num_tokens + tile_m - 1) // tile_m
 
             dispatch_kernel(
                 lib,
@@ -3051,7 +3398,7 @@ if HAS_METAL and HAS_MPS:
 
             return out
 
-        gate_up = _dispatch_shared_gemm(
+        gate_up=_dispatch_shared_gemm(
             hidden_2d,
             gate_up_packed.contiguous(),
             gate_up_scales.half().contiguous(),
@@ -3059,11 +3406,11 @@ if HAS_METAL and HAS_MPS:
             out_dim=gate_up_out,
             prob=1.0,
         )
-        gate = gate_up[:, :intermediate]
-        up = gate_up[:, intermediate:]
-        act = torch.nn.functional.silu(gate) * up
+        gate=gate_up[:, :intermediate]
+        up=gate_up[:, intermediate:]
+        act=torch.nn.functional.silu(gate) * up
 
-        output = _dispatch_shared_gemm(
+        output=_dispatch_shared_gemm(
             act,
             down_packed.contiguous(),
             down_scales.half().contiguous(),
@@ -3080,7 +3427,7 @@ if HAS_METAL and HAS_MPS:
         scales: torch.Tensor,
         expert_ids: torch.Tensor,
         expert_probs: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         MoE expert GEMM with FP4-quantized expert weights.
@@ -3100,59 +3447,59 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        orig_dtype = activations.dtype
-        batch_size = activations.shape[0]
-        hidden_dim = activations.shape[1]
-        num_experts = expert_weights.shape[0]
-        out_dim = expert_weights.shape[-1]
-        top_k = expert_ids.shape[1]
+        orig_dtype=activations.dtype
+        batch_size=activations.shape[0]
+        hidden_dim=activations.shape[1]
+        num_experts=expert_weights.shape[0]
+        out_dim=expert_weights.shape[-1]
+        top_k=expert_ids.shape[1]
 
         # Prepare dispatch info (groups tokens by expert)
-        dispatch_info = group_tokens_by_expert_full(expert_ids, num_experts)
+        dispatch_info=group_tokens_by_expert_full(expert_ids, num_experts)
 
         # Gather activations in expert-sorted order
-        gathered = gather_for_experts(activations, dispatch_info)
+        gathered=gather_for_experts(activations, dispatch_info)
 
         # Get expert probabilities in sorted order
         # sorted_token_indices[i] = which token, sorted_expert_indices[i] = which slot (0 to top_k-1)
-        expert_probs_sorted = expert_probs[
+        expert_probs_sorted=expert_probs[
             dispatch_info.sorted_token_indices, dispatch_info.sorted_expert_indices
         ]
 
         # Try batched Metal kernel dispatch
         try:
-            lib = get_default_library()
+            lib=get_default_library()
             _ensure_kernel_compiled(
                 lib, "moe_expert_gemm", get_shader_source("moe_expert_gemm"))
 
-            device = lib.device
+            device=lib.device
 
             # Prepare tensors
-            act_contig = gathered.half().contiguous()
-            weights_contig = expert_weights.contiguous()
-            scales_contig = scales.half().contiguous()
-            sorted_token_ids = dispatch_info.sorted_token_indices.int().contiguous()
-            expert_offsets = dispatch_info.expert_offsets.int().contiguous()
-            probs_sorted = expert_probs_sorted.half().contiguous()
+            act_contig=gathered.half().contiguous()
+            weights_contig=expert_weights.contiguous()
+            scales_contig=scales.half().contiguous()
+            sorted_token_ids=dispatch_info.sorted_token_indices.int().contiguous()
+            expert_offsets=dispatch_info.expert_offsets.int().contiguous()
+            probs_sorted=expert_probs_sorted.half().contiguous()
 
             # Output buffer [batch, out_dim]
-            output = torch.zeros(
+            output=torch.zeros(
                 batch_size, out_dim, dtype=torch.float16, device=activations.device
             )
 
             # Create Metal buffers
-            act_buf = mps_tensor_to_metal_buffer(act_contig, device)
-            weights_buf = mps_tensor_to_metal_buffer(weights_contig, device)
-            scales_buf = mps_tensor_to_metal_buffer(scales_contig, device)
-            sorted_token_buf = mps_tensor_to_metal_buffer(
+            act_buf=mps_tensor_to_metal_buffer(act_contig, device)
+            weights_buf=mps_tensor_to_metal_buffer(weights_contig, device)
+            scales_buf=mps_tensor_to_metal_buffer(scales_contig, device)
+            sorted_token_buf=mps_tensor_to_metal_buffer(
                 sorted_token_ids, device)
-            offsets_buf = mps_tensor_to_metal_buffer(expert_offsets, device)
-            probs_buf = mps_tensor_to_metal_buffer(probs_sorted, device)
-            output_buf = mps_tensor_to_metal_buffer(
+            offsets_buf=mps_tensor_to_metal_buffer(expert_offsets, device)
+            probs_buf=mps_tensor_to_metal_buffer(probs_sorted, device)
+            output_buf=mps_tensor_to_metal_buffer(
                 output, device, copy_back=True)
 
             # MoEParams struct (must match Metal struct layout)
-            params = np.array(
+            params=np.array(
                 [
                     batch_size,  # batch_size
                     hidden_dim,  # hidden_dim
@@ -3165,15 +3512,15 @@ if HAS_METAL and HAS_MPS:
                 ],
                 dtype=np.uint32,
             )
-            params_buf = device.newBufferWithBytes_length_options_(
+            params_buf=device.newBufferWithBytes_length_options_(
                 params.tobytes(), params.nbytes, Metal.MTLResourceStorageModeShared
             )
 
             # Dispatch grouped kernel
             # Grid: [ceil(out_dim/64), num_experts]
-            tile_n = 64
-            grid_x = (out_dim + tile_n - 1) // tile_n
-            grid_y = num_experts
+            tile_n=64
+            grid_x=(out_dim + tile_n - 1) // tile_n
+            grid_y=num_experts
 
             dispatch_kernel(
                 lib,
@@ -3195,7 +3542,7 @@ if HAS_METAL and HAS_MPS:
 
             # Preserve input dtype (Metal outputs float16, model may use bfloat16)
             if output.dtype != orig_dtype:
-                output = output.to(orig_dtype)
+                output=output.to(orig_dtype)
             return output
 
         except Exception as e:
@@ -3205,38 +3552,38 @@ if HAS_METAL and HAS_MPS:
             logging.getLogger(__name__).warning(
                 f"MoE Metal dispatch failed, using fallback: {e}")
 
-            expert_outputs = torch.empty(
+            expert_outputs=torch.empty(
                 (dispatch_info.total_assignments, out_dim),
                 dtype=torch.float16,
                 device=activations.device,
             )
 
             for e in range(num_experts):
-                start = int(dispatch_info.expert_offsets[e].item())
-                end = int(dispatch_info.expert_offsets[e + 1].item())
+                start=int(dispatch_info.expert_offsets[e].item())
+                end=int(dispatch_info.expert_offsets[e + 1].item())
                 if start == end:
                     continue
                 try:
-                    expert_outputs[start:end] = marlin_gemm_fp4(
+                    expert_outputs[start:end]=marlin_gemm_fp4(
                         gathered[start:end], expert_weights[e], scales[e], group_size
                     )
                 except Exception:
-                    k_dim = gathered.shape[1]
-                    n_dim = expert_weights.shape[-1]
-                    dequant = dequant_fp4(
+                    k_dim=gathered.shape[1]
+                    n_dim=expert_weights.shape[-1]
+                    dequant=dequant_fp4(
                         expert_weights[e], scales[e], k_dim, n_dim, group_size)
-                    expert_outputs[start:end] = gathered[start:end] @ dequant
+                    expert_outputs[start:end]=gathered[start:end] @ dequant
 
-            result = scatter_expert_outputs(
+            result=scatter_expert_outputs(
                 expert_outputs, expert_probs, dispatch_info)
             if result.dtype != orig_dtype:
-                result = result.to(orig_dtype)
+                result=result.to(orig_dtype)
             return result
 
     def moe_router_topk(
         hidden: torch.Tensor,
         router_weights: torch.Tensor,
-        top_k: int = 2,
+        top_k: int=2,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         MoE router with top-k expert selection.
@@ -3254,21 +3601,21 @@ if HAS_METAL and HAS_MPS:
         # Router forward: compute logits and apply softmax
         # hidden: [batch, hidden_dim]
         # router_weights: [hidden_dim, num_experts]
-        logits = torch.matmul(hidden, router_weights)  # [batch, num_experts]
-        probs = torch.softmax(logits, dim=-1)
+        logits=torch.matmul(hidden, router_weights)  # [batch, num_experts]
+        probs=torch.softmax(logits, dim=-1)
 
         # Select top-k experts per token
-        topk_probs, topk_ids = torch.topk(probs, k=top_k, dim=-1)
+        topk_probs, topk_ids=torch.topk(probs, k=top_k, dim=-1)
 
         # Renormalize probabilities for selected experts
-        topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+        topk_probs=topk_probs / topk_probs.sum(dim=-1, keepdim=True)
 
         return topk_ids, topk_probs
 
     def hadamard_transform(
         x: torch.Tensor,
-        block_size: int = 64,
-        normalize: bool = True,
+        block_size: int=64,
+        normalize: bool=True,
     ) -> torch.Tensor:
         """
         Apply Walsh-Hadamard transform to input vectors.
@@ -3292,28 +3639,28 @@ if HAS_METAL and HAS_MPS:
                 f"Last dimension of x ({x.shape[-1]}) must equal block_size ({block_size})"
             )
 
-        lib = get_default_library()
+        lib=get_default_library()
         _ensure_kernel_compiled(lib, "hadamard", _HADAMARD_KERNEL)
 
         # Flatten to 2D: [N, block_size]
-        orig_shape = x.shape
-        n = 1
+        orig_shape=x.shape
+        n=1
         for d in orig_shape[:-1]:
             n *= d
 
-        x_2d = x.reshape(n, block_size).half().contiguous()
-        out = torch.empty_like(x_2d)
+        x_2d=x.reshape(n, block_size).half().contiguous()
+        out=torch.empty_like(x_2d)
 
-        device = lib.device
+        device=lib.device
 
-        x_buf = _private_buffer_from_tensor(x_2d, lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        x_buf=_private_buffer_from_tensor(x_2d, lib, device, cache=False)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        params = np.array([n, 1 if normalize else 0], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params=np.array([n, 1 if normalize else 0], dtype=np.uint32)
+        params_buf=_params_buffer(lib, device, params)
 
         # Select kernel based on block size
-        kernel_name = f"hadamard_{block_size}"
+        kernel_name=f"hadamard_{block_size}"
 
         dispatch_kernel(
             lib,
@@ -3330,7 +3677,7 @@ if HAS_METAL and HAS_MPS:
         A: torch.Tensor,
         B_packed: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         Decode GEMV for M=1: C[1,N] = A[1,K] @ dequant(B[K/8,N], scales).
@@ -3348,17 +3695,17 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        lib = get_default_library()
+        lib=get_default_library()
         _ensure_kernel_compiled(lib, "decode_gemv", _DECODE_GEMV_FP4_KERNEL)
 
         # Normalize input shape
-        squeeze_output = False
+        squeeze_output=False
         if A.ndim == 1:
-            A = A.reshape(1, -1)
-            squeeze_output = True
+            A=A.reshape(1, -1)
+            squeeze_output=True
 
-        M, K = A.shape
-        K_packed, N = B_packed.shape
+        M, K=A.shape
+        K_packed, N=B_packed.shape
 
         if K != K_packed * FP4_PER_UINT:
             raise ValueError(
@@ -3370,25 +3717,25 @@ if HAS_METAL and HAS_MPS:
             return marlin_gemm_fp4(A, B_packed, scales, group_size)
 
         # Single-token decode
-        A_flat = A.reshape(-1).half().contiguous()
-        out = torch.empty((N,), dtype=torch.float16, device="mps")
+        A_flat=A.reshape(-1).half().contiguous()
+        out=torch.empty((N,), dtype=torch.float16, device="mps")
 
-        device = lib.device
+        device=lib.device
 
-        A_buf = _private_buffer_from_tensor(A_flat, lib, device, cache=False)
-        B_packed_contig = B_packed.contiguous()
-        B_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(A_flat, lib, device, cache=False)
+        B_packed_contig=B_packed.contiguous()
+        B_buf=_private_buffer_from_tensor(
             B_packed_contig, lib, device, cache=True)
-        scales_half = scales if scales.dtype == torch.float16 else scales.half()
-        scales_half = scales_half.contiguous()
-        S_buf = _private_buffer_from_tensor(
+        scales_half=scales if scales.dtype == torch.float16 else scales.half()
+        scales_half=scales_half.contiguous()
+        S_buf=_private_buffer_from_tensor(
             scales_half, lib, device, cache=True)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        params = np.array([K, N, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params=np.array([K, N, group_size], dtype=np.uint32)
+        params_buf=_params_buffer(lib, device, params)
 
-        grid_x = (N + 255) // 256
+        grid_x=(N + 255) // 256
 
         dispatch_kernel(
             lib,
@@ -3400,7 +3747,7 @@ if HAS_METAL and HAS_MPS:
         )
 
         if not squeeze_output:
-            out = out.reshape(1, N)
+            out=out.reshape(1, N)
         return out
 
     def select_decode_kernel(M: int, N: int, K: int) -> str:
@@ -3436,12 +3783,13 @@ if HAS_METAL and HAS_MPS:
         routed_down_scales: torch.Tensor,
         expert_ids: torch.Tensor,
         expert_probs: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         Fused MoE dispatch + shared expert computation in a single kernel.
 
-        Computes: output = shared_expert(x) + sum_k(prob[k] * routed_expert_k(x))
+        Computes: output = shared_expert(
+            x) + sum_k(prob[k] * routed_expert_k(x))
 
         This eliminates intermediate memory traffic and kernel launch overhead by:
         1. Computing shared expert contribution
@@ -3470,7 +3818,7 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         # Validate dimensions
@@ -3482,74 +3830,74 @@ if HAS_METAL and HAS_MPS:
                 f"hidden_dim ({hidden_dim}) must be divisible by group_size ({group_size})")
 
         # Infer intermediate dim from gate_up shape
-        intermediate_dim = shared_gate_up_packed.shape[1] // 2
+        intermediate_dim=shared_gate_up_packed.shape[1] // 2
 
         if intermediate_dim % group_size != 0:
             raise ValueError(
                 f"intermediate ({intermediate_dim}) must be divisible by group_size ({group_size})")
 
-        num_experts = routed_gate_up_packed.shape[0]
-        top_k = expert_ids.shape[1]
+        num_experts=routed_gate_up_packed.shape[0]
+        top_k=expert_ids.shape[1]
 
         # Prepare tensors
         def _prepare_tensor(t, dtype=torch.float16):
-            t = t.contiguous()
+            t=t.contiguous()
             if t.dtype != dtype:
-                t = t.to(dtype)
+                t=t.to(dtype)
             return t
 
-        hidden_contig = _prepare_tensor(hidden_2d)
-        shared_gate_up_p = _prepare_tensor(shared_gate_up_packed, torch.uint32)
-        shared_gate_up_s = _prepare_tensor(shared_gate_up_scales)
-        shared_down_p = _prepare_tensor(shared_down_packed, torch.uint32)
-        shared_down_s = _prepare_tensor(shared_down_scales)
-        routed_gate_up_p = _prepare_tensor(routed_gate_up_packed, torch.uint32)
-        routed_gate_up_s = _prepare_tensor(routed_gate_up_scales)
-        routed_down_p = _prepare_tensor(routed_down_packed, torch.uint32)
-        routed_down_s = _prepare_tensor(routed_down_scales)
+        hidden_contig=_prepare_tensor(hidden_2d)
+        shared_gate_up_p=_prepare_tensor(shared_gate_up_packed, torch.uint32)
+        shared_gate_up_s=_prepare_tensor(shared_gate_up_scales)
+        shared_down_p=_prepare_tensor(shared_down_packed, torch.uint32)
+        shared_down_s=_prepare_tensor(shared_down_scales)
+        routed_gate_up_p=_prepare_tensor(routed_gate_up_packed, torch.uint32)
+        routed_gate_up_s=_prepare_tensor(routed_gate_up_scales)
+        routed_down_p=_prepare_tensor(routed_down_packed, torch.uint32)
+        routed_down_s=_prepare_tensor(routed_down_scales)
 
         if expert_ids.dtype != torch.int32:
-            expert_ids = expert_ids.to(torch.int32)
-        expert_ids = expert_ids.contiguous()
+            expert_ids=expert_ids.to(torch.int32)
+        expert_ids=expert_ids.contiguous()
 
         if expert_probs.dtype != torch.float16:
-            expert_probs = expert_probs.half()
-        expert_probs = expert_probs.contiguous()
+            expert_probs=expert_probs.half()
+        expert_probs=expert_probs.contiguous()
 
         # Output buffer
-        out = torch.empty((num_tokens, hidden_dim),
+        out=torch.empty((num_tokens, hidden_dim),
                           dtype=torch.float16, device="mps")
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
-        # Create Metal buffers
-        A_buf = _private_buffer_from_tensor(
+        # Create buffers
+        A_buf=_private_buffer_from_tensor(
             hidden_contig, lib, device, cache=False)
-        sg_p_buf = _private_buffer_from_tensor(
+        sg_p_buf=_private_buffer_from_tensor(
             shared_gate_up_p, lib, device, cache=True)
-        sg_s_buf = _private_buffer_from_tensor(
+        sg_s_buf=_private_buffer_from_tensor(
             shared_gate_up_s, lib, device, cache=True)
-        sd_p_buf = _private_buffer_from_tensor(
+        sd_p_buf=_private_buffer_from_tensor(
             shared_down_p, lib, device, cache=True)
-        sd_s_buf = _private_buffer_from_tensor(
+        sd_s_buf=_private_buffer_from_tensor(
             shared_down_s, lib, device, cache=True)
-        rg_p_buf = _private_buffer_from_tensor(
+        rg_p_buf=_private_buffer_from_tensor(
             routed_gate_up_p, lib, device, cache=True)
-        rg_s_buf = _private_buffer_from_tensor(
+        rg_s_buf=_private_buffer_from_tensor(
             routed_gate_up_s, lib, device, cache=True)
-        rd_p_buf = _private_buffer_from_tensor(
+        rd_p_buf=_private_buffer_from_tensor(
             routed_down_p, lib, device, cache=True)
-        rd_s_buf = _private_buffer_from_tensor(
+        rd_s_buf=_private_buffer_from_tensor(
             routed_down_s, lib, device, cache=True)
-        ids_buf = _private_buffer_from_tensor(
+        ids_buf=_private_buffer_from_tensor(
             expert_ids, lib, device, cache=False)
-        probs_buf = _private_buffer_from_tensor(
+        probs_buf=_private_buffer_from_tensor(
             expert_probs, lib, device, cache=False)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
-        # Params buffer
-        params = np.array([
+        # Params
+        params=np.array([
             num_tokens,
             hidden_dim,
             intermediate_dim,
@@ -3557,12 +3905,12 @@ if HAS_METAL and HAS_MPS:
             top_k,
             group_size,
         ], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params_buf=_params_buffer(lib, device, params)
 
-        # Grid dimensions
-        tile_n = 64
-        grid_x = (hidden_dim + tile_n - 1) // tile_n
-        grid_y = num_tokens
+        # Grid
+        tile_n=64
+        grid_x=(hidden_dim + tile_n - 1) // tile_n
+        grid_y=num_tokens
 
         dispatch_kernel(
             lib,
@@ -3587,7 +3935,7 @@ if HAS_METAL and HAS_MPS:
         shared_gate_up_scales: torch.Tensor,
         shared_down_packed: torch.Tensor,
         shared_down_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """
         Add shared expert contribution to existing MoE output.
@@ -3613,14 +3961,14 @@ if HAS_METAL and HAS_MPS:
         """
         require_mps()
 
-        hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
+        hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
             hidden_states)
 
         if hidden_dim % FP4_PER_UINT != 0:
             raise ValueError(
                 f"hidden_dim ({hidden_dim}) must be divisible by {FP4_PER_UINT}")
 
-        intermediate_dim = shared_gate_up_packed.shape[1] // 2
+        intermediate_dim=shared_gate_up_packed.shape[1] // 2
 
         if intermediate_dim % group_size != 0:
             raise ValueError(
@@ -3631,26 +3979,26 @@ if HAS_METAL and HAS_MPS:
             raise ValueError(
                 f"moe_output shape {moe_output.shape} doesn't match hidden shape {hidden_2d.shape}")
 
-        out = moe_output.half().contiguous()
+        out=moe_output.half().contiguous()
 
-        lib = get_default_library()
-        device = lib.device
+        lib=get_default_library()
+        device=lib.device
 
         # Create buffers
-        A_buf = _private_buffer_from_tensor(
+        A_buf=_private_buffer_from_tensor(
             hidden_2d, lib, device, cache=False)
-        sg_p_buf = _private_buffer_from_tensor(
+        sg_p_buf=_private_buffer_from_tensor(
             shared_gate_up_packed.contiguous(), lib, device, cache=True)
-        sg_s_buf = _private_buffer_from_tensor(
+        sg_s_buf=_private_buffer_from_tensor(
             shared_gate_up_scales.half().contiguous(), lib, device, cache=True)
-        sd_p_buf = _private_buffer_from_tensor(
+        sd_p_buf=_private_buffer_from_tensor(
             shared_down_packed.contiguous(), lib, device, cache=True)
-        sd_s_buf = _private_buffer_from_tensor(
+        sd_s_buf=_private_buffer_from_tensor(
             shared_down_scales.half().contiguous(), lib, device, cache=True)
-        out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
+        out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
 
         # Params
-        params = np.array([
+        params=np.array([
             num_tokens,
             hidden_dim,
             intermediate_dim,
@@ -3658,12 +4006,12 @@ if HAS_METAL and HAS_MPS:
             0,  # top_k (unused)
             group_size,
         ], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params_buf=_params_buffer(lib, device, params)
 
         # Grid
-        tile_n = 64
-        grid_x = (hidden_dim + tile_n - 1) // tile_n
-        grid_y = num_tokens
+        tile_n=64
+        grid_x=(hidden_dim + tile_n - 1) // tile_n
+        grid_y=num_tokens
 
         dispatch_kernel(
             lib,
@@ -3685,18 +4033,18 @@ if HAS_METAL and HAS_MPS:
 
         def __init__(self) -> None:
             require_mps()
-            self.lib = get_default_library()
+            self.lib=get_default_library()
             self._load_kernels()
 
         def _load_kernels(self) -> None:
-            shader_dir = Path(__file__).parent / "shaders"
+            shader_dir=Path(__file__).parent / "shaders"
 
             # Compile MMFP4 GEMM kernel
-            gemm_shader_path = shader_dir / "mmfp4_gemm.metal"
+            gemm_shader_path=shader_dir / "mmfp4_gemm.metal"
             if not gemm_shader_path.exists():
                 raise FileNotFoundError(
                     f"Shader file not found: {gemm_shader_path}")
-            gemm_source = gemm_shader_path.read_text(encoding="utf-8")
+            gemm_source=gemm_shader_path.read_text(encoding="utf-8")
             _ensure_kernel_compiled(
                 self.lib,
                 "mmfp4_gemm",
@@ -3711,7 +4059,7 @@ if HAS_METAL and HAS_MPS:
                 _DECODE_GEMV_FP4_KERNEL,
             )
 
-            dequant_shader_path = shader_dir / "mmfp4_dequant.metal"
+            dequant_shader_path=shader_dir / "mmfp4_dequant.metal"
             if not dequant_shader_path.exists():
                 raise FileNotFoundError(
                     f"Shader file not found: {dequant_shader_path}")
@@ -3721,7 +4069,7 @@ if HAS_METAL and HAS_MPS:
                 dequant_shader_path.read_text(encoding="utf-8"),
             )
 
-            fused_qkv_shader_path = shader_dir / "mmfp4_fused_qkv.metal"
+            fused_qkv_shader_path=shader_dir / "mmfp4_fused_qkv.metal"
             if not fused_qkv_shader_path.exists():
                 raise FileNotFoundError(
                     f"Shader file not found: {fused_qkv_shader_path}")
@@ -3732,7 +4080,7 @@ if HAS_METAL and HAS_MPS:
             )
 
             # Pre-compile QKV shader (actual compilation happens on first use)
-            qkv_shader_path = shader_dir / "mmfp4_fused_qkv.metal"
+            qkv_shader_path=shader_dir / "mmfp4_fused_qkv.metal"
             if qkv_shader_path.exists():
                 _ensure_kernel_compiled(
                     self.lib,
@@ -3741,7 +4089,7 @@ if HAS_METAL and HAS_MPS:
                 )
 
             # Pre-compile MoE shader (optional - may fail on older Metal versions)
-            moe_shader_path = shader_dir / "mmfp4_fused_moe.metal"
+            moe_shader_path=shader_dir / "mmfp4_fused_moe.metal"
             if moe_shader_path.exists():
                 try:
                     _ensure_kernel_compiled(
@@ -3755,19 +4103,30 @@ if HAS_METAL and HAS_MPS:
                         moe_shader_path.read_text(encoding="utf-8"),
                     )
                 except Exception as e:
-                    print(f"DEBUG: Failed to compile mmfp4_fused_moe.metal: {e}")
+                    print(
+                        f"DEBUG: Failed to compile mmfp4_fused_moe.metal: {e}")
                     # MoE shader may have compilation issues on some Metal versions
                     # This is non-critical - the main GEMM kernels are the priority
                     pass
 
             # Compile fused gate-up shader
-            gate_up_shader_path = shader_dir / "mmfp4_fused_gate_up.metal"
+            gate_up_shader_path=shader_dir / "mmfp4_fused_gate_up.metal"
             if gate_up_shader_path.exists():
+                gate_up_source=gate_up_shader_path.read_text(
+                    encoding="utf-8")
                 try:
                     _ensure_kernel_compiled(
                         self.lib,
                         "fused_gate_up_gemm",
-                        gate_up_shader_path.read_text(encoding="utf-8"),
+                        gate_up_source,
+                    )
+                except Exception:
+                    pass
+                try:
+                    _ensure_kernel_compiled(
+                        self.lib,
+                        "mmfp4_fused_gate_up",
+                        gate_up_source,
                     )
                 except Exception:
                     pass
@@ -3779,38 +4138,184 @@ if HAS_METAL and HAS_MPS:
             gate_scales: torch.Tensor,
             up_packed: torch.Tensor,
             up_scales: torch.Tensor,
-            group_size: int = 128,
+            group_size: int=128,
         ) -> torch.Tensor:
             """Fused gate+up projection."""
-            M, K = x.shape
-            K_packed, N = gate_packed.shape
-            
+            M, K=x.shape
+            K_packed, N=gate_packed.shape
+
             # Output shape: [M, 2*N]
-            out = torch.empty((M, 2 * N), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            x_buf = _private_buffer_from_tensor(x, self.lib, device, cache=False)
-            gp_buf = _private_buffer_from_tensor(gate_packed, self.lib, device, cache=True)
-            gs_buf = _private_buffer_from_tensor(gate_scales, self.lib, device, cache=True)
-            up_buf = _private_buffer_from_tensor(up_packed, self.lib, device, cache=True)
-            us_buf = _private_buffer_from_tensor(up_scales, self.lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
-            
-            params = np.array([M, K, N, group_size], dtype=np.uint32)
-            params_buf = _params_buffer(self.lib, device, params)
-            
-            tile_n = 64
-            tile_m = 64
-            grid_x = (N + tile_n - 1) // tile_n
-            grid_y = (M + tile_m - 1) // tile_m
-            
+            out=torch.empty((M, 2 * N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            x_buf=_private_buffer_from_tensor(
+                x, self.lib, device, cache=False)
+            gp_buf=_private_buffer_from_tensor(
+                gate_packed, self.lib, device, cache=True)
+            gs_buf=_private_buffer_from_tensor(
+                gate_scales, self.lib, device, cache=True)
+            up_buf=_private_buffer_from_tensor(
+                up_packed, self.lib, device, cache=True)
+            us_buf=_private_buffer_from_tensor(
+                up_scales, self.lib, device, cache=True)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+            params=np.array([M, K, N, group_size], dtype=np.uint32)
+            params_buf=_params_buffer(self.lib, device, params)
+
+            tile_n=64
+            tile_m=64
+            grid_x=(N + tile_n - 1) // tile_n
+            grid_y=(M + tile_m - 1) // tile_m
+
             dispatch_kernel(
                 self.lib,
                 function_name="fused_gate_up_gemm",
                 grid=(grid_x, grid_y, 1),
                 threadgroup=(128, 1, 1),
-                buffers=[x_buf, gp_buf, gs_buf, up_buf, us_buf, out_buf, params_buf],
+                buffers=[x_buf, gp_buf, gs_buf, up_buf,
+                         us_buf, out_buf, params_buf],
                 wait=True
+            )
+            return out
+
+        def mmfp4_fused_gate_up(
+            self,
+            x: torch.Tensor,
+            gate_packed: torch.Tensor,
+            gate_scales: torch.Tensor,
+            up_packed: torch.Tensor,
+            up_scales: torch.Tensor,
+            group_size: int=128,
+        ) -> torch.Tensor:
+            """Fused MMFP4 gate/up projection with SiLU activation.
+
+            Computes `silu(gate_proj(x)) * up_proj(x)` in one kernel dispatch.
+
+            Expected layout:
+            - `x`: [M, K] float16
+            - `gate_packed`: [N, K/8] uint32 (row-packed)
+            - `gate_scales`: [K/group_size, N] float16
+            - `up_packed`: [N, K/8] uint32 (row-packed)
+            - `up_scales`: [K/group_size, N] float16
+            """
+            if x.dim() != 2:
+                raise ValueError(
+                    f"x must be 2D [M, K], got shape={tuple(x.shape)}")
+
+            M, K=x.shape
+            N, K_packed=gate_packed.shape
+
+            if up_packed.shape != (N, K_packed):
+                raise ValueError(
+                    "up_packed must match gate_packed shape "
+                    f"({N}, {K_packed}), got {tuple(up_packed.shape)}"
+                )
+            if K != K_packed * FP4_PER_UINT:
+                raise ValueError(
+                    f"K mismatch: x has K={K}, but packed tensors imply K={K_packed * FP4_PER_UINT}"
+                )
+            if K % group_size != 0:
+                raise ValueError(
+                    f"K ({K}) must be divisible by group_size ({group_size})"
+                )
+
+            expected_scales=(K // group_size, N)
+            if gate_scales.shape != expected_scales:
+                raise ValueError(
+                    "gate_scales shape mismatch: "
+                    f"expected {expected_scales}, got {tuple(gate_scales.shape)}"
+                )
+            if up_scales.shape != expected_scales:
+                raise ValueError(
+                    "up_scales shape mismatch: "
+                    f"expected {expected_scales}, got {tuple(up_scales.shape)}"
+                )
+
+            if M < 64:
+                # BUG: mmfp4_fused_gate_up shader uses local_row = thread_idx / 2,
+                # broken for M < TILE_M (64): only 2*M/128 threads contribute per row,
+                # leaving ~97% of output zeroed. FP16 overflow for large activations.
+                # Fix: mmfp4_linear.mmfp4_gemm for all M<64.
+                #   M=1 (decode)  → _small_batch_opt (PyTorch F.linear, FP32, async)
+                #   1<M<64 (prefill) → _small_batch_opt (M<4) or _fast_dequant fallback
+                # Handles row-packed [N, K/8] layout and [K/groups, N] scales directly.
+                import torch.nn.functional as _F
+                x_f16=x if x.dtype == torch.float16 else x.to(torch.float16)
+                gate_packed_u32=gate_packed if gate_packed.dtype == torch.uint32 else gate_packed.to(
+                    torch.uint32)
+                up_packed_u32=up_packed if up_packed.dtype == torch.uint32 else up_packed.to(
+                    torch.uint32)
+                gate_scales_f16=gate_scales if gate_scales.dtype == torch.float16 else gate_scales.to(
+                    torch.float16)
+                up_scales_f16=up_scales if up_scales.dtype == torch.float16 else up_scales.to(
+                    torch.float16)
+                from .layers.mmfp4_linear import mmfp4_gemm as _safe_gemm
+                gate_out=_safe_gemm(
+                    x_f16, gate_packed_u32, gate_scales_f16, group_size)
+                up_out=_safe_gemm(x_f16, up_packed_u32,
+                                    up_scales_f16, group_size)
+                return _F.silu(gate_out) * up_out
+
+            x_f16=x if x.dtype == torch.float16 else x.to(torch.float16)
+            gate_packed_u32=gate_packed if gate_packed.dtype == torch.uint32 else gate_packed.to(
+                torch.uint32)
+            up_packed_u32=up_packed if up_packed.dtype == torch.uint32 else up_packed.to(
+                torch.uint32)
+            gate_scales_f16=gate_scales if gate_scales.dtype == torch.float16 else gate_scales.to(
+                torch.float16)
+            up_scales_f16=up_scales if up_scales.dtype == torch.float16 else up_scales.to(
+                torch.float16)
+
+            if not x_f16.is_contiguous():
+                x_f16=x_f16.contiguous()
+            if not gate_packed_u32.is_contiguous():
+                gate_packed_u32=gate_packed_u32.contiguous()
+            if not up_packed_u32.is_contiguous():
+                up_packed_u32=up_packed_u32.contiguous()
+            if not gate_scales_f16.is_contiguous():
+                gate_scales_f16=gate_scales_f16.contiguous()
+            if not up_scales_f16.is_contiguous():
+                up_scales_f16=up_scales_f16.contiguous()
+
+            out=torch.empty((M, N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            x_buf=_private_buffer_from_tensor(
+                x_f16, self.lib, device, cache=False)
+            gp_buf=_private_buffer_from_tensor(
+                gate_packed_u32, self.lib, device, cache=True)
+            gs_buf=_private_buffer_from_tensor(
+                gate_scales_f16, self.lib, device, cache=True)
+            up_buf=_private_buffer_from_tensor(
+                up_packed_u32, self.lib, device, cache=True)
+            us_buf=_private_buffer_from_tensor(
+                up_scales_f16, self.lib, device, cache=True)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+            params=np.array([M, K, N, group_size], dtype=np.uint32)
+            params_buf=_params_buffer(self.lib, device, params)
+
+            tile_n=64
+            tile_m=64
+            grid_x=(N + tile_n - 1) // tile_n
+            grid_y=(M + tile_m - 1) // tile_m
+
+            dispatch_kernel(
+                self.lib,
+                function_name="mmfp4_fused_gate_up",
+                grid=(grid_x, grid_y, 1),
+                threadgroup=(128, 1, 1),
+                buffers=[
+                    x_buf,
+                    gate_packed_u32,
+                    gate_scales_f16,
+                    up_packed_u32,
+                    up_scales_f16,
+                    out_buf,
+                    params_buf,
+                ],
+                wait=True,
             )
             return out
 
@@ -3830,59 +4335,67 @@ if HAS_METAL and HAS_MPS:
             """Fused MoE MLP: gate/up -> swiglu -> down."""
             # Normalize input
             if x.dim() == 1:
-                x = x.reshape(1, -1)
-            
-            M, K = x.shape
-            
+                x=x.reshape(1, -1)
+
+            M, K=x.shape
+
             # 1. Fused Gate+Up+SiLU (MMFP4)
             # Output: intermediate [M, intermediate_size]
-            intermediate = torch.empty((M, intermediate_size), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            x_buf = _private_buffer_from_tensor(x, self.lib, device, cache=False)
-            gp_buf = _private_buffer_from_tensor(gate_packed, self.lib, device, cache=True)
-            up_buf = _private_buffer_from_tensor(up_packed, self.lib, device, cache=True)
-            gs_buf = _private_buffer_from_tensor(gate_scales, self.lib, device, cache=True)
-            us_buf = _private_buffer_from_tensor(up_scales, self.lib, device, cache=True)
-            inter_buf = mps_tensor_to_metal_buffer(intermediate, device, copy_back=True)
-            
-            params = np.array([M, hidden_size, intermediate_size, group_size], dtype=np.uint32)
-            params_buf = _params_buffer(self.lib, device, params)
-            
-            kernel_name = "mmfp4_fused_moe_mlp_batched" if M > 1 else "mmfp4_fused_moe_mlp"
-            
+            intermediate=torch.empty(
+                (M, intermediate_size), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            x_buf=_private_buffer_from_tensor(
+                x, self.lib, device, cache=False)
+            gp_buf=_private_buffer_from_tensor(
+                gate_packed, self.lib, device, cache=True)
+            up_buf=_private_buffer_from_tensor(
+                up_packed, self.lib, device, cache=True)
+            gs_buf=_private_buffer_from_tensor(
+                gate_scales, self.lib, device, cache=True)
+            us_buf=_private_buffer_from_tensor(
+                up_scales, self.lib, device, cache=True)
+            inter_buf=mps_tensor_to_metal_buffer(
+                intermediate, device, copy_back=True)
+
+            params=np.array(
+                [M, hidden_size, intermediate_size, group_size], dtype=np.uint32)
+            params_buf=_params_buffer(self.lib, device, params)
+
+            kernel_name="mmfp4_fused_moe_mlp_batched" if M > 1 else "mmfp4_fused_moe_mlp"
+
             # Grid calculation depends on kernel
             if M > 1:
                 # Batched kernel grid: [intermediate/32, 1, 1]
-                grid_x = (intermediate_size + 31) // 32
-                grid_y = 1
-                threads = 256 # 8 simdgroups
+                grid_x=(intermediate_size + 31) // 32
+                grid_y=1
+                threads=256  # 8 simdgroups
             else:
                 # Single token kernel grid: [1, 1, 1] - handles everything internally?
                 # No, check kernel source:
                 # uint tid [[thread_position_in_grid]]
                 # It seems to handle batch loop internally but grid is 1?
-                # "Dispatch 8 simdgroups per threadgroup"
                 # "Process intermediate dimension in tiles"
                 # Actually, M=1 kernel seems to be designed for single threadgroup?
                 # "Process each batch element" loop inside.
-                grid_x = 1
-                grid_y = 1
-                threads = 256
-            
+                grid_x=1
+                grid_y=1
+                threads=256
+
             dispatch_kernel(
                 self.lib,
                 function_name=kernel_name,
                 grid=(grid_x, grid_y, 1),
                 threadgroup=(threads, 1, 1),
-                buffers=[x_buf, gp_buf, up_buf, gs_buf, us_buf, inter_buf, params_buf],
+                buffers=[x_buf, gp_buf, up_buf, gs_buf,
+                         us_buf, inter_buf, params_buf],
                 wait=True
             )
-            
+
             # 2. Down Projection (MMFP4)
             # intermediate [M, intermediate] @ down [intermediate, hidden] -> [M, hidden]
             # down_packed is [intermediate/8, hidden]
-            
+
             # Use existing GEMM implementation
             # We can call mmfp4_gemm directly
             return self.mmfp4_gemm(intermediate, down_packed, down_scales, group_size)
@@ -3892,52 +4405,56 @@ if HAS_METAL and HAS_MPS:
             A: torch.Tensor,
             B_packed: torch.Tensor,
             B_scales: torch.Tensor,
-            group_size: int = 128,
+            group_size: int=128,
         ) -> torch.Tensor:
             """Optimized M=1 decode using decode_gemv_fp4 kernel.
-            
+
             This kernel uses TILE_N=256 with 2 columns per thread,
             achieving much better utilization than the 64x64 tile GEMM
             which wastes 98.4% of compute for M=1.
-            
+
             Expected speedup: ~3-4x for decode (M=1) cases.
             """
-            M, K = A.shape
-            K_packed, N = B_packed.shape
-            
-            # Ensure contiguous
-            A_contig = A.contiguous()
-            B_packed_contig = B_packed.contiguous()
-            B_scales_contig = B_scales.contiguous()
-            
-            # Output tensor
-            out = torch.empty((M, N), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            A_buf = _private_buffer_from_tensor(A_contig, self.lib, device, cache=False)
-            B_buf = _private_buffer_from_tensor(B_packed_contig, self.lib, device, cache=True)
-            S_buf = _private_buffer_from_tensor(B_scales_contig, self.lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
-            
-            # decode_gemv_fp4 kernel uses TILE_N=256
-            # Each threadgroup handles 256 columns with 128 threads (2 cols/thread)
-            TILE_N = 256
-            grid_x = (N + TILE_N - 1) // TILE_N
-            
-            # The kernel expects DecodeParams struct at buffer(4)
-            # struct DecodeParams { uint K; uint N; uint group_size; };
-            params = np.array([K, N, group_size], dtype=np.uint32)
-            params_buf = _params_buffer(self.lib, device, params)
-            
+            M, K=A.shape
+            K_packed, N=B_packed.shape
+
+            # Allocate output
+            out=torch.empty((M, N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            A_half=A.half().contiguous()
+            A_buf=_private_buffer_from_tensor(
+                A_half, self.lib, device, cache=False)
+            # IMPORTANT: cache=False for ALL buffers - see comment in mmfp4_gemm
+            B_buf=_private_buffer_from_tensor(
+                B_packed, self.lib, device, cache=False)
+            S_buf=_private_buffer_from_tensor(
+                B_scales, self.lib, device, cache=False)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+            # Parameter buffers
+            M_buf=_params_buffer(
+                self.lib, device, np.array([M], dtype=np.uint32))
+            N_buf=_params_buffer(
+                self.lib, device, np.array([N], dtype=np.uint32))
+            K_buf=_params_buffer(
+                self.lib, device, np.array([K], dtype=np.uint32))
+            gs_buf=_params_buffer(self.lib, device, np.array(
+                [group_size], dtype=np.uint32))
+
+            # Grid: each threadgroup handles 512 columns
+            grid_n=(N + 511) // 512
+
             dispatch_kernel(
                 self.lib,
-                function_name="decode_gemv_fp4",
-                grid=(grid_x, 1, 1),
+                function_name="decode_gemv_fp4_wide",
+                grid=(grid_n, 1, 1),
                 threadgroup=(128, 1, 1),
-                buffers=[A_buf, B_buf, S_buf, out_buf, params_buf],
-                wait=True
+                buffers=[A_buf, B_buf, S_buf, out_buf,
+                         M_buf, N_buf, K_buf, gs_buf],
+                wait=True,
             )
-            
+
             return out
 
         def mmfp4_gemm(
@@ -3945,18 +4462,18 @@ if HAS_METAL and HAS_MPS:
             A: torch.Tensor,
             B_packed: torch.Tensor,
             B_scales: torch.Tensor,
-            group_size: int = 128,
+            group_size: int=128,
         ) -> torch.Tensor:
             """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
-            M, K = A.shape
-            K_packed, N = B_packed.shape
-            
+            M, K=A.shape
+            K_packed, N=B_packed.shape
+
             # Validate shapes
             if K != K_packed * 8:
                 # Check if it matches after transpose (B is [K/8, N])
                 # In kernel signature: B_packed [[buffer(1)]]
                 pass
-            
+
             # Dispatch
             if M == 1:
                 # Use specialized decode GEMV kernel for M=1
@@ -3964,49 +4481,62 @@ if HAS_METAL and HAS_MPS:
                 # decode_gemv_fp4 uses TILE_N=256 with optimized memory access
                 # NOTE: No padding needed for M=1 - kernel handles single row directly
                 return self.decode_gemv_fp4(A, B_packed, B_scales, group_size)
-            
+
             # Pad A to TILE_M if M < TILE_M to avoid out-of-bounds memory access
             # The kernel loads TILE_M x TILE_K tiles and boundary checks can still
             # cause issues with small M when threads read beyond buffer bounds
-            TILE_M = 64
-            M_padded = M
+            TILE_M=64
+            M_padded=M
             if M < TILE_M:
-                A, _ = pad_torch_2d(A, rows_multiple=TILE_M, cols_multiple=1, value=0.0)
-                M_padded = TILE_M
-            
-            out = torch.empty((M, N), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            A_buf = _private_buffer_from_tensor(A, self.lib, device, cache=False)
-            B_buf = _private_buffer_from_tensor(B_packed, self.lib, device, cache=True)
-            S_buf = _private_buffer_from_tensor(B_scales, self.lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
-            
-            n_groups = K // group_size
-            
+                A, _=pad_torch_2d(A, rows_multiple=TILE_M,
+                                    cols_multiple=1, value=0.0)
+                M_padded=TILE_M
+
+            out=torch.empty((M, N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            A_buf=_private_buffer_from_tensor(
+                A, self.lib, device, cache=False)
+            # IMPORTANT: cache=False for ALL buffers when called via mmfp4_linear
+            # because _rowpacked_to_gpu_layout creates temporary tensors that can
+            # reuse memory addresses, causing data_ptr() collisions in the cache.
+            B_buf=_private_buffer_from_tensor(
+                B_packed, self.lib, device, cache=False)
+            S_buf=_private_buffer_from_tensor(
+                B_scales, self.lib, device, cache=False)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+            n_groups=K // group_size
+
             # Buffers for params
-            M_buf = _params_buffer(self.lib, device, np.array([M], dtype=np.uint32))
-            K_buf = _params_buffer(self.lib, device, np.array([K], dtype=np.uint32))
-            N_buf = _params_buffer(self.lib, device, np.array([N], dtype=np.uint32))
-            gs_buf = _params_buffer(self.lib, device, np.array([group_size], dtype=np.uint32))
-            ng_buf = _params_buffer(self.lib, device, np.array([n_groups], dtype=np.uint32))
-            
+            M_buf=_params_buffer(
+                self.lib, device, np.array([M], dtype=np.uint32))
+            K_buf=_params_buffer(
+                self.lib, device, np.array([K], dtype=np.uint32))
+            N_buf=_params_buffer(
+                self.lib, device, np.array([N], dtype=np.uint32))
+            gs_buf=_params_buffer(self.lib, device, np.array(
+                [group_size], dtype=np.uint32))
+            ng_buf=_params_buffer(
+                self.lib, device, np.array([n_groups], dtype=np.uint32))
+
             # Standard GEMM path for M > 1
             # Standard GEMM path
-            tile_n = 64
-            tile_m = 64
-            grid_x = (N + tile_n - 1) // tile_n
-            grid_y = (M_padded + tile_m - 1) // tile_m
-            
+            tile_n=64
+            tile_m=64
+            grid_x=(N + tile_n - 1) // tile_n
+            grid_y=(M_padded + tile_m - 1) // tile_m
+
             dispatch_kernel(
                 self.lib,
                 function_name="mmfp4_gemm",
                 grid=(grid_x, grid_y, 1),
                 threadgroup=(128, 1, 1),
-                buffers=[A_buf, B_buf, S_buf, out_buf, M_buf, K_buf, N_buf, gs_buf, ng_buf],
+                buffers=[A_buf, B_buf, S_buf, out_buf,
+                         M_buf, K_buf, N_buf, gs_buf, ng_buf],
                 wait=True
             )
-            
+
             return out
 
         def decode_gemv_fp4(
@@ -4014,96 +4544,110 @@ if HAS_METAL and HAS_MPS:
             A: torch.Tensor,
             B_packed: torch.Tensor,
             B_scales: torch.Tensor,
-            group_size: int = 128,
+            group_size: int=128,
         ) -> torch.Tensor:
             """Decode GEMV for M=1 using optimized decode kernel.
 
-            Routes to the decode_gemv_fp4 kernel which uses TILE_N=512 for
+            Routes to the decode_gemv_fp4 kernel which uses TILE_N=256 for
             ~3-4x speedup over standard GEMM for single-token decode.
 
             Args:
-                A: Activation vector [K] or [1, K]. MPS tensor.
+                A: Input tensor [K] or [1, K]. MPS tensor.
                 B_packed: Packed FP4 weights [K/8, N] as uint32. MPS tensor.
                 B_scales: Per-group scales [K/group_size, N]. MPS tensor.
-                group_size: Number of K-elements per quantization group.
+                group_size: Quantization group size (default 128).
 
             Returns:
                 Output vector [N] or [1, N] depending on input shape. MPS tensor.
             """
-            M, K = A.shape
-            K_packed, N = B_packed.shape
-            
+            M, K=A.shape
+            K_packed, N=B_packed.shape
+
             # Allocate output
-            out = torch.empty((M, N), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            A_half = A.half().contiguous()
-            A_buf = _private_buffer_from_tensor(A_half, self.lib, device, cache=False)
-            B_buf = _private_buffer_from_tensor(B_packed, self.lib, device, cache=True)
-            S_buf = _private_buffer_from_tensor(B_scales, self.lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
-            
+            out=torch.empty((M, N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            A_half=A.half().contiguous()
+            A_buf=_private_buffer_from_tensor(
+                A_half, self.lib, device, cache=False)
+            # IMPORTANT: cache=False for ALL buffers - see comment in mmfp4_gemm
+            B_buf=_private_buffer_from_tensor(
+                B_packed, self.lib, device, cache=False)
+            S_buf=_private_buffer_from_tensor(
+                B_scales, self.lib, device, cache=False)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
             # Parameter buffers
-            M_buf = _params_buffer(self.lib, device, np.array([M], dtype=np.uint32))
-            N_buf = _params_buffer(self.lib, device, np.array([N], dtype=np.uint32))
-            K_buf = _params_buffer(self.lib, device, np.array([K], dtype=np.uint32))
-            gs_buf = _params_buffer(self.lib, device, np.array([group_size], dtype=np.uint32))
-            
+            M_buf=_params_buffer(
+                self.lib, device, np.array([M], dtype=np.uint32))
+            N_buf=_params_buffer(
+                self.lib, device, np.array([N], dtype=np.uint32))
+            K_buf=_params_buffer(
+                self.lib, device, np.array([K], dtype=np.uint32))
+            gs_buf=_params_buffer(self.lib, device, np.array(
+                [group_size], dtype=np.uint32))
+
             # Grid: each threadgroup handles 512 columns
-            grid_n = (N + 511) // 512
-            
+            grid_n=(N + 511) // 512
+
             dispatch_kernel(
                 self.lib,
                 function_name="decode_gemv_fp4_wide",
                 grid=(grid_n, 1, 1),
                 threadgroup=(128, 1, 1),
-                buffers=[A_buf, B_buf, S_buf, out_buf, M_buf, N_buf, K_buf, gs_buf],
+                buffers=[A_buf, B_buf, S_buf, out_buf,
+                         M_buf, N_buf, K_buf, gs_buf],
                 wait=True,
             )
-            
+
             return out
 
         def dequantize_mmfp4(
             self,
             packed: torch.Tensor,
             scales: torch.Tensor,
-            group_size: int = 128,
+            group_size: int=128,
         ) -> torch.Tensor:
             """Dequantize MMFP4 packed weights to FP16 [K, N]."""
-            K_packed, N = packed.shape
-            K = K_packed * 8
-            
-            out = torch.empty((K, N), dtype=torch.float16, device="mps")
-            
-            device = self.lib.device
-            p_buf = _private_buffer_from_tensor(packed, self.lib, device, cache=True)
-            s_buf = _private_buffer_from_tensor(scales, self.lib, device, cache=True)
-            out_buf = mps_tensor_to_metal_buffer(out, device, copy_back=True)
-            
-            K_buf = _params_buffer(self.lib, device, np.array([K], dtype=np.uint32))
-            N_buf = _params_buffer(self.lib, device, np.array([N], dtype=np.uint32))
-            gs_buf = _params_buffer(self.lib, device, np.array([group_size], dtype=np.uint32))
-            
+            K_packed, N=packed.shape
+            K=K_packed * 8
+
+            out=torch.empty((K, N), dtype=torch.float16, device="mps")
+
+            device=self.lib.device
+            p_buf=_private_buffer_from_tensor(
+                packed, self.lib, device, cache=True)
+            s_buf=_private_buffer_from_tensor(
+                scales, self.lib, device, cache=True)
+            out_buf=mps_tensor_to_metal_buffer(out, device, copy_back=True)
+
+            K_buf=_params_buffer(
+                self.lib, device, np.array([K], dtype=np.uint32))
+            N_buf=_params_buffer(
+                self.lib, device, np.array([N], dtype=np.uint32))
+            gs_buf=_params_buffer(self.lib, device, np.array(
+                [group_size], dtype=np.uint32))
+
             # Grid: (N, K/8)
-            grid_x = N
-            grid_y = K // 8
-            
+            grid_x=N
+            grid_y=K // 8
+
             dispatch_kernel(
                 self.lib,
                 function_name="dequantize_mmfp4",
                 grid=(grid_x, grid_y, 1),
-                threadgroup=(1, 1, 1), # 1 thread per element? check shader
+                threadgroup=(1, 1, 1),  # 1 thread per element? check shader
                 buffers=[p_buf, s_buf, out_buf, K_buf, N_buf, gs_buf],
                 wait=True
             )
             return out
 
-    _mmfp4_kernels: MetalKernels | None = None
+    _mmfp4_kernels: MetalKernels | None=None
 
     def _get_mmfp4_kernels() -> MetalKernels:
         global _mmfp4_kernels
         if _mmfp4_kernels is None:
-            _mmfp4_kernels = MetalKernels()
+            _mmfp4_kernels=MetalKernels()
         return _mmfp4_kernels
 
     def fused_gate_up_gemm(
@@ -4112,9 +4656,22 @@ if HAS_METAL and HAS_MPS:
         gate_scales: torch.Tensor,
         up_packed: torch.Tensor,
         up_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         return _get_mmfp4_kernels().fused_gate_up_gemm(
+            x, gate_packed, gate_scales, up_packed, up_scales, group_size
+        )
+
+    def mmfp4_fused_gate_up(
+        x: torch.Tensor,
+        gate_packed: torch.Tensor,
+        gate_scales: torch.Tensor,
+        up_packed: torch.Tensor,
+        up_scales: torch.Tensor,
+        group_size: int=128,
+    ) -> torch.Tensor:
+        """Compute `silu(gate_proj(x)) * up_proj(x)` with one fused MMFP4 dispatch."""
+        return _get_mmfp4_kernels().mmfp4_fused_gate_up(
             x, gate_packed, gate_scales, up_packed, up_scales, group_size
         )
 
@@ -4131,14 +4688,15 @@ if HAS_METAL and HAS_MPS:
         group_size: int,
     ) -> torch.Tensor:
         return _get_mmfp4_kernels().fused_moe_mlp(
-            x, gate_packed, up_packed, down_packed, gate_scales, up_scales, down_scales,
+            x, gate_packed, up_packed, down_packed,
+            gate_scales, up_scales, down_scales,
             hidden_size, intermediate_size, group_size
         )
 
     def dequantize_mmfp4(
         packed: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """Dequantize MMFP4 packed weights to FP16 [K, N]."""
         return _get_mmfp4_kernels().dequantize_mmfp4(packed, scales, group_size)
@@ -4147,7 +4705,7 @@ if HAS_METAL and HAS_MPS:
         A: torch.Tensor,
         B_packed: torch.Tensor,
         B_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
         return _get_mmfp4_kernels().mmfp4_gemm(A, B_packed, B_scales, group_size)
@@ -4156,12 +4714,12 @@ if HAS_METAL and HAS_MPS:
         A: torch.Tensor,
         B_packed: torch.Tensor,
         B_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> torch.Tensor:
         """Optimized M=1 decode GEMV: A[1,K] @ dequant(B_packed[K/8,N], B_scales).
 
-        Uses specialized decode_gemv_fp4 kernel with TILE_N=256 for ~1.5-2x
-        speedup over standard GEMM for single-token decode scenarios.
+        Uses specialized decode_gemv_fp4 kernel with TILE_N=256 for
+        ~1.5-2x speedup over standard GEMM for single-token decode scenarios.
 
         Args:
             A: Input tensor [1, K] or [K]. MPS tensor.
@@ -4182,7 +4740,7 @@ if HAS_METAL and HAS_MPS:
         Wk_scales: torch.Tensor,
         Wv_packed: torch.Tensor,
         Wv_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused MMFP4 QKV projection: computes Q, K, V in a single kernel launch.
 
@@ -4219,7 +4777,7 @@ if HAS_METAL and HAS_MPS:
         K_scales: torch.Tensor,
         V_packed: torch.Tensor,
         V_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused MMFP4 QKV projection: compute Q, K, V projections in one kernel.
 
@@ -4248,30 +4806,33 @@ if HAS_METAL and HAS_MPS:
 
         # Normalize input shape
         if A.ndim == 1:
-            A = A.reshape(1, -1)
+            A=A.reshape(1, -1)
 
         if A.dim() != 2:
             raise ValueError(f"A must be 2D [M, K], got shape {A.shape}")
 
-        M, K = A.shape
+        M, K=A.shape
 
         # Validate packed weight shapes
-        K_packed_q, Nq = Q_packed.shape
-        K_packed_k, Nk = K_packed.shape
-        K_packed_v, Nv = V_packed.shape
+        K_packed_q, Nq=Q_packed.shape
+        K_packed_k, Nk=K_packed.shape
+        K_packed_v, Nv=V_packed.shape
 
         if K != K_packed_q * FP4_PER_UINT:
-            raise ValueError(f"Q weights: K mismatch {K} vs {K_packed_q * FP4_PER_UINT}")
+            raise ValueError(
+                f"Q weights: K mismatch {K} vs {K_packed_q * FP4_PER_UINT}")
         if K != K_packed_k * FP4_PER_UINT:
-            raise ValueError(f"K weights: K mismatch {K} vs {K_packed_k * FP4_PER_UINT}")
+            raise ValueError(
+                f"K weights: K mismatch {K} vs {K_packed_k * FP4_PER_UINT}")
         if K != K_packed_v * FP4_PER_UINT:
-            raise ValueError(f"V weights: K mismatch {K} vs {K_packed_v * FP4_PER_UINT}")
+            raise ValueError(
+                f"V weights: K mismatch {K} vs {K_packed_v * FP4_PER_UINT}")
 
         # For M > 1, fall back to separate GEMM calls
         if M > 1:
-            Q_out = mmfp4_gemm(A, Q_packed, Q_scales, group_size)
-            K_out = mmfp4_gemm(A, K_packed, K_scales, group_size)
-            V_out = mmfp4_gemm(A, V_packed, V_scales, group_size)
+            Q_out=mmfp4_gemm(A, Q_packed, Q_scales, group_size)
+            K_out=mmfp4_gemm(A, K_packed, K_scales, group_size)
+            V_out=mmfp4_gemm(A, V_packed, V_scales, group_size)
             return Q_out, K_out, V_out
 
         # M=1 decode path - use fused kernel
@@ -4287,77 +4848,81 @@ if HAS_METAL and HAS_MPS:
         up: torch.Tensor,
     ) -> torch.Tensor:
         """Fused SwiGLU activation: gate * SiLU(up).
-        
+
         Uses a custom Metal kernel for MPS tensors to fuse the SiLU activation
         and element-wise multiplication into a single kernel dispatch. This
         reduces memory bandwidth by ~50% compared to separate operations.
-        
+
         Args:
             gate: Gate tensor [M, N] or [N] float16. MPS tensor.
             up: Up tensor [M, N] or [N] float16. MPS tensor.
-            
+
         Returns:
             Output tensor [M, N] or [N] float16: gate * SiLU(up)
         """
         require_mps()
-        
+
         # Validate inputs
         if gate.shape != up.shape:
-            raise ValueError(f"gate and up must have same shape, got {gate.shape} vs {up.shape}")
+            raise ValueError(
+                f"gate and up must have same shape, got {gate.shape} vs {up.shape}")
         if gate.dtype != torch.float16 or up.dtype != torch.float16:
-            raise ValueError(f"Inputs must be float16, got {gate.dtype} and {up.dtype}")
+            raise ValueError(
+                f"Inputs must be float16, got {gate.dtype} and {up.dtype}")
         if not gate.is_mps or not up.is_mps:
             raise ValueError("Inputs must be MPS tensors")
-        
+
         # Flatten to 2D for uniform handling
-        orig_shape = gate.shape
+        orig_shape=gate.shape
         if gate.dim() == 1:
-            gate = gate.unsqueeze(0)
-            up = up.unsqueeze(0)
-            squeeze_output = True
+            gate=gate.unsqueeze(0)
+            up=up.unsqueeze(0)
+            squeeze_output=True
         else:
-            squeeze_output = False
+            squeeze_output=False
             # Flatten all but last dimension
             if gate.dim() > 2:
-                gate = gate.reshape(-1, gate.shape[-1])
-                up = up.reshape(-1, up.shape[-1])
-        
-        M, N = gate.shape
-        
+                gate=gate.reshape(-1, gate.shape[-1])
+                up=up.reshape(-1, up.shape[-1])
+
+        M, N=gate.shape
+
         # Prepare output tensor
-        output = torch.empty_like(gate)
-        
+        output=torch.empty_like(gate)
+
         # Get Metal library
-        lib = get_default_library()
-        device = lib.device
-        
+        lib=get_default_library()
+        device=lib.device
+
         # Load and compile shader
-        shader_dir = Path(__file__).parent / "shaders"
-        shader_path = shader_dir / "swiglu_fused.metal"
+        shader_dir=Path(__file__).parent / "shaders"
+        shader_path=shader_dir / "swiglu_fused.metal"
         if not shader_path.exists():
             # Fallback to PyTorch implementation
             return (gate * torch.nn.functional.silu(up)).reshape(orig_shape)
-        
+
         _ensure_kernel_compiled(
             lib,
             "swiglu_fused",
             shader_path.read_text(encoding="utf-8"),
         )
-        
+
         # Create Metal buffers
-        gate_buf = mps_tensor_to_metal_buffer(gate.contiguous(), device, copy_back=False)
-        up_buf = mps_tensor_to_metal_buffer(up.contiguous(), device, copy_back=False)
-        out_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
-        
+        gate_buf=mps_tensor_to_metal_buffer(
+            gate.contiguous(), device, copy_back=False)
+        up_buf=mps_tensor_to_metal_buffer(
+            up.contiguous(), device, copy_back=False)
+        out_buf=mps_tensor_to_metal_buffer(output, device, copy_back=True)
+
         # Dimensions buffer
-        dims = np.array([M, N], dtype=np.uint32)
-        dims_buf = _params_buffer(lib, device, dims)
-        
+        dims=np.array([M, N], dtype=np.uint32)
+        dims_buf=_params_buffer(lib, device, dims)
+
         # Dispatch kernel
         # Grid: (N/256, M) - each threadgroup processes 256 columns, one per row
-        grid_x = (N + 255) // 256
-        grid_y = M
-        
+        grid_x=(N + 255) // 256
+        grid_y=M
+
         dispatch_kernel(
             lib,
             function_name="swiglu_fused",
@@ -4366,13 +4931,13 @@ if HAS_METAL and HAS_MPS:
             buffers=[gate_buf, up_buf, out_buf, dims_buf],
             wait=True,
         )
-        
+
         # Reshape output to match input
         if squeeze_output:
-            output = output.squeeze(0)
+            output=output.squeeze(0)
         elif len(orig_shape) != 2:
-            output = output.reshape(orig_shape)
-            
+            output=output.reshape(orig_shape)
+
         return output
 
     def fused_moe_mlp(
@@ -4390,32 +4955,34 @@ if HAS_METAL and HAS_MPS:
     ) -> torch.Tensor:
         """Fused MoE MLP kernel dispatch."""
         require_mps()
-        
+
         # Flatten input
         if hidden_states.dim() == 3:
-            batch, seq, hidden = hidden_states.shape
-            M = batch * seq
+            batch, seq, hidden=hidden_states.shape
+            M=batch * seq
         else:
-            M, hidden = hidden_states.shape
-            batch, seq = M, 1
-            
-        x = hidden_states.reshape(M, hidden).half().contiguous()
-        
+            M, hidden=hidden_states.shape
+            batch, seq=M, 1
+
+        x=hidden_states.reshape(M, hidden).half().contiguous()
+
         # Determine kernel to use
         if M == 1:
-            kernel_name = "mmfp4_fused_moe_mlp"
+            kernel_name="mmfp4_fused_moe_mlp"
         elif M == 8:
-            kernel_name = "mmfp4_fused_moe_mlp_batched"
+            kernel_name="mmfp4_fused_moe_mlp_batched"
         else:
-            return None # Fallback to standard path
-        
-        device = self.lib.device
-        
+            return None  # Fallback to standard path
+
+        device=self.lib.device
+
         # Buffers
-        x_buf = _private_buffer_from_tensor(x, self.lib, device, cache=False)
-        gate_p_buf = _private_buffer_from_tensor(gate_packed, self.lib, device, cache=True)
-        up_p_buf = _private_buffer_from_tensor(up_packed, self.lib, device, cache=True)
-        # Down projection is separate in this kernel? 
+        x_buf=_private_buffer_from_tensor(x, self.lib, device, cache=False)
+        gate_p_buf=_private_buffer_from_tensor(
+            gate_packed, self.lib, device, cache=True)
+        up_p_buf=_private_buffer_from_tensor(
+            up_packed, self.lib, device, cache=True)
+        # Down projection is separate in this kernel?
         # Wait, mmfp4_fused_moe.metal: `mmfp4_fused_moe_mlp`
         # It computes `intermediate_out`. It does NOT do down projection.
         # It computes Gate/Up -> SiLU -> Mul -> Intermediate.
@@ -4428,35 +4995,41 @@ if HAS_METAL and HAS_MPS:
         # `MMFP4Expert` code:
         # output = _fused_moe_mlp_kernel(x, gate..., down..., ...)
         # So the Python wrapper MUST handle down projection.
-        
+
         # Okay, so this function should run the fused gate/up kernel, then run the down kernel.
-        
+
         # 1. Gate/Up + Activation
-        intermediate = torch.empty((M, intermediate_size), dtype=torch.float16, device="mps")
-        inter_buf = mps_tensor_to_metal_buffer(intermediate, device, copy_back=False)
-        
-        gate_s_buf = _private_buffer_from_tensor(gate_scales, self.lib, device, cache=True)
-        up_s_buf = _private_buffer_from_tensor(up_scales, self.lib, device, cache=True)
-        
-        dims = np.array([M, hidden_size, intermediate_size, group_size], dtype=np.uint32)
-        dims_buf = _params_buffer(self.lib, device, dims)
-        
+        intermediate=torch.empty(
+            (M, intermediate_size), dtype=torch.float16, device="mps")
+        inter_buf=mps_tensor_to_metal_buffer(
+            intermediate, device, copy_back=False)
+
+        gate_s_buf=_private_buffer_from_tensor(
+            gate_scales, self.lib, device, cache=True)
+        up_s_buf=_private_buffer_from_tensor(
+            up_scales, self.lib, device, cache=True)
+
+        dims=np.array([M, hidden_size, intermediate_size,
+                        group_size], dtype=np.uint32)
+        dims_buf=_params_buffer(self.lib, device, dims)
+
         # Dispatch Gate/Up
         if kernel_name == "mmfp4_fused_moe_mlp_batched":
             # Grid: intermediate / 32
-            grid_x = (intermediate_size + 31) // 32
+            grid_x=(intermediate_size + 31) // 32
             dispatch_kernel(
                 self.lib,
                 function_name=kernel_name,
                 grid=(grid_x, 1, 1),
                 threadgroup=(256, 1, 1),
-                buffers=[x_buf, gate_p_buf, up_p_buf, gate_s_buf, up_s_buf, inter_buf, dims_buf],
+                buffers=[x_buf, gate_p_buf, up_p_buf,
+                         gate_s_buf, up_s_buf, inter_buf, dims_buf],
                 wait=False,
             )
         else:
             # Grid: M (batch), intermediate (tiled)
             # TILE_SIZE=1024
-            grid_x = 1 # ? The kernel iterates dims[0]. 
+            grid_x=1  # ? The kernel iterates dims[0].
             # Original kernel seems to assume 1 threadgroup does it all? Or loops?
             # Let's assume M=1 dispatch for single token.
             dispatch_kernel(
@@ -4464,16 +5037,17 @@ if HAS_METAL and HAS_MPS:
                 function_name=kernel_name,
                 grid=(1, 1, 1),
                 threadgroup=(256, 1, 1),
-                buffers=[x_buf, gate_p_buf, up_p_buf, gate_s_buf, up_s_buf, inter_buf, dims_buf],
+                buffers=[x_buf, gate_p_buf, up_p_buf,
+                         gate_s_buf, up_s_buf, inter_buf, dims_buf],
                 wait=False,
             )
-            
+
         # 2. Down Projection (standard GEMM)
         # Input: intermediate [M, intermediate_size]
         # Weights: down_packed [intermediate/8, hidden]
         # Scales: down_scales [intermediate/group, hidden]
         # Output: [M, hidden]
-        
+
         # We can use `mmfp4_gemm` for this.
         # But we need to ensure intermediate is ready. `wait=True` on GEMM will handle it if on same queue.
         # However, `intermediate` is in `inter_buf` (MPS buffer).
@@ -4481,13 +5055,14 @@ if HAS_METAL and HAS_MPS:
         # `intermediate` tensor is backed by `inter_buf`.
         # If we didn't use `copy_back=True`, we might need to synchronize?
         # Metal command queue preserves order.
-        
+
         # Down proj
-        out = self.mmfp4_gemm(intermediate, down_packed, down_scales, group_size)
-        
+        out=self.mmfp4_gemm(intermediate, down_packed,
+                              down_scales, group_size)
+
         if batch * seq != M:
-            out = out.reshape(batch, seq, hidden_size)
-            
+            out=out.reshape(batch, seq, hidden_size)
+
         return out
 
         # Reshape outputs to match input shape
@@ -4530,74 +5105,74 @@ if HAS_METAL and HAS_MPS:
         """
 
         def __init__(self) -> None:
-            self._lib: MetalKernelLibrary | None = None
-            self._batch_state: Any = None
-            self._in_context = False
+            self._lib: MetalKernelLibrary | None=None
+            self._batch_state: Any=None
+            self._in_context=False
 
         def __enter__(self):
             """Enter the context and start batch dispatch mode."""
-            self._lib = get_default_library()
+            self._lib=get_default_library()
             # Start batch dispatch mode on the library
-            self._lib._batch_mode = True
-            self._lib._batch_command_buffer = self._lib.command_queue.commandBuffer()
-            self._lib._batch_encoder = self._lib._batch_command_buffer.computeCommandEncoder()
-            self._lib._batch_copy_backs = []
-            self._in_context = True
+            self._lib._batch_mode=True
+            self._lib._batch_command_buffer=self._lib.command_queue.commandBuffer()
+            self._lib._batch_encoder=self._lib._batch_command_buffer.computeCommandEncoder()
+            self._lib._batch_copy_backs=[]
+            self._in_context=True
             return self
 
         def __exit__(self, exc_type, exc_val, exc_tb):
             """Exit the context and commit the batched command buffer."""
-            self._in_context = False
-            
+            self._in_context=False
+
             if self._lib is not None and self._lib._batch_encoder is not None:
                 # End encoding and commit the batch
                 self._lib._batch_encoder.endEncoding()
                 self._lib._batch_command_buffer.commit()
                 self._lib._batch_command_buffer.waitUntilCompleted()
-                
+
                 # Handle any copy-back buffers
                 for item in self._lib._batch_copy_backs:
                     from .metal_dispatch import _copy_buffer_to_tensor
                     _copy_buffer_to_tensor(item.buffer, item.tensor)
-                
+
                 # Reset batch state
-                self._lib._batch_mode = False
-                self._lib._batch_encoder = None
-                self._lib._batch_command_buffer = None
-                self._lib._batch_copy_backs = []
-            
+                self._lib._batch_mode=False
+                self._lib._batch_encoder=None
+                self._lib._batch_command_buffer=None
+                self._lib._batch_copy_backs=[]
+
             return False
 
-        @property
+        @ property
         def lib(self) -> MetalKernelLibrary | None:
             """Access the library being used for batching."""
             return self._lib
 
         def commit(self) -> None:
             """Manually commit the current batch and start a new one.
-            
+
             Useful for periodic synchronization during long sequences of kernel launches.
             """
             if not self._in_context or self._lib is None:
                 raise RuntimeError("Cannot commit outside of context")
-            
+
             if self._lib._batch_encoder is not None:
                 # End current batch
                 self._lib._batch_encoder.endEncoding()
                 self._lib._batch_command_buffer.commit()
                 self._lib._batch_command_buffer.waitUntilCompleted()
-                
+
                 # Handle copy-backs
                 for item in self._lib._batch_copy_backs:
                     from .metal_dispatch import _copy_buffer_to_tensor
                     _copy_buffer_to_tensor(item.buffer, item.tensor)
-                self._lib._batch_copy_backs = []
-                
-                # Start new batch
-                self._lib._batch_command_buffer = self._lib.command_queue.commandBuffer()
-                self._lib._batch_encoder = self._lib._batch_command_buffer.computeCommandEncoder()
+                self._lib._batch_copy_backs=[]
 
-    @contextmanager
+                # Start new batch
+                self._lib._batch_command_buffer=self._lib.command_queue.commandBuffer()
+                self._lib._batch_encoder=self._lib._batch_command_buffer.computeCommandEncoder()
+
+    @ contextmanager
     def reusable_command_buffer():
         """Context manager for batching multiple kernel dispatches.
 
@@ -4623,7 +5198,7 @@ if HAS_METAL and HAS_MPS:
             - Sequential dispatch overhead: N × 100μs
             - Batched dispatch overhead: ~15μs (20x reduction for N=3)
         """
-        lib = get_default_library()
+        lib=get_default_library()
         with lib.batch_dispatch(wait=True):
             yield
 
@@ -4672,7 +5247,7 @@ if HAS_METAL and HAS_MPS:
                 raise TypeError(f"Item {i} is not callable, got {type(func)}")
 
         # Use batch dispatch for optimization
-        results: list[Any] = []
+        results: list[Any]=[]
 
         with get_default_library().batch_dispatch(wait=True):
             for func in funcs:
@@ -4688,7 +5263,7 @@ if HAS_METAL and HAS_MPS:
         Wk_scales: torch.Tensor,
         Wv_packed: torch.Tensor,
         Wv_scales: torch.Tensor,
-        group_size: int = 128,
+        group_size: int=128,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Fused MMFP4 QKV projection for decode phase (M=1) or batched (M>1).
 
@@ -4703,11 +5278,11 @@ if HAS_METAL and HAS_MPS:
         Args:
             A: Input activations [M, K] float16. MPS tensor.
             Wq_packed: Packed FP4 Q weights [K/8, Nq] uint32. MPS tensor.
-            Wq_scales: Q scales [K/group_size, Nq] float16. MPS tensor.
+            Wq_scales: Per-group Q scales [K/group_size, Nq]. MPS tensor.
             Wk_packed: Packed FP4 K weights [K/8, Nk] uint32. MPS tensor.
-            Wk_scales: K scales [K/group_size, Nk] float16. MPS tensor.
+            Wk_scales: Per-group K scales [K/group_size, Nk]. MPS tensor.
             Wv_packed: Packed FP4 V weights [K/8, Nv] uint32. MPS tensor.
-            Wv_scales: V scales [K/group_size, Nv] float16. MPS tensor.
+            Wv_scales: Per-group V scales [K/group_size, Nv]. MPS tensor.
             group_size: Quantization group size (default 128).
 
         Returns:
@@ -4716,19 +5291,19 @@ if HAS_METAL and HAS_MPS:
         require_mps()
 
         # Get dimensions
-        orig_shape = A.shape
+        orig_shape=A.shape
         if A.dim() != 2:
             raise ValueError(f"A must be 2D [M, K], got shape {A.shape}")
 
-        M, K = orig_shape[0], orig_shape[1]
+        M, K=orig_shape[0], orig_shape[1]
 
         # Flatten to 2D for processing (already 2D, just ensure contiguous)
-        A_2d = A.half().contiguous()
+        A_2d=A.half().contiguous()
 
         # Validate weight shapes
-        Kq_packed, Nq = Wq_packed.shape
-        Kk_packed, Nk = Wk_packed.shape
-        Kv_packed, Nv = Wv_packed.shape
+        Kq_packed, Nq=Wq_packed.shape
+        Kk_packed, Nk=Wk_packed.shape
+        Kv_packed, Nv=Wv_packed.shape
 
         if Kq_packed * 8 != K or Kk_packed * 8 != K or Kv_packed * 8 != K:
             raise ValueError(
@@ -4737,19 +5312,20 @@ if HAS_METAL and HAS_MPS:
 
         # For M > 1, use separate GEMM calls (simpler, no kernel synchronization needed)
         if M > 1:
-            Q = mmfp4_gemm(A_2d, Wq_packed, Wq_scales, group_size)
-            K_out = mmfp4_gemm(A_2d, Wk_packed, Wk_scales, group_size)
-            V = mmfp4_gemm(A_2d, Wv_packed, Wv_scales, group_size)
+            Q=mmfp4_gemm(A_2d, Wq_packed, Wq_scales, group_size)
+            K_out=mmfp4_gemm(A_2d, Wk_packed, Wk_scales, group_size)
+            V=mmfp4_gemm(A_2d, Wv_packed, Wv_scales, group_size)
             return Q.reshape(*orig_shape[:-1], Nq), K_out.reshape(*orig_shape[:-1], Nk), V.reshape(*orig_shape[:-1], Nv)
 
         # M == 1: Use fused kernel for decode phase
-        lib = get_default_library()
+        lib=get_default_library()
 
         # Load and compile the fused QKV shader
-        shader_dir = Path(__file__).parent / "shaders"
-        qkv_shader_path = shader_dir / "mmfp4_fused_qkv.metal"
+        shader_dir=Path(__file__).parent / "shaders"
+        qkv_shader_path=shader_dir / "mmfp4_fused_qkv.metal"
         if not qkv_shader_path.exists():
-            raise FileNotFoundError(f"Shader file not found: {qkv_shader_path}")
+            raise FileNotFoundError(
+                f"Shader file not found: {qkv_shader_path}")
         _ensure_kernel_compiled(
             lib,
             "mmfp4_fused_qkv",
@@ -4757,33 +5333,39 @@ if HAS_METAL and HAS_MPS:
         )
 
         # Prepare output tensors
-        Q = torch.empty((M, Nq), dtype=torch.float16, device="mps")
-        K_out = torch.empty((M, Nk), dtype=torch.float16, device="mps")
-        V = torch.empty((M, Nv), dtype=torch.float16, device="mps")
+        Q=torch.empty((M, Nq), dtype=torch.float16, device="mps")
+        K_out=torch.empty((M, Nk), dtype=torch.float16, device="mps")
+        V=torch.empty((M, Nv), dtype=torch.float16, device="mps")
 
-        device = lib.device
+        device=lib.device
 
         # Create Metal buffers
-        A_buf = _private_buffer_from_tensor(A_2d, lib, device, cache=False)
-        Wq_buf = _private_buffer_from_tensor(Wq_packed.contiguous(), lib, device, cache=True)
-        Sq_buf = _private_buffer_from_tensor(Wq_scales.half().contiguous(), lib, device, cache=True)
-        Wk_buf = _private_buffer_from_tensor(Wk_packed.contiguous(), lib, device, cache=True)
-        Sk_buf = _private_buffer_from_tensor(Wk_scales.half().contiguous(), lib, device, cache=True)
-        Wv_buf = _private_buffer_from_tensor(Wv_packed.contiguous(), lib, device, cache=True)
-        Sv_buf = _private_buffer_from_tensor(Wv_scales.half().contiguous(), lib, device, cache=True)
+        A_buf=_private_buffer_from_tensor(A_2d, lib, device, cache=False)
+        Wq_buf=_private_buffer_from_tensor(
+            Wq_packed.contiguous(), lib, device, cache=True)
+        Sq_buf=_private_buffer_from_tensor(
+            Wq_scales.half().contiguous(), lib, device, cache=True)
+        Wk_buf=_private_buffer_from_tensor(
+            Wk_packed.contiguous(), lib, device, cache=True)
+        Sk_buf=_private_buffer_from_tensor(
+            Wk_scales.half().contiguous(), lib, device, cache=True)
+        Wv_buf=_private_buffer_from_tensor(
+            Wv_packed.contiguous(), lib, device, cache=True)
+        Sv_buf=_private_buffer_from_tensor(
+            Wv_scales.half().contiguous(), lib, device, cache=True)
 
-        Q_buf = mps_tensor_to_metal_buffer(Q, device, copy_back=True)
-        K_buf = mps_tensor_to_metal_buffer(K_out, device, copy_back=True)
-        V_buf = mps_tensor_to_metal_buffer(V, device, copy_back=True)
+        Q_buf=mps_tensor_to_metal_buffer(Q, device, copy_back=True)
+        K_buf=mps_tensor_to_metal_buffer(K_out, device, copy_back=True)
+        V_buf=mps_tensor_to_metal_buffer(V, device, copy_back=True)
 
         # Params: [K, Nq, Nk, Nv, group_size]
-        params = np.array([K, Nq, Nk, Nv, group_size], dtype=np.uint32)
-        params_buf = _params_buffer(lib, device, params)
+        params=np.array([K, Nq, Nk, Nv, group_size], dtype=np.uint32)
+        params_buf=_params_buffer(lib, device, params)
 
         # Grid: total N dimension coverage (Nq + Nk + Nv)
-        total_n = Nq + Nk + Nv
-        tile_n = 64
-        grid_x = (total_n + tile_n - 1) // tile_n
+        total_n=Nq + Nk + Nv
+        tile_n=64
+        grid_x=(total_n + tile_n - 1) // tile_n
 
         dispatch_kernel(
             lib,

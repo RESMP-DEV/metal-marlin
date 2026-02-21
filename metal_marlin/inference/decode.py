@@ -679,58 +679,128 @@ def fused_qkv_projection(
 
 def quantized_kv_attention(
     q: torch.Tensor,  # [batch, num_heads, 1, head_dim]
-    k_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
-    v_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, head_dim] - quantized uint8
-    k_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, 1]
-    v_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, 1]
+    k_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, dim_or_packed_dim]
+    v_cache: torch.Tensor,  # [batch, num_kv_heads, seq_len, dim_or_packed_dim]
+    k_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, groups]
+    v_scales: torch.Tensor,  # [batch, num_kv_heads, seq_len, groups]
     num_heads: int,
     num_kv_heads: int,
     attention_mask: torch.Tensor | None = None,
+    quant_dtype: Literal["fp8", "int8", "fp4"] = "fp8",
+    group_size: int = 128,
+    use_fused_kernel: bool = True,
 ) -> torch.Tensor:
     """Scaled dot-product attention with quantized KV cache.
 
-    Performs fused attention computation directly on FP8/INT8 quantized
-    KV cache, avoiding the need to dequantize the full cache.
+    Supports FP8/INT8/FP4 cache layouts and can dispatch a fused Metal
+    dequant+attention decode kernel for FP4/INT8 paths.
 
     Memory savings:
     - FP8: 2x reduction vs BF16
     - INT8: 2x reduction vs BF16
+    - FP4: 4x reduction vs BF16
 
     Args:
         q: Query tensor [batch, num_heads, 1, head_dim].
-        k_cache: Quantized key cache [batch, num_kv_heads, seq_len, head_dim].
-        v_cache: Quantized value cache [batch, num_kv_heads, seq_len, head_dim].
-        k_scales: Per-position K scales [batch, num_kv_heads, seq_len, 1].
-        v_scales: Per-position V scales [batch, num_kv_heads, seq_len, 1].
+        k_cache: Quantized key cache.
+        v_cache: Quantized value cache.
+        k_scales: Per-position K scales.
+        v_scales: Per-position V scales.
         num_heads: Number of query heads.
         num_kv_heads: Number of KV heads.
         attention_mask: Optional attention mask.
+        quant_dtype: KV quant format ("fp8", "int8", "fp4").
+        group_size: Quantization group size for scales.
+        use_fused_kernel: Use fused Metal decode kernel for fp4/int8 when available.
 
     Returns:
         Attention output [batch, num_heads, 1, head_dim].
     """
     require_mps("quantized_kv_attention")
+    if quant_dtype not in {"fp8", "int8", "fp4"}:
+        raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
+    if group_size <= 0:
+        raise ValueError("group_size must be > 0")
 
-    head_dim = q.shape[3]
+    batch_size, _, _, head_dim = q.shape
 
-    # Dequantize K and V using exact inverse of quantization formula:
-    # Quantization: quant = round((value / max) * 127) + 128
-    # where scale = max / 448 (FP8 E4M3 max value is 448)
-    # Inverse: value = (quant - 128) / 127 * max = (quant - 128) / 127 * scale * 448
-    k_scale_f = k_scales.to(torch.float32)
-    v_scale_f = v_scales.to(torch.float32)
+    # Fast path: decode-only fused Metal kernel for FP4/INT8.
+    if (
+        use_fused_kernel
+        and quant_dtype in {"fp4", "int8"}
+        and q.device.type == "mps"
+        and q.shape[2] == 1
+        and k_cache.shape[0] == batch_size
+        and v_cache.shape[0] == batch_size
+    ):
+        try:
+            from ..kernels import quantized_kv_attention_decode
 
-    # Center around 128 (the zero point)
-    centered_k = k_cache.float() - 128.0
-    centered_v = v_cache.float() - 128.0
+            outputs: list[torch.Tensor] = []
+            for b in range(batch_size):
+                q_b = q[b, :, 0, :]  # [num_heads, head_dim]
+                k_b = k_cache[b].permute(1, 0, 2).contiguous()  # [seq_len, num_kv_heads, ...]
+                v_b = v_cache[b].permute(1, 0, 2).contiguous()
+                ks_b = k_scales[b].permute(1, 0, 2).contiguous()  # [seq_len, num_kv_heads, groups]
+                vs_b = v_scales[b].permute(1, 0, 2).contiguous()
+                out_b = quantized_kv_attention_decode(
+                    query=q_b,
+                    k_cache=k_b,
+                    v_cache=v_b,
+                    k_scales=ks_b,
+                    v_scales=vs_b,
+                    num_heads_q=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    quant_dtype=quant_dtype,
+                    group_size=group_size,
+                )
+                outputs.append(out_b)
+            fused_out = torch.stack(outputs, dim=0)  # [batch, num_heads, head_dim]
+            return fused_out.unsqueeze(2)
+        except Exception:
+            # Fallback below if fused dispatch is unavailable.
+            pass
 
-    # Exact inverse: (quant - 128) / 127 * scale * 448
-    k_dequant = centered_k / 127.0 * k_scale_f * 448.0
-    v_dequant = centered_v / 127.0 * v_scale_f * 448.0
+    def _expand_scales(scales: torch.Tensor, target_dim: int) -> torch.Tensor:
+        # scales: [B, H, S, G]
+        if scales.shape[-1] == target_dim:
+            return scales.to(torch.float32)
+        expanded = (
+            scales.to(torch.float32)
+            .unsqueeze(-1)
+            .expand(*scales.shape, group_size)
+            .reshape(*scales.shape[:-1], -1)
+        )
+        return expanded[..., :target_dim]
 
-    # Convert to bf16 for attention computation
-    k_dequant = k_dequant.to(torch.bfloat16)
-    v_dequant = v_dequant.to(torch.bfloat16)
+    def _dequantize_cache(cache: torch.Tensor, scales: torch.Tensor, mode: str) -> torch.Tensor:
+        if mode == "fp8":
+            centered = cache.to(torch.float32) - 128.0
+            return centered / 127.0 * _expand_scales(scales, cache.shape[-1]) * 448.0
+        if mode == "int8":
+            if cache.dtype == torch.int8:
+                signed = cache.to(torch.float32)
+            else:
+                signed = cache.to(torch.float32) - 128.0
+            return signed * _expand_scales(scales, cache.shape[-1])
+
+        # FP4 packed: [B, H, S, D/2] -> [B, H, S, D]
+        packed_dim = cache.shape[-1]
+        expanded_dim = packed_dim * 2
+        low = (cache & 0x0F).to(torch.float32) - 8.0
+        high = ((cache >> 4) & 0x0F).to(torch.float32) - 8.0
+        vals = torch.empty(
+            (*cache.shape[:-1], expanded_dim),
+            dtype=torch.float32,
+            device=cache.device,
+        )
+        vals[..., 0::2] = low
+        vals[..., 1::2] = high
+        return vals * _expand_scales(scales, expanded_dim)
+
+    k_dequant = _dequantize_cache(k_cache, k_scales, quant_dtype).to(torch.bfloat16)
+    v_dequant = _dequantize_cache(v_cache, v_scales, quant_dtype).to(torch.bfloat16)
 
     # Expand K/V for GQA if needed
     if num_kv_heads < num_heads:
@@ -738,16 +808,14 @@ def quantized_kv_attention(
         k_dequant = k_dequant.repeat_interleave(repeat_factor, dim=1)
         v_dequant = v_dequant.repeat_interleave(repeat_factor, dim=1)
 
-    # Scaled dot-product attention
-    scale = 1.0 / math.sqrt(head_dim)
-    attn_weights = (q @ k_dequant.transpose(-2, -1)) * scale
+    attn_scale = 1.0 / math.sqrt(head_dim)
+    attn_weights = (q @ k_dequant.transpose(-2, -1)) * attn_scale
 
     if attention_mask is not None:
         attn_weights = attn_weights + attention_mask
 
     attn_weights = F.softmax(attn_weights, dim=-1)
     attn_output = attn_weights @ v_dequant
-
     return attn_output
 
 

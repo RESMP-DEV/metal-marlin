@@ -283,6 +283,7 @@ def mla_fused_attention_decode(
     o_weights_packed: torch.Tensor,
     o_scales: torch.Tensor,
     params: MLAAttentionParams,
+    prefer_glm4_kernel: bool = False,
 ) -> torch.Tensor:
     """Dispatch MLA fused attention decode kernel via Metal.
     
@@ -306,6 +307,7 @@ def mla_fused_attention_decode(
         o_weights_packed: Output projection weights (FP4 packed)
         o_scales: Output projection scales
         params: MLAAttentionParams configuration
+        prefer_glm4_kernel: Prefer precompiled GLM4 decode kernel when available
         
     Returns:
         output: Attention output [batch, seq_q, hidden_size]
@@ -317,9 +319,30 @@ def mla_fused_attention_decode(
     
     lib = _get_metal_library()
     
-    # Get kernel function
-    kernel_name = "mla_fused_attention_decode"
-    kernel = lib.get_function(kernel_name)
+    # Select decode kernel, preferring precompiled GLM4 specialization when requested.
+    kernel_candidates: tuple[str, ...]
+    if prefer_glm4_kernel:
+        kernel_candidates = (
+            "mla_fused_attention_decode_glm4",
+            "mla_fused_attention_decode",
+        )
+    else:
+        kernel_candidates = ("mla_fused_attention_decode",)
+
+    kernel_name: str | None = None
+    for candidate in kernel_candidates:
+        try:
+            lib.get_function(candidate)
+            kernel_name = candidate
+            break
+        except KeyError:
+            continue
+
+    if kernel_name is None:
+        raise KeyError(
+            "No MLA decode kernel available; tried: "
+            + ", ".join(kernel_candidates)
+        )
     
     # Prepare parameters buffer
     params_np = params.to_struct()

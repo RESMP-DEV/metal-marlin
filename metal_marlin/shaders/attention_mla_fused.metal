@@ -1213,7 +1213,7 @@ kernel void mla_write_kv_cache_quantized(
                 v_cache_fp8[cache_pos * kv_dim + d] = q;
             }
         }
-        else if (params.kv_quant_group_size == 3) {
+        else if (params.kv_quant_mode == 3) {
             // INT8 symmetric quantization
             // Compute scale per group
             threadgroup half group_max[64];

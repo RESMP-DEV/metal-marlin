@@ -8,6 +8,7 @@ Key exports:
 
 Quantized KV Cache:
 - QuantizedKVCache: FP8/INT8 storage with FP16 compute (numpy-based)
+- QuantizedKVCacheFP4Int8: Torch FP4/INT8 storage with optional fused attention path
 - compress_kv: Quantize K/V tensors for storage
 - decompress_kv: Dequantize K/V tensors for attention
 - ScalingStrategy: Per-head, per-token, or asymmetric scaling
@@ -60,12 +61,14 @@ from .prompt_cache import (
     hash_prefix,
     hash_tokens,
 )
+from .quantized_cache import QuantizedKVCache as QuantizedKVCacheFP4Int8
 from .quantized_kv import CacheStats, QuantizedKVCache, ScalingStrategy, compress_kv, decompress_kv
 
 __all__ = [
     # Quantized KV cache
     "CacheStats",
     "QuantizedKVCache",
+    "QuantizedKVCacheFP4Int8",
     "ScalingStrategy",
     "compress_kv",
     "decompress_kv",

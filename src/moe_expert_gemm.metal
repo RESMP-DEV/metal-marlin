@@ -90,7 +90,7 @@ inline half moe_dequant_fp4_bitwise(uint nibble) {
 
     half magnitude;
     if (exp_bits == 0) {
-        magnitude = half(man_bit) * half(0.25h);
+        magnitude = half(man_bit) * half(0.5h);
     } else {
         half power = half(1u << (exp_bits - 1));
         half mantissa = half(1.0h) + half(man_bit) * half(0.5h);

@@ -169,6 +169,14 @@ def load_config(model_path: str | Path) -> dict[str, Any]:
         return json.load(f)
 
 
+def _tensor_scalar_to_int_cpu(tensor: torch_typing.Tensor) -> int:
+    """Convert a scalar tensor to int via explicit CPU transfer."""
+    require_torch()
+    assert torch is not None
+    cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
+    return int(cpu_view[0])
+
+
 def dequantize_fp4_torch(
     packed: torch_typing.Tensor,
     scales: torch_typing.Tensor,
@@ -303,6 +311,8 @@ class MetalMarlinModel:
 
         # Build dequantized weight cache (lazy)
         self._dequant_cache: dict[str, torch_typing.Tensor] = {}
+        self._group_size_cache: dict[str, int] = {}
+        self._preload_group_sizes()
 
         # Check if fused kernels are available and working
         try:
@@ -357,6 +367,12 @@ class MetalMarlinModel:
 
         return cls(config, weights, device=device)
 
+    def _preload_group_sizes(self) -> None:
+        """Load all quantized group sizes to Python ints once at initialization."""
+        for name, tensor in self.weights.items():
+            if name.endswith(".group_size"):
+                self._group_size_cache[name] = _tensor_scalar_to_int_cpu(tensor)
+
     def _get_weight(self, name: str) -> torch_typing.Tensor:
         """Get a weight tensor, dequantizing if needed.
 
@@ -368,7 +384,6 @@ class MetalMarlinModel:
 
         # Check if this is a quantized weight
         scales_name = f"{name}.scales"
-        gs_name = f"{name}.group_size"
 
         if scales_name in self.weights:
             packed_name = name
@@ -378,11 +393,8 @@ class MetalMarlinModel:
             packed = self.weights[packed_name]
             scales = self.weights[scales_name]
 
-            # Get group size
-            if gs_name in self.weights:
-                group_size = int(self.weights[gs_name].item())
-            else:
-                group_size = self.group_size
+            # Cache host-side group_size to avoid repeated device->host scalar reads.
+            group_size = self._get_group_size(name)
 
             # Dequantize
             weight = dequantize_fp4_torch(packed, scales, group_size)
@@ -413,9 +425,7 @@ class MetalMarlinModel:
                     packed_name = f"{layer_name}.packed"
 
                 if packed_name in self.weights:
-                    group_size = self.group_size
-                    if gs_name in self.weights:
-                        group_size = int(self.weights[gs_name].item())
+                    group_size = self._get_group_size(layer_name)
 
                     packed = self.weights[packed_name]
                     scales = self.weights[scales_name]
@@ -433,6 +443,21 @@ class MetalMarlinModel:
 
         weight = self._get_weight(layer_name)
         return torch.nn.functional.linear(x, weight)
+
+    def _get_group_size(self, name: str) -> int:
+        """Return cached group_size for a quantized weight tensor."""
+        gs_name = f"{name}.group_size"
+        if gs_name in self._group_size_cache:
+            return self._group_size_cache[gs_name]
+
+        if gs_name not in self.weights:
+            self._group_size_cache[gs_name] = self.group_size
+            return self.group_size
+
+        # Fallback for dynamically added weights; normal path is preloaded in __init__.
+        group_size = _tensor_scalar_to_int_cpu(self.weights[gs_name])
+        self._group_size_cache[gs_name] = group_size
+        return group_size
 
     def _quantized_linear(
         self,

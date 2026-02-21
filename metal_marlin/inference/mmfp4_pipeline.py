@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from threading import Thread
@@ -10,7 +11,9 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .._compat import require_torch, torch
 from ..kv_cache import CacheConfig, KVCache, MLAKVCache
+from ..cache.quantized_cache import QuantizedKVCache
 from ..layers.mmfp4_mtp_head import verify_kernel
+from ..utils.buffer_pool import BufferPool
 
 # Try to import optimized draft engine
 try:
@@ -219,6 +222,7 @@ def _fused_sampling(
     _range_indices_buffer: torch_typing.Tensor | None = None,
     _keep_mask_buffer: torch_typing.Tensor | None = None,
     _active_size_scalar_buffer: torch_typing.Tensor | None = None,
+    _probs_sum_buffer: torch_typing.Tensor | None = None,
 ) -> torch_typing.Tensor:
     """Fused sampling kernel (argmax + topk + topp).
 
@@ -253,7 +257,30 @@ def _fused_sampling(
         Sampled token IDs [batch, 1]
     """
     if temperature <= 0:
-        # Greedy decoding (argmax) - single kernel launch
+        # Greedy decode path can reuse top-k buffers for allocation-free argmax.
+        if (
+            _topk_buffer is not None
+            and _topk_indices_buffer is not None
+            and _topk_buffer.shape[0] == probs.shape[0]
+            and _topk_indices_buffer.shape[0] == probs.shape[0]
+            and _topk_buffer.shape[1] >= 1
+            and _topk_indices_buffer.shape[1] >= 1
+        ):
+            topk_values_view = _topk_buffer[:, :1]
+            topk_indices_view = _topk_indices_buffer[:, :1]
+            torch.topk(
+                probs,
+                k=1,
+                dim=-1,
+                sorted=False,
+                out=(topk_values_view, topk_indices_view),
+            )
+            if out is not None:
+                out.copy_(topk_indices_view)
+                return out
+            return topk_indices_view
+
+        # Fallback when no reusable top-k buffers are available.
         result = probs.argmax(dim=-1, keepdim=True)
         if out is not None:
             out.copy_(result)
@@ -266,23 +293,46 @@ def _fused_sampling(
         
         # Determine effective top_k (from explicit param or vocab size)
         effective_top_k = min(top_k, vocab_size) if top_k > 0 else vocab_size
+        filtering_needed = top_p < 1.0 or effective_top_k < vocab_size
+        if not filtering_needed:
+            return torch.multinomial(probs, num_samples=1, out=out)
         
-        if top_p < 1.0 and effective_top_k < vocab_size:
-            # Fused top-k + top-p: First filter to top_k, then apply top-p
-            # This reduces the sort space from vocab_size to top_k
-            
-            # Initialize top-k buffers if needed
-            if _topk_buffer is None or _topk_buffer.shape != (batch_size, effective_top_k):
-                _topk_buffer = torch.empty(batch_size, effective_top_k, dtype=probs.dtype, device=probs.device)
-                _topk_indices_buffer = torch.empty(batch_size, effective_top_k, dtype=torch.long, device=probs.device)
-            
-            # Get top-k values and indices (fused kernel)
-            torch.topk(probs, k=effective_top_k, dim=-1, sorted=True,
-                      out=(_topk_buffer, _topk_indices_buffer))
-            
-            # Work with reduced-size tensors for top-p
-            sorted_probs = _topk_buffer
-            sorted_indices = _topk_indices_buffer
+        if effective_top_k < vocab_size:
+            # Reduced-space top-k path for both top-k-only and top-k+top-p.
+            if (
+                _topk_buffer is not None
+                and _topk_indices_buffer is not None
+                and _topk_buffer.shape[0] == batch_size
+                and _topk_indices_buffer.shape[0] == batch_size
+                and _topk_buffer.shape[1] >= effective_top_k
+                and _topk_indices_buffer.shape[1] >= effective_top_k
+            ):
+                topk_values = _topk_buffer[:, :effective_top_k]
+                topk_indices = _topk_indices_buffer[:, :effective_top_k]
+            else:
+                topk_values = torch.empty(
+                    batch_size,
+                    effective_top_k,
+                    dtype=probs.dtype,
+                    device=probs.device,
+                )
+                topk_indices = torch.empty(
+                    batch_size,
+                    effective_top_k,
+                    dtype=torch.long,
+                    device=probs.device,
+                )
+
+            torch.topk(
+                probs,
+                k=effective_top_k,
+                dim=-1,
+                sorted=True,
+                out=(topk_values, topk_indices),
+            )
+
+            sorted_probs = topk_values
+            sorted_indices = topk_indices
             active_size = effective_top_k
         else:
             # Full vocabulary sort (either no top_k or top_k >= vocab_size)
@@ -318,9 +368,7 @@ def _fused_sampling(
                 _active_size_scalar_buffer.fill_(active_size)
                 first_exceed = torch.where(no_exceeds_mask, _active_size_scalar_buffer, first_exceed)
             else:
-                first_exceed = torch.where(no_exceeds_mask,
-                                           torch.tensor(active_size, device=probs.device, dtype=torch.long),
-                                           first_exceed)
+                first_exceed.masked_fill_(no_exceeds_mask, active_size)
             first_exceed.clamp_(min=1)  # Always keep at least the top token
             
             # Create truncated distribution by zeroing out in original probs
@@ -339,20 +387,21 @@ def _fused_sampling(
             
             # Zero out probs (in-place) - scatter back the kept values
             probs.zero_()
-            # Use in-place multiplication to avoid allocation
-            if _keep_mask_buffer is not None:
-                # keep_mask is already bool, convert in-place via indexing
-                probs.scatter_(-1, sorted_indices, sorted_probs * keep_mask.to(probs.dtype))
-            else:
-                probs.scatter_(-1, sorted_indices, sorted_probs * keep_mask.to(probs.dtype))
+            # In-place mask application to avoid temporary cast/multiply tensors.
+            sorted_probs.mul_(keep_mask)
+            probs.scatter_(-1, sorted_indices, sorted_probs)
         else:
             # Top-k only: zero out everything not in top-k
             probs.zero_()
-            probs.scatter_(-1, sorted_indices[..., :effective_top_k], sorted_probs[..., :effective_top_k])
+            probs.scatter_(-1, sorted_indices, sorted_probs)
 
         
         # Renormalize probabilities (fused: sum + clamp + div)
-        probs_sum = probs.sum(dim=-1, keepdim=True)
+        if _probs_sum_buffer is not None and _probs_sum_buffer.shape == (batch_size, 1):
+            torch.sum(probs, dim=-1, keepdim=True, out=_probs_sum_buffer)
+            probs_sum = _probs_sum_buffer
+        else:
+            probs_sum = probs.sum(dim=-1, keepdim=True)
         probs_sum.clamp_(min=1e-10)  # Avoid division by zero
         probs.div_(probs_sum)  # In-place normalization
 
@@ -371,7 +420,9 @@ def _optimized_generate(
     top_k: int = 0,
     pad_token_id: int | None = None,
     eos_token_id: int | None = None,
-) -> torch_typing.Tensor:
+    return_past_key_values: bool = False,
+    buffer_pool: BufferPool | None = None,
+) -> torch_typing.Tensor | tuple[torch_typing.Tensor, Any]:
     """Memory-optimized autoregressive generation loop.
     
     Eliminates per-step allocations by using pre-allocated output buffers
@@ -405,18 +456,41 @@ def _optimized_generate(
         eos_token_id: Token ID for end-of-sequence
     
     Returns:
-        Output token IDs [batch, seq_len + generated_tokens]
+        Output token IDs [batch, seq_len + generated_tokens].
+        If return_past_key_values=True, returns (output_ids, past_key_values).
     """
     require_torch()
     assert torch is not None
     
     batch_size, seq_len = input_ids.shape
     device = input_ids.device
+    output_dtype = input_ids.dtype
+
+    def _acquire_buffer(
+        name: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        *,
+        fill_value: int | float | None = None,
+    ) -> torch.Tensor:
+        if buffer_pool is None:
+            if fill_value == 0:
+                return torch.zeros(shape, dtype=dtype, device=device)
+            if fill_value == 1:
+                return torch.ones(shape, dtype=dtype, device=device)
+            return torch.empty(shape, dtype=dtype, device=device)
+
+        buf = buffer_pool.get(name=name, shape=shape, dtype=dtype)
+        if fill_value is not None:
+            buf.fill_(fill_value)
+        return buf
     
     # Pre-allocate output buffer to avoid repeated torch.cat()
     max_total_len = seq_len + max_new_tokens
-    output_buffer = torch.zeros(
-        batch_size, max_total_len, dtype=input_ids.dtype, device=device
+    output_buffer = _acquire_buffer(
+        name="optimized_generate_output",
+        shape=(batch_size, max_total_len),
+        dtype=output_dtype,
     )
     output_buffer[:, :seq_len] = input_ids
     
@@ -444,6 +518,7 @@ def _optimized_generate(
     range_indices_buffer: torch.Tensor | None = None
     keep_mask_buffer: torch.Tensor | None = None
     active_size_scalar_buffer: torch.Tensor | None = None
+    probs_sum_buffer: torch.Tensor | None = None
 
     # Pre-allocate single-token buffer for next iteration input (avoids allocation)
     next_token_buffer: torch.Tensor | None = None
@@ -451,23 +526,19 @@ def _optimized_generate(
     # Pre-allocate attention mask buffer if needed (avoids per-step torch.cat)
     mask_buffer: torch.Tensor | None = None
     if attention_mask is not None:
-        mask_buffer = torch.ones(
-            batch_size, max_total_len, dtype=attention_mask.dtype, device=device
+        mask_buffer = _acquire_buffer(
+            name="optimized_generate_attention_mask",
+            shape=(batch_size, max_total_len),
+            dtype=attention_mask.dtype,
+            fill_value=1,
         )
         mask_buffer[:, :seq_len] = attention_mask
     
-    # Pre-allocate EOS check buffers to avoid per-step allocations
-    eos_check_buffer: torch.Tensor | None = None
-    eos_flag_buffer: torch.Tensor | None = None  # Scalar buffer for .any() result
-    eos_seen_buffer: torch.Tensor | None = None  # Pre-allocate for multi-batch
-    eos_found_buffer: torch.Tensor | None = None  # Pre-allocated for multi-batch EOS check
-    if eos_token_id is not None:
-        eos_check_buffer = torch.empty(batch_size, 1, dtype=torch.bool, device=device)
-        eos_flag_buffer = torch.empty(1, dtype=torch.bool, device=device)
-        if batch_size > 1:
-            eos_seen_buffer = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            # Pre-allocate buffer for EOS check results to avoid per-step allocation
-            eos_found_buffer = torch.empty(batch_size, dtype=torch.bool, device=device)
+    # Track the first EOS position for each sequence using host-side state.
+    # This avoids per-token scalar reads from device tensors in the decode loop.
+    eos_first_positions: list[int | None] | None = None
+    if eos_token_id is not None and batch_size > 1:
+        eos_first_positions = [None] * batch_size
     
     # Pre-allocate ALL buffers upfront to eliminate ANY per-step allocations
     # Get vocab size from model config or use a default
@@ -482,33 +553,92 @@ def _optimized_generate(
             return_dict=True,
         )
         vocab_size = init_outputs.logits.shape[-1]
+        logits_dtype = init_outputs.logits.dtype
     
     # Pre-allocate all generation buffers upfront (NO allocations inside loop)
-    prob_buffer = torch.empty(batch_size, vocab_size, device=device)
-    logits_buffer = torch.empty(batch_size, vocab_size, device=device)
-    next_token_buffer = torch.empty(batch_size, 1, dtype=input_ids.dtype, device=device)
+    prob_buffer = _acquire_buffer(
+        name="optimized_generate_probs",
+        shape=(batch_size, vocab_size),
+        dtype=logits_dtype,
+    )
+    logits_buffer = _acquire_buffer(
+        name="optimized_generate_logits",
+        shape=(batch_size, vocab_size),
+        dtype=logits_dtype,
+    )
+    next_token_buffer = _acquire_buffer(
+        name="optimized_generate_next_token",
+        shape=(batch_size, 1),
+        dtype=output_dtype,
+    )
     
-    # Pre-allocate ALL fused sampling buffers based on vocab_size
-    # These will be reused every step - ZERO allocations during generation
-    if top_k > 0 or top_p < 1.0:
-        effective_top_k = min(top_k, vocab_size) if top_k > 0 else vocab_size
-        
-        # Always allocate both topk and full-sort buffers to handle any path
-        # Memory cost is small compared to fragmentation from allocations
-        max_top_k = max(effective_top_k, 1)
-        topk_buffer = torch.empty(batch_size, max_top_k, dtype=prob_buffer.dtype, device=device)
-        topk_indices_buffer = torch.empty(batch_size, max_top_k, dtype=torch.long, device=device)
-        sorted_probs_buffer = torch.empty(batch_size, vocab_size, dtype=prob_buffer.dtype, device=device)
-        sorted_indices_buffer = torch.empty(batch_size, vocab_size, dtype=torch.long, device=device)
-        cumsum_buffer = torch.empty(batch_size, vocab_size, dtype=prob_buffer.dtype, device=device)
+    # Pre-allocate ALL fused sampling buffers based on vocab_size.
+    # These are reused for every decode step to avoid allocator churn.
+    reduced_top_k = 0 < top_k < vocab_size
+    needs_sampling_filter = temperature > 0 and (top_p < 1.0 or reduced_top_k)
+    topk_width = 1 if temperature <= 0 else 0
+    if reduced_top_k:
+        topk_width = max(topk_width, top_k)
+
+    if topk_width > 0:
+        topk_buffer = _acquire_buffer(
+            name="optimized_generate_topk_values",
+            shape=(batch_size, topk_width),
+            dtype=prob_buffer.dtype,
+        )
+        topk_indices_buffer = _acquire_buffer(
+            name="optimized_generate_topk_indices",
+            shape=(batch_size, topk_width),
+            dtype=torch.long,
+        )
+
+    if needs_sampling_filter:
+        cumsum_buffer = _acquire_buffer(
+            name="optimized_generate_cumsum",
+            shape=(batch_size, vocab_size),
+            dtype=prob_buffer.dtype,
+        )
+        probs_sum_buffer = _acquire_buffer(
+            name="optimized_generate_probs_sum",
+            shape=(batch_size, 1),
+            dtype=prob_buffer.dtype,
+        )
+
+        needs_full_sort = not reduced_top_k
+        if needs_full_sort:
+            sorted_probs_buffer = _acquire_buffer(
+                name="optimized_generate_sorted_probs",
+                shape=(batch_size, vocab_size),
+                dtype=prob_buffer.dtype,
+            )
+            sorted_indices_buffer = _acquire_buffer(
+                name="optimized_generate_sorted_indices",
+                shape=(batch_size, vocab_size),
+                dtype=torch.long,
+            )
         
         if top_p < 1.0:
             # Range indices: [1, vocab_size] arange buffer
-            range_indices_buffer = torch.arange(vocab_size, device=device).view(1, -1).expand(batch_size, -1)
-            # Keep mask buffer: [batch, vocab_size] bool
-            keep_mask_buffer = torch.empty(batch_size, vocab_size, dtype=torch.bool, device=device)
+            range_row_buffer = _acquire_buffer(
+                name="optimized_generate_range_row",
+                shape=(vocab_size,),
+                dtype=torch.long,
+            )
+            torch.arange(vocab_size, device=device, out=range_row_buffer)
+            range_indices_buffer = range_row_buffer.view(1, -1).expand(batch_size, -1)
+            # Keep mask buffer is sized to active filtering width.
+            keep_width = top_k if reduced_top_k else vocab_size
+            keep_mask_buffer = _acquire_buffer(
+                name="optimized_generate_keep_mask",
+                shape=(batch_size, keep_width),
+                dtype=torch.bool,
+            )
             # Scalar buffer for active_size
-            active_size_scalar_buffer = torch.empty(1, dtype=torch.long, device=device)
+            active_size_scalar_buffer = _acquire_buffer(
+                name="optimized_generate_active_size",
+                shape=(1,),
+                dtype=torch.long,
+            )
     
     with torch.inference_mode():
         # Process initial outputs - use select() to avoid slice allocation
@@ -541,24 +671,36 @@ def _optimized_generate(
             _range_indices_buffer=range_indices_buffer,
             _keep_mask_buffer=keep_mask_buffer,
             _active_size_scalar_buffer=active_size_scalar_buffer,
+            _probs_sum_buffer=probs_sum_buffer,
         )
         
         # Store first token
         output_buffer[:, current_len:current_len + 1] = next_token_buffer
         current_len += 1
+        eos_scan_start = current_len - 1
         
         # Check for EOS on first token
         if eos_token_id is not None:
-            torch.eq(next_token_buffer, eos_token_id, out=eos_check_buffer)
+            first_tokens_cpu = next_token_buffer.detach().to(
+                device="cpu",
+                dtype=torch.long,
+                non_blocking=True,
+            ).reshape(-1)
+            first_tokens_np = first_tokens_cpu.numpy()
             if batch_size == 1:
-                if eos_check_buffer[0, 0].item():
-                    return output_buffer[:, :current_len]
+                if int(first_tokens_np[0]) == eos_token_id:
+                    result = output_buffer[:, :current_len]
+                    return (result, past_kv) if return_past_key_values else result
             else:
-                # Use pre-allocated tracking buffer (ZERO allocation)
-                eos_seen_buffer.zero_()  # Reset to zeros
-                eos_seen_buffer.copy_(eos_check_buffer.view(batch_size))
-                if eos_seen_buffer.all().item():
-                    return output_buffer[:, :current_len]
+                assert eos_first_positions is not None
+                for batch_idx in range(batch_size):
+                    if int(first_tokens_np[batch_idx]) == eos_token_id:
+                        eos_first_positions[batch_idx] = eos_scan_start
+                if all(pos is not None for pos in eos_first_positions):
+                    earliest_eos = min(pos for pos in eos_first_positions if pos is not None)
+                    current_len = min(current_len, earliest_eos + 1)
+                    result = output_buffer[:, :current_len]
+                    return (result, past_kv) if return_past_key_values else result
         
         # Update for next iteration
         current_input = next_token_buffer
@@ -612,6 +754,7 @@ def _optimized_generate(
                 _range_indices_buffer=range_indices_buffer,
                 _keep_mask_buffer=keep_mask_buffer,
                 _active_size_scalar_buffer=active_size_scalar_buffer,
+                _probs_sum_buffer=probs_sum_buffer,
             )
             
             # Store in pre-allocated output buffer (in-place assignment)
@@ -620,36 +763,40 @@ def _optimized_generate(
             eos_check_counter += 1
             
             # Check for EOS - batched to reduce GPU→CPU sync frequency
-            if eos_token_id is not None and eos_check_buffer is not None:
+            if eos_token_id is not None:
                 # Only sync to CPU every eos_check_interval steps (or at end)
                 is_last_step = step >= max_new_tokens - 2
                 should_check = (eos_check_counter >= eos_check_interval) or is_last_step
                 
                 if should_check:
+                    pending_tokens_cpu = output_buffer[:, eos_scan_start:current_len].detach().to(
+                        device="cpu",
+                        dtype=torch.long,
+                        non_blocking=True,
+                    )
                     if batch_size == 1:
-                        # Single batch: check latest token only (in-place comparison)
-                        torch.eq(next_token_buffer, eos_token_id, out=eos_check_buffer)
-                        # Direct scalar check without intermediate tensor
-                        if eos_check_buffer[0, 0].item():
+                        # Check all pending tokens since last host sync.
+                        eos_positions = (pending_tokens_cpu[0] == eos_token_id).nonzero(as_tuple=False)
+                        if eos_positions.numel() > 0:
+                            current_len = eos_scan_start + int(eos_positions[0, 0]) + 1
                             break
                     else:
-                        # Multi-batch: check all generated tokens since last check
-                        # Use select() to avoid slice allocation for single position check
-                        if eos_check_counter == 1:
-                            # First check: only need to check the latest token
-                            torch.eq(next_token_buffer, eos_token_id, out=eos_check_buffer)
-                            eos_seen_buffer.logical_or_(eos_check_buffer.view(batch_size))
-                        else:
-                            # Batch check: use slice with pre-allocated comparison buffer
-                            # Avoid creating new boolean tensor by using in-place operations
-                            generated_slice = output_buffer.select(1, current_len - 1)
-                            torch.eq(generated_slice, eos_token_id, out=eos_check_buffer.view(batch_size))
-                            eos_seen_buffer.logical_or_(eos_check_buffer.view(batch_size))
-                        
-                        # Single sync point for all sequences
-                        if eos_seen_buffer.all().item():
+                        # Multi-batch: keep first EOS positions on host and stop once all are known.
+                        assert eos_first_positions is not None
+                        pending_eos_mask = pending_tokens_cpu.eq(eos_token_id)
+                        for batch_idx in range(batch_size):
+                            if eos_first_positions[batch_idx] is not None:
+                                continue
+                            eos_positions = pending_eos_mask[batch_idx].nonzero(as_tuple=False)
+                            if eos_positions.numel() > 0:
+                                eos_first_positions[batch_idx] = eos_scan_start + int(eos_positions[0, 0])
+
+                        if all(pos is not None for pos in eos_first_positions):
+                            earliest_eos = min(pos for pos in eos_first_positions if pos is not None)
+                            current_len = min(current_len, earliest_eos + 1)
                             break
                     
+                    eos_scan_start = current_len
                     eos_check_counter = 0
             
             # Update for next iteration - reuse pre-allocated buffer instead of allocation
@@ -664,7 +811,8 @@ def _optimized_generate(
                 # The model uses the full buffer; only current_len positions are valid
     
     # Return only the valid portion of the buffer
-    return output_buffer[:, :current_len]
+    result = output_buffer[:, :current_len]
+    return (result, past_kv) if return_past_key_values else result
 
 
 @dataclass
@@ -718,6 +866,24 @@ def _resolve_device(requested_device: str) -> str:
     if requested_device == "cuda" and not torch.cuda.is_available():
         return "cpu"
     return requested_device
+
+
+def _tensor_scalar_to_bool_cpu(tensor: torch_typing.Tensor) -> bool:
+    """Convert a single-value tensor to bool via explicit CPU transfer."""
+    cpu_view = tensor.detach().to(device="cpu", dtype=torch.bool).reshape(-1).numpy()
+    return bool(cpu_view[0])
+
+
+def _tensor_scalar_to_int_cpu(tensor: torch_typing.Tensor) -> int:
+    """Convert a single-value tensor to int via explicit CPU transfer."""
+    cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
+    return int(cpu_view[0])
+
+
+def _tensor_to_int_list_cpu(tensor: torch_typing.Tensor) -> list[int]:
+    """Convert a tensor of token IDs to a Python list via explicit CPU transfer."""
+    cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
+    return [int(v) for v in cpu_view]
 
 
 def _truncate_kv_cache_optimized(
@@ -825,6 +991,20 @@ def _speculative_generate(
     
     batch_size, seq_len = input_ids.shape
     device = input_ids.device
+
+    pool = getattr(pipeline, "_buffer_pool", None)
+    if isinstance(pool, BufferPool) and pool.device != device:
+        pool = BufferPool(device)
+        pipeline._buffer_pool = pool
+
+    def _acquire_buffer(
+        name: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if isinstance(pool, BufferPool):
+            return pool.get(name=name, shape=shape, dtype=dtype)
+        return torch.empty(shape, dtype=dtype, device=device)
     
     # Initialize adaptive depth controller
     if adaptive_depth:
@@ -844,8 +1024,10 @@ def _speculative_generate(
     
     # Pre-allocate output buffer to avoid repeated torch.cat() allocations
     max_total_len = seq_len + max_new_tokens
-    output_buffer = torch.zeros(
-        batch_size, max_total_len, dtype=input_ids.dtype, device=device
+    output_buffer = _acquire_buffer(
+        name="speculative_generate_output",
+        shape=(batch_size, max_total_len),
+        dtype=input_ids.dtype,
     )
     output_buffer[:, :seq_len] = input_ids
     current_len = seq_len
@@ -895,6 +1077,17 @@ def _speculative_generate(
             and draft_model._fast_engine is not None
             and batch_size == 1  # Fast path optimized for single batch
         )
+        max_draft_tokens = (
+            adaptive_controller.config.max_depth
+            if adaptive_controller is not None
+            else num_draft
+        )
+        max_draft_tokens = max(max_draft_tokens, num_draft)
+        target_logits_buffer = _acquire_buffer(
+            name="speculative_generate_target_logits",
+            shape=(batch_size, max_draft_tokens + 1, target_logits_prev.shape[-1]),
+            dtype=target_logits_prev.dtype,
+        )
 
         while tokens_generated < max_new_tokens and not eos_reached:
             # Update num_draft from adaptive controller
@@ -929,8 +1122,12 @@ def _speculative_generate(
             )
             target_logits_draft = target_outputs.logits  # [B, K, V]
             
-            # Concatenate: [logits_prev, logits_draft] for verification
-            full_target_logits = torch.cat([target_logits_prev, target_logits_draft], dim=1)
+            # Stage [prev, draft] logits into a pooled buffer (no torch.cat allocation).
+            full_target_logits = target_logits_buffer[:, :num_draft + 1, :]
+            full_target_logits[:, :1, :].copy_(target_logits_prev)
+            full_target_logits[:, 1:num_draft + 1, :].copy_(
+                target_logits_draft[:, :num_draft, :]
+            )
             
             # 3. Verify - Vectorized rejection sampling
             num_accepted, accepted_mask, next_token = pipeline._draft_verify(
@@ -939,7 +1136,7 @@ def _speculative_generate(
                 temperature=temperature
             )
             
-            n_acc = int(num_accepted[0].item())
+            n_acc = _tensor_scalar_to_int_cpu(num_accepted[0])
             
             # Update adaptive depth controller
             if adaptive_controller is not None:
@@ -965,17 +1162,20 @@ def _speculative_generate(
             
             # Check EOS
             if eos_token_id is not None:
-                # Check only the newly added tokens
-                new_tokens_slice = output_buffer[:, current_len - new_token_count:current_len]
-                if (new_tokens_slice == eos_token_id).any():
-                    # Find first EOS position
-                    eos_positions = (new_tokens_slice == eos_token_id).nonzero(as_tuple=True)[1]
-                    if len(eos_positions) > 0:
-                        # Truncate at first EOS (relative to new tokens)
-                        eos_offset = int(eos_positions[0].item())
-                        current_len = current_len - new_token_count + eos_offset + 1
-                        eos_reached = True
-                        break
+                # Check only the newly added tokens using host-side scan to avoid
+                # scalar truthiness syncs on accelerator tensors.
+                new_tokens_cpu = output_buffer[:, current_len - new_token_count:current_len].detach().to(
+                    device="cpu",
+                    dtype=torch.long,
+                    non_blocking=True,
+                )
+                eos_positions = (new_tokens_cpu == eos_token_id).nonzero(as_tuple=False)
+                if eos_positions.numel() > 0:
+                    # Truncate at first EOS (relative to new tokens)
+                    eos_offset = int(eos_positions[0, 1])
+                    current_len = current_len - new_token_count + eos_offset + 1
+                    eos_reached = True
+                    break
             
             # 5. Advance State with optimized KV cache truncation
             if n_acc < num_draft:
@@ -1019,10 +1219,16 @@ class MMFP4Pipeline:
         tokenizer: Any,
         max_cache_memory_gb: float = 4.0,
         enable_persistent_cache: bool = True,
+        use_paged_attention: bool = True,
+        kv_cache_dtype: str | None = None,
+        kv_cache_quant_group_size: int = 128,
     ):
         self.model = model
         self.tokenizer = tokenizer
         self.device = _infer_model_device(model)
+        require_torch()
+        assert torch is not None
+        self._buffer_pool = BufferPool(torch.device(self.device))
         self._generation_cache: dict[tuple[Any, ...], str] = {}
         
         # Persistent KV cache configuration
@@ -1034,9 +1240,32 @@ class MMFP4Pipeline:
         self._draft_model: Any | None = None
         self._speculative_enabled: bool = False
         self._adaptive_depth_enabled: bool = True  # Enable by default
+        self.use_paged_attention = bool(use_paged_attention)
+        self._kv_cache_dtype = kv_cache_dtype.lower() if isinstance(kv_cache_dtype, str) else None
+        if self._kv_cache_dtype is not None and self._kv_cache_dtype not in {
+            "none",
+            "fp16",
+            "bf16",
+            "fp8",
+            "fp8_e5m2",
+            "fp4",
+            "int8",
+        }:
+            raise ValueError(
+                "kv_cache_dtype must be one of: "
+                "'none', 'fp16', 'bf16', 'fp8', 'fp8_e5m2', 'fp4', 'int8'"
+            )
+        if kv_cache_quant_group_size <= 0:
+            raise ValueError("kv_cache_quant_group_size must be > 0")
+        self._kv_cache_quant_group_size = int(kv_cache_quant_group_size)
+        self._paged_attention_adapter: Any = None
+        self._paged_attention_available: bool = False
+        self._glm4_mla_decode_kernel_available: bool = self._has_glm4_mla_decode_kernel()
 
         if hasattr(self.model, "eval"):
             self.model.eval()
+        self._configure_mla_fused_attention_layers()
+        self._configure_paged_attention_layers()
     
     def enable_speculative_decoding(
         self,
@@ -1133,6 +1362,159 @@ class MMFP4Pipeline:
             "draft_model_initialized": self._draft_model is not None,
             "speculative_enabled": self._speculative_enabled,
         }
+
+    def _has_glm4_mla_decode_kernel(self) -> bool:
+        """Check whether `mla_fused_attention_decode_glm4` is available."""
+        if not str(self.device).startswith("mps"):
+            return False
+        kernel_name = "mla_fused_attention_decode_glm4"
+        try:
+            from ..metal_dispatch import get_kernel
+
+            if get_kernel(kernel_name) is not None:
+                return True
+        except Exception:
+            pass
+
+        # Fallback to runtime Metal source library lookup.
+        # This catches kernels available via JIT/source compile even when
+        # a prebuilt metallib lookup misses them.
+        try:
+            from ..mla_fused import _get_metal_library
+
+            _get_metal_library().get_function(kernel_name)
+            return True
+        except Exception:
+            return False
+
+    def _configure_mla_fused_attention_layers(self) -> bool:
+        """Enable fused MLA decode and GLM4 kernel preference on attention layers."""
+        layer_stack = getattr(getattr(self.model, "model", None), "layers", None)
+        if layer_stack is None:
+            return False
+
+        enabled = bool(self._glm4_mla_decode_kernel_available)
+        configured = False
+        for layer in layer_stack:
+            attn = getattr(layer, "self_attn", None)
+            if attn is None:
+                continue
+            if hasattr(attn, "use_fused_decode"):
+                setattr(attn, "use_fused_decode", True)
+                configured = True
+            if hasattr(attn, "prefer_glm4_fused_kernel"):
+                setattr(attn, "prefer_glm4_fused_kernel", enabled)
+                configured = True
+        return configured
+
+    def _configure_paged_attention_layers(self) -> bool:
+        """Propagate use_paged_attention to model config/layers and warm adapter."""
+        enabled = bool(self.use_paged_attention)
+        self._glm4_mla_decode_kernel_available = self._has_glm4_mla_decode_kernel()
+        requested_dtype = (self._kv_cache_dtype or "").lower()
+        kv_quant_mode = requested_dtype if requested_dtype in {"fp4", "fp8", "int8"} else "none"
+
+        model_config = getattr(self.model, "config", None)
+        if model_config is not None:
+            setattr(model_config, "use_paged_attention", enabled)
+            setattr(model_config, "kv_quant_mode", kv_quant_mode)
+            setattr(model_config, "kv_quant_group_size", self._kv_cache_quant_group_size)
+
+        layer_stack = getattr(getattr(self.model, "model", None), "layers", None)
+        has_supported_layers = False
+        if layer_stack is not None:
+            for layer in layer_stack:
+                attn = getattr(layer, "self_attn", None)
+                if attn is None:
+                    continue
+                if hasattr(attn, "use_paged_attention"):
+                    has_supported_layers = True
+                    setattr(attn, "use_paged_attention", enabled)
+                if hasattr(attn, "kv_quant"):
+                    setattr(attn, "kv_quant", kv_quant_mode)
+                if hasattr(attn, "kv_quant_group_size"):
+                    setattr(attn, "kv_quant_group_size", self._kv_cache_quant_group_size)
+                if hasattr(attn, "_kv_quant_enabled"):
+                    setattr(attn, "_kv_quant_enabled", kv_quant_mode != "none")
+                if (
+                    enabled
+                    and self._paged_attention_adapter is None
+                    and str(self.device).startswith("mps")
+                    and hasattr(attn, "_get_or_create_paged_adapter")
+                ):
+                    try:
+                        self._paged_attention_adapter = attn._get_or_create_paged_adapter()
+                    except Exception:
+                        self._paged_attention_adapter = None
+
+        self._configure_mla_fused_attention_layers()
+        self._paged_attention_available = enabled and has_supported_layers
+        return self._paged_attention_available
+
+    def _supports_paged_forward_decode(self) -> bool:
+        """Check whether model.forward likely supports HF-style decode kwargs."""
+        forward_fn = getattr(self.model, "forward", None)
+        if forward_fn is None:
+            return False
+        try:
+            params = inspect.signature(forward_fn).parameters
+        except (TypeError, ValueError):
+            return False
+        if "past_key_values" in params:
+            return True
+        return any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in params.values()
+        )
+
+    def _try_paged_forward_generate(
+        self,
+        input_ids: torch.Tensor,
+        max_new_tokens: int,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Any = None,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        pad_token_id: int | None = None,
+        eos_token_id: int | None = None,
+    ) -> tuple[torch.Tensor | None, Any]:
+        """Try paged decode loop; return (None, None) on unsupported/failure."""
+        require_torch()
+        assert torch is not None
+
+        if not self.use_paged_attention:
+            return None, None
+        if not self._configure_paged_attention_layers():
+            return None, None
+        if not self._supports_paged_forward_decode():
+            return None, None
+        if input_ids.shape[1] == 0:
+            return None, None
+
+        try:
+            if self._buffer_pool.device != input_ids.device:
+                self._buffer_pool = BufferPool(input_ids.device)
+            result = _optimized_generate(
+                model=self.model,
+                input_ids=input_ids,
+                max_new_tokens=max_new_tokens,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                pad_token_id=pad_token_id,
+                eos_token_id=eos_token_id,
+                return_past_key_values=True,
+                buffer_pool=self._buffer_pool,
+            )
+        except Exception:
+            return None, None
+
+        if isinstance(result, tuple):
+            return result
+        return result, None
 
     def _init_persistent_kv_cache(self, batch_size: int, max_seq_len: int = 4096) -> PersistentKVCache:
         """Initialize the persistent KV cache with CUDA-style buffer pooling.
@@ -1250,7 +1632,7 @@ class MMFP4Pipeline:
         # Find the first mismatch index
         mismatch_indices = (~common).nonzero()
         if mismatch_indices.numel() > 0:
-            match_len = int(mismatch_indices[0].item())
+            match_len = _tensor_scalar_to_int_cpu(mismatch_indices[0])
         else:
             match_len = min_len
             
@@ -1331,7 +1713,16 @@ class MMFP4Pipeline:
 
         # Check for MLA configuration
         kv_lora_rank = getattr(config, "kv_lora_rank", None)
+        requested_dtype = (self._kv_cache_dtype or "").lower()
+        valid_mla_modes = {"none", "fp4", "fp8", "int8"}
+        valid_cache_dtypes = {"fp16", "bf16", "fp8", "fp8_e5m2", "fp4", "int8"}
+
         if kv_lora_rank is not None:
+            mla_quant_mode = (
+                requested_dtype
+                if requested_dtype in valid_mla_modes
+                else ("fp4" if self.use_paged_attention else "none")
+            )
             return MLAKVCache(
                 num_layers=num_layers,
                 batch_size=batch_size,
@@ -1340,16 +1731,31 @@ class MMFP4Pipeline:
                 qk_rope_head_dim=getattr(config, "qk_rope_head_dim", 64),
                 device=self.device,
                 dtype=getattr(self.model, "dtype", torch.float16),
+                quantize_mode=mla_quant_mode,
             )
 
         # Standard KVCache
+        cache_dtype = requested_dtype if requested_dtype in valid_cache_dtypes else "fp16"
+        
+        if cache_dtype in {"fp4", "int8"}:
+            return QuantizedKVCache(
+                max_seq_len=max_seq_len,
+                num_layers=num_layers,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                dtype=getattr(self.model, "dtype", torch.float16),
+                quant_dtype=cache_dtype,
+                scale_group_size=self._kv_cache_quant_group_size,
+                device=self.device,
+            )
+
         cache_config = CacheConfig(
             num_layers=num_layers,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_seq_len=max_seq_len,
-            cache_dtype="fp16",  # Default to fp16 for now
+            cache_dtype=cache_dtype,
         )
         return KVCache(cache_config, batch_size=batch_size, device=self.device)
 
@@ -1360,6 +1766,9 @@ class MMFP4Pipeline:
         device: str = "mps",
         max_cache_memory_gb: float = 4.0,
         enable_persistent_cache: bool = True,
+        use_paged_attention: bool = True,
+        kv_cache_dtype: str | None = None,
+        kv_cache_quant_group_size: int = 128,
     ) -> MMFP4Pipeline:
         """Load model and tokenizer from path.
         
@@ -1368,6 +1777,11 @@ class MMFP4Pipeline:
             device: Device to load model on ("mps", "cuda", or "cpu")
             max_cache_memory_gb: Maximum memory for persistent KV cache in GB
             enable_persistent_cache: Whether to enable persistent KV caching
+            use_paged_attention: Whether to enable paged attention for decode
+            kv_cache_dtype: KV cache dtype/quant mode override.
+                Standard KV cache: "fp16", "bf16", "fp8", "fp8_e5m2", "fp4", "int8".
+                MLA cache quant mode: "none", "fp4", "fp8", "int8".
+            kv_cache_quant_group_size: Scale group size for FP4/INT8 cache quantization.
             
         Returns:
             MMFP4Pipeline instance with loaded model and tokenizer
@@ -1402,6 +1816,9 @@ class MMFP4Pipeline:
             tokenizer=tokenizer,
             max_cache_memory_gb=max_cache_memory_gb,
             enable_persistent_cache=enable_persistent_cache,
+            use_paged_attention=use_paged_attention,
+            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_quant_group_size=kv_cache_quant_group_size,
         )
 
     def __call__(
@@ -1413,7 +1830,27 @@ class MMFP4Pipeline:
         top_k: int = 0,
         stream: bool = False,
     ) -> str | Iterator[str]:
+        return self.generate(
+            prompt=prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            stream=stream,
+        )
+
+    def generate(
+        self,
+        prompt: str,
+        max_new_tokens: int = 100,
+        temperature: float = 1.0,
+        top_p: float = 0.9,
+        top_k: int = 0,
+        stream: bool = False,
+    ) -> str | Iterator[str]:
         """Generate text from prompt."""
+        self._configure_paged_attention_layers()
+
         # Check cache for exact match (non-streaming only)
         cache_key = (prompt, max_new_tokens, temperature, top_p, top_k)
         if not stream and cache_key in self._generation_cache:
@@ -1503,6 +1940,8 @@ class MMFP4Pipeline:
                 skip_prompt=True,
                 skip_special_tokens=True,
             )
+            if self.use_paged_attention:
+                generate_kwargs["use_paged_attention"] = True
             generate_kwargs["streamer"] = streamer
 
             thread = Thread(
@@ -1530,9 +1969,37 @@ class MMFP4Pipeline:
             past_key_values = None
             cached_prefix_len = 0
 
+        if self.use_paged_attention:
+            paged_output_ids, paged_past_kv = self._try_paged_forward_generate(
+                input_ids=current_input_ids,
+                max_new_tokens=max_new_tokens,
+                attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                pad_token_id=generate_kwargs.get("pad_token_id"),
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+            if paged_output_ids is not None:
+                output_ids = paged_output_ids
+                if cached_prefix_len > 0:
+                    prefix = input_ids[:, :cached_prefix_len]
+                    output_ids = torch.cat([prefix, output_ids], dim=1)
+
+                if self._persistent_kv is not None:
+                    self._persistent_kv.cached_ids = output_ids
+                    self._persistent_kv.kv_cache = paged_past_kv
+
+                result = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+                self._generation_cache[cache_key] = result
+                return result
+
         generate_kwargs["past_key_values"] = past_key_values
         generate_kwargs["use_cache"] = True
         generate_kwargs["return_dict_in_generate"] = True
+        if self.use_paged_attention:
+            generate_kwargs["use_paged_attention"] = True
 
         with torch.inference_mode():
             outputs = self.model.generate(
@@ -1641,7 +2108,7 @@ class MMFP4Pipeline:
                 if len(value.shape) > 1:
                     value = value[0]
 
-                self.token_ids_buffer.extend(value.tolist())
+                self.token_ids_buffer.extend(_tensor_to_int_list_cpu(value))
 
                 if len(self.token_ids_buffer) >= self.batch_size:
                     self._flush_buffer()
@@ -1679,6 +2146,9 @@ class MMFP4Pipeline:
             "use_cache": True,
             "return_dict_in_generate": True,
         }
+        if self.use_paged_attention:
+            self._configure_paged_attention_layers()
+            generate_kwargs["use_paged_attention"] = True
         if do_sample:
             generate_kwargs["temperature"] = max(float(temperature), 1e-5)
             generate_kwargs["top_p"] = float(top_p)
@@ -2032,7 +2502,7 @@ class MMFP4Pipeline:
         # BUILD OUTPUT: Construct final token sequence
         # ─────────────────────────────────────────────────────────────
         
-        n_acc = int(num_accepted[0].item())  # Number of accepted draft tokens
+        n_acc = _tensor_scalar_to_int_cpu(num_accepted[0])  # Number of accepted draft tokens
         all_accepted = n_acc == num_draft_tokens
         
         # Build output sequence: accepted drafts + next token
@@ -2082,14 +2552,16 @@ class MMFP4Pipeline:
         # ─────────────────────────────────────────────────────────────
         
         if eos_token_id is not None:
-            if (output_tokens == eos_token_id).any():
-                # Find first EOS position and truncate
-                eos_mask = (output_tokens == eos_token_id)
-                first_eos = eos_mask.nonzero(as_tuple=True)[1]
-                if len(first_eos) > 0:
-                    eos_pos = int(first_eos[0].item()) + 1  # Include EOS
-                    output_tokens = output_tokens[:, :eos_pos]
-                    num_generated = eos_pos
+            output_tokens_cpu = output_tokens.detach().to(
+                device="cpu",
+                dtype=torch.long,
+                non_blocking=True,
+            )
+            eos_positions = (output_tokens_cpu == eos_token_id).nonzero(as_tuple=False)
+            if eos_positions.numel() > 0:
+                eos_pos = int(eos_positions[0, 1]) + 1  # Include EOS
+                output_tokens = output_tokens[:, :eos_pos]
+                num_generated = eos_pos
         
         return output_tokens, updated_past_kv, num_generated
 
@@ -2514,7 +2986,7 @@ class MMFP4Pipeline:
                     next_token = torch.multinomial(probs, num_samples=1)
                     
                     # Store generated
-                    state["generated_ids"].append(next_token.item())
+                    state["generated_ids"].append(_tensor_scalar_to_int_cpu(next_token))
                     state["step"] += 1
                     
                     # Prepare input for next decode step
@@ -2593,7 +3065,7 @@ class MMFP4Pipeline:
                 probs = torch.softmax(slot_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
                 
-                state["generated_ids"].append(next_token.item())
+                state["generated_ids"].append(_tensor_scalar_to_int_cpu(next_token))
                 state["step"] += 1
                 slot_next_inputs[slot_idx] = next_token
 

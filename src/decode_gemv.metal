@@ -57,8 +57,8 @@ inline half dequant_fp4_scalar(uint nibble) {
 
     half magnitude;
     if (exp_bits == 0) {
-        // Subnormal: 0.0 or 0.25
-        magnitude = half(man_bit) * half(0.25h);
+        // Subnormal: 0.0 or 0.5
+        magnitude = half(man_bit) * half(0.5h);
     } else {
         // Normal: 2^(exp-1) * (1 + mantissa*0.5)
         half power = half(1u << (exp_bits - 1));

@@ -818,29 +818,38 @@ def speculative_prefill(
     kv_cache.advance(input_ids.shape[1])
 
     # Speculative tokens
-    speculative_tokens: list[int] = []
+    speculative_token_tensors: list[torch.Tensor] = []
 
     # Get probability distribution for next token
     next_logits = logits[:, -1, :]  # [1, vocab_size]
     probs = F.softmax(next_logits, dim=-1)
 
+    confidence_threshold = torch.tensor(
+        config.confidence_threshold, device=probs.device, dtype=probs.dtype
+    )
+
     for _ in range(config.num_speculative_tokens):
-        # Check if top prediction is confident enough
-        max_prob = float(probs.max().item())
-        if max_prob < config.confidence_threshold:
+        # Compute confidence + candidate token in one reduction on-device.
+        top_prob, top_token = probs.max(dim=-1)
+        if bool(top_prob < confidence_threshold):
             break
 
-        # Get top token
-        top_token = int(probs.argmax(dim=-1).item())
-        speculative_tokens.append(top_token)
+        speculative_token_tensors.append(top_token)
 
-        # Forward speculative token through model
-        spec_input = torch.tensor([[top_token]], device=input_ids.device, dtype=input_ids.dtype)
+        # Forward speculative token through model without host scalar conversion.
+        spec_input = top_token.to(dtype=input_ids.dtype).unsqueeze(0)
         spec_logits = model(spec_input, kv_cache=kv_cache)
         kv_cache.advance(1)
 
         # Update probs for next speculation
         probs = F.softmax(spec_logits[:, -1, :], dim=-1)
+
+    speculative_tokens: list[int]
+    if speculative_token_tensors:
+        token_block = torch.cat(speculative_token_tensors, dim=0)
+        speculative_tokens = token_block.to(device="cpu", non_blocking=True).tolist()
+    else:
+        speculative_tokens = []
 
     return logits, speculative_tokens
 

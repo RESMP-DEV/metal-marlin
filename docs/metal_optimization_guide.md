@@ -5,16 +5,26 @@
 > There is no established playbook for Metal optimization like there is for CUDA.
 > This guide documents what works, what doesn't, and why.
 
-**Last Updated:** February 11, 2026
+**Last Updated:** February 20, 2026
 
 ## GLM-4.7-Flash Status Summary
 
 | Metric | Current | Target | Gap |
 |--------|---------|--------|-----|
-| **Decode** | 0.74 tok/s | 15-30 tok/s | 20-40× |
+| **Decode** | 7.1 tok/s | 30+ tok/s | 4× |
 | **Prefill (2K)** | 42 tok/s | 500+ tok/s | 12× |
 | **Memory** | 33 GB | 12-15 GB | ~2.5× |
 | **Model Load** | ~15s | ~10s | 1.5× |
+
+### GLM4-MoE-Lite Status (Feb 2026)
+
+| Metric | Current | Target | Notes |
+|--------|---------|--------|-------|
+| **Decode** | 7.1 tok/s | 10+ tok/s | M4 Max, 47 layers |
+| **Prefill** | - | - | Not benchmarked |
+| **Memory** | ~15 GB | ~8 GB | FP4 quantized |
+| **Expert time** | 9.7 ms | - | Only 7% of step time! |
+| **Step time** | 141 ms | <100 ms | Targeting 30+ tok/s |
 
 ### Done (Verified)
 - ✅ Fused GEMM kernels (51.9× speedup)
@@ -27,26 +37,51 @@
 - ✅ **PagedKVCache adapter** (vLLM-style 16-token blocks, fp16/fp8/int4, Feb 2026)
 - ✅ **MLA fused decode wired** (`use_fused_decode=True` in MMFP4MLA, Feb 2026)
 - ✅ **E2E decode benchmark** (0.74 tok/s, 2.65× vs 0.28 baseline, Feb 2026)
+- ✅ **FP4 dequant bug fixed** (0.5 value now correct, LUT-based approach, Feb 2026)
 
 ### Not Done (Blocking Performance)
+- ❌ **Bottleneck unknown** - Expert only 7% of time, 106ms/step unaccounted
 - ❌ Paged attention kernel integration (PagedKVCache exists, kernel dispatch not wired)
 - ❌ Quantized KV cache dispatch (FP8/INT4 storage ready, kernel path incomplete)
 - ❌ Decode GEMV optimization (single-token path unoptimized)
-- ⚠️ C++ dispatch API mismatch (using Python fallback for kernel dispatch)
+- ❌ **C++ dispatch API mismatch** (using Python fallback for kernel dispatch)
 
-### Remaining Gap Analysis
+### Bottleneck Analysis (GLM4-MoE-Lite, Feb 20 2026)
 
-With fused MoE kernel (13× measured) and MLA fused decode wired:
+**Measured breakdown per decode step (141ms total):**
 
-| Bottleneck | Current Cost | Optimized | Expected Gain |
-|------------|--------------|-----------|---------------|
-| ~~MoE per-layer dispatch~~ | ~~98% of forward~~ | ✅ **DONE** | **13× measured** |
-| ~~MLA fused attention~~ | ~~5+ dispatches/layer~~ | ✅ **WIRED** | (measuring) |
-| Paged attention dispatch | Not integrated | PagedKVCache ready | 2× context |
-| Decode GEMV | Matmul fallback | Specialized GEMV | 2× |
-| Memory overhead | 33 GB (2× model) | Buffer pooling | ~1.5× |
+| Component | Time | % of Step | Notes |
+|-----------|------|-----------|-------|
+| Expert F.linear (47×4) | 9.7 ms | 6.9% | 3 F.linear per expert |
+| .tolist() syncs | 16 ms | 11% | GPU→CPU for routing |
+| Attention (MHA) | 3.1 ms | 2.2% | At seq=155 |
+| Projections (Q/K/V/O) | 2.5 ms | 1.8% | |
+| LayerNorm (2×47) | 3.0 ms | 2.1% | |
+| **ACCOUNTED** | **34 ms** | **24%** | |
+| **UNACCOUNTED** | **107 ms** | **76%** | 🚨 Main bottleneck! |
 
-**Current E2E: 0.74 tok/s** (2.65× vs baseline)
+**Critical finding:** The bottleneck is NOT expert computation! We need to profile what's
+happening in the remaining 107ms - likely MPS scheduling, memory allocation, or hidden syncs.
+
+### Expert Computation is FAST (Micro-benchmark Feb 2026)
+
+```python
+# Measured in developer_tests/bench_bmm_vs_flinear.py
+F.linear loop per layer: 0.207ms
+Total 47 layers: 9.7ms
+
+# The model uses:
+# - MetalQuantizedLinear (NOT MMFP4Linear!) with LRU dequant cache
+# - _accumulate_expert_into does 3 F.linear calls per expert
+# - Dequant cache hit rate is HIGH (same experts reused)
+```
+
+**Why optimization attempts failed:**
+1. **Batch dequant** → 4× slower (bypassed LRU cache, re-dequant every call)
+2. **Weight combination** → slower (larger matrices = worse cache reuse)
+3. **torch.bmm** → 5× slower (torch.stack overhead dominates)
+
+**The LRU cache is critical.** Without it, every decode would re-dequantize weights.
 
 ## Executive Summary
 
@@ -71,6 +106,76 @@ With fused MoE kernel (13× measured) and MLA fused decode wired:
 14. **C++ dispatch API mismatch** - `dispatch_kernel` wrapper expects `(lib, fn_name)`, C++ expects `(ctx, pipeline)` - use Python path (Feb 2026)
 15. **Metal compiler has bugs** - `__attribute__((always_inline))` required for simdgroup arrays, float intermediates for dequant (Jan 2026)
 16. **Buffer pool ≠ always faster** - manual `.copy_()` into pooled buffers caused 3× regression vs `torch.stack()`; MPS copy overhead dominates benefits (Feb 2026)
+
+### GLM4-MoE-Lite Learnings (Feb 2026)
+
+17. **Model uses `MetalQuantizedLinear`, NOT `MMFP4Linear`** - Optimizing MMFP4Linear had ZERO effect on GLM4-MoE-Lite
+18. **LRU dequant cache is critical** - 90%+ hit rate on decode; bypassing it causes 4× slowdown
+19. **Expert compute is only 7% of step time** - 10ms of 141ms; NOT the bottleneck
+20. **GPU→CPU syncs cost 0.4ms each** - 2 `.tolist()` per layer = 38ms/step (27%)
+21. **torch.bmm slower than F.linear loop** - `torch.stack` overhead dominates (5× slower)
+22. **Larger combined weights = worse** - Cache reuse degrades with matrix size
+23. **FP4 dequant bug: nibble 1 → 0.25 not 0.5** - Metal half-precision bug; use LUT approach
+24. **C++ extension API mismatch** - `dispatch_kernel_by_name` vs `dispatch_kernel`; use Python path
+
+## Naming Conventions in Metal Marlin
+
+> **CRITICAL:** Know which class your model actually uses before optimizing!
+
+### Three Naming Schemes (Historical)
+
+| Prefix | Origin | What It Does | Location |
+|--------|--------|--------------|----------|
+| **Trellis** | Trellis quantization | General mixed-precision inference | `metal_marlin/trellis/` |
+| **MMFP4** | Mixed-precision FP4 | GLM-4.7-Flash specific stack | `metal_marlin/layers/mmfp4_*.py` |
+| **MetalQuantized** | Runtime quantized | On-demand dequant + LRU cache | `metal_marlin/inference_metal.py` |
+
+### What GLM4-MoE-Lite ACTUALLY Uses
+
+```python
+# The model uses MetalQuantizedLinear, NOT MMFP4Linear!
+class MetalQuantizedLinear(nn.Module):
+    def __init__(self, in_features, out_features, packed_weight, scales, bias=None):
+        self.packed_weight = packed_weight  # [K/8, N] packed FP4
+        self.scales = scales  # [K/128, N] per-group scales
+        self._dequant_cache = OrderedDict()  # LRU dequant cache
+        
+    def forward(self, x):
+        if key in self._dequant_cache:
+            weight_fp16 = self._dequant_cache[key]  # Cache hit
+        else:
+            weight_fp16 = self._dequant()  # Cache miss → dequant
+            self._cache_put(key, weight_fp16)
+        return F.linear(x, weight_fp16, self.bias)
+```
+
+### Module Hierarchy (What to Edit)
+
+| To Optimize | Edit This File | NOT This |
+|-------------|----------------|----------|
+| Expert computation | `glm4_moe_experts.py` | `layers/mmfp4_expert.py` |
+| MoE routing | `glm4_moe_experts.py` | `layers/mmfp4_moe.py` |
+| Linear layers | `inference_metal.py` | `trellis/linear.py` |
+| Attention | `mla_attention.py` | `trellis/attention.py` |
+
+### Kernel Names (Model-Agnostic)
+
+| Current Name | Actually Works With | Should Rename To |
+|--------------|---------------------|------------------|
+| `gemm_trellis_*` | Any mixed-precision GEMM | `gemm_mixedbit_*` |
+| `moe_trellis_swiglu_*` | Any SwiGLU MoE | `moe_swiglu_fused_*` |
+| `attention_mla_fused` | GLM, DeepSeek-V2/V3 | `attention_latent_fused` |
+| `rope_mla_*` | Any low-rank KV | `rope_latent_*` |
+
+### Quick Check: Which Class Does Your Model Use?
+
+```python
+from metal_marlin.model_utils import load_model
+model = load_model("path/to/model")
+for name, module in model.named_modules():
+    if "Quantized" in type(module).__name__ or "Linear" in type(module).__name__:
+        print(f"{name}: {type(module).__name__}")
+```
 
 ## Architecture: Apple Silicon vs CUDA
 
@@ -949,8 +1054,9 @@ dispatch_kernel(
     threads_per_grid=grid,
     threads_per_threadgroup=group,
     buffers=buffers,
-    wait=True  # ← Blocks until kernel finishes
+    wait=True  # ← Blocks until kernel completes
 )
+# Output is guaranteed valid
 ```
 
 **Why this was THE root cause:**
@@ -1942,3 +2048,27 @@ tasks:
       Verify: test -f benchmarks/results/mla_fused_benchmark.json
     dependencies: [wire-mla-fused-attention]
 ```
+
+---
+
+## GLM 4.7 Flash: MTP Support & 30+ TPS
+
+> **Full roadmap:** See [reports/mtp_roadmap.md](../reports/mtp_roadmap.md)
+
+**Quick summary:**
+
+| Metric | Current | Target | Path |
+|--------|---------|--------|------|
+| Base decode | 7.1 tok/s | 12 tok/s | Fix 107ms bottleneck |
+| With MTP | - | **30+ tok/s** | 2.5× acceptance rate |
+
+**Key blocking issues:**
+1. **107ms/step unaccounted** (76% of time!) - Needs profiling
+2. **MTP head not extracted** - Need to investigate model architecture
+3. **GPU→CPU syncs** - 16ms from `.tolist()` in routing
+
+**MTP phases:**
+1. Phase 1: Investigate MTP architecture → `reports/glm47_mtp_analysis.md`
+2. Phase 2: Extract MTP head → `metal_marlin/layers/mtp_head.py`
+3. Phase 3: Wire speculative decoding → `speculative_decode()` function
+4. Phase 4: Optimize for 30 TPS → Profile + fix unknown bottleneck

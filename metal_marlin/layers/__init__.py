@@ -40,6 +40,7 @@ MixedPrecisionLinear = _legacy_layers.MixedPrecisionLinear
 from .mixed_precision_linear import MixedPrecisionLinear
 from .mmfp4_linear import MMFP4Linear
 from .mmfp4_mtp_head import MMFP4MTPHead, verify_kernel
+from .mtp_head import GLMMTPHead
 
 try:
     from .mmfp4_mla import MMFP4MLA
@@ -64,5 +65,6 @@ __all__ = [
     "MMFP4MoE",
     "MMFP4FusedMoE",
     "MMFP4MTPHead",
+    "GLMMTPHead",
     "verify_kernel",
 ]

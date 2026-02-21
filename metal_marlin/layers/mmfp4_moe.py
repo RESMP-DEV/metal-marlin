@@ -544,53 +544,68 @@ class MMFP4MoE(nn.Module):
             output = torch.zeros_like(hidden_flat)
         
         input_f16 = hidden_flat.to(torch.float16)
-        
-        # _minimal_routing_overhead: Single CPU-GPU transfer for routing info
-        # Cache routing tensors on CPU to avoid .item() sync in loop
-        top_k = topk_indices.shape[1]
-        topk_indices_cpu = topk_indices[0].cpu().tolist()
-        topk_weights_list = topk_weights[0].tolist()
+        selected_expert_ids = topk_indices[0].to(
+            device=input_f16.device, dtype=torch.long
+        )
+        selected_weights = topk_weights[0].to(
+            device=input_f16.device, dtype=input_f16.dtype
+        )
         
         # _expert_fusion_decode: Use _fused_expert_mlp for single-kernel execution
         # This fuses gate_proj + silu + up_proj + down_proj into one kernel
         dispatch = _get_dispatch_module()
-        
-        # _fused_expert_combine: Process all experts and accumulate in-place
-        for i in range(top_k):
-            expert_idx = topk_indices_cpu[i]
-            weight = topk_weights_list[i]
-            expert = self.experts[expert_idx]
-            
-            # _expert_fusion_decode: Use fused kernel if available (MPS path)
-            if hidden_flat.device.type == "mps":
-                try:
-                    # Create fused weights on-the-fly for single-kernel dispatch
-                    gate_up_packed = torch.cat(
-                        [expert.gate_proj.packed_weights, expert.up_proj.packed_weights],
-                        dim=0,
-                    ).T.contiguous()
-                    gate_up_scales = torch.cat(
-                        [expert.gate_proj.scales, expert.up_proj.scales], dim=1
+
+        if hidden_flat.device.type == "mps":
+            try:
+                # _minimal_routing_overhead: Select routed experts on-device.
+                stacked_weights = dispatch._get_or_create_stacked_expert_weights(
+                    self.experts, input_f16.device
+                )
+                selected_gate_up_packed = stacked_weights[0].index_select(0, selected_expert_ids)
+                selected_gate_up_scales = stacked_weights[1].index_select(0, selected_expert_ids)
+                selected_down_packed = stacked_weights[2].index_select(0, selected_expert_ids)
+                selected_down_scales = stacked_weights[3].index_select(0, selected_expert_ids)
+                group_size = self.experts[0].group_size
+
+                expert_outputs: list[torch.Tensor] = []
+                for slot in range(selected_expert_ids.shape[0]):
+                    expert_outputs.append(
+                        dispatch._fused_expert_mlp(
+                            input_f16,
+                            selected_gate_up_packed[slot],
+                            selected_gate_up_scales[slot],
+                            selected_down_packed[slot],
+                            selected_down_scales[slot],
+                            group_size,
+                        )
                     )
-                    down_packed = expert.down_proj.packed_weights.T.contiguous()
-                    
-                    expert_out = dispatch._fused_expert_mlp(
-                        input_f16,
-                        gate_up_packed,
-                        gate_up_scales,
-                        down_packed,
-                        expert.down_proj.scales,
-                        expert.group_size,
+
+                if expert_outputs:
+                    stacked_outputs = torch.stack(expert_outputs, dim=0)
+                    output.copy_(
+                        (
+                            stacked_outputs
+                            * selected_weights.to(stacked_outputs.dtype).view(-1, 1, 1)
+                        ).sum(dim=0).to(output.dtype)
                     )
-                except Exception:
-                    # Fallback to standard expert forward
-                    expert_out = expert(input_f16)
-            else:
-                # Non-MPS: use standard expert forward
-                expert_out = expert(input_f16)
-            
-            # In-place addition: output += weight * expert_out
-            output.add_(weight * expert_out.to(output.dtype))
+            except Exception:
+                # Fallback to module execution if fused path is unavailable.
+                expert_ids_cpu = selected_expert_ids.to("cpu")
+                for slot in range(expert_ids_cpu.shape[0]):
+                    expert_idx = int(expert_ids_cpu[slot])
+                    expert_out = self.experts[expert_idx](input_f16)
+                    output.add_(
+                        selected_weights[slot].to(output.dtype) * expert_out.to(output.dtype)
+                    )
+        else:
+            # Non-MPS: standard expert forward path.
+            expert_ids_cpu = selected_expert_ids.to("cpu")
+            for slot in range(expert_ids_cpu.shape[0]):
+                expert_idx = int(expert_ids_cpu[slot])
+                expert_out = self.experts[expert_idx](input_f16)
+                output.add_(
+                    selected_weights[slot].to(output.dtype) * expert_out.to(output.dtype)
+                )
         
         # Add shared expert if present (also use fused path)
         if shared_expert is not None:

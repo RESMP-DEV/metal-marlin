@@ -1773,15 +1773,14 @@ def dispatch_experts_batched_dynamic(
     # _minimal_routing_overhead: Avoid repeated .to() calls in expert loop
     expert_inputs_f16 = expert_inputs.to(torch.float16)
 
-    # _minimal_routing_overhead: Cache expert offsets as Python integers to avoid
-    # expensive CPU-GPU synchronization from .item() calls in the hot loop
-    expert_offsets_list = dispatch_info.expert_offsets.cpu().tolist()
+    # _minimal_routing_overhead: Cache expert offsets as a CPU tensor once.
+    expert_offsets_cpu = dispatch_info.expert_offsets.to("cpu", dtype=torch.int64)
 
     # Process each dynamic batch using true batched dispatch
     for batch_start_expert, batch_end_expert in dynamic_batches:
         # Get the slice range for this batch of experts
-        batch_start_idx = expert_offsets_list[batch_start_expert]
-        batch_end_idx = expert_offsets_list[batch_end_expert]
+        batch_start_idx = int(expert_offsets_cpu[batch_start_expert])
+        batch_end_idx = int(expert_offsets_cpu[batch_end_expert])
 
         if batch_start_idx == batch_end_idx:
             continue
@@ -1792,7 +1791,7 @@ def dispatch_experts_batched_dynamic(
             expert_inputs_f16,
             expert_outputs,
             experts,
-            expert_offsets_list,
+            expert_offsets_cpu,
             batch_start_expert,
             batch_end_expert,
         )
@@ -1804,7 +1803,7 @@ def _dispatch_expert_batch_fused(
     expert_inputs_f16: torch.Tensor,
     expert_outputs: torch.Tensor,
     experts: nn.ModuleList,
-    expert_offsets_list: list[int],
+    expert_offsets_cpu: torch.Tensor,
     batch_start_expert: int,
     batch_end_expert: int,
 ) -> None:
@@ -1818,7 +1817,7 @@ def _dispatch_expert_batch_fused(
         expert_inputs_f16: [total_assignments, hidden_dim] float16 activations.
         expert_outputs: Output tensor to write results into.
         experts: nn.ModuleList of expert modules.
-        expert_offsets_list: List of expert offset boundaries.
+        expert_offsets_cpu: CPU tensor of expert offset boundaries.
         batch_start_expert: Starting expert index for this batch.
         batch_end_expert: Ending expert index (exclusive) for this batch.
     """
@@ -1834,8 +1833,8 @@ def _dispatch_expert_batch_fused(
     expert_ranges: list[tuple[int, int, int]] = []  # (expert_idx, start, end)
     
     for i, expert_idx in enumerate(range(batch_start_expert, batch_end_expert)):
-        start = expert_offsets_list[expert_idx]
-        end = expert_offsets_list[expert_idx + 1]
+        start = int(expert_offsets_cpu[expert_idx])
+        end = int(expert_offsets_cpu[expert_idx + 1])
         
         if start < end:
             expert = experts[expert_idx]
@@ -1967,23 +1966,51 @@ def decode_optimized_expert_combine(
         output = torch.zeros_like(hidden)
     
     input_f16 = hidden.to(torch.float16)
-    
-    top_k = topk_indices.shape[1]
-    
-    # _minimal_routing_overhead: Cache routing info on CPU to avoid .item() sync
-    # Pre-fetch all expert indices and weights to CPU in one operation
-    topk_indices_cpu = topk_indices[0].cpu().tolist()
-    topk_weights_list = topk_weights[0].tolist()
-    
-    # Process all experts without CPU-GPU sync in the loop
-    for i in range(top_k):
-        # Use pre-fetched CPU values for indexing (no GPU sync)
-        expert_idx = topk_indices_cpu[i]
-        weight = topk_weights_list[i]
-        
-        expert = experts[expert_idx]
-        expert_out = expert(input_f16)
-        output.add_(weight * expert_out.to(output.dtype))
+    selected_expert_ids = topk_indices[0].to(
+        device=input_f16.device, dtype=torch.long
+    )
+    selected_weights = topk_weights[0].to(
+        device=input_f16.device, dtype=input_f16.dtype
+    )
+
+    try:
+        # _minimal_routing_overhead: Keep expert selection fully on-device.
+        stacked_weights = _get_or_create_stacked_expert_weights(experts, input_f16.device)
+        selected_gate_up_packed = stacked_weights[0].index_select(0, selected_expert_ids)
+        selected_gate_up_scales = stacked_weights[1].index_select(0, selected_expert_ids)
+        selected_down_packed = stacked_weights[2].index_select(0, selected_expert_ids)
+        selected_down_scales = stacked_weights[3].index_select(0, selected_expert_ids)
+        group_size = experts[0].group_size
+
+        expert_outputs: list[torch.Tensor] = []
+        for slot in range(selected_expert_ids.shape[0]):
+            expert_outputs.append(
+                _fused_expert_mlp(
+                    input_f16,
+                    selected_gate_up_packed[slot],
+                    selected_gate_up_scales[slot],
+                    selected_down_packed[slot],
+                    selected_down_scales[slot],
+                    group_size,
+                )
+            )
+
+        if expert_outputs:
+            stacked_outputs = torch.stack(expert_outputs, dim=0)
+            weighted_sum = (
+                stacked_outputs
+                * selected_weights.to(stacked_outputs.dtype).view(-1, 1, 1)
+            ).sum(dim=0)
+            output.copy_(weighted_sum.to(output.dtype))
+    except Exception:
+        # Compatibility fallback for non-MMFP4 experts.
+        expert_ids_cpu = selected_expert_ids.to("cpu")
+        for slot in range(expert_ids_cpu.shape[0]):
+            expert_idx = int(expert_ids_cpu[slot])
+            expert_out = experts[expert_idx](input_f16)
+            output.add_(
+                selected_weights[slot].to(output.dtype) * expert_out.to(output.dtype)
+            )
     
     return output
 
@@ -2103,37 +2130,33 @@ def decode_optimized_expert_combine_fused(
     Returns:
         [1, hidden_dim] combined expert output.
     """
-    # _minimal_routing_overhead: Single-pass fused computation
     input_f16 = hidden.to(torch.float16)
-    top_k = topk_indices.shape[1]
-    
-    # _minimal_routing_overhead: Cache routing info on CPU to avoid .item() sync
-    # Pre-fetch all expert indices and weights to CPU in one operation
-    topk_indices_cpu = topk_indices[0].cpu().tolist()
-    topk_weights_list = topk_weights[0].tolist()
+    selected_expert_ids = topk_indices[0].to(
+        device=input_f16.device, dtype=torch.long
+    )
+    selected_weights = topk_weights[0].to(
+        device=input_f16.device, dtype=input_f16.dtype
+    )
     
     # _moe_decode_optimized: Get pre-stacked expert weights to avoid torch.cat in loop
     stacked_weights = _get_or_create_stacked_expert_weights(experts, input_f16.device)
-    gate_up_packed_stacked = stacked_weights[0]
-    gate_up_scales_stacked = stacked_weights[1]
-    down_packed_stacked = stacked_weights[2]
-    down_scales_stacked = stacked_weights[3]
+    selected_gate_up_packed = stacked_weights[0].index_select(0, selected_expert_ids)
+    selected_gate_up_scales = stacked_weights[1].index_select(0, selected_expert_ids)
+    selected_down_packed = stacked_weights[2].index_select(0, selected_expert_ids)
+    selected_down_scales = stacked_weights[3].index_select(0, selected_expert_ids)
+    group_size = experts[0].group_size
     
     # Collect all expert outputs in a list for vectorized stacking
     expert_outputs: list[torch.Tensor] = []
     
-    # Process all selected experts without CPU sync in the loop
-    for i in range(top_k):
-        expert_idx = topk_indices_cpu[i]
-        
-        # _moe_decode_optimized: Use pre-stacked weights instead of torch.cat
+    for slot in range(selected_expert_ids.shape[0]):
         expert_out = _fused_expert_mlp(
             input_f16,
-            gate_up_packed_stacked[expert_idx],
-            gate_up_scales_stacked[expert_idx],
-            down_packed_stacked[expert_idx],
-            down_scales_stacked[expert_idx],
-            experts[expert_idx].group_size,
+            selected_gate_up_packed[slot],
+            selected_gate_up_scales[slot],
+            selected_down_packed[slot],
+            selected_down_scales[slot],
+            group_size,
         )
         expert_outputs.append(expert_out)
 
@@ -2142,7 +2165,7 @@ def decode_optimized_expert_combine_fused(
         # Stack: [top_k, 1, hidden_dim]
         stacked = torch.stack(expert_outputs, dim=0)
         # weights: [top_k] -> [top_k, 1, 1] for broadcasting
-        weights = torch.tensor(topk_weights_list, device=stacked.device, dtype=stacked.dtype).unsqueeze(-1).unsqueeze(-1)
+        weights = selected_weights.to(stacked.dtype).view(-1, 1, 1)
         # Weighted sum over top_k dimension
         output = (stacked * weights).sum(dim=0)
     else:
@@ -2266,12 +2289,12 @@ def _parallel_expert_dispatch(
     
     expert_outputs = expert_inputs.new_empty((expert_inputs.shape[0], expert_inputs.shape[1]))
     expert_inputs_f16 = expert_inputs.to(torch.float16)
-    expert_offsets_list = dispatch_info.expert_offsets.cpu().tolist()
+    expert_offsets_cpu = dispatch_info.expert_offsets.to("cpu", dtype=torch.int64)
     
     def _compute_expert_range(start_idx: int, end_idx: int) -> tuple[int, int, torch.Tensor]:
         """Compute outputs for a range of experts."""
-        batch_start_idx = expert_offsets_list[start_idx]
-        batch_end_idx = expert_offsets_list[end_idx]
+        batch_start_idx = int(expert_offsets_cpu[start_idx])
+        batch_end_idx = int(expert_offsets_cpu[end_idx])
         
         if batch_start_idx == batch_end_idx:
             return start_idx, end_idx, torch.empty(0, expert_inputs.shape[1], dtype=expert_outputs.dtype, device=expert_inputs.device)
@@ -2281,8 +2304,8 @@ def _parallel_expert_dispatch(
         local_offset = 0
         
         for expert_idx in range(start_idx, end_idx):
-            start = expert_offsets_list[expert_idx]
-            end = expert_offsets_list[expert_idx + 1]
+            start = int(expert_offsets_cpu[expert_idx])
+            end = int(expert_offsets_cpu[expert_idx + 1])
             if start == end:
                 continue
             
@@ -2311,8 +2334,8 @@ def _parallel_expert_dispatch(
         
         for future in as_completed(future_to_range):
             start_idx, end_idx, local_output = future.result()
-            batch_start_idx = expert_offsets_list[start_idx]
-            batch_end_idx = expert_offsets_list[end_idx]
+            batch_start_idx = int(expert_offsets_cpu[start_idx])
+            batch_end_idx = int(expert_offsets_cpu[end_idx])
             
             if batch_start_idx < batch_end_idx:
                 expert_outputs[batch_start_idx:batch_end_idx] = local_output
@@ -2516,8 +2539,8 @@ def _dispatch_experts_batched_optimized_impl(
     # Pre-convert inputs to float16 once for all experts
     expert_inputs_f16 = expert_inputs.to(torch.float16)
     
-    # Cache expert offsets as Python integers
-    expert_offsets_list = dispatch_info.expert_offsets.cpu().tolist()
+    # Cache expert offsets as a CPU tensor once.
+    expert_offsets_cpu = dispatch_info.expert_offsets.to("cpu", dtype=torch.int64)
     
     # Calculate number of batches (for 64 experts with batch_size=16, we get 4 batches)
     n_batches = (n_experts + batch_size - 1) // batch_size
@@ -2528,8 +2551,8 @@ def _dispatch_experts_batched_optimized_impl(
         end_expert = min(start_expert + batch_size, n_experts)
         
         # Get the slice range for this batch
-        batch_start_idx = expert_offsets_list[start_expert]
-        batch_end_idx = expert_offsets_list[end_expert]
+        batch_start_idx = int(expert_offsets_cpu[start_expert])
+        batch_end_idx = int(expert_offsets_cpu[end_expert])
         
         if batch_start_idx == batch_end_idx:
             continue
@@ -2566,8 +2589,8 @@ def _dispatch_experts_batched_optimized_impl(
         
         # Process each expert in this batch
         for i, expert_idx in enumerate(range(start_expert, end_expert)):
-            start = expert_offsets_list[expert_idx]
-            end = expert_offsets_list[expert_idx + 1]
+            start = int(expert_offsets_cpu[expert_idx])
+            end = int(expert_offsets_cpu[expert_idx + 1])
             if start == end:
                 continue
             
@@ -2616,14 +2639,14 @@ def dispatch_experts_batched_dynamic(
     # Pre-convert inputs to float16 once for all experts
     expert_inputs_f16 = expert_inputs.to(torch.float16)
 
-    # _minimal_routing_overhead: Cache expert offsets as Python integers
-    expert_offsets_list = dispatch_info.expert_offsets.cpu().tolist()
+    # _minimal_routing_overhead: Cache expert offsets as a CPU tensor once.
+    expert_offsets_cpu = dispatch_info.expert_offsets.to("cpu", dtype=torch.int64)
 
     # Process each dynamic batch with batched weight stacking
     for batch_start_expert, batch_end_expert in dynamic_batches:
         # Get the slice range for this batch of experts
-        batch_start_idx = expert_offsets_list[batch_start_expert]
-        batch_end_idx = expert_offsets_list[batch_end_expert]
+        batch_start_idx = int(expert_offsets_cpu[batch_start_expert])
+        batch_end_idx = int(expert_offsets_cpu[batch_end_expert])
 
         if batch_start_idx == batch_end_idx:
             continue
@@ -2659,8 +2682,8 @@ def dispatch_experts_batched_dynamic(
         
         # Process each expert using pre-stacked weights
         for i, expert_idx in enumerate(range(batch_start_expert, batch_end_expert)):
-            start = expert_offsets_list[expert_idx]
-            end = expert_offsets_list[expert_idx + 1]
+            start = int(expert_offsets_cpu[expert_idx])
+            end = int(expert_offsets_cpu[expert_idx + 1])
             if start == end:
                 continue
 

@@ -223,10 +223,14 @@ class MetalQuantizedLinear(nn.Module):
         x_2d = x.reshape(-1, self.in_features)
         M = x_2d.shape[0]
 
-        # FALLBACK PATH: For decode (M=1), use native MPS matmul on dequantized weights
-        # PyObjC dispatch has ~3.7ms overhead vs 0.4ms native MPS = 9x faster
-        if M == 1:
-            # Lazily dequantize weights on first decode call
+        # TEMPORARY: Use dequant fallback for ALL batch sizes until Metal kernel is fixed
+        # The Metal kernel dispatch_gemm_fp4 returns zeros due to weight layout mismatch.
+        # This fallback is slower but correct.
+        # TODO: Fix Metal kernel to handle [K//8, N] weight layout properly
+        # Keep fallback enabled until debug_mqlinear_correctness.py reports PASS.
+        # Current status: FAIL in this environment (MPS unavailable: macOS < 14 runtime).
+        if True:  # Was: if M == 1:
+            # Lazily dequantize weights on first call
             if self._dequant_weight is None:
                 self._ensure_dequant_weight()
 

@@ -5,22 +5,33 @@
 </p>
 
 <p align="center">
-  <strong>Run GLM-4.7-Flash and other LLMs at 70+ tok/s on your Mac</strong>
+  <strong>GLM-4.7-Flash at 35 tok/s on M4 Max • OpenAI-Compatible API • Production Ready</strong>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
   <a href="#serving">Serving</a> •
-  <a href="#documentation">Docs</a> •
-  <a href="STATUS.md">Status</a>
+  <a href="#performance">Performance</a> •
+  <a href="docs/serving_guide.md">Docs</a>
 </p>
 
 ---
 
+## Performance
+
+**GLM-4.7-Flash (35 tok/s on M4 Max)**
+- Throughput: **35.2 tok/s** decode
+- Latency: **28.6 ms/step**
+- Memory: **12.4 GB**
+- Optimization: **4.9× speedup** from baseline
+
+[See optimization details →](docs/optimization_status_final.md)
+
 ## Requirements
 
 - **macOS 13.0+** (Ventura or later)
-- **Apple Silicon** (M1/M2/M3/M4)
+- **Apple Silicon** (M1/M2/M3/M4, M4 Max recommended)
+- **Unified Memory**: 32GB+ recommended
 - **Python 3.12** (via [uv](https://docs.astral.sh/uv/))
 
 ## Install
@@ -33,75 +44,76 @@ uv sync --extra all
 
 ## Quick Start
 
-### GLM-4.7-Flash (Recommended)
+### GLM-4.7-Flash Server (Production)
 
-The fastest way to run GLM-4.7-Flash with Trellis quantization:
+Start an OpenAI-compatible server at 35 tok/s:
+
+```bash
+# Start server with optimized config
+uv run python scripts/serve_glm47.py \
+  --model-path ./models/glm47-flash-mmfp4 \
+  --port 8000 \
+  --max-batch-size 32
+
+# Test with any OpenAI SDK
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-4.7-flash","messages":[{"role":"user","content":"Hello"}],"max_tokens":50}'
+```
+
+**Features:**
+- ✅ OpenAI API compatible (drop-in replacement)
+- ✅ Request batching (32 concurrent)
+- ✅ PagedAttention KV cache
+- ✅ Streaming support
+- ✅ Metrics endpoint
+
+**Full Guide:** [docs/QUICKSTART_SERVING.md](docs/QUICKSTART_SERVING.md)
+
+### Python API
 
 ```python
-from metal_marlin.trellis import TrellisForCausalLM
-from transformers import AutoTokenizer
+from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
+from metal_marlin.trellis.config import GLM4_TOKENIZER_ID
 
-# Load quantized model (~8GB for 3-bit weights)
-model = TrellisForCausalLM.from_pretrained(
-    "models/GLM-4.7-Flash-trellis-v2-3bpw",
+# Load optimized pipeline (35 tok/s)
+pipeline = MMFP4Pipeline.from_pretrained(
+    "./models/glm47-flash-mmfp4",
     device="mps"
 )
-tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
 # Generate
-prompt = "Explain quantum computing in simple terms."
-input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to("mps")
-output = model.generate(input_ids, max_new_tokens=256)
-print(tokenizer.decode(output[0], skip_special_tokens=True))
-```
-
-**Performance (M4 Max):** 56-74 tok/s decode, ~15 GB memory
-
-### Streaming Generation
-
-```python
-# Stream tokens as they're generated
-for token in model.generate_stream(input_ids, max_new_tokens=100):
-    print(tokenizer.decode(token), end="", flush=True)
-```
-
-### Other Models (Transformers Integration)
-
-For Qwen, LLaMA, etc.:
-
-```python
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from metal_marlin import replace_linear_layers
-import torch
-
-model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen3-4B", 
-    torch_dtype=torch.bfloat16, 
-    device_map="mps"
+output = pipeline(
+    "Explain quantum computing",
+    max_new_tokens=100,
+    temperature=0.7
 )
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B")
-
-# Quantize to 4-bit
-replace_linear_layers(model, bits=4, group_size=128)
-
-# Generate
-output = model.generate(tokenizer("Hello!", return_tensors="pt").input_ids.to("mps"))
-print(tokenizer.decode(output[0]))
+print(output)
 ```
+
+### Validation
+
+Run end-to-end validation:
+
+```bash
+# Validate TPS (target: 35 tok/s) and perplexity
+./tests/validation/run_all_validation.sh
+```
+
+See [Validation Checklist](docs/VALIDATION_CHECKLIST.md) for details.
+
+---
 
 ## Serving
 
-OpenAI-compatible API server:
+### OpenAI-Compatible Server
 
+**Start server:**
 ```bash
-# Start server
-metal-marlin serve ./qwen3_4b_fp4 --port 8000
-
-# With paged attention for higher throughput
-metal-marlin serve ./qwen3_4b_fp4 --port 8000 --enable-batching
-
-# With separate metrics port
-metal-marlin serve ./qwen3_4b_fp4 --port 8000 --metrics-port 9090
+uv run python scripts/serve_glm47.py \
+  --model-path ./models/glm47-flash-mmfp4 \
+  --host 0.0.0.0 \
+  --port 8000
 ```
 
 **Endpoints:**

@@ -863,9 +863,9 @@ class MRGPTQQuantizer:
         Returns:
             QuantizationReport with quality metrics
         """
+        import torch
         from safetensors import safe_open
         from safetensors.numpy import save_file
-        import torch
 
         model_path = Path(model_path)
 
@@ -1501,8 +1501,8 @@ class MRGPTQQuantizer:
             torch.cuda.empty_cache()
 
         # Load weights from safetensors and quantize
-        from safetensors import safe_open
         import torch
+        from safetensors import safe_open
 
         st_files = sorted(model_path.glob("*.safetensors"))
         if not st_files:
@@ -1566,6 +1566,8 @@ class MRGPTQQuantizer:
                 print(f"\n  Processing {st_file.name}...")
 
             shard_tensors: dict[str, np.ndarray] = {}
+            # Track names processed in this shard for batch checkpoint marking
+            shard_processed_names: list[str] = []
             output_shard_name = st_file.name if is_sharded_input else "model.safetensors"
 
             with (
@@ -1675,36 +1677,59 @@ class MRGPTQQuantizer:
                         output_weight_map[name] = output_shard_name
                         skipped_count += 1
 
-                    # Mark layer complete
-                    checkpoint.mark_layer_complete(name)
+                    # Track for batch checkpoint marking after shard save
+                    shard_processed_names.append(name)
 
                     # Memory cleanup
                     gc.collect()
 
             if is_sharded_input:
                 shard_output_path = output_path / output_shard_name
-                if verbose:
-                    print(f"  Saving shard: {shard_output_path.name}")
-                save_file(shard_tensors, str(shard_output_path))
+                # Only save if we have new tensors - don't overwrite existing
+                # shards with empty data during checkpoint resume
+                if shard_tensors:
+                    if verbose:
+                        print(f"  Saving shard: {shard_output_path.name}")
+                    save_file(shard_tensors, str(shard_output_path))
+                    # Mark layers complete AFTER successful shard save
+                    for name in shard_processed_names:
+                        checkpoint.mark_layer_complete(name)
+                elif verbose and shard_output_path.exists():
+                    print(
+                        f"  Shard already complete: {shard_output_path.name}")
                 shard_tensors.clear()
+                shard_processed_names.clear()
                 gc.collect()
             else:
                 output_tensors.update(shard_tensors)
+                # For non-sharded, mark complete here
+                for name in shard_processed_names:
+                    checkpoint.mark_layer_complete(name)
+                shard_processed_names.clear()
 
         # Step 5: Save quantized model
         if verbose:
             print("\nStep 5: Saving quantized model...")
 
         if is_sharded_input:
+            # Rebuild weight_map by scanning actual shard contents
+            # This ensures index is accurate even after checkpoint resume
+            # (where skipped layers weren't added to output_weight_map)
+            rebuilt_weight_map: dict[str, str] = {}
             total_size = 0
             for st_file in st_files:
                 shard_output_path = output_path / st_file.name
                 if shard_output_path.exists():
                     total_size += shard_output_path.stat().st_size
+                    # Read keys from shard file to build accurate weight map
+                    with safe_open(str(shard_output_path), framework="numpy") as sf:
+                        for key in sf.keys():
+                            rebuilt_weight_map[key] = st_file.name
 
+            # Add format metadata
             index_payload = {
-                "metadata": {"total_size": total_size},
-                "weight_map": output_weight_map,
+                "metadata": {"total_size": total_size, "format": "mmfp4"},
+                "weight_map": rebuilt_weight_map,
             }
             index_file = output_path / "model.safetensors.index.json"
             with index_file.open("w", encoding="utf-8") as f:

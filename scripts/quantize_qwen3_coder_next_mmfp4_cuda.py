@@ -64,12 +64,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from metal_marlin.calibration import CalibrationDataset  # noqa: E402
 from metal_marlin.hf_loader import download_model  # noqa: E402
-from metal_marlin.mr_gptq import (  # noqa: E402
-    AcceleratedMRGPTQQuantizer,
-    MRGPTQQuantizer,
-    QuantizationFormat,
-)
-
+from metal_marlin.mr_gptq import (AcceleratedMRGPTQQuantizer,  # noqa: E402
+                                  MRGPTQQuantizer, QuantizationFormat)
 
 # ============================================================================
 # Model Configuration - Qwen3-Coder-Next
@@ -682,10 +678,11 @@ def main() -> int:
         hessian_path = checkpoint_dir / "hessians"
         hessian_path.mkdir(parents=True, exist_ok=True)
 
-        from metal_marlin.hf_loader import load_layer_weights, load_non_layer_weights
-        from transformers import AutoConfig, AutoModelForCausalLM
         import torch.nn as nn
         from accelerate import init_empty_weights
+        from metal_marlin.hf_loader import (load_layer_weights,
+                                            load_non_layer_weights)
+        from transformers import AutoConfig, AutoModelForCausalLM
 
         # Load config only
         config = AutoConfig.from_pretrained(

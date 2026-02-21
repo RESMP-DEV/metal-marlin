@@ -12,6 +12,22 @@ from .inference_metal import MetalQuantizedLinear
 from .mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
 _SUPPORTED_FORMATS = {"fp4", "int4", "nf4"}
+__all__ = [
+    "MetalQuantizedMoE",
+    "MoEExperts",
+    "MoEModule",
+    "find_linear_layers",
+    "find_moe_layers",
+    "get_parent_module",
+    "quantize_linear_layer",
+    "quantize_moe_experts",
+    "replace_linear_layers",
+    "replace_moe_layers",
+    "replace_glm4_moe_experts",
+    "collect_moe_expert_hessians",
+    "collect_single_layer_hessians",
+    "replace_moe_layers_streaming",
+]
 
 
 class MoEExperts(Protocol):
@@ -673,6 +689,81 @@ def replace_moe_layers(
     }
 
 
+def replace_glm4_moe_experts(
+    model: nn.Module,
+    device: str = "mps",
+    group_size: int = 128,
+) -> dict[str, Any]:
+    """Replace Glm4MoeLiteNaiveMoe with QuantizedGlm4MoEExperts in-place.
+
+    This handles the GLM4-MoE-Lite architecture where experts are stored
+    as 3D nn.Parameters instead of nn.Linear layers.
+
+    Args:
+        model: Model to modify
+        device: Target device
+        group_size: Quantization group size
+
+    Returns:
+        Dict with replacement stats
+    """
+    targets = [
+        (name, module)
+        for name, module in model.named_modules()
+        if type(module).__name__ in ("Glm4MoeLiteNaiveMoe", "Glm4MoeLiteMoE")
+    ]
+    if not targets:
+        return {
+            "detected_count": 0,
+            "replaced_count": 0,
+            "skipped_count": 0,
+            "replaced_layers": [],
+            "skipped_layers": [],
+            "total_experts": 0,
+        }
+
+    quantized_cls = _resolve_quantized_glm4_moe_experts_class()
+
+    replaced_layers: list[str] = []
+    skipped_layers: list[str] = []
+    total_experts = 0
+    errors: list[str] = []
+
+    for name, module in targets:
+        try:
+            quantized, num_experts = _build_quantized_glm4_moe_experts(
+                module,
+                quantized_cls,
+                device=device,
+                group_size=group_size,
+            )
+        except Exception as exc:
+            skipped_layers.append(name)
+            errors.append(f"{name}: {exc}")
+            continue
+
+        parent, attr = get_parent_module(model, name)
+        # NOTE: Do NOT preserve old module as _metal_marlin_experts_fp16
+        # because it would still be traversed by named_parameters() and
+        # counted towards memory. The old BF16 weights waste 56GB.
+        setattr(parent, attr, quantized)
+
+        replaced_layers.append(name)
+        total_experts += num_experts
+
+    stats: dict[str, Any] = {
+        "detected_count": len(targets),
+        "replaced_count": len(replaced_layers),
+        "skipped_count": len(skipped_layers),
+        "replaced_layers": replaced_layers,
+        "skipped_layers": skipped_layers,
+        "total_experts": total_experts,
+    }
+    if errors:
+        stats["errors"] = errors
+    return stats
+
+
 def _extract_hessian(module: nn.Module) -> Any | None:
     for attr in ("_metal_marlin_hessian", "hessian", "calibration_hessian", "hessian_info"):
         if hasattr(module, attr):
@@ -705,6 +796,130 @@ def _cleanup_layer_overrides(module: nn.Module) -> None:
     for attr in ("_metal_marlin_hessian", "_metal_marlin_use_hadamard", "_metal_marlin_layer_name"):
         if hasattr(module, attr):
             delattr(module, attr)
+
+
+def _resolve_quantized_glm4_moe_experts_class() -> type[nn.Module]:
+    cls = globals().get("QuantizedGlm4MoEExperts")
+    if isinstance(cls, type):
+        return cls
+
+    import importlib
+
+    candidate_modules = (
+        ".glm4_moe_experts",
+        ".models",
+        ".models.glm4_moe",
+        ".models.glm4_moe_lite",
+        ".layers",
+        ".layers.glm4_moe",
+        ".layers.mmfp4_moe",
+    )
+    for module_name in candidate_modules:
+        try:
+            module = importlib.import_module(module_name, package=__package__)
+        except Exception:
+            continue
+        candidate = getattr(module, "QuantizedGlm4MoEExperts", None)
+        if isinstance(candidate, type):
+            return candidate
+
+    raise ImportError(
+        "QuantizedGlm4MoEExperts not found. Ensure GLM4 MoE expert quantization "
+        "module is importable before calling replace_glm4_moe_experts()."
+    )
+
+
+def _resolve_glm4_moe_dims(module: nn.Module) -> tuple[int, int, int]:
+    num_experts = getattr(module, "num_experts", None)
+    hidden_dim = getattr(module, "hidden_dim", None)
+    intermediate_dim = getattr(module, "intermediate_dim", None)
+
+    gate_up = _resolve_moe_weight(getattr(module, "gate_up_proj", None))
+    down = _resolve_moe_weight(getattr(module, "down_proj", None))
+
+    if gate_up is not None and gate_up.ndim == 3:
+        num_experts = int(
+            gate_up.shape[0]) if num_experts is None else num_experts
+        hidden_dim = int(
+            gate_up.shape[2]) if hidden_dim is None else hidden_dim
+        if intermediate_dim is None:
+            gate_out = int(gate_up.shape[1])
+            intermediate_dim = gate_out // 2 if gate_out % 2 == 0 else gate_out
+
+    if down is not None and down.ndim == 3:
+        num_experts = int(
+            down.shape[0]) if num_experts is None else num_experts
+        hidden_dim = int(down.shape[1]) if hidden_dim is None else hidden_dim
+        intermediate_dim = (
+            int(down.shape[2]
+                ) if intermediate_dim is None else intermediate_dim
+        )
+
+    if num_experts is None or hidden_dim is None or intermediate_dim is None:
+        raise ValueError("Unable to infer GLM4 MoE expert dimensions")
+
+    return int(num_experts), int(hidden_dim), int(intermediate_dim)
+
+
+def _build_quantized_glm4_moe_experts(
+    source: nn.Module,
+    cls: type[nn.Module],
+    *,
+    device: str,
+    group_size: int,
+) -> tuple[nn.Module, int]:
+    import inspect
+    from types import SimpleNamespace
+
+    num_experts, hidden_dim, intermediate_dim = _resolve_glm4_moe_dims(source)
+    config_stub = SimpleNamespace(
+        num_local_experts=num_experts,
+        hidden_size=hidden_dim,
+        moe_intermediate_size=intermediate_dim,
+    )
+
+    kwargs = {
+        "num_experts": num_experts,
+        "n_experts": num_experts,
+        "hidden_dim": hidden_dim,
+        "hidden_size": hidden_dim,
+        "intermediate_dim": intermediate_dim,
+        "intermediate_size": intermediate_dim,
+        "device": device,
+        "group_size": group_size,
+        "config": config_stub,
+    }
+
+    signature = inspect.signature(cls.__init__)
+    params = signature.parameters
+    supports_var_kwargs = any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if supports_var_kwargs:
+        filtered_kwargs = kwargs
+    else:
+        filtered_kwargs = {name: value for name,
+                           value in kwargs.items() if name in params}
+
+    try:
+        return cls(**filtered_kwargs), num_experts
+    except TypeError:
+        pass
+
+    attempts = [
+        (num_experts, hidden_dim, intermediate_dim, device, group_size),
+        (num_experts, hidden_dim, intermediate_dim, group_size),
+        (num_experts, hidden_dim, intermediate_dim),
+        (config_stub,),
+    ]
+    for args in attempts:
+        try:
+            return cls(*args), num_experts
+        except TypeError:
+            continue
+
+    # Re-raise with kwargs to preserve constructor error context.
+    return cls(**filtered_kwargs), num_experts
 
 
 def _resolve_moe_weight(value: Any) -> torch.Tensor | None:

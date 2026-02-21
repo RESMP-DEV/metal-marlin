@@ -6,11 +6,13 @@ import json
 import os
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..inference.mmfp4_pipeline import MMFP4Pipeline
 from ..inference.pipeline import MarlinPipeline
 from .._compat import HAS_CPP_EXT
 from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
@@ -84,9 +86,10 @@ class RequestLatencyMetrics:
 
 
 def _detect_model_format(model_path: str) -> str:
-    """Detect if model is Marlin or Trellis format.
+    """Detect if model is Marlin, MMFP4, or Trellis format.
 
     Returns:
+        'mmfp4' for GLM-4.7-Flash style MMFP4 checkpoints
         'trellis' if model uses Trellis quantization
         'marlin' otherwise (default)
     """
@@ -99,8 +102,58 @@ def _detect_model_format(model_path: str) -> str:
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
+            quantization_config = config.get("quantization_config", {})
+            if not isinstance(quantization_config, dict):
+                quantization_config = {}
+
+            # GLM-4.7-Flash MMFP4 detection:
+            # 1) MMFP4 quantization marker
+            # 2) GLM architecture markers (or MLA + MoE structural markers)
+            quant_markers = (
+                quantization_config.get("quant_method"),
+                quantization_config.get("format"),
+                quantization_config.get("type"),
+                config.get("quant_method"),
+                config.get("quant_type"),
+                config.get("format"),
+            )
+            has_mmfp4_quant = any(
+                marker is not None and "mmfp4" in str(marker).lower()
+                for marker in quant_markers
+            )
+
+            architectures = config.get("architectures", [])
+            if not isinstance(architectures, list):
+                architectures = [architectures]
+            architecture_blob = " ".join(str(item).lower() for item in architectures)
+            model_type = str(config.get("model_type", "")).lower()
+            model_name = str(config.get("_name_or_path", "")).lower()
+
+            has_glm47_architecture = (
+                "glm-4.7-flash" in model_name
+                or "glm4_moe" in model_type
+                or ("glm4" in model_type and "moe" in model_type)
+                or ("glm4" in architecture_blob and "moe" in architecture_blob)
+            )
+
+            expert_count_raw = (
+                config.get("num_experts")
+                or config.get("num_local_experts")
+                or config.get("n_routed_experts")
+                or 0
+            )
+            try:
+                expert_count = int(expert_count_raw)
+            except (TypeError, ValueError):
+                expert_count = 0
+            has_mla = config.get("kv_lora_rank") is not None
+            has_moe = expert_count > 1
+
+            if has_mmfp4_quant and (has_glm47_architecture or (has_mla and has_moe)):
+                return "mmfp4"
+
             # Trellis models have specific markers
-            if config.get("quantization_config", {}).get("quant_method") == "trellis":
+            if quantization_config.get("quant_method") == "trellis":
                 return "trellis"
             if config.get("format") == "trellis":
                 return "trellis"
@@ -175,6 +228,7 @@ class EngineConfig:
     enable_batching: bool = False  # Start disabled for compatibility
     num_kv_blocks: int = 512
     block_size: int = 16
+    use_paged_attention: bool = True
     use_cpp_serving: bool = True  # Use C++ serving path when available
 
 
@@ -199,6 +253,8 @@ class ServingEngine:
 
         if use_mock:
             self.pipeline = _MockPipeline(model_name)
+        elif model_format == "mmfp4":
+            self.pipeline = self._load_mmfp4_pipeline(config)
         elif model_format == "trellis":
             self.pipeline = self._load_trellis_pipeline(config)
         else:
@@ -252,6 +308,24 @@ class ServingEngine:
         if self._serving_cpp is not None and self._serving_cpp.available:
             return self._serving_cpp.get_metrics()
         return {"dispatch_count": 0, "total_dispatch_us": 0, "avg_dispatch_us": 0}
+
+    def _load_mmfp4_pipeline(self, config: EngineConfig) -> MMFP4Pipeline:
+        """Load an MMFP4 pipeline for GLM-4.7-Flash style checkpoints."""
+        if not Path(config.model_path).exists():
+            raise FileNotFoundError(f"Model not found: {config.model_path}")
+
+        try:
+            pipeline = MMFP4Pipeline.from_pretrained(
+                config.model_path,
+                device=config.device,
+                use_paged_attention=config.use_paged_attention,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load MMFP4 model from {config.model_path}: {e}"
+            ) from e
+
+        return pipeline
 
     def _load_trellis_pipeline(self, config: EngineConfig):
         """Load a Trellis-quantized model.
@@ -470,12 +544,15 @@ class ServingEngine:
 
         def _run_stream() -> None:
             try:
-                iterator = self.pipeline(
+                stream_output = self._call_pipeline(
                     prompt,
                     max_tokens=request.max_tokens or 256,
                     temperature=request.temperature,
                     top_p=request.top_p,
                     stream=True,
+                )
+                iterator = (
+                    iter([stream_output]) if isinstance(stream_output, str) else stream_output
                 )
                 for piece in iterator:
                     loop.call_soon_threadsafe(queue.put_nowait, piece)
@@ -562,12 +639,15 @@ class ServingEngine:
 
         def _run_stream() -> None:
             try:
-                iterator = self.pipeline(
+                stream_output = self._call_pipeline(
                     prompt,
                     max_tokens=request.max_tokens,
                     temperature=request.temperature,
                     top_p=request.top_p,
                     stream=True,
+                )
+                iterator = (
+                    iter([stream_output]) if isinstance(stream_output, str) else stream_output
                 )
                 for piece in iterator:
                     loop.call_soon_threadsafe(queue.put_nowait, piece)
@@ -613,7 +693,7 @@ class ServingEngine:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             self._executor,
-            lambda: self.pipeline(
+            lambda: self._call_pipeline(
                 prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -621,6 +701,31 @@ class ServingEngine:
             ),
         )
         return str(result)
+
+    def _call_pipeline(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> str | Iterator[str]:
+        if self._model_format == "mmfp4":
+            return self.pipeline(
+                prompt,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stream=stream,
+            )
+        return self.pipeline(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+        )
 
     def _strip_prompt(self, full_text: str, prompt: str) -> str:
         if full_text.startswith(prompt):
@@ -685,7 +790,7 @@ class ServingEngine:
             hidden_size = getattr(config, "hidden_size", hidden_size)
             num_layers = getattr(config, "num_hidden_layers", num_layers)
 
-        quant_type = "fp4" if self._model_format == "trellis" else "int4"
+        quant_type = "fp4" if self._model_format in {"trellis", "mmfp4"} else "int4"
 
         memory_mb = 0
         try:

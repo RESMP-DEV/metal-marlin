@@ -32,11 +32,12 @@ print(tokenizer.decode(output[0]))
 
 | Metric | Value |
 |--------|-------|
-| Decode throughput | 56-74 tok/s |
-| Prefill throughput | ~11 tok/s |
-| Latency per token | 13-18 ms |
-| Memory usage | ~15 GB (2-4 BPW mixed) |
-| GPU commits per forward | ~12 (async batched) |
+| Decode throughput | ~2 tok/s |
+| Prefill throughput | ~32 tok/s |
+| Memory usage | ~60 GB |
+
+> **Note:** Performance varies significantly based on context length and model configuration.
+> See [reports/tps_benchmark_2026-02-18.md](reports/tps_benchmark_2026-02-18.md) for detailed benchmarks.
 
 ## Fast Decode Path
 

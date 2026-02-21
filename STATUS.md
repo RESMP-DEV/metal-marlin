@@ -8,14 +8,14 @@
 |-----------|--------|
 | Test Suite | **5427 tests collected** ✅ |
 | GEMM Kernel | **Working + Optimized** ✅ (2.4x speedup) |
-| **Fast Decode Path** | **Complete** ✅ (**~196x speedup**, 56-74 tok/s) |
+| **Fast Decode Path** | ⚠️ **Needs Investigation** |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
-| **Trellis Inference** | **Complete** ✅ (11 modules, 3500 LOC, fused GEMM ~50x speedup) |
+| **Trellis Inference** | **Working** ✅ (end-to-end generation, ~2 tok/s) |
 | **Async Dispatch Batching** | **Complete** ✅ (LayerBatchContext, 1.29x speedup) |
 | **Perplexity Evaluation** | **Complete** ✅ (API endpoint + Prometheus metrics) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
-| GLM-4.7-Flash MoE | **Verified** ✅ (end-to-end generation working, **56-74 tok/s**) |
+| GLM-4.7-Flash MoE | **Working** ✅ (end-to-end generation, **~2 tok/s**) |
 | OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
@@ -28,19 +28,32 @@
 
 ---
 
-## Fast Decode Path (NEW)
+## Measured Performance (2026-02-18)
 
-**Status:** ✅ Complete (2026-02-18)
+**Benchmark:** `benchmarks/bench_comprehensive_e2e.py`
+**Model:** GLM-4.7-Flash MMFP4 (48-shard, 3-bit quantized)
+**Hardware:** M4 Max
+
+| Metric | Measured | Previously Claimed |
+|--------|----------|-------------------|
+| Decode throughput | **~2 tok/s** | 56-74 tok/s |
+| Prefill throughput | **~32 tok/s** | 11 tok/s |
+| Time to first token | **3,663 ms** | — |
+| Peak memory | **60 GB** | 15 GB |
+| Perplexity | **154,880** ⚠️ | — |
+
+> ⚠️ **High perplexity indicates potential model loading or quantization issues.**
+> See [reports/tps_benchmark_2026-02-18.md](reports/tps_benchmark_2026-02-18.md) for full analysis.
+
+---
+
+## Fast Decode Path (Investigation Needed)
+
+**Status:** ⚠️ Implementation exists but not yet verified in benchmarks
 
 Single-token decode optimization using pre-dequantized weights with native PyTorch MPS operations.
 
-### Problem
-
-Custom Metal kernel dispatch via PyObjC had ~3.7ms overhead per layer:
-- 47 layers × 3.7ms = ~174ms per token → ~5.7 tok/s theoretical
-- Actual performance was ~0.38 tok/s (even worse due to additional overhead)
-
-### Solution
+### Theory
 
 For M=1 (decode), pre-dequantize FP4 → FP16 weights and use native `torch.nn.functional.linear()`:
 
@@ -54,21 +67,18 @@ self._dequant_weight = dequant
 result = torch.nn.functional.linear(x_2d.half(), self._dequant_weight, self.bias)
 ```
 
-### Performance
+### Outstanding Issues
 
-| Metric | Before | After | Improvement |
-|--------|--------|-------|-------------|
-| Per-layer latency | ~3.7ms | **0.15ms** | **25x faster** |
-| Per-token latency | ~2.6s | **13-18ms** | **~196x faster** |
-| Decode throughput | ~0.38 tok/s | **56-74 tok/s** | **~196x faster** |
+1. **Fast path not activating**: Measured ~2 tok/s suggests PyObjC path is still in use
+2. **High perplexity**: 154,880 suggests model quality issues
+3. **Memory usage**: 60 GB measured vs 15 GB claimed
 
-### Components
+### Next Steps
 
-| Module | Purpose | Status |
-|--------|---------|--------|
-| `inference_metal.py` | Fast path in `forward()` | ✅ |
-| `_ensure_dequant_weight()` | Lazy weight dequantization | ✅ |
-| `_fast_dequant()` | Optimized dequant from `mmfp4_linear.py` | ✅ |
+- Verify fast path activation in inference code
+- Check if MMFP4 model weights are compatible with fast path
+- Investigate perplexity issues
+- Run comparison against HuggingFace baseline
 
 ---
 

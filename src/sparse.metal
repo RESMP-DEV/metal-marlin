@@ -131,7 +131,7 @@ inline half dequant_fp4_e2m1(uint nibble) {
     uint exp_bits = (nibble >> 1) & 0x3u;
     uint man_bit  = nibble & 1u;
 
-    half sub_mag = half(man_bit) * half(0.25h);
+    half sub_mag = half(man_bit) * half(0.5h);
     half norm_mag = half(1u << (exp_bits - 1u))
                     * (half(1.0h) + half(man_bit) * half(0.5h));
 

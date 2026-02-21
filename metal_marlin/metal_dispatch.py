@@ -1580,6 +1580,29 @@ class MetalKernelLibrary:
         self._pipelines[cache_key] = pipeline
         return pipeline
 
+    def get_function(self, function_name: str) -> Any:
+        """Get a kernel pipeline by function name.
+
+        Prefers precompiled metallib kernels (including kernels that are not
+        present in JIT shader sources), then falls back to JIT pipeline lookup.
+        """
+        cache_key = f"*::{function_name}"
+        if cache_key in self._pipelines:
+            return self._pipelines[cache_key]
+
+        kernel_fn = get_kernel_from_metallib(function_name)
+        if kernel_fn is not None:
+            pipeline, error = self._device.newComputePipelineStateWithFunction_error_(
+                kernel_fn, None
+            )
+            if pipeline is not None:
+                self._pipelines[cache_key] = pipeline
+                _kernel_logger.debug(f"[metallib] {function_name}")
+                return pipeline
+
+        _kernel_logger.debug(f"[jit] {function_name}")
+        return self.get_pipeline(function_name)
+
     def list_functions(self, library_name: str) -> list[str]:
         """List all function names in a compiled library."""
         lib = self._libraries.get(library_name)

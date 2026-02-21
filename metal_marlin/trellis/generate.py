@@ -91,6 +91,16 @@ class TrellisGenerator:
         self.tokenizer = tokenizer
         self.device = next(model.parameters()).device
 
+    @property
+    def _is_hf_model(self) -> bool:
+        """Return True if the model uses HuggingFace past_key_values KV cache."""
+        import inspect
+        try:
+            sig = inspect.signature(self.model.forward)
+            return "past_key_values" in sig.parameters
+        except (TypeError, AttributeError, ValueError):
+            return False
+
     def _forward(self, *args, **kwargs) -> torch_typing.Tensor:
         """Call model forward and return raw logits tensor.
 
@@ -101,6 +111,23 @@ class TrellisGenerator:
         if hasattr(output, "logits"):
             return output.logits
         return output
+
+    def _forward_with_cache(
+        self,
+        input_ids: torch_typing.Tensor,
+        past_key_values=None,
+        attention_mask: torch_typing.Tensor | None = None,
+        position_ids: torch_typing.Tensor | None = None,
+    ) -> tuple[torch_typing.Tensor, object]:
+        """Call HF model forward, returning (logits, updated_past_key_values)."""
+        output = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=True,
+        )
+        return output.logits, output.past_key_values
 
     def _create_kv_cache(
         self,
@@ -425,7 +452,9 @@ class TrellisGenerator:
         """
         batch_size = logits.shape[0]
 
-        # Apply temperature scaling
+        # Apply temperature scaling (temperature=0 → greedy)
+        if config.temperature == 0.0:
+            return logits.argmax(dim=-1)
         if config.temperature != 1.0 and config.temperature > 0:
             logits = logits / config.temperature
 
@@ -509,11 +538,15 @@ class TrellisGenerator:
             input_ids: Input token IDs [1, seq_len].
             attention_mask: Optional attention mask [1, seq_len].
             config: Generation configuration.
-            kv_cache: KV cache for the model.
+            kv_cache: KV cache for the model (used for custom Trellis models).
 
         Returns:
             Full sequence tensor [1, total_seq_len] including prompt and generated.
         """
+        if self._is_hf_model:
+            return self._generate_single_hf(input_ids, attention_mask, config)
+
+        # Custom Trellis model path (uses kv_cache=)
         # Prefill phase: process entire prompt
         logits = self._forward(
             input_ids, attention_mask=attention_mask, kv_cache=kv_cache)
@@ -558,6 +591,89 @@ class TrellisGenerator:
 
         return output_ids
 
+    def _generate_single_hf(
+        self,
+        input_ids: torch_typing.Tensor,
+        attention_mask: torch_typing.Tensor | None,
+        config: GenerationConfig,
+    ) -> torch_typing.Tensor:
+        """Generate tokens for a single sequence using HF past_key_values cache.
+
+        This is used when the model is a standard HuggingFace model that
+        accepts past_key_values instead of a custom kv_cache argument.
+
+        Args:
+            input_ids: Input token IDs [1, seq_len].
+            attention_mask: Optional attention mask [1, seq_len].
+            config: Generation configuration.
+
+        Returns:
+            Full sequence tensor [1, total_seq_len] including prompt and generated.
+        """
+        prompt_len = input_ids.shape[1]
+
+        # Prefill phase: process entire prompt, get initial cache
+        # Build attention mask for prefill
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        logits, past_key_values = self._forward_with_cache(
+            input_ids,
+            past_key_values=None,
+            attention_mask=attention_mask,
+        )
+        next_token_logits = logits[:, -1, :]
+
+        generated_tokens: list[int] = []
+        max_length = prompt_len + config.max_new_tokens
+        current_len = prompt_len
+
+        for _ in range(config.max_new_tokens):
+            # Sample next token
+            next_token = self._sample(
+                next_token_logits, config, generated_tokens)
+
+            # Check for EOS
+            if self._is_eos(next_token, config.eos_token_id):
+                break
+
+            generated_tokens.append(next_token.item())
+            current_len += 1
+
+            # Check if we've reached max length
+            if current_len >= max_length:
+                break
+
+            # Decode step: forward single new token with position_ids
+            next_token_tensor = torch.tensor(
+                [[next_token]], device=self.device, dtype=torch.long)
+            # position_ids must point to the new token position
+            position_ids = torch.tensor(
+                [[current_len - 1]], device=self.device, dtype=torch.long)
+            # Extend attention mask by 1
+            attention_mask = torch.cat(
+                [attention_mask,
+                 torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)],
+                dim=1,
+            )
+            logits, past_key_values = self._forward_with_cache(
+                next_token_tensor,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            next_token_logits = logits[:, -1, :]
+
+        # Combine prompt and generated tokens
+        if generated_tokens:
+            generated = torch.tensor(
+                [generated_tokens], device=self.device, dtype=torch.long)
+            output_ids = torch.cat([input_ids, generated], dim=1)
+        else:
+            output_ids = input_ids
+
+        return output_ids
+
     def _generate_stream(
         self,
         input_ids: torch_typing.Tensor,
@@ -576,6 +692,11 @@ class TrellisGenerator:
         Yields:
             Decoded text chunks as they are generated.
         """
+        if self._is_hf_model:
+            yield from self._generate_stream_hf(input_ids, attention_mask, config)
+            return
+
+        # Custom Trellis model path (uses kv_cache=)
         # Prefill phase
         logits = self._forward(
             input_ids, attention_mask=attention_mask, kv_cache=kv_cache)
@@ -613,6 +734,61 @@ class TrellisGenerator:
             kv_cache.advance(1)
             next_token_logits = logits[:, -1, :]
 
+    def _generate_stream_hf(
+        self,
+        input_ids: torch_typing.Tensor,
+        attention_mask: torch_typing.Tensor | None,
+        config: GenerationConfig,
+    ) -> Iterator[str]:
+        """Stream generated text using HF past_key_values cache."""
+        prompt_len = input_ids.shape[1]
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        logits, past_key_values = self._forward_with_cache(
+            input_ids,
+            past_key_values=None,
+            attention_mask=attention_mask,
+        )
+        next_token_logits = logits[:, -1, :]
+
+        generated_tokens: list[int] = []
+        max_length = prompt_len + config.max_new_tokens
+        current_len = prompt_len
+
+        for _ in range(config.max_new_tokens):
+            next_token = self._sample(
+                next_token_logits, config, generated_tokens)
+
+            if self._is_eos(next_token, config.eos_token_id):
+                break
+
+            generated_tokens.append(next_token.item())
+            current_len += 1
+
+            yield self.tokenizer.decode([next_token.item()], skip_special_tokens=True)
+
+            if current_len >= max_length:
+                break
+
+            next_token_tensor = torch.tensor(
+                [[next_token]], device=self.device, dtype=torch.long)
+            position_ids = torch.tensor(
+                [[current_len - 1]], device=self.device, dtype=torch.long)
+            attention_mask = torch.cat(
+                [attention_mask,
+                 torch.ones((1, 1), device=self.device, dtype=attention_mask.dtype)],
+                dim=1,
+            )
+            logits, past_key_values = self._forward_with_cache(
+                next_token_tensor,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+            )
+            next_token_logits = logits[:, -1, :]
+
     def _sample(
         self,
         logits: torch_typing.Tensor,
@@ -629,7 +805,9 @@ class TrellisGenerator:
         Returns:
             Sampled token ID tensor [batch].
         """
-        # Apply temperature scaling
+        # Apply temperature scaling (temperature=0 → greedy)
+        if config.temperature == 0.0:
+            return logits.argmax(dim=-1)
         if config.temperature != 1.0 and config.temperature > 0:
             logits = logits / config.temperature
 
