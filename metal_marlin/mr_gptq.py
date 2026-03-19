@@ -482,21 +482,29 @@ def gptq_quantize_layer(
             scale_col = scales[:, g]
 
             # Quantize column
-            q_col, idx_col = quantize_to_grid(col, grid, scale_col[:, None])
-            q_col = q_col.flatten()
-            idx_col = idx_col.flatten()
+            q_col, idx_col = quantize_to_grid(col, grid, scale_col)
+            q_col = q_col.reshape(-1)
+            idx_col = idx_col.reshape(-1)
 
             Q[:, i] = q_col
             Qidx[:, i] = idx_col
 
             # Compute error and propagate to remaining columns
-            err = (col - q_col)[:, None]  # [out_features, 1]
+            err = col - q_col
 
             # Error propagation: W[:, j] -= err * H_inv[i, j] / H_inv[i, i]
-            # Only propagate to columns within same group (locality)
-            for j in range(i + 1, g_end):
-                h_ratio = H_inv[i, j] / max(H_inv[i, i], 1e-10)
-                W[:, j] -= err.flatten() * h_ratio
+            # Only propagate to columns within same group (locality).
+            # Use vectorized rank-1 update for small workloads; for large workloads
+            # avoid materializing a large temporary 2D outer-product buffer.
+            if i + 1 < g_end:
+                h_ratio = H_inv[i, i + 1 : g_end] / max(H_inv[i, i], 1e-10)
+                remaining = g_end - (i + 1)
+                # 32k elements ~= 128 KiB float32 temporary.
+                if err.shape[0] * remaining <= 32_768:
+                    W[:, i + 1 : g_end] -= err[:, None] * h_ratio[None, :]
+                else:
+                    for rel_j, h in enumerate(h_ratio):
+                        W[:, i + 1 + rel_j] -= err * h
 
     # Unpermute back to original order
     Q = Q[:, inv_perm]
@@ -788,6 +796,118 @@ class MRGPTQQuantizer:
 
         return packed, scales, metadata
 
+    def _quantize_stacked_tensor(
+        self,
+        tensor: NDArray[np.float32],
+        *,
+        layer_name: str,
+        hessian: NDArray[np.float32] | None = None,
+        use_hadamard: bool | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray[np.uint32], NDArray[np.float16], dict[str, Any]]:
+        """Quantize stacked expert weights stored as [E, out, in].
+
+        Large MoE checkpoints (for example Qwen3.5 A10B) store expert banks as a
+        single 3D tensor. Quantize each expert slice independently, then stack.
+        """
+        import time
+
+        packed_slices: list[NDArray[np.uint32]] = []
+        scale_slices: list[NDArray[np.float16]] = []
+        metas: list[dict[str, Any]] = []
+        n_experts = int(tensor.shape[0])
+        started_at = time.perf_counter()
+
+        for expert_idx in range(n_experts):
+            slice_name = f"{layer_name}[expert_{expert_idx}]"
+            expert_started_at = time.perf_counter()
+            packed_i, scales_i, meta_i = self.quantize_layer(
+                tensor[expert_idx],
+                hessian=hessian,
+                layer_name=slice_name,
+                use_hadamard=use_hadamard,
+            )
+            packed_slices.append(packed_i)
+            scale_slices.append(scales_i)
+            metas.append(meta_i)
+
+            if verbose:
+                done = expert_idx + 1
+                should_log = done == 1 or done % 8 == 0 or done == n_experts
+                if should_log:
+                    elapsed = time.perf_counter() - started_at
+                    avg_per_expert = elapsed / max(done, 1)
+                    eta = avg_per_expert * max(n_experts - done, 0)
+                    backend = meta_i.get("backend", "numpy")
+                    time_q = float(meta_i.get("time_quantize", 0.0))
+                    time_chol = float(meta_i.get("time_cholesky", 0.0))
+                    total_expert = time.perf_counter() - expert_started_at
+                    print(
+                        "    "
+                        f"[experts {done:3d}/{n_experts}] "
+                        f"backend={backend} "
+                        f"quant={time_q:.3f}s "
+                        f"chol={time_chol:.3f}s "
+                        f"total={total_expert:.3f}s "
+                        f"elapsed={elapsed/60.0:.1f}m "
+                        f"eta={eta/60.0:.1f}m"
+                    )
+
+        packed = np.stack(packed_slices, axis=0)
+        scales = np.stack(scale_slices, axis=0)
+
+        rmse_vals = [m.get("error", {}).get("rmse", 0.0) for m in metas]
+        max_err_vals = [m.get("error", {}).get("max_error", 0.0) for m in metas]
+        mean_rel_vals = [
+            m.get("error", {}).get("mean_relative_error", 0.0) for m in metas
+        ]
+
+        metadata: dict[str, Any] = {
+            "layer_name": layer_name,
+            "original_shape": tensor.shape,
+            "format": self.format.value,
+            "group_size": self.group_size,
+            "use_hadamard": any(m.get("use_hadamard", False) for m in metas),
+            "stacked_experts": int(tensor.shape[0]),
+            "error": {
+                "rmse": float(np.mean(rmse_vals)) if rmse_vals else 0.0,
+                "max_error": float(np.max(max_err_vals)) if max_err_vals else 0.0,
+                "mean_relative_error": (
+                    float(np.mean(mean_rel_vals)) if mean_rel_vals else 0.0
+                ),
+            },
+        }
+        return packed, scales, metadata
+
+    def _quantize_tensor_auto(
+        self,
+        tensor: NDArray[np.float32],
+        *,
+        layer_name: str,
+        hessian: NDArray[np.float32] | None = None,
+        use_hadamard: bool | None = None,
+        verbose: bool = False,
+    ) -> tuple[NDArray[np.uint32], NDArray[np.float16], dict[str, Any]]:
+        """Dispatch quantization based on tensor rank."""
+        if tensor.ndim == 2:
+            return self.quantize_layer(
+                tensor,
+                hessian=hessian,
+                layer_name=layer_name,
+                use_hadamard=use_hadamard,
+            )
+        if tensor.ndim == 3:
+            return self._quantize_stacked_tensor(
+                tensor,
+                layer_name=layer_name,
+                hessian=hessian,
+                use_hadamard=use_hadamard,
+                verbose=verbose,
+            )
+        raise ValueError(
+            f"Unsupported tensor rank for quantization: {tensor.ndim} ({layer_name})"
+        )
+
     def _rtn_quantize(
         self,
         weights: NDArray[np.float32],
@@ -961,12 +1081,13 @@ class MRGPTQQuantizer:
                             layer_kurtosis = _compute_excess_kurtosis(tensor)
                             apply_hadamard = layer_kurtosis >= self.hadamard_kurtosis_threshold
 
-                        # Quantize layer
-                        packed, scales, meta = self.quantize_layer(
+                        # Quantize layer / expert bank
+                        packed, scales, meta = self._quantize_tensor_auto(
                             tensor,
-                            hessian,
+                            hessian=hessian,
                             layer_name=name,
                             use_hadamard=apply_hadamard,
+                            verbose=verbose,
                         )
                         if layer_kurtosis is not None:
                             meta["kurtosis"] = layer_kurtosis
@@ -1104,12 +1225,12 @@ class MRGPTQQuantizer:
         layers_to_quantize: list[str] | None,
     ) -> bool:
         """Determine if a tensor should be quantized."""
-        # Must be 2D weight matrix
-        if tensor.ndim != 2:
-            return False
+        name_lower = name.lower()
 
-        # Must have "weight" in name
-        if "weight" not in name.lower():
+        # Supported tensor ranks:
+        # - 2D linear weights
+        # - 3D stacked MoE expert banks [num_experts, out, in]
+        if tensor.ndim not in (2, 3):
             return False
 
         # Skip embeddings, norms, biases, lm_head
@@ -1123,14 +1244,37 @@ class MRGPTQQuantizer:
             "output",
             "bias",
             "router",  # Keep MoE router in full precision
+            "vision",
+            "visual",
+            "image",
+            "video",
         ]
-        name_lower = name.lower()
         if any(pat in name_lower for pat in skip_patterns):
             return False
 
+        # Most checkpoints expose linear tensors with explicit ".weight".
+        # Some MoE checkpoints (e.g. Qwen3.5 A10B) omit the suffix for stacked
+        # expert tensors, so allow known MoE projection names as well.
+        has_weight_suffix = "weight" in name_lower
+        is_moe_projection = any(
+            marker in name_lower
+            for marker in (
+                ".experts.gate_up_proj",
+                ".experts.down_proj",
+                ".experts.gate_proj",
+                ".experts.up_proj",
+            )
+        )
+        if not has_weight_suffix and not is_moe_projection:
+            return False
+
         # Check dimension compatibility
-        out_feat, in_feat = tensor.shape
+        in_feat = int(tensor.shape[-1])
         if in_feat % 8 != 0 or in_feat % self.group_size != 0:
+            return False
+
+        # 3D tensors are only supported for known MoE projection banks.
+        if tensor.ndim == 3 and not is_moe_projection:
             return False
 
         # Check against layer filter if provided
@@ -1621,17 +1765,23 @@ class MRGPTQQuantizer:
                                         hessian = hessians[h_name].hessian
                                         break
 
-                        # Quantize layer
+                        # Quantize layer / expert bank
                         try:
-                            packed, scales, meta = self.quantize_layer(
-                                tensor, hessian, layer_name=name
+                            packed, scales, meta = self._quantize_tensor_auto(
+                                tensor,
+                                hessian=hessian,
+                                layer_name=name,
+                                verbose=verbose,
                             )
                         except Exception as e:
                             if verbose:
                                 print(
                                     f"      Warning: GPTQ failed ({e}), using RTN")
-                            packed, scales, meta = self.quantize_layer(
-                                tensor, hessian=None, layer_name=name
+                            packed, scales, meta = self._quantize_tensor_auto(
+                                tensor,
+                                hessian=None,
+                                layer_name=name,
+                                verbose=verbose,
                             )
 
                         # Store results
@@ -1956,8 +2106,7 @@ class HessianCollector:
         self.accumulator_dtype = np.float64 if accumulator_dtype == "float64" else np.float32
 
         # Running sums: layer_name -> (H_sum, n_samples)
-        self._hessians: dict[str, tuple[NDArray[np.float64]
-                                        | NDArray[np.float32], int]] = {}
+        self._hessians: dict[str, tuple[Any, int]] = {}
         self._hooks: list = []
         self._layer_dims: dict[str, int] = {}  # Cache in_features per layer
         self._skipped_due_limit = 0
@@ -2018,6 +2167,10 @@ class HessianCollector:
         """Create forward hook for Hessian accumulation."""
         import torch
 
+        accumulator_torch_dtype = (
+            torch.float64 if self.accumulator_dtype == np.float64 else torch.float32
+        )
+
         def hook(module, input, output):
             # Get input activations
             if isinstance(input, tuple):
@@ -2028,10 +2181,14 @@ class HessianCollector:
             if not isinstance(x, torch.Tensor):
                 return
 
-            # Flatten to [n_tokens, in_features]
+            # Flatten to [n_tokens, in_features] and keep tensor-native accumulation
+            # to avoid per-hook NumPy conversion overhead.
             with torch.no_grad():
-                x_flat = x.view(-1, x.shape[-1]).float()
-                x_np = x_flat.cpu().numpy().astype(self.accumulator_dtype, copy=False)
+                x_flat = x.view(-1, x.shape[-1]).detach()
+                if x_flat.device.type != "cpu":
+                    x_flat = x_flat.to(device="cpu", dtype=accumulator_torch_dtype)
+                elif x_flat.dtype != accumulator_torch_dtype:
+                    x_flat = x_flat.to(dtype=accumulator_torch_dtype)
 
             # Accumulate H += X^T @ X
             if layer_name not in self._hessians:
@@ -2042,16 +2199,26 @@ class HessianCollector:
                     self._skipped_due_limit += 1
                     return
 
-                in_features = self._layer_dims.get(layer_name, x_np.shape[-1])
+                in_features = self._layer_dims.get(layer_name, x_flat.shape[-1])
                 self._hessians[layer_name] = (
-                    np.zeros((in_features, in_features),
-                             dtype=self.accumulator_dtype),
+                    torch.zeros(
+                        (in_features, in_features),
+                        dtype=accumulator_torch_dtype,
+                        device="cpu",
+                    ),
                     0,
                 )
 
             H_sum, n_samples = self._hessians[layer_name]
-            H_sum += x_np.T @ x_np
-            self._hessians[layer_name] = (H_sum, n_samples + x_np.shape[0])
+            if not isinstance(H_sum, torch.Tensor):
+                H_sum = torch.as_tensor(H_sum, dtype=accumulator_torch_dtype)
+            elif H_sum.dtype != accumulator_torch_dtype:
+                H_sum = H_sum.to(dtype=accumulator_torch_dtype)
+            if H_sum.device.type != "cpu":
+                H_sum = H_sum.cpu()
+
+            H_sum.addmm_(x_flat.T, x_flat)
+            self._hessians[layer_name] = (H_sum, n_samples + x_flat.shape[0])
 
         return hook
 
@@ -2077,7 +2244,13 @@ class HessianCollector:
                 continue
 
             # Normalize by sample count
-            H = H_sum / n_samples
+            if isinstance(H_sum, np.ndarray):
+                H_np = H_sum.astype(self.accumulator_dtype, copy=False)
+            else:
+                H_np = (
+                    H_sum.detach().cpu().numpy().astype(self.accumulator_dtype, copy=False)
+                )
+            H = H_np / n_samples
 
             # Compute diagonal for actorder
             diag = np.diag(H).copy()
@@ -2116,8 +2289,13 @@ class HessianCollector:
             else:
                 filename = f"{safe_name}.pt"
 
+            if isinstance(H_sum, np.ndarray):
+                h_sum_tensor = torch.from_numpy(H_sum)
+            else:
+                h_sum_tensor = H_sum.detach().cpu()
+
             data = {
-                "H_sum": torch.from_numpy(H_sum),
+                "H_sum": h_sum_tensor,
                 "n_samples": n_samples,
                 "accumulator_dtype": str(self.accumulator_dtype),
             }
@@ -2140,7 +2318,11 @@ class HessianCollector:
         if n_samples == 0:
             return None
 
-        H = H_sum / n_samples
+        if isinstance(H_sum, np.ndarray):
+            H_np = H_sum.astype(self.accumulator_dtype, copy=False)
+        else:
+            H_np = H_sum.detach().cpu().numpy().astype(self.accumulator_dtype, copy=False)
+        H = H_np / n_samples
         diag = np.diag(H).copy()
 
         damp = 0.0
@@ -2157,12 +2339,25 @@ class HessianCollector:
 
     def clear(self) -> None:
         """Clear accumulated Hessians (but keep hooks)."""
+        import torch
+
+        accumulator_torch_dtype = (
+            torch.float64 if self.accumulator_dtype == np.float64 else torch.float32
+        )
         for name in self._hessians:
             in_features = self._layer_dims.get(
                 name, self._hessians[name][0].shape[0])
+            current_sum, _ = self._hessians[name]
+            if isinstance(current_sum, torch.Tensor):
+                reset_h = torch.zeros(
+                    (in_features, in_features),
+                    dtype=accumulator_torch_dtype,
+                    device="cpu",
+                )
+            else:
+                reset_h = np.zeros((in_features, in_features), dtype=self.accumulator_dtype)
             self._hessians[name] = (
-                np.zeros((in_features, in_features),
-                         dtype=self.accumulator_dtype),
+                reset_h,
                 0,
             )
 
@@ -2311,8 +2506,19 @@ class MoEMRGPTQQuantizer(MRGPTQQuantizer):
         layers_to_quantize: list[str] | None,
     ) -> bool:
         """Override to handle MoE-specific patterns."""
-        # Keep router in full precision
-        if "router" in name.lower() or "gate" in name.lower():
+        # Keep routing logits projections in full precision.
+        # Do not block expert projections such as experts.gate_up_proj.
+        name_lower = name.lower()
+        if any(
+            marker in name_lower
+            for marker in (
+                ".mlp.gate.weight",
+                ".router.weight",
+                ".router",
+                ".moe_gate.weight",
+                ".expert_gate.weight",
+            )
+        ):
             return False
 
         # Base check
@@ -2468,6 +2674,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         self._backend_name = backend_name
         self._remote_address = remote_address
         self._accelerated_backend = None
+        self._synthetic_hessian_cache: dict[int, NDArray[np.float32]] = {}
 
     @classmethod
     def create(
@@ -2522,6 +2729,45 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
             )
 
         return self._accelerated_backend
+
+    def _get_synthetic_hessian(self, in_features: int) -> NDArray[np.float32]:
+        """Return cached identity Hessian used for no-calibration acceleration."""
+        cached = self._synthetic_hessian_cache.get(in_features)
+        if cached is not None:
+            return cached
+
+        hessian = np.eye(in_features, dtype=np.float32)
+        self._synthetic_hessian_cache[in_features] = hessian
+        return hessian
+
+    def quantize_layer(
+        self,
+        weights: NDArray[np.float32],
+        hessian: NDArray[np.float32] | None = None,
+        layer_name: str = "",
+        use_hadamard: bool | None = None,
+    ) -> tuple[NDArray[np.uint32], NDArray[np.float16], dict[str, Any]]:
+        """Quantize a layer with accelerated backend.
+
+        When calibration Hessians are unavailable, we still route quantization through
+        the accelerated backend using a synthetic identity Hessian. This keeps large
+        no-calibration jobs on MPS/CUDA instead of CPU-only RTN loops.
+        """
+        synthetic_hessian = False
+        if hessian is None:
+            hessian = self._get_synthetic_hessian(int(weights.shape[1]))
+            synthetic_hessian = True
+
+        packed, scales, metadata = self.quantize_layer_accelerated(
+            weights=weights,
+            hessian=hessian,
+            layer_name=layer_name,
+            use_hadamard=use_hadamard,
+        )
+        if synthetic_hessian:
+            metadata["synthetic_hessian"] = True
+            metadata["calibration_mode"] = "no_calibration_identity_hessian"
+        return packed, scales, metadata
 
     def quantize_layer_accelerated(
         self,
@@ -2582,10 +2828,21 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         metadata["time_cholesky"] = result.time_cholesky
         metadata["time_quantize"] = result.time_quantize
 
+        # Normalize scales layout: backend emits [n_groups, out_features].
+        # Checkpoint format expects [out_features, n_groups].
+        scales = result.scales
+        out_features = int(W.shape[0])
+        if (
+            scales.ndim == 2
+            and scales.shape[1] == out_features
+            and scales.shape[0] != out_features
+        ):
+            scales = scales.T.copy()
+
         # Pack to FP4
         packed = _pack_fp4_weights(result.indices)
 
-        return packed, result.scales, metadata
+        return packed, scales, metadata
 
     def quantize_model_parallel(
         self,

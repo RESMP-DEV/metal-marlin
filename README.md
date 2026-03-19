@@ -154,6 +154,10 @@ metal-marlin quantize Qwen/Qwen3-4B --format fp4 -o qwen3_4b_fp4
 
 # Trellis v2 (recommended for MoE models)
 metal-marlin quantize Qwen/Qwen3-30B-A3B --format trellis-v2 -o qwen3_30b_trellis
+
+# Qwen3.5-122B-A10B MMFP4 (CUDA MR-GPTQ)
+uv run python scripts/quantize_qwen35_122b_a10b_mmfp4_cuda.py \
+  --output models/Qwen3.5-122B-A10B-MMFP4
 ```
 
 For MoE models, dynamic bit allocation reduces size 40-50% with <1% quality loss.

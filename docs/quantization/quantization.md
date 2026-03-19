@@ -10,6 +10,10 @@ metal-marlin quantize Qwen/Qwen3-4B --format fp4 -o qwen3_4b_fp4
 
 # Trellis v2 (recommended for MoE models)
 metal-marlin quantize Qwen/Qwen3-30B-A3B --format trellis-v2 -o qwen3_30b_trellis
+
+# Qwen3.5-122B-A10B MMFP4 (stacked MoE experts)
+uv run python scripts/quantize_qwen35_122b_a10b_mmfp4_cuda.py \
+    --output ./qwen35_122b_a10b_mmfp4
 ```
 
 ## Supported Formats

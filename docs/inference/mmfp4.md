@@ -2,6 +2,10 @@
 
 Metal Marlin supports MMFP4-quantized GLM-4.7-Flash with fused MoE kernels.
 
+For Qwen3.5-122B-A10B, use the dedicated CUDA quantization script:
+`scripts/quantize_qwen35_122b_a10b_mmfp4_cuda.py`.
+This path expects a Transformers build that recognizes `qwen3_5_moe`.
+
 ## Quick Start
 
 ```bash

@@ -80,9 +80,25 @@ class ModelConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         """Parse from HuggingFace config.json."""
+        text_cfg = d.get("text_config")
+        if not isinstance(text_cfg, dict):
+            text_cfg = {}
+
+        def _get(*keys: str, default: Any = None) -> Any:
+            for key in keys:
+                if key in text_cfg:
+                    return text_cfg[key]
+                if key in d:
+                    return d[key]
+            return default
+
         # Parse rope_scaling config if present
-        rope_scaling = d.get("rope_scaling") or {}
+        rope_scaling = _get("rope_scaling", default={}) or {}
+        if not rope_scaling and isinstance(text_cfg.get("rope_parameters"), dict):
+            rope_scaling = text_cfg["rope_parameters"]
         rope_scaling_type = rope_scaling.get("type") if rope_scaling else None
+        if rope_scaling_type is None and rope_scaling:
+            rope_scaling_type = rope_scaling.get("rope_type")
         rope_scaling_factor = rope_scaling.get("factor", 1.0) if rope_scaling else 1.0
         rope_original_max_position = (
             rope_scaling.get("original_max_position_embeddings", 0) if rope_scaling else 0
@@ -92,20 +108,27 @@ class ModelConfig:
         rope_mscale = rope_scaling.get("mscale", 1.0) if rope_scaling else 1.0
 
         return cls(
-            hidden_size=d.get("hidden_size", d.get("d_model", 4096)),
-            num_hidden_layers=d.get("num_hidden_layers", d.get("n_layer", 32)),
-            num_attention_heads=d.get("num_attention_heads", d.get("n_head", 32)),
-            num_key_value_heads=d.get("num_key_value_heads", d.get("num_attention_heads", 32)),
-            intermediate_size=d.get("intermediate_size", d.get("d_ff", 11008)),
-            vocab_size=d.get("vocab_size", 32000),
-            max_position_embeddings=d.get("max_position_embeddings", 4096),
-            rope_theta=d.get("rope_theta", 10000.0),
-            rms_norm_eps=d.get("rms_norm_eps", d.get("layer_norm_epsilon", 1e-6)),
-            hidden_act=d.get("hidden_act", d.get("activation_function", "silu")),
-            tie_word_embeddings=d.get("tie_word_embeddings", False),
-            model_type=d.get("model_type", "llama"),
-            use_sliding_window=d.get("use_sliding_window", False),
-            sliding_window=d.get("sliding_window"),
+            hidden_size=_get("hidden_size", "d_model", default=4096),
+            num_hidden_layers=_get("num_hidden_layers", "n_layer", default=32),
+            num_attention_heads=_get("num_attention_heads", "n_head", default=32),
+            num_key_value_heads=_get(
+                "num_key_value_heads",
+                "num_attention_heads",
+                default=32,
+            ),
+            intermediate_size=_get("intermediate_size", "d_ff", default=11008),
+            vocab_size=_get("vocab_size", default=32000),
+            max_position_embeddings=_get("max_position_embeddings", default=4096),
+            rope_theta=_get(
+                "rope_theta",
+                default=(rope_scaling.get("rope_theta", 10000.0) if rope_scaling else 10000.0),
+            ),
+            rms_norm_eps=_get("rms_norm_eps", "layer_norm_epsilon", default=1e-6),
+            hidden_act=_get("hidden_act", "activation_function", default="silu"),
+            tie_word_embeddings=bool(_get("tie_word_embeddings", default=False)),
+            model_type=_get("model_type", default="llama"),
+            use_sliding_window=bool(_get("use_sliding_window", default=False)),
+            sliding_window=_get("sliding_window"),
             # RoPE scaling (YaRN, linear, dynamic)
             rope_scaling_type=rope_scaling_type,
             rope_scaling_factor=rope_scaling_factor,
@@ -114,14 +137,18 @@ class ModelConfig:
             rope_beta_slow=rope_beta_slow,
             rope_mscale=rope_mscale,
             # MoE config - check multiple naming conventions
-            num_experts=d.get("num_local_experts")
-            or d.get("num_experts")
-            or d.get("n_routed_experts"),
-            num_experts_per_tok=d.get("num_experts_per_tok") or d.get("num_selected_experts"),
-            shared_expert_intermediate_size=d.get("shared_expert_intermediate_size")
-            or d.get("n_shared_experts"),
+            num_experts=_get("num_local_experts", "num_experts", "n_routed_experts"),
+            num_experts_per_tok=_get("num_experts_per_tok", "num_selected_experts"),
+            shared_expert_intermediate_size=_get(
+                "shared_expert_intermediate_size",
+                "n_shared_experts",
+            ),
             # MTP config (GLM-4.7-Flash style)
-            num_mtp_heads=d.get("num_mtp_heads", d.get("num_nextn_predict_layers")),
+            num_mtp_heads=_get(
+                "num_mtp_heads",
+                "num_nextn_predict_layers",
+                "mtp_num_hidden_layers",
+            ),
         )
 
 
@@ -693,7 +720,13 @@ def _get_layer_weight_files(
     """
     from safetensors import safe_open
 
-    layer_prefix = f"model.layers.{layer_idx}."
+    layer_prefixes = (
+        f"model.layers.{layer_idx}.",
+        f"model.language_model.layers.{layer_idx}.",
+        f"language_model.layers.{layer_idx}.",
+        f"transformer.layers.{layer_idx}.",
+        f"layers.{layer_idx}.",
+    )
     result: dict[str, Path] = {}
 
     if weight_map is None:
@@ -702,13 +735,13 @@ def _get_layer_weight_files(
         if st_file.exists():
             with safe_open(str(st_file), framework="numpy") as f:
                 for name in f.keys():
-                    if name.startswith(layer_prefix):
+                    if any(name.startswith(prefix) for prefix in layer_prefixes):
                         result[name] = st_file
         return result
 
     # Sharded model - find files for this layer
     for tensor_name, filename in weight_map.items():
-        if tensor_name.startswith(layer_prefix):
+        if any(tensor_name.startswith(prefix) for prefix in layer_prefixes):
             result[tensor_name] = model_path / filename
 
     return result
@@ -782,9 +815,22 @@ def load_non_layer_weights(
     from safetensors import safe_open
 
     prefixes = {
-        "embed": ["model.embed_tokens", "wte", "word_embedding", "embed"],
+        "embed": [
+            "model.embed_tokens",
+            "model.language_model.embed_tokens",
+            "language_model.embed_tokens",
+            "wte",
+            "word_embedding",
+            "embed",
+        ],
         "lm_head": ["lm_head", "output.weight"],
-        "final_norm": ["model.norm", "model.final_layernorm", "ln_f"],
+        "final_norm": [
+            "model.norm",
+            "model.language_model.norm",
+            "language_model.norm",
+            "model.final_layernorm",
+            "ln_f",
+        ],
     }
 
     if weight_type not in prefixes:

@@ -36,3 +36,4 @@ coverage in tests. They should not be treated as validated until tests are added
 | Model | HuggingFace ID | Notes |
 | --- | --- | --- |
 | Mixtral-8x7B | mistralai/Mixtral-8x7B-v0.1 | Listed in README/STATUS; no Transformers integration test (only generic MoE unit tests) |
+| Qwen3.5-122B-A10B | Qwen/Qwen3.5-122B-A10B | MMFP4 CUDA quantization script available (`scripts/quantize_qwen35_122b_a10b_mmfp4_cuda.py`); full end-to-end model test not yet in CI |

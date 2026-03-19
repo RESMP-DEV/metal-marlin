@@ -166,43 +166,67 @@ def _apply_quantized_weights(
     """
     from metal_marlin.inference_metal import MetalQuantizedLinear
 
+    def _candidate_weight_names(module_name: str) -> list[str]:
+        names = [f"{module_name}.weight"]
+
+        if module_name.startswith("model.language_model."):
+            names.append(module_name.replace("model.language_model.", "model.", 1) + ".weight")
+        elif module_name.startswith("model."):
+            names.append(module_name.replace("model.", "model.language_model.", 1) + ".weight")
+        elif module_name.startswith("language_model."):
+            names.append("model." + module_name + ".weight")
+
+        # Preserve insertion order while removing duplicates.
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append(name)
+        return deduped
+
     loaded = 0
     for name, module in model.named_modules():
         if not isinstance(module, MetalQuantizedLinear):
             continue
 
-        # Try to find matching weight in loader
-        weight_name = f"{name}.weight"
-        try:
-            qweight, scales = loader.get_quantized_weight(weight_name)
-            if qweight is not None and scales is not None:
-                # Safetensors: [out_features, in_features//pack_factor]
-                # MetalQuantizedLinear: [in_features//pack_factor, out_features]
-                # Need to TRANSPOSE both!
-                qweight = qweight.T.contiguous()
-                scales = scales.T.contiguous()
+        qweight = None
+        scales = None
+        for weight_name in _candidate_weight_names(name):
+            try:
+                qweight, scales = loader.get_quantized_weight(weight_name)
+                break
+            except Exception:
+                continue
 
-                # Move to device with correct dtypes
-                qweight = qweight.to(device=device, dtype=torch.uint32)
-                scales = scales.to(device=device, dtype=torch.float16)
+        if qweight is None or scales is None:
+            continue
 
-                # Handle padding if needed
-                if hasattr(module, "_needs_output_slice") and module._needs_output_slice:
-                    pad_cols = module._padded_out_features - module.out_features
-                    qweight = torch.nn.functional.pad(
-                        qweight, (0, pad_cols, 0, 0))
-                    scales = torch.nn.functional.pad(
-                        scales, (0, pad_cols, 0, 0))
+        # Safetensors: [out_features, in_features//pack_factor]
+        # MetalQuantizedLinear: [in_features//pack_factor, out_features]
+        # Need to TRANSPOSE both!
+        qweight = qweight.T.contiguous()
+        scales = scales.T.contiguous()
 
-                # Copy to module
-                if hasattr(module, "weight_packed"):
-                    module.weight_packed.copy_(qweight)
-                if hasattr(module, "scales"):
-                    module.scales.copy_(scales)
-                loaded += 1
-        except Exception:
-            # Weight not found in quantized checkpoint, skip
-            pass
+        # Move to device with correct dtypes
+        qweight = qweight.to(device=device, dtype=torch.uint32)
+        scales = scales.to(device=device, dtype=torch.float16)
+
+        # Handle padding if needed
+        if hasattr(module, "_needs_output_slice") and module._needs_output_slice:
+            pad_cols = module._padded_out_features - module.out_features
+            qweight = torch.nn.functional.pad(
+                qweight, (0, pad_cols, 0, 0))
+            scales = torch.nn.functional.pad(
+                scales, (0, pad_cols, 0, 0))
+
+        # Copy to module
+        if hasattr(module, "weight_packed"):
+            module.weight_packed.copy_(qweight)
+        if hasattr(module, "scales"):
+            module.scales.copy_(scales)
+        loaded += 1
 
     return loaded
 

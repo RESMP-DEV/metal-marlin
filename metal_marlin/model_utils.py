@@ -123,13 +123,21 @@ def load_prequantized_mmfp4_model(
     # Step 1: Load config only (no weights)
     print("  Loading model config...")
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+    causal_config = config
+
+    # Qwen3.5 multimodal configs keep text dimensions under `text_config`.
+    # AutoModelForCausalLM needs the text-only config object.
+    if not hasattr(causal_config, "vocab_size"):
+        text_config = getattr(config, "text_config", None)
+        if text_config is not None and hasattr(text_config, "vocab_size"):
+            causal_config = text_config
 
     # Step 2: Create model architecture WITHOUT weight initialization
     # Using meta device avoids allocating/initializing 30B params (saves minutes)
     print("  Creating model architecture (meta device)...")
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(
-            config,
+            causal_config,
             torch_dtype=torch.bfloat16,
             trust_remote_code=True,
         )
