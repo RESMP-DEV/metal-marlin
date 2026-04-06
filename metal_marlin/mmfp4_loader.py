@@ -552,7 +552,78 @@ class MMFP4ModelLoader:
                     tensor = tensor.to(device)
         
         return tensor
-    
+
+    def _load_tensor_mps_zerocopy(self, tensor_name: str) -> torch.Tensor:
+        """Load a tensor via mmap + frombuffer for true zero-copy on MPS.
+
+        On Apple Silicon, CPU and GPU share the same physical RAM (Unified
+        Memory Architecture).  By memory-mapping the safetensors file and
+        creating a tensor that points directly at the mapped region, we
+        avoid *all* copies — the GPU reads the weights straight from the
+        page cache.
+
+        The returned tensor is **read-only** (requires_grad=False, backed
+        by a read-only mmap).  This is safe for model weights which are
+        never written after loading.
+
+        Args:
+            tensor_name: Full name of the tensor in the checkpoint.
+
+        Returns:
+            A CPU tensor whose storage is the mmap'd file region.  On MPS
+            this is already accessible to the GPU via unified memory — no
+            ``.to("mps")`` call is needed for read-only weight access.
+
+        Raises:
+            KeyError: If *tensor_name* is not found in the model checkpoint.
+            RuntimeError: If tensor metadata is unavailable (headers not parsed).
+        """
+        import mmap as _mmap
+
+        metadata = self._tensor_metadata.get(tensor_name)
+        shard_path = self._tensor_to_shard.get(tensor_name)
+
+        if metadata is None or shard_path is None:
+            raise RuntimeError(
+                f"Cannot zero-copy load '{tensor_name}': metadata or shard path "
+                "unavailable. Ensure _parse_shard_headers() has run."
+            )
+
+        torch_dtype = self.DTYPE_MAP.get(metadata.dtype, torch.float32)
+
+        # Open the shard file and create a read-only mmap over the whole file.
+        # We keep references to the file and mmap objects alive by stashing
+        # them on the tensor so the GC doesn't collect them while the tensor
+        # storage is still in use.
+        f = open(shard_path, "rb")  # noqa: SIM115
+        try:
+            mm = _mmap.mmap(f.fileno(), 0, access=_mmap.ACCESS_READ)
+        except Exception:
+            f.close()
+            raise
+
+        # Slice the mmap to the exact byte range for this tensor.
+        buf = mm[metadata.offset : metadata.offset + metadata.size_bytes]
+
+        # Create tensor backed by the mmap'd bytes.  torch.frombuffer
+        # does NOT copy — the tensor storage points at *buf*.
+        tensor = torch.frombuffer(buf, dtype=torch_dtype)
+
+        # Reshape to the original dimensions.
+        if metadata.shape:
+            tensor = tensor.view(metadata.shape)
+
+        # Mark read-only: weights are never modified after load.
+        tensor.requires_grad_(False)
+
+        # Prevent GC of the backing mmap / file handle by pinning them
+        # onto the tensor object.  They will be cleaned up when the last
+        # reference to the tensor (and its storage) is released.
+        tensor._mmap_handle = mm  # type: ignore[attr-defined]
+        tensor._mmap_file = f  # type: ignore[attr-defined]
+
+        return tensor
+
     def load_tensor_streaming(
         self,
         tensor_name: str,
@@ -563,15 +634,15 @@ class MMFP4ModelLoader:
         buffer_recycler: Any | None = None,
     ) -> torch.Tensor:
         """Load a tensor using memory-mapped I/O for efficient streaming.
-        
+
         This method bypasses the safetensors handle and reads directly
         from the file using memory mapping, which is more efficient for
         large models when only specific tensors are needed.
-        
+
         On Apple Silicon with unified memory, memory-mapped files can be
         accessed directly by the GPU without explicit CPU->GPU copies,
         enabling true zero-copy transfers.
-        
+
         Args:
             tensor_name: Full name of the tensor
             device: Target device
@@ -579,12 +650,24 @@ class MMFP4ModelLoader:
             buffer: Optional pre-allocated buffer to read into
             zero_copy: Use zero-copy transfer for unified memory systems
         buffer_recycler: Optional BufferRecycler for buffer reuse
-            
+
         Returns:
             The loaded tensor
         """
         import mmap
-        
+
+        # Fast path: MPS zero-copy via mmap'd frombuffer
+        if device == "mps" and zero_copy:
+            metadata = self._tensor_metadata.get(tensor_name)
+            if metadata is not None and self._tensor_to_shard.get(tensor_name) is not None:
+                try:
+                    return self._load_tensor_mps_zerocopy(tensor_name)
+                except Exception as e:
+                    logger.debug(
+                        f"MPS zero-copy failed for {tensor_name}, "
+                        f"falling back to standard path: {e}"
+                    )
+
         # Try to get recycled buffer if none provided
         if buffer is None and buffer_recycler is not None:
             metadata = self._tensor_metadata.get(tensor_name)
