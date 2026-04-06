@@ -30,6 +30,7 @@ from metal_marlin.memory.buffer_pool import (
     BufferPoolStats,
     PooledBuffer,
 )
+from metal_marlin.memory.cuda_pinned_pool import CUDAPinnedPool
 
 __all__ = [
     "MMFP4MemoryManager",
@@ -46,4 +47,5 @@ __all__ = [
     "BufferPool",
     "BufferPoolStats",
     "PooledBuffer",
+    "CUDAPinnedPool",
 ]

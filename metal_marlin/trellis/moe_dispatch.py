@@ -343,6 +343,27 @@ def _get_or_create_moe_params_buffer(
     return params_buf
 
 
+class ExpertOutputRing:
+    """Ring buffer for expert output reuse during MoE dispatch.
+
+    Pre-allocates a small number of output buffers and cycles through them.
+    Since expert outputs are consumed (combined) before the next batch of
+    experts runs, we only need enough buffers to cover pipeline depth.
+    """
+
+    def __init__(self, num_buffers: int = 3, shape: tuple = (), dtype=torch.float16, device: str = "mps"):
+        self._buffers = [torch.empty(shape, dtype=dtype, device=device) for _ in range(num_buffers)]
+        self._index = 0
+
+    def next(self) -> torch.Tensor:
+        buf = self._buffers[self._index]
+        self._index = (self._index + 1) % len(self._buffers)
+        return buf
+
+    def reset(self):
+        self._index = 0
+
+
 class MoEDispatchValidationError(ValueError):
     """Raised when MoE dispatch input validation fails."""
 

@@ -2,12 +2,15 @@ import threading
 import time
 import psutil
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
+
+import torch
+
 
 @dataclass
 class MemoryPressureConfig:
     """Configuration for memory pressure detection.
-    
+
     Attributes:
         warning_threshold_mb: Free memory MB to trigger warning state
         critical_threshold_mb: Free memory MB to trigger critical state
@@ -95,30 +98,30 @@ class MemoryPressureMonitor:
         """Perform memory check and update statistics."""
         if not self.config.enable_monitoring:
             return
-            
+
         try:
-            vm = psutil.virtual_memory()
-            available_mb = vm.available // (1024 * 1024)
-            total_mb = vm.total // (1024 * 1024)
-            
+            available_bytes = self._get_available_memory()
+            available_mb = available_bytes // (1024 * 1024)
+            total_mb = psutil.virtual_memory().total // (1024 * 1024)
+
             with self._lock:
                 self._last_check_time = time.time()
-                
+
                 # Update history for trend analysis
                 self._history.append(available_mb)
                 if len(self._history) > self.config.pressure_history_window:
                     self._history.pop(0)
-                
+
                 # Determine state
                 is_critical = available_mb < self.config.critical_threshold_mb
                 is_warning = available_mb < self.config.warning_threshold_mb
-                
+
                 pressure_level = "normal"
                 if is_critical:
                     pressure_level = "critical"
                 elif is_warning:
                     pressure_level = "warning"
-                
+
                 # Analyze trend (decreasing available memory = increasing pressure)
                 trend = "stable"
                 if len(self._history) >= 3:
@@ -127,7 +130,7 @@ class MemoryPressureMonitor:
                         trend = "increasing"  # Pressure increasing (memory decreasing)
                     elif recent[0] < recent[1] < recent[2]:
                         trend = "decreasing"  # Pressure decreasing (memory freeing)
-                
+
                 self._stats = MemoryPressureStats(
                     total_memory_mb=total_mb,
                     available_memory_mb=available_mb,
@@ -140,6 +143,84 @@ class MemoryPressureMonitor:
         except Exception:
             # Fallback if psutil fails
             pass
+
+    def _get_available_memory(self) -> int:
+        """Get available memory in bytes, platform-aware.
+
+        Returns:
+            Available memory in bytes for the current platform.
+            - MPS: Uses system available memory (unified memory architecture)
+            - CUDA: Uses GPU free memory
+            - CPU: Uses system available memory
+        """
+        if torch.backends.mps.is_available():
+            # MPS: use system available memory (unified)
+            return psutil.virtual_memory().available
+        elif torch.cuda.is_available():
+            # CUDA: use GPU free memory
+            free, _ = torch.cuda.mem_get_info()
+            return free
+        else:
+            return psutil.virtual_memory().available
+
+    @property
+    def critical_threshold_bytes(self) -> int:
+        """Get critical threshold in bytes."""
+        return self.config.critical_threshold_mb * 1024 * 1024
+
+    def check_headroom(self, required_bytes: int) -> bool:
+        """Check if required_bytes can be allocated without hitting critical threshold.
+
+        Args:
+            required_bytes: Number of bytes that will be allocated.
+
+        Returns:
+            True if the allocation can proceed without hitting critical threshold,
+            False otherwise.
+        """
+        available = self._get_available_memory()
+        return (available - required_bytes) > self.critical_threshold_bytes
+
+    def ensure_headroom(
+        self,
+        required_bytes: int,
+        eviction_callback: Callable[[], int] | None = None
+    ) -> bool:
+        """Ensure headroom exists, evicting cached buffers if needed.
+
+        This method proactively attempts to free memory by calling the eviction
+        callback until either sufficient headroom is achieved or the callback
+        can no longer free memory.
+
+        Args:
+            required_bytes: Number of bytes that need to be allocated.
+            eviction_callback: Optional callback that evicts cached buffers and
+                returns the number of bytes freed. Called repeatedly until
+                sufficient headroom is achieved or no more memory can be freed.
+
+        Returns:
+            True if headroom was achieved (either already available or through
+            eviction), False if eviction was insufficient.
+        """
+        # First, check if we already have enough headroom
+        if self.check_headroom(required_bytes):
+            return True
+
+        # If no callback provided, we can't do anything
+        if eviction_callback is None:
+            return False
+
+        # Attempt eviction until we have enough headroom or can't free more
+        max_iterations = 10  # Prevent infinite loops
+        for _ in range(max_iterations):
+            freed = eviction_callback()
+            if freed == 0:
+                # No more memory could be freed
+                break
+            if self.check_headroom(required_bytes):
+                return True
+
+        return False
 
 
 # Global memory pressure monitor instance

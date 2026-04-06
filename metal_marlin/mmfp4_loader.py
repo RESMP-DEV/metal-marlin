@@ -538,12 +538,7 @@ class MMFP4ModelLoader:
         if device != "cpu":
             if device == "mps" and torch.backends.mps.is_available():
                 if zero_copy:
-                    # Zero-copy transfer for Unified Memory:
-                    # 1. Pin memory for faster DMA transfer
-                    # 2. Use non-blocking transfer for async copy
-                    # On Apple Silicon, this enables zero-copy via unified memory architecture
-                    if not tensor.is_pinned():
-                        tensor = tensor.pin_memory()
+                    # UMA: skip pin_memory, GPU shares physical RAM with CPU
                     tensor = tensor.to("mps", non_blocking=True)
                 else:
                     tensor = tensor.to("mps")
@@ -665,8 +660,8 @@ class MMFP4ModelLoader:
                     
                     # Use pinned memory if requested for zero-copy transfer
                     # Allocate pinned memory directly if possible
-                    # On Apple Silicon, pinned CPU memory allows zero-copy access from GPU
-                    pin_memory = zero_copy and (device != "cpu")
+                    # On Apple Silicon, skip pin_memory since UMA shares physical RAM
+                    pin_memory = zero_copy and (device != "cpu") and (device != "mps")
                     
                     try:
                         tensor = torch.empty(
@@ -745,9 +740,11 @@ class MMFP4ModelLoader:
         
         # Move to device with zero-copy optimization
         if device != "cpu":
-            if zero_copy and (device == "mps" or device.startswith("cuda")):
-                # Zero-copy: use pinned memory + non-blocking transfer
-                # If we pinned it already (in optimized path), this transfer is fast
+            if zero_copy and device == "mps":
+                # UMA: skip pin_memory, GPU shares physical RAM with CPU
+                tensor = tensor.to("mps", non_blocking=True)
+            elif zero_copy and device.startswith("cuda"):
+                # CUDA: pin for DMA and transfer
                 if not tensor.is_pinned():
                     tensor = tensor.pin_memory()
                 tensor = tensor.to(device, non_blocking=True)
@@ -813,47 +810,78 @@ class MMFP4ModelLoader:
         
         return total_size
     
-    def load_layer(self, layer_idx: int, device: str = "mps", zero_copy: bool = False) -> dict[str, torch.Tensor]:
+    def load_layer(
+        self,
+        layer_idx: int,
+        device: str = "mps",
+        zero_copy: bool = False,
+        batch_transfer: bool = True,
+    ) -> dict[str, torch.Tensor]:
         """Load all tensors for a single layer.
-        
+
         Args:
             layer_idx: Index of the layer to load
             device: Target device ("cpu", "mps", "cuda")
             zero_copy: Use zero-copy transfer for unified memory systems
-            
+            batch_transfer: If True (default), collect all CPU tensors first then
+                transfer in a single batch with one sync point. If False, transfer
+                each tensor individually (legacy behavior).
+
         Returns:
             Dictionary of tensor_name -> tensor
         """
-        tensors = {}
-        for name in self._layer_to_tensors.get(layer_idx, []):
+        tensor_names = self._layer_to_tensors.get(layer_idx, [])
+
+        # Phase 1: Load all tensors from shards into CPU memory
+        cpu_tensors: dict[str, torch.Tensor] = {}
+        for name in tensor_names:
             shard_path = self._tensor_to_shard[name]
             handle = self._get_shard_handle(shard_path)
-            tensor = handle.get_tensor(name)
-            
-            if device != "cpu":
-                if device == "mps" and torch.backends.mps.is_available():
-                    if zero_copy:
-                        # Zero-copy optimization for Unified Memory:
-                        # 1. Pin memory to enable faster DMA transfer
-                        # 2. Use non-blocking transfer for async copy
-                        # On Apple Silicon, this leverages the unified memory architecture
-                        # for near-zero-copy access between CPU and GPU
-                        if not tensor.is_pinned():
-                            tensor = tensor.pin_memory()
-                        tensor = tensor.to("mps", non_blocking=True)
-                    else:
-                        tensor = tensor.to("mps")
-                elif device.startswith("cuda") and torch.cuda.is_available():
-                    if zero_copy:
-                        # Zero-copy for CUDA with pinned memory
-                        if not tensor.is_pinned():
-                            tensor = tensor.pin_memory()
-                        tensor = tensor.to(device, non_blocking=True)
-                    else:
-                        tensor = tensor.to(device)
-                    
-            tensors[name] = tensor
-        return tensors
+            cpu_tensors[name] = handle.get_tensor(name)
+
+        if device == "cpu" or not batch_transfer:
+            # Legacy per-tensor path
+            tensors = {}
+            for name, tensor in cpu_tensors.items():
+                if device != "cpu":
+                    if device == "mps" and torch.backends.mps.is_available():
+                        if zero_copy:
+                            tensor = tensor.to("mps", non_blocking=True)
+                        else:
+                            tensor = tensor.to("mps")
+                    elif device.startswith("cuda") and torch.cuda.is_available():
+                        if zero_copy:
+                            if not tensor.is_pinned():
+                                tensor = tensor.pin_memory()
+                            tensor = tensor.to(device, non_blocking=True)
+                        else:
+                            tensor = tensor.to(device)
+                tensors[name] = tensor
+            return tensors
+
+        # Phase 2: Batch transfer — submit all tensors with non_blocking=True
+        gpu_tensors: dict[str, torch.Tensor] = {}
+
+        if device == "mps" and torch.backends.mps.is_available():
+            for name, tensor in cpu_tensors.items():
+                gpu_tensors[name] = tensor.to("mps", non_blocking=True)
+            torch.mps.synchronize()
+
+        elif device.startswith("cuda") and torch.cuda.is_available():
+            transfer_stream = torch.cuda.Stream(device=device)
+            with torch.cuda.stream(transfer_stream):
+                for name, tensor in cpu_tensors.items():
+                    if zero_copy and not tensor.is_pinned():
+                        tensor = tensor.pin_memory()
+                    gpu_tensors[name] = tensor.to(device, non_blocking=True)
+            transfer_stream.synchronize()
+
+        else:
+            # Unknown device — fall back to blocking transfers
+            for name, tensor in cpu_tensors.items():
+                gpu_tensors[name] = tensor.to(device)
+
+        return gpu_tensors
     
     def mmap_weights(
         self,
@@ -893,7 +921,7 @@ class MMFP4ModelLoader:
             enable_mmap=True,
             cache_size_gb=cache_size_gb,
             enable_lazy_load=lazy,
-            pin_memory=(device != "cpu"),
+            pin_memory=(device != "cpu" and device != "mps"),
         )
 
         manager = MMAPWeightManager(self, config=config, device=device, buffer_recycler=buffer_recycler)
@@ -961,7 +989,7 @@ class MMFP4ModelLoader:
         config = MMAPWeightConfig(
             enable_mmap=True,
             cache_size_gb=cache_size_gb,
-            pin_memory=(device != "cpu"),
+            pin_memory=(device != "cpu" and device != "mps"),
         )
         return MMAPWeightManager(self, config=config, device=device, buffer_recycler=buffer_recycler)
 
