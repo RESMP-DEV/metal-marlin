@@ -954,8 +954,9 @@ class MMFP4ModelLoader:
             transfer_stream = torch.cuda.Stream(device=device)
             with torch.cuda.stream(transfer_stream):
                 for name, tensor in cpu_tensors.items():
-                    if zero_copy and not tensor.is_pinned():
-                        tensor = tensor.pin_memory()
+                    if zero_copy:
+                        if not tensor.is_pinned():
+                            tensor = tensor.pin_memory()
                     gpu_tensors[name] = tensor.to(device, non_blocking=True)
             transfer_stream.synchronize()
 
