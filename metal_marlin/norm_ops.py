@@ -23,19 +23,23 @@ Example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import numpy as np
+    pass
 
 # Try to import from C++ extension
 try:
     from metal_marlin._cpp_ext import (
         LayerNormConfig,
-        LayerNormOp as _LayerNormOp,
-        RMSNormConfig,
-        RMSNormOp as _RMSNormOp,
         NormResult,
+        RMSNormConfig,
+    )
+    from metal_marlin._cpp_ext import (
+        LayerNormOp as _LayerNormOp,
+    )
+    from metal_marlin._cpp_ext import (
+        RMSNormOp as _RMSNormOp,
     )
     from metal_marlin._cpp_ext import norm_utils as _norm_utils
     _HAS_CPP_EXT = True
@@ -72,9 +76,9 @@ class LayerNormOp:
     
     def forward(
         self,
-        input: List[float],
-        gamma: List[float],
-        beta: List[float] | None = None,
+        input: list[float],
+        gamma: list[float],
+        beta: list[float] | None = None,
     ) -> NormResult:
         """Apply LayerNorm.
         
@@ -128,8 +132,8 @@ class RMSNormOp:
     
     def forward(
         self,
-        input: List[float],
-        gamma: List[float],
+        input: list[float],
+        gamma: list[float],
     ) -> NormResult:
         """Apply RMSNorm.
         
@@ -144,9 +148,9 @@ class RMSNormOp:
     
     def forward_fused(
         self,
-        input: List[float],
-        residual: List[float],
-        gamma: List[float],
+        input: list[float],
+        residual: list[float],
+        gamma: list[float],
     ) -> NormResult:
         """Apply fused residual add + RMSNorm.
         
@@ -171,21 +175,21 @@ class RMSNormOp:
         return self._hidden_dim
 
 
-def compute_mean(data: List[float]) -> float:
+def compute_mean(data: list[float]) -> float:
     """Compute mean of a float array."""
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.compute_mean(data, len(data))
 
 
-def compute_variance(data: List[float], mean: float) -> float:
+def compute_variance(data: list[float], mean: float) -> float:
     """Compute variance of a float array."""
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.compute_variance(data, len(data), mean)
 
 
-def compute_rms(data: List[float]) -> float:
+def compute_rms(data: list[float]) -> float:
     """Compute RMS (root mean square) of a float array."""
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")

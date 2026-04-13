@@ -12,12 +12,10 @@ Memory: ~2GB peak (single layer at a time)
 """
 
 from __future__ import annotations
-from metal_marlin.mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
 import argparse
 import gc
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -25,6 +23,8 @@ import numpy as np
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+from metal_marlin.mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:

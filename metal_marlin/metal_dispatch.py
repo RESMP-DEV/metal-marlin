@@ -29,6 +29,7 @@ Note:
 
 from __future__ import annotations
 
+import _ctypes
 import logging
 import os
 import weakref
@@ -37,7 +38,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import _ctypes
 import numpy as np
 
 from ._compat import HAS_CPP_EXT, _metal_dispatch_ext

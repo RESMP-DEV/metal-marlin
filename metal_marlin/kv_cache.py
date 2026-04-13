@@ -1249,7 +1249,7 @@ class MLAKVCache:
     qk_rope_head_dim: int = 64
     device: str = "mps"
     dtype: torch.dtype | str = "float16"
-    quantize_mode: Literal["none", "int8", "fp8", "fp8_e5m2", "fp4"] = "none"
+    quantize_mode: Literal["none", "int8", "fp8", "fp8_e5m2", "fp4"] = "int8"
     fp8_scale_method: Literal["tensor", "channel"] = "tensor"
     auto_grow: bool = True
 
@@ -1277,7 +1277,7 @@ class MLAKVCache:
         qk_rope_head_dim: int = 64,
         device: str = "mps",
         dtype: torch.dtype | str = "float16",
-        quantize_mode: Literal["none", "int8", "fp8", "fp4"] = "none",
+        quantize_mode: Literal["none", "int8", "fp8", "fp4"] = "int8",
         fp8_scale_method: Literal["tensor", "channel"] = "tensor",
         auto_grow: bool = True,
         max_batch_size: int | None = None,

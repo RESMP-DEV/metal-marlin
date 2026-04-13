@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Generator
 
 import torch
 

@@ -11,7 +11,7 @@ depth is computed based on the theoretical speedup formula for speculative decod
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -319,6 +319,6 @@ class AdaptiveSpeculationController:
 
 __all__ = [
     "AdaptiveDepthConfig",
-    "AdaptiveDepthStats", 
+    "AdaptiveDepthStats",
     "AdaptiveSpeculationController",
 ]

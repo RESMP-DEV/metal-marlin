@@ -32,9 +32,11 @@ try:
     from metal_marlin.trellis.config import TrellisModelConfig
     from metal_marlin.trellis.model import TrellisMoEMLP
     from metal_marlin.trellis.moe import ExpertCache, TrellisMoELayer
-    from metal_marlin.trellis.testing import (create_mini_model,
-                                              create_mock_dense_mlp,
-                                              create_mock_moe_mlp)
+    from metal_marlin.trellis.testing import (
+        create_mini_model,
+        create_mock_dense_mlp,
+        create_mock_moe_mlp,
+    )
 
     HAS_TRELLIS = True
 except ImportError:

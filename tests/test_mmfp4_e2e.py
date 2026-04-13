@@ -1,6 +1,8 @@
+from pathlib import Path
+
 import pytest
 import torch
-from pathlib import Path
+
 
 @pytest.fixture(scope="module")
 def model():

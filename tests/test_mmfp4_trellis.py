@@ -1,9 +1,12 @@
 
-import torch
-import pytest
-import time
 import os
+import time
+
+import pytest
+import torch
+
 from metal_marlin.layers.mmfp4_linear import MMFP4Linear
+
 
 # Helper to run test
 def run_test_mmfp4_trellis():
@@ -80,7 +83,7 @@ def run_test_mmfp4_trellis():
         return
 
     # Tolerances
-    # FP16 matrix mult can accumulate error. 
+    # FP16 matrix mult can accumulate error.
     # MMFP4 kernel vs Trellis kernel might have different accumulation order or rounding.
     atol = 1e-2
     rtol = 1e-2

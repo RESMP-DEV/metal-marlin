@@ -9,7 +9,7 @@ Key Features:
 - Memory pooling to reduce allocation overhead
 - Prefetch next block during attention computation
 - Threadgroup cache for decompressed tiles
-- Support for FP8/FP4 quantization on compressed KV
+- Support for FP8/FP4/INT8 quantization on compressed KV
 - Smart block reuse and defragmentation
 
 Memory Comparison (seq_len=8192, num_layers=32, dtype=fp16):
@@ -20,12 +20,15 @@ Memory Comparison (seq_len=8192, num_layers=32, dtype=fp16):
 
 from __future__ import annotations
 
-import math
+import os
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
+
+# Default KV quantization mode, configurable via environment variable
+KV_QUANT_MODE = os.environ.get("METAL_MARLIN_KV_QUANT", "int8")
 
 if TYPE_CHECKING:
     from .config import TrellisModelConfig
@@ -55,7 +58,7 @@ class CompressedKVCacheMLA:
     - Memory pooling to reduce allocation overhead
     - Prefetch next block during attention computation
     - Threadgroup cache for decompressed tiles
-    - FP8/FP4 quantization support for additional memory savings
+    - FP8/FP4/INT8 quantization support for additional memory savings
 
     Example:
         config = TrellisModelConfig.from_pretrained("THUDM/glm-4-9b-chat")
@@ -65,10 +68,11 @@ class CompressedKVCacheMLA:
             max_seq_len=8192,
             device=torch.device("mps"),
             block_size=64,
-            quantize_mode="none",  # or "fp8", "fp4"
+            quantize_mode="int8",  # default: int8 (or METAL_MARLIN_KV_QUANT)
         )
 
-        # Update with new tokens
+        # INT8 quantization halves KV cache memory (~30GB → ~15GB for 8192 tokens).
+        # This enables longer context windows within the same peak memory budget.
         compressed_kv = torch.randn(1, 1, 576, device="mps", dtype=torch.float16)
         cache.update(layer_idx=0, compressed_kv=compressed_kv)
 
@@ -88,7 +92,7 @@ class CompressedKVCacheMLA:
         device: torch.device,
         dtype: torch.dtype = torch.float16,
         block_size: int = 64,
-        quantize_mode: str = "none",
+        quantize_mode: str = KV_QUANT_MODE,
         prefetch_enabled: bool = True,
         threadgroup_cache_size: int = 4,
     ):
@@ -161,7 +165,7 @@ class CompressedKVCacheMLA:
 
         # Quantization state
         self._kv_scales = None
-        if quantize_mode in ("fp8", "fp4"):
+        if quantize_mode in ("fp8", "fp4", "int8"):
             # Per-block scale factors for quantization
             self._kv_scales = torch.ones(
                 (self.num_layers, self.num_blocks),
@@ -181,6 +185,8 @@ class CompressedKVCacheMLA:
             return torch.uint8  # FP8 stored as uint8
         elif self.quantize_mode == "fp4":
             return torch.uint8  # FP4 stored as uint8 (2 values per byte)
+        elif self.quantize_mode == "int8":
+            return torch.int8  # INT8 stored as int8
         else:
             return self.dtype
 
@@ -235,7 +241,7 @@ class CompressedKVCacheMLA:
         batch_size, num_new_tokens, _ = compressed_kv.shape
 
         # Quantize if enabled
-        if self.quantize_mode in ("fp8", "fp4"):
+        if self.quantize_mode in ("fp8", "fp4", "int8"):
             compressed_kv = self._quantize_compressed_kv(
                 compressed_kv, layer_idx
             )
@@ -271,7 +277,7 @@ class CompressedKVCacheMLA:
         compressed_kv: torch.Tensor,
         layer_idx: int,
     ) -> torch.Tensor:
-        """Quantize compressed KV to FP8/FP4."""
+        """Quantize compressed KV to FP8/FP4/INT8."""
         if self.quantize_mode == "fp8":
             # FP8e5m2 quantization (scale factor per block)
             # For simplicity, compute max abs value and scale
@@ -295,13 +301,21 @@ class CompressedKVCacheMLA:
                 val2 = quantized[:, :, min(i + 1, dim - 1)] + 8 if i + 1 < dim else torch.zeros_like(val1)
                 packed[:, :, i // 2] = (val1 << 4) | val2
             return packed
+        elif self.quantize_mode == "int8":
+            # INT8 quantization (scale factor per block)
+            max_val = compressed_kv.abs().max(dim=-1, keepdim=True).values.clamp(min=1e-5)
+            scale = max_val / 127.0
+            quantized = (compressed_kv / scale).clamp(-127, 127).to(torch.int8)
+            # Store scale for later dequantization
+            self._kv_scales[layer_idx] = scale.squeeze(-1).mean(-1)
+            return quantized
         else:
             return compressed_kv
 
     def get_compressed_kv(
         self,
         layer_idx: int,
-        batch_indices: Optional[list[int]] = None,
+        batch_indices: list[int] | None = None,
     ) -> torch.Tensor:
         """
         Retrieve the full compressed KV sequence for the current batch.
@@ -352,7 +366,7 @@ class CompressedKVCacheMLA:
                 block_data = self.kv_cache_pool[layer_idx, physical_block, :valid_len]
 
                 # Dequantize if needed
-                if self.quantize_mode in ("fp8", "fp4"):
+                if self.quantize_mode in ("fp8", "fp4", "int8"):
                     block_data = self._dequantize_compressed_kv(
                         block_data, layer_idx, physical_block
                     )
@@ -367,7 +381,7 @@ class CompressedKVCacheMLA:
         layer_idx: int,
         block_idx: int,
     ) -> torch.Tensor:
-        """Dequantize compressed KV from FP8/FP4."""
+        """Dequantize compressed KV from FP8/FP4/INT8."""
         scale = self._kv_scales[layer_idx, block_idx]
 
         if self.quantize_mode == "fp8":
@@ -390,6 +404,10 @@ class CompressedKVCacheMLA:
                 if i * 2 + 1 < dim:
                     unpacked[:, :, i * 2 + 1] = val2.to(self.dtype) * scale
             return unpacked
+        elif self.quantize_mode == "int8":
+            # Dequantize INT8
+            dequantized = compressed_kv.to(self.dtype) * scale
+            return dequantized.unsqueeze(-1)
         else:
             return compressed_kv
 
@@ -397,8 +415,8 @@ class CompressedKVCacheMLA:
         self,
         layer_idx: int,
         kv_b_proj_weight: torch.Tensor,
-        kv_a_layernorm: Optional[torch.nn.Module] = None,
-        batch_indices: Optional[list[int]] = None,
+        kv_a_layernorm: torch.nn.Module | None = None,
+        batch_indices: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Decompress KV on-the-fly with threadgroup caching.
@@ -454,7 +472,7 @@ class CompressedKVCacheMLA:
 
         return k, v
 
-    def prefetch_layer_async(self, layer_idx: int, block_indices: Optional[list[int]] = None) -> None:
+    def prefetch_layer_async(self, layer_idx: int, block_indices: list[int] | None = None) -> None:
         """
         Prefetch next layer's blocks for efficient attention computation.
 
@@ -504,7 +522,7 @@ class CompressedKVCacheMLA:
         self,
         layer_idx: int,
         block_idx: int,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """Get block from threadgroup cache if available."""
         key = (layer_idx, block_idx)
         if key in self._threadgroup_cache:

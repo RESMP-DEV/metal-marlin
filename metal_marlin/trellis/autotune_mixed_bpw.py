@@ -32,17 +32,14 @@ from __future__ import annotations
 
 import json
 import logging
-import platform
 import statistics
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-
-import numpy as np
+from typing import Any
 
 from .._compat import HAS_MPS, torch
-from ..utils.profiling import ProfileRecord, _ProfileRegistry
+from ..utils.profiling import _ProfileRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +118,7 @@ class KernelConfig:
             f"{self.batch_strategy}"
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return asdict(self)
 
@@ -150,7 +147,7 @@ class BenchmarkResult:
     success: bool
     error_msg: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "config": self.config.to_dict(),
@@ -193,11 +190,11 @@ class OptimizedConfig:
     throughput: float
 
     @property
-    def lookup_key(self) -> Tuple[int, int, int]:
+    def lookup_key(self) -> tuple[int, int, int]:
         """Key for lookup table: (batch_size, bit_width, hidden_dim)."""
         return (self.batch_size, self.bit_width, self.hidden_dim)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return asdict(self)
 
@@ -227,7 +224,7 @@ class MixedBPWAutoTuner:
 
     def __init__(
         self,
-        device: Optional[str] = None,
+        device: str | None = None,
         warmup_iterations: int = 5,
         benchmark_iterations: int = 20,
         enable_online_adaptation: bool = True,
@@ -254,11 +251,11 @@ class MixedBPWAutoTuner:
         self.history_length = history_length
 
         # Storage for benchmark results and optimized configs
-        self.benchmark_results: List[BenchmarkResult] = []
-        self.optimized_configs: Dict[Tuple[int, int, int], OptimizedConfig] = {}
+        self.benchmark_results: list[BenchmarkResult] = []
+        self.optimized_configs: dict[tuple[int, int, int], OptimizedConfig] = {}
 
         # Online adaptation history: (batch_size, bit_width, hidden_dim) -> list of (config_id, latency_ms)
-        self.online_history: Dict[Tuple[int, int, int], List[Tuple[str, float]]] = {}
+        self.online_history: dict[tuple[int, int, int], list[tuple[str, float]]] = {}
 
         # Profile registry for kernel timing
         self.profile_registry = _ProfileRegistry()
@@ -300,10 +297,10 @@ class MixedBPWAutoTuner:
 
     def generate_configs(
         self,
-        bit_widths: List[int],
-        kernel_variants: Optional[List[str]] = None,
-        batch_strategies: Optional[List[str]] = None,
-    ) -> List[KernelConfig]:
+        bit_widths: list[int],
+        kernel_variants: list[str] | None = None,
+        batch_strategies: list[str] | None = None,
+    ) -> list[KernelConfig]:
         """Generate all kernel configurations to benchmark.
 
         Args:
@@ -565,14 +562,14 @@ class MixedBPWAutoTuner:
 
     def run_autotune(
         self,
-        bit_widths: List[int],
-        batch_sizes: List[int],
-        hidden_dims: List[int],
-        intermediate_dims: Optional[List[int]] = None,
+        bit_widths: list[int],
+        batch_sizes: list[int],
+        hidden_dims: list[int],
+        intermediate_dims: list[int] | None = None,
         num_experts: int = 8,
-        kernel_variants: Optional[List[str]] = None,
-        batch_strategies: Optional[List[str]] = None,
-    ) -> Dict[Tuple[int, int, int], OptimizedConfig]:
+        kernel_variants: list[str] | None = None,
+        batch_strategies: list[str] | None = None,
+    ) -> dict[tuple[int, int, int], OptimizedConfig]:
         """Run full auto-tuning for mixed bit-width kernels.
 
         This is the main entry point for auto-tuning. It generates all
@@ -669,7 +666,7 @@ class MixedBPWAutoTuner:
         batch_size: int,
         bit_width: int,
         hidden_dim: int,
-    ) -> Optional[OptimizedConfig]:
+    ) -> OptimizedConfig | None:
         """Get the optimal configuration for a specific workload.
 
         Args:
@@ -699,8 +696,8 @@ class MixedBPWAutoTuner:
 
     def _find_nearest_key(
         self,
-        target_key: Tuple[int, int, int],
-    ) -> Optional[Tuple[int, int, int]]:
+        target_key: tuple[int, int, int],
+    ) -> tuple[int, int, int] | None:
         """Find the nearest configuration key to the target.
 
         Bit width is heavily prioritized as different bit widths require
@@ -777,7 +774,7 @@ class MixedBPWAutoTuner:
 
     def _update_config_from_history(
         self,
-        lookup_key: Tuple[int, int, int],
+        lookup_key: tuple[int, int, int],
     ) -> None:
         """Update optimized configuration from online history samples.
 
@@ -790,7 +787,7 @@ class MixedBPWAutoTuner:
         samples = self.online_history[lookup_key]
 
         # Group samples by config_id and calculate average latency
-        config_latencies: Dict[str, List[float]] = {}
+        config_latencies: dict[str, list[float]] = {}
         for config_id, latency in samples:
             if config_id not in config_latencies:
                 config_latencies[config_id] = []
@@ -874,7 +871,7 @@ class MixedBPWAutoTuner:
         Args:
             path: Path to JSON configuration file.
         """
-        with open(path, "r") as f:
+        with open(path) as f:
             data = json.load(f)
 
         # Verify device compatibility
@@ -896,7 +893,7 @@ class MixedBPWAutoTuner:
             f"(source device: {data.get('device', 'unknown')})"
         )
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get statistics about the auto-tuner.
 
         Returns:
@@ -916,8 +913,8 @@ def get_optimal_config(
     batch_size: int,
     bit_width: int,
     hidden_dim: int,
-    config_path: Optional[str] = None,
-) -> Optional[KernelConfig]:
+    config_path: str | None = None,
+) -> KernelConfig | None:
     """Get optimal kernel configuration for a workload.
 
     Convenience function that loads configs from file and returns the optimal
@@ -955,7 +952,7 @@ def HAS_METAL_AVAILABLE() -> bool:
 
 
 # Default singleton tuner instance for convenience
-_default_tuner: Optional[MixedBPWAutoTuner] = None
+_default_tuner: MixedBPWAutoTuner | None = None
 
 
 def get_default_tuner() -> MixedBPWAutoTuner:

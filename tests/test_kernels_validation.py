@@ -1,7 +1,9 @@
 
 import pytest
 import torch
-from metal_marlin.kernels import mmfp4_gemm, HAS_MPS, HAS_METAL
+
+from metal_marlin.kernels import HAS_METAL, HAS_MPS, mmfp4_gemm
+
 
 @pytest.mark.skipif(not (HAS_MPS and HAS_METAL), reason="Requires MPS and Metal")
 def test_mmfp4_gemm_validation_m_zero():

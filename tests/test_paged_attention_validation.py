@@ -16,10 +16,10 @@ from metal_marlin.paged.validation import (
     ParityValidationResult,
     ParityValidator,
     ValidationConfig,
+    compute_linear_attention,
     validate_paged_block_pool_parity,
     validate_paged_linear_parity,
     validate_paged_v1_parity,
-    compute_linear_attention,
 )
 
 

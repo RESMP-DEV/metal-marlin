@@ -1,14 +1,19 @@
 """
-Fused scaled dot-product attention using MPSGraph.
+Fused scaled dot-product attention with configurable Metal backend selection.
 
-Uses MPSGraph's scaledDotProductAttention to fuse Q*K^T, mask, softmax, and V.
-Falls back to Flash Attention V2 or PyTorch SDPA when MPSGraph is unavailable.
+Backend selection is controlled by ``METAL_MARLIN_ATTENTION_BACKEND``:
+    - ``v3`` (default): try Flash Attention v3, then v2, then plain SDPA
+    - ``v2``: try Flash Attention v2, then plain SDPA
+    - ``plain``: use PyTorch scaled_dot_product_attention directly
 """
 
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
+import os
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,6 +23,181 @@ from ._compat import HAS_MPS, HAS_MPSGRAPH, HAS_PYOBJC_METAL, HAS_TORCH, Metal, 
 from ._compat import MPSGraph as MPSG
 from .flash_attention_v2 import flash_attention_v2
 from .metal_dispatch import mps_tensor_to_metal_buffer
+
+# Module-level logger
+_logger = logging.getLogger(__name__)
+
+# Singleton to track which backend was selected at init time (once, not per-call)
+_SELECTED_ATTENTION_BACKEND: str | None = None
+_ATTENTION_BACKEND_LOGGED: bool = False
+_ATTENTION_BACKEND_ENV = "METAL_MARLIN_ATTENTION_BACKEND"
+_VALID_ATTENTION_BACKENDS = ("v3", "v2", "plain")
+
+
+def _get_requested_attention_backend() -> str:
+    """Return the requested attention backend, normalized from the environment."""
+    backend = os.environ.get(_ATTENTION_BACKEND_ENV, "v3").strip().lower()
+    if backend in _VALID_ATTENTION_BACKENDS:
+        return backend
+
+    _logger.warning(
+        "[fused_attention_mps] Ignoring unsupported %s=%r; expected one of %s",
+        _ATTENTION_BACKEND_ENV,
+        backend,
+        ", ".join(_VALID_ATTENTION_BACKENDS),
+    )
+    return "v3"
+
+
+def _attention_backend_candidates() -> tuple[str, ...]:
+    """Return the fallback chain for the requested attention backend."""
+    requested = _get_requested_attention_backend()
+    if requested == "plain":
+        return ("plain",)
+    if requested == "v2":
+        return ("v2", "plain")
+    return ("v3", "v2", "plain")
+
+
+def _probe_v3_backend() -> bool:
+    """Check whether Flash Attention v3 can be dispatched."""
+    if not (HAS_TORCH and torch is not None and HAS_MPS):
+        return False
+
+    try:
+        from .flash_attn_mla import flash_attention_v3_mla
+
+        test_q = torch.zeros((1, 1, 4, 64), dtype=torch.float16, device="mps")
+        test_k = torch.zeros((1, 1, 4, 64), dtype=torch.float16, device="mps")
+        test_v = torch.zeros((1, 1, 4, 64), dtype=torch.float16, device="mps")
+        flash_attention_v3_mla(test_q, test_k, test_v, scale=0.125, causal=False)
+        return True
+    except Exception:
+        return False
+
+
+def _probe_v2_backend() -> bool:
+    """Check whether Flash Attention v2 can be dispatched."""
+    if not (HAS_TORCH and torch is not None and HAS_MPS):
+        return False
+
+    try:
+        test_q = torch.zeros((1, 1, 4, 16), dtype=torch.float16, device="mps")
+        test_k = torch.zeros((1, 1, 4, 16), dtype=torch.float16, device="mps")
+        test_v = torch.zeros((1, 1, 4, 16), dtype=torch.float16, device="mps")
+        flash_attention_v2(test_q, test_k, test_v, scale=0.25, causal=False)
+        return True
+    except Exception:
+        return False
+
+
+def _probe_plain_backend() -> bool:
+    """Check whether the plain PyTorch SDPA fallback is available."""
+    return HAS_TORCH and torch is not None
+
+
+def _run_v3_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    scale: float | None,
+    causal: bool,
+) -> torch.Tensor:
+    """Run Flash Attention v3."""
+    from .flash_attn_mla import flash_attention_v3_mla
+
+    return flash_attention_v3_mla(q, k, v, scale=scale, causal=causal)
+
+
+def _run_v2_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    scale: float | None,
+    causal: bool,
+) -> torch.Tensor:
+    """Run Flash Attention v2."""
+    return flash_attention_v2(q, k, v, scale=scale, causal=causal)
+
+
+def _run_plain_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    *,
+    mask: torch.Tensor | None,
+    scale: float | None,
+    causal: bool,
+) -> torch.Tensor:
+    """Run the plain PyTorch SDPA fallback."""
+    if not HAS_TORCH or torch is None:
+        raise RuntimeError("PyTorch is required for plain attention fallback.")
+
+    return torch.nn.functional.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        attn_mask=mask,
+        dropout_p=0.0,
+        is_causal=causal,
+        scale=scale,
+    )
+
+
+def _get_attention_backend() -> str:
+    """Determine which attention backend will be used at runtime.
+
+    Returns:
+        Backend name: "v3", "v2", "plain", or "unavailable"
+    """
+    for backend in _attention_backend_candidates():
+        if backend == "v3" and _probe_v3_backend():
+            return "v3"
+        if backend == "v2" and _probe_v2_backend():
+            return "v2"
+        if backend == "plain" and _probe_plain_backend():
+            return "plain"
+
+    return "unavailable"
+
+
+def _log_attention_backend_once() -> str:
+    """Log which attention backend is selected (once at init time, not per-call).
+
+    Returns:
+        The selected backend name.
+    """
+    global _SELECTED_ATTENTION_BACKEND, _ATTENTION_BACKEND_LOGGED
+
+    if _ATTENTION_BACKEND_LOGGED:
+        return _SELECTED_ATTENTION_BACKEND or "unknown"
+
+    # Only log once
+    _ATTENTION_BACKEND_LOGGED = True
+
+    backend = _get_attention_backend()
+    _SELECTED_ATTENTION_BACKEND = backend
+
+    backend_descriptions = {
+        "v3": "Flash Attention v3 (Metal MLA kernels)",
+        "v2": "Flash Attention v2 (Metal kernels)",
+        "plain": "PyTorch scaled_dot_product_attention",
+        "unavailable": "No available attention backend",
+    }
+
+    desc = backend_descriptions.get(backend, backend)
+    msg = f"[fused_attention_mps] Attention backend selected: {desc} ({backend})"
+    _logger.info(msg)
+    # Also print to stderr so the selection is visible even when logging is not configured
+    print(msg, file=sys.stderr)
+
+    return backend
+
+
+# Log the selected backend at module import time (once, not per-call)
+_log_attention_backend_once()
 
 
 def _require_mpsgraph_attention() -> None:
@@ -320,49 +500,68 @@ def fused_attention(
     scale: float | None = None,
     causal: bool = True,
 ) -> torch.Tensor:
-    """Dispatch fused SDPA with MPSGraph, fallback to Flash Attention V2 or PyTorch."""
-    import os
+    """Dispatch attention according to the configured v3/v2/plain fallback chain."""
     debug = os.environ.get("FUSED_ATTN_DEBUG", "0") == "1"
+    last_error: Exception | None = None
 
-    if HAS_MPSGRAPH and HAS_PYOBJC_METAL and HAS_MPS and HAS_TORCH and torch is not None:
-        try:
-            result = fused_scaled_dot_product_attention(
-                q, k, v, mask=mask, scale=scale, causal=causal)
-            if debug:
-                print("[FUSED_ATTN] Using fused_scaled_dot_product_attention")
-            return result
-        except Exception as e:
+    for backend in _attention_backend_candidates():
+        if backend in {"v3", "v2"} and mask is not None:
             if debug:
                 print(
-                    f"[FUSED_ATTN] fused_scaled_dot_product_attention failed: {e}")
-            pass
+                    f"[FUSED_ATTN] Skipping flash_attention_{backend} because attn_mask is set"
+                )
+            continue
 
-    if HAS_TORCH and torch is not None:
-        if mask is None:
-            try:
-                result = flash_attention_v2(
-                    q, k, v, scale=scale, causal=causal)
-                if debug:
-                    print("[FUSED_ATTN] Using flash_attention_v2")
-                return result
-            except Exception as e:
-                if debug:
-                    print(f"[FUSED_ATTN] flash_attention_v2 failed: {e}")
-                pass
-        if debug:
-            print(
-                f"[FUSED_ATTN] Using F.scaled_dot_product_attention (mask={mask is not None})")
-        return torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=mask,
-            dropout_p=0.0,
-            is_causal=causal,
-            scale=scale,
+        label = (
+            "flash_attention_v3"
+            if backend == "v3"
+            else "flash_attention_v2"
+            if backend == "v2"
+            else "F.scaled_dot_product_attention"
         )
 
-    raise RuntimeError("No available backend for fused attention.")
+        try:
+            if backend == "v3":
+                result = _run_v3_attention(q, k, v, scale=scale, causal=causal)
+            elif backend == "v2":
+                result = _run_v2_attention(q, k, v, scale=scale, causal=causal)
+            else:
+                result = _run_plain_attention(
+                    q, k, v, mask=mask, scale=scale, causal=causal
+                )
+
+            if debug:
+                print(f"[FUSED_ATTN] Using {label}")
+            return result
+        except Exception as exc:
+            last_error = exc
+            if debug:
+                print(f"[FUSED_ATTN] {label} failed: {exc}")
+
+    if last_error is not None:
+        raise RuntimeError("No available backend for fused attention.") from last_error
+    raise RuntimeError("No compatible attention backend for the provided inputs.")
 
 
-__all__ = ["fused_attention", "fused_scaled_dot_product_attention"]
+def get_selected_attention_backend() -> str:
+    """Get the name of the attention backend selected at init time.
+
+    This function returns the backend that was selected and logged when the
+    module was first imported. The backend is determined by testing availability
+    in the configured fallback order (v3 -> v2 -> plain by default).
+
+    Returns:
+        Backend name: "v3", "v2", "plain", or "unavailable"
+    """
+    global _SELECTED_ATTENTION_BACKEND
+    if _SELECTED_ATTENTION_BACKEND is None:
+        # Fallback in case module was imported without running init
+        return _get_attention_backend()
+    return _SELECTED_ATTENTION_BACKEND
+
+
+__all__ = [
+    "fused_attention",
+    "fused_scaled_dot_product_attention",
+    "get_selected_attention_backend",
+]

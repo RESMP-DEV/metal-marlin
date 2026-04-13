@@ -18,13 +18,13 @@ import torch
 
 from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.speculative.draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
-from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel
 from metal_marlin.speculative.engine import (
     GenerationStats,
     SpeculativeConfig,
     SpeculativeEngine,
     StepResult,
 )
+from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel
 from metal_marlin.speculative.verify import verify_speculative
 
 # ---------------------------------------------------------------------------
@@ -701,7 +701,7 @@ class TestMMFP4DraftModel:
         """Weight sharing factory should enable weight sharing flag."""
         target = MockCausalLM(vocab_size=100)
         draft = MMFP4DraftModel.from_target_model_with_weight_sharing(
-            target, 
+            target,
             num_predictions=3,
             share_lm_head=False # Mock doesn't have compatible LM head usually
         )

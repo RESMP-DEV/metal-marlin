@@ -1,6 +1,8 @@
 
 import pytest
+
 from metal_marlin.paged.allocator import MultimodalBlockAllocator, TokenModality
+
 
 class TestMultimodalBlockAllocator:
     def test_allocate_basic(self):
@@ -55,7 +57,7 @@ class TestMultimodalBlockAllocator:
         allocator.free(3)
         
         # Free 4 -> hole at 4.
-        # Free list: 1, 3, 4. 
+        # Free list: 1, 3, 4.
         # Contiguous runs: [1], [3, 4].
         
         # Allocate 2 blocks. Should skip 1 and take [3, 4].

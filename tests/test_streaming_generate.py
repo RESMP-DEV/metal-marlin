@@ -2,9 +2,10 @@
 import asyncio
 import sys
 import unittest
-from unittest.mock import MagicMock, ANY
-import torch
 from pathlib import Path
+from unittest.mock import ANY, MagicMock
+
+import torch
 
 # Add the project root to the python path
 _parent = Path(__file__).parent
@@ -13,7 +14,11 @@ while _parent.name != "metal_marlin" and _parent.parent != _parent:
 if _parent.name == "metal_marlin":
     sys.path.insert(0, str(_parent.parent))
 
-from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline, StreamingOutput
+from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import (
+    MMFP4Pipeline,
+    StreamingOutput,
+)
+
 
 class MockModel:
     def __init__(self):

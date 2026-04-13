@@ -48,6 +48,7 @@ class TestBlockSparseMask:
     def test_sliding_window_mask_creation(self):
         """Test creation of sliding window block-sparse mask."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 256
@@ -72,6 +73,7 @@ class TestBlockSparseMask:
     def test_sliding_window_mask_pattern(self):
         """Verify sliding window mask has correct pattern."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 256
@@ -105,6 +107,7 @@ class TestBlockSparseMask:
     def test_bigbird_mask_creation(self):
         """Test creation of BigBird-style block-sparse mask."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 512
@@ -150,6 +153,7 @@ class TestBlockSparseMask:
     def test_longformer_mask_creation(self):
         """Test creation of Longformer-style block-sparse mask."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 512
@@ -167,6 +171,7 @@ class TestBlockSparseMask:
     def test_from_dense_mask(self):
         """Test conversion from dense mask to block-sparse."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 128
@@ -185,6 +190,7 @@ class TestBlockSparseMask:
     def test_from_dense_mask_pattern(self):
         """Verify block-sparse mask matches dense mask pattern."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 64
@@ -253,6 +259,7 @@ class TestBlockSparseAttentionAccuracy:
     def test_block_sparse_mask_sliding_window_accuracy(self, rng):
         """Test that sliding window block-sparse produces correct attention pattern."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         batch, heads, seq_len, head_dim = 1, 4, 128, 64
@@ -336,6 +343,7 @@ class TestBlockSparseAttentionAccuracy:
         """Compare block-sparse sliding window to dense sliding window."""
         import torch
         import torch.nn.functional as F
+
         from metal_marlin.attention import BlockSparseMask, create_sliding_window_mask
 
         batch, heads, seq_len, head_dim = 1, 4, 128, 64
@@ -386,6 +394,7 @@ class TestBlockSparseMetalDispatch:
     def test_block_sparse_attention_metal_basic(self, rng):
         """Test basic block-sparse attention dispatch."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask, block_sparse_attention_metal
 
         batch, heads, seq_len, head_dim = 1, 4, 64, 32
@@ -418,6 +427,7 @@ class TestBlockSparseMetalDispatch:
     def test_block_sparse_attention_metal_output_shape(self, rng):
         """Verify output shape of block-sparse attention."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask, block_sparse_attention_metal
 
         batch, heads, seq_len, head_dim = 1, 8, 128, 64
@@ -445,6 +455,7 @@ class TestBlockSparseMetalDispatch:
         """Compare block-sparse attention to reference implementation."""
         import torch
         import torch.nn.functional as F
+
         from metal_marlin.attention import BlockSparseMask, block_sparse_attention_metal
 
         batch, heads, seq_len, head_dim = 1, 4, 64, 32
@@ -492,6 +503,7 @@ class TestBlockSparseEdgeCases:
     def test_empty_mask(self):
         """Test behavior with completely empty mask."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 128
@@ -513,6 +525,7 @@ class TestBlockSparseEdgeCases:
     def test_sequence_not_divisible_by_block(self):
         """Test mask creation when seq_len is not divisible by block_size."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 100  # Not divisible by 64
@@ -531,6 +544,7 @@ class TestBlockSparseEdgeCases:
     def test_single_block(self):
         """Test mask creation with single block."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 32
@@ -554,6 +568,7 @@ class TestBlockSparseEdgeCases:
     def test_very_small_window(self):
         """Test sliding window with very small window size."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 256
@@ -572,6 +587,7 @@ class TestBlockSparseEdgeCases:
     def test_large_num_blocks_warning(self):
         """Test that we handle cases with many blocks."""
         import torch
+
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 8192
@@ -596,9 +612,11 @@ class TestMarlinAttentionIntegration:
 
     def test_block_sparse_dispatch(self):
         """Verify BlockSparseMask dispatches to block_sparse_attention_metal."""
-        import torch
         from unittest.mock import MagicMock, patch
-        from metal_marlin.attention import MarlinAttention, BlockSparseMask
+
+        import torch
+
+        from metal_marlin.attention import BlockSparseMask, MarlinAttention
 
         # Mock dependencies to avoid Metal/GPU requirements
         with patch("metal_marlin.attention.MarlinLinear", MagicMock()), \
@@ -630,9 +648,9 @@ class TestMarlinAttentionIntegration:
             
             # Case 2: BlockSparseMask -> block_sparse_attention_metal
             block_mask = BlockSparseMask(
-                mask_bits=torch.tensor([1]), 
-                block_q=16, block_k=16, 
-                num_q_blocks=1, num_k_blocks=1, 
+                mask_bits=torch.tensor([1]),
+                block_q=16, block_k=16,
+                num_q_blocks=1, num_k_blocks=1,
                 seq_q=32, seq_k=32
             )
             attn(x, attention_mask=block_mask)

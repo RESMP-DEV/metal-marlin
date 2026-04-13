@@ -1,8 +1,11 @@
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
-from unittest.mock import MagicMock, patch
-from metal_marlin.inference.mmfp4_pipeline import _optimized_generate, _fused_sampling
+
+from metal_marlin.inference.mmfp4_pipeline import _fused_sampling, _optimized_generate
+
 
 def test_optimized_generate_passes_buffers():
     """Verify that _optimized_generate passes pre-allocated buffers to _fused_sampling."""

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections import deque
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
@@ -24,7 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .allocator import BlockAllocator, MultimodalBlockAllocator
-from .kv_block import KVBlock, KVBlockConfig
+from .kv_block import KVBlockConfig
 from .page_table import PageTable
 
 
@@ -218,9 +217,9 @@ class PagedKVCache:
         self._fragmentation_info = {'fragmentation_ratio': 0.0}
 
     def add_sequence(
-        self, 
-        seq_id: int, 
-        priority: int = 0, 
+        self,
+        seq_id: int,
+        priority: int = 0,
         ttl: float | None = None
     ) -> bool:
         """Add a new sequence."""

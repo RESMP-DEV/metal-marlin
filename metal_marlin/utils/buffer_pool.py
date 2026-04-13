@@ -1,7 +1,7 @@
 """Pre-allocated buffer pool for inference."""
 
+
 import torch
-from typing import Dict, Optional
 
 
 class BufferPool:
@@ -9,7 +9,7 @@ class BufferPool:
 
     def __init__(self, device: torch.device):
         self.device = device
-        self.buffers: Dict[str, torch.Tensor] = {}
+        self.buffers: dict[str, torch.Tensor] = {}
 
     def get(
         self,

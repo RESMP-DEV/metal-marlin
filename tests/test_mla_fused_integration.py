@@ -1,9 +1,9 @@
 '''Test MLA fused attention integration in TrellisMLAttention.'''
 import pytest
 import torch
+from metal_marlin.trellis_config import TrellisConfig
 
 from metal_marlin.trellis.attention import TrellisMLAttention
-from metal_marlin.trellis_config import TrellisConfig
 
 
 @pytest.fixture

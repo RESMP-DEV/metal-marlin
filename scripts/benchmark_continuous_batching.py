@@ -263,12 +263,12 @@ def benchmark_context_lengths(
     """
     import torch
 
+    from metal_marlin.kv_cache import TrellisKVCache
     from metal_marlin.serving.request import GenerationRequest, RequestStatus
     from metal_marlin.serving.scheduler import (
         BatchScheduler,
         SchedulerConfig,
     )
-    from metal_marlin.kv_cache import TrellisKVCache
 
     device = next(model.parameters()).device
     results: list[BenchmarkResult] = []

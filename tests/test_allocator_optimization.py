@@ -1,6 +1,11 @@
 
 import unittest
-from contrib.metal_marlin.metal_marlin.paged.allocator import MultimodalBlockAllocator, TokenModality
+
+from contrib.metal_marlin.metal_marlin.paged.allocator import (
+    MultimodalBlockAllocator,
+    TokenModality,
+)
+
 
 class TestMultimodalBlockAllocatorOptimization(unittest.TestCase):
     def test_fragmentation_and_contiguous_allocation(self):

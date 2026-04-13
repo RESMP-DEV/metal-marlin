@@ -6,13 +6,15 @@ awareness, and adaptive policies.
 """
 
 import time
-import pytest
+
 import numpy as np
+import pytest
+
 from metal_marlin.paged.cache_manager_optimized import (
-    PagedKVCacheOptimized,
-    EvictionPolicy,
     EvictionConfig,
+    EvictionPolicy,
     EvictionStats,
+    PagedKVCacheOptimized,
     WeightedScore,
 )
 from metal_marlin.paged.kv_block import KVBlockConfig

@@ -25,13 +25,13 @@ Usage:
 
 from __future__ import annotations
 
-from .visualizer import WeightVisualizer
 from .error_analysis import ErrorAnalyzer, ErrorMetrics
-from .plots import plot_weight_comparison, plot_error_distribution, plot_layer_errors
+from .plots import plot_error_distribution, plot_layer_errors, plot_weight_comparison
+from .visualizer import WeightVisualizer
 
 __all__ = [
     "WeightVisualizer",
-    "ErrorAnalyzer", 
+    "ErrorAnalyzer",
     "ErrorMetrics",
     "plot_weight_comparison",
     "plot_error_distribution",

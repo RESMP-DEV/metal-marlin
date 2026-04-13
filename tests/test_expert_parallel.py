@@ -6,8 +6,9 @@ import torch
 import torch.nn as nn
 
 from metal_marlin.layers import mmfp4_moe
-from metal_marlin.layers.mmfp4_moe import MMFP4MoE
 from metal_marlin.layers.mmfp4_fused_moe import MMFP4FusedMoE
+from metal_marlin.layers.mmfp4_moe import MMFP4MoE
+
 
 class TestExpertParallel:
     @pytest.fixture
@@ -93,7 +94,7 @@ class TestExpertParallel:
         # Mock device to be MPS
         x.to = MagicMock(return_value=x)
         # We can't easily mock x.device.type without a real MPS tensor or property mock
-        # But we can assume the logic we verified in code holds: 
+        # But we can assume the logic we verified in code holds:
         # if self.expert_parallel: ... elif hidden_flat.device.type == "mps": ...
         
         # If we can't run on MPS, we can't fully verify the precedence at runtime without hardware

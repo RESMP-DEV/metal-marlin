@@ -34,21 +34,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ..kv_cache import TrellisKVCache
-from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary,
-                              PipelinedLayerDispatcher,
-                              mps_tensor_to_metal_buffer)
+from ..metal_dispatch import (
+    HAS_METAL,
+    MetalKernelLibrary,
+    PipelinedLayerDispatcher,
+    mps_tensor_to_metal_buffer,
+)
 from ..transformer import RMSNorm
 from .async_dispatch import LayerBatchContext
 from .attention import TrellisMLAConfig, TrellisMLAttention
 from .config import TrellisModelConfig
 from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
-from .moe_dispatch import (BatchedDispatcher, CachedRouterBuffers,
-                           CachedWeightBuffers, MoEBufferPool,
-                           RouterBufferPool, create_cached_weight_buffers,
-                           dispatch_moe_trellis_swiglu)
-from .optimizations import (ExpertMemoryPool, ExpertSelectionCache,
-                            MixedBPWMoEDispatcher)
+from .moe_dispatch import (
+    BatchedDispatcher,
+    CachedRouterBuffers,
+    CachedWeightBuffers,
+    MoEBufferPool,
+    RouterBufferPool,
+    create_cached_weight_buffers,
+    dispatch_moe_trellis_swiglu,
+)
+from .optimizations import ExpertMemoryPool, ExpertSelectionCache, MixedBPWMoEDispatcher
 from .softmax_topk import SoftmaxTopKDispatcher
 
 __all__ = [
@@ -2736,8 +2743,7 @@ class TrellisMoEMLP(nn.Module):
         # This handles lazy initialization when Metal becomes available
         self._ensure_bit_group_buffers()
 
-        from .moe_dispatch import (dispatch_moe_per_bit_tuple,
-                                   dispatch_moe_trellis_swiglu)
+        from .moe_dispatch import dispatch_moe_per_bit_tuple, dispatch_moe_trellis_swiglu
 
         # Split groups by availability:
         # - Available groups run through grouped dispatch.

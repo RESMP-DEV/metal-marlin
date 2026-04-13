@@ -46,6 +46,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from .kv_cache_compressed import KV_QUANT_MODE
+
 if TYPE_CHECKING:
     from .config import TrellisModelConfig
     from .kv_cache_compressed import CompressedKVCacheMLA
@@ -247,7 +249,7 @@ def create_compressed_kv_cache(
     device: torch.device | str,
     dtype: torch.dtype = torch.float16,
     block_size: int = 64,
-    quantize_mode: str = "none",
+    quantize_mode: str = KV_QUANT_MODE,
     prefetch_enabled: bool = True,
     threadgroup_cache_size: int = 4,
 ) -> CompressedKVCacheMLA:
@@ -263,7 +265,7 @@ def create_compressed_kv_cache(
         device: Device to use
         dtype: Data type for cache storage
         block_size: Block size for paging (default: 64)
-        quantize_mode: Quantization mode ("none", "fp8", "fp4")
+        quantize_mode: Quantization mode ("none", "fp8", "fp4", "int8")
         prefetch_enabled: Enable async prefetching
         threadgroup_cache_size: Size of threadgroup cache
 
@@ -278,7 +280,7 @@ def create_compressed_kv_cache(
             max_batch_size=1,
             max_seq_len=8192,
             device=torch.device("mps"),
-            quantize_mode="fp8",
+            quantize_mode="int8",
         )
     """
     from .kv_cache_compressed import CompressedKVCacheMLA

@@ -1,13 +1,15 @@
 import json
+import os
+import tempfile
+from pathlib import Path
+
 import pytest
 import torch
-import tempfile
-import os
-from pathlib import Path
 from safetensors.torch import save_file
 
+from metal_marlin.memory.mmfp4_memory import WeightStreamConfig, WeightStreamer
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
-from metal_marlin.memory.mmfp4_memory import WeightStreamer, WeightStreamConfig
+
 
 @pytest.fixture
 def dummy_model_dir():

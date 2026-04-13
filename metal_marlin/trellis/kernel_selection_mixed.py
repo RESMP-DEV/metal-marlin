@@ -32,8 +32,9 @@ Key Features:
 """
 
 from __future__ import annotations
-import time
+
 import random
+import time
 from collections import Counter
 
 # --- Existing kernel definitions from kernel_selection.py ---

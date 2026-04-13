@@ -1,5 +1,5 @@
-import sys
 import os
+import sys
 from unittest.mock import MagicMock
 
 # Add contrib/metal_marlin to path
@@ -27,6 +27,7 @@ sys.modules["transformers.models.glm4_moe.modeling_glm4_moe"] = MagicMock()
 
 # Now import the pipeline
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
+
 
 def test_caching():
     mock_model = MagicMock()

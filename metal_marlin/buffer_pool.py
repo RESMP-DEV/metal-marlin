@@ -263,7 +263,6 @@ class MetalBufferPool:
 from metal_marlin._buffer_pool import (
     BufferPoolMetrics,
     BufferPriority,
-    MetalBufferPool as _InternalMetalBufferPool,
     TrackedBuffer,
     TransientRingBuffer,
 )

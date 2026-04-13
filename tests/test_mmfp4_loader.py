@@ -1,9 +1,12 @@
 import json
-import torch
 from pathlib import Path
+
 import pytest
+import torch
 from safetensors.torch import save_file
+
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
 
 def test_mmfp4_loader_mock(tmp_path):
     # 1. Create mock safetensors shards

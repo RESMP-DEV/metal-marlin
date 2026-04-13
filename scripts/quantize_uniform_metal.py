@@ -39,22 +39,16 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import shutil
 import sys
-import time
 from collections import Counter
-from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from queue import Empty, Queue
-from threading import Thread
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_numpy_file
-from safetensors.torch import save_file as save_torch_file
 
 if TYPE_CHECKING:
     pass
@@ -66,7 +60,7 @@ if not torch.backends.mps.is_available():
     sys.exit(1)
 
 MPS_DEVICE = torch.device("mps")
-print(f"Using MPS device: Apple Silicon")
+print("Using MPS device: Apple Silicon")
 
 # Force uniform 4-bit for all tensors
 UNIFORM_BITS = 4
@@ -597,7 +591,7 @@ class MPSQuantizer:
 
         self.bit_allocator = BitAllocator(min_bits=4, max_bits=4)
 
-        print(f"Initialized MPS Quantizer (UNIFORM 4-bit)")
+        print("Initialized MPS Quantizer (UNIFORM 4-bit)")
 
     def quantize_tensor(
         self,
@@ -726,7 +720,7 @@ class MPSQuantizer:
 
         print(f"\nQuantizing model from {model_path}")
         print(f"Output: {output_path}")
-        print(f"UNIFORM 4-bit quantization for all tensors")
+        print("UNIFORM 4-bit quantization for all tensors")
 
         # Load model index
         index_path = model_path / "model.safetensors.index.json"
@@ -861,7 +855,7 @@ def main():
     print("=" * 70)
     print(f"Model: {args.model}")
     print(f"Output: {args.output}")
-    print(f"Quantization: UNIFORM 4-bit (all tensors)")
+    print("Quantization: UNIFORM 4-bit (all tensors)")
     print("=" * 70)
 
     # Download model if needed
@@ -888,7 +882,7 @@ def main():
     print("QUANTIZATION COMPLETE")
     print("=" * 70)
     print(f"Output: {args.output}")
-    print(f"This model will enable FUSED BATCHED DISPATCH = 10x speedup!")
+    print("This model will enable FUSED BATCHED DISPATCH = 10x speedup!")
     print("=" * 70)
 
 

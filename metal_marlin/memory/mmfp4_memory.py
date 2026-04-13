@@ -17,7 +17,6 @@ import heapq
 import io
 import mmap
 import platform
-import psutil
 import threading
 import time
 from collections import OrderedDict
@@ -37,13 +36,6 @@ if TYPE_CHECKING:
 from metal_marlin.memory.buffer_recycler import (
     BufferRecycler,
     get_global_buffer_recycler,
-    reset_global_buffer_recycler,
-)
-from metal_marlin.memory.memory_pressure import (
-    MemoryPressureConfig,
-    MemoryPressureStats,
-    MemoryPressureMonitor,
-    get_global_memory_pressure_monitor,
 )
 
 if TYPE_CHECKING:
@@ -79,7 +71,7 @@ class MMAPWeightConfig:
     enable_background_prefetch: bool = True
 
 
-@dataclass 
+@dataclass
 class MMAPWeightStats:
     """Statistics for memory-mapped weight operations."""
     total_mappings: int = 0
@@ -134,7 +126,7 @@ class MMAPWeightManager:
         loader: MMFP4ModelLoader,
         config: MMAPWeightConfig | None = None,
         device: str = "cpu",
-        buffer_recycler: "BufferRecycler | None" = None,
+        buffer_recycler: BufferRecycler | None = None,
     ) -> None:
         """Initialize MMAP weight manager.
         
@@ -909,7 +901,7 @@ class StreamBuffer:
     _loaded: bool = False
     _pinned: bool = False
     _recycled_buffer: bytearray | None = None
-    _recycler: "BufferRecycler | None" = None
+    _recycler: BufferRecycler | None = None
     # Heap-based LRU tracking
     _last_access_time: float = field(default_factory=time.time)
     _access_sequence: int = 0  # Monotonic counter for tie-breaking
@@ -955,8 +947,8 @@ class StreamBuffer:
         name: str,
         size_bytes: int,
         device: str,
-        recycler: "BufferRecycler",
-    ) -> "StreamBuffer":
+        recycler: BufferRecycler,
+    ) -> StreamBuffer:
         """Create a StreamBuffer with buffer recycling enabled.
         
         Args:
@@ -1303,8 +1295,8 @@ class ZeroCopyTransferManager:
             # Allocate pinned tensor if requested
             # Use CPU as staging area for mmap read
             tensor = self.allocate_pinned_buffer(
-                alloc_shape, 
-                target_dtype, 
+                alloc_shape,
+                target_dtype,
                 device="cpu"
             )
             
@@ -2316,8 +2308,8 @@ class WeightStreamer:
         # To be safe and ensure CPU allocation for readinto, we start with standard CPU memory.
         try:
             tensor = torch.empty(
-                alloc_shape, 
-                dtype=target_dtype, 
+                alloc_shape,
+                dtype=target_dtype,
                 device="cpu"
             )
             
@@ -2849,7 +2841,6 @@ class MMFP4MemoryManager:
         Returns:
             Tensor on target device with zero-copy optimization applied
         """
-        import torch
         
         # Fast path: already on target device - return as-is (no copy)
         if str(tensor.device) == str(self._device):
@@ -3146,7 +3137,7 @@ class MMFP4MemoryManager:
         # Use OptimizedExpertCache's efficient heap-based eviction
         # This provides O(log n) eviction vs O(n) for manual scanning
         evicted_list = self._expert_weight_cache.evict_if_needed(
-            required_bytes, 
+            required_bytes,
             self._gpu_memory_used
         )
         

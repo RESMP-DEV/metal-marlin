@@ -1,7 +1,10 @@
+from unittest.mock import ANY, MagicMock
+
 import pytest
-from unittest.mock import MagicMock, ANY
 import torch
+
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
+
 
 def test_continuous_batching_method():
     # Mock model

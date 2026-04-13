@@ -3,6 +3,7 @@
 This module is maintained for backward compatibility.
 """
 
-from .kv_cache import KVCacheTorch as KVCache, KVCacheTorch, CacheConfigTorch
+from .kv_cache import CacheConfigTorch, KVCacheTorch
+from .kv_cache import KVCacheTorch as KVCache
 
 __all__ = ["KVCache", "KVCacheTorch", "CacheConfigTorch"]

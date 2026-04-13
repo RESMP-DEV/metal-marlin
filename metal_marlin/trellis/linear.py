@@ -31,9 +31,11 @@ import torch.nn as nn
 
 from ..metal_dispatch import HAS_METAL, HAS_MPS, MetalKernelLibrary
 from ..quantization.trellis_codebook import TrellisCodebook
-from .dispatch import (dispatch_gemm_trellis_auto,
-                       dispatch_gemm_trellis_decode,
-                       dispatch_trellis_dequant_packed)
+from .dispatch import (
+    dispatch_gemm_trellis_auto,
+    dispatch_gemm_trellis_decode,
+    dispatch_trellis_dequant_packed,
+)
 
 if TYPE_CHECKING:
     from .loader import TrellisWeight

@@ -63,15 +63,13 @@ Usage Example:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Set, Tuple
-
 import torch
 
 
 def get_expert_bits(
     expert_ids: torch.Tensor,
-    expert_bit_metadata: Dict[int, Tuple[int, int, int]],
-) -> List[int]:
+    expert_bit_metadata: dict[int, tuple[int, int, int]],
+) -> list[int]:
     """Extract bit-width information for activated experts.
 
     Args:
@@ -110,7 +108,7 @@ def estimate_gpu_memory_pressure(device: torch.device) -> float:
     return 0.0
 
 
-def get_available_kernels(lib: object) -> Set[str]:
+def get_available_kernels(lib: object) -> set[str]:
     """Get the set of available kernel names from the Metal library.
 
     Args:
@@ -134,7 +132,7 @@ def get_available_kernels(lib: object) -> Set[str]:
 def analyze_expert_activation_pattern(
     expert_ids: torch.Tensor,
     num_experts: int,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Analyze the expert activation pattern.
 
     Args:
@@ -163,7 +161,7 @@ class MixedBpwMoEDispatcher:
     def __init__(
         self,
         lib,
-        expert_bit_metadata: Dict[int, Tuple[int, int, int]],
+        expert_bit_metadata: dict[int, tuple[int, int, int]],
         use_fp32_acc: bool = False,
         enable_ab_testing: bool = True,
         exploration_rate: float = 0.05,
@@ -214,16 +212,17 @@ class MixedBpwMoEDispatcher:
         top_k: int,
         cached_buffers=None,
         buffer_pool=None,
-    ) -> Tuple[torch.Tensor, Dict]:
+    ) -> tuple[torch.Tensor, dict]:
         """Dispatch MoE computation with intelligent kernel selection.
 
         Returns:
             Tuple of (output_tensor, metadata_dict)
         """
         # Import at runtime
+        import time
+
         from .kernel_selection_mixed import get_mixed_kernel, record_kernel_latency
         from .moe_dispatch import dispatch_moe_trellis_swiglu
-        import time
 
         # Get expert bit-widths
         active_bits = get_expert_bits(expert_ids, self.expert_bit_metadata)

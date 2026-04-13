@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 try:
     import torch

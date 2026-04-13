@@ -1,6 +1,8 @@
-import torch
 import pytest
+import torch
+
 from metal_marlin.layers.mmfp4_mtp_head import verify_kernel
+
 
 class TestVerifyKernel:
     """Test verify_kernel from mmfp4_mtp_head.py."""

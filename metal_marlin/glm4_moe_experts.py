@@ -55,17 +55,16 @@ def _copy_with_optional_transpose(dst: torch.Tensor, src: torch.Tensor, name: st
 
 
 def _batch_dequant_fp4_experts(
-    packed: "torch.Tensor",   # [k, out_features, in_packed] uint32
-    scales: "torch.Tensor",   # [k, n_groups, out_features] fp16
+    packed: torch.Tensor,   # [k, out_features, in_packed] uint32
+    scales: torch.Tensor,   # [k, n_groups, out_features] fp16
     group_size: int,
-) -> "torch.Tensor":          # [k, out_features, in_features] fp16
+) -> torch.Tensor:          # [k, out_features, in_features] fp16
     """Dequantize FP4 weights for k experts in one vectorized GPU pass.
 
     Eliminates the need to loop over experts or call tolist().
     Memory: ~18 MB for k=4 experts (intermediate tensors freed immediately).
     """
-    from .layers.mmfp4_linear import (_SHIFT_4BIT, _get_cached_e2m1_table,
-                                      _get_cached_group_ids)
+    from .layers.mmfp4_linear import _SHIFT_4BIT, _get_cached_e2m1_table, _get_cached_group_ids
 
     k, out_f, in_packed = packed.shape
     in_features = in_packed * 8

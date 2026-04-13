@@ -320,7 +320,7 @@ if TYPE_CHECKING:
     import torch
 
 
-def dequantize_e2m1(indices: "torch.Tensor") -> "torch.Tensor":
+def dequantize_e2m1(indices: torch.Tensor) -> torch.Tensor:
     """Dequantize 4-bit indices to E2M1 values (unscaled) using PyTorch.
 
     This is the canonical dequantization implementation used across metal_marlin.

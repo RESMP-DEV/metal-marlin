@@ -10,7 +10,7 @@ and a cache for frequently co-occurring expert pairs.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -97,7 +97,7 @@ class MoERouterCpp:
         self,
         token_activations: NDArray,
         router_weights: NDArray[np.float32],
-        router_bias: Optional[NDArray[np.float32]] = None,
+        router_bias: NDArray[np.float32] | None = None,
     ) -> RouterBatchOutput:
         """
         Perform routing for a batch of tokens.

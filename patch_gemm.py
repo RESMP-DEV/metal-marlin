@@ -1,6 +1,5 @@
-import re
 
-with open('./metal_marlin/shaders/mmfp4_gemm.metal', 'r') as f:
+with open('./metal_marlin/shaders/mmfp4_gemm.metal') as f:
     code = f.read()
 
 # Replace the inner multiplication loop

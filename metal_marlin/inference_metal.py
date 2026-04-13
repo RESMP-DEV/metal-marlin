@@ -25,9 +25,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .metal_dispatch import (MetalKernelLibrary, dispatch_gemm_fp4,
-                             dispatch_gemm_fp8, dispatch_gemm_int2,
-                             get_default_library, mps_tensor_to_metal_buffer)
+from .metal_dispatch import (
+    MetalKernelLibrary,
+    dispatch_gemm_fp4,
+    dispatch_gemm_fp8,
+    dispatch_gemm_int2,
+    get_default_library,
+    mps_tensor_to_metal_buffer,
+)
 
 # ---------------------------------------------------------------------------
 # Check MPS availability

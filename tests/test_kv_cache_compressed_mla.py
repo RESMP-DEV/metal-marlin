@@ -23,7 +23,10 @@ requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 
 if HAS_TORCH:
     from metal_marlin.trellis.config import TrellisModelConfig
-    from metal_marlin.trellis.kv_cache_compressed import CompressedKVCacheMLA
+    from metal_marlin.trellis.kv_cache_compressed import (
+        KV_QUANT_MODE,
+        CompressedKVCacheMLA,
+    )
     from metal_marlin.trellis.kv_cache_compressed_integration import (
         create_compressed_kv_cache,
         decompress_kv_optimized,
@@ -507,6 +510,27 @@ class TestCompressedKVCacheMLAIntegration:
 
         assert cache.quantize_mode == "fp8"
         assert cache.prefetch_enabled
+
+    def test_create_compressed_kv_cache_uses_default_quantization(self):
+        """Test factory inherits the module-level default quantization mode."""
+        config = TrellisModelConfig(
+            num_hidden_layers=1,
+            num_attention_heads=4,
+            num_kv_heads=2,
+            kv_lora_rank=128,
+            qk_nope_head_dim=64,
+            qk_rope_head_dim=32,
+            v_head_dim=64,
+        )
+
+        cache = create_compressed_kv_cache(
+            config=config,
+            max_batch_size=1,
+            max_seq_len=512,
+            device=self._device(),
+        )
+
+        assert cache.quantize_mode == KV_QUANT_MODE
 
     def test_update_with_prefetch_and_cache(self):
         """Test update wrapper with prefetch."""

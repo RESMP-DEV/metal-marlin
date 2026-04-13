@@ -9,8 +9,7 @@ import pytest
 
 # Import at module level to catch import errors
 try:
-    from metal_marlin.trellis.generate import (GenerationConfig,
-                                               TrellisGenerator)
+    from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
     HAS_TRELLIS_GENERATE = True
 except ImportError:

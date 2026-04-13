@@ -40,7 +40,7 @@ class GLMMTPHead(nn.Module):
         return [head(hidden) for head in self.heads]
 
     @classmethod
-    def from_model(cls, model: Any) -> "GLMMTPHead | None":
+    def from_model(cls, model: Any) -> GLMMTPHead | None:
         """Extract MTP head from a loaded model if available."""
         config = getattr(model, "config", None)
         hidden_size = getattr(config, "hidden_size", None) or getattr(

@@ -7,15 +7,15 @@ standard TrellisMLAttention.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
-import numpy as np
 
-from metal_marlin.trellis.attention import TrellisMLAttention, TrellisMLAConfig
+from metal_marlin._compat import HAS_MPS, HAS_TORCH
 from metal_marlin.kv_cache import TrellisKVCache
 from metal_marlin.paged.mla_paged_adapter import MLAPagedAdapter
-from metal_marlin._compat import HAS_MPS, HAS_TORCH
+from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
 
 # Skip if MPS is not available
 pytestmark = pytest.mark.skipif(not HAS_MPS, reason="Requires PyTorch MPS")

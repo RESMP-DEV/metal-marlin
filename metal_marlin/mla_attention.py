@@ -63,12 +63,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .fused_attention_mps import fused_attention
-from .kv_cache import KVCache, MLAKVCache, TrellisKVCache
+from .kv_cache import KVCache, MLAKVCache
 from .layers import MarlinLinear
 
 # Import C++ MLA attention if available
 try:
-    from .mla_attention_cpp import MLAAttentionCpp, is_available as _cpp_mla_available
+    from .mla_attention_cpp import MLAAttentionCpp
+    from .mla_attention_cpp import is_available as _cpp_mla_available
     _HAS_CPP_MLA = _cpp_mla_available()
 except ImportError:
     _HAS_CPP_MLA = False

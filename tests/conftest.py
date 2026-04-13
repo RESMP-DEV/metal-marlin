@@ -28,8 +28,8 @@ try:
 except Exception:  # pragma: no cover - fallback for partial installs
     import importlib.util
     import sys
-    from types import ModuleType
     from pathlib import Path
+    from types import ModuleType
 
     _pkg_root = Path(__file__).resolve().parents[1] / "metal_marlin"
     _pkg_name = "metal_marlin"
@@ -56,10 +56,6 @@ if TYPE_CHECKING:
 # Skip markers for hardware-dependent tests
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
-
-# Legacy marker (deprecated, always skips since MLX is removed)
-requires_mlx = pytest.mark.skip(reason="MLX support removed; use PyTorch MPS")
-
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
@@ -88,7 +84,6 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "smoke: essential smoke test (always runs)")
     config.addinivalue_line("markers", "requires_mps: mark test as requiring MPS (Apple Silicon)")
     config.addinivalue_line("markers", "requires_torch: mark test as requiring PyTorch")
-    config.addinivalue_line("markers", "requires_mlx: DEPRECATED - MLX support removed")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

@@ -14,7 +14,6 @@ from typing import Any
 
 from ..inference.mmfp4_pipeline import MMFP4Pipeline
 from ..inference.pipeline import MarlinPipeline
-from .._compat import HAS_CPP_EXT
 from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
 from .openai_schemas import (
     ChatCompletionChunk,

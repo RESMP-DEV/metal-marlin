@@ -1,8 +1,8 @@
 """Accuracy tests for MMFP4 GEMM and dequantization paths."""
 
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
 from metal_marlin.layers.mmfp4_linear import _fast_dequant, mmfp4_gemm
 from metal_marlin.quantize import pack_fp4_weights

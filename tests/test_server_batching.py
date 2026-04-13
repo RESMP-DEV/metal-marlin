@@ -8,7 +8,7 @@ import pytest
 
 def test_server_batching_imports():
     """Test that _server_batching can be imported."""
-    from metal_marlin.serving.mmfp4_server import _server_batching, MMFP4Server
+    from metal_marlin.serving.mmfp4_server import MMFP4Server, _server_batching
 
     assert callable(_server_batching)
     assert isinstance(MMFP4Server, type)
@@ -29,6 +29,7 @@ def test_mmfp4server_has_continuous_batching_methods():
 def test_server_batching_signature():
     """Test that _server_batching has the correct signature."""
     import inspect
+
     from metal_marlin.serving.mmfp4_server import _server_batching
 
     sig = inspect.signature(_server_batching)
@@ -60,7 +61,7 @@ async def test_continuous_batching_queues_initialized():
 @pytest.mark.asyncio
 async def test_submit_request_to_queue_raises_when_not_started():
     """Test that submit_request_to_queue raises when continuous batching not started."""
-    from metal_marlin.serving.mmfp4_server import MMFP4Server, GenerationRequest
+    from metal_marlin.serving.mmfp4_server import GenerationRequest, MMFP4Server
 
     # Mock engine
     mock_engine = MagicMock()

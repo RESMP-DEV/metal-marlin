@@ -27,13 +27,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    import torch
+    pass
 
 
 @dataclass
@@ -126,7 +126,7 @@ def _gather_kv_from_blocks(
     head_dim = k_cache.shape[3]
     max_context_len = max_blocks * block_size
     
-    k_linear = np.zeros((num_seqs, max_context_len, num_kv_heads, head_dim), 
+    k_linear = np.zeros((num_seqs, max_context_len, num_kv_heads, head_dim),
                         dtype=k_cache.dtype)
     v_linear = np.zeros((num_seqs, max_context_len, num_kv_heads, head_dim),
                         dtype=v_cache.dtype)

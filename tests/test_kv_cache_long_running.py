@@ -1,14 +1,17 @@
 """Tests for long-running KV cache scenarios."""
 
 import time
-import pytest
+
 import numpy as np
+import pytest
+
 from metal_marlin.paged.cache_manager_optimized import (
-    PagedKVCacheOptimized,
-    EvictionPolicy,
     EvictionConfig,
+    EvictionPolicy,
+    PagedKVCacheOptimized,
 )
 from metal_marlin.paged.kv_block import KVBlockConfig
+
 
 class TestLongRunningKVCache:
     """Test scenarios typical of long-running servers."""
@@ -48,10 +51,10 @@ class TestLongRunningKVCache:
         # Add Seq 10. Should trigger eviction.
         # If raw frequency is used, Seq 0 (freq 101) will NEVER be evicted compared to Seq 1 (freq 1).
         # Even if Seq 0 hasn't been used in a "long time" (simulated by others being added later).
-        # But we want to ensure that if we add MANY new items, eventually we might evict Seq 0 
+        # But we want to ensure that if we add MANY new items, eventually we might evict Seq 0
         # if using a smart policy, OR we verify that log-frequency makes the gap smaller.
         
-        # Actually, for this test, we want to verify the implementation details of log-frequency 
+        # Actually, for this test, we want to verify the implementation details of log-frequency
         # or just verify the behavior.
         # Let's verify that we can inspect the score and see the effect.
         

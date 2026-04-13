@@ -24,7 +24,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -182,6 +181,7 @@ def load_glm4_model(args: argparse.Namespace) -> torch.nn.Module:
     """Load real GLM-4.7 model for benchmark."""
     from metal_marlin.metal_core import get_device_info
     from metal_marlin.shards.hf_shard_loader import HFShardLoader
+
     from metal_marlin.trellis.model import TrellisModel
     
     print(f"Loading GLM-4.7 from: {args.model_path}")

@@ -2,6 +2,7 @@
 from unittest.mock import MagicMock
 
 import torch
+
 from metal_marlin.inference.mmfp4_pipeline import _optimized_generate
 
 

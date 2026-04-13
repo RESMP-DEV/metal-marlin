@@ -1,7 +1,8 @@
 """E2E generation test with memory cleanup."""
-import torch
 import gc
+
 import pytest
+import torch
 
 
 def test_generation_not_gibberish():

@@ -1,12 +1,14 @@
 
 import pytest
 import torch
+
 from metal_marlin.speculative.token_acceptance import (
     AcceptanceResult,
     TokenAcceptanceTracker,
     compute_acceptance_probabilities,
     estimate_optimal_speculation_length,
 )
+
 
 class TestTokenAcceptanceTracker:
     def test_initialization(self):

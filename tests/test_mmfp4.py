@@ -21,7 +21,6 @@ from metal_marlin.layers import MarlinLinear
 from metal_marlin.quantize import pack_fp4_weights as pack_fp4_weights_cpu
 from metal_marlin.quantize import unpack_fp4_weights
 
-
 HAS_MPS = torch.backends.mps.is_available()
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
 

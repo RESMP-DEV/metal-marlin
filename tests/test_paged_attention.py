@@ -23,11 +23,12 @@ import torch.nn.functional as F
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 from metal_marlin.paged.attention import paged_attention, paged_attention_v1
 from metal_marlin.paged.validation import (
+    ValidationConfig,
     validate_paged_block_pool_parity,
     validate_paged_linear_parity,
     validate_paged_v1_parity,
-    ValidationConfig,
 )
+
 try:
     from metal_marlin.kernels import paged_attention_v1 as paged_attention_v1_metal
     HAS_KERNELS = True

@@ -11,11 +11,11 @@
 | **Fast Decode Path** | ⚠️ **Needs Investigation** |
 | MoE Infrastructure | **Complete** ✅ (batched expert kernels wired) |
 | EXL3 Quantization | **Complete** ✅ (trellis + viterbi pipeline) |
-| **Trellis Inference** | **Working** ✅ (end-to-end generation, ~2 tok/s) |
+| **Trellis Inference** | **Working** ✅ (end-to-end generation; measured decode ~1.5-2 tok/s) |
 | **Async Dispatch Batching** | **Complete** ✅ (LayerBatchContext, 1.29x speedup) |
 | **Perplexity Evaluation** | **Complete** ✅ (API endpoint + Prometheus metrics) |
 | Qwen3-4B FP4 Inference | **PyTorch MPS fallback** ~27 tok/s |
-| GLM-4.7-Flash MoE | **Working** ✅ (end-to-end generation, **~2 tok/s**) |
+| GLM-4.7-Flash MoE | **Working** ✅ (end-to-end generation; measured decode **~1.5-2 tok/s**) |
 | OpenAI Server | **Complete** ✅ (30 tests, paged attention via CLI) |
 | Metal Shaders | **65 shaders** ✅ (precompiled metallib) |
 | Vision Preprocessing | **Complete** ✅ (16 kernels wired) |
@@ -34,12 +34,12 @@
 **Model:** GLM-4.7-Flash MMFP4 (48-shard, 3-bit quantized)
 **Hardware:** M4 Max
 
-| Metric | Measured | Previously Claimed |
-|--------|----------|-------------------|
-| Decode throughput | **~2 tok/s** | 56-74 tok/s |
-| Prefill throughput | **~32 tok/s** | 11 tok/s |
+| Metric | Measured | Prior Claim / Target |
+|--------|----------|----------------------|
+| Decode throughput | **~1.5-2 tok/s** | 56-74 tok/s claim |
+| Prefill throughput | **~32 tok/s** | 11 tok/s claim |
 | Time to first token | **3,663 ms** | — |
-| Peak memory | **60 GB** | 15 GB |
+| Peak memory | **60 GB** | 15 GB target/claim |
 | Perplexity | **154,880** ⚠️ | — |
 
 > ⚠️ **High perplexity indicates potential model loading or quantization issues.**
@@ -49,11 +49,11 @@
 
 ## Fast Decode Path (Investigation Needed)
 
-**Status:** ⚠️ Implementation exists but not yet verified in benchmarks
+**Status:** ⚠️ Implementation exists but is not yet verified in the current E2E benchmark surface
 
 Single-token decode optimization using pre-dequantized weights with native PyTorch MPS operations.
 
-### Theory
+### Theoretical Fast Path
 
 For M=1 (decode), pre-dequantize FP4 → FP16 weights and use native `torch.nn.functional.linear()`:
 
@@ -69,9 +69,9 @@ result = torch.nn.functional.linear(x_2d.half(), self._dequant_weight, self.bias
 
 ### Outstanding Issues
 
-1. **Fast path not activating**: Measured ~2 tok/s suggests PyObjC path is still in use
+1. **Fast path not activating**: Measured ~1.5-2 tok/s suggests PyObjC path is still in use
 2. **High perplexity**: 154,880 suggests model quality issues
-3. **Memory usage**: 60 GB measured vs 15 GB claimed
+3. **Memory usage**: 60 GB measured vs a prior 15 GB target/claim
 
 ### Next Steps
 
@@ -183,7 +183,7 @@ cp _cpp_ext.cpython-312-darwin.so ../metal_marlin/
 | **INT8 KV cache** | Quantized attention cache | 2x context length |
 | **MoE kernel fusion** | Fuse router + expert GEMM | Reduce per-layer latency |
 | **Decode GEMV optimization** | Single-token decode kernel | Target: 10+ tok/s |
-| **Auto-detect metallib staleness** | Warn if shaders modified | Prevent silent bugs |
+| **Auto-detect metallib staleness** | ✅ Implemented (hash-based) | Prevent silent bugs |
 
 ### Low Priority (Developer Experience)
 
@@ -359,7 +359,7 @@ transformer layers into a single Metal command buffer.
 
 - [Batch Dispatch Analysis](docs/reports/batch_dispatch_analysis.md) — lib.dispatch() interference analysis
 - [Attention Batch Analysis](docs/reports/attention_batch_analysis.md) — CopyBackBuffer and commit() tracing
-- [Batch Fix Benchmark](docs/reports/batch_fix_benchmark.md) — Before/after performance data
+- [TPS Benchmark Report](reports/tps_benchmark_2026-02-18.md) — Current measured-vs-theoretical summary for the E2E path
 
 ---
 
@@ -1028,7 +1028,7 @@ uv run ruff check . --fix
 
 | Task | Description | Impact |
 |------|-------------|--------|
-| **Auto-detect metallib staleness** | Warn if shaders modified | Prevent silent bugs |
+| **Auto-detect metallib staleness** | ✅ Implemented (hash-based) | Prevent silent bugs |
 | **Profiling dashboard** | Real-time kernel timing | Easier optimization |
 | **Model registry** | Centralized model configs | Less hardcoding |
 

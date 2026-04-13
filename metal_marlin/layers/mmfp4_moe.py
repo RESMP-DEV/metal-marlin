@@ -27,14 +27,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .mmfp4_linear import MMFP4Linear
+from ..expert_cache import ExpertCache
+from ..moe.prefetch import ExpertPrefetcher, PrefetchStrategy
 from ..moe_dispatch import (
     _dynamic_batch_experts,
     _fused_router_topk,
     compute_load_balancing_loss,
 )
-from ..moe.prefetch import ExpertPrefetcher, PrefetchStrategy
-from ..expert_cache import ExpertCache
+from .mmfp4_linear import MMFP4Linear
 
 logger = logging.getLogger(__name__)
 
@@ -1360,7 +1360,7 @@ class MMFP4FusedExpert(nn.Module):
         gate_proj: MMFP4Linear,
         up_proj: MMFP4Linear,
         down_proj: MMFP4Linear,
-    ) -> "MMFP4FusedExpert":
+    ) -> MMFP4FusedExpert:
         """Create a fused expert from separate gate/up/down MMFP4Linear layers.
 
         Args:

@@ -6,8 +6,8 @@ query/KV projections and compressed KV-cache storage.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
 import logging
+from typing import TYPE_CHECKING, Any
 
 from .._compat import HAS_TORCH, torch
 
@@ -21,17 +21,16 @@ if HAS_TORCH and torch is not None:
     import torch.nn as nn
     import torch.nn.functional as F
 
-    from ..kv_cache import KVCache, MLAKVCache
-    from ..paged_kv_cache import PagedKVCache
     from ..kernels import paged_attention_v1
+    from ..kv_cache import KVCache, MLAKVCache
     from ..mla_fused import (
         MLAAttentionParams,
+        mla_chunked_prefill_attention,
         mla_fused_attention_decode,
         mla_fused_attention_prefill,
-        mla_chunked_prefill_attention,
     )
+    from ..paged_kv_cache import PagedKVCache
     from ..rope import (
-        YaRNRoPEMetal,
         dispatch_fused_rope_attention,
     )
     from .mmfp4_linear import MMFP4Linear
@@ -473,7 +472,7 @@ if HAS_TORCH and torch is not None:
             # Handle unit scales for non-quantized case if None
             if k_scales_buf is None:
                 # Kernel expects scales. If not quantized, create dummy or handle in kernel?
-                # mla_fused_attention_decode expects k_scales. 
+                # mla_fused_attention_decode expects k_scales.
                 # In _forward_fused_decode, it created ones.
                 # Here we should ideally use what's in cache or ones.
                 # MLAKVCache.kv_scales is None if quantize_mode="none".
@@ -920,7 +919,7 @@ if HAS_TORCH and torch is not None:
                 kv_b_weights_packed=kv_b_packed,
                 kv_b_scales=kv_b_scales,
                 k_cache=cached_kv, # Writable buffer for both K and V (MLA unified cache)
-                v_cache=cached_kv, 
+                v_cache=cached_kv,
                 o_weights_packed=o_packed,
                 o_scales=o_scales,
                 params=params,
@@ -970,7 +969,7 @@ if HAS_TORCH and torch is not None:
             # Wait, let's check forward.
             # forward: q_rope_pre = q_rope.transpose(1, 2) -> [B, S, H, D]
             # But the signature here says [B, num_heads, seq_q, rope_dim]
-            # Let's adjust to be consistent. 
+            # Let's adjust to be consistent.
             # If input is [B, H, S, D], transpose.
             # If input is [B, S, H, D], keep.
             

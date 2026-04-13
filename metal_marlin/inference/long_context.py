@@ -23,14 +23,13 @@ Usage:
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
-from .._compat import HAS_TORCH, torch
+from .._compat import torch
 
 if TYPE_CHECKING:
-    from ..kv_cache import KVCache
+    pass
 
 
 @dataclass

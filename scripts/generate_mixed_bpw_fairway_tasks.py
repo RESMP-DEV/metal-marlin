@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
 import textwrap
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -326,7 +326,7 @@ def validate_tasks(tasks: list[TaskSpec]) -> None:
 
 
 def render_yaml(tasks: list[TaskSpec]) -> str:
-    generated = datetime.now(timezone.utc).isoformat()
+    generated = datetime.now(UTC).isoformat()
 
     lines = [
         "# yaml-language-server: $schema=https://raw.githubusercontent.com/RESMP-DEV/alphaheng/main/configs/task_schema.json",

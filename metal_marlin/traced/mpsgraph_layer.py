@@ -1,7 +1,7 @@
 """MPSGraph traced decoder layer for fused execution."""
 
+
 import torch
-from typing import Optional
 
 try:
     import MetalPerformanceShadersGraph as MPSGraph
@@ -36,8 +36,8 @@ class TracedDecoderLayer:
         self.seq_len = seq_len
         self.hidden_size = hidden_size
         
-        self._graph: Optional[MPSGraph.MPSGraph] = None
-        self._executable: Optional[MPSGraph.MPSGraphExecutable] = None
+        self._graph: MPSGraph.MPSGraph | None = None
+        self._executable: MPSGraph.MPSGraphExecutable | None = None
         self._compiled = False
     
     def _build_graph(self):

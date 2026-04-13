@@ -21,15 +21,14 @@ Usage:
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from metal_marlin._compat import (
-    E2M1_VALUES,
     E2M1_POSITIVE,
+    E2M1_VALUES,
     HAS_TORCH,
     dequantize_e2m1,
     torch,
@@ -63,7 +62,6 @@ _SHADER_DIR = Path(__file__).parent.parent / "src"
 
 # Re-export dequantize_e2m1 from _compat for backward compatibility
 # (this is the canonical implementation now)
-from metal_marlin._compat import dequantize_e2m1  # noqa: F401
 
 
 class FP4Metal:

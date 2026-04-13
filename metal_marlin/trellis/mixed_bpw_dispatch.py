@@ -26,9 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -74,7 +73,7 @@ class _BufferPool:
         Args:
             required_bytes: Additional bytes needed (evict until we have this much room).
         """
-        while (self._current_size + required_bytes > self.max_size_bytes and 
+        while (self._current_size + required_bytes > self.max_size_bytes and
                self._current_size > 0):
             # Find the least recently used tensor across all pools
             lru_key = None
@@ -101,9 +100,9 @@ class _BufferPool:
                 del self._pool[lru_key]
     
     def get_buffer(
-        self, 
-        shape: tuple[int, ...], 
-        dtype: torch.dtype, 
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
         device: torch.device | str
     ) -> torch.Tensor:
         """Get a buffer from the pool or create a new one.
@@ -177,17 +176,17 @@ class _BufferPool:
 # Global buffer pool instance for MixedBPWMoEDispatcher
 _global_buffer_pool = _BufferPool()
 
-from .moe_dispatch import (
-    CachedWeightBuffers,
-    create_cached_weight_buffers,
-    dispatch_moe_trellis_swiglu_batched,
-)
 from ..metal_dispatch import (
     HAS_METAL,
     MetalKernelLibrary,
     dispatch_kernel,
     mps_tensor_to_metal_buffer,
     require_mps,
+)
+from .moe_dispatch import (
+    CachedWeightBuffers,
+    create_cached_weight_buffers,
+    dispatch_moe_trellis_swiglu_batched,
 )
 
 if HAS_METAL:
@@ -450,8 +449,8 @@ class MixedBPWMoEDispatcher:
         # Cache key based on data pointers to detect if underlying weights are the same
         weight_data_ptrs = tuple(expert_weights[eid].data_ptr() for eid in expert_ids)
         scale_data_ptrs = tuple(
-            expert_scales[eid].data_ptr() 
-            for eid in expert_ids 
+            expert_scales[eid].data_ptr()
+            for eid in expert_ids
             if eid in expert_scales and expert_scales[eid] is not None
         )
         cache_key = (bit_width, weight_data_ptrs, scale_data_ptrs, ref_shape)
@@ -619,7 +618,7 @@ class MixedBPWMoEDispatcher:
         weight_shapes = {eid: expert_weights[eid].shape for eid in expert_ids}
         
         if cache is not None:
-            if (cache.expert_ids == expert_ids and 
+            if (cache.expert_ids == expert_ids and
                 cache.weight_shapes == weight_shapes):
                 return cache
             logger.debug("Mixed kernel cache invalidated, rebuilding")

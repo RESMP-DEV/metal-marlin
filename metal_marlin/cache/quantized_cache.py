@@ -7,7 +7,6 @@ It is designed for decode-time workloads where KV bandwidth dominates latency.
 from __future__ import annotations
 
 import math
-from typing import Tuple
 
 import torch
 
@@ -83,7 +82,7 @@ class QuantizedKVCache:
         new_k: torch.Tensor,
         new_v: torch.Tensor,
         position: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add new K/V and return full dequantized cache range for this layer."""
         if not (0 <= layer_idx < self.num_layers):
             raise IndexError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")

@@ -7,8 +7,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .engine import EngineConfig, ServingEngine
 from .errors import ModelNotFoundError, ModelNotLoadedError, ServingError
 from .metrics import MetricsCollector
-from .openai_schemas import (ChatCompletionRequest, CompletionRequest,
-                             CompletionResponse, ModelInfo, ModelList)
+from .openai_schemas import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    CompletionResponse,
+    ModelInfo,
+    ModelList,
+)
 from .perplexity import PerplexityTracker, compute_perplexity
 
 engine: ServingEngine | None = None

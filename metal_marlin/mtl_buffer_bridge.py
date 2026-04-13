@@ -25,8 +25,7 @@ Usage:
 
 from __future__ import annotations
 
-import warnings
-from typing import TYPE_CHECKING, Any, Tuple
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import numpy as np
@@ -34,19 +33,27 @@ if TYPE_CHECKING:
 # Try to import the native extension
 try:
     from metal_marlin._mtl_buffer_bridge import (
-        DirectBufferPtr as _NativeDirectBufferPtr,
-        MPSTensorWrapper as _NativeMPSTensorWrapper,
+        CACHE_LINE_SIZE,
+        LARGE_BUFFER_THRESHOLD,
+        PAGE_SIZE,
         align_buffer_size,
         align_to_cache_line,
         fast_copy,
         fast_zero,
-        get_buffer_ptr as _native_get_buffer_ptr,
-        get_buffer_ptr_batch as _native_get_buffer_ptr_batch,
         prefetch_read,
         prefetch_write,
-        CACHE_LINE_SIZE,
-        PAGE_SIZE,
-        LARGE_BUFFER_THRESHOLD,
+    )
+    from metal_marlin._mtl_buffer_bridge import (
+        DirectBufferPtr as _NativeDirectBufferPtr,
+    )
+    from metal_marlin._mtl_buffer_bridge import (
+        MPSTensorWrapper as _NativeMPSTensorWrapper,
+    )
+    from metal_marlin._mtl_buffer_bridge import (
+        get_buffer_ptr as _native_get_buffer_ptr,
+    )
+    from metal_marlin._mtl_buffer_bridge import (
+        get_buffer_ptr_batch as _native_get_buffer_ptr_batch,
     )
     _HAS_NATIVE = True
 except ImportError as _import_err:
@@ -124,19 +131,19 @@ class DirectBufferPtr:
         """Get buffer length in bytes."""
         return self._native.length
     
-    def as_float32(self) -> "np.ndarray":
+    def as_float32(self) -> np.ndarray:
         """Get numpy float32 array view (zero-copy)."""
         return self._native.as_float32()
     
-    def as_float16(self) -> "np.ndarray":
+    def as_float16(self) -> np.ndarray:
         """Get numpy float16 (uint16) array view (zero-copy)."""
         return self._native.as_float16()
     
-    def as_int32(self) -> "np.ndarray":
+    def as_int32(self) -> np.ndarray:
         """Get numpy int32 array view (zero-copy)."""
         return self._native.as_int32()
     
-    def as_uint8(self) -> "np.ndarray":
+    def as_uint8(self) -> np.ndarray:
         """Get numpy uint8 array view (zero-copy)."""
         return self._native.as_uint8()
     
@@ -208,7 +215,7 @@ class MPSTensorWrapper:
         self._native = native_wrapper
     
     @staticmethod
-    def wrap(buffer: Any) -> "MPSTensorWrapper":
+    def wrap(buffer: Any) -> MPSTensorWrapper:
         """
         Wrap existing MPS tensor buffer (no copy).
         
@@ -245,7 +252,7 @@ class MPSTensorWrapper:
         return self.is_valid
 
 
-def get_buffer_ptr(buffer: Any) -> Tuple[int, int]:
+def get_buffer_ptr(buffer: Any) -> tuple[int, int]:
     """
     Get direct pointer and length from MTLBuffer (fast one-shot access).
     
@@ -267,7 +274,7 @@ def get_buffer_ptr(buffer: Any) -> Tuple[int, int]:
     return _native_get_buffer_ptr(buffer)
 
 
-def get_buffer_ptr_batch(buffers: list) -> list[Tuple[int, int]]:
+def get_buffer_ptr_batch(buffers: list) -> list[tuple[int, int]]:
     """
     Get pointers for multiple buffers efficiently.
     

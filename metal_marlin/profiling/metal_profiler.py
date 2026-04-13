@@ -28,10 +28,10 @@ import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from .._compat import HAS_PYOBJC_METAL, HAS_TORCH, torch
+from .._compat import HAS_PYOBJC_METAL
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    pass
 
 # Try to import Metal framework
 try:
@@ -230,7 +230,7 @@ class MetalProfiler:
         })
         trace_events.append({
             "name": "process_sort_index",
-            "ph": "M", 
+            "ph": "M",
             "pid": self._pid,
             "tid": 0,
             "args": {"sort_index": 1},

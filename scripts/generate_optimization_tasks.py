@@ -75,7 +75,7 @@ def generate_optimization_tasks():
         "Implement asynchronous command buffer submission for parallel expert execution in `contrib/metal_marlin/metal_marlin/moe/moe_dispatch_metal.py`.",
         "Optimize `moe_dispatch` in `contrib/metal_marlin/src/moe_dispatch.metal` to use atomic increments for expert counts on GPU.",
         "Create `contrib/metal_marlin/scripts/benchmark_moe_fusion.py` to benchmark Fused MoE vs Sequential Dispatch for GLM-4.7-Flash (64 experts).",
-        "Implement 'expert-prefetch' logic in `contrib/metal_marlin/metal_marlin/moe/expert_weight_manager.py` to overlap weight loading with computation.",
+        "Implement hot/cold expert prefetch logic in `contrib/metal_marlin/metal_marlin/trellis/optimizations.py` to overlap cold-buffer loading with computation.",
         "Optimize shared experts execution in `contrib/metal_marlin/src/moe_fused_shared_expert.metal` by fusing it with the router kernel.",
         "Add a 'sparse-expert' path for tokens that only active one expert in `contrib/metal_marlin/metal_marlin/moe/moe_dispatch_metal.py`.",
         "Implement 2:4 sparsity support in MoE expert GEMMs in `contrib/metal_marlin/src/sparse_gemm.metal`.",

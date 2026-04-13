@@ -10,8 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .mmfp4_linear import MMFP4Linear
-from .adaptive_depth import AdaptiveSpeculationController, AdaptiveDepthConfig
+from .adaptive_depth import AdaptiveDepthConfig, AdaptiveSpeculationController
 
 try:
     from ..metal_dispatch import MetalKernelLibrary, get_fast_path
@@ -184,7 +183,7 @@ class MMFP4MTPHead(nn.Module):
         group_size: int = 128,
         share_embeddings: bool = True,
         share_lm_head: bool = True,
-    ) -> "MMFP4MTPHead":
+    ) -> MMFP4MTPHead:
         """Create an MTP head with weight sharing from a target model.
         
         This enables memory-efficient speculative decoding by sharing
@@ -486,7 +485,7 @@ def verify_kernel(
     # Try using fast Metal kernel if available
     metal_lib = _get_metal_lib()
     if (
-        metal_lib is not None 
+        metal_lib is not None
         and device.type == "mps"
         and draft_probs is None  # Fused kernel assumes greedy draft for now
         and target_logits.dtype == torch.float32  # Kernel assumes float32

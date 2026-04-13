@@ -6,7 +6,7 @@ Provides Chrome Tracing export for Metal command buffer execution times.
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ._compat import HAS_PYOBJC_METAL
 
@@ -27,8 +27,8 @@ class MetalProfiler:
             enabled: whether to enable profiling.
         """
         self.enabled = enabled and HAS_PYOBJC_METAL
-        self.events: List[Dict[str, Any]] = []
-        self._region_stack: List[str] = []
+        self.events: list[dict[str, Any]] = []
+        self._region_stack: list[str] = []
         self._start_time = time.time()  # CPU start time
 
         if enabled and not HAS_PYOBJC_METAL:
@@ -53,7 +53,7 @@ class MetalProfiler:
         if self._region_stack:
             self._region_stack.pop()
 
-    def profile_buffer(self, buffer: Any, name: Optional[str] = None) -> None:
+    def profile_buffer(self, buffer: Any, name: str | None = None) -> None:
         """Attach profiling handler to a command buffer.
 
         Must be called before the command buffer is committed.

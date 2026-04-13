@@ -151,8 +151,9 @@ class TestTrellisInferShape:
 def test_load_layer_from_hf_shards(tmp_path: Path) -> None:
     """Test loading a layer from HF-style sharded safetensors."""
     import numpy as np
-    from metal_marlin.trellis.loader import TrellisModelLoader
     from safetensors.numpy import save_file
+
+    from metal_marlin.trellis.loader import TrellisModelLoader
 
     # Create mock quantized tensor (4-bit, 64x64 weight)
     bits = 4

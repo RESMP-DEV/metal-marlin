@@ -12,7 +12,6 @@ from .mmfp4_linear import (
     _as_u32_tensor,
     _fused_dtype_convert,
     _minimize_contiguous,
-    _optimized_scale_load,
     _try_mmfp4_kernel_gemm,
 )
 
@@ -698,8 +697,8 @@ class MMFP4Expert(nn.Module):
         return None
 
     def _optimized_down_small_batch(
-        self, 
-        x_2d: torch.Tensor, 
+        self,
+        x_2d: torch.Tensor,
         m_size: int
     ) -> torch.Tensor | None:
         """Optimized down projection for small batches (2 <= M <= 16).

@@ -613,9 +613,12 @@ def scaled_dot_product_attention_metal(
     Scaled dot-product attention with Metal-optimized backends.
 
     Dispatches to fused_attention() which tries in order:
-    1. fused_scaled_dot_product_attention (MPSGraph)
+    1. flash_attention_v3 (Metal MLA kernels)
     2. flash_attention_v2 (Metal kernels)
     3. F.scaled_dot_product_attention (PyTorch fallback)
+
+    The order is controlled by ``METAL_MARLIN_ATTENTION_BACKEND``:
+    ``v3`` (default), ``v2``, or ``plain``.
 
     Args:
         q: Query tensor [batch, num_heads, seq_len, head_dim]
@@ -947,9 +950,10 @@ def block_sparse_attention_metal(
     v = v.to(device="mps", dtype=torch.float16).contiguous()
 
     # Import Metal libraries
+    from pathlib import Path
+
     import Metal
     import numpy as np
-    from pathlib import Path
 
     # Load and compile the attention kernel
     kernel_path = Path(__file__).parent.parent / "src" / "attention.metal"

@@ -1,8 +1,11 @@
 
-import unittest
-import torch
 import time
-from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager, ExpertMetadata
+import unittest
+
+import torch
+
+from metal_marlin.memory.mmfp4_memory import ExpertMetadata, MMFP4MemoryManager
+
 
 class TestMMFP4MemoryOptimization(unittest.TestCase):
     def setUp(self):
@@ -21,7 +24,7 @@ class TestMMFP4MemoryOptimization(unittest.TestCase):
 
     def test_expert_weight_cache_existence(self):
         """Test that _expert_weight_cache exists."""
-        self.assertTrue(hasattr(self.memory_manager, "_expert_weight_cache"), 
+        self.assertTrue(hasattr(self.memory_manager, "_expert_weight_cache"),
                         "MMFP4MemoryManager should have _expert_weight_cache attribute")
         
     def test_smart_caching_behavior(self):
@@ -45,7 +48,7 @@ class TestMMFP4MemoryOptimization(unittest.TestCase):
         w01 = self.memory_manager.get_expert_weights(0, 1)
         self.assertIn((0, 1), self.memory_manager._expert_weight_cache)
         
-        # Cache is full (size 2). 
+        # Cache is full (size 2).
         # Cache state: (0, 0) -> (0, 1) (most recent)
         
         # Load expert (0, 2). Should evict (0, 0)

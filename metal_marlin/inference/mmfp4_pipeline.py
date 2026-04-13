@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from threading import Thread
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .._compat import require_torch, torch
-from ..kv_cache import CacheConfig, KVCache, MLAKVCache
 from ..cache.quantized_cache import QuantizedKVCache
+from ..kv_cache import CacheConfig, KVCache, MLAKVCache
 from ..layers.mmfp4_mtp_head import verify_kernel
 from ..utils.buffer_pool import BufferPool
 
@@ -21,6 +22,8 @@ try:
     HAS_OPTIMIZED_DRAFT = True
 except ImportError:
     HAS_OPTIMIZED_DRAFT = False
+
+DEFAULT_MLA_KV_QUANT_MODE = os.environ.get("METAL_MARLIN_KV_QUANT", "int8")
 
 
 @dataclass
@@ -1721,7 +1724,7 @@ class MMFP4Pipeline:
             mla_quant_mode = (
                 requested_dtype
                 if requested_dtype in valid_mla_modes
-                else ("fp4" if self.use_paged_attention else "none")
+                else ("fp4" if self.use_paged_attention else DEFAULT_MLA_KV_QUANT_MODE)
             )
             return MLAKVCache(
                 num_layers=num_layers,

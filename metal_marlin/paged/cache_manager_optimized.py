@@ -10,12 +10,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, Optional, Dict, List, Tuple
+from typing import Any
 
-import numpy as np
-
-from .cache_manager import PagedKVCache, EvictionStats, SequenceEvictionMetadata
+from .cache_manager import EvictionStats, PagedKVCache, SequenceEvictionMetadata
 from .kv_block import KVBlockConfig
+
 
 class EvictionPolicy(Enum):
     """Cache eviction policy."""
@@ -29,7 +28,7 @@ class EvictionPolicy(Enum):
 class EvictionConfig:
     """Configuration for eviction policies."""
     policy: EvictionPolicy = EvictionPolicy.WEIGHTED
-    max_size: Optional[int] = None
+    max_size: int | None = None
     
     # Weights for WEIGHTED policy
     recency_weight: float = 1.0
@@ -87,7 +86,7 @@ class WeightedScore:
 class OptimizedSequenceEvictionMetadata(SequenceEvictionMetadata):
     """Extended metadata for optimized eviction."""
     priority: int = 0
-    ttl: Optional[float] = None
+    ttl: float | None = None
     
 class PagedKVCacheOptimized(PagedKVCache):
     """Paged KV cache with optimized eviction policies."""
@@ -98,7 +97,7 @@ class PagedKVCacheOptimized(PagedKVCache):
         num_blocks: int = 1024,
         use_multimodal: bool = False,
         eviction_config: EvictionConfig | None = None,
-        eviction_policy: Any = None, 
+        eviction_policy: Any = None,
     ) -> None:
         # Initialize base
         super().__init__(
@@ -113,13 +112,13 @@ class PagedKVCacheOptimized(PagedKVCache):
         self._eviction_metadata: dict[int, OptimizedSequenceEvictionMetadata] = {}
         
         self._fragmentation_info = {'fragmentation_ratio': 0.0}
-        self._workload_history: List[str] = []
+        self._workload_history: list[str] = []
         self._detailed_stats = {
             'avg_score_evicted': 0.0,
             'eviction_reasons': {}
         }
 
-    def add_sequence(self, seq_id: int, priority: int = 0, ttl: Optional[float] = None) -> bool:
+    def add_sequence(self, seq_id: int, priority: int = 0, ttl: float | None = None) -> bool:
         """Add a new sequence with priority and TTL."""
         # Ensure we have at least one block available
         if self.allocator.num_free == 0:

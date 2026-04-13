@@ -18,13 +18,10 @@ _psd_project_metal = None
 _is_likely_psd = None
 _gershgorin_min_eigenvalue = None
 try:
-    from metal_marlin._psd_dispatch import \
-        gershgorin_min_eigenvalue as _gershgorin_min_eig
-    from metal_marlin._psd_dispatch import get_prefetched
+    from metal_marlin._psd_dispatch import gershgorin_min_eigenvalue as _gershgorin_min_eig
+    from metal_marlin._psd_dispatch import get_prefetched, start_prefetch
     from metal_marlin._psd_dispatch import is_likely_psd as _is_likely_psd_impl
-    from metal_marlin._psd_dispatch import \
-        psd_project_metal as _psd_project_metal_impl
-    from metal_marlin._psd_dispatch import start_prefetch
+    from metal_marlin._psd_dispatch import psd_project_metal as _psd_project_metal_impl
     _USE_METAL_PSD = True
     _psd_project_metal = _psd_project_metal_impl
     _is_likely_psd = _is_likely_psd_impl

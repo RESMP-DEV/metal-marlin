@@ -12,8 +12,8 @@ import pytest
 from metal_marlin.paged.parity_validation import (
     ParityConfig,
     ParityResult,
-    run_paged_v1_parity_test,
     run_comprehensive_parity_suite,
+    run_paged_v1_parity_test,
     validate_parity,
 )
 

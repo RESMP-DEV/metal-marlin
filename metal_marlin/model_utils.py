@@ -4,13 +4,12 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from metal_marlin._quantized_weights import (_apply_moe_expert_weights,
-                                             _apply_quantized_weights)
-from metal_marlin.layer_replacement import (replace_glm4_moe_experts,
-                                            replace_linear_layers)
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from metal_marlin._quantized_weights import _apply_moe_expert_weights, _apply_quantized_weights
+from metal_marlin.layer_replacement import replace_glm4_moe_experts, replace_linear_layers
 from metal_marlin.layers.mtp_head import GLMMTPHead
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
 def _load_mtp_head_from_checkpoint(

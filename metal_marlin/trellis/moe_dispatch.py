@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -1638,7 +1638,7 @@ def dispatch_moe_trellis_swiglu(
     use_fp32_acc: bool = False,
     kernel_name_override: str | None = None,
     cmd_manager: Any | None = None,
-) -> Optional[MTLCommandBuffer]:
+) -> MTLCommandBuffer | None:
     """Fused MoE GEMM with Trellis quantization and SwiGLU activation.
 
     HOT PATH: This function is called for every forward pass. Keep it minimal:

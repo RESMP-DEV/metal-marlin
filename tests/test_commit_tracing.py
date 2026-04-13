@@ -1,16 +1,16 @@
 """Trace all command buffer commits during one forward pass."""
 import os
+
 os.environ["METAL_MARLIN_TRACE_BATCH"] = "1"
 
 import logging
-from pathlib import Path
 import sys
 import time
 import traceback
+from pathlib import Path
 from typing import Any
 
 import torch
-
 
 _THIS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _THIS_DIR.parent

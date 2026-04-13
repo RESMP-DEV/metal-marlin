@@ -21,7 +21,7 @@ import torch
 from torch import Tensor
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    pass
 
 
 @dataclass

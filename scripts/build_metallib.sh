@@ -263,19 +263,21 @@ metal_version=3.0
 EOF
     echo "Version: $VERSION_FILE"
 
-    # Generate checksum manifest for staleness detection
+    # Generate source hash and checksum manifest for staleness detection
     echo ""
-    echo "Generating checksum manifest..."
-    if command -v python3 >/dev/null 2>&1; then
-        python3 -c "
+    echo "Generating staleness tracking data..."
+    if command -v uv >/dev/null 2>&1; then
+        uv run python -c "
 import sys
 sys.path.insert(0, '$PROJECT_ROOT')
-from metal_marlin.metallib_loader import save_checksum_manifest
+from metal_marlin.metallib_loader import save_source_hash, save_checksum_manifest
 from pathlib import Path
+hash_path = save_source_hash(Path('$METALLIB_FILE'))
+print(f'Source hash: {hash_path}')
 manifest_path = save_checksum_manifest(Path('$METALLIB_FILE'))
 print(f'Checksum manifest: {manifest_path}')
-" 2>/dev/null || echo "Warning: Could not generate checksum manifest (Python not available or module error)"
+" 2>/dev/null || echo "Warning: Could not generate staleness data (uv/python not available or module error)"
     else
-        echo "Warning: Python3 not available, skipping checksum manifest generation"
+        echo "Warning: uv not available, skipping staleness data generation"
     fi
 fi

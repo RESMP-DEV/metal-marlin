@@ -19,7 +19,6 @@ from safetensors import safe_open
 # Import buffer recycling for memory optimization
 from metal_marlin.memory.buffer_recycler import BufferRecycler
 from metal_marlin.memory.memory_pressure import (
-    MemoryPressureConfig,
     get_global_memory_pressure_monitor,
 )
 
@@ -748,8 +747,8 @@ class MMFP4ModelLoader:
                     
                     try:
                         tensor = torch.empty(
-                            alloc_shape, 
-                            dtype=target_dtype, 
+                            alloc_shape,
+                            dtype=target_dtype,
                             device="cpu",
                             pin_memory=pin_memory
                         )
@@ -777,8 +776,8 @@ class MMFP4ModelLoader:
                                  # Re-attempt allocation if previous one failed/was skipped
                                  if 'tensor' not in locals() or tensor is None:
                                      tensor = torch.empty(
-                                        alloc_shape, 
-                                        dtype=target_dtype, 
+                                        alloc_shape,
+                                        dtype=target_dtype,
                                         device="cpu",
                                         pin_memory=True
                                      )
@@ -1028,7 +1027,7 @@ class MMFP4ModelLoader:
 
     def _mmap_weights_iterator(
         self,
-        manager: "MMAPWeightManager",
+        manager: MMAPWeightManager,
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """Iterator for lazy loading weights via memory mapping.
         
@@ -1055,7 +1054,7 @@ class MMFP4ModelLoader:
         device: str = "cpu",
         cache_size_gb: float = 4.0,
         buffer_recycler: Any | None = None,
-    ) -> "MMAPWeightManager":
+    ) -> MMAPWeightManager:
         """Create a reusable MMAP weight manager.
 
         This allows efficient repeated access to weights with caching.

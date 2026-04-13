@@ -1,15 +1,18 @@
-import torch
 import unittest
 from unittest.mock import MagicMock, patch
-from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager, MLACompressionRatio
+
+import torch
+
+from metal_marlin.memory.mmfp4_memory import MLACompressionRatio, MMFP4MemoryManager
+
 
 class TestZeroCopy(unittest.TestCase):
     def setUp(self):
         # Mocking init to avoid complex setup
         with patch('metal_marlin.memory.mmfp4_memory.MMFP4ModelLoader'):
             self.manager = MMFP4MemoryManager(
-                model_path=".", 
-                max_memory_gb=1.0, 
+                model_path=".",
+                max_memory_gb=1.0,
                 unified_memory=True
             )
         # Mock _has_unified_memory to ensure we test the path regardless of hardware

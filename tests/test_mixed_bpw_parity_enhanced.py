@@ -17,20 +17,23 @@ Test that mixed BPW produces same results as reference:
    - Perplexity comparison on validation set
 """
 
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
-from typing import List, Dict, Tuple
-import tempfile
-from pathlib import Path
+
+from metal_marlin.quantization.trellis_codebook import TrellisCodebook
+from metal_marlin.trellis.layer import TrellisDenseMLP
+from metal_marlin.trellis.linear import TrellisLinear
 
 # Local imports
 from metal_marlin.trellis.model import TrellisMoEMLP
-from metal_marlin.trellis.layer import TrellisDenseMLP
-from metal_marlin.trellis.linear import TrellisLinear
-from metal_marlin.quantization.trellis_codebook import TrellisCodebook
+
 
 def _has_metal() -> bool:
     """Check if Metal is available and MPS is initialized."""
@@ -82,9 +85,9 @@ def create_test_expert(
 def create_mixed_bit_experts(
     hidden_dim: int,
     intermediate_dim: int,
-    bit_pattern: List[int],
+    bit_pattern: list[int],
     device: str = "mps"
-) -> List[TrellisDenseMLP]:
+) -> list[TrellisDenseMLP]:
     """Create experts with specified bit pattern."""
     return [create_test_expert(hidden_dim, intermediate_dim, bits, device) for bits in bit_pattern]
 
@@ -127,7 +130,7 @@ class ExplicitMoEReference:
 
 class FP16ReferenceMoE:
     """FP16 reference implementation for comparison."""
-    def __init__(self, experts: List[TrellisDenseMLP], router: nn.Linear, top_k: int = 2):
+    def __init__(self, experts: list[TrellisDenseMLP], router: nn.Linear, top_k: int = 2):
         self.experts = experts
         self.router = router
         self.top_k = top_k
@@ -529,7 +532,7 @@ def test_mixed_bpw_regression_detection():
     assert avg_cos_sim > 0.995, f"Regression detected: cosine similarity dropped to {avg_cos_sim:.6f}"
     
     # Print statistics for monitoring
-    print(f"\nRegression test statistics:")
+    print("\nRegression test statistics:")
     print(f"  Average MSE: {avg_mse:.6f}")
     print(f"  Average Cosine Similarity: {avg_cos_sim:.6f}")
     print(f"  MSE range: [{min(mse_values):.6f}, {max(mse_values):.6f}]")

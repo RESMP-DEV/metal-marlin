@@ -19,7 +19,6 @@ from metal_marlin.layers.adaptive_depth import (
 )
 from metal_marlin.layers.mmfp4_mtp_head import MMFP4MTPHead
 
-
 # -----------------------------------------------------------------------------
 # Test AdaptiveSpeculationController
 # -----------------------------------------------------------------------------

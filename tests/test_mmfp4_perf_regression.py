@@ -1,7 +1,8 @@
 """Performance regression tests for MMFP4 kernels."""
 import os
-import pytest
 import time
+
+import pytest
 import torch
 
 from metal_marlin.layers.mmfp4_expert import MMFP4Expert

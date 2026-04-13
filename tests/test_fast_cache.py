@@ -1,17 +1,19 @@
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import torch
 import torch.nn as nn
-from unittest.mock import MagicMock, patch
-import json
-import shutil
-from pathlib import Path
-import sys
-import os
 
 # Ensure we can import metal_marlin
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from metal_marlin.trellis.model import TrellisMoEMLP, TrellisDenseMLP
 from metal_marlin.trellis.linear import TrellisLinear
+from metal_marlin.trellis.model import TrellisDenseMLP, TrellisMoEMLP
+
 
 def create_dummy_moe():
     router = nn.Linear(64, 4, bias=False, device='cpu', dtype=torch.float16)

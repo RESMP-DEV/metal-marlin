@@ -6,12 +6,12 @@ implementation for zero-overhead transient buffer management.
 
 from __future__ import annotations
 
-from typing import Any
 import ctypes
+from typing import Any
 
 try:
+    from metal_marlin._cpp_ext import MetalDevice, StorageMode
     from metal_marlin._cpp_ext import TransientRingBuffer as _CppTransientRingBuffer
-    from metal_marlin._cpp_ext import StorageMode, MetalDevice
     HAS_CPP_EXT = True
 except ImportError:
     HAS_CPP_EXT = False
@@ -188,7 +188,7 @@ class TransientBufferCPP:
         }
     
     @classmethod
-    def get_for_device(cls, device: Any = None, capacity: int = 100 * 1024 * 1024) -> "TransientBufferCPP":
+    def get_for_device(cls, device: Any = None, capacity: int = 100 * 1024 * 1024) -> TransientBufferCPP:
         """Get or create transient buffer for device.
         
         Uses a global singleton per device for efficient reuse.

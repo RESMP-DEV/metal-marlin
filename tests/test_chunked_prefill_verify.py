@@ -13,8 +13,8 @@ import torch
 
 def test_chunked_prefill_imports():
     """Test that chunked prefill components can be imported."""
-    from metal_marlin.mla_fused import mla_chunked_prefill_attention
     from metal_marlin.layers.mmfp4_mla import MMFP4MLA
+    from metal_marlin.mla_fused import mla_chunked_prefill_attention
     # If we get here, imports work
     assert callable(mla_chunked_prefill_attention)
     assert hasattr(MMFP4MLA, '_forward_chunked_prefill')
@@ -49,7 +49,7 @@ def test_chunked_prefill_kernel_exists():
     
     # Check the shader file directly
     shader_path = os.path.join(
-        os.path.dirname(__file__), 
+        os.path.dirname(__file__),
         '..', 'metal_marlin', 'shaders', 'attention_mla_fused.metal'
     )
     if os.path.exists(shader_path):

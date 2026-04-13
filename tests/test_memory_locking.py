@@ -1,10 +1,13 @@
 
 import threading
 import time
-import pytest
 from unittest.mock import MagicMock
-from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
+import pytest
+
 from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager
+from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
 
 class MockLoader:
     def load_layer(self, layer_idx, device):

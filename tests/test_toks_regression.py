@@ -4,7 +4,8 @@ Target: _toks_tests
 """
 import pytest
 import torch
-from .fixtures.synthetic_mixed_moe import create_synthetic_model, benchmark_forward
+
+from .fixtures.synthetic_mixed_moe import benchmark_forward, create_synthetic_model
 
 # Thresholds for synthetic model on MPS
 # Note: Synthetic model uses FakeTrellisLinear (F.linear) so it should be fast.

@@ -7,7 +7,8 @@ using GLM-style dimensions.
 import pytest
 import torch
 
-from metal_marlin._compat import HAS_MPS, torch as _torch
+from metal_marlin._compat import HAS_MPS
+from metal_marlin._compat import torch as _torch
 from metal_marlin.kv_cache import MLAKVCache
 from metal_marlin.layers.mmfp4_mla import MMFP4MLA
 

@@ -2722,7 +2722,6 @@ def convert_model_transformers(
 
 def main():
     import argparse
-    import sys
 
     parser = argparse.ArgumentParser(
         description="Download, calibrate, and convert models to Metal Marlin FP4 format",

@@ -4,6 +4,7 @@ import torch
 
 from metal_marlin.kernels import HAS_CPP_EXT, dispatch_kernel
 
+
 @pytest.mark.skipif(not HAS_CPP_EXT, reason="C++ extension not available")
 class TestCppDispatch:
     def test_dispatch_uses_cpp_when_available(self):

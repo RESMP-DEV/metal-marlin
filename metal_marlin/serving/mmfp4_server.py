@@ -641,7 +641,7 @@ class RequestBatcher:
                     self._batch_event.wait(),
                     timeout=self.config.max_wait_ms / 1000.0
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             finally:
                 self._batch_event.clear()
@@ -879,7 +879,7 @@ class MMFP4Server:
         if self._batch_task:
             try:
                 await asyncio.wait_for(self._batch_task, timeout=30.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
             self._batch_task = None
 
@@ -1057,7 +1057,7 @@ async def _request_batch(
 
 
 async def _run_prefill_batch(
-    engine: "ServingEngine",
+    engine: ServingEngine,
     requests: list[GenerationRequest],
 ) -> None:
     """Run prefill phase for a batch of requests with parallel processing.
@@ -1111,7 +1111,7 @@ async def _run_prefill_batch(
 
 
 async def _run_decode_batch(
-    engine: "ServingEngine", 
+    engine: ServingEngine,
     requests: list[GenerationRequest],
 ) -> None:
     """Run decode phase for a batch of requests (generate next token) with parallel processing.
@@ -1292,7 +1292,7 @@ def _build_response(
     original_req: ChatCompletionRequest | CompletionRequest,
     gen_req: GenerationRequest,
     prompt_text: str,
-    engine: "ServingEngine",
+    engine: ServingEngine,
 ) -> ChatCompletionResponse | CompletionResponse:
     """Build the final response from a completed generation request.
 

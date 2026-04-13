@@ -40,7 +40,6 @@ from metal_marlin.mr_gptq import (
     QuantizationFormat,
 )
 
-
 DEFAULT_MODEL = "zai-org/GLM-4.7-Flash"
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4-CUDA"
 DEFAULT_BATCH_SIZE = 4

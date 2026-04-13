@@ -1,8 +1,10 @@
 
+import numpy as np
 import pytest
 import torch
-import numpy as np
+
 from metal_marlin import _cpp_ext
+
 
 def test_fast_router_dispatcher_creation():
     num_experts = 16
@@ -36,7 +38,7 @@ def test_fast_router_dispatcher_route_batch():
         activations_bytes = activations.numpy().tobytes() # This might not work for bf16 in numpy
     except:
         # Fallback if torch bf16 to numpy is not supported directly or numpy doesn't support bf16
-        # Construct raw bytes. 
+        # Construct raw bytes.
         # 1.0 in BF16 is 0x3F80
         activations_bytes = b'\x80\x3f' * (num_tokens * hidden_dim)
 
@@ -68,10 +70,10 @@ def test_hot_pair_caching():
     top_k = 2
     
     # Threshold = 2 for easy testing
-    dispatcher = _cpp_ext.FastRouterDispatcher(num_experts, hidden_dim, top_k, 
+    dispatcher = _cpp_ext.FastRouterDispatcher(num_experts, hidden_dim, top_k,
                                               hot_pair_threshold=2)
     
-    # We can't easily trigger the hot pair logic without controlling the logits exactly 
+    # We can't easily trigger the hot pair logic without controlling the logits exactly
     # to select specific experts repeatedly.
     # But we can verify the cache starts empty and we can reset it.
     

@@ -1,10 +1,12 @@
-import pytest
-import torch
-from unittest.mock import MagicMock, patch
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
 
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline, PersistentKVCache
+
 
 # Mock classes
 @dataclass
@@ -32,9 +34,9 @@ class MockModel(torch.nn.Module):
         
         # Mock KV cache
         # Create dummy past_key_values for the current input
-        # We assume if past_key_values is passed, we append to it (conceptually), 
+        # We assume if past_key_values is passed, we append to it (conceptually),
         # but for this mock we just return a full new one for simplicity or just the new part
-        # depending on what generate expects. 
+        # depending on what generate expects.
         # But here we are in forward, usually it returns the NEW kv for the input.
         
         new_past_key_values = []

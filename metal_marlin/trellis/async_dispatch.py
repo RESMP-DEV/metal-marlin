@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .._compat import Metal
-from ..metal_dispatch import (HAS_METAL, MetalKernelLibrary,
-                              _copy_buffer_to_tensor, _CopyBackBuffer)
+from ..metal_dispatch import HAS_METAL, MetalKernelLibrary, _copy_buffer_to_tensor, _CopyBackBuffer
 
 if TYPE_CHECKING:
     from .model import TrellisModel
@@ -245,7 +244,7 @@ class AsyncCommandBufferManager:
 class LayerBatchContext:
     """Batch command buffers across multiple MoE layers."""
 
-    def __init__(self, model: "TrellisModel", batch_size: int = 8):
+    def __init__(self, model: TrellisModel, batch_size: int = 8):
         if not HAS_METAL:
             # Return a dummy context manager when Metal is not available
             class DummyContext:

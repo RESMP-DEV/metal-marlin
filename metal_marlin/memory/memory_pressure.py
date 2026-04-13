@@ -1,9 +1,10 @@
 import threading
 import time
-import psutil
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
+import psutil
 import torch
 
 

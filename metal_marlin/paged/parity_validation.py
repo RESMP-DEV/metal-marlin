@@ -15,7 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    import torch
+    pass
 
 
 @dataclass
@@ -63,7 +63,7 @@ class ParityConfig:
             return (self.fp32_atol, self.fp32_rtol)
 
 
-@dataclass 
+@dataclass
 class ParityResult:
     """Result of parity validation.
     
@@ -312,7 +312,7 @@ def run_comprehensive_parity_suite(
             {"num_seqs": 2, "num_heads": 4, "num_kv_heads": 4, "dtype": np.float16, "name": "fp16_multi_seq"},
             {"num_seqs": 4, "num_heads": 8, "num_kv_heads": 8, "dtype": np.float16, "name": "fp16_batch4"},
             {"num_seqs": 1, "num_heads": 8, "num_kv_heads": 4, "dtype": np.float16, "name": "fp16_gqa"},
-            # FP32 tests  
+            # FP32 tests
             {"num_seqs": 1, "num_heads": 4, "num_kv_heads": 4, "dtype": np.float32, "name": "fp32_single_seq"},
             {"num_seqs": 2, "num_heads": 4, "num_kv_heads": 4, "dtype": np.float32, "name": "fp32_multi_seq"},
         ]

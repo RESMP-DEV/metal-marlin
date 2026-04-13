@@ -34,7 +34,7 @@ if HAS_TORCH and torch is not None:
     import torch.nn as nn
     import torch.nn.functional as F
 
-    from .mmfp4_linear import MMFP4Linear, _fast_dequant, _minimize_contiguous
+    from .mmfp4_linear import _fast_dequant
 
     _E2M1_TABLE = get_e2m1_torch_table()
 
@@ -131,8 +131,8 @@ if HAS_TORCH and torch is not None:
             self._input_cache: torch.Tensor | None = None
         
         def forward(
-            self, 
-            x: torch.Tensor, 
+            self,
+            x: torch.Tensor,
             input_scales: torch.Tensor | None = None
         ) -> torch.Tensor:
             """Forward pass with automatic precision detection.
@@ -178,8 +178,8 @@ if HAS_TORCH and torch is not None:
                 )
         
         def batch_aware_dispatch(
-            self, 
-            x: torch.Tensor, 
+            self,
+            x: torch.Tensor,
             lora_u: list[torch.Tensor] | torch.Tensor | None = None,
             lora_v: list[torch.Tensor] | torch.Tensor | None = None,
             lora_indices: torch.Tensor | None = None,
@@ -289,8 +289,8 @@ if HAS_TORCH and torch is not None:
             return out
         
         def _forward_fp4(
-            self, 
-            x: torch.Tensor, 
+            self,
+            x: torch.Tensor,
             input_scales: torch.Tensor
         ) -> torch.Tensor:
             """FP4 packed input forward pass.
@@ -332,14 +332,14 @@ if HAS_TORCH and torch is not None:
                 Dequantized weight tensor [out_features, in_features] as FP16.
             """
             return _fast_dequant(
-                self.weight_fp4_packed, 
-                self.scales, 
+                self.weight_fp4_packed,
+                self.scales,
                 self.fp4_group_size
             )
         
         def _dequantize_fp4_input(
-            self, 
-            x: torch.Tensor, 
+            self,
+            x: torch.Tensor,
             scales: torch.Tensor
         ) -> torch.Tensor:
             """Dequantize FP4 packed input tensor.
@@ -415,7 +415,7 @@ if HAS_TORCH and torch is not None:
         
         @staticmethod
         def _pack_weights_fp4(
-            weight: torch.Tensor, 
+            weight: torch.Tensor,
             group_size: int
         ) -> tuple[torch.Tensor, torch.Tensor]:
             """Pack FP16 weights into FP4 format.

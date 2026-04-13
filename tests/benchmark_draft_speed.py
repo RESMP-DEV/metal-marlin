@@ -26,7 +26,7 @@ def benchmark_draft_speed():
     num_iterations = 100
     
     # Create draft model
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Hidden size: {hidden_size}")
     print(f"  Vocab size: {vocab_size}")
     print(f"  Num predictions: {num_predictions}")
@@ -43,12 +43,12 @@ def benchmark_draft_speed():
     
     # Check if using optimized components
     has_fast_engine = (
-        hasattr(draft_model, '_fast_engine') 
+        hasattr(draft_model, '_fast_engine')
         and draft_model._fast_engine is not None
     )
     has_optimized_head = hasattr(draft_model.mtp_head, 'speculate_fast_path')
     
-    print(f"\nOptimizations enabled:")
+    print("\nOptimizations enabled:")
     print(f"  FastSpeculationEngine: {has_fast_engine}")
     print(f"  speculate_fast_path: {has_optimized_head}")
     
@@ -74,7 +74,7 @@ def benchmark_draft_speed():
     min_time = min(times)
     max_time = max(times)
     
-    print(f"\nResults:")
+    print("\nResults:")
     print(f"  Average time: {avg_time:.3f} ms")
     print(f"  Min time: {min_time:.3f} ms")
     print(f"  Max time: {max_time:.3f} ms")
@@ -89,7 +89,7 @@ def benchmark_draft_speed():
                 
                 start = time.perf_counter()
                 tokens, probs = draft_model._fast_engine.speculate(
-                    hidden_states, 
+                    hidden_states,
                     num_tokens=num_predictions
                 )
                 end = time.perf_counter()
@@ -99,7 +99,7 @@ def benchmark_draft_speed():
         avg_time_fast = sum(times_fast) / len(times_fast)
         speedup = avg_time / avg_time_fast if avg_time_fast > 0 else 1.0
         
-        print(f"\nFastSpeculationEngine results:")
+        print("\nFastSpeculationEngine results:")
         print(f"  Average time: {avg_time_fast:.3f} ms")
         print(f"  Speedup: {speedup:.2f}x")
     
@@ -122,7 +122,7 @@ def benchmark_draft_speed():
         avg_time_fp = sum(times_fp) / len(times_fp)
         speedup_fp = avg_time / avg_time_fp if avg_time_fp > 0 else 1.0
         
-        print(f"\nspeculate_fast_path results:")
+        print("\nspeculate_fast_path results:")
         print(f"  Average time: {avg_time_fp:.3f} ms")
         print(f"  Speedup: {speedup_fp:.2f}x")
     

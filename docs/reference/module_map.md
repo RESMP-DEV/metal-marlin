@@ -10,8 +10,8 @@
 | `metal_marlin/calibration/` | Hessian analysis and calibration tools | `hooks.py`, `hessian_collector.py`, `sensitivity.py` |
 | `metal_marlin/speculative/` | Speculative decoding engines | `engine.py`, `draft.py`, `eagle.py`, `verify.py` |
 | `metal_marlin/asr/` | Automatic speech recognition (Conformer/Parakeet) | `parakeet_model.py`, `conformer_block.py`, `hybrid_parakeet.py` |
-| `metal_marlin/moe/` | Mixture of Experts routing and execution | `moe_dispatch.py`, `token_dispatcher.py`, `adaptive_precision.py` |
-| `metal_marlin/kernels/` | Metal kernel implementations | `mla_proj.metal` (Metal Shaders) |
+| `metal_marlin/moe/` | Active MoE grouping helpers and public re-exports | `__init__.py`, `gpu_grouping.py` (core dispatch lives in `metal_marlin/moe_dispatch.py`) |
+| `metal_marlin/kernels/` | Split kernel export helpers | `attention.py`, `moe.py`, `../kernels_core.py` |
 | `metal_marlin/models/` | Model-specific implementations | `deepseek.py` |
 | `metal_marlin/ane/` | Apple Neural Engine optimizations | `conv_ane.py`, `depthwise_conv_ane.py`, `buffer_pool.py` |
 | `metal_marlin/vision/` | Vision model components | Various vision processing modules |
@@ -47,21 +47,15 @@
 
 ## Benchmarks
 
-| Category | Files | Purpose |
-|----------|-------|---------|
-| **Core Kernels** | `bench_gemm.py`, `bench_attention.py`, `benchmark_attention.py` | Metal kernel timing and performance analysis |
-| **Model Performance** | `bench_glm47.py`, `bench_qwen3.py`, `eval_glm4_full.py` | End-to-end model inference benchmarks |
-| **Memory Analysis** | `profile_memory_breakdown.py`, `bench_memory.py`, `profile_kv_cache.py` | Memory usage profiling and optimization |
-| **MoE Benchmarks** | `bench_moe_kernel.py`, `bench_moe_gptq_hessian.py` | Mixture of Experts performance testing |
-| **Trellis Specific** | `bench_trellis_generation.py`, `bench_trellis_performance.py` | Trellis model specialized benchmarks |
-| **Backend Comparison** | `benchmark_backends.py`, `bench_bf16_conversion.py` | Cross-backend performance comparisons |
-| **Throughput Tests** | `bench_throughput.py`, `bench_glm4_throughput.py` | Request throughput and latency analysis |
-| **Quality Evaluation** | `bench_glm47_quality.py`, `quality_comparison.py` | Model accuracy and quality metrics |
-| **Metal Specific** | `bench_metal_e2e.py`, `bench_fp4_metal.py` | Metal shader and kernel performance |
-| **MLA Attention** | `bench_mla_attention.py`, `profile_attention.py` | Multi-head Latent Attention benchmarks |
-| **ASR Benchmarks** | `benchmark_metal_asr.py`, `eval_glm4_trellis.py` | Speech recognition performance |
-| **Profiling Tools** | `profile_dequant.py`, `profile_moe_dispatch.py` | Detailed operation profiling |
-| **Framework Testing** | `framework.py`, `baseline_benchmark.py` | Benchmark framework and baseline tests |
+| Category | Representative Files | Purpose |
+|----------|----------------------|---------|
+| **Core Kernels** | `bench_attention.py`, `bench_fp4_metal.py`, `bench_kernel_variants.py` | Metal kernel timing and performance analysis |
+| **Model Performance** | `bench_comprehensive_e2e.py`, `bench_glm47_canonical.py`, `glm_flash_benchmark.py` | End-to-end model inference benchmarks |
+| **Memory Analysis** | `bench_memory.py`, `bench_kv_memory_bandwidth.py`, `bench_unified_memory.py` | Memory usage profiling and optimization |
+| **MoE Benchmarks** | `bench_moe_fusion.py`, `bench_moe_kernel.py`, `bench_moe_decode_glm_qwen.py` | Mixture of Experts performance testing |
+| **Trellis Specific** | `bench_mla_attention.py`, `bench_mla_fused_speedup.py`, `bench_e2e_decode.py` | Trellis / MLA specific benchmarking |
+| **Throughput & Repro** | `bench_throughput.py`, `bench_standardized_decode.py`, `reproduce_benchmark.py` | Throughput baselines and reproducibility checks |
+| **Archived Experiments** | `benchmarks/_archive/` | Historical scripts kept out of the active benchmark surface |
 
 ## Data Formats and Loaders
 
@@ -91,9 +85,8 @@
 | `_buffer_pool.py` | Internal buffer management |
 | `layernorm_metal.py` | Metal-optimized layer normalization |
 
-## Statistics
+## Notes
 
-- **Total Python Files**: 229
-- **Main Directories**: 24
-- **Core Areas**: Quantization, Serving, Benchmarks, Trellis, ASR, MoE
-- **Hardware Support**: Metal (GPU), ANE, Multi-GPU Distribution
+- This map highlights major module groupings and representative files rather than serving as an exhaustive inventory.
+- Benchmark scripts under `benchmarks/_archive/` are historical and not part of the current active surface.
+- The current core areas remain quantization, serving, benchmarks, trellis, ASR, and MoE on Apple Silicon / Metal.

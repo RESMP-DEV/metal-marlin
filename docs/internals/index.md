@@ -30,7 +30,6 @@ Low-level documentation for Metal shader development and optimization.
 - [**Kernel Optimization**](kernel_optimization.md) — Applied kernel optimization techniques
 - [**MoE Optimization**](moe_optimization.md) — MoE architecture and dispatch strategies
 - [**Compressed KV Cache (MLA)**](compressed_kv_cache_mla.md) — Memory and latency optimizations for GLM-4.7
-- [**Enhanced Expert Memory Pool**](enhanced_expert_memory_pool.md) — Pooling/defrag strategy for MoE experts
 - [**Kernel Selection**](kernel_selection.md) — Core MoE kernel selection strategy
 - [**Mixed Kernel Selection**](mixed_kernel_selection.md) — Mixed precision selector heuristics
 - [**Mixed Kernel Selection (Implementation)**](kernel_selection_mixed_implementation.md) — Implementation details for mixed-BPW routing

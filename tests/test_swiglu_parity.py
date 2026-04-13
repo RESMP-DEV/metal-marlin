@@ -1,6 +1,8 @@
 
 import torch
+
 from metal_marlin.layers.mmfp4_expert import MMFP4Expert
+
 
 def test_parity():
     if not torch.backends.mps.is_available():
@@ -23,7 +25,7 @@ def test_parity():
     # Initialize weights with something non-zero/random
     # MMFP4Linear placeholder weights are zeros, so we need to mock them or fill them
     # But MMFP4Linear expects packed weights.
-    # To properly test, we can just use the random init from constructor (which are zeros) 
+    # To properly test, we can just use the random init from constructor (which are zeros)
     # but we need to inject some values or use `_standard_forward` vs `_decode_compiled_fastpath`.
     
     # Actually, the placeholder weights are zeros.
@@ -34,10 +36,10 @@ def test_parity():
     # So we need non-zero weights.
     
     # Let's just monkey-patch the projections to return random data
-    # to test the SwiGLU part specifically? 
+    # to test the SwiGLU part specifically?
     # No, `_decode_compiled_fastpath` calls `_kernel_gemm` which uses `packed_weights`.
     
-    # Easier: Just check the code by reading. 
+    # Easier: Just check the code by reading.
     # But I want to verify the fix works.
     
     # I'll try to run _decode_compiled_fastpath directly.

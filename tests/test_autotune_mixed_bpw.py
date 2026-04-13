@@ -441,7 +441,7 @@ class TestMixedBPWAutoTuner:
             assert parsed["device_family"] == "M4"
 
             # Verify file content matches
-            with open(export_path, "r") as f:
+            with open(export_path) as f:
                 file_json = json.load(f)
                 assert file_json == parsed
 

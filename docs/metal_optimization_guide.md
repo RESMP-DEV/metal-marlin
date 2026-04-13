@@ -9,22 +9,27 @@
 
 ## GLM-4.7-Flash Status Summary
 
-| Metric | Current | Target | Gap |
-|--------|---------|--------|-----|
-| **Decode** | 7.1 tok/s | 30+ tok/s | 4× |
-| **Prefill (2K)** | 42 tok/s | 500+ tok/s | 12× |
-| **Memory** | 33 GB | 12-15 GB | ~2.5× |
-| **Model Load** | ~15s | ~10s | 1.5× |
+> **Note:** This summary mixes current measured end-to-end results with older measured point benchmarks and theoretical targets.
+> Use `reports/tps_benchmark_2026-02-18.md` / `benchmarks/bench_comprehensive_e2e.py` for the current measured decode headline (~1.5-2 tok/s), and `benchmarks/glm_flash_benchmark.py` for the measured 2K prefill snapshot.
+
+| Metric | Measured | Theoretical Target | Gap |
+|--------|----------|--------------------|-----|
+| **Decode** | ~1.5-2 tok/s | 30+ tok/s (theoretical target) | ~15× |
+| **Prefill (2K)** | 42 tok/s | 500+ tok/s (theoretical target) | 12× |
+| **Memory** | 33 GB | 12-15 GB (target) | ~2.5× |
+| **Model Load** | ~15s | ~10s (target) | 1.5× |
 
 ### GLM4-MoE-Lite Status (Feb 2026)
 
-| Metric | Current | Target | Notes |
-|--------|---------|--------|-------|
-| **Decode** | 7.1 tok/s | 10+ tok/s | M4 Max, 47 layers |
+> **Note:** "Target" numbers below are theoretical targets, NOT measured performance.
+
+| Metric | Measured | Theoretical Target | Notes |
+|--------|----------|--------------------|-------|
+| **Decode** | ~1.5-2 tok/s | 10+ tok/s (theoretical) | M4 Max, 47 layers |
 | **Prefill** | - | - | Not benchmarked |
 | **Memory** | ~15 GB | ~8 GB | FP4 quantized |
 | **Expert time** | 9.7 ms | - | Only 7% of step time! |
-| **Step time** | 141 ms | <100 ms | Targeting 30+ tok/s |
+| **Step time** | 141 ms | <100 ms (theoretical) | 30+ tok/s is a theoretical target, not measured |
 
 ### Done (Verified)
 - ✅ Fused GEMM kernels (51.9× speedup)
@@ -222,12 +227,14 @@ for name, module in model.named_modules():
 
 | Metric | Measured Value | Source |
 |--------|----------------|--------|
-| Model Load Time | ~15s | bench_glm47_kernels.py |
-| Prefill (2K context) | 42 tok/s | glm_flash_benchmark.py |
-| Decode (batch=1) | 5.4 tok/s | glm_flash_benchmark.py |
-| Memory (after load) | 16.93 GB | glm_flash_benchmark.py |
-| Memory (after forward) | 17.24 GB | glm_flash_benchmark.py |
-| GPU commits per forward | ~12 (async batched) | profiler |
+| Model Load Time | ~15s | Historical Feb 2026 point benchmark |
+| Prefill (2K context) | 42 tok/s | `benchmarks/glm_flash_benchmark.py` |
+| Decode (batch=1) | 5.4 tok/s | `benchmarks/glm_flash_benchmark.py` |
+| Memory (after load) | 16.93 GB | `benchmarks/glm_flash_benchmark.py` |
+| Memory (after forward) | 17.24 GB | `benchmarks/glm_flash_benchmark.py` |
+| GPU commits per forward | ~12 (async batched) | Profiler snapshot |
+
+> **Important:** The 5.4 tok/s row above is an older measured point benchmark, not the current end-to-end headline. Current measured E2E decode remains ~1.5-2 tok/s in `reports/tps_benchmark_2026-02-18.md`.
 
 ### MMFP4 E2E Decode Benchmark (Feb 2026)
 
@@ -245,7 +252,7 @@ for name, module in model.named_modules():
 cd contrib/metal_marlin && PYTHONPATH=. uv run python benchmarks/bench_e2e_decode.py --max-new-tokens 50
 ```
 
-**Note:** Memory usage (33GB) is higher than expected due to intermediate buffers during generation. The fused MoE kernel provides 13× forward pass speedup, but E2E throughput is limited by other factors (attention, KV cache management).
+**Note:** This is a measured spot benchmark for one decode configuration. Memory usage (33GB) is higher than expected due to intermediate buffers during generation. The fused MoE kernel provides 13× forward pass speedup, but E2E throughput is still limited by other factors (attention, KV cache management).
 
 ### MMFP4 Fused Dispatch Migration (Feb 2026)
 
@@ -273,7 +280,7 @@ The MMFP4 inference stack was migrated from sequential dispatches to fused kerne
 **Performance status:**
 - Pre-optimization decode: 0.27 tok/s (baseline)
 - Post-optimization decode: pending measurement
-- Expected improvement from dispatch overhead reduction
+- Expected gains remain theoretical until re-measured on the current benchmark surface
 
 > **Note:** Benchmarks should be re-run manually to measure the impact of fused dispatches. DO NOT include extrapolated numbers.
 
@@ -283,11 +290,11 @@ The MMFP4 inference stack was migrated from sequential dispatches to fused kerne
 |---------|-------------------|-------|
 | MLX | 10-20 tok/s | Estimated Native Apple framework performance (Model not supported by MLX) |
 | llama.cpp | ~3 tok/s | Q4_K_M quantization |
-| Metal Marlin | 5.4 tok/s | Current, fused trellis kernels |
+| Metal Marlin | ~1.5-5.4 tok/s | Measured range across current E2E and older point benchmarks |
 
 **Status:** We're between llama.cpp and MLX. The gap to MLX is mostly MoE overhead.
 
-### Where Time Goes (Profiled)
+### Where Time Went in an Earlier Profile (Historical)
 
 | Component | % of Forward Pass | Notes |
 |-----------|-------------------|-------|
@@ -312,16 +319,20 @@ Total @ 10K:                6.35 GB
 
 M4 Max effective BW:        ~273 GB/s (50% of 546 GB/s)
 Time per token:             6.35 GB / 273 GB/s = 23.3 ms
-Throughput:                 43 tok/s theoretical
+Throughput:                 43 tok/s (theoretical target, NOT measured)
 ```
 
-**Reality check:** MLX achieves 10-20 tok/s. The gap is kernel overhead + MoE routing.
+> **Warning:** The 43 tok/s figure above is a theoretical target calculated from memory bandwidth.
+> It does **not** represent actual performance. Measured decode throughput is ~1.5-2 tok/s on the same
+> hardware (M4 Max). See `reports/tps_benchmark_2026-02-18.md` for measured data.
+
+**Reality check:** Measured ~1.5-2 tok/s vs 43 tok/s theoretical. The gap (~76% unaccounted time) is due to Metal dispatch overhead, MoE expert routing, and kernel launch latency. MLX achieves 10-20 tok/s for comparison.
 
 ### KV Cache Dominates Long Context (Calculated)
 
-> **Warning:** These throughput numbers are calculated, NOT measured. Actual perf will be lower.
+> **Warning:** These throughput numbers are theoretical targets calculated from memory bandwidth, NOT measured. Actual decode throughput is ~1.5-2 tok/s on the same hardware (M4 Max). See `reports/tps_benchmark_2026-02-18.md` for measured data.
 
-| Context | Weights | KV Cache | KV % | Throughput (calculated) |
+| Context | Weights | KV Cache | KV % | Throughput (theoretical target, NOT measured) |
 |---------|---------|----------|------|------------|
 | 512 | 1.54 GB | 0.25 GB | 14% | ~82 tok/s |
 | 10K | 1.54 GB | 4.81 GB | 76% | ~35 tok/s |
@@ -565,7 +576,7 @@ let buffer = device.makeBuffer(length: size,
 | 32 | 162.4 ms | 4.2 ms | **38.7×** |
 | 128 | 189.6 ms | 12.5 ms | **15.2×** |
 
-**Source:** `benchmarks/bench_glm47_kernels.py`
+**Source:** Historical Feb 2026 kernel benchmark notes retained for context. Use `benchmarks/glm_flash_benchmark.py`, `benchmarks/bench_e2e_decode.py`, and `benchmarks/bench_comprehensive_e2e.py` for the current benchmark surface.
 
 **Lesson:** Kernel fusion is not optional. 50× speedup is real.
 
@@ -588,7 +599,7 @@ let buffer = device.makeBuffer(length: size,
 
 **Source:** `docs/guides/mixed_bpw_inference.md` Appendix A
 
-### Per-Layer Timing (bench_glm47_kernels.py, 2026-02-08)
+### Per-Layer Timing (historical kernel notes, 2026-02-08)
 
 | Operation | Measured | Notes |
 |-----------|----------|-------|
@@ -1195,8 +1206,9 @@ for config in configs:
     del model  # Doesn't actually release
 
 # CORRECT: Use subprocess isolation
+benchmark_script = 'benchmarks/bench_comprehensive_e2e.py'  # plus any benchmark-specific args
 for config in configs:
-    subprocess.run(['python', 'bench_single.py', config])
+    subprocess.run(['uv', 'run', 'python', benchmark_script, '--model', config], check=True)
     # Child process terminates → memory fully released
 ```
 
@@ -1767,14 +1779,17 @@ device.makeBuffer(options: .storageModePrivate)
 ```bash
 cd contrib/metal_marlin
 
-# Per-kernel timing (GLM-4.7 shapes)
-uv run python benchmarks/bench_glm47_kernels.py
-
-# MoE throughput (fused vs unfused)
-uv run python benchmarks/benchmark_moe_throughput.py
-
 # Full model benchmark (requires weights)
 uv run python benchmarks/glm_flash_benchmark.py --model path/to/model
+
+# Focused decode regression check
+PYTHONPATH=. uv run python benchmarks/bench_e2e_decode.py --max-new-tokens 50
+
+# Comprehensive E2E sweep
+uv run python benchmarks/bench_comprehensive_e2e.py \
+  --model path/to/model \
+  --context-length 128 \
+  --output-tokens 64
 ```
 
 ## Implementation Checklist
@@ -1904,13 +1919,14 @@ MLA (Multi-head Latent Attention) is NOT GLM-specific. These work with:
 | [mla_proj.metal](../src/mla_proj.metal) | MLA projections | Any MLA model |
 | [attention_mla_fused.metal](../src/attention_mla_fused.metal) | Fused MLA attention | GLM, DeepSeek |
 
-### Analysis Scripts
+### Current Benchmark Artifacts
 
-| Script | Purpose |
-|--------|---------|
-| [bench_glm47_kernels.py](../benchmarks/bench_glm47_kernels.py) | Per-kernel timing |
-| [glm47_roofline.py](../benchmarks/glm47_roofline.py) | Memory bandwidth analysis |
-| [benchmark_moe_throughput.py](../benchmarks/benchmark_moe_throughput.py) | MoE throughput |
+| Artifact | Purpose |
+|----------|---------|
+| [bench_comprehensive_e2e.py](../benchmarks/bench_comprehensive_e2e.py) | Current end-to-end sweep for throughput, TTFT, and perplexity |
+| [bench_e2e_decode.py](../benchmarks/bench_e2e_decode.py) | Focused decode regression benchmark |
+| [glm_flash_benchmark.py](../benchmarks/glm_flash_benchmark.py) | GLM Flash point benchmark for load, prefill, decode, and memory |
+| [tps_benchmark_2026-02-18.md](../reports/tps_benchmark_2026-02-18.md) | Measured-vs-theoretical report and investigation summary |
 
 ### External Resources
 
@@ -1996,13 +2012,13 @@ Target: 4 commits per forward pass by batching all layers in groups of 8-12.
 ```bash
 # Run tests to verify implementation
 cd contrib/metal_marlin
-.venv/bin/pytest tests/test_trellis_linear.py tests/test_trellis_model.py -v
+uv run pytest tests/test_trellis_linear.py tests/test_trellis_model.py -v
 
-# Quick benchmark (requires model weights)
-.venv/bin/python benchmarks/glm_flash_benchmark.py --quick
+# Quick GLM Flash benchmark (requires model weights)
+uv run python benchmarks/glm_flash_benchmark.py --quick
 
-# Profile MoE hotpath
-.venv/bin/python benchmarks/profile_moe_hotpath.py
+# Decode regression spot-check
+PYTHONPATH=. uv run python benchmarks/bench_e2e_decode.py --max-new-tokens 50
 ```
 
 ### Success Metrics
@@ -2057,10 +2073,10 @@ tasks:
 
 **Quick summary:**
 
-| Metric | Current | Target | Path |
-|--------|---------|--------|------|
-| Base decode | 7.1 tok/s | 12 tok/s | Fix 107ms bottleneck |
-| With MTP | - | **30+ tok/s** | 2.5× acceptance rate |
+| Metric | Measured | Theoretical Target | Path |
+|--------|----------|--------------------|------|
+| Base decode | ~1.5-2 tok/s | 12 tok/s (theoretical) | Fix 107ms bottleneck |
+| With MTP | - | **30+ tok/s** (theoretical) | 2.5× acceptance rate |
 
 **Key blocking issues:**
 1. **107ms/step unaccounted** (76% of time!) - Needs profiling

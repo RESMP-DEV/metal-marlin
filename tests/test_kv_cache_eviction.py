@@ -1,10 +1,13 @@
 """Tests for KV cache eviction policy in PagedKVCache."""
 
 import time
-import pytest
+
 import numpy as np
-from metal_marlin.paged.cache_manager import PagedKVCache, EvictionPolicy
+import pytest
+
+from metal_marlin.paged.cache_manager import EvictionPolicy, PagedKVCache
 from metal_marlin.paged.kv_block import KVBlockConfig
+
 
 class TestKVCacheEviction:
     """Test LRU eviction in PagedKVCache."""

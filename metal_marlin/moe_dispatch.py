@@ -33,10 +33,10 @@ IMPACT: Single-token MoE optimized path with pre-stacked expert weights
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
-import warnings
 
 import torch
 import torch.nn as nn
@@ -1606,7 +1606,7 @@ def _get_expert_cache_stats(experts: nn.ModuleList) -> dict[str, Any]:
     state = _expert_lru_cache_state[cache_key]
     total_accesses = sum(state['access_count'].values())
     resident_hits = sum(
-        state['access_count'].get(idx, 0) 
+        state['access_count'].get(idx, 0)
         for idx in state['resident']
     )
     

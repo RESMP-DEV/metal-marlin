@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -185,7 +186,6 @@ def _dispatch_attention_kernel(
         function_name, library_name="flash_attention_v3")
 
     if os.getenv("METAL_MARLIN_AUDIT", "0") == "1":
-        import os
         print(f"DISPATCH: {function_name} grid={grid} tg={threadgroup}")
 
     command_buffer = lib.command_queue.commandBuffer()

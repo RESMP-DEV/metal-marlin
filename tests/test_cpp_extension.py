@@ -158,7 +158,7 @@ def test_expert_buffer_pool():
          assert buf.size >= 1024
          
          # Verify it's pinned
-         # assert buf.priority == cpp_ext.BufferPriority.PINNED 
+         # assert buf.priority == cpp_ext.BufferPriority.PINNED
          # (If BufferPriority is exposed and checking logic exists)
          
          pool.clear()

@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import torch
 
-from metal_marlin._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH, torch
+from metal_marlin._compat import HAS_MPS, HAS_PYOBJC_METAL, torch
 
 # Metal kernel dispatch requires both PyTorch MPS and PyObjC Metal framework
 HAS_METAL_DISPATCH: bool = HAS_MPS and HAS_PYOBJC_METAL
@@ -314,7 +314,6 @@ def mla_fused_attention_decode(
     """
     _require_mps()
     
-    import Metal
     from metal_marlin.metal_dispatch import dispatch_kernel
     
     lib = _get_metal_library()
@@ -429,7 +428,6 @@ def mla_fused_attention_prefill(
     """
     _require_mps()
     
-    import Metal
     from metal_marlin.metal_dispatch import dispatch_kernel
     
     lib = _get_metal_library()
@@ -560,7 +558,6 @@ def mla_chunked_prefill_attention(
             params,
         )
     
-    import Metal
     from metal_marlin.metal_dispatch import dispatch_kernel
     
     lib = _get_metal_library()
@@ -626,12 +623,12 @@ def mla_chunked_prefill_attention(
         
         # 1. Dispatch KV Cache Write Kernel
         # Grid: (ceil(chunk_len / TILE_Q), batch, 1) - One threadgroup per tile of tokens
-        grid_kv_x = (chunk_len + 31) // 32 
+        grid_kv_x = (chunk_len + 31) // 32
         grid_kv = (grid_kv_x, chunk_params.batch, 1)
         threadgroup_kv = (128, 1, 1) # 4 simds
         
         buffers_kv = [
-            hidden_buf, 
+            hidden_buf,
             kv_a_weights_packed._mps._get_metal_buffer_ptr(),
             kv_a_scales._mps._get_metal_buffer_ptr(),
             k_cache._mps._get_metal_buffer_ptr(),

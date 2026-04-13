@@ -16,24 +16,33 @@ Uses GLM's rotary embedding from transformers.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
+
 # Import GLM's RoPE from transformers
 from transformers.models.glm4_moe.modeling_glm4_moe import apply_rotary_pos_emb
 
-from ..attention import scaled_dot_product_attention_metal
-from ..fused_attention_mps import fused_attention
-from .dispatch import dispatch_fused_qkv_trellis
-from ..kv_cache import TrellisKVCache
-from .linear import TrellisLinear
 from metal_marlin.mla_fused import create_glm_mla_params, mla_fused_attention_decode
+
+from ..attention import scaled_dot_product_attention_metal
+from ..fused_attention_mps import fused_attention, get_selected_attention_backend
+from ..kv_cache import TrellisKVCache
+from .dispatch import dispatch_fused_qkv_trellis
+from .linear import TrellisLinear
 
 if TYPE_CHECKING:
     pass
+
+# Module-level logger
+_logger = logging.getLogger(__name__)
+
+# One-time init log tracking which attention backend the Trellis module uses
+_trellis_attention_backend_logged: bool = False
 
 # Profiling globals for attention overhead
 _attention_total_ms = 0.0
@@ -51,6 +60,49 @@ def reset_attention_stats():
     global _attention_total_ms, _attention_count
     _attention_total_ms = 0.0
     _attention_count = 0
+
+
+def _log_trellis_attention_backend(*, use_fused_decode: bool) -> None:
+    """Log which attention backend the Trellis attention module will use (once).
+
+    Called from ``TrellisMLAttention.__init__`` so the message appears at model
+    construction time, not on every forward pass.  The log includes:
+
+    * The fused-attention backend selected by ``fused_attention_mps``
+      (v3, v2, or plain).
+    * Whether the MLA fused-decode fast-path is active.
+
+    The message is emitted via both the module logger and ``print(stderr)`` so
+    it is visible even when logging is not configured.
+    """
+    global _trellis_attention_backend_logged
+
+    if _trellis_attention_backend_logged:
+        return
+    _trellis_attention_backend_logged = True
+
+    # Determine the fused-attention backend (v3 / v2 / plain / unavailable).
+    selected = get_selected_attention_backend()
+
+    backend_labels = {
+        "v3": "Flash Attention v3 (Metal MLA kernels)",
+        "v2": "Flash Attention v2 (Metal kernels)",
+        "plain": "PyTorch scaled_dot_product_attention",
+        "unavailable": "No available attention backend",
+    }
+    backend_desc = backend_labels.get(selected, selected)
+
+    fused_desc = "enabled" if use_fused_decode else "disabled"
+
+    msg = (
+        f"[trellis.attention] Attention backend for TrellisMLAttention: "
+        f"{backend_desc} (fused_attention={selected}), "
+        f"MLA fused-decode path {fused_desc}"
+    )
+    _logger.info(msg)
+    import sys
+
+    print(msg, file=sys.stderr)
 
 
 @dataclass
@@ -137,10 +189,8 @@ class TrellisMLAttention(nn.Module):
         self.qk_head_dim = config.qk_head_dim
 
         # GLM's rotary embedding - use actual HF config class
-        from transformers.models.glm4_moe.configuration_glm4_moe import \
-            Glm4MoeConfig
-        from transformers.models.glm4_moe.modeling_glm4_moe import \
-            Glm4MoeRotaryEmbedding
+        from transformers.models.glm4_moe.configuration_glm4_moe import Glm4MoeConfig
+        from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeRotaryEmbedding
 
         rope_config = Glm4MoeConfig(
             hidden_size=config.hidden_size,
@@ -175,6 +225,9 @@ class TrellisMLAttention(nn.Module):
                 )
             except Exception:
                 self._fused_params = None  # Fall back to unfused
+
+        # Log which attention backend is selected (once at init time, not per-call).
+        _log_trellis_attention_backend(use_fused_decode=self.use_fused_decode)
 
     def _fused_qkv_forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Fused Q/KV projection for decode.

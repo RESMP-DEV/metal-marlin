@@ -82,8 +82,8 @@ moe_data_gb = 0.85  # GB of data transferred
 moe_time_s = 0.325  # 325ms
 moe_bw_gbs = moe_data_gb / moe_time_s
 
-# Estimate AI: 4-bit weights => 0.5 bytes/param. 
-# Params = 0.85GB / 0.5 = 1.7B params. 
+# Estimate AI: 4-bit weights => 0.5 bytes/param.
+# Params = 0.85GB / 0.5 = 1.7B params.
 # FLOPs = 2 * Params = 3.4 GFLOPs.
 moe_ai = (3.4 * 1e9) / (moe_data_gb * 1e9)
 
@@ -94,7 +94,7 @@ moe_analysis = analyze_bandwidth_bottleneck(
     peak_tflops=peak_tflops
 )
 
-print(f"MoE Kernel (W4A16 MatMul + SwiGLU):")
+print("MoE Kernel (W4A16 MatMul + SwiGLU):")
 print(f"  Data transferred: {moe_data_gb:.2f} GB")
 print(f"  Time:             {moe_time_s * 1000:.0f} ms")
 print(f"  Bandwidth:        {moe_bw_gbs:.1f} GB/s")
@@ -120,7 +120,7 @@ attn_analysis = analyze_bandwidth_bottleneck(
     peak_tflops=peak_tflops
 )
 
-print(f"Attention Kernel (QKV + Softmax + Proj):")
+print("Attention Kernel (QKV + Softmax + Proj):")
 print(f"  Data transferred: {attn_data_gb:.2f} GB")
 print(f"  Time:             {attn_time_s * 1000:.0f} ms")
 print(f"  Bandwidth:        {attn_bw_gbs:.1f} GB/s")

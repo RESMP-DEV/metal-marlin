@@ -3,6 +3,7 @@
 This module is maintained for backward compatibility.
 """
 
-from .kv_cache import MLAKVCache as TrellisKVCache, MLAKVCache, CompressedKVCache
+from .kv_cache import CompressedKVCache, MLAKVCache
+from .kv_cache import MLAKVCache as TrellisKVCache
 
 __all__ = ["TrellisKVCache", "MLAKVCache", "CompressedKVCache"]

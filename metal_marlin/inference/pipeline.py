@@ -764,7 +764,8 @@ class MetalMarlinModel:
         """Create empty KV cache structure."""
         require_torch()
 
-        from ..kv_cache import CacheConfig as CacheConfigTorch, KVCache as KVCacheTorch
+        from ..kv_cache import CacheConfig as CacheConfigTorch
+        from ..kv_cache import KVCache as KVCacheTorch
 
         config = CacheConfigTorch(
             num_layers=self.num_layers,

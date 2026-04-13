@@ -1,20 +1,20 @@
 """Simple kernel timing profiler."""
 from __future__ import annotations
-import time
+
 import logging
+import time
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Dict, List
 
 _logger = logging.getLogger(__name__)
-_global_timer: "KernelTimer | None" = None
+_global_timer: KernelTimer | None = None
 
 class KernelTimer:
     """Tracks kernel execution times."""
     
     def __init__(self, enabled: bool = True):
         self.enabled = enabled
-        self.timings: Dict[str, List[float]] = defaultdict(list)
+        self.timings: dict[str, list[float]] = defaultdict(list)
         self._depth = 0
     
     @contextmanager

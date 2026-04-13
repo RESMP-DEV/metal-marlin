@@ -25,8 +25,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import numpy as np
-    from numpy.typing import NDArray
+    pass
 
 # Import C++ extension if available
 cpp_ext: Any = None
@@ -41,9 +40,9 @@ try:
     import metal_marlin._cpp_ext as cpp_ext
     from metal_marlin._cpp_ext import (
         MetalContext,
-        mla_proj_fp4,
         mla_decode_proj_fp4,
         mla_fused_kv_proj_fp4,
+        mla_proj_fp4,
     )
     _has_cpp_ext = True
 except ImportError:

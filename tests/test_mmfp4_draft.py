@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from metal_marlin.layers.mmfp4_mtp_head import MMFP4MTPHead, verify_kernel
+from metal_marlin.speculative.draft import DraftOutput
+from metal_marlin.speculative.engine import SpeculativeConfig, SpeculativeEngine
 from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel, MMFP4DraftModelWithTarget
 from metal_marlin.speculative.mtp_draft import MTPDraft
-from metal_marlin.speculative.engine import SpeculativeConfig, SpeculativeEngine
-from metal_marlin.speculative.draft import DraftOutput
 
 
 def _get_default_dtype():

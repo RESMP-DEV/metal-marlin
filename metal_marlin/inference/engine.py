@@ -5,9 +5,9 @@ Automatically selects optimal decode strategy:
 2. Standard - default fallback
 '''
 
-import torch
-from typing import Optional, Union
 from dataclasses import dataclass
+
+import torch
 
 
 @dataclass
@@ -32,8 +32,8 @@ class GenerationOutput:
     sequences: torch.Tensor  # Generated token IDs [B, S]
     
     # Optional metadata
-    acceptance_rate: Optional[float] = None
-    tokens_per_second: Optional[float] = None
+    acceptance_rate: float | None = None
+    tokens_per_second: float | None = None
     decode_strategy: str = "standard"
 
 
@@ -58,7 +58,7 @@ class InferenceEngine:
     def generate(
         self,
         input_ids: torch.Tensor,
-        config: Optional[GenerationConfig] = None,
+        config: GenerationConfig | None = None,
     ) -> GenerationOutput:
         '''Generate text with automatic strategy selection.
         
@@ -141,7 +141,7 @@ class InferenceEngine:
     def chat(
         self,
         messages: list[dict],
-        config: Optional[GenerationConfig] = None,
+        config: GenerationConfig | None = None,
     ) -> str:
         '''Chat-style interface.
         
@@ -157,8 +157,8 @@ class InferenceEngine:
         
         # Apply chat template
         prompt = self.tokenizer.apply_chat_template(
-            messages, 
-            tokenize=False, 
+            messages,
+            tokenize=False,
             add_generation_prompt=True
         )
         

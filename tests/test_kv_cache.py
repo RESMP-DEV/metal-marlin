@@ -16,8 +16,8 @@ import pytest
 
 from metal_marlin._compat import HAS_TORCH, torch
 from metal_marlin.kv_cache import (
-    KVCacheTorch,
     CacheConfigTorch,
+    KVCacheTorch,
     MLAKVCache,
     clear_pool,
     get_pool_stats,

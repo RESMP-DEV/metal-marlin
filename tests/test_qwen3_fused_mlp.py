@@ -1,12 +1,14 @@
 """Tests for fused Trellis SwiGLU MLP kernel."""
 
+import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
-from metal_marlin.trellis.linear import TrellisLinear
+
 from metal_marlin.trellis.layer import TrellisSwiGLUMlp
+from metal_marlin.trellis.linear import TrellisLinear
 from metal_marlin.trellis.loader import TrellisWeight
-import numpy as np
+
 
 def create_mock_trellis_weight(in_features, out_features, bits=4):
     """Create a mock TrellisWeight for testing."""

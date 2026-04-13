@@ -35,8 +35,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import numpy as np
-
 from .._compat import HAS_TORCH, torch
 
 if TYPE_CHECKING:
@@ -46,7 +44,6 @@ if TYPE_CHECKING:
 if HAS_TORCH and torch is not None:
     import torch.nn as nn
 
-    from ..kernels import paged_attention_fp4
     from ..kv_cache import MLAKVCache
 
     class MMFP4PagedAttention(nn.Module):
@@ -457,7 +454,7 @@ if HAS_TORCH and torch is not None:
             
             # For cache dequantization, we apply per-token dequantization
             # packed: [batch, seq, cache_dim//8], scales: [batch, seq, 1]
-            from ..layers.mmfp4_linear import _unpack_rowwise_nibbles, _E2M1_TABLE
+            from ..layers.mmfp4_linear import _E2M1_TABLE
             
             # Unpack FP4 nibbles: [batch, seq, cache_dim//8] -> [batch, seq, cache_dim]
             shifts = torch.arange(8, device=device, dtype=torch.int64) * 4

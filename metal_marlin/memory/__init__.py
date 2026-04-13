@@ -12,25 +12,25 @@ Modules:
 
 from __future__ import annotations
 
-from metal_marlin.memory.mmfp4_memory import (
-    MMFP4MemoryManager,
-    MLACompressionRatio,
-    MemoryStats,
-    LayerMetadata,
-    ExpertMetadata,
-    MemoryCompactor,
-    CompactionConfig,
-    CompactionStats,
-    MMAPWeightConfig,
-    MMAPWeightStats,
-    MMAPWeightManager,
-)
 from metal_marlin.memory.buffer_pool import (
     BufferPool,
     BufferPoolStats,
     PooledBuffer,
 )
 from metal_marlin.memory.cuda_pinned_pool import CUDAPinnedPool
+from metal_marlin.memory.mmfp4_memory import (
+    CompactionConfig,
+    CompactionStats,
+    ExpertMetadata,
+    LayerMetadata,
+    MemoryCompactor,
+    MemoryStats,
+    MLACompressionRatio,
+    MMAPWeightConfig,
+    MMAPWeightManager,
+    MMAPWeightStats,
+    MMFP4MemoryManager,
+)
 
 __all__ = [
     "MMFP4MemoryManager",

@@ -84,6 +84,7 @@ def load_metallib(path: str | Path | None = None) -> Any:
 
     # Return cached if same path
     if _cached_library is not None and _cached_path == path:
+        _check_metallib_staleness(path)
         return _cached_library
 
     if not path.exists():
@@ -103,11 +104,45 @@ def load_metallib(path: str | Path | None = None) -> Any:
         error_msg = error.localizedDescription() if error else "Unknown error"
         raise MetallibLoadError(f"Failed to load metallib: {error_msg}")
 
+    # Check for staleness before caching
+    _check_metallib_staleness(path)
+
     # Cache the loaded library
     _cached_library = library
     _cached_path = path
 
     return library
+
+
+def _check_metallib_staleness(path: Path) -> None:
+    """Log a warning if shaders were modified since last metallib build.
+
+    Does NOT fail — just warns to avoid breaking dev workflows.
+
+    Args:
+        path: Path to the metallib file.
+    """
+    details = get_staleness_details(path)
+    if not details["is_stale"]:
+        return
+
+    changed_files = [
+        *details["modified_files"],
+        *details["added_files"],
+        *details["removed_files"],
+    ]
+    preview = ", ".join(changed_files[:5])
+    if len(changed_files) > 5:
+        preview += f" (+{len(changed_files) - 5} more)"
+
+    message = (
+        f"Metal shaders modified since last metallib build [{details['reason']}]. "
+        "Run ./scripts/build_metallib.sh to rebuild."
+    )
+    if preview:
+        message = f"{message} Files: {preview}"
+
+    logger.warning(message)
 
 
 def get_metallib_version(path: str | Path | None = None) -> dict[str, Any]:
@@ -204,6 +239,7 @@ def get_precompiled_library(path: str | Path | None = None) -> Any | None:
 
     # Return cached if same path
     if _cached_library is not None and _cached_path == path:
+        _check_metallib_staleness(path)
         return _cached_library
 
     try:
@@ -265,9 +301,9 @@ def _get_metal_source_dirs(metallib_path: Path) -> list[Path]:
     if src_dir.exists():
         dirs.append(src_dir)
 
-    # metal_marlin subdirectories (distributed, vision, src)
+    # metal_marlin subdirectories (distributed, vision, src, shaders)
     metal_marlin_dir = metallib_path.parent.parent
-    for subdir in ["distributed", "vision", "src"]:
+    for subdir in ["distributed", "vision", "src", "shaders"]:
         subdir_path = metal_marlin_dir / subdir
         if subdir_path.exists():
             dirs.append(subdir_path)
@@ -304,6 +340,91 @@ def _collect_metal_files(source_dirs: list[Path]) -> list[Path]:
     for src_dir in source_dirs:
         metal_files.extend(src_dir.glob("**/*.metal"))
     return sorted(set(metal_files))
+
+
+def compute_source_hash(metallib_path: Path | None = None) -> str:
+    """Compute a single aggregate SHA-256 hash of all .metal source files.
+
+    Files are processed in sorted order to ensure deterministic results.
+
+    Args:
+        metallib_path: Path to metallib (used to locate source dirs).
+
+    Returns:
+        Hex-encoded SHA-256 aggregate hash.
+    """
+    if metallib_path is None:
+        metallib_path = DEFAULT_METALLIB
+    metallib_path = Path(metallib_path)
+
+    source_dirs = _get_metal_source_dirs(metallib_path)
+    metal_files = _collect_metal_files(source_dirs)
+
+    hasher = hashlib.sha256()
+    for metal_file in metal_files:
+        try:
+            hasher.update(metal_file.read_bytes())
+        except OSError as e:
+            logger.warning(f"Failed to hash {metal_file}: {e}")
+            continue
+    return hasher.hexdigest()
+
+
+def get_source_hash_path(metallib_path: Path) -> Path:
+    """Get path to the aggregate source hash file.
+
+    Args:
+        metallib_path: Path to the .metallib file.
+
+    Returns:
+        Path to the corresponding .metallib_hash file.
+    """
+    return metallib_path.parent / ".metallib_hash"
+
+
+def save_source_hash(metallib_path: Path | None = None) -> Path:
+    """Save aggregate source hash alongside the metallib.
+
+    Args:
+        metallib_path: Path to metallib. If None, uses default.
+
+    Returns:
+        Path to the saved hash file.
+    """
+    if metallib_path is None:
+        metallib_path = DEFAULT_METALLIB
+    metallib_path = Path(metallib_path)
+
+    hash_path = get_source_hash_path(metallib_path)
+    source_hash = compute_source_hash(metallib_path)
+
+    hash_path.write_text(source_hash + "\n")
+    logger.debug(f"Saved source hash: {hash_path}")
+    return hash_path
+
+
+def load_source_hash(metallib_path: Path | None = None) -> str | None:
+    """Load aggregate source hash for a metallib.
+
+    Args:
+        metallib_path: Path to metallib. If None, uses default.
+
+    Returns:
+        Stored hash string, or None if file missing/invalid.
+    """
+    if metallib_path is None:
+        metallib_path = DEFAULT_METALLIB
+    metallib_path = Path(metallib_path)
+
+    hash_path = get_source_hash_path(metallib_path)
+    if not hash_path.exists():
+        return None
+
+    try:
+        return hash_path.read_text().strip()
+    except OSError as e:
+        logger.warning(f"Failed to load source hash: {e}")
+        return None
 
 
 def compute_source_checksums(
@@ -436,36 +557,7 @@ def is_metallib_stale(path: str | Path | None = None) -> bool:
         path = DEFAULT_METALLIB
     path = Path(path)
 
-    if not path.exists():
-        return True
-
-    # Try checksum-based comparison first
-    stored_checksums = load_checksum_manifest(path)
-    if stored_checksums is not None:
-        current_checksums = compute_source_checksums(path)
-
-        # Check for added, removed, or modified files
-        stored_files = set(stored_checksums.keys())
-        current_files = set(current_checksums.keys())
-
-        if stored_files != current_files:
-            added = current_files - stored_files
-            removed = stored_files - current_files
-            if added:
-                logger.debug(f"New .metal files: {added}")
-            if removed:
-                logger.debug(f"Removed .metal files: {removed}")
-            return True
-
-        for file_path, current_hash in current_checksums.items():
-            if stored_checksums.get(file_path) != current_hash:
-                logger.debug(f"Modified .metal file: {file_path}")
-                return True
-
-        return False
-
-    logger.debug("No checksum manifest found; treating metallib as stale")
-    return True
+    return bool(get_staleness_details(path)["is_stale"])
 
 
 def get_staleness_details(path: str | Path | None = None) -> dict[str, Any]:
@@ -499,8 +591,18 @@ def get_staleness_details(path: str | Path | None = None) -> dict[str, Any]:
 
     stored_checksums = load_checksum_manifest(path)
     if stored_checksums is None:
-        result["reason"] = "no checksum manifest"
-        result["is_stale"] = True
+        stored_hash = load_source_hash(path)
+        if stored_hash is None:
+            result["reason"] = "no staleness metadata"
+            result["is_stale"] = True
+            return result
+
+        current_hash = compute_source_hash(path)
+        if current_hash != stored_hash:
+            result["reason"] = "aggregate source hash mismatch"
+            result["is_stale"] = True
+        else:
+            result["reason"] = "source hash matches"
         return result
 
     result["has_manifest"] = True

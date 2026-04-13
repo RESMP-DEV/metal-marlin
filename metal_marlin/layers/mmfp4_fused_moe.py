@@ -23,14 +23,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .mmfp4_moe import MMFP4Expert, MMFP4FusedExpert, MMFP4MoE
+from ..expert_cache import ExpertCache
+from ..moe.prefetch import ExpertPrefetcher, PrefetchConfig, PrefetchStrategy
 from ..moe_dispatch import (
-    _dynamic_batch_experts,
     _fused_router_topk,
     compute_load_balancing_loss,
 )
-from ..moe.prefetch import ExpertPrefetcher, PrefetchStrategy, PrefetchConfig
-from ..expert_cache import ExpertCache
+from .mmfp4_moe import MMFP4Expert, MMFP4FusedExpert, MMFP4MoE
 
 if TYPE_CHECKING:
     pass
@@ -315,7 +314,7 @@ class MMFP4FusedMoE(nn.Module):
             return True
         
         # Cache actual shared expert weights
-        if (self._cached_shared_gate_up_packed is None or 
+        if (self._cached_shared_gate_up_packed is None or
             self._cached_shared_gate_up_packed.device != device):
             self._cached_shared_gate_up_packed = torch.cat(
                 [self.shared_experts.gate_proj.packed_weights.T,
@@ -614,7 +613,7 @@ class MMFP4FusedMoE(nn.Module):
         if hidden_flat.shape[0] == 1 and not self.training:
             # Only prefetch in decode mode (single token) and not training
             self._prefetch_experts_for_next_token(
-                topk_indices[0], 
+                topk_indices[0],
                 attention_pattern=attention_pattern,
                 layer_idx=self._layer_idx
             )

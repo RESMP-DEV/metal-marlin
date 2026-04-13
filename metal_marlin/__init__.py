@@ -76,12 +76,12 @@ from .heap_allocator import (
     MetalHeapAllocator,
 )
 from .kernels import (
+    dequantize_mmfp4,
     marlin_gemm_fp4,
     marlin_gemm_int4,
     mmfp4_fused_qkv,
     mmfp4_gemm,
-    dequantize_mmfp4,
-    pack_fp4_weights
+    pack_fp4_weights,
 )
 
 # Batched GEMM with variable sequence lengths (supports per-batch M dimensions)
@@ -101,6 +101,7 @@ from .kv_cache import (
     KVCacheTorch,
     MLAKVCache,
 )
+
 try:
     from .layer_replacement import (
         MetalQuantizedMoE,
@@ -122,10 +123,23 @@ except ImportError:
     replace_linear_layers = None
     replace_moe_layers = None
 from .layers import MarlinLinear
+
 try:
     from .inference_metal import MetalQuantizedLinear
 except ImportError:
     MetalQuantizedLinear = None
+from .fp8_utils import (  # FP8 E4M3/E5M2 utilities for KV cache
+    FP8_E4M3_MAX,
+    FP8_E5M2_MAX,
+    dequantize_fp8_e4m3,
+    dequantize_fp8_e5m2,
+    dequantize_kv_cache_fp8,
+    dequantize_kv_cache_fp8_e5m2,
+    quantize_kv_cache_fp8,
+    quantize_kv_cache_fp8_e5m2,
+    quantize_to_fp8_e4m3,
+    quantize_to_fp8_e5m2,
+)
 from .mixed_precision import (
     LayerPrecisionSelector,
     LayerQuantConfig,
@@ -170,18 +184,6 @@ from .pipeline import (
     RequestState,
     generate_pipelined,
 )
-from .fp8_utils import (  # FP8 E4M3/E5M2 utilities for KV cache
-    FP8_E4M3_MAX,
-    FP8_E5M2_MAX,
-    dequantize_fp8_e4m3,
-    dequantize_fp8_e5m2,
-    dequantize_kv_cache_fp8,
-    dequantize_kv_cache_fp8_e5m2,
-    quantize_kv_cache_fp8,
-    quantize_kv_cache_fp8_e5m2,
-    quantize_to_fp8_e4m3,
-    quantize_to_fp8_e5m2,
-)
 from .quantize import (  # FP8 weight quantization
     FP8_E4M3_VALUES,
     FP8_E5M2_VALUES,
@@ -207,6 +209,7 @@ from .rope import (
     get_yarn_mscale,
 )
 from .sampler import MetalSampler, SamplingConfig, sample_next_token
+
 try:
     from .vision import (
         InternVLProjector,
@@ -244,6 +247,8 @@ try:
         CppDispatchInfo,
         ExpertManagerCpp,
         create_expert_manager,
+    )
+    from .expert_manager_cpp import (
         is_available as expert_manager_available,
     )
 except ImportError:
@@ -256,6 +261,8 @@ except ImportError:
 try:
     from .moe_router_cpp import (
         MoERouterCpp,
+    )
+    from .moe_router_cpp import (
         is_available as moe_router_available,
     )
 except ImportError:
@@ -266,6 +273,8 @@ except ImportError:
 try:
     from .mla_attention_cpp import (
         MLAAttentionCpp,
+    )
+    from .mla_attention_cpp import (
         is_available as _mla_cpp_is_available,
     )
     mla_cpp_available = _mla_cpp_is_available()

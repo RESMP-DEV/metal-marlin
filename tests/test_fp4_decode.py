@@ -13,6 +13,7 @@ import pytest
 # Optional imports - tests skip if Metal implementation not available
 try:
     import torch
+
     from metal_marlin.kernels import dequant_fp4_decode_gemv
     from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
 

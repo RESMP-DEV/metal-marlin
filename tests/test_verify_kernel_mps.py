@@ -1,7 +1,9 @@
 
-import torch
 import pytest
+import torch
+
 from metal_marlin.layers.mmfp4_mtp_head import verify_kernel
+
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 class TestVerifyKernelMPS:

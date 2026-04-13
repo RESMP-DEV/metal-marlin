@@ -5,9 +5,9 @@ Standalone test that doesn't require torch/metal dependencies.
 
 import numpy as np
 import pytest
-from metal_marlin.paged.cache_manager import PagedKVCache
 
 from metal_marlin.paged.allocator import BlockAllocator
+from metal_marlin.paged.cache_manager import PagedKVCache
 from metal_marlin.paged.kv_block import KVBlockConfig
 
 

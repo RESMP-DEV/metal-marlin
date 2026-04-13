@@ -9,6 +9,7 @@ This module provides:
 from __future__ import annotations
 
 import json
+import os
 import warnings
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from .._compat import require_torch, torch
 
 GLM47_ARCHITECTURE = "GLM4ForCausalLM"
 GLM47_DEFAULT_TOKENIZER_ID = "zai-org/GLM-4.7-Flash"
+DEFAULT_KV_QUANTIZE_MODE = os.environ.get("METAL_MARLIN_KV_QUANT", "int8")
 
 try:
     from ..glm4_moe_experts import QuantizedGlm4MoEExperts as GLM4MoEExperts
@@ -80,7 +82,7 @@ class GLM47Loader:
         max_batch_size: int = 1,
         tokenizer_id: str | None = None,
         trust_remote_code: bool = True,
-        kv_quantize_mode: str = "none",
+        kv_quantize_mode: str = DEFAULT_KV_QUANTIZE_MODE,
     ) -> None:
         self.model_path = Path(model_path)
         self.device = device
@@ -288,7 +290,7 @@ def load_glm47(
     max_batch_size: int = 1,
     tokenizer_id: str | None = None,
     trust_remote_code: bool = True,
-    kv_quantize_mode: str = "none",
+    kv_quantize_mode: str = DEFAULT_KV_QUANTIZE_MODE,
 ) -> Any:
     """Load a GLM-4.7-Flash MMFP4 checkpoint and return a model ready for inference."""
     loader = GLM47Loader(

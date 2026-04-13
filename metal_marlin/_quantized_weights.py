@@ -3,6 +3,7 @@ from itertools import permutations
 from typing import Any
 
 import torch
+
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
 
 _LAYER_INDEX_RE = re.compile(r"(?:^|\.)(?:layers|h)\.(\d+)(?:\.|$)")

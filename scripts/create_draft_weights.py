@@ -8,10 +8,10 @@ These weights serve as a starting point for fine-tuning or testing
 speculative decoding.
 """
 
-import os
 import sys
-import torch
 from pathlib import Path
+
+import torch
 
 # Add project root to path to import metal_marlin modules
 # REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent

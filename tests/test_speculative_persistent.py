@@ -1,9 +1,10 @@
 
-import pytest
-import torch
-from unittest.mock import MagicMock, patch
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
 
 # Adjust path to ensure we can import the module under test if needed,
 # though pytest usually handles this if run from root.
@@ -17,12 +18,20 @@ if _parent.name == "metal_marlin":
     sys.path.insert(0, str(_parent.parent))
 
 try:
-    from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline, _speculative_generate, PersistentKVCache
     from metal_marlin.inference import mmfp4_pipeline
+    from metal_marlin.inference.mmfp4_pipeline import (
+        MMFP4Pipeline,
+        PersistentKVCache,
+        _speculative_generate,
+    )
 except ImportError:
     # Fallback for direct execution
-    from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline, _speculative_generate, PersistentKVCache
     from contrib.metal_marlin.metal_marlin.inference import mmfp4_pipeline
+    from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import (
+        MMFP4Pipeline,
+        PersistentKVCache,
+        _speculative_generate,
+    )
 
 # Mock verify_kernel to return 1 accepted token
 def mock_verify_kernel(*args, **kwargs):

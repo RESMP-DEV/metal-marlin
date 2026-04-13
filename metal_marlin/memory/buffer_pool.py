@@ -14,7 +14,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 @dataclass
 class PooledBuffer:
     """A buffer in the pool with metadata for management."""
-    tensor: "torch.Tensor"
+    tensor: torch.Tensor
     size_bytes: int
     added_time: float = field(default_factory=time.time)
     use_count: int = 0
@@ -134,8 +134,8 @@ class BufferPool:
             return self._large_pool, "large"
     
     def _get_best_fit(
-        self, 
-        size_bytes: int, 
+        self,
+        size_bytes: int,
         device: str
     ) -> PooledBuffer | None:
         """Find best-fit buffer from appropriate tier."""
@@ -163,11 +163,11 @@ class BufferPool:
         return None
     
     def acquire(
-        self, 
-        size_bytes: int, 
+        self,
+        size_bytes: int,
         device: str,
-        dtype: "torch.dtype" | None = None,
-    ) -> "torch.Tensor":
+        dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
         """Acquire a buffer from the pool or create new one.
         
         Args:
@@ -200,8 +200,8 @@ class BufferPool:
         return torch.empty(num_elements, dtype=dtype, device=device)
     
     def release(
-        self, 
-        tensor: "torch.Tensor",
+        self,
+        tensor: torch.Tensor,
         skip_pool: bool = False,
     ) -> None:
         """Release a buffer back to the pool.

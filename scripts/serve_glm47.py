@@ -126,7 +126,7 @@ def _install_mmfp4_adapter(use_paged_attention: bool) -> None:
         @classmethod
         def from_pretrained(
             cls, model_path: str, device: str = "mps"
-        ) -> "MMFP4ServingPipeline":
+        ) -> MMFP4ServingPipeline:
             pipeline = MMFP4Pipeline.from_pretrained(model_path, device=device)
             return cls(pipeline)
 

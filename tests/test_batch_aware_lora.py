@@ -1,7 +1,9 @@
+import pytest
 import torch
 import torch.nn as nn
-import pytest
+
 from metal_marlin.layers import MarlinLinear, MixedPrecisionLinear
+
 
 class TestBatchAwareLoRA:
     def test_marlin_linear_lora_dispatch(self):

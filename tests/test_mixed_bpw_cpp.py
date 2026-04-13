@@ -1,5 +1,5 @@
-import torch
 import numpy as np
+import torch
 
 try:
     from metal_marlin import _cpp_ext
@@ -9,6 +9,7 @@ except ImportError:
     can_import_cpp_ext = False
 
 import pytest
+
 
 @pytest.mark.skipif(not can_import_cpp_ext, reason="C++ extension not built")
 def test_cpp_dispatch_mixed_bpw_moe_e2e():

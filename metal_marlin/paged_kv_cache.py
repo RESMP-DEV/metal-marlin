@@ -20,8 +20,6 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from .fp8_utils import _compute_fp8_e4m3_codebook
-
 KVCacheDType = Literal["fp16", "fp8", "fp8_e5m2", "FP8-E5M2", "int8", "int4"]
 
 

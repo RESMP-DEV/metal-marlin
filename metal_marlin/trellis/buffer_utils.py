@@ -3,8 +3,9 @@
 On Apple Silicon, CPU and GPU share the same physical memory.
 MPS tensors can be accessed by Metal directly via data_ptr().
 """
-import torch
 from typing import Any
+
+import torch
 
 
 def mps_tensor_to_metal_buffer_zerocopy(

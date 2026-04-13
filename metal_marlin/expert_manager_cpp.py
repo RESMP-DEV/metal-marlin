@@ -49,7 +49,7 @@ if HAS_CPP_EXT:
             pass  # torch not available, _cpp_ext might still work
         
         import metal_marlin._cpp_ext as cpp_ext
-        from metal_marlin._cpp_ext import TokenGroupManager, DispatchInfo, TokenGroup
+        from metal_marlin._cpp_ext import DispatchInfo, TokenGroup, TokenGroupManager
         
         # Import ExpertBufferPool for expert weight management
         try:

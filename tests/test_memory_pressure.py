@@ -1,14 +1,20 @@
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
+
 import torch
-import sys
-import os
 
 # Add contrib/metal_marlin to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
-from metal_marlin.mmfp4_loader import WeightPrefetcher, MMFP4ModelLoader
-from metal_marlin.memory.mmfp4_memory import MemoryPressureConfig, get_global_memory_pressure_monitor, _global_monitor_lock
+from metal_marlin.memory.mmfp4_memory import (
+    MemoryPressureConfig,
+    _global_monitor_lock,
+    get_global_memory_pressure_monitor,
+)
+from metal_marlin.mmfp4_loader import MMFP4ModelLoader, WeightPrefetcher
+
 
 class TestMemoryPressure(unittest.TestCase):
     def setUp(self):

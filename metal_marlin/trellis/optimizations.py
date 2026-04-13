@@ -14,11 +14,18 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn.functional as F
 
-from ..metal_dispatch import (MetalKernelLibrary, _copy_buffer_to_tensor,
-                              _CopyBackBuffer, mps_tensor_to_metal_buffer)
-from .moe_dispatch import (CachedWeightBuffers, MoEBufferPool,
-                           create_cached_weight_buffers_from_cpu,
-                           select_moe_kernel)
+from ..metal_dispatch import (
+    MetalKernelLibrary,
+    _copy_buffer_to_tensor,
+    _CopyBackBuffer,
+    mps_tensor_to_metal_buffer,
+)
+from .moe_dispatch import (
+    CachedWeightBuffers,
+    MoEBufferPool,
+    create_cached_weight_buffers_from_cpu,
+    select_moe_kernel,
+)
 
 if TYPE_CHECKING:
     from .async_dispatch import AsyncCommandBufferManager

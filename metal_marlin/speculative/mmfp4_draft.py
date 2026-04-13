@@ -18,17 +18,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import Any
 
-from ..layers.mmfp4_mtp_head import MMFP4MTPHead, verify_kernel
 from ..kv_cache import KVCache
+from ..layers.mmfp4_mtp_head import MMFP4MTPHead
 from .draft import DraftModel, DraftOutput
 
 # Try to import optimized version
 try:
     from ..layers.mmfp4_mtp_head_optimized import (
-        OptimizedMMFP4MTPHead, 
         FastSpeculationEngine,
+        OptimizedMMFP4MTPHead,
         UltraFastMTPHead,
     )
     HAS_OPTIMIZED = True
@@ -417,15 +416,15 @@ class MMFP4DraftModel(DraftModel):
     def _fallback_output(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Generate fallback output when hidden states aren't available."""
         tokens = torch.zeros(
-            batch_size, 
-            num_tokens, 
-            dtype=torch.long, 
+            batch_size,
+            num_tokens,
+            dtype=torch.long,
             device=self.device
         )
         probs = torch.ones(
-            batch_size, 
-            num_tokens, 
-            self.vocab_size, 
+            batch_size,
+            num_tokens,
+            self.vocab_size,
             device=self.device
         ) / self.vocab_size
         return DraftOutput(tokens=tokens, probs=probs)

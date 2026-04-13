@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
-from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
+import pytest
+
+from metal_marlin.inference.mmfp4_pipeline import (
+    DEFAULT_MLA_KV_QUANT_MODE,
+    MMFP4Pipeline,
+)
+from metal_marlin.kv_cache import MLAKVCache
+
+KV_CACHE_MODULE = importlib.import_module("metal_marlin.kv_cache")
 
 
 class _DummyAttention:
@@ -84,3 +93,16 @@ def test_mla_glm4_kernel_preference_falls_back_when_unavailable(
         attn = layer.self_attn
         assert attn.use_fused_decode is True
         assert attn.prefer_glm4_fused_kernel is False
+
+
+def test_mla_kv_cache_defaults_to_int8_for_non_paged_pipeline(monkeypatch) -> None:
+    monkeypatch.setattr(KV_CACHE_MODULE, "require_mps", lambda *_args, **_kwargs: None)
+
+    pipeline = _build_pipeline(device="cpu")
+    pipeline.model.config.kv_lora_rank = 128
+    pipeline.model.config.qk_rope_head_dim = 64
+
+    cache = pipeline._create_kv_cache(batch_size=1, max_seq_len=128)
+
+    assert isinstance(cache, MLAKVCache)
+    assert cache.quantize_mode == DEFAULT_MLA_KV_QUANT_MODE

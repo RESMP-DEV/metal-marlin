@@ -2,7 +2,9 @@
 
 import numpy as np
 import pytest
+
 from metal_marlin.paged_kv_cache import PagedKVCache
+
 
 class TestPagedKVCacheFP8:
     @pytest.fixture
@@ -73,7 +75,7 @@ class TestPagedKVCacheFP8:
         
         seq_len = 16
         blocks = cache.allocate_blocks(seq_len)
-        slot_mapping = np.arange(seq_len, dtype=np.int32) 
+        slot_mapping = np.arange(seq_len, dtype=np.int32)
         # For simplicity, if blocks are 0, 1..., physical slots match logical if we map manually
         # allocate_blocks returns specific indices from free pool.
         # Let's map properly.

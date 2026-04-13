@@ -1,6 +1,8 @@
 
 import torch
-from tests.fixtures.synthetic_mixed_moe import create_synthetic_model, benchmark_forward
+
+from tests.fixtures.synthetic_mixed_moe import benchmark_forward, create_synthetic_model
+
 
 def measure():
     print("Creating model...")

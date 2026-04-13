@@ -2,6 +2,8 @@
 
 Standalone inference for trellis-quantized models on Apple Silicon via Metal acceleration.
 
+**Note:** Performance varies based on model configuration, quantization settings, and hardware. For the current benchmark surface, see `benchmarks/glm_flash_benchmark.py`, `benchmarks/bench_comprehensive_e2e.py`, and `reports/tps_benchmark_2026-02-18.md`.
+
 ## Quick Start
 
 ```python
@@ -22,37 +24,10 @@ print(tokenizer.decode(output[0]))
 
 | Feature | Description |
 |---------|-------------|
-| **MLA Attention** | 8x KV cache memory savings via compression |
+| **MLA Attention** | KV cache compression support |
 | **MoE Support** | GLM-4.7-Flash (64 experts + shared expert per layer) |
-| **Metal Acceleration** | On-the-fly dequantization via custom Metal shaders |
+| **Metal Backend** | Models run on Apple MPS device |
 | **Streaming Generation** | Token-by-token output with `stream_generate()` |
-| **Fast Decode Path** | 56-74 tok/s via pre-dequantized weights |
-
-## Performance (M4 Max)
-
-| Metric | Value |
-|--------|-------|
-| Decode throughput | ~2 tok/s |
-| Prefill throughput | ~32 tok/s |
-| Memory usage | ~60 GB |
-
-> **Note:** Performance varies significantly based on context length and model configuration.
-> See [reports/tps_benchmark_2026-02-18.md](reports/tps_benchmark_2026-02-18.md) for detailed benchmarks.
-
-## Fast Decode Path
-
-For single-token decode (M=1), Metal Marlin uses pre-dequantized weights with native PyTorch MPS operations:
-
-```python
-# Fast path is automatic for decode
-for token in model.generate_stream(input_ids, max_new_tokens=100):
-    print(tokenizer.decode(token), end="", flush=True)
-```
-
-**How it works:**
-1. On first decode, weights are dequantized FP4 → FP16
-2. Native `torch.nn.functional.linear()` is used for M=1
-3. Bypasses PyObjC dispatch overhead (~3.7ms → 0.15ms per layer)
 
 ## Architecture
 
@@ -60,7 +35,7 @@ for token in model.generate_stream(input_ids, max_new_tokens=100):
 |--------|---------|
 | `model.py` | MoE/dense transformer layers, `MixedBPWMoEDispatcher` |
 | `attention.py` | MLA (Multi-head Latent Attention) with KV compression |
-| `linear.py` | Quantized linear with Metal dequant kernels |
+| `linear.py` | Quantized linear operations |
 | `loader.py` | Layer-wise streaming model loading |
 | `generate.py` | Text generation with sampling and streaming |
 | `kv_cache_compressed.py` | Compressed KV cache for MLA |
@@ -75,6 +50,15 @@ for token in model.generate_stream(input_ids, max_new_tokens=100):
 for token in model.generate_stream(input_ids, max_new_tokens=100):
     print(tokenizer.decode(token), end="", flush=True)
 ```
+
+## Measured Performance
+
+| Metric | Result | Notes |
+|--------|--------|-------|
+| **Decode (batch=1, measured E2E)** | ~1.5-2 tok/s | `benchmarks/bench_comprehensive_e2e.py`, summarized in `reports/tps_benchmark_2026-02-18.md` |
+| **Prefill (2K context, measured)** | 42 tok/s | `benchmarks/glm_flash_benchmark.py`, M4 Max |
+
+> **Framing:** The current measured end-to-end decode result is ~1.5-2 tok/s. The oft-cited ~43 tok/s figure is a theoretical memory-bandwidth target, not a measured decode result. The gap is still attributed to Metal dispatch overhead, MoE routing, and kernel launch latency.
 
 ## More Details
 

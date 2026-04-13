@@ -8,8 +8,6 @@ Usage:
     uv run python tests/manual/benchmark_perplexity.py --model-path ./models/glm47-flash-mmfp4
 """
 
-from metal_marlin.trellis.config import GLM4_TOKENIZER_ID
-from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 import argparse
 import math
 import sys
@@ -17,6 +15,9 @@ from pathlib import Path
 
 import torch
 from transformers import AutoTokenizer
+
+from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
+from metal_marlin.trellis.config import GLM4_TOKENIZER_ID
 
 # Add parent directory for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

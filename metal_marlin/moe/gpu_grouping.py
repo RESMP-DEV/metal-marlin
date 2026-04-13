@@ -55,7 +55,7 @@ class GPUGroupingResult:
         """Total number of token-expert assignments (num_tokens * top_k)."""
         return self.num_tokens * self.top_k
     
-    def to_dispatch_info(self) -> "MoEDispatchInfo":
+    def to_dispatch_info(self) -> MoEDispatchInfo:
         """Convert to MoEDispatchInfo for compatibility with existing code."""
         from metal_marlin.moe_dispatch import MoEDispatchInfo
         
@@ -309,8 +309,8 @@ class GPUExpertGrouping:
         
         self.device = device
         self._use_gpu = (
-            prefer_gpu and 
-            device.type == "mps" and 
+            prefer_gpu and
+            device.type == "mps" and
             _has_metal_kernels()
         )
     

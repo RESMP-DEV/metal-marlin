@@ -1,7 +1,8 @@
-import torch
 import time
-import sys
+
+import torch
 from metal_marlin.core import _marlin_gemm
+
 
 def test_prefill():
     # Large prefill dimensions

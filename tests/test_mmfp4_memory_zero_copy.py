@@ -1,8 +1,11 @@
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
-from unittest.mock import MagicMock, patch
+
 from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager
+
 
 class TestMMFP4MemoryZeroCopy:
     
@@ -40,8 +43,8 @@ class TestMMFP4MemoryZeroCopy:
             # Verify load_layer was called with zero_copy=True
             # Use assert_any_call because prefetching may trigger multiple calls
             mock_loader_instance.load_layer.assert_any_call(
-                0, 
-                device=manager._device, 
+                0,
+                device=manager._device,
                 zero_copy=True
             )
             

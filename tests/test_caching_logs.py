@@ -43,7 +43,7 @@ def test_caching_log_messages(
         TrellisMoEMLP, "_get_tuning_cache_path", lambda self: cache_path
     )
     
-    # Reset the static flag so we can test the INFO message if we want, 
+    # Reset the static flag so we can test the INFO message if we want,
     # but more importantly to have a clean state.
     TrellisMoEMLP._tuning_message_printed = False
 
