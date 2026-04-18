@@ -135,6 +135,18 @@ def _detect_model_format(model_path: str) -> str:
                 or ("glm4" in architecture_blob and "moe" in architecture_blob)
             )
 
+            # Qwen3.5-35B-A3B MMFP4 detection:
+            # - model_type contains "qwen3_5_moe"
+            # - model name contains "qwen3.5-35b-a3b"
+            # - vocab_size == 248320 (Qwen3.5's distinctive vocab size)
+            has_qwen35_architecture = (
+                "qwen3.5" in model_name
+                or "qwen3_5_moe" in model_type
+                or ("qwen3" in model_type and "moe" in model_type)
+                or ("qwen3" in architecture_blob and "moe" in architecture_blob)
+                or config.get("vocab_size") == 248320
+            )
+
             expert_count_raw = (
                 config.get("num_experts")
                 or config.get("num_local_experts")
@@ -148,7 +160,9 @@ def _detect_model_format(model_path: str) -> str:
             has_mla = config.get("kv_lora_rank") is not None
             has_moe = expert_count > 1
 
-            if has_mmfp4_quant and (has_glm47_architecture or (has_mla and has_moe)):
+            if has_mmfp4_quant and (
+                has_glm47_architecture or has_qwen35_architecture or (has_mla and has_moe)
+            ):
                 return "mmfp4"
 
             # Trellis models have specific markers
@@ -246,6 +260,11 @@ class ServingEngine:
             model_name = (
                 str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
             )
+
+        # Normalize Qwen3.5 model name for API compatibility
+        model_name_lower = model_name.lower()
+        if "qwen3.5-35b-a3b" in model_name_lower or "qwen3_5" in model_name_lower:
+            model_name = "qwen3.5-35b-a3b"
 
         model_format = _detect_model_format(config.model_path)
         self._model_format = model_format
