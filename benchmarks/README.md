@@ -150,8 +150,34 @@ Compare fused kernels against PyTorch baseline.
 
 ### Model-Specific Benchmarks
 
-#### `bench_glm47_trellis.py`
-GLM-4.7-Flash Trellis-specific benchmark.
+#### `bench_moe_decode_glm_qwen.py`
+End-to-end decode regression benchmark for GLM-4.7 MoE, Qwen3 Coder Next MoE,
+and Qwen3.5/3.6-35B-A3B hybrid DeltaNet/Full-Attention MoE models.
+
+**Presets:**
+- `glm47_moe` — GLM-4.7 Flash Marlin/MMFP4/Trellis
+- `qwen3_coder_next` — Qwen3-Coder-Next-Trellis
+- `qwen35_35b_a3b` — Qwen3.5-35B-A3B hybrid DeltaNet/Full-Attention MoE (Trellis/MMFP4)
+- `qwen36_35b_a3b` — Qwen3.6-35B-A3B hybrid DeltaNet/Full-Attention MoE (Trellis/MMFP4)
+
+**Usage:**
+```bash
+# Run all presets (default)
+uv run python benchmarks/bench_moe_decode_glm_qwen.py
+
+# Run specific presets
+uv run python benchmarks/bench_moe_decode_glm_qwen.py --presets glm47_moe,qwen35_35b_a3b
+
+# Override model paths
+uv run python benchmarks/bench_moe_decode_glm_qwen.py \
+    --qwen35-model-path /path/to/Qwen3.5-35B-A3B-Trellis \
+    --qwen36-model-path /path/to/Qwen3.6-35B-A3B-Trellis
+
+# Per-preset override via --model-path
+uv run python benchmarks/bench_moe_decode_glm_qwen.py \
+    --model-path qwen35_35b_a3b=/path/to/model \
+    --model-path qwen36_35b_a3b=/path/to/model
+```
 
 #### `bench_glm47_quality.py`
 Quality/speed tradeoff for GLM-4.7.

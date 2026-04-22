@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Metal MR-GPTQ quantization for Qwen/Qwen3.5-35B-A3B (MMFP4).
+"""Metal MR-GPTQ quantization for Qwen/Qwen3.6-35B-A3B (MMFP4).
 
-This script targets the Qwen3.5 35B-A3B Mixture-of-Experts checkpoint and
+This script targets the Qwen3.6 35B-A3B Mixture-of-Experts checkpoint and
 writes a Metal Marlin MMFP4-compatible output directory.  It is the Metal
-(Apple Silicon) counterpart of ``quantize_qwen35_122b_a10b_mmfp4_cuda.py``.
+(Apple Silicon) counterpart of ``quantize_qwen36_122b_a10b_mmfp4_cuda.py``.
 
 Architecture highlights (35B-A3B):
   - 256 routed experts per MoE layer
   - 512 intermediate (FFN) dimension per expert
   - Expert MLP weights stored as 3-D tensors ``[E, out, in]``
   - Quantized with group-128 FP4 E2M1 (MMFP4) and packed 8-per-uint32
+
+Qwen3.6 adds DeltaNet (sparse local attention) layers alongside MoE.
+DeltaNet projection layers are kept in full precision.
 
 MMFP4 format:
   - FP4 E2M1 representable grid with LUT-based dequantization
@@ -22,11 +25,11 @@ MMFP4 format:
 
 Usage:
     cd contrib/metal_marlin
-    uv run python scripts/quantize_qwen35_35b_a3b_mmfp4.py \\
-        --model Qwen/Qwen3.5-35B-A3B --output models/Qwen3.5-35B-A3B-MMFP4
+    uv run python scripts/quantize_qwen36_35b_a3b_mmfp4.py \\
+        --model Qwen/Qwen3.6-35B-A3B --output models/Qwen3.6-35B-A3B-MMFP4
 
     # Quick test (no calibration, RTN fallback)
-    uv run python scripts/quantize_qwen35_35b_a3b_mmfp4.py --no-calibration
+    uv run python scripts/quantize_qwen36_35b_a3b_mmfp4.py --no-calibration
 """
 
 from __future__ import annotations
@@ -54,7 +57,7 @@ try:
         print(
             "WARNING: MPS not available.  This script targets Apple Silicon "
             "(M1/M2/M3/M4).  Metal kernels will not run.\n"
-            "For NVIDIA GPUs use quantize_qwen35_122b_a10b_mmfp4_cuda.py instead.",
+            "For NVIDIA GPUs use quantize_qwen36_122b_a10b_mmfp4_cuda.py instead.",
             file=sys.stderr,
         )
 except ImportError:
@@ -73,16 +76,19 @@ from scripts._qwen_moe_shared import (
     add_shared_args,
     copy_model_artifacts,
     infer_layer_prefixes,
+    load_model_config,
     load_weight_map,
     resolve_model_path,
     save_quantization_config,
 )
 
 # =====================================================================
-# Model constants – Qwen3.5-35B-A3B
+# Model constants – Qwen3.6-35B-A3B
 # =====================================================================
-DEFAULT_MODEL = "Qwen/Qwen3.5-35B-A3B"
-DEFAULT_OUTPUT = REPO_ROOT / "models" / "Qwen3.5-35B-A3B-MMFP4"
+# The 35B-A3B variant is shared by Qwen3.5 and Qwen3.6: both use 256 routed
+# experts with 512-dim intermediate FFN per expert.
+DEFAULT_MODEL = "Qwen/Qwen3.6-35B-A3B"
+DEFAULT_OUTPUT = REPO_ROOT / "models" / "Qwen3.6-35B-A3B-MMFP4"
 
 # Expert topology
 NUM_EXPERTS = 256
@@ -100,7 +106,7 @@ HADAMARD_BLOCK_SIZE = 64
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Quantize Qwen3.5-35B-A3B to MMFP4 (FP4 E2M1) with "
+            "Quantize Qwen3.6-35B-A3B to MMFP4 (FP4 E2M1) with "
             "Metal-accelerated MR-GPTQ."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -142,18 +148,25 @@ def main() -> int:
 
     weight_map = load_weight_map(model_path)
     layer_prefixes = infer_layer_prefixes(weight_map)
+    model_config = load_model_config(model_path)
 
     if verbose:
         print("=" * 72)
-        print("Qwen3.5-35B-A3B MR-GPTQ Metal Quantization (MMFP4)")
+        print("Qwen3.6-35B-A3B MR-GPTQ Metal Quantization (MMFP4)")
         print("=" * 72)
-        print(f"Model path:       {model_path}")
-        print(f"Output path:      {output_path}")
-        print(f"Layer prefixes:   {layer_prefixes}")
-        print(f"Experts:          {NUM_EXPERTS}")
-        print(f"Intermediate dim: {INTERMEDIATE_DIM}")
-        print(f"Group size:       {args.group_size}")
-        print(f"Backend:          {args.backend}")
+        print(f"Model path:         {model_path}")
+        print(f"Output path:        {output_path}")
+        print(f"Layer prefixes:     {layer_prefixes}")
+        print(f"Experts:            {NUM_EXPERTS}")
+        print(f"Intermediate dim:   {INTERMEDIATE_DIM}")
+        print(f"Group size:         {args.group_size}")
+        print(f"Backend:            {args.backend}")
+        print(f"DeltaNet enabled:   {model_config.get('use_delta', False)}")
+        print(
+            f"DeltaNet int dim:    {model_config.get('delta_intermediate_size', 'N/A')}"
+        )
+        if model_config.get("layer_types"):
+            print(f"Layer types:        {model_config['layer_types'][:5]}...")
 
     # ------------------------------------------------------------------
     # Calibration setup
@@ -240,6 +253,19 @@ def main() -> int:
         calibration_batches=calibration_batches,
         num_experts=NUM_EXPERTS,
         intermediate_dim=INTERMEDIATE_DIM,
+        method="mr_gptq_mps",
+        extra={
+            "deltanet": {
+                "use_delta": model_config.get("use_delta", False),
+                "delta_intermediate_size": model_config.get(
+                    "delta_intermediate_size"
+                ),
+                "layer_types": model_config.get("layer_types", []),
+                "full_attention_interval": model_config.get(
+                    "full_attention_interval"
+                ),
+            }
+        },
     )
 
     if verbose:

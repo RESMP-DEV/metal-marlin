@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from safetensors import safe_open
@@ -21,6 +21,9 @@ from metal_marlin.memory.buffer_recycler import BufferRecycler
 from metal_marlin.memory.memory_pressure import (
     get_global_memory_pressure_monitor,
 )
+
+if TYPE_CHECKING:
+    from metal_marlin.memory.mmfp4_memory import MMAPWeightManager
 
 logger = logging.getLogger(__name__)
 
@@ -493,7 +496,14 @@ class MMFP4ModelLoader:
             return json.loads(header_bytes.decode("utf-8")), header_len
     
     def _extract_layer_index(self, name: str) -> int | None:
-        """Extract layer index from tensor name using common patterns."""
+        """Extract layer index from tensor name using common patterns.
+
+        Supports:
+        - `layers.{idx}.` - Standard HuggingFace / GLM / Qwen3-Coder-Next
+        - `model.language_model.layers.{idx}.` - Qwen3.5 / Qwen3.6 official
+        - `h.{idx}.` - Legacy transformer style
+        - `blocks.{idx}.` - Alternative block-style naming
+        """
         patterns = [
             r"layers\.(\d+)\.",
             r"h\.(\d+)\.",
@@ -504,6 +514,63 @@ class MMFP4ModelLoader:
             if match:
                 return int(match.group(1))
         return None
+
+    def _generate_name_variants(self, name: str) -> list[str]:
+        """Generate naming variants for cross-naming compatibility.
+
+        Handles:
+        - `model.language_model.layers.{idx}` <-> `model.layers.{idx}`
+        - Strips or adds common suffixes like `.weight`
+
+        Args:
+            name: Original tensor name
+
+        Returns:
+            List of candidate names to try
+        """
+        variants: list[str] = [name]
+
+        # Strip common suffixes for lookup
+        base_name = name
+        for suffix in [".weight", ".qweight", ".bias"]:
+            if base_name.endswith(suffix):
+                base_name = base_name[:-len(suffix)]
+                variants.append(base_name)
+                break
+
+        # Generate cross-naming variants for model.language_model.layers <-> model.layers
+        if base_name.startswith("model.language_model."):
+            cross_name = base_name.replace("model.language_model.", "model.", 1)
+            variants.append(cross_name)
+            # Also add with suffixes
+            for suffix in [".weight", ".qweight", ".bias"]:
+                variants.append(cross_name + suffix)
+        elif base_name.startswith("model."):
+            cross_name = base_name.replace("model.", "model.language_model.", 1)
+            variants.append(cross_name)
+            for suffix in [".weight", ".qweight", ".bias"]:
+                variants.append(cross_name + suffix)
+        elif base_name.startswith("language_model."):
+            cross_name = "model." + base_name
+            variants.append(cross_name)
+            for suffix in [".weight", ".qweight", ".bias"]:
+                variants.append(cross_name + suffix)
+
+        # Add variants with suffixes for base names too
+        for variant in list(variants):
+            for suffix in [".weight", ".qweight", ".bias"]:
+                if not variant.endswith(suffix):
+                    variants.append(variant + suffix)
+
+        # Remove duplicates while preserving order
+        seen: set[str] = set()
+        unique: list[str] = []
+        for v in variants:
+            if v not in seen:
+                seen.add(v)
+                unique.append(v)
+
+        return unique
     
     def _get_shard_handle(self, shard_path: Path) -> Any:
         if shard_path not in self._shard_handles:
@@ -517,21 +584,38 @@ class MMFP4ModelLoader:
         zero_copy: bool = False,
     ) -> torch.Tensor:
         """Load a single tensor by name with optional device placement.
-        
+
+        Supports cross-naming lookup:
+        - `model.language_model.layers.{idx}` <-> `model.layers.{idx}`
+        - Handles `.weight` suffix variations
+
         Args:
             tensor_name: Full name of the tensor in the checkpoint
             device: Target device ("cpu", "mps", "cuda", etc.)
             zero_copy: Use zero-copy transfer for MPS Unified Memory
-            
+
         Returns:
             The loaded tensor
+
+        Raises:
+            KeyError: If tensor not found with any naming variant
         """
-        shard_path = self._tensor_to_shard.get(tensor_name)
+        # Try original name and cross-naming variants
+        candidate_names = self._generate_name_variants(tensor_name)
+
+        shard_path = None
+        resolved_name = None
+        for candidate in candidate_names:
+            if candidate in self._tensor_to_shard:
+                shard_path = self._tensor_to_shard[candidate]
+                resolved_name = candidate
+                break
+
         if shard_path is None:
             raise KeyError(f"Tensor {tensor_name} not found in model checkpoint")
-        
+
         handle = self._get_shard_handle(shard_path)
-        tensor = handle.get_tensor(tensor_name)
+        tensor = handle.get_tensor(resolved_name)
         
         # Device placement with zero-copy optimization
         if device != "cpu":
@@ -1077,37 +1161,68 @@ class MMFP4ModelLoader:
         return MMAPWeightManager(self, config=config, device=device, buffer_recycler=buffer_recycler)
 
     def get_quantized_weight(self, name: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return (packed_weights, scales) tuple for a quantized weight."""
+        """Return (packed_weights, scales) tuple for a quantized weight.
+
+        Supports multiple naming conventions:
+        - Standard: `model.layers.{idx}.{module}.weight`
+        - Qwen3.5/3.6: `model.language_model.layers.{idx}.{module}.weight`
+        - GLM-4.7: `model.layers.{idx}.{module}.qweight`
+
+        Args:
+            name: Tensor name (with or without suffix)
+
+        Returns:
+            Tuple of (qweight, scales) tensors
+        """
         # Look for packed weights (uint32 [K, N//8] where 8 FP4 nibbles packed per uint32)
         qweight_suffixes = [".qweight", ".weight", ".packed_weight"]
         scales_suffixes = [".scales", ".weight_scale", ".scales_fp4"]
-        
+
         base_name = name
         for s in qweight_suffixes + scales_suffixes:
             if name.endswith(s):
                 base_name = name[:-len(s)]
                 break
-        
+
+        # Generate candidate names for different naming conventions
+        candidate_bases = [base_name]
+
+        # Qwen3.5/3.6 official: model.language_model.layers.{idx}.*
+        # vs standard: model.layers.{idx}.*
+        if base_name.startswith("model.language_model."):
+            candidate_bases.append(base_name.replace("model.language_model.", "model.", 1))
+        elif base_name.startswith("model."):
+            candidate_bases.append(base_name.replace("model.", "model.language_model.", 1))
+        elif base_name.startswith("language_model."):
+            candidate_bases.append("model." + base_name)
+
+        # Try to find qweight and scales with any candidate base name
         qweight_key = None
-        for s in qweight_suffixes:
-            cand = base_name + s
-            if cand in self._tensor_to_shard:
-                qweight_key = cand
+        for base in candidate_bases:
+            for s in qweight_suffixes:
+                cand = base + s
+                if cand in self._tensor_to_shard:
+                    qweight_key = cand
+                    break
+            if qweight_key is not None:
                 break
-        
+
         scales_key = None
-        for s in scales_suffixes:
-            cand = base_name + s
-            if cand in self._tensor_to_shard:
-                scales_key = cand
+        for base in candidate_bases:
+            for s in scales_suffixes:
+                cand = base + s
+                if cand in self._tensor_to_shard:
+                    scales_key = cand
+                    break
+            if scales_key is not None:
                 break
-            
+
         if qweight_key is None or scales_key is None:
             raise KeyError(f"Could not find both qweight and scales for {name}")
-            
+
         qweight = self._get_shard_handle(self._tensor_to_shard[qweight_key]).get_tensor(qweight_key)
         scales = self._get_shard_handle(self._tensor_to_shard[scales_key]).get_tensor(scales_key)
-            
+
         return qweight, scales
     
     def __iter__(self) -> Iterator[tuple[int, dict[str, torch.Tensor]]]:

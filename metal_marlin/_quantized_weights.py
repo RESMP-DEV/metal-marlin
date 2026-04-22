@@ -6,7 +6,30 @@ import torch
 
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
 
+# Updated to handle Qwen3.5/3.6 official naming: model.language_model.layers.{idx}
 _LAYER_INDEX_RE = re.compile(r"(?:^|\.)(?:layers|h)\.(\d+)(?:\.|$)")
+_QWEN_LANG_MODEL_PREFIX = "model.language_model.layers."
+_STANDARD_MODEL_PREFIX = "model.layers."
+
+
+def _normalize_qwen_tensor_name(name: str) -> str:
+    """Normalize Qwen official checkpoint tensor names to standard format.
+
+    Handles:
+    - `model.language_model.layers.{idx}` -> `model.layers.{idx}`
+    - `language_model.layers.{idx}` -> `model.layers.{idx}`
+
+    Args:
+        name: Tensor name from checkpoint
+
+    Returns:
+        Normalized tensor name
+    """
+    if name.startswith(_QWEN_LANG_MODEL_PREFIX):
+        return name.replace(_QWEN_LANG_MODEL_PREFIX, _STANDARD_MODEL_PREFIX, 1)
+    if name.startswith("language_model.layers."):
+        return _STANDARD_MODEL_PREFIX + name[len("language_model.layers."):]
+    return name
 
 
 def _normalize_key(key: str) -> str:
@@ -242,6 +265,13 @@ def _apply_moe_expert_weights(
     Finds all QuantizedGlm4MoEExperts modules and loads their weights
     from the safetensors checkpoint.
 
+    Supports naming conventions:
+    - GLM-4.7: `model.layers.{idx}.mlp.experts.{e}.{gate|up|down}_proj.*`
+    - Qwen3.5/3.6: `model.language_model.layers.{idx}.mlp.experts.{e}.*`
+    - Qwen shared expert: `mlp.shared_expert.{gate|up|down}_proj.*`
+    - Qwen3-Coder-Next fused: `in_proj_qkvz`, `in_proj_ba`
+    - Qwen3.5/3.6 split: `in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`
+
     Returns:
         Number of expert layers loaded
     """
@@ -304,6 +334,70 @@ def _apply_moe_expert_weights(
             "gate_up_scales",
             "routed_gate_up_scales",
         ),
+        # Qwen shared expert naming
+        "shared_expert_gate": (
+            "shared_expert_gate",
+            "shared_expert.gate_proj",
+            "shared_expert_gate_proj",
+            "mlp.shared_expert_gate",
+        ),
+        "shared_expert_up": (
+            "shared_expert_up",
+            "shared_expert.up_proj",
+            "shared_expert_up_proj",
+            "mlp.shared_expert_up",
+        ),
+        "shared_expert_down": (
+            "shared_expert_down",
+            "shared_expert.down_proj",
+            "shared_expert_down_proj",
+            "mlp.shared_expert_down",
+        ),
+        # Qwen3-Coder-Next fused projections
+        "in_proj_qkvz": (
+            "in_proj_qkvz",
+            "in_proj_qkv_z",
+            "W_qkvz",
+        ),
+        "in_proj_ba": (
+            "in_proj_ba",
+            "in_proj_b_a",
+            "W_ba",
+        ),
+        # Qwen3.5/3.6 split projections
+        "in_proj_qkv": (
+            "in_proj_qkv",
+            "in_proj_q_k_v",
+            "W_qkv",
+        ),
+        "in_proj_z": (
+            "in_proj_z",
+            "W_z",
+        ),
+        "in_proj_a": (
+            "in_proj_a",
+            "W_a",
+        ),
+        "in_proj_b": (
+            "in_proj_b",
+            "W_b",
+        ),
+        # DeltaNet linear attention tensors
+        "linear_attn_A_log": (
+            "linear_attn.A_log",
+            "linear_attn_A_log",
+            "A_log",
+        ),
+        "linear_attn_dt_bias": (
+            "linear_attn.dt_bias",
+            "linear_attn_dt_bias",
+            "dt_bias",
+        ),
+        "linear_attn_conv1d": (
+            "linear_attn.conv1d.weight",
+            "linear_attn_conv1d",
+            "conv1d.weight",
+        ),
     }
 
     dst_aliases = {
@@ -315,6 +409,18 @@ def _apply_moe_expert_weights(
         "down_scales": src_aliases["down_scales"],
         "gate_up_packed": src_aliases["gate_up_packed"],
         "gate_up_scales": src_aliases["gate_up_scales"],
+        "shared_expert_gate": src_aliases["shared_expert_gate"],
+        "shared_expert_up": src_aliases["shared_expert_up"],
+        "shared_expert_down": src_aliases["shared_expert_down"],
+        "in_proj_qkvz": src_aliases["in_proj_qkvz"],
+        "in_proj_ba": src_aliases["in_proj_ba"],
+        "in_proj_qkv": src_aliases["in_proj_qkv"],
+        "in_proj_z": src_aliases["in_proj_z"],
+        "in_proj_a": src_aliases["in_proj_a"],
+        "in_proj_b": src_aliases["in_proj_b"],
+        "linear_attn_A_log": src_aliases["linear_attn_A_log"],
+        "linear_attn_dt_bias": src_aliases["linear_attn_dt_bias"],
+        "linear_attn_conv1d": src_aliases["linear_attn_conv1d"],
     }
 
     loaded_layers = 0
@@ -336,7 +442,9 @@ def _apply_moe_expert_weights(
         source_tensors = _flatten_tensor_tree(loaded_weights)
         source_lookup: dict[str, torch.Tensor] = {}
         for key, tensor in source_tensors.items():
-            source_lookup.setdefault(_normalize_key(key), tensor)
+            # Normalize Qwen naming: model.language_model.layers -> model.layers
+            normalized_key = _normalize_qwen_tensor_name(key)
+            source_lookup.setdefault(_normalize_key(normalized_key), tensor)
 
         buffer_lookup: dict[str, torch.Tensor] = {}
         for buffer_name, buffer_tensor in module.named_buffers():
@@ -370,6 +478,9 @@ def _apply_moe_expert_weights(
             "down_scales": copy_alias("down_scales"),
             "gate_up_packed": copy_alias("gate_up_packed"),
             "gate_up_scales": copy_alias("gate_up_scales"),
+            "shared_expert_gate": copy_alias("shared_expert_gate"),
+            "shared_expert_up": copy_alias("shared_expert_up"),
+            "shared_expert_down": copy_alias("shared_expert_down"),
         }
 
         copied_any = any(copy_results.values())

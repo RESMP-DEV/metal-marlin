@@ -4,6 +4,67 @@ from dataclasses import dataclass
 GLM4_TOKENIZER_ID = "zai-org/GLM-4.7-Flash"
 
 
+def _resolve_full_attention_interval(config: object) -> int | None:
+    """Extract ``full_attention_interval`` from a HF config-like object.
+
+    Qwen3NextConfig may store this in ``__dict__`` / ``to_dict()`` rather
+    than as a plain attribute.  This helper checks both paths.
+    """
+    # Direct attribute
+    val = getattr(config, "full_attention_interval", None)
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+
+    # Fallback: raw config dict
+    as_dict: dict = {}
+    if hasattr(config, "to_dict"):
+        try:
+            as_dict = config.to_dict()  # type: ignore[union-attr]
+        except Exception:
+            pass
+    elif hasattr(config, "__dict__"):
+        as_dict = config.__dict__  # type: ignore[attr-defined]
+
+    val = as_dict.get("full_attention_interval")
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _resolve_full_attention_interval_from_dict(data: dict) -> int | None:
+    """Extract ``full_attention_interval`` from a config.json dict.
+
+    Handles the case where this field may be nested inside ``text_config``
+    or stored at the top level.
+    """
+    # Check top-level first
+    val = data.get("full_attention_interval")
+    if val is not None:
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            pass
+
+    # Check nested text_config
+    text_cfg = data.get("text_config")
+    if isinstance(text_cfg, dict):
+        val = text_cfg.get("full_attention_interval")
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                pass
+
+    return None
+
+
 @dataclass
 class TrellisModelConfig:
     """Configuration for trellis-quantized model.
@@ -15,6 +76,16 @@ class TrellisModelConfig:
     - GLM-4.7-Flash: MLA attention, 64 experts, first_moe_layer=1
     - Qwen3-30B-A3B: GQA attention, 128 experts, first_moe_layer=0 (all MoE)
     - DeepSeek-V3: MLA attention, 256 experts, first_moe_layer varies
+    - Qwen3.5/3.6 DeltaNet hybrids: interleaved linear + full attention,
+      optional MoE with shared experts
+    - Qwen VL / VL-MoE multimodal: nested text_config support
+
+    Qwen Hybrid DeltaNet Support:
+    - layer_types: Per-layer attention type (linear_attention/full_attention)
+    - full_attention_interval: Frequency of full-attention layers in hybrids
+    - linear_* fields: DeltaNet linear attention dimensions
+    - shared_expert_intermediate_size: Shared expert FFN size for hybrid MoE
+    - Nested text_config handling for multimodal Qwen VL models
     """
 
     # Model architecture (generic defaults, override via from_pretrained)
@@ -44,7 +115,22 @@ class TrellisModelConfig:
     num_shared_experts: int = 0  # Shared expert count (GLM has 1)
     num_experts_per_tok: int = 1  # Top-k experts per token
     moe_intermediate_size: int | None = None  # Per-expert hidden size
+    shared_expert_intermediate_size: int | None = None  # Qwen hybrid MoE
     first_moe_layer: int = 0  # First layer using MoE (0 = all layers)
+
+    # Qwen hybrid DeltaNet layer configuration
+    # Per-layer attention type list, e.g.
+    # ["linear_attention", "full_attention", "linear_attention", ...]
+    layer_types: list[str] | None = None
+    # How often a full-attention layer appears in DeltaNet hybrids
+    full_attention_interval: int | None = None
+
+    # DeltaNet linear-attention dimensions (Qwen3.5/3.6 hybrids)
+    linear_key_head_dim: int | None = None
+    linear_value_head_dim: int | None = None
+    linear_num_key_heads: int | None = None
+    linear_num_value_heads: int | None = None
+    linear_conv_kernel_dim: int | None = None
 
     # RoPE configuration
     rope_theta: float = 10000.0
@@ -98,7 +184,17 @@ class TrellisModelConfig:
 
     @classmethod
     def _from_dict(cls, data: dict) -> "TrellisModelConfig":
-        """Create config from a dictionary (config.json contents)."""
+        """Create config from a dictionary (config.json contents).
+
+        Handles nested ``text_config`` dicts (Qwen VL / VL-MoE style
+        multimodal configs) by merging text-level fields into the top-level
+        mapping before constructing the dataclass.
+        """
+        # If a nested text_config dict is present, merge its fields so
+        # architecture-specific names are resolved uniformly.
+        if "text_config" in data and isinstance(data["text_config"], dict):
+            data = {**data, **data["text_config"]}
+
         # Direct field mapping for fields we recognize
         kwargs = {k: v for k, v in data.items() if hasattr(cls, k)}
 
@@ -120,11 +216,39 @@ class TrellisModelConfig:
             "qk_nope_head_dim": "qk_nope_head_dim",
             "qk_rope_head_dim": "qk_rope_head_dim",
             "v_head_dim": "v_head_dim",
+            # Qwen hybrid MoE shared expert
+            "shared_expert_intermediate_size": "shared_expert_intermediate_size",
+            "num_shared_experts": "num_shared_experts",
+            # Qwen hybrid DeltaNet layer configuration
+            "layer_types": "layer_types",
+            "full_attention_interval": "full_attention_interval",
+            # DeltaNet linear-attention dimensions
+            "linear_key_head_dim": "linear_key_head_dim",
+            "linear_value_head_dim": "linear_value_head_dim",
+            "linear_num_key_heads": "linear_num_key_heads",
+            "linear_num_value_heads": "linear_num_value_heads",
+            "linear_conv_kernel_dim": "linear_conv_kernel_dim",
         }
 
         for src_key, dst_key in field_mappings.items():
             if src_key in data and dst_key and dst_key not in kwargs:
                 kwargs[dst_key] = data[src_key]
+
+        # Handle full_attention_interval with fallback for nested dicts
+        if "full_attention_interval" not in kwargs:
+            fai = _resolve_full_attention_interval_from_dict(data)
+            if fai is not None:
+                kwargs["full_attention_interval"] = fai
+        elif isinstance(kwargs["full_attention_interval"], str):
+            # Coerce string to int if possible
+            try:
+                kwargs["full_attention_interval"] = int(kwargs["full_attention_interval"])
+            except (TypeError, ValueError):
+                kwargs["full_attention_interval"] = None
+
+        # Validate layer_types is a list if present
+        if "layer_types" in kwargs and not isinstance(kwargs["layer_types"], list):
+            kwargs["layer_types"] = None
 
         # Compute head_dim if not provided
         if "head_dim" not in kwargs and "hidden_size" in kwargs and "num_attention_heads" in kwargs:
@@ -140,10 +264,21 @@ class TrellisModelConfig:
 
     @classmethod
     def _from_hf_config(cls, hf_config) -> "TrellisModelConfig":
-        """Create config from HuggingFace AutoConfig."""
+        """Create config from HuggingFace AutoConfig.
+
+        Handles nested ``text_config`` (multimodal Qwen VL models) by
+        resolving the effective text config first, then extracting fields.
+        """
         kwargs = {}
 
-        # Standard LLM fields
+        # Resolve effective text config for multimodal wrappers
+        text_cfg = hf_config
+        if hasattr(hf_config, "text_config"):
+            nested = getattr(hf_config, "text_config", None)
+            if nested is not None and hasattr(nested, "vocab_size"):
+                text_cfg = nested
+
+        # Standard LLM fields (read from effective text config)
         for attr in [
             "hidden_size",
             "num_hidden_layers",
@@ -154,41 +289,74 @@ class TrellisModelConfig:
             "rms_norm_eps",
             "rope_theta",
         ]:
-            if hasattr(hf_config, attr):
-                kwargs[attr] = getattr(hf_config, attr)
+            if hasattr(text_cfg, attr):
+                kwargs[attr] = getattr(text_cfg, attr)
 
         # KV heads (various names)
         for attr in ["num_key_value_heads", "num_kv_heads"]:
-            if hasattr(hf_config, attr):
-                kwargs["num_kv_heads"] = getattr(hf_config, attr)
+            if hasattr(text_cfg, attr):
+                kwargs["num_kv_heads"] = getattr(text_cfg, attr)
                 break
 
         # MoE fields
         for attr in ["num_local_experts", "n_routed_experts", "num_experts"]:
-            if hasattr(hf_config, attr):
-                kwargs["num_experts"] = getattr(hf_config, attr)
+            if hasattr(text_cfg, attr):
+                kwargs["num_experts"] = getattr(text_cfg, attr)
                 break
 
-        if hasattr(hf_config, "num_experts_per_tok"):
-            kwargs["num_experts_per_tok"] = hf_config.num_experts_per_tok
+        if hasattr(text_cfg, "num_experts_per_tok"):
+            kwargs["num_experts_per_tok"] = text_cfg.num_experts_per_tok
+
+        if hasattr(text_cfg, "num_shared_experts"):
+            kwargs["num_shared_experts"] = text_cfg.num_shared_experts
+
+        if hasattr(text_cfg, "moe_intermediate_size"):
+            kwargs["moe_intermediate_size"] = text_cfg.moe_intermediate_size
+
+        if hasattr(text_cfg, "shared_expert_intermediate_size"):
+            kwargs["shared_expert_intermediate_size"] = (
+                text_cfg.shared_expert_intermediate_size
+            )
 
         # MLA fields (GLM/DeepSeek)
-        if hasattr(hf_config, "kv_lora_rank"):
-            kwargs["kv_lora_rank"] = hf_config.kv_lora_rank
-        if hasattr(hf_config, "q_lora_rank"):
-            kwargs["q_lora_rank"] = hf_config.q_lora_rank
+        if hasattr(text_cfg, "kv_lora_rank"):
+            kwargs["kv_lora_rank"] = text_cfg.kv_lora_rank
+        if hasattr(text_cfg, "q_lora_rank"):
+            kwargs["q_lora_rank"] = text_cfg.q_lora_rank
 
         # GLM-4 MLA specific dimensions
-        if hasattr(hf_config, "qk_nope_head_dim"):
-            kwargs["qk_nope_head_dim"] = hf_config.qk_nope_head_dim
-        if hasattr(hf_config, "qk_rope_head_dim"):
-            kwargs["qk_rope_head_dim"] = hf_config.qk_rope_head_dim
-        if hasattr(hf_config, "v_head_dim"):
-            kwargs["v_head_dim"] = hf_config.v_head_dim
+        if hasattr(text_cfg, "qk_nope_head_dim"):
+            kwargs["qk_nope_head_dim"] = text_cfg.qk_nope_head_dim
+        if hasattr(text_cfg, "qk_rope_head_dim"):
+            kwargs["qk_rope_head_dim"] = text_cfg.qk_rope_head_dim
+        if hasattr(text_cfg, "v_head_dim"):
+            kwargs["v_head_dim"] = text_cfg.v_head_dim
+
+        # Qwen hybrid DeltaNet fields
+        if hasattr(text_cfg, "layer_types") and isinstance(
+            text_cfg.layer_types, list
+        ):
+            kwargs["layer_types"] = text_cfg.layer_types
+
+        # full_attention_interval may live in kwargs dict rather than attr
+        fai = _resolve_full_attention_interval(text_cfg)
+        if fai is not None:
+            kwargs["full_attention_interval"] = fai
+
+        # DeltaNet linear-attention dimensions
+        for attr in (
+            "linear_key_head_dim",
+            "linear_value_head_dim",
+            "linear_num_key_heads",
+            "linear_num_value_heads",
+            "linear_conv_kernel_dim",
+        ):
+            if hasattr(text_cfg, attr):
+                kwargs[attr] = getattr(text_cfg, attr)
 
         # RoPE scaling
-        if hasattr(hf_config, "rope_scaling") and hf_config.rope_scaling:
-            kwargs["rope_scaling"] = hf_config.rope_scaling
+        if hasattr(text_cfg, "rope_scaling") and text_cfg.rope_scaling:
+            kwargs["rope_scaling"] = text_cfg.rope_scaling
 
         if hasattr(hf_config, "use_mixed_bpw_optimizations"):
             kwargs["use_mixed_bpw_optimizations"] = hf_config.use_mixed_bpw_optimizations
