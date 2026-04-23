@@ -446,8 +446,8 @@ class ServingEngine:
                 str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
             )
 
-        # Normalize model name for API compatibility using config-driven detection
-        model_name = _normalize_model_name(config.model_path)
+        # Normalize the selected model name without discarding explicit overrides.
+        model_name = _normalize_model_name(model_name)
 
         model_format = _detect_model_format(config.model_path)
         self._model_format = model_format
