@@ -63,9 +63,20 @@ class ModelConfig:
     num_experts: int | None = None
     num_experts_per_tok: int | None = None
     shared_expert_intermediate_size: int | None = None
+    moe_intermediate_size: int | None = None
 
     # MTP-specific (Multi-Token Prediction)
-    num_mtp_heads: int | None = None  # GLM-4.7-Flash uses MTP
+    num_mtp_heads: int | None = None
+    mtp_num_hidden_layers: int | None = None
+    mtp_expansion_factor: int | None = None
+
+    # Qwen3.6 MoE/DAN layer types
+    layer_types: list[str] | None = None
+    full_attention_interval: list[int] | None = None
+
+    # DeltaNet (Qwen3.6 sparse attention)
+    use_delta: bool = False
+    delta_intermediate_size: int | None = None
 
     @property
     def is_moe(self) -> bool:
@@ -77,12 +88,22 @@ class ModelConfig:
         """Check if model has Multi-Token Prediction heads."""
         return self.num_mtp_heads is not None and self.num_mtp_heads > 0
 
+    @property
+    def has_delta(self) -> bool:
+        """Check if model uses DeltaNet sparse attention."""
+        return self.use_delta and self.delta_intermediate_size is not None
+
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         """Parse from HuggingFace config.json."""
         text_cfg = d.get("text_config")
         if not isinstance(text_cfg, dict):
             text_cfg = {}
+
+        # When text_config is a non-empty dict, it represents the effective
+        # text model config nested inside a multimodal wrapper. Its fields
+        # take precedence over the outer wrapper fields.
+        has_text_cfg = bool(text_cfg)
 
         def _get(*keys: str, default: Any = None) -> Any:
             for key in keys:
@@ -92,10 +113,25 @@ class ModelConfig:
                     return d[key]
             return default
 
-        # Parse rope_scaling config if present
+        # model_type: when text_config is present, use its model_type;
+        # the outer model_type is the multimodal wrapper type (e.g. "qwen3_6_moe")
+        # not the effective text model type (e.g. "qwen3_6_moe_text")
+        if has_text_cfg and "model_type" in text_cfg:
+            model_type = text_cfg["model_type"]
+        elif has_text_cfg:
+            # text_config exists but has no explicit model_type;
+            # don't fall back to the outer wrapper's model_type
+            model_type = "llama"
+        else:
+            model_type = d.get("model_type", "llama")
+
+        # Parse rope_scaling / rope_parameters config if present
+        # Qwen3.5/3.6 use rope_parameters; other models use rope_scaling
         rope_scaling = _get("rope_scaling", default={}) or {}
-        if not rope_scaling and isinstance(text_cfg.get("rope_parameters"), dict):
-            rope_scaling = text_cfg["rope_parameters"]
+        if not rope_scaling:
+            rope_params = _get("rope_parameters", default={})
+            if isinstance(rope_params, dict) and rope_params:
+                rope_scaling = rope_params
         rope_scaling_type = rope_scaling.get("type") if rope_scaling else None
         if rope_scaling_type is None and rope_scaling:
             rope_scaling_type = rope_scaling.get("rope_type")
@@ -106,6 +142,16 @@ class ModelConfig:
         rope_beta_fast = rope_scaling.get("beta_fast", 32.0) if rope_scaling else 32.0
         rope_beta_slow = rope_scaling.get("beta_slow", 1.0) if rope_scaling else 1.0
         rope_mscale = rope_scaling.get("mscale", 1.0) if rope_scaling else 1.0
+
+        # Normalize full_attention_interval: Qwen3.6 configs may use int or list[int]
+        fai = _get("full_attention_interval")
+        if isinstance(fai, int):
+            fai = [fai]
+
+        # Ensure layer_types is a list of strings or None
+        lt = _get("layer_types")
+        if isinstance(lt, list):
+            lt = [str(x) for x in lt]
 
         return cls(
             hidden_size=_get("hidden_size", "d_model", default=4096),
@@ -126,7 +172,7 @@ class ModelConfig:
             rms_norm_eps=_get("rms_norm_eps", "layer_norm_epsilon", default=1e-6),
             hidden_act=_get("hidden_act", "activation_function", default="silu"),
             tie_word_embeddings=bool(_get("tie_word_embeddings", default=False)),
-            model_type=_get("model_type", default="llama"),
+            model_type=model_type,
             use_sliding_window=bool(_get("use_sliding_window", default=False)),
             sliding_window=_get("sliding_window"),
             # RoPE scaling (YaRN, linear, dynamic)
@@ -137,17 +183,33 @@ class ModelConfig:
             rope_beta_slow=rope_beta_slow,
             rope_mscale=rope_mscale,
             # MoE config - check multiple naming conventions
+            # Qwen3.5/3.6 use num_local_experts; some configs use num_experts or n_routed_experts
             num_experts=_get("num_local_experts", "num_experts", "n_routed_experts"),
+            # Qwen3.5/3.6 use num_experts_per_tok; some configs use num_selected_experts
             num_experts_per_tok=_get("num_experts_per_tok", "num_selected_experts"),
+            # Qwen3.5/3.6 official configs use shared_expert_intermediate_size
+            # Fallback to shared_expert_ffn_hidden_size for compatibility
             shared_expert_intermediate_size=_get(
                 "shared_expert_intermediate_size",
-                "n_shared_experts",
+                "shared_expert_ffn_hidden_size",
             ),
-            # MTP config (GLM-4.7-Flash style)
+            # Qwen3.5/3.6 use moe_intermediate_size; some configs use expert_intermediate_size
+            moe_intermediate_size=_get("moe_intermediate_size", "expert_intermediate_size"),
+            # MTP config (GLM-4.7-Flash / Qwen3.6 style)
             num_mtp_heads=_get(
                 "num_mtp_heads",
                 "num_nextn_predict_layers",
-                "mtp_num_hidden_layers",
+            ),
+            mtp_num_hidden_layers=_get("mtp_num_hidden_layers"),
+            mtp_expansion_factor=_get("mtp_expansion_factor"),
+            # Qwen3.6 MoE/DAN layer types
+            layer_types=lt,
+            full_attention_interval=fai,
+            # DeltaNet (Qwen3.6 sparse attention) - support alternate naming
+            use_delta=bool(_get("use_delta", default=False)),
+            delta_intermediate_size=_get(
+                "delta_intermediate_size",
+                "delta_net_intermediate_size",
             ),
         )
 

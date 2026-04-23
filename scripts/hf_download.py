@@ -36,6 +36,10 @@ MODEL_PRESETS = {
     "mistral-7b": "mistralai/Mistral-7B-v0.1",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-v0.1",
     "qwen-7b": "Qwen/Qwen-7B",
+    "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
+    "qwen3.6-35b-a3b": "Qwen/Qwen3.6-35B-A3B",
+    "qwen3-coder-next": "Qwen/Qwen3-Coder-Next",
+    "qwen3.6-35b-a3b-fp8": "Qwen/Qwen3.6-35B-A3B-FP8",
     "deepseek-7b": "deepseek-ai/deepseek-llm-7b-base",
 }
 
@@ -185,6 +189,17 @@ Examples:
 
   # List available presets
   %(prog)s --list
+
+Lightweight investigation pull (Qwen DeltaNet-family models):
+  # Inspect model config before full download
+  %(prog)s --preset qwen3.6-35b-a3b --file config.json
+  %(prog)s --preset qwen3.6-35b-a3b --file tokenizer.json
+
+  # Lightweight pull: config + tokenizer only (no weights)
+  %(prog)s --preset qwen3.6-35b-a3b --allow config.json tokenizer.json tokenizer_config.json
+
+  # Qwen DeltaNet-family investigation pattern
+  %(prog)s --preset qwen3-coder-next --allow config.json tokenizer*.json qwen3*.json
         """,
     )
 

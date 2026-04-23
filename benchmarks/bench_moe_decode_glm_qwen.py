@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Decode regression benchmark for GLM-4.7 MoE and Qwen3 Coder Next MoE.
+"""Decode regression benchmark for GLM-4.7 MoE, Qwen3 Coder Next MoE,
+and Qwen3.5/3.6-35B-A3B hybrid DeltaNet/Full-Attention MoE models.
 
 This benchmark reports per-preset decode metrics:
 - decode_ms_per_token
@@ -34,7 +35,12 @@ from metal_marlin.trellis.lm import TrellisForCausalLM  # noqa: E402
 if not HAS_TORCH or torch is None:
     raise RuntimeError("PyTorch is required to run this benchmark.")
 
-SUPPORTED_PRESETS = ("glm47_moe", "qwen3_coder_next")
+SUPPORTED_PRESETS = (
+    "glm47_moe",
+    "qwen3_coder_next",
+    "qwen35_35b_a3b",
+    "qwen36_35b_a3b",
+)
 DEFAULT_PRESETS = list(SUPPORTED_PRESETS)
 
 PRESET_CANDIDATES: dict[str, list[str]] = {
@@ -46,6 +52,14 @@ PRESET_CANDIDATES: dict[str, list[str]] = {
     "qwen3_coder_next": [
         "models/Qwen3-Coder-Next-Trellis-3bpw",
         "models/Qwen3-Coder-Next-Trellis",
+    ],
+    "qwen35_35b_a3b": [
+        "models/Qwen3.5-35B-A3B-Trellis",
+        "models/Qwen3.5-35B-A3B-Trellis-MMFP4",
+    ],
+    "qwen36_35b_a3b": [
+        "models/Qwen3.6-35B-A3B-Trellis",
+        "models/Qwen3.6-35B-A3B-Trellis-MMFP4",
     ],
 }
 
@@ -297,7 +311,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--presets",
         default=",".join(DEFAULT_PRESETS),
-        help="Comma-separated presets to run (default: glm47_moe,qwen3_coder_next).",
+        help=(
+            "Comma-separated presets to run (default: glm47_moe,qwen3_coder_next,"
+            "qwen35_35b_a3b,qwen36_35b_a3b)."
+        ),
     )
     parser.add_argument(
         "--preset",
@@ -315,6 +332,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--qwen-model-path",
         help="Override model path for preset 'qwen3_coder_next'.",
+    )
+    parser.add_argument(
+        "--qwen35-model-path",
+        help="Override model path for preset 'qwen35_35b_a3b'.",
+    )
+    parser.add_argument(
+        "--qwen36-model-path",
+        help="Override model path for preset 'qwen36_35b_a3b'.",
     )
     parser.add_argument("--device", default="auto", help="Device: auto|mps|cuda|cpu.")
     parser.add_argument("--prompt-len", type=int, default=128)
@@ -350,6 +375,10 @@ def main() -> int:
         overrides["glm47_moe"] = args.glm_model_path
     if args.qwen_model_path:
         overrides["qwen3_coder_next"] = args.qwen_model_path
+    if args.qwen35_model_path:
+        overrides["qwen35_35b_a3b"] = args.qwen35_model_path
+    if args.qwen36_model_path:
+        overrides["qwen36_35b_a3b"] = args.qwen36_model_path
 
     results: dict[str, dict[str, Any]] = {}
     for preset in presets:

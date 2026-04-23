@@ -84,11 +84,163 @@ class RequestLatencyMetrics:
         return None
 
 
+# Model family detection constants
+QWEN_DELTANET_MODEL_TYPES = frozenset({
+    "qwen3_5_moe",
+    "qwen3_6_moe",
+    "qwen3_next",
+    "qwen3_vl_moe",
+})
+
+QWEN_DELTANET_MODEL_NAME_PATTERNS = frozenset({
+    "qwen3.5-35b-a3b",
+    "qwen3.6-35b-a3b",
+    "qwen3.5",
+    "qwen3.6",
+})
+
+# MoE marker keys for config-driven detection
+MOE_EXPERT_COUNTS = frozenset({
+    "num_experts",
+    "num_local_experts",
+    "n_routed_experts",
+})
+
+# MoE intermediate size keys
+MOE_INTERMEDIATE_KEYS = frozenset({
+    "moe_intermediate_size",
+    "expert_intermediate_size",
+})
+
+# DeltaNet hybrid layer type markers
+DELTANET_LAYER_TYPES = frozenset({
+    "linear_attention",
+    "full_attention",
+    "delta_attention",
+    "hybrid_attention",
+})
+
+
+def _get_config_value(config: dict, *keys: str, default: Any = None) -> Any:
+    """Get a value from config dict, checking multiple possible keys.
+
+    Handles nested text_config dictionaries for multimodal models.
+    """
+    # First check text_config if present (for multimodal models)
+    text_cfg = config.get("text_config")
+    if isinstance(text_cfg, dict):
+        for key in keys:
+            if key in text_cfg:
+                return text_cfg[key]
+
+    # Then check top-level
+    for key in keys:
+        if key in config:
+            return config[key]
+
+    return default
+
+
+def _is_moe_config(config: dict) -> bool:
+    """Check if config indicates a Mixture of Experts model."""
+    for key in MOE_EXPERT_COUNTS:
+        val = _get_config_value(config, key, default=0)
+        try:
+            if int(val) > 1:
+                return True
+        except (TypeError, ValueError):
+            pass
+    return False
+
+
+def _has_deltanet_layers(config: dict) -> bool:
+    """Check if config has DeltaNet hybrid layer types."""
+    layer_types = _get_config_value(config, "layer_types")
+    if isinstance(layer_types, list) and layer_types:
+        # Check if any layer type matches DeltaNet patterns
+        types_set = frozenset(str(lt).lower() for lt in layer_types)
+        return bool(types_set & DELTANET_LAYER_TYPES)
+
+    # Also check for full_attention_interval as a secondary marker
+    # Qwen3.5 uses int (e.g. 7), Qwen3.6 uses list (e.g. [0, 1, 2, 3])
+    fai = _get_config_value(config, "full_attention_interval")
+    if fai is not None:
+        try:
+            if isinstance(fai, list):
+                if len(fai) > 0:
+                    return True
+            elif int(fai) > 0:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+    # Check for explicit use_delta marker (Qwen3.6 DeltaNet flag)
+    use_delta = _get_config_value(config, "use_delta")
+    if use_delta is True:
+        return True
+
+    return False
+
+
+def _is_qwen_deltanet_family(config: dict, model_name: str = "") -> bool:
+    """Check if config represents a Qwen DeltaNet family model.
+
+    Uses config markers instead of hard-coded vocab size heuristics.
+    """
+    model_type = _get_config_value(config, "model_type", default="").lower()
+    model_name_lower = model_name.lower()
+
+    # 1. Check model_type patterns for Qwen DeltaNet family
+    for qtype in QWEN_DELTANET_MODEL_TYPES:
+        if qtype in model_type:
+            return True
+
+    # 2. Check model name patterns
+    for pattern in QWEN_DELTANET_MODEL_NAME_PATTERNS:
+        if pattern in model_name_lower:
+            return True
+
+    # 3. Check architecture list for Qwen DeltaNet markers
+    architectures = _get_config_value(config, "architectures", default=[])
+    if isinstance(architectures, list):
+        arch_blob = " ".join(str(a).lower() for a in architectures)
+        for qtype in QWEN_DELTANET_MODEL_TYPES:
+            if qtype.replace("_", "") in arch_blob.replace("_", ""):
+                return True
+
+    # 4. Config-driven hybrid MoE + DeltaNet detection
+    # Qwen3.5/3.6 hybrids have MoE + DeltaNet layer markers
+    has_moe = _is_moe_config(config)
+    has_deltanet = _has_deltanet_layers(config)
+    has_moe_intermediate = any(
+        _get_config_value(config, key) is not None
+        for key in MOE_INTERMEDIATE_KEYS
+    )
+
+    # If config has both MoE markers and DeltaNet layer types, it's a Qwen hybrid
+    if has_moe and has_deltanet:
+        return True
+
+    # 5. Shared expert intermediate size is distinctive for Qwen hybrid MoE
+    shared_exp_size = _get_config_value(
+        config,
+        "shared_expert_intermediate_size",
+        "shared_expert_ffn_hidden_size",
+    )
+    if shared_exp_size is not None and has_deltanet:
+        return True
+
+    return False
+
+
 def _detect_model_format(model_path: str) -> str:
     """Detect if model is Marlin, MMFP4, or Trellis format.
 
+    Uses config-driven detection based on model_type, text_config,
+    layer_types, and MoE metadata instead of narrow hard-coded heuristics.
+
     Returns:
-        'mmfp4' for GLM-4.7-Flash style MMFP4 checkpoints
+        'mmfp4' for GLM-4.7-Flash and Qwen DeltaNet hybrid MMFP4 checkpoints
         'trellis' if model uses Trellis quantization
         'marlin' otherwise (default)
     """
@@ -101,13 +253,14 @@ def _detect_model_format(model_path: str) -> str:
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
+            if not isinstance(config, dict):
+                config = {}
+
             quantization_config = config.get("quantization_config", {})
             if not isinstance(quantization_config, dict):
                 quantization_config = {}
 
-            # GLM-4.7-Flash MMFP4 detection:
-            # 1) MMFP4 quantization marker
-            # 2) GLM architecture markers (or MLA + MoE structural markers)
+            # MMFP4 quantization marker detection
             quant_markers = (
                 quantization_config.get("quant_method"),
                 quantization_config.get("format"),
@@ -121,12 +274,17 @@ def _detect_model_format(model_path: str) -> str:
                 for marker in quant_markers
             )
 
+            model_name = str(config.get("_name_or_path", "")).lower()
+
+            # GLM-4.7-Flash MMFP4 detection using config markers:
+            # - GLM architecture markers (glm4_moe or glm4 + moe in model_type/architectures)
+            # - MLA attention markers (kv_lora_rank)
+            # - MoE structural markers
             architectures = config.get("architectures", [])
             if not isinstance(architectures, list):
                 architectures = [architectures]
             architecture_blob = " ".join(str(item).lower() for item in architectures)
             model_type = str(config.get("model_type", "")).lower()
-            model_name = str(config.get("_name_or_path", "")).lower()
 
             has_glm47_architecture = (
                 "glm-4.7-flash" in model_name
@@ -135,35 +293,32 @@ def _detect_model_format(model_path: str) -> str:
                 or ("glm4" in architecture_blob and "moe" in architecture_blob)
             )
 
-            # Qwen3.5-35B-A3B MMFP4 detection:
-            # - model_type contains "qwen3_5_moe"
-            # - model name contains "qwen3.5-35b-a3b"
-            # - vocab_size == 248320 (Qwen3.5's distinctive vocab size)
-            has_qwen35_architecture = (
-                "qwen3.5" in model_name
-                or "qwen3_5_moe" in model_type
-                or ("qwen3" in model_type and "moe" in model_type)
-                or ("qwen3" in architecture_blob and "moe" in architecture_blob)
-                or config.get("vocab_size") == 248320
-            )
+            # MLA attention marker for GLM models
+            has_mla = _get_config_value(config, "kv_lora_rank") is not None
 
-            expert_count_raw = (
-                config.get("num_experts")
-                or config.get("num_local_experts")
-                or config.get("n_routed_experts")
-                or 0
-            )
-            try:
-                expert_count = int(expert_count_raw)
-            except (TypeError, ValueError):
-                expert_count = 0
-            has_mla = config.get("kv_lora_rank") is not None
-            has_moe = expert_count > 1
+            # Qwen DeltaNet family MMFP4 detection using config markers:
+            # - model_type contains Qwen DeltaNet family types
+            # - model name contains Qwen3.5/3.6 patterns
+            # - layer_types indicates DeltaNet hybrid layers
+            # - MoE metadata present alongside DeltaNet markers
+            has_qwen_deltanet = _is_qwen_deltanet_family(config, model_name)
 
-            if has_mmfp4_quant and (
-                has_glm47_architecture or has_qwen35_architecture or (has_mla and has_moe)
-            ):
-                return "mmfp4"
+            # If MMFP4 quantization AND any recognized MMFP4 architecture:
+            # - GLM-4.7-Flash (MLA + MoE)
+            # - Qwen DeltaNet family (hybrid MoE + DeltaNet layers)
+            # - Generic MoE + MLA combination
+            if has_mmfp4_quant:
+                expert_count_raw = _get_config_value(
+                    config, "num_experts", "num_local_experts", "n_routed_experts", default=0,
+                )
+                try:
+                    expert_count = int(expert_count_raw)
+                except (TypeError, ValueError):
+                    expert_count = 0
+                has_moe = expert_count > 1
+
+                if has_glm47_architecture or has_qwen_deltanet or (has_mla and has_moe):
+                    return "mmfp4"
 
             # Trellis models have specific markers
             if quantization_config.get("quant_method") == "trellis":
@@ -178,6 +333,36 @@ def _detect_model_format(model_path: str) -> str:
         return "trellis"
 
     return "marlin"
+
+
+def _normalize_model_name(model_path: str) -> str:
+    """Normalize model name for API compatibility.
+
+    Maps Qwen DeltaNet family model identifiers to canonical API names
+    without inventing new incompatible naming schemes.
+    """
+    model_name = model_path.split("/")[-1] if model_path else "mock-model"
+    model_name_lower = model_name.lower()
+
+    # --- Qwen3.5 variants (check specific patterns before generic) ---
+    if "qwen3.5" in model_name_lower or "qwen3_5" in model_name_lower:
+        # Specific size variants first
+        if "35b" in model_name_lower and "a3b" in model_name_lower:
+            return "Qwen/Qwen3.5-35B-A3B"
+        if "30b" in model_name_lower and "a3b" in model_name_lower:
+            return "Qwen/Qwen3.5-30B-A3B"
+        # Generic Qwen3.5 for other variants
+        return "Qwen/Qwen3.5"
+
+    # --- Qwen3.6 variants (check specific patterns before generic) ---
+    if "qwen3.6" in model_name_lower or "qwen3_6" in model_name_lower:
+        # Specific size variants first
+        if "35b" in model_name_lower and "a3b" in model_name_lower:
+            return "Qwen/Qwen3.6-35B-A3B"
+        # Generic Qwen3.6 for other variants
+        return "Qwen/Qwen3.6"
+
+    return model_name
 
 
 class _MockTokenizer:
@@ -261,10 +446,8 @@ class ServingEngine:
                 str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
             )
 
-        # Normalize Qwen3.5 model name for API compatibility
-        model_name_lower = model_name.lower()
-        if "qwen3.5-35b-a3b" in model_name_lower or "qwen3_5" in model_name_lower:
-            model_name = "qwen3.5-35b-a3b"
+        # Normalize the selected model name without discarding explicit overrides.
+        model_name = _normalize_model_name(model_name)
 
         model_format = _detect_model_format(config.model_path)
         self._model_format = model_format
