@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import pytest
 import torch
@@ -17,6 +18,9 @@ try:
 except ImportError:
     HAS_TRELLIS = False
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class _MockTrellisWeight:
@@ -34,6 +38,7 @@ def _create_mock_trellis_linear(
     bits: int,
     device: str,
 ) -> TrellisLinear:
+    logger.debug("_create_mock_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     tile_dim = 16
     tiles_k = (out_features + tile_dim - 1) // tile_dim
     tiles_n = (in_features + tile_dim - 1) // tile_dim
@@ -72,6 +77,7 @@ def _create_mock_dense_mlp(
     bits: int,
     device: str,
 ) -> TrellisDenseMLP:
+    logger.debug("_create_mock_dense_mlp called with hidden_dim=%s, intermediate_dim=%s, bits=%s", hidden_dim, intermediate_dim, bits)
     gate_proj = _create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     up_proj = _create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     down_proj = _create_mock_trellis_linear(intermediate_dim, hidden_dim, bits, device)
@@ -85,6 +91,7 @@ def _create_mock_moe_mlp_mixed(
     num_experts_per_tok: int = 3,
     device: str = "cpu",
 ) -> TrellisMoEMLP:
+    logger.debug("_create_mock_moe_mlp_mixed called with hidden_dim=%s, intermediate_dim=%s, bits_per_expert=%s", hidden_dim, intermediate_dim, bits_per_expert)
     num_experts = len(bits_per_expert)
     router = nn.Linear(
         hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32
@@ -109,6 +116,7 @@ def _create_mock_moe_mlp_mixed(
 @pytest.mark.skipif(not HAS_TRELLIS, reason="Trellis modules required")
 def test_mixed_bpw_decode_keeps_grouped_dispatch_active(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mixed-BPW decode should stay on grouped bit-tuple dispatch and be deterministic."""
+    logger.info("running test_mixed_bpw_decode_keeps_grouped_dispatch_active")
     import metal_marlin.trellis.moe_dispatch as moe_dispatch_mod
 
     torch.manual_seed(1234)
@@ -134,6 +142,7 @@ def test_mixed_bpw_decode_keeps_grouped_dispatch_active(monkeypatch: pytest.Monk
     fallback_calls = 0
 
     def _fail_fallback(*_args: object, **_kwargs: object) -> torch.Tensor:
+        logger.debug("_fail_fallback called")
         nonlocal fallback_calls
         fallback_calls += 1
         raise AssertionError("Regressed to mixed-BPW fallback path.")
@@ -151,6 +160,7 @@ def test_mixed_bpw_decode_keeps_grouped_dispatch_active(monkeypatch: pytest.Monk
         bit_group_buffers: dict[tuple[int, int, int], tuple[list[int], object]],
         **_kwargs: object,
     ) -> torch.Tensor:
+        logger.debug("_fake_dispatch_moe_per_bit_tuple called")
         nonlocal dispatch_calls
         dispatch_calls += 1
 
@@ -182,6 +192,7 @@ def test_mixed_bpw_decode_keeps_grouped_dispatch_active(monkeypatch: pytest.Monk
     def _route_decode(
         input_x: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        logger.debug("_route_decode called with input_x=%s", input_x)
         router_logits = mlp.router(input_x.to(dtype=mlp.router.weight.dtype))
         routing_weights, selected_experts = torch.topk(
             torch.softmax(router_logits, dim=-1, dtype=torch.float16),
@@ -226,6 +237,7 @@ def test_mixed_bpw_grouped_partial_fallback_merges_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Grouped path should run for available tuples and fallback only missing tuples."""
+    logger.info("running test_mixed_bpw_grouped_partial_fallback_merges_once")
     import metal_marlin.trellis.moe_dispatch as moe_dispatch_mod
 
     monkeypatch.setattr(TrellisMoEMLP, "_create_buffers_eagerly", lambda self: None)
@@ -246,12 +258,15 @@ def test_mixed_bpw_grouped_partial_fallback_merges_once(
 
     class _FakeWorkspacePool:
         def __init__(self, hidden_dim: int) -> None:
+            logger.debug("initializing %s with hidden_dim=%s", type(self).__name__, hidden_dim)
             self.hidden_dim = hidden_dim
 
         def get_accum_buffer(self, batch_size: int) -> torch.Tensor:
+            logger.debug("get_accum_buffer called with batch_size=%s", batch_size)
             return torch.zeros(batch_size, self.hidden_dim, dtype=torch.float32)
 
         def get_output_buffer(self, batch_size: int) -> torch.Tensor:
+            logger.debug("get_output_buffer called with batch_size=%s", batch_size)
             return torch.zeros(batch_size, self.hidden_dim, dtype=torch.float16)
 
     monkeypatch.setattr(
@@ -262,6 +277,7 @@ def test_mixed_bpw_grouped_partial_fallback_merges_once(
     monkeypatch.setattr(mlp, "_get_cached_buffers", lambda: object())
 
     def _fail_full_fallback(*_args: object, **_kwargs: object) -> torch.Tensor:
+        logger.debug("_fail_full_fallback called")
         raise AssertionError("Should not use full grouped fallback when some groups are ready.")
 
     monkeypatch.setattr(mlp, "_forward_grouped_fallback", _fail_full_fallback)
@@ -271,6 +287,7 @@ def test_mixed_bpw_grouped_partial_fallback_merges_once(
     fallback_expert_ids: list[torch.Tensor] = []
 
     def _fake_dispatch_moe_per_bit_tuple(*_args: object, **kwargs: object) -> torch.Tensor:
+        logger.debug("_fake_dispatch_moe_per_bit_tuple called")
         bit_group_buffers = kwargs["bit_group_buffers"]
         output_accum = kwargs["output_accum"]
         output_fp16 = kwargs["output_fp16"]
@@ -286,6 +303,7 @@ def test_mixed_bpw_grouped_partial_fallback_merges_once(
         return output_fp16
 
     def _fake_dispatch_moe_trellis_swiglu(*_args: object, **kwargs: object) -> torch.Tensor:
+        logger.debug("_fake_dispatch_moe_trellis_swiglu called")
         activations = kwargs["activations"]
         bits = kwargs["bits"]
         expert_ids = kwargs["expert_ids"]

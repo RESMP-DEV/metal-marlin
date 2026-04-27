@@ -1,13 +1,18 @@
 """Tests for CPU to Metal buffer creation."""
+import logging
 
 import numpy as np
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def metal_device():
     """Get Metal device."""
+    logger.debug("metal_device called")
     import Metal
     return Metal.MTLCreateSystemDefaultDevice()
 
@@ -17,6 +22,7 @@ class TestCPUToMetalBuffer:
 
     def test_float32_tensor(self, metal_device):
         """Test float32 CPU tensor to Metal buffer."""
+        logger.info("running test_float32_tensor")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         t = torch.randn(100, 100, dtype=torch.float32)
@@ -26,6 +32,7 @@ class TestCPUToMetalBuffer:
 
     def test_float16_tensor(self, metal_device):
         """Test float16 CPU tensor to Metal buffer."""
+        logger.info("running test_float16_tensor")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         t = torch.randn(100, 100, dtype=torch.float16)
@@ -35,6 +42,7 @@ class TestCPUToMetalBuffer:
 
     def test_uint8_tensor(self, metal_device):
         """Test uint8 CPU tensor to Metal buffer."""
+        logger.info("running test_uint8_tensor")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         t = torch.randint(0, 256, (100, 100), dtype=torch.uint8)
@@ -44,6 +52,7 @@ class TestCPUToMetalBuffer:
 
     def test_rejects_mps_tensor(self, metal_device):
         """Test that MPS tensors are rejected."""
+        logger.info("running test_rejects_mps_tensor")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         t = torch.randn(10, 10, device="mps")
@@ -52,6 +61,7 @@ class TestCPUToMetalBuffer:
 
     def test_handles_non_contiguous(self, metal_device):
         """Test non-contiguous tensor is made contiguous."""
+        logger.info("running test_handles_non_contiguous")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         t = torch.randn(100, 100).t()  # Transpose makes non-contiguous
@@ -65,6 +75,7 @@ class TestNumpyToMetalBuffer:
 
     def test_float32_array_via_torch(self, metal_device):
         """Test float32 numpy array to Metal buffer via torch tensor."""
+        logger.info("running test_float32_array_via_torch")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         arr = np.random.randn(100, 100).astype(np.float32)
@@ -75,6 +86,7 @@ class TestNumpyToMetalBuffer:
 
     def test_uint8_array_via_torch(self, metal_device):
         """Test uint8 numpy array to Metal buffer via torch tensor."""
+        logger.info("running test_uint8_array_via_torch")
         from metal_marlin.metal_dispatch import cpu_tensor_to_metal_buffer
 
         arr = np.random.randint(0, 256, (100, 100), dtype=np.uint8)

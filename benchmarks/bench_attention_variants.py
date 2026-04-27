@@ -17,6 +17,7 @@ Metrics:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import os
 
@@ -43,6 +44,9 @@ except ImportError:
     torch = None  # type: ignore
     F = None  # type: ignore
 
+
+logger = logging.getLogger(__name__)
+
 # Add contrib paths for book-maker implementations
 _ROOT = Path(__file__).resolve().parents[1]
 _BOOK_MAKER_PATH = (
@@ -59,6 +63,7 @@ sys.path.insert(0, str(_BOOK_MAKER_PATH.parent / "ch06"))
 
 
 def ensure_torch() -> None:
+    logger.debug("ensure_torch called")
     if not TORCH_AVAILABLE:
         raise RuntimeError("PyTorch is required for this benchmark")
 
@@ -76,6 +81,7 @@ class AttentionConfig:
 
     @property
     def hidden_dim(self) -> int:
+        logger.debug("hidden_dim called")
         return self.num_heads * self.head_dim
 
     def __str__(self) -> str:
@@ -99,6 +105,7 @@ class BenchmarkResult:
     tflops: float
 
     def to_dict(self) -> dict:
+        logger.debug("to_dict called")
         return {
             "implementation": self.implementation,
             "batch_size": self.config.batch_size,
@@ -127,6 +134,7 @@ def standard_attention(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: bool = True
 ) -> torch.Tensor:
     """Standard naive attention: O(N^2) memory for attention matrix."""
+    logger.debug("standard_attention called with q=%s, k=%s, v=%s", q, k, v)
     scale = q.size(-1) ** -0.5
     scores = torch.matmul(q, k.transpose(-2, -1)) * scale
 
@@ -147,6 +155,7 @@ def flash_attention_tiled(
     Tiled flash attention implementation.
     Uses online softmax to avoid materializing full attention matrix.
     """
+    logger.debug("flash_attention_tiled called with q=%s, k=%s, v=%s", q, k, v)
     batch, heads, seq_len, head_dim = q.shape
     scale = head_dim ** -0.5
 
@@ -214,6 +223,7 @@ class FusedQKVAttention(nn.Module):
     """
 
     def __init__(self, hidden_dim: int, num_heads: int):
+        logger.debug("initializing %s with hidden_dim=%s, num_heads=%s", type(self).__name__, hidden_dim, num_heads)
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
@@ -225,6 +235,7 @@ class FusedQKVAttention(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor, causal: bool = True) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch, seq_len, _ = x.shape
 
         # Fused QKV projection
@@ -261,6 +272,7 @@ class GroupedQueryAttention(nn.Module):
     """
 
     def __init__(self, hidden_dim: int, num_heads: int, num_kv_heads: int):
+        logger.debug("initializing %s with hidden_dim=%s, num_heads=%s, num_kv_heads=%s", type(self).__name__, hidden_dim, num_heads, num_kv_heads)
         super().__init__()
         assert num_heads % num_kv_heads == 0, "num_heads must be divisible by num_kv_heads"
 
@@ -277,6 +289,7 @@ class GroupedQueryAttention(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor, causal: bool = True) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch, seq_len, _ = x.shape
 
         # Project to Q, K, V
@@ -315,6 +328,7 @@ class StandardMultiHeadAttention(nn.Module):
     """Standard MHA with separate Q, K, V projections."""
 
     def __init__(self, hidden_dim: int, num_heads: int):
+        logger.debug("initializing %s with hidden_dim=%s, num_heads=%s", type(self).__name__, hidden_dim, num_heads)
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
@@ -327,6 +341,7 @@ class StandardMultiHeadAttention(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
     def forward(self, x: torch.Tensor, causal: bool = True) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch, seq_len, _ = x.shape
 
         q = self.q_proj(x)
@@ -359,6 +374,7 @@ class StandardMultiHeadAttention(nn.Module):
 
 def get_device() -> torch.device:
     """Get the best available device."""
+    logger.debug("get_device called")
     if torch.cuda.is_available():
         return torch.device("cuda")
     elif torch.backends.mps.is_available():
@@ -368,6 +384,7 @@ def get_device() -> torch.device:
 
 def measure_memory(func: Callable, config: AttentionConfig, *args, **kwargs) -> tuple[torch.Tensor, float]:
     """Run function and measure peak memory usage."""
+    logger.debug("measure_memory called with func=%s, config=%s", func, config)
     device = get_device()
 
     if device.type == "cuda":
@@ -406,6 +423,7 @@ def calculate_tflops(config: AttentionConfig, time_ms: float) -> float:
     # Attn @ V: 2 * B * H * N^2 * D
     # Total: ~4 * B * H * N^2 * D
 
+    logger.debug("calculate_tflops called with config=%s, time_ms=%s", config, time_ms)
     flops = 4 * config.batch_size * config.num_heads * config.seq_len * config.seq_len * config.head_dim
 
     if config.num_kv_heads and config.num_kv_heads < config.num_heads:
@@ -427,6 +445,7 @@ def benchmark_implementation(
     reference_output: torch.Tensor | None = None,
 ) -> BenchmarkResult:
     """Benchmark a single attention implementation."""
+    logger.info("benchmark_implementation starting with name=%s, config=%s, forward_fn=%s, warmup=%s", name, config, forward_fn, warmup)
     ensure_torch()
     device = get_device()
 
@@ -485,6 +504,7 @@ def benchmark_implementation(
 
 def benchmark_standard_attention(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     """Benchmark standard attention with separate projections."""
+    logger.info("benchmark_standard_attention starting with config=%s", config)
     ensure_torch()
     device = get_device()
 
@@ -492,6 +512,7 @@ def benchmark_standard_attention(config: AttentionConfig, **kwargs) -> Benchmark
     model.eval()
 
     def forward_fn(x):
+        logger.debug("forward_fn called with x=%s", x)
         with torch.no_grad():
             return model(x, causal=config.causal)
 
@@ -500,6 +521,7 @@ def benchmark_standard_attention(config: AttentionConfig, **kwargs) -> Benchmark
 
 def benchmark_fused_qkv(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     """Benchmark fused QKV attention."""
+    logger.info("benchmark_fused_qkv starting with config=%s", config)
     ensure_torch()
     device = get_device()
 
@@ -507,6 +529,7 @@ def benchmark_fused_qkv(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     model.eval()
 
     def forward_fn(x):
+        logger.debug("forward_fn called with x=%s", x)
         with torch.no_grad():
             return model(x, causal=config.causal)
 
@@ -515,6 +538,7 @@ def benchmark_fused_qkv(config: AttentionConfig, **kwargs) -> BenchmarkResult:
 
 def benchmark_gqa(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     """Benchmark Grouped Query Attention."""
+    logger.info("benchmark_gqa starting with config=%s", config)
     ensure_torch()
     device = get_device()
 
@@ -528,6 +552,7 @@ def benchmark_gqa(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     model.eval()
 
     def forward_fn(x):
+        logger.debug("forward_fn called with x=%s", x)
         with torch.no_grad():
             return model(x, causal=config.causal)
 
@@ -538,6 +563,7 @@ def benchmark_gqa(config: AttentionConfig, **kwargs) -> BenchmarkResult:
 
 def benchmark_flash_attention(config: AttentionConfig, **kwargs) -> BenchmarkResult:
     """Benchmark flash attention using optimized SDPA when available."""
+    logger.info("benchmark_flash_attention starting with config=%s", config)
     ensure_torch()
     device = get_device()
 
@@ -548,6 +574,7 @@ def benchmark_flash_attention(config: AttentionConfig, **kwargs) -> BenchmarkRes
     has_sdpa = hasattr(F, 'scaled_dot_product_attention')
 
     def flash_forward(x):
+        logger.debug("flash_forward called with x=%s", x)
         with torch.no_grad():
             batch, seq_len, _ = x.shape
 
@@ -577,6 +604,7 @@ def benchmark_flash_attention(config: AttentionConfig, **kwargs) -> BenchmarkRes
 
 def generate_reference_output(config: AttentionConfig) -> torch.Tensor:
     """Generate reference output using double precision."""
+    logger.debug("generate_reference_output called with config=%s", config)
     ensure_torch()
     device = get_device()
 
@@ -600,6 +628,7 @@ def generate_reference_output(config: AttentionConfig) -> torch.Tensor:
 
 def print_results(results: list[BenchmarkResult]) -> None:
     """Print benchmark results in a formatted table."""
+    logger.debug("print_results called with results=%s", results)
     print("\n" + "=" * 120)
     print(
         f"{'Implementation':<30} {'Time (ms)':<15} {'Memory (MB)':<15} {'Throughput (tok/s)':<20} {'TFLOPS':<10} {'Max Error':<12}"
@@ -617,6 +646,7 @@ def print_results(results: list[BenchmarkResult]) -> None:
 
 def print_comparison(results: list[BenchmarkResult], baseline: str = "Standard Attention") -> None:
     """Print speedup comparison relative to baseline."""
+    logger.debug("print_comparison called with results=%s, baseline=%s", results, baseline)
     baseline_result = next((r for r in results if r.implementation == baseline), None)
     if not baseline_result:
         return
@@ -636,6 +666,7 @@ def run_benchmark_suite(
     iterations: int = 20,
 ) -> list[BenchmarkResult]:
     """Run full benchmark suite."""
+    logger.info("run_benchmark_suite starting with configs=%s, implementations=%s, warmup=%s, iterations=%s", configs, implementations, warmup, iterations)
     ensure_torch()
 
     all_results = []
@@ -692,6 +723,7 @@ def run_benchmark_suite(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Benchmark attention implementations")
     parser.add_argument(
         "--implementations",

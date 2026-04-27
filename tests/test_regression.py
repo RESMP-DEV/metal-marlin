@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from pathlib import Path
@@ -42,6 +43,9 @@ except ImportError:
     HAS_TRELLIS = False
 
 
+
+logger = logging.getLogger(__name__)
+
 requires_model = pytest.mark.skipif(
     not MODEL_EXISTS,
     reason=f"Model not found at {MODEL_PATH}. Set MODEL_PATH env var or download model.",
@@ -58,6 +62,7 @@ def model():
 
     This fixture is module-scoped to avoid reloading for each test.
     """
+    logger.debug("model called")
     if not HAS_TRELLIS or not MODEL_EXISTS or not HAS_MPS:
         pytest.skip("Model, Trellis module, or MPS not available")
 
@@ -72,6 +77,7 @@ class TestForwardPassRegression:
 
     def test_forward_16_tokens_under_500ms(self, model):
         """Forward pass with 16 tokens should complete in <500ms."""
+        logger.info("running test_forward_16_tokens_under_500ms")
         input_ids = torch.randint(0, 1000, (1, 16), device="mps")
 
         # Warmup
@@ -90,6 +96,7 @@ class TestForwardPassRegression:
 
     def test_forward_128_tokens_under_2000ms(self, model):
         """Forward pass with 128 tokens should complete in <2000ms."""
+        logger.info("running test_forward_128_tokens_under_2000ms")
         input_ids = torch.randint(0, 1000, (1, 128), device="mps")
 
         # Warmup
@@ -123,6 +130,7 @@ class TestMoEDispatchRegression:
         Before fix: 20,000ms+ per layer (47 layers = catastrophic)
         After fix: should be <1000ms total for a forward pass
         """
+        logger.info("running test_no_moe_dispatch_slowness")
         input_ids = torch.randint(0, 1000, (1, 64), device="mps")
 
         # Warmup
@@ -154,6 +162,7 @@ class TestMoEDispatchRegression:
 
         Large variance indicates buffer creation or other per-call overhead.
         """
+        logger.info("running test_consistent_latency")
         input_ids = torch.randint(0, 1000, (1, 32), device="mps")
 
         # Warmup
@@ -191,6 +200,7 @@ class TestDecodeRegression:
     def test_single_token_decode_latency(self, model):
         """Single token decode should be fast after prefill."""
         # Prefill with initial prompt
+        logger.info("running test_single_token_decode_latency")
         input_ids = torch.randint(0, 1000, (1, 32), device="mps")
 
         with torch.no_grad():

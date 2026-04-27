@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TaskSpec:
@@ -19,21 +23,25 @@ class TaskSpec:
 
 
 def _clean(text: str) -> str:
+    logger.debug("_clean called with text=%s", text)
     return textwrap.dedent(text).strip("\n")
 
 
 def _flow_list(values: tuple[str, ...]) -> str:
+    logger.debug("_flow_list called with values=%s", values)
     if not values:
         return "[]"
     return "[" + ", ".join(values) + "]"
 
 
 def _indent_block(text: str, spaces: int = 6) -> str:
+    logger.debug("_indent_block called with text=%s, spaces=%s", text, spaces)
     pad = " " * spaces
     return "\n".join(f"{pad}{line}" if line else pad for line in text.splitlines())
 
 
 def build_tasks() -> list[TaskSpec]:
+    logger.info("build_tasks starting")
     work_root = "contrib/metal_marlin/agent_workspace/mixed_bpw_fairway_autotune"
     candidates_dir = f"{work_root}/candidates"
     results_dir = f"{work_root}/results"
@@ -304,6 +312,7 @@ def build_tasks() -> list[TaskSpec]:
 
 
 def validate_tasks(tasks: list[TaskSpec]) -> None:
+    logger.debug("validate_tasks called with tasks=%s", tasks)
     has_baseline = False
     has_post_collect = False
 
@@ -326,6 +335,7 @@ def validate_tasks(tasks: list[TaskSpec]) -> None:
 
 
 def render_yaml(tasks: list[TaskSpec]) -> str:
+    logger.debug("render_yaml called with tasks=%s", tasks)
     generated = datetime.now(UTC).isoformat()
 
     lines = [
@@ -352,6 +362,7 @@ def render_yaml(tasks: list[TaskSpec]) -> str:
 
 
 def main() -> None:
+    logger.info("main starting")
     script_path = Path(__file__).resolve()
     metal_marlin_root = script_path.parents[1]
     output_path = metal_marlin_root / "tasks" / "mixed_bpw_fairway_autotune.yaml"

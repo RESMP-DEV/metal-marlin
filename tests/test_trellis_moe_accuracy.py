@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
+import logging
 
 import pytest
 import torch
@@ -27,6 +28,9 @@ try:
 except ImportError:
     HAS_TRELLIS = False
 
+
+
+logger = logging.getLogger(__name__)
 
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required")
 requires_trellis = pytest.mark.skipif(
@@ -56,6 +60,7 @@ def create_mock_trellis_linear(
     Creates realistic packed Trellis weights that will dequantize to
     reasonable values for numerical accuracy testing.
     """
+    logger.debug("create_mock_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     TILE_DIM = 16
     tiles_k = (out_features + TILE_DIM - 1) // TILE_DIM  # K = out_features
     tiles_n = (in_features + TILE_DIM - 1) // TILE_DIM   # N = in_features
@@ -95,6 +100,7 @@ def create_mock_dense_mlp(
     device: str = "mps",
 ) -> TrellisDenseMLP:
     """Create a mock TrellisDenseMLP for testing."""
+    logger.debug("create_mock_dense_mlp called with hidden_dim=%s, intermediate_dim=%s, bits=%s", hidden_dim, intermediate_dim, bits)
     gate_proj = create_mock_trellis_linear(
         hidden_dim, intermediate_dim, bits, device)
     up_proj = create_mock_trellis_linear(
@@ -114,6 +120,7 @@ def create_mock_moe_mlp(
 ) -> TrellisMoEMLP:
     """Create a mock TrellisMoEMLP for testing fast vs slow path accuracy."""
     # Create router
+    logger.debug("create_mock_moe_mlp called with hidden_dim=%s, intermediate_dim=%s, num_experts=%s", hidden_dim, intermediate_dim, num_experts)
     router = nn.Linear(hidden_dim, num_experts, bias=False,
                        device=device, dtype=torch.float32)
     nn.init.xavier_uniform_(router.weight)
@@ -142,6 +149,7 @@ def moe_forward_slow(mlp: TrellisMoEMLP, x: torch.Tensor) -> torch.Tensor:
     This is a copy of the slow path from TrellisMoEMLP.forward() that we use
     as the reference implementation for accuracy testing.
     """
+    logger.debug("moe_forward_slow called with mlp=%s, x=%s", mlp, x)
     orig_dtype = x.dtype
     x_router = x.to(mlp.router.weight.dtype)
 
@@ -187,6 +195,7 @@ class TestTrellisMoEAccuracy:
 
         This is the primary accuracy test for the Metal MoE kernel.
         """
+        logger.info("running test_moe_output_matches_slow_path")
         torch.manual_seed(42)
         device = "mps"
 
@@ -237,6 +246,7 @@ class TestTrellisMoEAccuracy:
 
     def test_moe_output_correlation(self):
         """Check that fast and slow outputs are highly correlated."""
+        logger.info("running test_moe_output_correlation")
         torch.manual_seed(123)
         device = "mps"
 
@@ -273,6 +283,7 @@ class TestTrellisMoEAccuracy:
 
     def test_dequantization_3bit_range(self):
         """Test that 3-bit dequantized values are in expected range."""
+        logger.info("running test_dequantization_3bit_range")
         torch.manual_seed(0)
         device = "mps"
 
@@ -291,6 +302,7 @@ class TestTrellisMoEAccuracy:
 
     def test_moe_determinism(self):
         """Test that MoE outputs are deterministic across runs."""
+        logger.info("running test_moe_determinism")
         torch.manual_seed(456)
         device = "mps"
 
@@ -313,6 +325,7 @@ class TestTrellisMoEAccuracy:
 
     def test_moe_different_batch_sizes(self):
         """Test accuracy across different batch sizes."""
+        logger.info("running test_moe_different_batch_sizes")
         torch.manual_seed(789)
         device = "mps"
 
@@ -337,6 +350,7 @@ class TestTrellisMoEAccuracy:
 
     def test_routing_weights_preserved(self):
         """Test that expert routing weights are applied correctly."""
+        logger.info("running test_routing_weights_preserved")
         torch.manual_seed(101)
         device = "mps"
 
@@ -381,6 +395,7 @@ class TestTrellisLinearAccuracy:
 
     def test_linear_output_finite(self):
         """Test that TrellisLinear produces finite outputs."""
+        logger.info("running test_linear_output_finite")
         torch.manual_seed(0)
         device = "mps"
 
@@ -395,6 +410,7 @@ class TestTrellisLinearAccuracy:
 
     def test_linear_shape(self):
         """Test TrellisLinear output shape."""
+        logger.info("running test_linear_shape")
         torch.manual_seed(0)
         device = "mps"
 
@@ -408,6 +424,7 @@ class TestTrellisLinearAccuracy:
 
     def test_dequantize_vs_forward(self):
         """Test that explicit dequantize matches forward pass."""
+        logger.info("running test_dequantize_vs_forward")
         torch.manual_seed(42)
         device = "mps"
 
@@ -434,6 +451,7 @@ class TestDenseMlpAccuracy:
 
     def test_swiglu_activation(self):
         """Test that SwiGLU activation is computed correctly."""
+        logger.info("running test_swiglu_activation")
         torch.manual_seed(0)
         device = "mps"
 
@@ -451,6 +469,7 @@ class TestDenseMlpAccuracy:
 
     def test_dense_mlp_determinism(self):
         """Test that TrellisDenseMLP is deterministic."""
+        logger.info("running test_dense_mlp_determinism")
         torch.manual_seed(0)
         device = "mps"
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,9 @@ try:
 except ImportError:
     pass
 
+
+logger = logging.getLogger(__name__)
+
 HAS_TRELLIS = _HAS_TRELLIS
 
 requires_mps = pytest.mark.skipif(
@@ -54,6 +58,7 @@ requires_trellis = pytest.mark.skipif(
 
 def clear_mps_memory() -> None:
     """Clear MPS memory cache and run garbage collection."""
+    logger.debug("clear_mps_memory called")
     gc.collect()
     if HAS_MPS:
         torch.mps.empty_cache()
@@ -86,6 +91,7 @@ def swiglu_reference(
     This is the ground truth implementation that expert outputs
     should match.
     """
+    logger.debug("swiglu_reference called with x=%s, gate_proj=%s, up_proj=%s", x, gate_proj, up_proj)
     gate = F.silu(gate_proj(x))
     up = up_proj(x)
     return down_proj(gate * up)
@@ -113,6 +119,7 @@ def full_64_expert_moe() -> Any:
     - Routing behavior
     NOT on absolute numerical accuracy (use real model tests for that).
     """
+    logger.debug("full_64_expert_moe called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
     if not HAS_TRELLIS:
@@ -143,6 +150,7 @@ def small_moe_for_gradients():
 
     Smaller than full 64 experts to keep gradient tests fast.
     """
+    logger.debug("small_moe_for_gradients called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
     if not HAS_TRELLIS:
@@ -189,6 +197,7 @@ class TestIndividualExpertOutputs:
 
     def test_all_64_experts_output_shapes(self, full_64_expert_moe: Any) -> None:
         """Verify each of 64 experts produces correct output shape."""
+        logger.info("running test_all_64_experts_output_shapes")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -215,6 +224,7 @@ class TestIndividualExpertOutputs:
         This is documented behavior - real model weights are calibrated.
         We test with small inputs which should be stable.
         """
+        logger.info("running test_all_64_experts_no_nan_with_small_input")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -243,6 +253,7 @@ class TestIndividualExpertOutputs:
         With mock weights, intermediate values may overflow, so we use
         small inputs and check finite results match.
         """
+        logger.info("running test_all_64_experts_swiglu_structure")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -282,6 +293,7 @@ class TestIndividualExpertOutputs:
         Zero input: gate_proj(0), up_proj(0) may have bias from quantization,
         but silu(x) ≈ 0 for x near 0, so output should be small.
         """
+        logger.info("running test_expert_zero_input_small_output")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
         expert = moe.experts[0]
@@ -300,6 +312,7 @@ class TestIndividualExpertOutputs:
 
     def test_experts_produce_different_outputs(self, full_64_expert_moe: Any) -> None:
         """Verify different experts produce different outputs for same input."""
+        logger.info("running test_experts_produce_different_outputs")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -341,6 +354,7 @@ class TestNumericalAccuracy:
 
     def test_expert_vs_reference_mlp_small_input(self, full_64_expert_moe: Any) -> None:
         """Compare expert outputs to explicit SwiGLU with small inputs."""
+        logger.info("running test_expert_vs_reference_mlp_small_input")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -379,6 +393,7 @@ class TestNumericalAccuracy:
         This is the key validation: both paths use the same quantized weights,
         so they should produce nearly identical results regardless of mock weights.
         """
+        logger.info("running test_moe_fast_vs_slow_path_correlation")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -440,6 +455,7 @@ class TestNumericalAccuracy:
 
     def test_expert_output_variation(self, full_64_expert_moe: Any) -> None:
         """Verify experts produce variation (not constant output)."""
+        logger.info("running test_expert_output_variation")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -469,6 +485,7 @@ class TestGradientFlow:
 
     def test_expert_gradients_exist(self, small_moe_for_gradients):
         """Verify gradients flow through each expert."""
+        logger.info("running test_expert_gradients_exist")
         moe = small_moe_for_gradients
         hidden_dim = moe.hidden_dim
 
@@ -503,6 +520,7 @@ class TestGradientFlow:
 
     def test_expert_weight_gradients(self, small_moe_for_gradients):
         """Verify gradients flow to expert weights."""
+        logger.info("running test_expert_weight_gradients")
         moe = small_moe_for_gradients
         hidden_dim = moe.hidden_dim
 
@@ -539,6 +557,7 @@ class TestGradientFlow:
 
     def test_gradient_magnitude_reasonable(self, small_moe_for_gradients):
         """Verify gradient magnitudes are not exploding or vanishing."""
+        logger.info("running test_gradient_magnitude_reasonable")
         moe = small_moe_for_gradients
         hidden_dim = moe.hidden_dim
 
@@ -571,6 +590,7 @@ class TestExpertRouting:
 
     def test_all_experts_can_be_selected(self, full_64_expert_moe):
         """Verify all 64 experts can potentially be selected by router."""
+        logger.info("running test_all_experts_can_be_selected")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -599,6 +619,7 @@ class TestExpertRouting:
 
     def test_routing_weights_sum_correctly(self, full_64_expert_moe):
         """Verify routing weights are properly normalized."""
+        logger.info("running test_routing_weights_sum_correctly")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -631,6 +652,7 @@ class TestExpertDeterminism:
 
     def test_expert_output_deterministic(self, full_64_expert_moe):
         """Verify same input produces same output."""
+        logger.info("running test_expert_output_deterministic")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -649,6 +671,7 @@ class TestExpertDeterminism:
 
     def test_expert_seeded_reproducibility(self, full_64_expert_moe):
         """Verify outputs are reproducible with same seed."""
+        logger.info("running test_expert_seeded_reproducibility")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 
@@ -676,6 +699,7 @@ class TestComprehensiveExpertValidation:
 
     def test_full_expert_validation_suite(self, full_64_expert_moe):
         """Run complete validation on all 64 experts and summarize results."""
+        logger.info("running test_full_expert_validation_suite")
         moe = full_64_expert_moe
         hidden_dim = moe.hidden_dim
 

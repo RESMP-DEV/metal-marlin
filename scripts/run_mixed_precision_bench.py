@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import time
 from pathlib import Path
@@ -35,7 +36,11 @@ sys.path.insert(0, str(_ROOT))
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Benchmark mixed-precision MoE dispatch strategies",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -162,6 +167,7 @@ Examples:
 
 def load_synthetic_model(args: argparse.Namespace) -> torch.nn.Module:
     """Load synthetic model for benchmark."""
+    logger.info("load_synthetic_model called with args=%s", args)
     from tests.fixtures.synthetic_mixed_moe import (
         SyntheticConfig,
         create_synthetic_model,
@@ -179,6 +185,7 @@ def load_synthetic_model(args: argparse.Namespace) -> torch.nn.Module:
 
 def load_glm4_model(args: argparse.Namespace) -> torch.nn.Module:
     """Load real GLM-4.7 model for benchmark."""
+    logger.info("load_glm4_model called with args=%s", args)
     from metal_marlin.metal_core import get_device_info
     from metal_marlin.shards.hf_shard_loader import HFShardLoader
 
@@ -199,6 +206,7 @@ def load_glm4_model(args: argparse.Namespace) -> torch.nn.Module:
 
 def run_benchmark(args: argparse.Namespace) -> None:
     """Run benchmark with given configuration."""
+    logger.info("run_benchmark starting with args=%s", args)
     from benchmarks.mixed_precision_bench import (
         BenchmarkConfig,
         MixedPrecisionBenchmark,
@@ -268,6 +276,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     
     try:

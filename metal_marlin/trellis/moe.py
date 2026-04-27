@@ -64,11 +64,13 @@ def get_moe_dispatch_stats() -> dict[str, int]:
         - total_tokens_processed: Cumulative tokens processed
         - total_experts_activated: Cumulative experts activated
     """
+    logger.debug("get_moe_dispatch_stats called")
     return _moe_stats.copy()
 
 
 def reset_moe_dispatch_stats() -> None:
     """Reset MoE dispatch statistics."""
+    logger.debug("reset_moe_dispatch_stats called")
     global _moe_stats
     _moe_stats = {
         "metal_router_calls": 0,
@@ -102,6 +104,7 @@ def _log_moe_dispatch(
         success: Whether the operation succeeded
         error: Exception if operation failed
     """
+    logger.debug("_log_moe_dispatch called with stage=%s", stage)
     if not (_MOE_DEBUG or logger.isEnabledFor(logging.DEBUG)):
         return
 
@@ -160,6 +163,7 @@ class ExpertCache:
             enable_speculation: Enable speculative prefetching of next layer's experts.
             speculation_depth: Number of future layers to predict (default: 1).
         """
+        logger.debug("initializing %s with num_experts=%s, cache_size=%s, window_size=%s, device=%s, stream_threshold=%s", type(self).__name__, num_experts, cache_size, window_size, device, stream_threshold)
         self.num_experts = num_experts
         self.cache_size = cache_size
         self.window_size = window_size
@@ -189,6 +193,7 @@ class ExpertCache:
         Args:
             expert_ids: Selected expert indices [num_assignments].
         """
+        logger.debug("record_selection called with expert_ids=%s", expert_ids)
         flat_expert_ids = expert_ids.reshape(-1)
 
         # Add new selections
@@ -209,6 +214,7 @@ class ExpertCache:
         Returns:
             List of expert indices sorted by frequency (descending).
         """
+        logger.debug("get_top_experts called")
         _, top_indices = torch.topk(self.expert_frequency, self.cache_size)
         return top_indices.cpu().numpy().tolist()
 
@@ -222,6 +228,7 @@ class ExpertCache:
         Returns:
             List of expert indices to prefetch.
         """
+        logger.debug("should_prefetch called with router_logits=%s, threshold=%s", router_logits, threshold)
         routing_probs = F.softmax(router_logits, dim=-1)
 
         top_predictions = []
@@ -250,6 +257,7 @@ class ExpertCache:
         Returns:
             List of expert indices newly added to cache.
         """
+        logger.debug("update_cache called with experts=%s, prefetch_indices=%s", experts, prefetch_indices)
         top_experts = self.get_top_experts()
         target_experts = set(top_experts)
         if prefetch_indices:
@@ -291,18 +299,22 @@ class ExpertCache:
 
     def is_cached(self, expert_idx: int) -> bool:
         """Check if expert is in cache."""
+        logger.debug("is_cached called with expert_idx=%s", expert_idx)
         return expert_idx in self.cached_experts
 
     def get_cached_experts(self) -> list[int]:
         """Get all cached expert indices."""
+        logger.debug("get_cached_experts called")
         return sorted(self.cached_experts)
 
     def get_frequency(self) -> torch.Tensor:
         """Get current expert selection frequencies."""
+        logger.debug("get_frequency called")
         return self.expert_frequency.clone()
 
     def get_frequency_ratio(self) -> torch.Tensor:
         """Get expert selection frequency as ratio of total selections."""
+        logger.debug("get_frequency_ratio called")
         total_selections = self.expert_frequency.sum()
         if total_selections == 0:
             return torch.zeros_like(self.expert_frequency)
@@ -314,6 +326,7 @@ class ExpertCache:
         Returns:
             List of expert indices with frequency < stream_threshold.
         """
+        logger.debug("get_rare_experts called")
         freq_ratio = self.get_frequency_ratio()
         rare_mask = freq_ratio < self.stream_threshold
         return torch.where(rare_mask)[0].cpu().numpy().tolist()
@@ -325,6 +338,7 @@ class ExpertCache:
             expert_idx: Expert index to move to CPU.
             expert_module: Expert module to move.
         """
+        logger.debug("move_to_cpu called with expert_idx=%s, expert_module=%s", expert_idx, expert_module)
         if expert_idx not in self.cpu_experts:
             # Move expert to CPU
             cpu_expert = expert_module.cpu()
@@ -358,6 +372,7 @@ class ExpertCache:
         Returns:
             Expert module on GPU (may be still transferring).
         """
+        logger.debug("stream_to_gpu called with expert_idx=%s, non_blocking=%s", expert_idx, non_blocking)
         if expert_idx in self.expert_weights:
             return self.expert_weights[expert_idx]
 
@@ -390,6 +405,7 @@ class ExpertCache:
         Returns:
             List of predicted expert indices.
         """
+        logger.debug("predict_next_experts called with current_expert_ids=%s, top_k=%s", current_expert_ids, top_k)
         if not self.enable_speculation:
             return []
 
@@ -419,6 +435,7 @@ class ExpertCache:
             next_layer_experts: Expert modules from next layer.
             next_layer_cache: ExpertCache instance for next layer.
         """
+        logger.debug("start_speculative_prefetch called with predicted_experts=%s, next_layer_experts=%s, next_layer_cache=%s", predicted_experts, next_layer_experts, next_layer_cache)
         if not self.enable_speculation or next_layer_cache is None:
             return
 
@@ -452,6 +469,7 @@ class ExpertCache:
         Args:
             actual_expert_ids: Actually selected expert IDs [tokens, k].
         """
+        logger.debug("validate_speculation called with actual_expert_ids=%s", actual_expert_ids)
         if not self.speculative_experts:
             return
 
@@ -470,6 +488,7 @@ class ExpertCache:
 
     def reset(self) -> None:
         """Reset cache statistics."""
+        logger.debug("reset called")
         self.expert_frequency.zero_()
         self.selection_history.clear()
         self.cached_experts.clear()
@@ -501,6 +520,7 @@ def _fused_router_topk(
         expert_ids: Top-k expert indices [tokens, k].
         expert_weights: Normalized weights for top-k experts [tokens, k].
     """
+    logger.debug("_fused_router_topk called with x=%s, W_router=%s, k=%s", x, W_router, k)
     num_tokens = x.shape[0]
     num_experts = W_router.shape[0]
 
@@ -638,6 +658,7 @@ class TrellisMoELayer(nn.Module):
                 Default 1.25 allows 25% imbalance. Set to float('inf') to disable.
             aux_loss_weight: Weight for auxiliary balance loss (default: 0.0 = disabled).
         """
+        logger.debug("initializing %s with config=%s, layer_weights=%s, router_weight=%s, layer_idx=%s, device=%s", type(self).__name__, config, layer_weights, router_weight, layer_idx, device)
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -693,12 +714,14 @@ class TrellisMoELayer(nn.Module):
 
     def _get_lib(self) -> MetalKernelLibrary:
         """Get or create Metal kernel library."""
+        logger.debug("_get_lib called")
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
     def _get_buffer_pool(self) -> MoEBufferPool:
         """Get or create MoE buffer pool for dynamic input/output buffers."""
+        logger.debug("_get_buffer_pool called")
         if self._buffer_pool is None:
             lib = self._get_lib()
             self._buffer_pool = MoEBufferPool(
@@ -715,6 +738,7 @@ class TrellisMoELayer(nn.Module):
         Returns None if batched dispatch is not available (e.g., experts not
         using TrellisLinear, or Metal not available).
         """
+        logger.debug("_get_cached_buffers called")
         if not self._use_batched_dispatch:
             return None
 
@@ -756,6 +780,7 @@ class TrellisMoELayer(nn.Module):
         Sets self._use_batched_dispatch = True if packing succeeds.
         """
         # Check if experts use TrellisLinear (required for batched dispatch)
+        logger.info("_pack_expert_weights_for_batched_dispatch called")
         if not self.experts:
             return
 
@@ -777,6 +802,7 @@ class TrellisMoELayer(nn.Module):
 
     def _pack_trellis_expert_weights(self) -> None:
         """Pack TrellisExpert weights into stacked buffers."""
+        logger.info("_pack_trellis_expert_weights called")
         gate_indices_list = []
         gate_scales_list = []
         gate_su_list = []
@@ -887,6 +913,7 @@ class TrellisMoELayer(nn.Module):
         Handles both fused (gate_up_proj) and separate (gate_proj, up_proj) formats.
         """
         # Check for fused vs separate weight format
+        logger.info("_build_expert starting")
         fused_key = f"experts.{expert_idx}.gate_up_proj"
         gate_key = f"experts.{expert_idx}.gate_proj"
         up_key = f"experts.{expert_idx}.up_proj"
@@ -917,6 +944,7 @@ class TrellisMoELayer(nn.Module):
     def _dict_to_linear(self, weight_dict: dict, device: str) -> TrellisLinear:
         """Convert weight dict to TrellisLinear module."""
         # Create TrellisWeight-like object from dict
+        logger.debug("_dict_to_linear called with weight_dict=%s, device=%s", weight_dict, device)
         weight = _DictWeight(weight_dict)
         return TrellisLinear.from_trellis_weight(weight, device=device)
 
@@ -940,6 +968,7 @@ class TrellisMoELayer(nn.Module):
             (expert_ids, expert_weights): Capacity-limited assignments and weights.
         """
         # Compute capacity per expert
+        logger.debug("_apply_capacity_limit called with expert_ids=%s, expert_weights=%s, num_tokens=%s", expert_ids, expert_weights, num_tokens)
         capacity = int(self.capacity_factor *
                        num_tokens / self.config.num_experts)
 
@@ -996,6 +1025,7 @@ class TrellisMoELayer(nn.Module):
     ) -> None:
         """Process tokens assigned to a specific expert."""
         # Get all tokens assigned to this expert
+        logger.debug("_process_expert_tokens called with expert_idx=%s, start=%s, end=%s", expert_idx, start, end)
         token_indices = sorted_token_indices[start:end]
         slot_indices = sorted_slot_indices[start:end]
         expert_tokens = x[token_indices]
@@ -1035,6 +1065,7 @@ class TrellisMoELayer(nn.Module):
             Output tensor with same shape as input.
         """
         # Handle both 2D and 3D inputs
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         original_shape = x.shape
         if x.dim() == 3:
             batch, seq_len, hidden = x.shape
@@ -1111,6 +1142,7 @@ class TrellisMoELayer(nn.Module):
         Returns:
             Output tensor [num_tokens, hidden_dim], or None if dispatch fails.
         """
+        logger.debug("_forward_batched_metal called with x=%s, expert_ids=%s, expert_weights=%s", x, expert_ids, expert_weights)
         try:
             lib = self._get_lib()
             cached_buffers = self._get_cached_buffers()
@@ -1193,6 +1225,7 @@ class TrellisMoELayer(nn.Module):
             Output tensor [num_tokens, hidden_dim].
         """
         # Update expert cache: record selections and prefetch
+        logger.debug("_forward_python_loop called with x=%s, expert_ids=%s, expert_weights=%s", x, expert_ids, expert_weights)
         if self.expert_cache is not None:
             # Validate speculation from previous layer (if any)
             self.expert_cache.validate_speculation(expert_ids)
@@ -1322,6 +1355,7 @@ class TrellisMoELayer(nn.Module):
             router_logits: Router output logits [tokens, num_experts].
         """
         # Compute soft routing probabilities
+        logger.debug("_compute_balance_loss called with router_logits=%s", router_logits)
         routing_probs = F.softmax(router_logits, dim=-1)
 
         # Compute average load per expert (differentiable)
@@ -1345,6 +1379,7 @@ class TrellisMoELayer(nn.Module):
         Returns:
             Auxiliary loss tensor (scalar).
         """
+        logger.debug("get_aux_loss called")
         return self.aux_loss
 
 
@@ -1352,6 +1387,7 @@ class _DictWeight:
     """Adapter to make a dict look like TrellisWeight for from_trellis_weight."""
 
     def __init__(self, d: dict) -> None:
+        logger.debug("initializing %s with d=%s", type(self).__name__, d)
         self.packed_indices = d["indices"]
         self.scales = d["scales"]
         self.su = d["su"]
@@ -1369,6 +1405,7 @@ class _FusedTrellisExpert(nn.Module):
         down_weight: TrellisLinear,
         config: TrellisModelConfig,
     ) -> None:
+        logger.debug("initializing %s with gate_up_weight=%s, down_weight=%s, config=%s", type(self).__name__, gate_up_weight, down_weight, config)
         super().__init__()
         self.gate_up = gate_up_weight
         self.down = down_weight
@@ -1376,6 +1413,7 @@ class _FusedTrellisExpert(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Fused gate_up: output is [gate, up] concatenated
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate_up_out = self.gate_up(x)
 
         # Check if truly fused (2x intermediate) or just named oddly
@@ -1393,6 +1431,7 @@ class _DummyExpert(nn.Module):
     """Dummy expert for testing when weights aren't available."""
 
     def __init__(self, hidden_size: int, intermediate_size: int, device: str) -> None:
+        logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, device=%s", type(self).__name__, hidden_size, intermediate_size, device)
         super().__init__()
         # Use regular linear for testing
         self.gate = nn.Linear(
@@ -1408,6 +1447,7 @@ class _DummyExpert(nn.Module):
         nn.init.normal_(self.down.weight, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         return self.down(F.silu(self.gate(x)) * self.up(x))
 
 
@@ -1433,6 +1473,7 @@ class TrellisExpert(nn.Module):
             up_proj: TrellisLinear for up projection.
             down_proj: TrellisLinear for down projection.
         """
+        logger.debug("initializing %s with gate_proj=%s, up_proj=%s, down_proj=%s", type(self).__name__, gate_proj, up_proj, down_proj)
         super().__init__()
         self.gate_proj = gate_proj
         self.up_proj = up_proj
@@ -1447,6 +1488,7 @@ class TrellisExpert(nn.Module):
         Returns:
             Output tensor [..., hidden_size].
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate = F.silu(self.gate_proj(x))
         up = self.up_proj(x)
         return self.down_proj(gate * up)
@@ -1473,6 +1515,7 @@ class TrellisExpert(nn.Module):
         Raises:
             KeyError: If required weights are not found in layer_weights.
         """
+        logger.debug("from_trellis_weights called with layer_weights=%s, expert_idx=%s, layer_idx=%s", layer_weights, expert_idx, layer_idx)
         prefix = f"model.layers.{layer_idx}.mlp.experts.{expert_idx}"
         return cls(
             gate_proj=TrellisLinear.from_trellis_weight(
@@ -1488,6 +1531,7 @@ class TrellisExpert(nn.Module):
 
     def extra_repr(self) -> str:
         """String representation for printing."""
+        logger.debug("extra_repr called")
         return (
             f"gate_proj={self.gate_proj.in_features}x{self.gate_proj.out_features}, "
             f"up_proj={self.up_proj.in_features}x{self.up_proj.out_features}, "

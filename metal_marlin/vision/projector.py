@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import Any, Literal
 
 import numpy as np
@@ -32,6 +33,9 @@ import numpy as np
 from .._compat import to_numpy
 from ..dtypes import DTypeConfig, get_default_config
 
+
+
+logger = logging.getLogger(__name__)
 
 class ProjectorType(Enum):
     """Supported vision projector architectures."""
@@ -105,6 +109,7 @@ class VisionProjectorConfig:
         Returns:
             VisionProjectorConfig instance
         """
+        logger.debug("from_hf_config called with config=%s", config)
         projector_type = detect_projector_type(config)
 
         # Vision encoder hidden size
@@ -176,6 +181,7 @@ def detect_projector_type(config: dict[str, Any]) -> ProjectorType:
     Returns:
         Detected ProjectorType
     """
+    logger.debug("detect_projector_type called with config=%s", config)
     model_type = config.get("model_type", "").lower()
     arch = config.get("architectures", [""])[0].lower() if config.get("architectures") else ""
 
@@ -213,6 +219,7 @@ def detect_projector_type(config: dict[str, Any]) -> ProjectorType:
 
 def _apply_activation(x: np.ndarray, activation: str) -> np.ndarray:
     """Apply activation function to numpy array."""
+    logger.debug("_apply_activation called with x=%s, activation=%s", x, activation)
     if activation == "gelu":
         # GELU approximation
         return 0.5 * x * (1 + np.tanh(np.sqrt(2 / np.pi) * (x + 0.044715 * x**3)))
@@ -226,6 +233,7 @@ def _apply_activation(x: np.ndarray, activation: str) -> np.ndarray:
 
 def _create_sinusoidal_positions(max_len: int, dim: int) -> np.ndarray:
     """Create sinusoidal position encodings."""
+    logger.debug("_create_sinusoidal_positions called with max_len=%s, dim=%s", max_len, dim)
     positions = np.arange(max_len, dtype=np.float32)
     inv_freq = 1.0 / (10000 ** (np.arange(0, dim, 2, dtype=np.float32) / dim))
     sincos = np.outer(positions, inv_freq)
@@ -234,6 +242,7 @@ def _create_sinusoidal_positions(max_len: int, dim: int) -> np.ndarray:
 
 def _layer_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
     """Apply layer normalization."""
+    logger.debug("_layer_norm called with x=%s, eps=%s", x, eps)
     mean = x.mean(axis=-1, keepdims=True)
     var = x.var(axis=-1, keepdims=True)
     return (x - mean) / np.sqrt(var + eps)
@@ -241,6 +250,7 @@ def _layer_norm(x: np.ndarray, eps: float = 1e-5) -> np.ndarray:
 
 def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """Apply softmax."""
+    logger.debug("_softmax called with x=%s, axis=%s", x, axis)
     x_max = x.max(axis=axis, keepdims=True)
     exp_x = np.exp(x - x_max)
     return exp_x / exp_x.sum(axis=axis, keepdims=True)
@@ -260,6 +270,7 @@ class LLaVAProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -314,6 +325,7 @@ class LLaVAProjector:
         return out.reshape(out_shape)
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"vision_hidden={self.vision_hidden_size}, "
             f"llm_hidden={self.llm_hidden_size}, "
@@ -333,6 +345,7 @@ class _PerceiverResamplerLayer:
         use_bias: bool = True,
         activation: str = "gelu",
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, head_dim=%s, use_bias=%s, activation=%s", type(self).__name__, hidden_size, num_heads, head_dim, use_bias, activation)
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -471,6 +484,7 @@ class Qwen2VLProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -548,6 +562,7 @@ class Qwen2VLProjector:
         return output.reshape(batch_size, self.num_query_tokens, self.llm_hidden_size)
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"vision_hidden={self.vision_hidden_size}, "
             f"llm_hidden={self.llm_hidden_size}, "
@@ -570,6 +585,7 @@ class InternVLProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -649,6 +665,7 @@ class InternVLProjector:
         return _layer_norm(hidden_states)
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"vision_hidden={self.vision_hidden_size}, "
             f"llm_hidden={self.llm_hidden_size}, "
@@ -670,6 +687,7 @@ class LinearProjector:
     """
 
     def __init__(self, config: VisionProjectorConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self.vision_hidden_size = config.vision_hidden_size
         self.llm_hidden_size = config.llm_hidden_size
@@ -694,6 +712,7 @@ class IdentityProjector:
     """Identity projector when dimensions already match."""
 
     def __init__(self, config: VisionProjectorConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         if config.vision_hidden_size != config.llm_hidden_size:
             raise ValueError(
@@ -726,6 +745,7 @@ class VisionProjector:
         Returns:
             Projector instance (LLaVAProjector, Qwen2VLProjector, etc.)
         """
+        logger.debug("from_config called with config=%s", config)
         projector_map = {
             ProjectorType.LLAVA_MLP: LLaVAProjector,
             ProjectorType.PERCEIVER: Qwen2VLProjector,
@@ -750,5 +770,6 @@ class VisionProjector:
         Returns:
             Projector instance
         """
+        logger.debug("from_hf_config called with hf_config=%s", hf_config)
         config = VisionProjectorConfig.from_hf_config(hf_config)
         return VisionProjector.from_config(config)

@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,9 @@ if HAS_PYOBJC_METAL:
 if TYPE_CHECKING:
     import torch
 
+
+logger = logging.getLogger(__name__)
+
 # Thread configuration matching Metal kernel
 THREADS_PER_HEAD = 32
 HEADS_PER_TG = 4
@@ -59,6 +63,7 @@ HEAD_DIM_MAX_PARALLEL = 128
 
 def _require_metal_mha() -> None:
     """Raise if Metal MHA dispatch is not available."""
+    logger.debug("_require_metal_mha called")
     if not HAS_TORCH:
         raise RuntimeError("Parallel MHA requires PyTorch. Install with: pip install torch")
     if not HAS_MPS:
@@ -84,6 +89,7 @@ class ParallelMHAParams:
 
     def to_buffer(self, device: Any) -> Any:
         """Pack parameters into Metal buffer for kernel dispatch."""
+        logger.debug("to_buffer called with device=%s", device)
         return np.array(
             [
                 self.batch,
@@ -103,6 +109,7 @@ class ParallelMHADispatcher:
 
     def __init__(self) -> None:
         """Initialize Metal device and compile kernels."""
+        logger.debug("initializing %s", type(self).__name__)
         _require_metal_mha()
 
         self.device = Metal.MTLCreateSystemDefaultDevice()
@@ -114,6 +121,7 @@ class ParallelMHADispatcher:
 
     def _compile_kernels(self) -> Metal.MTLComputePipelineState:
         """Compile parallel MHA Metal shaders."""
+        logger.info("_compile_kernels starting")
         kernel_path = Path(__file__).parent.parent / "src" / "parallel_multihead_attention.metal"
 
         if not kernel_path.exists():
@@ -134,6 +142,7 @@ class ParallelMHADispatcher:
 
     def _get_pipeline(self, function_name: str) -> Metal.MTLComputePipelineState:
         """Get compiled Metal pipeline for kernel function."""
+        logger.debug("_get_pipeline called with function_name=%s", function_name)
         if self._kernel_lib is None:
             raise RuntimeError("Kernel library not compiled")
 
@@ -158,6 +167,7 @@ class ParallelMHADispatcher:
         function_name: str,
     ) -> None:
         """Dispatch Metal kernel for parallel MHA computation."""
+        logger.debug("_dispatch called with Q=%s, K=%s, V=%s", Q, K, V)
         pipeline = self._get_pipeline(function_name)
 
         command_buffer = self.command_queue.commandBuffer()
@@ -216,6 +226,7 @@ class ParallelMHADispatcher:
         Returns:
             Output tensor [batch, num_heads, seq_q, head_dim]
         """
+        logger.debug("forward: input shape=%s dtype=%s", Q.shape if hasattr(Q, "shape") else type(Q).__name__, Q.dtype if hasattr(Q, "dtype") else "N/A")
         _require_metal_mha()
 
         # Validate input shapes
@@ -268,6 +279,7 @@ _dispatcher: ParallelMHADispatcher | None = None
 
 def _get_dispatcher() -> ParallelMHADispatcher:
     """Get or create global dispatcher instance."""
+    logger.debug("_get_dispatcher called")
     global _dispatcher
     if _dispatcher is None:
         _dispatcher = ParallelMHADispatcher()
@@ -316,5 +328,6 @@ def parallel_multihead_attention(
         >>> scale = 1.0 / (head_dim ** 0.5)
         >>> output = parallel_multihead_attention(Q, K, V, scale=scale, causal=True)
     """
+    logger.debug("parallel_multihead_attention called with Q=%s, K=%s, V=%s", Q, K, V)
     dispatcher = _get_dispatcher()
     return dispatcher.forward(Q, K, V, scale, causal)

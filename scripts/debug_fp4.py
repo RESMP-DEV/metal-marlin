@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Debug FP4 GEMM copy-back mechanism."""
 
+import logging
 import numpy as np
 import torch
 
@@ -17,7 +18,11 @@ from metal_marlin.metal_dispatch import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def main() -> None:
+    logger.info("main starting")
     lib = get_default_library()
     device = lib.device
     family = get_gpu_family(device)

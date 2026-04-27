@@ -1,3 +1,4 @@
+import logging
 #!/usr/bin/env python3
 """Verify that vision_preprocess.metal has all required kernels for 1024x1024+ images."""
 
@@ -16,6 +17,7 @@ REQUIRED_KERNELS = [
 ]
 
 def verify_kernels():
+    logger.info("verify_kernels starting")
     shader_path = Path(__file__).parent / "src" / "vision_preprocess.metal"
     
     if not shader_path.exists():
@@ -60,3 +62,6 @@ if __name__ == "__main__":
     import sys
     success = verify_kernels()
     sys.exit(0 if success else 1)
+
+
+logger = logging.getLogger(__name__)

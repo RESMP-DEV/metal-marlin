@@ -14,6 +14,7 @@ Does not break existing GLM MMFP4 loading.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,9 @@ from metal_marlin._quantized_weights import (
     _normalize_qwen_tensor_name,
 )
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Fixtures: Qwen3.5/3.6 style checkpoint shards
@@ -39,6 +43,7 @@ def qwen35_official_shard(tmp_path: Path) -> Path:
     Qwen3.5 / Qwen3.6 naming convention where all transformer layers are under
     `model.language_model.layers.{idx}` instead of `model.layers.{idx}`.
     """
+    logger.debug("qwen35_official_shard called with tmp_path=%s", tmp_path)
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
     # Qwen3.5 official naming: model.language_model.layers.{idx}.*
@@ -124,6 +129,7 @@ def qwen35_deltanet_shard(tmp_path: Path) -> Path:
     - linear_attn.dt_bias: Discrete-time bias
     - linear_attn.conv1d.weight: Causal convolution kernel
     """
+    logger.debug("qwen35_deltanet_shard called with tmp_path=%s", tmp_path)
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
     tensors = {
@@ -171,6 +177,7 @@ def qwen3_coder_next_shard(tmp_path: Path) -> Path:
     - in_proj_qkvz: fused Q, K, V, Z projections
     - in_proj_ba: fused B, A projections (DeltaNet)
     """
+    logger.debug("qwen3_coder_next_shard called with tmp_path=%s", tmp_path)
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
     tensors = {
@@ -217,6 +224,7 @@ def qwen_moe_shared_expert_shard(tmp_path: Path) -> Path:
     - mlp.shared_expert.down_proj
     - mlp.shared_expert_gate.weight (alternate)
     """
+    logger.debug("qwen_moe_shared_expert_shard called with tmp_path=%s", tmp_path)
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
     tensors = {
@@ -278,6 +286,7 @@ def glm47_standard_shard(tmp_path: Path) -> Path:
     - model.layers.{idx}.self_attn.{q|k|v|o}_proj
     - model.layers.{idx}.mlp.{gate|up|down}_proj
     """
+    logger.debug("glm47_standard_shard called with tmp_path=%s", tmp_path)
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
     tensors = {
@@ -331,34 +340,40 @@ class TestNormalizeQwenTensorName:
 
     def test_qwen35_official_prefix(self):
         """Qwen3.5 official `model.language_model.layers` -> `model.layers`."""
+        logger.info("running test_qwen35_official_prefix")
         name = "model.language_model.layers.0.self_attn.q_proj"
         expected = "model.layers.0.self_attn.q_proj"
         assert _normalize_qwen_tensor_name(name) == expected
 
     def test_language_model_layers_prefix(self):
         """`language_model.layers` -> `model.layers`."""
+        logger.info("running test_language_model_layers_prefix")
         name = "language_model.layers.0.self_attn.q_proj"
         expected = "model.layers.0.self_attn.q_proj"
         assert _normalize_qwen_tensor_name(name) == expected
 
     def test_standard_prefix_unchanged(self):
         """Standard `model.layers` prefix should be unchanged."""
+        logger.info("running test_standard_prefix_unchanged")
         name = "model.layers.0.self_attn.q_proj"
         assert _normalize_qwen_tensor_name(name) == name
 
     def test_glm_prefix_unchanged(self):
         """GLM `model.layers` prefix should be unchanged."""
+        logger.info("running test_glm_prefix_unchanged")
         name = "model.layers.0.self_attn.q_proj"
         assert _normalize_qwen_tensor_name(name) == name
 
     def test_deltanet_tensor(self):
         """DeltaNet tensors should be normalized."""
+        logger.info("running test_deltanet_tensor")
         name = "model.language_model.layers.0.self_attn.linear_attn.A_log"
         expected = "model.layers.0.self_attn.linear_attn.A_log"
         assert _normalize_qwen_tensor_name(name) == expected
 
     def test_shared_expert_tensor(self):
         """Shared expert tensors should be normalized."""
+        logger.info("running test_shared_expert_tensor")
         name = "model.language_model.layers.0.mlp.shared_expert.gate_proj"
         expected = "model.layers.0.mlp.shared_expert.gate_proj"
         assert _normalize_qwen_tensor_name(name) == expected
@@ -374,14 +389,17 @@ class TestNormalizeKey:
 
     def test_dots_to_underscores(self):
         """Dots should become underscores."""
+        logger.info("running test_dots_to_underscores")
         assert _normalize_key("model.layers.0.q_proj") == "model_layers_0_q_proj"
 
     def test_lowercase(self):
         """Should be lowercased."""
+        logger.info("running test_lowercase")
         assert _normalize_key("MODEL.LAYERS.0") == "model_layers_0"
 
     def test_special_chars_stripped(self):
         """Special chars should be handled."""
+        logger.info("running test_special_chars_stripped")
         assert _normalize_key("model-layers-0") == "model_layers_0"
 
 
@@ -395,12 +413,14 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_qwen35_layer_indices(self, qwen35_official_shard: Path):
         """Layer indices should be extracted from Qwen3.5 naming."""
+        logger.info("running test_qwen35_layer_indices")
         loader = MMFP4ModelLoader(qwen35_official_shard)
         # Should find layer 0 from model.language_model.layers.0.*
         assert 0 in loader._layer_to_tensors
 
     def test_qwen35_load_layer(self, qwen35_official_shard: Path):
         """Should load Qwen3.5 layer tensors."""
+        logger.info("running test_qwen35_load_layer")
         loader = MMFP4ModelLoader(qwen35_official_shard)
         layer0 = loader.load_layer(0, device="cpu")
 
@@ -412,6 +432,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_qwen35_get_quantized_weight(self, qwen35_official_shard: Path):
         """Should retrieve weights with Qwen3.5 naming via load_tensor."""
+        logger.info("running test_qwen35_get_quantized_weight")
         loader = MMFP4ModelLoader(qwen35_official_shard)
 
         # Test with Qwen3.5 official naming - use load_tensor for raw weights
@@ -422,6 +443,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_qwen35_get_quantized_weight_cross_naming(self, qwen35_official_shard: Path):
         """Should retrieve weights with Qwen3.5 naming via GLM-style names."""
+        logger.info("running test_qwen35_get_quantized_weight_cross_naming")
         loader = MMFP4ModelLoader(qwen35_official_shard)
 
         # Query with GLM-style name, should find Qwen3.5 tensor
@@ -432,6 +454,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_deltanet_tensors_loaded(self, qwen35_deltanet_shard: Path):
         """DeltaNet tensors should be loadable."""
+        logger.info("running test_deltanet_tensors_loaded")
         loader = MMFP4ModelLoader(qwen35_deltanet_shard)
         layer0 = loader.load_layer(0, device="cpu")
 
@@ -442,6 +465,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_qwen3_coder_next_fused(self, qwen3_coder_next_shard: Path):
         """Qwen3-Coder-Next fused naming should work."""
+        logger.info("running test_qwen3_coder_next_fused")
         loader = MMFP4ModelLoader(qwen3_coder_next_shard)
         layer0 = loader.load_layer(0, device="cpu")
 
@@ -451,6 +475,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_shared_expert_naming(self, qwen_moe_shared_expert_shard: Path):
         """Shared expert naming should be preserved."""
+        logger.info("running test_shared_expert_naming")
         loader = MMFP4ModelLoader(qwen_moe_shared_expert_shard)
         layer0 = loader.load_layer(0, device="cpu")
 
@@ -460,6 +485,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_glm_backward_compatibility(self, glm47_standard_shard: Path):
         """GLM-4.7 standard naming should still work."""
+        logger.info("running test_glm_backward_compatibility")
         loader = MMFP4ModelLoader(glm47_standard_shard)
         layer0 = loader.load_layer(0, device="cpu")
 
@@ -469,6 +495,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_cross_naming_compatibility_qwen_to_glm(self, qwen35_official_shard: Path):
         """Qwen3.5 naming should be findable via GLM-style queries."""
+        logger.info("running test_cross_naming_compatibility_qwen_to_glm")
         loader = MMFP4ModelLoader(qwen35_official_shard)
 
         # Query with GLM-style name, should find Qwen3.5 tensor
@@ -479,6 +506,7 @@ class TestMMFP4LoaderQwenNaming:
 
     def test_cross_naming_compatibility_glm_to_qwen(self, glm47_standard_shard: Path):
         """GLM naming should be findable via Qwen-style queries."""
+        logger.info("running test_cross_naming_compatibility_glm_to_qwen")
         loader = MMFP4ModelLoader(glm47_standard_shard)
 
         # Query with Qwen3.5-style name, should find GLM tensor
@@ -498,6 +526,7 @@ class TestTensorMetadata:
 
     def test_qwen35_metadata(self, qwen35_official_shard: Path):
         """Metadata should be available for Qwen3.5 tensors."""
+        logger.info("running test_qwen35_metadata")
         loader = MMFP4ModelLoader(qwen35_official_shard)
 
         meta = loader.get_tensor_metadata(
@@ -509,6 +538,7 @@ class TestTensorMetadata:
 
     def test_deltanet_metadata(self, qwen35_deltanet_shard: Path):
         """Metadata should be available for DeltaNet tensors."""
+        logger.info("running test_deltanet_metadata")
         loader = MMFP4ModelLoader(qwen35_deltanet_shard)
 
         meta = loader.get_tensor_metadata(
@@ -529,6 +559,7 @@ class TestLoaderIterator:
 
     def test_qwen35_iterator(self, qwen35_official_shard: Path):
         """Iterator should yield Qwen3.5 layers."""
+        logger.info("running test_qwen35_iterator")
         loader = MMFP4ModelLoader(qwen35_official_shard)
         layers = list(loader)
 
@@ -539,6 +570,7 @@ class TestLoaderIterator:
 
     def test_glm_iterator(self, glm47_standard_shard: Path):
         """Iterator should yield GLM layers."""
+        logger.info("running test_glm_iterator")
         loader = MMFP4ModelLoader(glm47_standard_shard)
         layers = list(loader)
 
@@ -557,6 +589,7 @@ class TestEdgeCases:
 
     def test_empty_shard(self, tmp_path: Path):
         """Empty shard should not crash."""
+        logger.info("running test_empty_shard")
         shard_path = tmp_path / "model-00001-of-00001.safetensors"
         tensors: dict[str, torch.Tensor] = {}
         save_file(tensors, str(shard_path))
@@ -570,6 +603,7 @@ class TestEdgeCases:
 
     def test_mixed_naming_single_shard(self, tmp_path: Path):
         """Mixed Qwen/GLM naming in single shard should work."""
+        logger.info("running test_mixed_naming_single_shard")
         shard_path = tmp_path / "model-00001-of-00001.safetensors"
 
         tensors = {

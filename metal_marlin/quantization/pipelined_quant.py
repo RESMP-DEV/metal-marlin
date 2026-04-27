@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 import torch
@@ -30,6 +31,9 @@ except ImportError:
     pass
 
 
+
+logger = logging.getLogger(__name__)
+
 # =============================================================================
 # Aggressive Quantization Optimizations
 # =============================================================================
@@ -54,6 +58,7 @@ def fast_psd_project(
     Returns:
         H_psd: Nearest PSD matrix
     """
+    logger.debug("fast_psd_project called with H=%s, sigma_reg=%s, max_iters=%s", H, sigma_reg, max_iters)
     H = np.ascontiguousarray(H.astype(np.float32))
 
     # Fast path: check if already PSD via Gershgorin circles
@@ -78,6 +83,7 @@ def make_hessian_fp16(H: NDArray) -> NDArray:
 
     Note: Only use for Hessians with reasonable condition numbers (<1e4).
     """
+    logger.debug("make_hessian_fp16 called with H=%s", H)
     return H.astype(np.float16).astype(np.float32)
 
 
@@ -99,6 +105,7 @@ def downsample_calibration(
     Returns:
         Downsampled activations
     """
+    logger.debug("downsample_calibration called with activations=%s, target_samples=%s, strategy=%s", activations, target_samples, strategy)
     n_samples = activations.shape[0]
     if n_samples <= target_samples:
         return activations
@@ -132,6 +139,7 @@ def skip_low_sensitivity_experts(
     Returns:
         Set of expert names to skip or use minimal quantization
     """
+    logger.debug("skip_low_sensitivity_experts called with expert_sensitivities=%s, threshold_percentile=%s", expert_sensitivities, threshold_percentile)
     if not expert_sensitivities:
         return set()
 
@@ -163,6 +171,7 @@ def compute_layer_sensitivity(
     Sensitive layers should use higher bit precision or more iterations.
     """
     # Proxy: Frobenius norm of weight * activation variance
+    logger.debug("compute_layer_sensitivity called with weight=%s, activations=%s", weight, activations)
     w_norm = torch.norm(weight, p='fro').item()
     act_var = activations.var().item()
     return w_norm * act_var
@@ -193,11 +202,13 @@ def quantize_model_pipelined(
         EXL3QuantResult for each layer
     """
     # Buffer for prefetched layers
+    logger.info("quantize_model_pipelined called with layers=%s, quantizer=%s, hessian_fn=%s, prefetch_depth=%s", layers, quantizer, hessian_fn, prefetch_depth)
     prefetch_buffer: list[LayerInfo] = []
     executor = ThreadPoolExecutor(max_workers=prefetch_depth)
 
     def prefetch_hessian(layer: LayerInfo) -> tuple[LayerInfo, NDArray]:
         """Compute Hessian in background."""
+        logger.debug("prefetch_hessian called with layer=%s", layer)
         H = hessian_fn(layer.activations)
         return layer, H
 
@@ -269,6 +280,7 @@ def sensitivity_to_bits(
     Returns:
         Bit precision (clamped to [min_bits, max_bits])
     """
+    logger.debug("sensitivity_to_bits called with sensitivity=%s, min_sensitivity=%s, max_sensitivity=%s", sensitivity, min_sensitivity, max_sensitivity)
     if max_sensitivity <= min_sensitivity:
         return (min_bits + max_bits) // 2
 
@@ -320,6 +332,7 @@ def quantize_moe_experts_fast(
     Returns:
         Tuple of (results dict, metadata dict)
     """
+    logger.info("quantize_moe_experts_fast called with expert_weights=%s, expert_activations=%s, quantizer=%s, hessian_fn=%s", expert_weights, expert_activations, quantizer, hessian_fn)
     import time
     from concurrent.futures import ThreadPoolExecutor
 
@@ -368,6 +381,7 @@ def quantize_moe_experts_fast(
     quantizers: dict[int, EXL3Quantizer] = {}
 
     def get_quantizer(bits: int) -> EXL3Quantizer:
+        logger.info("get_quantizer called with bits=%s", bits)
         if bits not in quantizers:
             quantizers[bits] = EXL3Quantizer(
                 bits=bits,
@@ -384,6 +398,7 @@ def quantize_moe_experts_fast(
     metadata = {}
 
     def quantize_single_expert(args):
+        logger.info("quantize_single_expert called with args=%s", args)
         name, weight, act, bits = args
 
         # Downsample calibration for speed

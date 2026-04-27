@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerInfo:
@@ -88,6 +92,7 @@ class StreamingQuantizer:
         min_batch_size: int = 1,
         max_batch_size: int = 32,
     ):
+        logger.debug("initializing %s with model_path=%s, bits=%s, group_size=%s, memory_fraction=%s, min_batch_size=%s", type(self).__name__, model_path, bits, group_size, memory_fraction, min_batch_size)
         self.model_path = Path(model_path)
         self.bits = bits
         self.group_size = group_size
@@ -115,6 +120,7 @@ class StreamingQuantizer:
 
     def initialize(self) -> None:
         """Load config, tokenizer, and build layer index without loading weights."""
+        logger.debug("initialize called")
         print(f"Initializing from {self.model_path}")
 
         # Handle HuggingFace model IDs vs local paths
@@ -126,6 +132,7 @@ class StreamingQuantizer:
 
     def _init_from_hub(self, model_id: str) -> None:
         """Initialize from HuggingFace Hub without downloading weights."""
+        logger.debug("_init_from_hub called with model_id=%s", model_id)
         from huggingface_hub import hf_hub_download, list_repo_files
 
         print(f"  Fetching metadata from HuggingFace Hub: {model_id}")
@@ -159,6 +166,7 @@ class StreamingQuantizer:
 
     def _init_from_local(self, model_path: Path) -> None:
         """Initialize from local model directory."""
+        logger.debug("_init_from_local called with model_path=%s", model_path)
         print(f"  Loading from local path: {model_path}")
 
         # Load config and tokenizer
@@ -184,6 +192,7 @@ class StreamingQuantizer:
 
     def _build_layer_index_from_hub(self, model_id: str, safetensor_files: list[str]) -> None:
         """Build layer index from HuggingFace Hub safetensors."""
+        logger.info("_build_layer_index_from_hub starting")
         from huggingface_hub import hf_hub_download
 
         self.layers = []
@@ -199,6 +208,7 @@ class StreamingQuantizer:
 
     def _build_layer_index_from_local(self, safetensor_files: list[Path]) -> None:
         """Build layer index from local safetensors."""
+        logger.info("_build_layer_index_from_local starting")
         self.layers = []
 
         for st_file in safetensor_files:
@@ -208,6 +218,7 @@ class StreamingQuantizer:
 
     def _scan_safetensors_for_layers(self) -> None:
         """Scan safetensor files to find quantizable layers."""
+        logger.debug("_scan_safetensors_for_layers called")
         print("  Scanning for quantizable layers...")
 
         for filename, filepath in self.safetensor_files.items():
@@ -254,6 +265,7 @@ class StreamingQuantizer:
 
     def _parse_block_index(self, key: str) -> int | None:
         """Extract transformer block index from tensor key."""
+        logger.debug("_parse_block_index called with key=%s", key)
         import re
 
         # Match patterns like "layers.0.", "h.0.", "decoder.layers.0."
@@ -273,6 +285,7 @@ class StreamingQuantizer:
 
     def _extract_sublayer_name(self, layer_name: str) -> str:
         """Extract sublayer name (e.g., 'self_attn.q_proj' from full path)."""
+        logger.debug("_extract_sublayer_name called with layer_name=%s", layer_name)
         import re
 
         # Remove the block prefix
@@ -292,12 +305,14 @@ class StreamingQuantizer:
 
     def _num_blocks(self) -> int:
         """Return number of transformer blocks."""
+        logger.debug("_num_blocks called")
         if not self.layers:
             return 0
         return max(l.block_idx for l in self.layers) + 1
 
     def estimate_memory_per_layer(self) -> int:
         """Estimate memory needed per layer for quantization."""
+        logger.debug("estimate_memory_per_layer called")
         if not self.layers:
             return 0
 
@@ -317,6 +332,7 @@ class StreamingQuantizer:
     def calculate_batch_size(self) -> int:
         """Calculate how many layers to process in parallel based on available memory."""
         # Get available system memory
+        logger.debug("calculate_batch_size called")
         mem = psutil.virtual_memory()
         available_bytes = mem.available
 
@@ -345,6 +361,7 @@ class StreamingQuantizer:
 
     def load_layer_weight(self, layer: LayerInfo) -> torch.Tensor:
         """Load a single layer's weight from safetensors."""
+        logger.info("load_layer_weight called with layer=%s", layer)
         filepath = self.safetensor_files[layer.safetensor_file]
         with safe_open(filepath, framework="pt", device="cpu") as f:
             weight = f.get_tensor(layer.tensor_key)
@@ -362,6 +379,7 @@ class StreamingQuantizer:
         then use those cached activations for Hessian computation without needing
         the full model loaded.
         """
+        logger.debug("collect_calibration_activations called with calibration_texts=%s, max_seq_len=%s, batch_size=%s", calibration_texts, max_seq_len, batch_size)
         print("\nCollecting calibration activations...")
         print(f"  Samples: {len(calibration_texts)}")
         print(f"  Max sequence length: {max_seq_len}")
@@ -430,6 +448,7 @@ class StreamingQuantizer:
         Uses Metal shader acceleration when available, falls back to MPS/CPU.
         Note: Metal hessian kernel requires threadgroup memory reduction for M4.
         """
+        logger.debug("compute_hessian_from_cache called with layer=%s, sigma_reg=%s", layer, sigma_reg)
         block_idx = layer.block_idx
 
         if block_idx not in self.activation_cache:
@@ -484,6 +503,7 @@ class StreamingQuantizer:
         - 8-bit: Very sensitive (first/last layers, small projections)
         """
         # 1. Weight outlier ratio (capped to prevent explosion)
+        logger.debug("compute_layer_sensitivity called with weight=%s, H=%s", weight, H)
         w = weight.float().numpy()
         w_abs = np.abs(w)
         p99 = np.percentile(w_abs, 99)
@@ -553,6 +573,7 @@ class StreamingQuantizer:
 
     def quantize_layer(self, layer: LayerInfo) -> QuantizationResult:
         """Quantize a single layer with sensitivity analysis."""
+        logger.info("quantize_layer called with layer=%s", layer)
         try:
             # Load weight from safetensors
             weight = self.load_layer_weight(layer)
@@ -596,6 +617,7 @@ class StreamingQuantizer:
 
     def quantize_layer_with_hessian(self, layer: LayerInfo, H: np.ndarray) -> QuantizationResult:
         """Quantize a single layer with pre-computed Hessian."""
+        logger.info("quantize_layer_with_hessian called with layer=%s, H=%s", layer, H)
         try:
             import time
 
@@ -650,6 +672,7 @@ class StreamingQuantizer:
 
         This keeps both GPU compute units busy and avoids thread-safety issues.
         """
+        logger.info("quantize_batch called with layers=%s, max_workers=%s", layers, max_workers)
         import time
 
         results = []
@@ -698,6 +721,7 @@ class StreamingQuantizer:
     ) -> list[QuantizationResult]:
         """Quantize all layers using streaming with dynamic parallelization."""
 
+        logger.info("quantize_all called with calibration_texts=%s, max_layers=%s, output_dir=%s", calibration_texts, max_layers, output_dir)
         if calibration_texts is None:
             calibration_texts = self._get_default_calibration()
 
@@ -734,6 +758,7 @@ class StreamingQuantizer:
 
     def _get_default_calibration(self, num_samples: int = 32) -> list[str]:
         """Get default calibration texts."""
+        logger.debug("_get_default_calibration called with num_samples=%s", num_samples)
         base_texts = [
             "The quick brown fox jumps over the lazy dog.",
             "Machine learning has revolutionized many industries.",
@@ -754,6 +779,7 @@ class StreamingQuantizer:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Streaming EXL3 quantization")
     parser.add_argument(
         "--model",

@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import curses
 import json
+import logging
 import sys
 import time
 from collections import deque
@@ -35,6 +36,9 @@ try:
 except ImportError:
     HAS_TORCH = False
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class InferenceMetrics:
@@ -67,6 +71,7 @@ class InferenceMetrics:
     @property
     def tokens_per_second(self) -> float:
         """Calculate overall TPS."""
+        logger.debug("tokens_per_second called")
         if self.time_elapsed > 0:
             return self.tokens_generated / self.time_elapsed
         return 0.0
@@ -74,6 +79,7 @@ class InferenceMetrics:
     @property
     def prefill_tps(self) -> float:
         """Calculate prefill TPS."""
+        logger.debug("prefill_tps called")
         if self.prefill_time > 0:
             return self.prefill_tokens / self.prefill_time
         return 0.0
@@ -81,6 +87,7 @@ class InferenceMetrics:
     @property
     def decode_tps(self) -> float:
         """Calculate decode TPS."""
+        logger.debug("decode_tps called")
         if self.decode_time > 0:
             return self.decode_tokens / self.decode_time
         return 0.0
@@ -88,6 +95,7 @@ class InferenceMetrics:
     @property
     def mean_latency(self) -> float:
         """Average token latency in ms."""
+        logger.debug("mean_latency called")
         if self.token_latencies:
             return sum(self.token_latencies) / len(self.token_latencies) * 1000
         return 0.0
@@ -95,6 +103,7 @@ class InferenceMetrics:
     @property
     def p50_latency(self) -> float:
         """Median token latency in ms."""
+        logger.debug("p50_latency called")
         if self.token_latencies:
             sorted_lat = sorted(self.token_latencies)
             idx = len(sorted_lat) // 2
@@ -104,6 +113,7 @@ class InferenceMetrics:
     @property
     def p99_latency(self) -> float:
         """99th percentile token latency in ms."""
+        logger.debug("p99_latency called")
         if self.token_latencies:
             sorted_lat = sorted(self.token_latencies)
             idx = int(len(sorted_lat) * 0.99)
@@ -115,12 +125,14 @@ class MetricsCollector:
     """Collects inference metrics from various sources."""
     
     def __init__(self, history_size: int = 100):
+        logger.debug("initializing %s with history_size=%s", type(self).__name__, history_size)
         self.history: deque[InferenceMetrics] = deque(maxlen=history_size)
         self.current = InferenceMetrics()
         self.start_time = time.time()
         
     def update_from_log(self, log_line: str) -> bool:
         """Parse and update metrics from log line."""
+        logger.debug("update_from_log called with log_line=%s", log_line)
         try:
             # Try to parse as JSON
             if log_line.strip().startswith("{"):
@@ -142,6 +154,7 @@ class MetricsCollector:
     
     def _update_from_dict(self, data: dict[str, Any]) -> None:
         """Update metrics from dictionary."""
+        logger.debug("_update_from_dict called with data=%s", data)
         self.current.timestamp = data.get("timestamp", time.time())
         self.current.tokens_generated = data.get("tokens_generated", 0)
         self.current.time_elapsed = data.get("time_elapsed", 0.0)
@@ -167,6 +180,7 @@ class MetricsCollector:
     def _parse_tps_line(self, line: str) -> None:
         """Parse TPS from text log line."""
         # Example: "Generated 128 tokens in 2.5s (51.2 tokens/sec)"
+        logger.debug("_parse_tps_line called with line=%s", line)
         import re
         match = re.search(r"(\d+)\s+tokens.*?([\d.]+)s.*?([\d.]+)\s+tokens", line)
         if match:
@@ -180,6 +194,7 @@ class MetricsCollector:
     def _parse_memory_line(self, line: str) -> None:
         """Parse memory usage from text log line."""
         # Example: "GPU Memory: 4.2 / 16.0 GB"
+        logger.debug("_parse_memory_line called with line=%s", line)
         import re
         match = re.search(r"([\d.]+)\s*/\s*([\d.]+)\s*GB", line)
         if match:
@@ -188,6 +203,7 @@ class MetricsCollector:
     
     def collect_system_metrics(self) -> None:
         """Collect current system metrics."""
+        logger.debug("collect_system_metrics called")
         if HAS_TORCH and torch.backends.mps.is_available():
             try:
                 # MPS memory stats
@@ -213,6 +229,7 @@ class InferenceMonitor:
         refresh_rate: float = 1.0,
         history_size: int = 100,
     ):
+        logger.debug("initializing %s with log_file=%s, refresh_rate=%s, history_size=%s", type(self).__name__, log_file, refresh_rate, history_size)
         self.log_file = log_file
         self.refresh_rate = refresh_rate
         self.collector = MetricsCollector(history_size=history_size)
@@ -221,6 +238,7 @@ class InferenceMonitor:
         
     def read_log_updates(self) -> None:
         """Read new lines from log file."""
+        logger.debug("read_log_updates called")
         if not self.log_file or not self.log_file.exists():
             return
             
@@ -235,6 +253,7 @@ class InferenceMonitor:
     
     def run(self, stdscr: Any) -> None:
         """Main monitoring loop."""
+        logger.info("run starting")
         self.running = True
         curses.curs_set(0)  # Hide cursor
         stdscr.nodelay(True)  # Non-blocking input
@@ -265,6 +284,7 @@ class InferenceMonitor:
     
     def render(self, stdscr: Any) -> None:
         """Render dashboard to terminal."""
+        logger.debug("render called with stdscr=%s", stdscr)
         stdscr.clear()
         height, width = stdscr.getmaxyx()
         
@@ -372,6 +392,7 @@ class InferenceMonitor:
     
     def _get_tps_color(self, tps: float) -> int:
         """Get color based on TPS value."""
+        logger.debug("_get_tps_color called with tps=%s", tps)
         if tps > 50:
             return 1  # Green
         elif tps > 20:
@@ -381,6 +402,7 @@ class InferenceMonitor:
     
     def _get_memory_color(self, percent: float) -> int:
         """Get color based on memory usage."""
+        logger.debug("_get_memory_color called with percent=%s", percent)
         if percent < 70:
             return 1  # Green
         elif percent < 85:
@@ -390,11 +412,13 @@ class InferenceMonitor:
     
     def _render_bar(self, percent: float, width: int = 20) -> str:
         """Render a progress bar."""
+        logger.debug("_render_bar called with percent=%s, width=%s", percent, width)
         filled = int((percent / 100) * width)
         return "█" * filled + "░" * (width - filled)
     
     def _render_sparkline(self, values: list[float], width: int) -> str:
         """Render a sparkline chart."""
+        logger.debug("_render_sparkline called with values=%s, width=%s", values, width)
         if not values:
             return ""
         
@@ -422,6 +446,7 @@ class InferenceMonitor:
 
 def main() -> int:
     """Entry point."""
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Terminal-based inference monitor for Metal Marlin"
     )

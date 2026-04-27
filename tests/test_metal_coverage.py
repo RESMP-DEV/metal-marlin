@@ -7,6 +7,7 @@ to detect when PyTorch operations are called during Metal-accelerated paths.
 
 from __future__ import annotations
 
+import logging
 import sys
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -20,6 +21,9 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+
+
+logger = logging.getLogger(__name__)
 
 @contextmanager
 def count_torch_dispatches(*ops: str):
@@ -36,11 +40,14 @@ def count_torch_dispatches(*ops: str):
             sampler.argmax(logits)
         assert counts['argmax'] == 0, "argmax should use Metal, not PyTorch"
     """
+    logger.debug("count_torch_dispatches called")
     counts: dict[str, int] = {op: 0 for op in ops}
     original_ops: dict[str, Callable] = {}
 
     def make_counter(op_name: str, original: Callable) -> Callable:
+        logger.debug("make_counter called with op_name=%s, original=%s", op_name, original)
         def counted_op(*args, **kwargs):  # type: ignore[no-untyped-def]
+            logger.debug("counted_op called")
             counts[op_name] += 1
             return original(*args, **kwargs)
 
@@ -68,11 +75,14 @@ def count_torch_tensor_methods(*ops: str):
 
     Similar to count_torch_dispatches but for tensor methods like argsort, sort.
     """
+    logger.debug("count_torch_tensor_methods called")
     counts: dict[str, int] = {op: 0 for op in ops}
     original_methods: dict[str, Callable] = {}
 
     def make_counter(op_name: str, original: Callable) -> Callable:
+        logger.debug("make_counter called with op_name=%s, original=%s", op_name, original)
         def counted_method(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            logger.debug("counted_method called")
             counts[op_name] += 1
             return original(self, *args, **kwargs)
 
@@ -109,6 +119,7 @@ class TestSamplingUsesMetal:
     @pytest.fixture
     def sampler(self):
         """Create a MetalSampler instance."""
+        logger.debug("sampler called")
         from metal_marlin.sampler import MetalSampler
 
         return MetalSampler(vocab_size=32000)
@@ -116,11 +127,13 @@ class TestSamplingUsesMetal:
     @pytest.fixture
     def sample_logits(self):
         """Create sample logits tensor on MPS."""
+        logger.debug("sample_logits called")
         torch.manual_seed(42)
         return torch.randn(1, 32000, device="mps")
 
     def test_argmax_uses_metal(self, sampler, sample_logits):
         """Verify argmax uses Metal kernel, not torch.argmax."""
+        logger.info("running test_argmax_uses_metal")
         with count_torch_dispatches("argmax") as counts:
             result = sampler.argmax(sample_logits)
 
@@ -131,6 +144,7 @@ class TestSamplingUsesMetal:
 
     def test_sample_top_p_uses_metal(self, sampler, sample_logits):
         """Verify top-p sampling uses Metal kernel, not torch.sort or torch.multinomial."""
+        logger.info("running test_sample_top_p_uses_metal")
         with (
             count_torch_dispatches("sort", "multinomial") as torch_counts,
             count_torch_tensor_methods("sort") as tensor_counts,
@@ -149,6 +163,7 @@ class TestSamplingUsesMetal:
 
     def test_sample_top_k_uses_metal(self, sampler, sample_logits):
         """Verify top-k sampling uses Metal kernel, not torch.topk."""
+        logger.info("running test_sample_top_k_uses_metal")
         with count_torch_dispatches("topk") as counts:
             result = sampler.sample_top_k(sample_logits, k=50)
 
@@ -159,6 +174,7 @@ class TestSamplingUsesMetal:
 
     def test_sample_categorical_uses_metal(self, sampler, sample_logits):
         """Verify categorical sampling uses Metal kernel, not torch.multinomial."""
+        logger.info("running test_sample_categorical_uses_metal")
         with count_torch_dispatches("multinomial") as counts:
             result = sampler.sample_categorical(sample_logits, temperature=1.0)
 
@@ -175,11 +191,13 @@ class TestMoEDispatchUsesMetal:
     @pytest.fixture
     def sample_expert_ids(self):
         """Create sample expert IDs tensor on MPS."""
+        logger.debug("sample_expert_ids called")
         torch.manual_seed(42)
         return torch.randint(0, 8, (64, 2), device="mps")
 
     def _check_metal_moe_available(self):
         """Check if Metal MoE dispatch is actually working."""
+        logger.debug("_check_metal_moe_available called")
         from metal_marlin.moe_dispatch import _USE_METAL
 
         if not _USE_METAL:
@@ -197,6 +215,7 @@ class TestMoEDispatchUsesMetal:
 
     def test_group_tokens_by_expert_avoids_torch_sort(self, sample_expert_ids):
         """Verify group_tokens_by_expert avoids torch.argsort when Metal is available."""
+        logger.info("running test_group_tokens_by_expert_avoids_torch_sort")
         group_tokens_by_expert_metal = self._check_metal_moe_available()
 
         with count_torch_tensor_methods("argsort") as counts:
@@ -218,6 +237,7 @@ class TestMoEDispatchUsesMetal:
 
     def test_group_tokens_does_not_call_bincount_or_cumsum(self, sample_expert_ids):
         """Verify Metal MoE dispatch avoids torch.bincount and torch.cumsum."""
+        logger.info("running test_group_tokens_does_not_call_bincount_or_cumsum")
         group_tokens_by_expert_metal = self._check_metal_moe_available()
 
         with (
@@ -245,6 +265,7 @@ class TestFP4QuantizeUsesMetal:
         This test documents whether Metal FP4 is available on this system.
         If False, the Metal FP4 tests will be skipped.
         """
+        logger.info("running test_fp4_metal_flag_reflects_availability")
         from metal_marlin.quantize_fp4 import _USE_METAL
 
         # Log the status without failing - Metal FP4 might not be built
@@ -255,6 +276,7 @@ class TestFP4QuantizeUsesMetal:
 
     def test_quantize_fp4_dispatches_to_metal(self):
         """Verify quantize_fp4 uses Metal path when available."""
+        logger.info("running test_quantize_fp4_dispatches_to_metal")
         from metal_marlin.quantize_fp4 import _USE_METAL, quantize_fp4
 
         if not _USE_METAL:
@@ -280,6 +302,7 @@ class TestFP4QuantizeUsesMetal:
 
     def test_unpack_fp4_uses_metal(self):
         """Verify unpack_fp4 uses Metal when available."""
+        logger.info("running test_unpack_fp4_uses_metal")
         from metal_marlin.quantize_fp4 import _USE_METAL, quantize_fp4, unpack_fp4
 
         if not _USE_METAL:
@@ -304,11 +327,13 @@ class TestActivationUsesMetal:
     @pytest.fixture
     def sample_hidden_states(self):
         """Create sample hidden states on MPS."""
+        logger.debug("sample_hidden_states called")
         torch.manual_seed(42)
         return torch.randn(2, 128, 4096, device="mps", dtype=torch.float16)
 
     def test_marlin_linear_uses_metal(self, sample_hidden_states):
         """Verify MarlinLinear uses Metal GEMM kernels."""
+        logger.info("running test_marlin_linear_uses_metal")
         from metal_marlin.layers import MarlinLinear
 
         # Create layer using dimension-based constructor
@@ -332,6 +357,7 @@ class TestMetalKernelDispatch:
 
     def test_metal_dispatch_does_not_sync_to_cpu(self):
         """Verify that Metal operations don't unnecessarily sync to CPU."""
+        logger.info("running test_metal_dispatch_does_not_sync_to_cpu")
         from metal_marlin.metal_dispatch import require_metal, require_mps
 
         # These should not raise on MPS-enabled systems
@@ -348,6 +374,7 @@ class TestMetalKernelDispatch:
 
     def test_mps_tensors_stay_on_device_through_ops(self):
         """Verify MPS tensors stay on MPS through Metal operations."""
+        logger.info("running test_mps_tensors_stay_on_device_through_ops")
         from metal_marlin.sampler import MetalSampler
 
         sampler = MetalSampler(vocab_size=1000)

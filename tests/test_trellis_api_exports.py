@@ -1,12 +1,16 @@
 """Import regression tests for Trellis public API exports."""
 
 from __future__ import annotations
+import logging
 
 import importlib
 
 import pytest
 
 from metal_marlin._compat import HAS_TORCH, torch
+
+
+logger = logging.getLogger(__name__)
 
 STABLE_TRELLIS_SYMBOLS = (
     "TrellisForCausalLM",
@@ -37,6 +41,7 @@ _OPTIONAL_TRELLIS_DEPS = {"torch", "transformers", "numpy", "safetensors"}
 
 
 def _has_usable_torch() -> bool:
+    logger.debug("_has_usable_torch called")
     if not HAS_TORCH or torch is None:
         return False
     required_attrs = ("float16", "bfloat16", "float32", "Tensor", "nn")
@@ -44,11 +49,13 @@ def _has_usable_torch() -> bool:
 
 
 def _require_trellis_runtime() -> None:
+    logger.debug("_require_trellis_runtime called")
     if not _has_usable_torch():
         pytest.skip("Requires a functional PyTorch runtime for Trellis imports")
 
 
 def _import_trellis_module(name: str):
+    logger.debug("_import_trellis_module called with name=%s", name)
     try:
         return importlib.import_module(name)
     except ModuleNotFoundError as exc:
@@ -60,6 +67,7 @@ def _import_trellis_module(name: str):
 
 def test_stable_public_symbols_importable_from_trellis() -> None:
     """Stable symbols should be importable from ``metal_marlin.trellis``."""
+    logger.info("running test_stable_public_symbols_importable_from_trellis")
     _require_trellis_runtime()
     trellis = _import_trellis_module("metal_marlin.trellis")
 
@@ -99,6 +107,7 @@ def test_stable_public_symbols_importable_from_trellis() -> None:
 
 def test_trellis_lm_reexports_are_backward_compatible() -> None:
     """``metal_marlin.trellis.lm`` should re-export stable Trellis model symbols."""
+    logger.info("running test_trellis_lm_reexports_are_backward_compatible")
     _require_trellis_runtime()
     trellis_lm = _import_trellis_module("metal_marlin.trellis.lm")
     trellis_model = _import_trellis_module("metal_marlin.trellis.model")

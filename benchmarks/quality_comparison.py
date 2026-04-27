@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 
 import torch
@@ -11,6 +12,7 @@ from tqdm import tqdm
 
 
 def _extract_logits(outputs: torch.Tensor | object) -> torch.Tensor:
+    logger.debug("_extract_logits called with outputs=%s", outputs)
     if hasattr(outputs, "logits"):
         return outputs.logits  # type: ignore[no-any-return]
     if isinstance(outputs, torch.Tensor):
@@ -27,6 +29,7 @@ def compute_perplexity(
     device: str = "mps",
 ) -> float:
     """Compute perplexity on text samples."""
+    logger.debug("compute_perplexity called with model=%s, tokenizer=%s, texts=%s", model, tokenizer, texts)
     total_loss = 0.0
     total_tokens = 0
 
@@ -63,6 +66,7 @@ def compare_quality(
 ) -> None:
     """Compare BF16 and quantized model quality."""
     # Load WikiText-2 test set
+    logger.debug("compare_quality called with original_path=%s, quantized_path=%s", original_path, quantized_path)
     dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     texts = [t for t in dataset["text"] if len(t) > min_length][:sample_count]
 
@@ -89,6 +93,9 @@ def compare_quality(
 import os
 import sys
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -107,6 +114,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--original-path", required=True, help="BF16 model path or HF id.")
     parser.add_argument("--quantized-path", required=True, help="Quantized model path.")

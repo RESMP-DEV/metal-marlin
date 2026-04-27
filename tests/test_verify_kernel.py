@@ -1,14 +1,19 @@
+import logging
 import pytest
 import torch
 
 from metal_marlin.layers.mmfp4_mtp_head import verify_kernel
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestVerifyKernel:
     """Test verify_kernel from mmfp4_mtp_head.py."""
 
     def test_perfect_match_accepts_all(self):
         """When draft == target distributions, all tokens should be accepted."""
+        logger.info("running test_perfect_match_accepts_all")
         torch.manual_seed(42)
         batch, num_spec, vocab = 2, 4, 50
         device = torch.device("cpu")
@@ -47,6 +52,7 @@ class TestVerifyKernel:
 
     def test_complete_mismatch_rejects_first(self):
         """When target mismatches draft, should reject."""
+        logger.info("running test_complete_mismatch_rejects_first")
         torch.manual_seed(123)
         batch, num_spec, vocab = 1, 4, 50
         device = torch.device("cpu")
@@ -67,6 +73,7 @@ class TestVerifyKernel:
         assert not accepted_mask[0, 0]
 
     def test_output_shapes(self):
+        logger.info("running test_output_shapes")
         batch, num_spec, vocab = 3, 5, 200
         device = torch.device("cpu")
 
@@ -84,6 +91,7 @@ class TestVerifyKernel:
     def test_temperature_scaling(self):
         """Test that temperature argument is accepted and affects results."""
         # This mostly verifies the function signature and execution path
+        logger.info("running test_temperature_scaling")
         batch, num_spec, vocab = 1, 4, 50
         device = torch.device("cpu")
         draft_tokens = torch.zeros((batch, num_spec), dtype=torch.long, device=device)

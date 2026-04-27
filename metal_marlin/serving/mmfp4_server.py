@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import time
 import uuid
 from collections import deque
@@ -43,6 +44,9 @@ from .request import GenerationRequest, RequestStatus, RunningRequest
 if TYPE_CHECKING:
     from .engine import ServingEngine
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SharedBlock:
@@ -93,6 +97,7 @@ class KVCacheSharing:
 
     def __init__(self) -> None:
         # Block index -> SharedBlock tracking
+        logger.debug("initializing %s", type(self).__name__)
         self._shared_blocks: dict[int, SharedBlock] = {}
         
         # Request ID -> SharedRegion mapping
@@ -123,6 +128,7 @@ class KVCacheSharing:
         Returns:
             Region ID for the created region.
         """
+        logger.debug("create_region called with request_id=%s, block_indices=%s, prompt_hash=%s", request_id, block_indices, prompt_hash)
         region_id = self._next_region_id
         self._next_region_id += 1
 
@@ -163,6 +169,7 @@ class KVCacheSharing:
         Returns:
             List of shared block indices, or None if sharing failed.
         """
+        logger.debug("share_prompt called with parent_request_id=%s, child_request_id=%s, num_prefix_tokens=%s", parent_request_id, child_request_id, num_prefix_tokens)
         parent_region = self._shared_regions.get(parent_request_id)
         if parent_region is None:
             return None
@@ -221,6 +228,7 @@ class KVCacheSharing:
         Returns:
             True if COW was performed, False if not needed or failed.
         """
+        logger.info("copy_on_write called with request_id=%s, block_idx=%s, new_block_idx=%s", request_id, block_idx, new_block_idx)
         region = self._shared_regions.get(request_id)
         if region is None:
             return False
@@ -258,6 +266,7 @@ class KVCacheSharing:
         Returns:
             True if COW is required before writing.
         """
+        logger.debug("check_needs_cow called with request_id=%s, block_idx=%s", request_id, block_idx)
         shared_block = self._shared_blocks.get(block_idx)
         if shared_block is None:
             return False
@@ -272,6 +281,7 @@ class KVCacheSharing:
         Returns:
             List of block indices that are shared (refcount > 1).
         """
+        logger.debug("get_shared_blocks called with request_id=%s", request_id)
         region = self._shared_regions.get(request_id)
         if region is None:
             return []
@@ -292,6 +302,7 @@ class KVCacheSharing:
         Returns:
             List of block indices that can be freed (refcount reached 0).
         """
+        logger.debug("release_request called with request_id=%s", request_id)
         region = self._shared_regions.pop(request_id, None)
         if region is None:
             return []
@@ -332,6 +343,7 @@ class KVCacheSharing:
         Returns:
             Prompt hash for cache lookup.
         """
+        logger.debug("cache_prompt called with request_id=%s, prompt_tokens=%s, block_indices=%s", request_id, prompt_tokens, block_indices)
         prompt_hash = self._compute_prompt_hash(prompt_tokens)
         
         if prompt_hash not in self._prompt_cache:
@@ -357,6 +369,7 @@ class KVCacheSharing:
         Returns:
             Tuple of (block_indices, source_request_id) or None if not found.
         """
+        logger.debug("lookup_cached_prompt called with prompt_tokens=%s", prompt_tokens)
         prompt_hash = self._compute_prompt_hash(prompt_tokens)
         
         if prompt_hash not in self._prompt_cache:
@@ -377,11 +390,13 @@ class KVCacheSharing:
     @staticmethod
     def _compute_prompt_hash(tokens: list[int]) -> str:
         """Compute hash for prompt prefix matching."""
+        logger.debug("_compute_prompt_hash called with tokens=%s", tokens)
         token_bytes = b"".join(t.to_bytes(4, "little") for t in tokens)
         return hashlib.sha256(token_bytes).hexdigest()[:16]
 
     def get_stats(self) -> dict:
         """Get sharing statistics."""
+        logger.debug("get_stats called")
         return {
             "cow_operations": self._cow_operations,
             "shared_blocks": self._shared_block_count,
@@ -419,6 +434,7 @@ def _kv_sharing(
         # Share prompt between requests
         sharing.share_prompt(parent_id, child_id, num_tokens)
     """
+    logger.debug("_kv_sharing called with server=%s, enable_prefix_caching=%s", server, enable_prefix_caching)
     sharing = KVCacheSharing()
     
     # Future: integrate with server.scheduler if server is provided
@@ -449,6 +465,7 @@ def get_request_queue(maxsize: int = 0) -> RequestQueue:
         # Process requests
         request = await queue.get()
     """
+    logger.debug("get_request_queue called with maxsize=%s", maxsize)
     global _request_queue
     if _request_queue is None:
         _request_queue = RequestQueue(maxsize=maxsize)
@@ -468,6 +485,7 @@ def init_request_queue(server: MMFP4Server, maxsize: int = 0) -> RequestQueue:
     Returns:
         Configured RequestQueue instance.
     """
+    logger.debug("init_request_queue called with server=%s, maxsize=%s", server, maxsize)
     global _request_queue
     _request_queue = RequestQueue(maxsize=maxsize)
     return _request_queue
@@ -517,24 +535,29 @@ class RequestQueue:
     @property
     def size(self) -> int:
         """Current number of items in the queue."""
+        logger.debug("size called")
         return self.queue.qsize()
 
     @property
     def is_empty(self) -> bool:
         """Whether the queue is empty."""
+        logger.debug("is_empty called")
         return self.queue.empty()
 
     @property
     def is_full(self) -> bool:
         """Whether the queue is full."""
+        logger.debug("is_full called")
         return self.queue.full()
 
     async def put(self, item: GenerationRequest) -> None:
         """Put a request into the queue."""
+        logger.debug("put called with item=%s", item)
         await self.queue.put(item)
 
     def put_nowait(self, item: GenerationRequest) -> bool:
         """Put a request without waiting, returns False if full."""
+        logger.debug("put_nowait called with item=%s", item)
         try:
             self.queue.put_nowait(item)
             return True
@@ -543,10 +566,12 @@ class RequestQueue:
 
     async def get(self) -> GenerationRequest:
         """Get a request from the queue."""
+        logger.debug("get called")
         return await self.queue.get()
 
     def get_nowait(self) -> GenerationRequest | None:
         """Get a request without waiting, returns None if empty."""
+        logger.debug("get_nowait called")
         try:
             return self.queue.get_nowait()
         except asyncio.QueueEmpty:
@@ -554,6 +579,7 @@ class RequestQueue:
 
     def task_done(self) -> None:
         """Mark a task as done."""
+        logger.debug("task_done called")
         self.queue.task_done()
 
 
@@ -584,6 +610,7 @@ class RequestBatcher:
     """
 
     def __init__(self, config: BatchConfig | None = None):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or BatchConfig()
         self._queue: deque[BatchedRequest] = deque()
         self._batch_event = asyncio.Event()
@@ -601,6 +628,7 @@ class RequestBatcher:
         Returns:
             A future that will resolve when the request is processed.
         """
+        logger.debug("submit called with request=%s", request)
         future = asyncio.get_event_loop().create_future()
         batched = BatchedRequest(request=request, future=future)
 
@@ -624,6 +652,7 @@ class RequestBatcher:
         Returns:
             List of batched requests to process together.
         """
+        logger.debug("get_batch called")
         while True:
             async with self._lock:
                 if len(self._queue) >= self.config.min_batch_size:
@@ -657,6 +686,7 @@ class RequestBatcher:
             batch: The batch that was processed.
             results: Results for each request in the batch.
         """
+        logger.debug("complete_batch called with batch=%s, results=%s", batch, results)
         for batched, result in zip(batch, results):
             if not batched.future.done():
                 batched.future.set_result(result)
@@ -674,6 +704,7 @@ class RequestBatcher:
             batch: The batch that failed.
             error: The exception that occurred.
         """
+        logger.debug("fail_batch called with batch=%s, error=%s", batch, error)
         for batched in batch:
             if not batched.future.done():
                 batched.future.set_exception(error)
@@ -681,11 +712,13 @@ class RequestBatcher:
     @property
     def queue_depth(self) -> int:
         """Number of requests currently waiting to be batched."""
+        logger.debug("queue_depth called")
         return len(self._queue)
 
     @property
     def pending_batches_count(self) -> int:
         """Number of batches currently being processed."""
+        logger.debug("pending_batches_count called")
         return len(self._pending_batches)
 
 
@@ -717,6 +750,7 @@ class MMFP4Server:
         scheduler_config: SchedulerConfig | None = None,
         batch_config: BatchConfig | None = None,
     ):
+        logger.debug("initializing %s with engine=%s, scheduler_config=%s, batch_config=%s", type(self).__name__, engine, scheduler_config, batch_config)
         self.engine = engine
         self.scheduler_config = scheduler_config or SchedulerConfig()
         self.batch_config = batch_config or BatchConfig()
@@ -741,6 +775,7 @@ class MMFP4Server:
 
     async def start(self) -> None:
         """Start the batch processing loop."""
+        logger.debug("start called")
         if self._running:
             return
 
@@ -749,6 +784,7 @@ class MMFP4Server:
 
     async def stop(self) -> None:
         """Stop the batch processing loop."""
+        logger.debug("stop called")
         self._running = False
         if self._batch_task:
             self._batch_task.cancel()
@@ -760,6 +796,7 @@ class MMFP4Server:
 
     async def _batch_loop(self) -> None:
         """Background task that continuously processes batches."""
+        logger.debug("_batch_loop called")
         while self._running:
             try:
                 batch = await self.batcher.get_batch()
@@ -773,6 +810,7 @@ class MMFP4Server:
 
     async def _process_batch(self, batch: list[BatchedRequest]) -> None:
         """Process a batch of requests through the scheduler."""
+        logger.debug("_process_batch called with batch=%s", batch)
         try:
             results = await _request_batch(self, [b.request for b in batch])
             self.batcher.complete_batch(batch, results)
@@ -790,6 +828,7 @@ class MMFP4Server:
         Returns:
             The completion response.
         """
+        logger.debug("submit_chat_request called with request=%s", request)
         future = await self.batcher.submit(request)
         return await future
 
@@ -804,12 +843,14 @@ class MMFP4Server:
         Returns:
             The completion response.
         """
+        logger.debug("submit_completion_request called with request=%s", request)
         future = await self.batcher.submit(request)
         return await future
 
     @property
     def stats(self) -> dict:
         """Get current server statistics."""
+        logger.debug("stats called")
         return {
             "queue_depth": self.batcher.queue_depth,
             "pending_batches": self.batcher.pending_batches_count,
@@ -822,6 +863,7 @@ class MMFP4Server:
 
         Available after calling start_continuous_batching().
         """
+        logger.debug("request_queue called")
         return self._request_queue
 
     @property
@@ -830,6 +872,7 @@ class MMFP4Server:
 
         Available after calling start_continuous_batching().
         """
+        logger.debug("result_queue called")
         return self._result_queue
 
     async def start_continuous_batching(self) -> None:
@@ -847,6 +890,7 @@ class MMFP4Server:
             # Get results as they complete
             req_id, response = await server.result_queue.get()
         """
+        logger.debug("start_continuous_batching called")
         if self._running:
             return
 
@@ -869,6 +913,7 @@ class MMFP4Server:
 
     async def stop_continuous_batching(self) -> None:
         """Stop the continuous batching loop gracefully."""
+        logger.debug("stop_continuous_batching called")
         if not self._running or self._shutdown_event is None:
             return
 
@@ -913,6 +958,7 @@ class MMFP4Server:
         Raises:
             RuntimeError: If continuous batching mode is not active.
         """
+        logger.debug("submit_request_to_queue called with request=%s, original_request=%s", request, original_request)
         if not self._running or self._request_queue is None:
             raise RuntimeError(
                 "Continuous batching mode is not active. "
@@ -958,6 +1004,7 @@ async def _request_batch(
         for resp in responses:
             print(resp.choices[0].message.content)
     """
+    logger.debug("_request_batch called with server=%s, requests=%s", server, requests)
     if not requests:
         return []
 
@@ -1066,6 +1113,7 @@ async def _run_prefill_batch(
         engine: The serving engine for model execution.
         requests: List of requests in prefill phase.
     """
+    logger.debug("_run_prefill_batch called with engine=%s, requests=%s", engine, requests)
     if not requests:
         return
     
@@ -1078,6 +1126,7 @@ async def _run_prefill_batch(
     # Process all prefill requests in parallel using asyncio.gather
     async def _prefill_single(req: GenerationRequest) -> None:
         """Process a single prefill request."""
+        logger.debug("_prefill_single called with req=%s", req)
         try:
             # Use the pipeline to process prompt and get first token
             prompt_text = engine.pipeline.tokenizer.decode(req.prompt_tokens)
@@ -1120,6 +1169,7 @@ async def _run_decode_batch(
         engine: The serving engine for model execution.
         requests: List of requests in decode phase.
     """
+    logger.debug("_run_decode_batch called with engine=%s, requests=%s", engine, requests)
     if not requests:
         return
     
@@ -1130,6 +1180,7 @@ async def _run_decode_batch(
     
     async def _decode_single(req: GenerationRequest) -> None:
         """Process a single decode request to generate the next token."""
+        logger.debug("_decode_single called with req=%s", req)
         try:
             # Build full prompt from tokens so far
             prompt_text = engine.pipeline.tokenizer.decode(req.prompt_tokens)
@@ -1199,6 +1250,7 @@ def _build_error_response(
         Response with partial or error result.
     """
     # Decode any tokens we have
+    logger.info("_build_error_response starting")
     output_text = _simple_detokenize(gen_req.output_tokens)
     
     if isinstance(original_req, ChatCompletionRequest):
@@ -1250,6 +1302,7 @@ def _extract_prompt_from_chat(request: ChatCompletionRequest) -> str:
     Returns:
         Concatenated text from all messages.
     """
+    logger.debug("_extract_prompt_from_chat called with request=%s", request)
     parts = []
     for msg in request.messages:
         parts.append(f"{msg.role}: {msg.content}")
@@ -1268,6 +1321,7 @@ def _simple_tokenize(text: str) -> list[int]:
         List of token IDs.
     """
     # Simple word-based tokenization
+    logger.debug("_simple_tokenize called with text=%s", text)
     words = text.split()
     return [i % 50000 for i in range(len(words))]
 
@@ -1280,6 +1334,7 @@ def _generate_mock_token() -> int:
     Returns:
         A random token ID.
     """
+    logger.debug("_generate_mock_token called")
     import random
 
     # Occasionally return EOS token (50256 is common)
@@ -1306,6 +1361,7 @@ def _build_response(
         The appropriate response type.
     """
     # Decode tokens to text using actual tokenizer
+    logger.info("_build_response starting")
     try:
         output_text = engine.pipeline.tokenizer.decode(gen_req.output_tokens)
     except Exception:
@@ -1380,6 +1436,7 @@ class ContinuousBatchingMetrics:
     @property
     def avg_iteration_time_ms(self) -> float:
         """Average iteration time in milliseconds."""
+        logger.debug("avg_iteration_time_ms called")
         if not self.iteration_times_ms:
             return 0.0
         return sum(self.iteration_times_ms) / len(self.iteration_times_ms)
@@ -1387,6 +1444,7 @@ class ContinuousBatchingMetrics:
     @property
     def avg_batch_size(self) -> float:
         """Average number of requests per iteration."""
+        logger.debug("avg_batch_size called")
         if not self.batch_sizes:
             return 0.0
         return sum(self.batch_sizes) / len(self.batch_sizes)
@@ -1394,6 +1452,7 @@ class ContinuousBatchingMetrics:
     @property
     def throughput_tokens_per_sec(self) -> float:
         """Overall token throughput."""
+        logger.debug("throughput_tokens_per_sec called")
         total_time_sec = sum(self.iteration_times_ms) / 1000.0
         if total_time_sec <= 0:
             return 0.0
@@ -1408,6 +1467,7 @@ class ContinuousBatchingMetrics:
         decode_tokens: int,
     ) -> None:
         """Record metrics for a single iteration."""
+        logger.debug("record_iteration called with duration_ms=%s, batch_size=%s, prefill_tokens=%s", duration_ms, batch_size, prefill_tokens)
         self.iteration_count += 1
         self.iteration_times_ms.append(duration_ms)
         self.batch_sizes.append(batch_size)
@@ -1421,6 +1481,7 @@ class ContinuousBatchingMetrics:
 
     def get_stats(self) -> dict:
         """Get metrics as a dictionary."""
+        logger.debug("get_stats called")
         return {
             "iterations": self.iteration_count,
             "avg_iteration_ms": round(self.avg_iteration_time_ms, 2),
@@ -1466,6 +1527,7 @@ async def _server_batching(
         # Get results as they complete
         request_id, response = await result_queue.get()
     """
+    logger.debug("_server_batching called with server=%s, request_queue=%s, result_queue=%s", server, request_queue, result_queue)
     engine = server.engine
     scheduler = server.scheduler
     kv_manager = server.scheduler.kv_manager
@@ -1481,6 +1543,7 @@ async def _server_batching(
 
     async def process_iteration() -> list[tuple[str, ChatCompletionResponse | CompletionResponse]]:
         """Process one scheduling iteration and return completed results."""
+        logger.debug("process_iteration called")
         completed: list[tuple[str, ChatCompletionResponse | CompletionResponse]] = []
         iteration_start = time.time()
 
@@ -1585,6 +1648,7 @@ async def _server_batching(
 
     async def poll_new_requests() -> list[GenerationRequest]:
         """Poll for new requests from the queue (non-blocking)."""
+        logger.debug("poll_new_requests called")
         new_requests: list[GenerationRequest] = []
         try:
             # Poll with a limit to avoid blocking too long
@@ -1599,6 +1663,7 @@ async def _server_batching(
 
     async def add_requests_to_scheduler(requests: list[GenerationRequest]) -> None:
         """Add new requests to the scheduler with proper tracking."""
+        logger.debug("add_requests_to_scheduler called with requests=%s", requests)
         for gen_req in requests:
             # Store mapping for response building
             scheduler.add_request(gen_req)
@@ -1607,6 +1672,7 @@ async def _server_batching(
 
     async def handle_preemption_recovery() -> None:
         """Try to resume preempted requests if memory is available."""
+        logger.debug("handle_preemption_recovery called")
         free_blocks = kv_manager.num_free_blocks
         if free_blocks > 10:  # Threshold for resuming
             resumed = scheduler.resume_swapped(max_to_resume=2)
@@ -1690,6 +1756,7 @@ def _simple_detokenize(tokens: list[int]) -> str:
         Decoded text.
     """
     # Mock decoding - just generate some text
+    logger.debug("_simple_detokenize called with tokens=%s", tokens)
     words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog"]
     return " ".join(words[i % len(words)] for i in tokens[:20])
 
@@ -1710,6 +1777,7 @@ def create_batched_server(
     Returns:
         Configured MMFP4Server instance.
     """
+    logger.debug("create_batched_server called with engine=%s, max_batch_size=%s, max_wait_ms=%s", engine, max_batch_size, max_wait_ms)
     batch_config = BatchConfig(
         max_batch_size=max_batch_size,
         max_wait_ms=max_wait_ms,

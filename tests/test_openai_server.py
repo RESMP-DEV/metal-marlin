@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import json
+import logging
 import os
 import signal
 import socket
@@ -16,6 +17,9 @@ import requests
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
 
+
+logger = logging.getLogger(__name__)
+
 _PORT = 8123
 _BASE_URL = f"http://localhost:{_PORT}"
 _MODEL_NAME = "qwen3_4b_fp4"
@@ -23,14 +27,17 @@ _USE_MOCK = os.getenv("METAL_MARLIN_MOCK_MODEL", "1") == "1"
 
 
 def _project_root() -> Path:
+    logger.debug("_project_root called")
     return Path(__file__).resolve().parents[1]
 
 
 def _model_path() -> Path:
+    logger.debug("_model_path called")
     return _project_root() / "benchmarks" / "results" / _MODEL_NAME
 
 
 def _wait_for_health(timeout_s: float = 30.0) -> None:
+    logger.debug("_wait_for_health called with timeout_s=%s", timeout_s)
     deadline = time.time() + timeout_s
     last_error: Exception | None = None
     while time.time() < deadline:
@@ -46,6 +53,7 @@ def _wait_for_health(timeout_s: float = 30.0) -> None:
 
 
 def _port_available(port: int) -> bool:
+    logger.debug("_port_available called with port=%s", port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -57,6 +65,7 @@ def _port_available(port: int) -> bool:
 
 @pytest.fixture(scope="module")
 def server_process() -> Generator[subprocess.Popen[str], None, None]:
+    logger.debug("server_process called")
     if not _USE_MOCK:
         if not HAS_TORCH:
             pytest.skip("PyTorch not available")
@@ -123,11 +132,13 @@ def server_process() -> Generator[subprocess.Popen[str], None, None]:
 
 
 def test_health(server_process: subprocess.Popen[str]) -> None:
+    logger.info("running test_health")
     response = requests.get(f"{_BASE_URL}/health", timeout=5.0)
     assert response.status_code == 200
 
 
 def test_list_models(server_process: subprocess.Popen[str]) -> None:
+    logger.info("running test_list_models")
     response = requests.get(f"{_BASE_URL}/v1/models", timeout=5.0)
     assert response.status_code == 200
     data = response.json()
@@ -136,6 +147,7 @@ def test_list_models(server_process: subprocess.Popen[str]) -> None:
 
 def test_get_model_info(server_process: subprocess.Popen[str]) -> None:
     """Test detailed model info endpoint."""
+    logger.info("running test_get_model_info")
     response = requests.get(
         f"{_BASE_URL}/v1/models/{_MODEL_NAME}",
         timeout=10.0,
@@ -151,6 +163,7 @@ def test_get_model_info(server_process: subprocess.Popen[str]) -> None:
 
 def test_get_model_info_not_found(server_process: subprocess.Popen[str]) -> None:
     """Test model info for nonexistent model returns 404."""
+    logger.info("running test_get_model_info_not_found")
     response = requests.get(
         f"{_BASE_URL}/v1/models/nonexistent_model",
         timeout=10.0,
@@ -161,6 +174,7 @@ def test_get_model_info_not_found(server_process: subprocess.Popen[str]) -> None
 
 
 def test_chat_completion(server_process: subprocess.Popen[str]) -> None:
+    logger.info("running test_chat_completion")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -178,6 +192,7 @@ def test_chat_completion(server_process: subprocess.Popen[str]) -> None:
 
 def test_chat_completion_streaming(server_process: subprocess.Popen[str]) -> None:
     """Test streaming chat completion."""
+    logger.info("running test_chat_completion_streaming")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -206,6 +221,7 @@ def test_chat_completion_streaming(server_process: subprocess.Popen[str]) -> Non
 
 def test_completion_basic(server_process: subprocess.Popen[str]) -> None:
     """Test basic text completion endpoint."""
+    logger.info("running test_completion_basic")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -224,7 +240,9 @@ def test_completion_basic(server_process: subprocess.Popen[str]) -> None:
 def test_concurrent_requests(server_process: subprocess.Popen[str]) -> None:
     """Test multiple concurrent chat completions."""
 
+    logger.info("running test_concurrent_requests")
     def make_request(idx: int) -> dict:
+        logger.debug("make_request called with idx=%s", idx)
         response = requests.post(
             f"{_BASE_URL}/v1/chat/completions",
             json={
@@ -248,7 +266,9 @@ def test_concurrent_requests(server_process: subprocess.Popen[str]) -> None:
 def test_concurrent_streaming(server_process: subprocess.Popen[str]) -> None:
     """Test multiple concurrent streaming requests."""
 
+    logger.info("running test_concurrent_streaming")
     def stream_request(idx: int) -> int:
+        logger.debug("stream_request called with idx=%s", idx)
         response = requests.post(
             f"{_BASE_URL}/v1/chat/completions",
             json={
@@ -273,6 +293,7 @@ def test_concurrent_streaming(server_process: subprocess.Popen[str]) -> None:
 
 def test_invalid_message_format(server_process: subprocess.Popen[str]) -> None:
     """Test malformed messages array returns 422."""
+    logger.info("running test_invalid_message_format")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -287,6 +308,7 @@ def test_invalid_message_format(server_process: subprocess.Popen[str]) -> None:
 
 def test_invalid_model_name(server_process: subprocess.Popen[str]) -> None:
     """Test request with wrong model name returns 404."""
+    logger.info("running test_invalid_model_name")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -304,6 +326,7 @@ def test_invalid_model_name(server_process: subprocess.Popen[str]) -> None:
 
 def test_chat_completion_missing_model(server_process: subprocess.Popen[str]) -> None:
     """Test request without model field returns 422."""
+    logger.info("running test_chat_completion_missing_model")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -316,6 +339,7 @@ def test_chat_completion_missing_model(server_process: subprocess.Popen[str]) ->
 
 def test_chat_completion_missing_messages(server_process: subprocess.Popen[str]) -> None:
     """Test request without messages field returns 422."""
+    logger.info("running test_chat_completion_missing_messages")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -328,6 +352,7 @@ def test_chat_completion_missing_messages(server_process: subprocess.Popen[str])
 
 def test_chat_completion_empty_messages(server_process: subprocess.Popen[str]) -> None:
     """Test request with empty messages array returns 422."""
+    logger.info("running test_chat_completion_empty_messages")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -341,6 +366,7 @@ def test_chat_completion_empty_messages(server_process: subprocess.Popen[str]) -
 
 def test_chat_message_missing_role(server_process: subprocess.Popen[str]) -> None:
     """Test message without role returns 422."""
+    logger.info("running test_chat_message_missing_role")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -354,6 +380,7 @@ def test_chat_message_missing_role(server_process: subprocess.Popen[str]) -> Non
 
 def test_chat_message_missing_content(server_process: subprocess.Popen[str]) -> None:
     """Test message without content returns 422."""
+    logger.info("running test_chat_message_missing_content")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -367,6 +394,7 @@ def test_chat_message_missing_content(server_process: subprocess.Popen[str]) -> 
 
 def test_completion_missing_model(server_process: subprocess.Popen[str]) -> None:
     """Test completion request without model returns 422."""
+    logger.info("running test_completion_missing_model")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -379,6 +407,7 @@ def test_completion_missing_model(server_process: subprocess.Popen[str]) -> None
 
 def test_completion_missing_prompt(server_process: subprocess.Popen[str]) -> None:
     """Test completion request without prompt returns 422."""
+    logger.info("running test_completion_missing_prompt")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -391,6 +420,7 @@ def test_completion_missing_prompt(server_process: subprocess.Popen[str]) -> Non
 
 def test_chat_completion_streaming_missing_model(server_process: subprocess.Popen[str]) -> None:
     """Test streaming request without model field returns 422."""
+    logger.info("running test_chat_completion_streaming_missing_model")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -404,6 +434,7 @@ def test_chat_completion_streaming_missing_model(server_process: subprocess.Pope
 
 def test_chat_completion_streaming_missing_messages(server_process: subprocess.Popen[str]) -> None:
     """Test streaming request without messages field returns 422."""
+    logger.info("running test_chat_completion_streaming_missing_messages")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -417,6 +448,7 @@ def test_chat_completion_streaming_missing_messages(server_process: subprocess.P
 
 def test_chat_completion_model_null(server_process: subprocess.Popen[str]) -> None:
     """Test request with null model field returns 422."""
+    logger.info("running test_chat_completion_model_null")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -430,6 +462,7 @@ def test_chat_completion_model_null(server_process: subprocess.Popen[str]) -> No
 
 def test_chat_completion_messages_null(server_process: subprocess.Popen[str]) -> None:
     """Test request with null messages field returns 422."""
+    logger.info("running test_chat_completion_messages_null")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={
@@ -443,6 +476,7 @@ def test_chat_completion_messages_null(server_process: subprocess.Popen[str]) ->
 
 def test_completion_streaming_missing_model(server_process: subprocess.Popen[str]) -> None:
     """Test streaming completion request without model returns 422."""
+    logger.info("running test_completion_streaming_missing_model")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -456,6 +490,7 @@ def test_completion_streaming_missing_model(server_process: subprocess.Popen[str
 
 def test_completion_streaming_missing_prompt(server_process: subprocess.Popen[str]) -> None:
     """Test streaming completion request without prompt returns 422."""
+    logger.info("running test_completion_streaming_missing_prompt")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -469,6 +504,7 @@ def test_completion_streaming_missing_prompt(server_process: subprocess.Popen[st
 
 def test_chat_completion_messages_wrong_type(server_process: subprocess.Popen[str]) -> None:
     """Test request with messages as object instead of array returns 422."""
+    logger.info("running test_chat_completion_messages_wrong_type")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -482,6 +518,7 @@ def test_chat_completion_messages_wrong_type(server_process: subprocess.Popen[st
 
 def test_chat_completion_model_wrong_type(server_process: subprocess.Popen[str]) -> None:
     """Test request with model as number instead of string returns 422."""
+    logger.info("running test_chat_completion_model_wrong_type")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -495,6 +532,7 @@ def test_chat_completion_model_wrong_type(server_process: subprocess.Popen[str])
 
 def test_chat_completion_message_element_wrong_type(server_process: subprocess.Popen[str]) -> None:
     """Test request with non-object element in messages array returns 422."""
+    logger.info("running test_chat_completion_message_element_wrong_type")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={
@@ -508,6 +546,7 @@ def test_chat_completion_message_element_wrong_type(server_process: subprocess.P
 
 def test_completion_prompt_wrong_type(server_process: subprocess.Popen[str]) -> None:
     """Test request with prompt as number instead of string returns 422."""
+    logger.info("running test_completion_prompt_wrong_type")
     response = requests.post(
         f"{_BASE_URL}/v1/completions",
         json={

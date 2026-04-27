@@ -33,6 +33,7 @@ IMPACT: Single-token MoE optimized path with pre-stacked expert weights
 
 from __future__ import annotations
 
+import logging
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ from typing import TYPE_CHECKING, Protocol
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -117,6 +121,7 @@ def _router_softmax_fusion(
         Tuple of (topk_weights, topk_indices).
     """
     # Use fused implementation when possible
+    logger.debug("_router_softmax_fusion called with gate_logits=%s, top_k=%s, renormalize=%s", gate_logits, top_k, renormalize)
     if gate_logits.is_mps and _USE_METAL:
         try:
             return _router_softmax_fusion_metal(gate_logits, top_k, renormalize)
@@ -157,6 +162,7 @@ def _router_softmax_fusion_metal(
     """
     # Fallback to PyTorch - the main Metal fused path is in _fused_router_topk_metal
     # which handles the full hidden -> weights -> softmax -> topk pipeline
+    logger.debug("_router_softmax_fusion_metal called with gate_logits=%s, top_k=%s, renormalize=%s", gate_logits, top_k, renormalize)
     logits_f32 = gate_logits.to(torch.float32)
     max_logits = logits_f32.max(dim=-1, keepdim=True).values
     exp_logits = torch.exp(logits_f32 - max_logits)
@@ -198,6 +204,7 @@ def _fused_router_topk(
     """
     # Try Metal fused kernel on MPS devices
     # Skip Metal path during training to avoid caching issues with updated weights
+    logger.debug("_fused_router_topk called with hidden_states=%s, gate=%s, top_k=%s", hidden_states, gate, top_k)
     if use_metal and hidden_states.device.type == "mps" and _USE_METAL and not training:
         try:
             return _fused_router_topk_metal(hidden_states, gate, top_k)
@@ -247,6 +254,7 @@ class TopKExpertGrouping:
         num_experts: int,
         device: torch.device | str | None = None,
     ) -> None:
+        logger.debug("initializing %s with num_experts=%s, device=%s", type(self).__name__, num_experts, device)
         if device is None:
             device = torch.device("mps" if _USE_METAL else "cpu")
         elif isinstance(device, str):
@@ -278,6 +286,7 @@ class TopKExpertGrouping:
             This is the GPU-accelerated path. For CPU tensors, falls back to
             CPU-based sorting via group_tokens_by_expert_full.
         """
+        logger.debug("group_tokens called with expert_ids=%s, expert_probs=%s", expert_ids, expert_probs)
         if not self._use_gpu:
             # Fall back to CPU implementation
             return group_tokens_by_expert_full(expert_ids, self.num_experts)
@@ -307,6 +316,7 @@ class TopKExpertGrouping:
             - dispatch_info: MoEDispatchInfo for the grouping
         """
         # Group tokens
+        logger.debug("group_and_prepare_dispatch called with hidden_states=%s, expert_ids=%s, expert_probs=%s", hidden_states, expert_ids, expert_probs)
         dispatch_info = self.group_tokens(expert_ids, expert_probs)
         
         # Gather activations in sorted order
@@ -333,6 +343,7 @@ def _fused_router_topk_metal(
     Returns:
         Tuple of (topk_weights, topk_indices) on MPS device.
     """
+    logger.debug("_fused_router_topk_metal called with hidden_states=%s, gate=%s, top_k=%s", hidden_states, gate, top_k)
     import numpy as np
 
     from metal_marlin.metal_dispatch import (
@@ -475,6 +486,7 @@ class MoEDispatchInfo:
     @property
     def total_assignments(self) -> int:
         """Total number of token-expert assignments (num_tokens * top_k)."""
+        logger.debug("total_assignments called")
         return self.num_tokens * self.top_k
 
 
@@ -511,6 +523,7 @@ def group_tokens_by_expert(
         - Space: O(N + num_experts) auxiliary
         - Typical speedup: 1.5-3x for N > 1000 on GPU
     """
+    logger.debug("group_tokens_by_expert called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     device = expert_ids.device
     batch_size, top_k = expert_ids.shape
     total_assignments = batch_size * top_k
@@ -544,6 +557,7 @@ def group_tokens_by_expert(
 
 def _get_gpu_sort_kernel():
     """Lazy-load the moe_gpu_sort Metal kernel."""
+    logger.debug("_get_gpu_sort_kernel called")
     global _GPU_SORT_KERNEL
     if _GPU_SORT_KERNEL is None:
         try:
@@ -580,6 +594,7 @@ def group_tokens_by_expert_gpu(
     Raises:
         RuntimeError: If Metal is not available or kernel fails.
     """
+    logger.debug("group_tokens_by_expert_gpu called with expert_ids=%s, expert_probs=%s, num_experts=%s", expert_ids, expert_probs, num_experts)
     if not _USE_METAL:
         raise RuntimeError("GPU sort requires Metal backend (MPS)")
 
@@ -684,6 +699,7 @@ def group_tokens_by_expert_full_gpu(
     Returns:
         MoEDispatchInfo with all indexing tensors.
     """
+    logger.debug("group_tokens_by_expert_full_gpu called with expert_ids=%s, expert_probs=%s, num_experts=%s", expert_ids, expert_probs, num_experts)
     batch_size, top_k = expert_ids.shape
 
     sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert_gpu(
@@ -725,6 +741,7 @@ def group_tokens_by_expert_full(
     Returns:
         MoEDispatchInfo with all indexing tensors.
     """
+    logger.debug("group_tokens_by_expert_full called with expert_ids=%s, num_experts=%s, use_gpu=%s", expert_ids, num_experts, use_gpu)
     batch_size, top_k = expert_ids.shape
     device = expert_ids.device
     
@@ -788,6 +805,7 @@ def gather_for_experts(
     """
     # Gather using sorted_token_indices
     # Each assignment gets a copy of its token's activation
+    logger.debug("gather_for_experts called with activations=%s, dispatch_info=%s", activations, dispatch_info)
     return activations[dispatch_info.sorted_token_indices]
 
 
@@ -821,6 +839,7 @@ def _aggregate_expert_outputs(
     Returns:
         [batch, out_dim] combined outputs with original token order.
     """
+    logger.debug("_aggregate_expert_outputs called with expert_outputs=%s, expert_probs=%s, dispatch_info=%s", expert_outputs, expert_probs, dispatch_info)
     batch_size = dispatch_info.num_tokens
     top_k = dispatch_info.top_k
     out_dim = expert_outputs.shape[1]
@@ -900,6 +919,7 @@ def scatter_expert_outputs(
         [batch, out_dim] combined outputs with original token order.
     """
     # Delegate to optimized aggregation function
+    logger.debug("scatter_expert_outputs called with expert_outputs=%s, expert_probs=%s, dispatch_info=%s", expert_outputs, expert_probs, dispatch_info)
     return _aggregate_expert_outputs(
         expert_outputs, expert_probs, dispatch_info, use_fused=True
     )
@@ -920,6 +940,7 @@ def compute_expert_load(
     Returns:
         [num_experts] int64 tensor of token counts per expert.
     """
+    logger.info("compute_expert_load called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     expert_ids_flat = expert_ids.reshape(-1).to(torch.int64)
 
     # Count occurrences using bincount
@@ -952,6 +973,7 @@ def compute_load_balancing_loss(
         Scalar load balancing loss.
     """
     # f_e: fraction of tokens routed to each expert
+    logger.info("compute_load_balancing_loss called with expert_probs_pre_topk=%s, expert_ids=%s, num_experts=%s", expert_probs_pre_topk, expert_ids, num_experts)
     expert_counts = compute_expert_load(expert_ids, num_experts).to(torch.float32)
     # Normalize by total assignments
     total_assignments = expert_ids.numel()
@@ -980,6 +1002,7 @@ def ensure_torch_tensor(
     Returns:
         PyTorch tensor on the target device.
     """
+    logger.debug("ensure_torch_tensor called with arr=%s, device=%s", arr, device)
     if device is None:
         device = _DEFAULT_DEVICE
 
@@ -1018,6 +1041,7 @@ class MoEDispatcher(nn.Module):
         shared_expert: ExpertForward | None = None,
         shared_expert_weight: float = 1.0,
     ) -> None:
+        logger.debug("initializing %s with num_experts=%s, num_experts_per_tok=%s, experts=%s, shared_expert=%s, shared_expert_weight=%s", type(self).__name__, num_experts, num_experts_per_tok, experts, shared_expert, shared_expert_weight)
         super().__init__()
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -1035,6 +1059,7 @@ class MoEDispatcher(nn.Module):
         Returns:
             Combined expert output with same shape as hidden.
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden.shape if hasattr(hidden, "shape") else type(hidden).__name__, hidden.dtype if hasattr(hidden, "dtype") else "N/A")
         if hidden.dim() == 3:
             batch, seq, hidden_dim = hidden.shape
             hidden_flat = hidden.view(-1, hidden_dim)
@@ -1120,6 +1145,7 @@ class FusedMoEDispatcher(nn.Module):
         shared_down_scales: torch.Tensor,
         group_size: int = 128,
     ) -> None:
+        logger.debug("initializing %s with num_experts=%s, num_experts_per_tok=%s, expert_gate_up_weights=%s, expert_gate_up_scales=%s, expert_down_weights=%s", type(self).__name__, num_experts, num_experts_per_tok, expert_gate_up_weights, expert_gate_up_scales, expert_down_weights)
         super().__init__()
         self.num_experts = num_experts
         self.num_experts_per_tok = num_experts_per_tok
@@ -1156,6 +1182,7 @@ class FusedMoEDispatcher(nn.Module):
         Returns:
             Combined expert output with same shape as hidden.
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden.shape if hasattr(hidden, "shape") else type(hidden).__name__, hidden.dtype if hasattr(hidden, "dtype") else "N/A")
         if hidden.dim() == 3:
             batch, seq, hidden_dim = hidden.shape
             hidden_flat = hidden.view(-1, hidden_dim)
@@ -1249,6 +1276,7 @@ def _fused_expert_mlp(
         On MPS devices, uses the optimized metal_marlin kernels.
         On other devices, falls back to PyTorch operations.
     """
+    logger.debug("_fused_expert_mlp called with x=%s, gate_up_packed=%s, gate_up_scales=%s", x, gate_up_packed, gate_up_scales)
     batch_size, hidden_size = x.shape
     intermediate_size = gate_up_scales.shape[1] // 2
 
@@ -1329,6 +1357,7 @@ def _fused_expert_mlp(
         Returns:
             [K, N] fp16 dequantized weights
         """
+        logger.info("unpack_fp4_to_fp16 called with packed=%s, scales=%s", packed, scales)
         k_div_8, N = packed.shape
         K = k_div_8 * 8
 
@@ -1409,6 +1438,7 @@ def _dynamic_batch_experts(
     Returns:
         List of (start_expert, end_expert) tuples defining dynamic batches.
     """
+    logger.debug("_dynamic_batch_experts called with expert_offsets=%s, base_batch_size=%s, min_batch_size=%s", expert_offsets, base_batch_size, min_batch_size)
     n_experts = len(expert_offsets) - 1
     batches: list[tuple[int, int]] = []
     
@@ -1457,6 +1487,7 @@ def _prefetch_expert_weights(expert: Any) -> None:
     Args:
         expert: The expert module (MMFP4Expert or MMFP4FusedExpert).
     """
+    logger.debug("_prefetch_expert_weights called with expert=%s", expert)
     if hasattr(expert, "prefetch"):
         expert.prefetch()
     elif hasattr(expert, "gate_proj"):
@@ -1510,6 +1541,7 @@ def _expert_cache_lru(
         ...         _expert_cache_lru(i, experts, active_experts, device)
         ...         output = experts[i](inputs)
     """
+    logger.debug("_expert_cache_lru called with expert_idx=%s, experts=%s, active_experts=%s", expert_idx, experts, active_experts)
     n_experts = len(experts)
     
     # Auto-compute cache size if not provided
@@ -1594,6 +1626,7 @@ def _get_expert_cache_stats(experts: nn.ModuleList) -> dict[str, Any]:
         - access_counts: Dictionary of access frequencies
         - hit_rate: Cache hit rate (if tracking enabled)
     """
+    logger.debug("_get_expert_cache_stats called with experts=%s", experts)
     cache_key = id(experts)
     if cache_key not in _expert_lru_cache_state:
         return {
@@ -1629,6 +1662,7 @@ def _clear_expert_cache(experts: nn.ModuleList | None = None) -> None:
         experts: Specific experts ModuleList to clear cache for.
             If None, clears all caches.
     """
+    logger.debug("_clear_expert_cache called with experts=%s", experts)
     global _expert_lru_cache_state
     
     if experts is None:
@@ -1669,6 +1703,7 @@ def dispatch_experts_batched(
     """
     # For 64 experts, use fixed 4 batches of 16 experts each
     # This ensures optimal dispatch for GLM-4.7-Flash architecture
+    logger.debug("dispatch_experts_batched called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     if n_experts == 64 and batch_size == 16:
         # Fixed 4-batch dispatch: [0-16), [16-32), [32-48), [48-64)
         fixed_batches = [(0, 16), (16, 32), (32, 48), (48, 64)]
@@ -1732,6 +1767,7 @@ def _moe_decode_optimized(
         ... )
     """
     # Delegate to the fused implementation for optimal performance
+    logger.debug("_moe_decode_optimized called with hidden=%s, experts=%s, topk_indices=%s", hidden, experts, topk_indices)
     return decode_optimized_expert_combine_fused(
         hidden=hidden,
         experts=experts,
@@ -1767,6 +1803,7 @@ def dispatch_experts_batched_dynamic(
     Returns:
         [total_assignments, hidden_dim] combined expert outputs.
     """
+    logger.debug("dispatch_experts_batched_dynamic called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     expert_outputs = expert_inputs.new_empty((expert_inputs.shape[0], expert_inputs.shape[1]))
 
     # Pre-convert inputs to float16 once for all experts
@@ -1823,6 +1860,7 @@ def _dispatch_expert_batch_fused(
     """
     # Pre-fetch and stack weights for all experts in this batch
     # This amortizes the torch.cat overhead across the batch
+    logger.debug("_dispatch_expert_batch_fused called with expert_inputs_f16=%s, expert_outputs=%s, experts=%s", expert_inputs_f16, expert_outputs, experts)
     batch_size = batch_end_expert - batch_start_expert
     
     # Collect weights for all experts in this batch
@@ -1916,6 +1954,7 @@ def _execute_batched_experts(
     # Execute each expert in the batch
     # While this still loops, the weight preparation is batched and we can
     # potentially use parallel execution for independent experts
+    logger.debug("_execute_batched_experts called with expert_inputs_f16=%s, expert_outputs=%s, gate_up_packed_list=%s", expert_inputs_f16, expert_outputs, gate_up_packed_list)
     for i, (expert_idx, start, end) in enumerate(expert_ranges):
         output = _fused_expert_mlp(
             expert_inputs_f16[start:end],
@@ -1959,6 +1998,7 @@ def decode_optimized_expert_combine(
     # topk_weights: [1, top_k]
     
     # _decode_output_buffer: Use provided buffer or allocate new
+    logger.debug("decode_optimized_expert_combine called with hidden=%s, experts=%s, topk_indices=%s", hidden, experts, topk_indices)
     if output_buffer is not None and output_buffer.shape == hidden.shape:
         output = output_buffer
         output.zero_()
@@ -2033,6 +2073,7 @@ def _get_or_create_stacked_expert_weights(
                   down_packed_stacked, down_scales_stacked) where each tensor
         has shape [n_experts, ...] and is on the target device.
     """
+    logger.debug("_get_or_create_stacked_expert_weights called with experts=%s, device=%s", experts, device)
     cache_key = id(experts)
     cache_attr = '_decode_stacked_weights_cache'
     
@@ -2092,6 +2133,7 @@ def _clear_stacked_expert_weights_cache(experts: nn.ModuleList | None = None) ->
         experts: Specific experts ModuleList to clear cache for.
             If None, clears all caches.
     """
+    logger.debug("_clear_stacked_expert_weights_cache called with experts=%s", experts)
     if hasattr(_get_or_create_stacked_expert_weights, '_cache'):
         if experts is None:
             _get_or_create_stacked_expert_weights._cache.clear()
@@ -2130,6 +2172,7 @@ def decode_optimized_expert_combine_fused(
     Returns:
         [1, hidden_dim] combined expert output.
     """
+    logger.debug("decode_optimized_expert_combine_fused called with hidden=%s, experts=%s, topk_indices=%s", hidden, experts, topk_indices)
     input_f16 = hidden.to(torch.float16)
     selected_expert_ids = topk_indices[0].to(
         device=input_f16.device, dtype=torch.long
@@ -2226,6 +2269,7 @@ def _prestack_expert_weights_for_dispatch(
         Tuple of (routed_gate_up_packed, routed_gate_up_scales, 
                   routed_down_packed, routed_down_scales) stacked tensors.
     """
+    logger.debug("_prestack_expert_weights_for_dispatch called with experts=%s, device=%s", experts, device)
     gate_up_packed_list = []
     gate_up_scales_list = []
     down_packed_list = []
@@ -2285,6 +2329,7 @@ def _parallel_expert_dispatch(
     Returns:
         [total_assignments, hidden_dim] combined expert outputs.
     """
+    logger.debug("_parallel_expert_dispatch called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     from concurrent.futures import ThreadPoolExecutor, as_completed
     
     expert_outputs = expert_inputs.new_empty((expert_inputs.shape[0], expert_inputs.shape[1]))
@@ -2293,6 +2338,7 @@ def _parallel_expert_dispatch(
     
     def _compute_expert_range(start_idx: int, end_idx: int) -> tuple[int, int, torch.Tensor]:
         """Compute outputs for a range of experts."""
+        logger.debug("_compute_expert_range called with start_idx=%s, end_idx=%s", start_idx, end_idx)
         batch_start_idx = int(expert_offsets_cpu[start_idx])
         batch_end_idx = int(expert_offsets_cpu[end_idx])
         
@@ -2370,6 +2416,7 @@ def dispatch_mmfp4_experts_fused(
         NotImplementedError: If Metal backend is not available.
     """
     # Validate inputs
+    logger.debug("dispatch_mmfp4_experts_fused called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     if expert_inputs.device.type != "mps":
         raise ValueError("dispatch_mmfp4_experts_fused requires MPS device")
     if len(experts) != n_experts:
@@ -2504,6 +2551,7 @@ def dispatch_experts_batched(
     """
     # _dispatch_experts_batched_optimized: Use the optimized 4-batch implementation
     # For 64 experts, this creates exactly 4 batches of 16 experts each
+    logger.debug("dispatch_experts_batched called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     return _dispatch_experts_batched_optimized_impl(
         expert_inputs, experts, dispatch_info, n_experts, batch_size
     )
@@ -2534,6 +2582,7 @@ def _dispatch_experts_batched_optimized_impl(
     Returns:
         [total_assignments, hidden_dim] combined expert outputs.
     """
+    logger.debug("_dispatch_experts_batched_optimized_impl called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     expert_outputs = expert_inputs.new_empty((expert_inputs.shape[0], expert_inputs.shape[1]))
     
     # Pre-convert inputs to float16 once for all experts
@@ -2634,6 +2683,7 @@ def dispatch_experts_batched_dynamic(
         [total_assignments, hidden_dim] combined expert outputs.
     """
     # _dispatch_experts_batched_optimized: Use batched weight stacking for dynamic batches too
+    logger.debug("dispatch_experts_batched_dynamic called with expert_inputs=%s, experts=%s, dispatch_info=%s", expert_inputs, experts, dispatch_info)
     expert_outputs = expert_inputs.new_empty((expert_inputs.shape[0], expert_inputs.shape[1]))
 
     # Pre-convert inputs to float16 once for all experts

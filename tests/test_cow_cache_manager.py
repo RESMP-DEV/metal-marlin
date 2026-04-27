@@ -2,6 +2,7 @@
 
 Standalone test that doesn't require torch/metal dependencies.
 """
+import logging
 
 import numpy as np
 import pytest
@@ -11,8 +12,12 @@ from metal_marlin.paged.cache_manager import PagedKVCache
 from metal_marlin.paged.kv_block import KVBlockConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_prompt_sharing_basic():
     """Test basic prompt sharing between two sequences."""
+    logger.info("running test_prompt_sharing_basic")
     config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
     cache = PagedKVCache(config, num_blocks=16)
     
@@ -41,6 +46,7 @@ def test_prompt_sharing_basic():
 
 def test_cow_on_divergence():
     """Test copy-on-write when sequences diverge."""
+    logger.info("running test_cow_on_divergence")
     config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
     cache = PagedKVCache(config, num_blocks=16)
     
@@ -78,6 +84,7 @@ def test_cow_on_divergence():
 
 def test_share_prompt_blocks_batch():
     """Test sharing prompt across multiple sequences."""
+    logger.info("running test_share_prompt_blocks_batch")
     config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
     cache = PagedKVCache(config, num_blocks=32)
     
@@ -112,6 +119,7 @@ def test_share_prompt_blocks_batch():
 
 def test_prompt_cache_invalidation():
     """Test that stale prompt cache entries are cleaned up."""
+    logger.info("running test_prompt_cache_invalidation")
     config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
     cache = PagedKVCache(config, num_blocks=16)
     
@@ -132,6 +140,7 @@ def test_prompt_cache_invalidation():
 
 def test_cow_preserves_block_data():
     """Verify COW correctly copies block data."""
+    logger.info("running test_cow_preserves_block_data")
     config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
     cache = PagedKVCache(config, num_blocks=16)
     

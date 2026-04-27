@@ -54,6 +54,7 @@ class _BufferPool:
         Args:
             max_size_bytes: Maximum pool size in bytes (default 4GB).
         """
+        logger.debug("initializing %s with max_size_bytes=%s", type(self).__name__, max_size_bytes)
         self.max_size_bytes = max_size_bytes
         self._pool: dict[tuple[tuple[int, ...], torch.dtype, torch.device], list[tuple[torch.Tensor, int]]] = defaultdict(list)
         self._current_size = 0
@@ -61,6 +62,7 @@ class _BufferPool:
     
     def _get_tensor_size(self, shape: tuple[int, ...], dtype: torch.dtype) -> int:
         """Calculate tensor size in bytes."""
+        logger.debug("_get_tensor_size called with shape=%s, dtype=%s", shape, dtype)
         elem_size = torch.tensor([], dtype=dtype).element_size()
         num_elements = 1
         for dim in shape:
@@ -73,6 +75,7 @@ class _BufferPool:
         Args:
             required_bytes: Additional bytes needed (evict until we have this much room).
         """
+        logger.debug("_evict_if_needed called with required_bytes=%s", required_bytes)
         while (self._current_size + required_bytes > self.max_size_bytes and
                self._current_size > 0):
             # Find the least recently used tensor across all pools
@@ -116,6 +119,7 @@ class _BufferPool:
             A tensor with the specified shape, dtype, and device.
             If available, returns a cached tensor; otherwise creates a new one.
         """
+        logger.debug("get_buffer called with shape=%s, dtype=%s, device=%s", shape, dtype, device)
         if isinstance(device, str):
             device = torch.device(device)
         
@@ -139,6 +143,7 @@ class _BufferPool:
         Args:
             tensor: The tensor to return to the pool.
         """
+        logger.debug("return_buffer called with tensor=%s", tensor)
         if tensor is None:
             return
         
@@ -155,6 +160,7 @@ class _BufferPool:
     
     def clear(self) -> None:
         """Clear all buffers from the pool."""
+        logger.debug("clear called")
         self._pool.clear()
         self._current_size = 0
     
@@ -164,6 +170,7 @@ class _BufferPool:
         Returns:
             Dict with pool statistics (current_size_bytes, max_size_bytes, num_buffers).
         """
+        logger.debug("get_stats called")
         total_buffers = sum(len(bufs) for bufs in self._pool.values())
         return {
             'current_size_bytes': self._current_size,
@@ -248,6 +255,7 @@ def get_mixed_bpw_stats() -> MixedBPWDispatchStats:
     Returns:
         Copy of the current statistics.
     """
+    logger.debug("get_mixed_bpw_stats called")
     return MixedBPWDispatchStats(
         total_dispatches=_global_mixed_bpw_stats.total_dispatches,
         mixed_kernel_success=_global_mixed_bpw_stats.mixed_kernel_success,
@@ -259,6 +267,7 @@ def get_mixed_bpw_stats() -> MixedBPWDispatchStats:
 
 def reset_mixed_bpw_stats() -> None:
     """Reset global mixed bit-width dispatch statistics."""
+    logger.debug("reset_mixed_bpw_stats called")
     global _global_mixed_bpw_stats
     _global_mixed_bpw_stats = MixedBPWDispatchStats()
 
@@ -361,6 +370,7 @@ class MixedBPWMoEDispatcher:
                 If None, assumes uniform bit-width from config.
             lib: Optional pre-initialized Metal kernel library.
         """
+        logger.debug("initializing %s with config=%s, hidden_dim=%s, expert_bit_widths=%s, lib=%s", type(self).__name__, config, hidden_dim, expert_bit_widths, lib)
         self.config = config
         self.hidden_dim = hidden_dim
         self.lib = lib
@@ -392,6 +402,7 @@ class MixedBPWMoEDispatcher:
 
     def _build_bit_width_groups(self) -> None:
         """Build groups of experts by bit-width."""
+        logger.info("_build_bit_width_groups starting")
         self.bit_width_groups: dict[int, list[int]] = defaultdict(list)
 
         for expert_id, bit_width in self.expert_bit_widths.items():
@@ -415,6 +426,7 @@ class MixedBPWMoEDispatcher:
 
     def get_lib(self) -> MetalKernelLibrary:
         """Get or create Metal kernel library."""
+        logger.debug("get_lib called")
         if self.lib is None:
             self.lib = MetalKernelLibrary.from_source_dir()
         return self.lib
@@ -442,6 +454,7 @@ class MixedBPWMoEDispatcher:
         Returns:
             _BitWidthCache with pre-stacked weights, scales, and MTLBuffers.
         """
+        logger.info("_get_or_build_bit_width_cache starting")
         expert_ids = self.bit_width_groups[bit_width]
         ref_weight = expert_weights[expert_ids[0]]
         ref_shape = ref_weight.shape
@@ -610,6 +623,7 @@ class MixedBPWMoEDispatcher:
             _MixedKernelCache with concatenated buffers.
         """
         # Check if we have a valid cache
+        logger.info("_get_or_build_mixed_kernel_cache starting")
         cache = self._mixed_kernel_cache
         num_experts = self.config.num_experts
         
@@ -801,6 +815,7 @@ class MixedBPWMoEDispatcher:
         Raises:
             RuntimeError: If Metal kernel dispatch fails.
         """
+        logger.debug("_dispatch_mixed_bpw_kernel called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
         require_mps()
         lib = self.get_lib()
         device = lib.device
@@ -995,6 +1010,7 @@ class MixedBPWMoEDispatcher:
                 - inverse_indices: Indices to unsort the output
                 - sorted_probs: Router probabilities in sorted order
         """
+        logger.debug("sort_tokens_by_expert called with expert_indices=%s, router_probs=%s", expert_indices, router_probs)
         if expert_indices.ndim == 2:
             batch_size, top_k = expert_indices.shape
             num_assignments = batch_size * top_k
@@ -1043,6 +1059,7 @@ class MixedBPWMoEDispatcher:
             Dictionary mapping bit_width -> tensor of token indices
             belonging to experts with that bit-width.
         """
+        logger.debug("group_tokens_by_bit_width called with expert_indices=%s", expert_indices)
         if expert_indices.ndim == 1:
             # 1D input: treat as a flattened list of expert IDs
             flat_experts = expert_indices
@@ -1108,6 +1125,7 @@ class MixedBPWMoEDispatcher:
             Expert outputs for this bit-width group.
         """
         # Gather tokens assigned to this bit-width group
+        logger.debug("dispatch_same_bit_width_batch called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
         if len(token_indices) == 0:
             # No tokens assigned to this bit-width
             return self._buffer_pool.get_buffer(
@@ -1299,6 +1317,7 @@ class MixedBPWMoEDispatcher:
         Returns:
             Combined expert outputs [batch, hidden_dim].
         """
+        logger.debug("dispatch_mixed_bit_width_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
         device = hidden_states.device
 
         # Handle both 1D and 2D expert_indices
@@ -1415,6 +1434,7 @@ class MixedBPWMoEDispatcher:
         Returns:
             Combined expert outputs [batch, hidden_dim].
         """
+        logger.debug("dispatch called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
         _global_mixed_bpw_stats.total_dispatches += 1
         _global_mixed_bpw_stats.tokens_processed += hidden_states.shape[0]
         _global_mixed_bpw_stats.experts_activated += expert_indices.numel()
@@ -1482,6 +1502,7 @@ def dispatch_mixed_bpw_moe(
     Raises:
         ValueError: If expert_ids in expert_indices are out of range.
     """
+    logger.debug("dispatch_mixed_bpw_moe called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
     require_mps()
 
     batch_size, hidden_dim = hidden_states.shape
@@ -1544,6 +1565,7 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
     Returns:
         Combined expert outputs [batch, hidden_dim].
     """
+    logger.debug("dispatch_mixed_bpw_moe_with_cpp_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
     try:
         # Try Python/Metal dispatch first
         return dispatch_mixed_bpw_moe(

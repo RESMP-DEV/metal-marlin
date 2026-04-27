@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import shutil
@@ -23,6 +24,9 @@ if str(REPO_ROOT) not in sys.path:
 from metal_marlin.calibration import CalibrationDataset
 from metal_marlin.hf_loader import download_model
 from metal_marlin.mr_gptq import AcceleratedMRGPTQQuantizer, QuantizationFormat
+
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3.5-122B-A10B"
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "Qwen3.5-122B-A10B-MMFP4-CUDA"
@@ -42,6 +46,7 @@ COPY_ARTIFACTS = (
 
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Quantize Qwen3.5-122B-A10B to MMFP4 with CUDA MR-GPTQ.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -73,6 +78,7 @@ def resolve_model_path(
     download_dir: Path | None,
     verbose: bool,
 ) -> Path:
+    logger.debug("resolve_model_path called with model_ref=%s, revision=%s, token=%s", model_ref, revision, token)
     local_path = Path(model_ref)
     if local_path.exists():
         return local_path
@@ -87,6 +93,7 @@ def resolve_model_path(
 
 
 def load_weight_map(model_path: Path) -> dict[str, str]:
+    logger.info("load_weight_map called with model_path=%s", model_path)
     index_path = model_path / "model.safetensors.index.json"
     if not index_path.exists():
         return {}
@@ -95,6 +102,7 @@ def load_weight_map(model_path: Path) -> dict[str, str]:
 
 
 def infer_layer_prefixes(weight_map: dict[str, str]) -> list[str]:
+    logger.debug("infer_layer_prefixes called with weight_map=%s", weight_map)
     candidates = (
         "model.language_model.layers.",
         "model.layers.",
@@ -112,6 +120,7 @@ def infer_layer_prefixes(weight_map: dict[str, str]) -> list[str]:
 
 
 def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
+    logger.debug("copy_model_artifacts called with src_dir=%s, dst_dir=%s", src_dir, dst_dir)
     for name in COPY_ARTIFACTS:
         src = src_dir / name
         if src.exists() and src.is_file():
@@ -127,6 +136,7 @@ def save_quantization_config(
     calibration_count: int,
     calibration_batches: int,
 ) -> None:
+    logger.info("save_quantization_config called with output_dir=%s, model_path=%s, report=%s, args=%s", output_dir, model_path, report, args)
     payload: dict[str, Any] = {
         "format": "mmfp4_e2m1_marlin",
         "method": "mr_gptq_cuda",
@@ -153,6 +163,7 @@ def save_quantization_config(
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     verbose = not args.quiet
 

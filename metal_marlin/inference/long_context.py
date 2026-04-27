@@ -24,9 +24,13 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 from .._compat import torch
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -116,6 +120,7 @@ class SlidingWindowConfig:
         Returns:
             Attention mask of shape [seq_len, seq_len] where True = can attend.
         """
+        logger.debug("get_attention_mask called with seq_len=%s, device=%s, dtype=%s", seq_len, device, dtype)
         positions_q = torch.arange(seq_len, device=device).unsqueeze(1)
         positions_k = torch.arange(seq_len, device=device).unsqueeze(0)
         
@@ -157,6 +162,7 @@ class KVCacheCompressor:
             head_dim: Dimension per head.
             num_kv_heads: Number of KV heads.
         """
+        logger.debug("initializing %s with config=%s, head_dim=%s, num_kv_heads=%s", type(self).__name__, config, head_dim, num_kv_heads)
         self.config = config
         self.head_dim = head_dim
         self.num_kv_heads = num_kv_heads
@@ -174,6 +180,7 @@ class KVCacheCompressor:
         Returns:
             True if compression should be applied.
         """
+        logger.debug("should_compress called with seq_len=%s", seq_len)
         return (
             self.config.enable_kv_compression
             and seq_len >= self.config.compression_threshold
@@ -188,6 +195,7 @@ class KVCacheCompressor:
         Returns:
             Dictionary with compression tier information.
         """
+        logger.debug("get_compression_info called with seq_len=%s", seq_len)
         if not self.should_compress(seq_len):
             return {
                 "compress": False,
@@ -225,6 +233,7 @@ class KVCacheCompressor:
         Returns:
             Tuple of (compressed_k, compressed_v, compression_info).
         """
+        logger.debug("compress_kv called with k=%s, v=%s", k, v)
         batch, num_kv_heads, seq_len, head_dim = k.shape
         
         info = self.get_compression_info(seq_len)
@@ -280,6 +289,7 @@ class StreamingAttention:
             num_kv_heads: Number of KV heads.
             head_dim: Dimension per head.
         """
+        logger.debug("initializing %s with config=%s, num_kv_heads=%s, head_dim=%s", type(self).__name__, config, num_kv_heads, head_dim)
         self.config = config
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -292,6 +302,7 @@ class StreamingAttention:
         
     def reset(self) -> None:
         """Reset the streaming cache."""
+        logger.debug("reset called")
         self.k_cache = None
         self.v_cache = None
         self.cache_len = 0
@@ -310,6 +321,7 @@ class StreamingAttention:
         Returns:
             Updated cache tensors (k_cache, v_cache).
         """
+        logger.debug("update_cache called with k=%s, v=%s", k, v)
         batch, num_kv_heads, seq_len, head_dim = k.shape
         
         # Initialize cache if needed
@@ -377,6 +389,7 @@ class MemoryEfficientAttention:
         Args:
             chunk_size: Size of chunks for attention computation.
         """
+        logger.debug("initializing %s with chunk_size=%s", type(self).__name__, chunk_size)
         self.chunk_size = chunk_size
     
     def forward(
@@ -399,6 +412,7 @@ class MemoryEfficientAttention:
         Returns:
             Attention output [batch, num_heads, seq_q, head_dim].
         """
+        logger.debug("forward: input shape=%s dtype=%s", q.shape if hasattr(q, "shape") else type(q).__name__, q.dtype if hasattr(q, "dtype") else "N/A")
         import torch.nn.functional as F
         
         batch, num_heads, seq_q, head_dim = q.shape
@@ -466,6 +480,7 @@ class LongContextAttention:
             head_dim: Dimension per head.
             rope_theta: RoPE base frequency.
         """
+        logger.debug("initializing %s with config=%s, num_heads=%s, num_kv_heads=%s, head_dim=%s, rope_theta=%s", type(self).__name__, config, num_heads, num_kv_heads, head_dim, rope_theta)
         self.config = config
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -518,6 +533,7 @@ class LongContextAttention:
         Returns:
             Tuple of (attention_output, (k_cache, v_cache) if use_cache else None).
         """
+        logger.debug("forward: input shape=%s dtype=%s", q.shape if hasattr(q, "shape") else type(q).__name__, q.dtype if hasattr(q, "dtype") else "N/A")
         import torch.nn.functional as F
         
         batch, num_heads, seq_q, head_dim = q.shape
@@ -564,6 +580,7 @@ class LongContextAttention:
     
     def reset(self) -> None:
         """Reset any internal state (e.g., streaming cache)."""
+        logger.debug("reset called")
         if self.streaming is not None:
             self.streaming.reset()
 
@@ -585,6 +602,7 @@ def create_long_context_config(
     Returns:
         LongContextConfig instance.
     """
+    logger.debug("create_long_context_config called with max_seq_len=%s, model_type=%s", max_seq_len, model_type)
     presets = {
         "default": LongContextConfig(
             max_seq_len=max_seq_len,

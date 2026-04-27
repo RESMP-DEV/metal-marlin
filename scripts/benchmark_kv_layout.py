@@ -44,11 +44,15 @@ Run:
 from __future__ import annotations
 
 import gc
+import logging
 import time
 from dataclasses import dataclass
 from typing import Literal
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 # Warmup iterations to prime Metal shader caches
 WARMUP_ITERS = 20
@@ -73,6 +77,7 @@ MultiLayerLayoutType = Literal["LHSD", "LSHD"]
 
 def sync_mps() -> None:
     """Synchronize MPS operations."""
+    logger.debug("sync_mps called")
     if torch.backends.mps.is_available():
         torch.mps.synchronize()
 
@@ -81,6 +86,7 @@ def create_cache_tensor(
     layout: LayoutType, config: CacheConfig, device: str
 ) -> torch.Tensor:
     """Create cache tensor with specified layout."""
+    logger.debug("create_cache_tensor called with layout=%s, config=%s, device=%s", layout, config, device)
     B = config.batch_size
     H = config.num_kv_heads
     S = config.max_seq_len
@@ -103,6 +109,7 @@ def decode_update_bhsd(
 ) -> torch.Tensor:
     """Update BHSD cache at position, return slice for attention."""
     # token: [B, H, 1, D]
+    logger.debug("decode_update_bhsd called with cache=%s, token=%s, pos=%s", cache, token, pos)
     cache[:, :, pos : pos + 1, :] = token
     # Return slice [B, H, :pos+1, D] - already contiguous along D
     return cache[:, :, : pos + 1, :]
@@ -113,6 +120,7 @@ def decode_update_bshd(
 ) -> torch.Tensor:
     """Update BSHD cache at position, return slice for attention."""
     # token: [B, H, 1, D] -> need [B, 1, H, D]
+    logger.debug("decode_update_bshd called with cache=%s, token=%s, pos=%s", cache, token, pos)
     token_t = token.permute(0, 2, 1, 3)
     cache[:, pos : pos + 1, :, :] = token_t
     # Return transposed back to [B, H, :pos+1, D] for attention
@@ -124,6 +132,7 @@ def decode_update_hbsd(
 ) -> torch.Tensor:
     """Update HBSD cache at position, return slice for attention."""
     # token: [B, H, 1, D] -> need [H, B, 1, D]
+    logger.debug("decode_update_hbsd called with cache=%s, token=%s, pos=%s", cache, token, pos)
     token_t = token.permute(1, 0, 2, 3)
     cache[:, :, pos : pos + 1, :] = token_t
     # Return transposed back to [B, H, :pos+1, D] for attention
@@ -136,6 +145,7 @@ def benchmark_decode_update(layout: LayoutType, config: CacheConfig) -> dict[str
     This measures the core decode loop: append one KV pair per layer,
     then read the full cache slice for attention.
     """
+    logger.info("benchmark_decode_update starting with layout=%s, config=%s", layout, config)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
     # Create caches for all layers
@@ -212,6 +222,7 @@ def benchmark_attention_read_pattern(
     The K vectors are accessed with stride seq_len in head_dim chunks.
     This benchmarks how efficiently we can read K vectors for dot products.
     """
+    logger.info("benchmark_attention_read_pattern starting with layout=%s, config=%s, seq_len=%s", layout, config, seq_len)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     B = config.batch_size
     H = config.num_kv_heads
@@ -235,6 +246,7 @@ def benchmark_attention_read_pattern(
 
     # Get K in standard [B, H, seq, D] format for attention
     def get_k_for_attention() -> torch.Tensor:
+        logger.debug("get_k_for_attention called")
         if layout == "BHSD":
             return cache[:, :, :seq_len, :]
         elif layout == "BSHD":
@@ -282,6 +294,7 @@ def benchmark_strided_read(
     This tests how efficiently the GPU can read vectors at stride head_dim
     across the sequence dimension.
     """
+    logger.info("benchmark_strided_read starting with layout=%s, config=%s, seq_len=%s", layout, config, seq_len)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     B = config.batch_size
     H = config.num_kv_heads
@@ -339,6 +352,7 @@ def benchmark_write_coalescing(
     BSHD: writes are contiguous per token (coalesced)
     HBSD: writes are strided per head
     """
+    logger.info("benchmark_write_coalescing starting with layout=%s, config=%s", layout, config)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     B = config.batch_size
     H = config.num_kv_heads
@@ -400,6 +414,7 @@ def benchmark_contiguous_read(
     Tests the cost of making non-contiguous views contiguous,
     which is required for some operations.
     """
+    logger.info("benchmark_contiguous_read starting with layout=%s, config=%s, seq_len=%s", layout, config, seq_len)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     B = config.batch_size
     H = config.num_kv_heads
@@ -425,6 +440,7 @@ def benchmark_contiguous_read(
 
     def get_contiguous_bhsd() -> torch.Tensor:
         """Get cache as contiguous [B, H, seq, D] tensor."""
+        logger.debug("get_contiguous_bhsd called")
         if layout == "BHSD":
             return cache[:, :, :seq_len, :].contiguous()
         elif layout == "BSHD":
@@ -470,6 +486,7 @@ def create_multilayer_cache(
     LHSD: [num_layers, num_heads, seq_len, head_dim]
     LSHD: [num_layers, seq_len, num_heads, head_dim]
     """
+    logger.debug("create_multilayer_cache called with layout=%s, config=%s, device=%s", layout, config, device)
     L = config.num_layers
     H = config.num_kv_heads
     S = config.max_seq_len
@@ -493,6 +510,7 @@ def benchmark_multilayer_decode_update(
     This simulates the decode loop where we append one token per layer.
     The consolidated layout allows potential prefetching benefits.
     """
+    logger.info("benchmark_multilayer_decode_update starting with layout=%s, config=%s", layout, config)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     L = config.num_layers
     H = config.num_kv_heads
@@ -568,6 +586,7 @@ def benchmark_multilayer_write_coalescing(
     LHSD: writes stride across seq dimension (non-coalesced within layer)
     LSHD: writes are contiguous within seq position (coalesced for all heads)
     """
+    logger.info("benchmark_multilayer_write_coalescing starting with layout=%s, config=%s", layout, config)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     L = config.num_layers
     H = config.num_kv_heads
@@ -625,6 +644,7 @@ def benchmark_multilayer_attention_read(
     Simulates reading K cache for Q @ K^T during decode.
     Tests both the raw read and any transpose overhead.
     """
+    logger.info("benchmark_multilayer_attention_read starting with layout=%s, config=%s, seq_len=%s", layout, config, seq_len)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     L = config.num_layers
     H = config.num_kv_heads
@@ -649,6 +669,7 @@ def benchmark_multilayer_attention_read(
 
     def get_k_and_compute(layer_idx: int) -> torch.Tensor:
         """Get K for layer and compute Q @ K^T."""
+        logger.debug("get_k_and_compute called with layer_idx=%s", layer_idx)
         if layout == "LHSD":
             # Already [H, S, D] - add batch dim, transpose for matmul
             k = cache[layer_idx, :, :seq_len, :].unsqueeze(0)  # [1, H, S, D]
@@ -696,6 +717,7 @@ def benchmark_multilayer_prefetch(
     Tests whether reading layer N+1 while computing layer N
     provides any performance benefit with the consolidated layout.
     """
+    logger.info("benchmark_multilayer_prefetch starting with layout=%s, config=%s, seq_len=%s", layout, config, seq_len)
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     L = config.num_layers
     H = config.num_kv_heads
@@ -718,6 +740,7 @@ def benchmark_multilayer_prefetch(
     # Simulate layer iteration with prefetch
     def prefetch_layer(layer_idx: int) -> torch.Tensor:
         """Touch layer data to warm cache."""
+        logger.debug("prefetch_layer called with layer_idx=%s", layer_idx)
         if layout == "LHSD":
             return cache[layer_idx, :, :seq_len, :].sum()
         else:
@@ -725,6 +748,7 @@ def benchmark_multilayer_prefetch(
 
     def compute_layer(layer_idx: int) -> torch.Tensor:
         """Simulate attention computation on layer."""
+        logger.debug("compute_layer called with layer_idx=%s", layer_idx)
         if layout == "LHSD":
             k = cache[layer_idx, :, :seq_len, :]
         else:
@@ -767,6 +791,7 @@ def benchmark_multilayer_prefetch(
 
 def run_benchmarks() -> None:
     """Run all benchmarks and report results."""
+    logger.info("run_benchmarks starting")
     print("=" * 80)
     print("KV Cache Memory Layout Benchmark")
     print("=" * 80)
@@ -917,6 +942,7 @@ Recommendations:
 
 def _layout_shape(layout: LayoutType) -> str:
     """Return human-readable shape string."""
+    logger.debug("_layout_shape called with layout=%s", layout)
     if layout == "BHSD":
         return "B, H, S, D"
     elif layout == "BSHD":
@@ -929,6 +955,7 @@ def _print_comparison(
     results: dict[str, dict[str, float]], key: str, unit: str
 ) -> None:
     """Print comparison between layouts."""
+    logger.debug("_print_comparison called with results=%s, key=%s, unit=%s", results, key, unit)
     values = {k: v[key] for k, v in results.items()}
     best = min(values, key=lambda x: values[x])
     worst_val = max(values.values())

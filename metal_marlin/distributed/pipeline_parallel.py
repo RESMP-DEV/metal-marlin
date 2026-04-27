@@ -44,12 +44,16 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .._compat import to_numpy
 from .device_mesh import Device, DeviceMesh, move_to_device
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -117,6 +121,7 @@ class PipelineStage:
             Output activations (or logits if is_last)
         """
         # Move input to this device
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         x = move_to_device(hidden_states, self.device)
 
         # Embedding if first stage
@@ -165,6 +170,7 @@ class PipelineParallel:
             mesh: Device mesh with pipeline_parallel_size >= len(stages)
             config: Pipeline configuration
         """
+        logger.debug("initializing %s with stages=%s, mesh=%s, config=%s", type(self).__name__, stages, mesh, config)
         self.stages = stages
         self.mesh = mesh
         self.config = config or PipelineConfig()
@@ -201,6 +207,7 @@ class PipelineParallel:
         Returns:
             PipelineParallel wrapping the model
         """
+        logger.debug("from_model called with model=%s, mesh=%s, config=%s", model, mesh, config)
         num_stages = mesh.pipeline_parallel_size
         layers = list(model.layers) if hasattr(model, "layers") else []
 
@@ -271,6 +278,7 @@ class PipelineParallel:
         ...
         """
         # Split into micro-batches
+        logger.debug("_forward_gpipe called with inputs=%s", inputs)
         inputs_np = to_numpy(inputs)
         batch_size = inputs_np.shape[0]
         num_mb = min(self.config.num_microbatches, batch_size)
@@ -305,6 +313,7 @@ class PipelineParallel:
         """
         # For inference, 1F1B is similar to GPipe
         # The real benefit of 1F1B is memory savings during training
+        logger.debug("_forward_1f1b called with inputs=%s", inputs)
         return self._forward_gpipe(inputs, **kwargs)
 
     def _forward_streaming(self, inputs: Any, **kwargs: Any) -> Any:
@@ -313,6 +322,7 @@ class PipelineParallel:
         Processes one micro-batch at a time through all stages,
         yielding output as soon as it's available.
         """
+        logger.debug("_forward_streaming called with inputs=%s", inputs)
         inputs_np = to_numpy(inputs)
         batch_size = inputs_np.shape[0]
         num_mb = min(self.config.num_microbatches, batch_size)
@@ -341,6 +351,7 @@ class PipelineParallel:
         Returns:
             List of estimated bytes per stage
         """
+        logger.debug("get_stage_memory_usage called")
         usage = []
         for stage in self.stages:
             total = 0
@@ -388,6 +399,7 @@ def assign_layers_to_stages(
     Returns:
         List of (start_layer, end_layer) tuples for each stage
     """
+    logger.debug("assign_layers_to_stages called with num_layers=%s, num_stages=%s, strategy=%s", num_layers, num_stages, strategy)
     if strategy == "uniform":
         layers_per_stage = num_layers // num_stages
         remainder = num_layers % num_stages
@@ -435,6 +447,7 @@ def estimate_pipeline_bubble(
     # Ideal time = M * time_per_stage (if all stages worked in parallel)
     # Bubble = warmup + cooldown = 2 * (P-1) * time_per_stage
 
+    logger.debug("estimate_pipeline_bubble called with num_stages=%s, num_microbatches=%s, time_per_stage=%s", num_stages, num_microbatches, time_per_stage)
     P = num_stages
     M = num_microbatches
 
@@ -469,6 +482,7 @@ def optimal_num_microbatches(
         Optimal number of micro-batches
     """
     # Minimum: at least as many as stages for pipeline utilization
+    logger.debug("optimal_num_microbatches called with batch_size=%s, num_stages=%s, memory_per_activation=%s", batch_size, num_stages, memory_per_activation)
     min_mb = num_stages
 
     # Maximum based on memory: need to store activations for in-flight batches
@@ -509,6 +523,7 @@ class PipelineSchedule:
         All forwards first, then all backwards.
         For inference, only forward steps.
         """
+        logger.debug("gpipe_schedule called with num_stages=%s, num_microbatches=%s", num_stages, num_microbatches)
         steps = []
 
         # Forward passes
@@ -529,6 +544,7 @@ class PipelineSchedule:
         Interleaves forward and backward passes to minimize memory.
         For inference-only, degenerates to streaming.
         """
+        logger.debug("one_f_one_b_schedule called with num_stages=%s, num_microbatches=%s", num_stages, num_microbatches)
         steps = []
 
         # Warmup: fill pipeline

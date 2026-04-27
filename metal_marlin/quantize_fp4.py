@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Iterator
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +75,7 @@ def quantize_to_fp4(values: np.ndarray) -> np.ndarray:
     Returns:
         uint8 array of same shape with values in [0, 15]
     """
+    logger.info("quantize_to_fp4 called with values=%s", values)
     if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
         indices, _ = _fp4_metal.quantize(values, group_size=len(values))
         return indices if isinstance(indices, np.ndarray) else indices.numpy()
@@ -116,6 +118,7 @@ def dequantize_fp4(indices: np.ndarray) -> np.ndarray:
     Returns:
         Float array with dequantized values
     """
+    logger.info("dequantize_fp4 called with indices=%s", indices)
     if _USE_METAL and _fp4_metal is not None and _fp4_metal.available:
         # Need dummy scales for Metal dispatcher
         scales = np.ones(1, dtype=np.float32)
@@ -163,6 +166,7 @@ def quantize_fp4(
         (packed_weights, scales) in Marlin-compatible layout.
     """
     # Use Metal for basic quantization (no activation_ranges)
+    logger.info("quantize_fp4 called with weight=%s, group_size=%s, activation_ranges=%s, marlin_layout=%s", weight, group_size, activation_ranges, marlin_layout)
     if _USE_METAL and _fp4_metal is not None and _fp4_metal.available and activation_ranges is None:
         return _fp4_metal.quantize(weight, group_size=group_size, marlin_layout=marlin_layout)
 
@@ -304,6 +308,7 @@ def unpack_fp4(
         Dequantized float16 weights. Shape depends on layout:
         - Marlin: [K, N] (transpose back to get original shape)
     """
+    logger.info("unpack_fp4 called with packed=%s, scales=%s, group_size=%s, marlin_layout=%s", packed, scales, group_size, marlin_layout)
     if marlin_layout is False:
         raise ValueError("Legacy layout is not supported. Use marlin_layout=True.")
     if marlin_layout is None:
@@ -358,6 +363,7 @@ def compute_quantization_error(
     Returns:
         Dict with mse, rmse, max_error, mean_relative_error.
     """
+    logger.info("compute_quantization_error called with original=%s, packed=%s, scales=%s, group_size=%s", original, packed, scales, group_size)
     if marlin_layout is False:
         raise ValueError("Legacy layout is not supported. Use marlin_layout=True.")
     if marlin_layout is None:
@@ -410,6 +416,7 @@ def load_and_quantize_safetensors(
         - For quantized: (name, packed_uint32, scales_fp16)
         - For non-quantized: (name, original_tensor, None)
     """
+    logger.info("load_and_quantize_safetensors called with path=%s, group_size=%s, skip_patterns=%s", path, group_size, skip_patterns)
     from safetensors import safe_open
 
     skip_patterns = skip_patterns or ["embed", "norm", "bias", "lm_head"]
@@ -453,6 +460,7 @@ def convert_safetensors_to_fp4(
     Returns:
         Stats dict with tensor counts, sizes, errors
     """
+    logger.info("convert_safetensors_to_fp4 called with input_path=%s, output_path=%s, group_size=%s, validate=%s", input_path, output_path, group_size, validate)
     from safetensors.numpy import save_file
 
     output_tensors = {}
@@ -527,3 +535,6 @@ if __name__ == "__main__":
     if "mean_rmse" in stats:
         print(f"  Mean RMSE:         {stats['mean_rmse']:.6f}")
         print(f"  Max error:         {stats['max_error']:.6f}")
+
+
+logger = logging.getLogger(__name__)

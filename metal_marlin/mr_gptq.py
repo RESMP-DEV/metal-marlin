@@ -46,6 +46,7 @@ import gc
 import json
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +56,9 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     from .calibration import CalibrationDataset
 
+
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Quantization format configuration
@@ -142,6 +146,7 @@ def hadamard_matrix(n: int) -> NDArray[np.float32]:
     Raises:
         ValueError: If n is not a power of 2
     """
+    logger.debug("hadamard_matrix called with n=%s", n)
     if n == 0 or (n & (n - 1)) != 0:
         raise ValueError(f"Hadamard size must be power of 2, got {n}")
 
@@ -182,6 +187,7 @@ def apply_hadamard_rotation(
         (rotated_weights, metadata) where metadata contains block_size and
         any padding information needed for inverse transform.
     """
+    logger.debug("apply_hadamard_rotation called with weights=%s, block_size=%s, axis=%s", weights, block_size, axis)
     w = weights.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -246,6 +252,7 @@ def inverse_hadamard_rotation(
     Returns:
         Original (unrotated) weights with padding removed
     """
+    logger.debug("inverse_hadamard_rotation called with weights=%s, metadata=%s", weights, metadata)
     block_size = metadata["block_size"]
     original_dim = metadata["original_dim"]
     axis = metadata["axis"]
@@ -307,6 +314,7 @@ def collect_hessian_from_activations(
         HessianInfo with accumulated Hessian and metadata
     """
     # Flatten and stack activations
+    logger.debug("collect_hessian_from_activations called with activations=%s, damp_ratio=%s", activations, damp_ratio)
     flat_acts = []
     for act in activations:
         if act.ndim == 3:
@@ -359,6 +367,7 @@ def quantize_to_grid(
     Returns:
         (quantized_values, indices) where quantized_values = grid[indices] * scale
     """
+    logger.info("quantize_to_grid called with values=%s, grid=%s, scale=%s", values, grid, scale)
     original_shape = values.shape
 
     # Flatten both values and scale for uniform processing
@@ -426,6 +435,7 @@ def gptq_quantize_layer(
         - scales: Per-group scale factors [out, in // group_size]
         - indices: Quantization grid indices [out, in]
     """
+    logger.info("gptq_quantize_layer called with weights=%s, hessian=%s, grid=%s, group_size=%s", weights, hessian, grid, group_size)
     W = weights.astype(np.float64).copy()
     out_features, in_features = W.shape
 
@@ -562,6 +572,7 @@ class QuantizationReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert report to dictionary."""
+        logger.debug("to_dict called")
         return {
             "model_path": self.model_path,
             "output_path": self.output_path,
@@ -595,6 +606,7 @@ class QuantizationReport:
 
 def _get_quantization_grid(fmt: QuantizationFormat) -> NDArray[np.float32]:
     """Get quantization grid for format."""
+    logger.info("_get_quantization_grid called with fmt=%s", fmt)
     if fmt == QuantizationFormat.FP4:
         return FP4_E2M1_GRID
     elif fmt == QuantizationFormat.INT4:
@@ -623,6 +635,7 @@ def _pack_fp4_weights(
     Returns:
         Packed uint32 array [out_features, in_features // 8]
     """
+    logger.info("_pack_fp4_weights called with indices=%s", indices)
     out_feat, in_feat = indices.shape
     if in_feat % 8 != 0:
         raise ValueError(
@@ -640,6 +653,7 @@ def _compute_layer_error(
     quantized: NDArray[np.float32],
 ) -> dict[str, float]:
     """Compute quantization error metrics."""
+    logger.debug("_compute_layer_error called with original=%s, quantized=%s", original, quantized)
     diff = original.astype(np.float64) - quantized.astype(np.float64)
     mse = float(np.mean(diff**2))
     rmse = float(np.sqrt(mse))
@@ -657,6 +671,7 @@ def _compute_layer_error(
 
 def _compute_excess_kurtosis(weights: NDArray[np.floating[Any]]) -> float:
     """Compute excess kurtosis (normal distribution = 0)."""
+    logger.debug("_compute_excess_kurtosis called with weights=%s", weights)
     w = np.asarray(weights, dtype=np.float64).ravel()
     if w.size == 0:
         return 0.0
@@ -700,6 +715,7 @@ class MRGPTQQuantizer:
         actorder: bool = True,
         percdamp: float = 0.01,
     ):
+        logger.debug("initializing %s with bits=%s, format=%s, group_size=%s, use_hadamard=%s, hadamard_block_size=%s", type(self).__name__, bits, format, group_size, use_hadamard, hadamard_block_size)
         if bits != 4:
             raise ValueError(f"Only 4-bit quantization supported, got {bits}")
 
@@ -739,6 +755,7 @@ class MRGPTQQuantizer:
             - scales: FP16 per-group scales [out, in // group_size]
             - metadata: Hadamard rotation metadata and quantization stats
         """
+        logger.info("quantize_layer called with weights=%s, hessian=%s, layer_name=%s, use_hadamard=%s", weights, hessian, layer_name, use_hadamard)
         W = weights.astype(np.float32)
         out_feat, in_feat = W.shape
 
@@ -810,6 +827,7 @@ class MRGPTQQuantizer:
         Large MoE checkpoints (for example Qwen3.5 A10B) store expert banks as a
         single 3D tensor. Quantize each expert slice independently, then stack.
         """
+        logger.info("_quantize_stacked_tensor called with tensor=%s", tensor)
         import time
 
         packed_slices: list[NDArray[np.uint32]] = []
@@ -889,6 +907,7 @@ class MRGPTQQuantizer:
         verbose: bool = False,
     ) -> tuple[NDArray[np.uint32], NDArray[np.float16], dict[str, Any]]:
         """Dispatch quantization based on tensor rank."""
+        logger.info("_quantize_tensor_auto called with tensor=%s", tensor)
         if tensor.ndim == 2:
             return self.quantize_layer(
                 tensor,
@@ -921,6 +940,7 @@ class MRGPTQQuantizer:
         Returns:
             (quantized_weights, scales, indices)
         """
+        logger.info("_rtn_quantize called with weights=%s", weights)
         W = weights.astype(np.float32)
         out_feat, in_feat = W.shape
 
@@ -983,6 +1003,7 @@ class MRGPTQQuantizer:
         Returns:
             QuantizationReport with quality metrics
         """
+        logger.info("quantize_model called with model_path=%s, calibration_data=%s, output_path=%s, layers_to_quantize=%s", model_path, calibration_data, output_path, layers_to_quantize)
         import torch
         from safetensors import safe_open
         from safetensors.numpy import save_file
@@ -1225,6 +1246,7 @@ class MRGPTQQuantizer:
         layers_to_quantize: list[str] | None,
     ) -> bool:
         """Determine if a tensor should be quantized."""
+        logger.info("_should_quantize_tensor called with name=%s, tensor=%s, layers_to_quantize=%s", name, tensor, layers_to_quantize)
         name_lower = name.lower()
 
         # Supported tensor ranks:
@@ -1349,6 +1371,7 @@ class MRGPTQQuantizer:
         Returns:
             QuantizationReport with quality metrics
         """
+        logger.info("quantize_model_with_calibration called with model_path=%s, calibration=%s, tokenizer=%s, output_path=%s", model_path, calibration, tokenizer, output_path)
         import torch
         from safetensors.numpy import save_file
 
@@ -1454,6 +1477,7 @@ class MRGPTQQuantizer:
             collector: HessianCollector,
             progress_prefix: str = "",
         ) -> None:
+            logger.debug("_run_calibration_batches called with collector=%s, progress_prefix=%s", collector, progress_prefix)
             collector.register_hooks(model)
             if verbose:
                 print(f"  Registered hooks on {len(collector._hooks)} layers")
@@ -1561,6 +1585,7 @@ class MRGPTQQuantizer:
                 group_to_layers.setdefault(group, []).append(module_name)
 
             def _group_sort_key(group_name: str) -> tuple[int, int | str]:
+                logger.debug("_group_sort_key called with group_name=%s", group_name)
                 if group_name.startswith("model.layers."):
                     parts = group_name.split(".")
                     if len(parts) >= 3 and parts[2].isdigit():
@@ -1568,6 +1593,7 @@ class MRGPTQQuantizer:
                 return (1, group_name)
 
             def _hessian_checkpoint_path(layer_name: str) -> Path:
+                logger.debug("_hessian_checkpoint_path called with layer_name=%s", layer_name)
                 safe_name = layer_name.replace("/", "_").replace(".", "_")
                 npz = hessian_checkpoint_path / f"{safe_name}.npz"
                 if npz.exists():
@@ -1664,6 +1690,7 @@ class MRGPTQQuantizer:
         hessian_cache: dict[str, NDArray[np.float32]] = {}
 
         def _hessian_checkpoint_path(layer_name: str) -> Path:
+            logger.debug("_hessian_checkpoint_path called with layer_name=%s", layer_name)
             safe_name = layer_name.replace("/", "_").replace(".", "_")
             npz = hessian_checkpoint_path / f"{safe_name}.npz"
             if npz.exists():
@@ -1672,6 +1699,7 @@ class MRGPTQQuantizer:
             return pt
 
         def _load_hessian_from_checkpoint(layer_name: str) -> NDArray[np.float32] | None:
+            logger.info("_load_hessian_from_checkpoint called with layer_name=%s", layer_name)
             if layer_name in hessian_cache:
                 return hessian_cache[layer_name]
 
@@ -1990,6 +2018,7 @@ class MoEPrecisionConfig:
     @classmethod
     def default_dense(cls) -> MoEPrecisionConfig:
         """Default config for dense transformer models."""
+        logger.debug("default_dense called")
         return cls(
             router_precision="bf16",
             expert_format="fp4",
@@ -2001,6 +2030,7 @@ class MoEPrecisionConfig:
     @classmethod
     def default_moe(cls) -> MoEPrecisionConfig:
         """Default config for MoE models (Mixtral, etc.)."""
+        logger.debug("default_moe called")
         return cls(
             router_precision="bf16",
             expert_format="fp4",
@@ -2012,6 +2042,7 @@ class MoEPrecisionConfig:
     @classmethod
     def default_moe_mtp(cls) -> MoEPrecisionConfig:
         """Config for MoE + MTP models like GLM-4.7-Flash."""
+        logger.debug("default_moe_mtp called")
         return cls(
             router_precision="bf16",
             expert_format="fp4",
@@ -2025,6 +2056,7 @@ class MoEPrecisionConfig:
     @classmethod
     def quality_first(cls) -> MoEPrecisionConfig:
         """Prioritize quality over compression."""
+        logger.debug("quality_first called")
         return cls(
             router_precision="bf16",
             expert_format="fp4",
@@ -2038,6 +2070,7 @@ class MoEPrecisionConfig:
     @classmethod
     def speed_first(cls) -> MoEPrecisionConfig:
         """Prioritize speed/compression over quality."""
+        logger.debug("speed_first called")
         return cls(
             router_precision="bf16",
             expert_format="fp4",
@@ -2094,6 +2127,7 @@ class HessianCollector:
                 layers are skipped (they can fall back to RTN quantization).
             accumulator_dtype: Hessian accumulator dtype ("float64" or "float32").
         """
+        logger.debug("initializing %s with damp_ratio=%s, layer_patterns=%s, exclude_patterns=%s, max_tracked_layers=%s, accumulator_dtype=%s", type(self).__name__, damp_ratio, layer_patterns, exclude_patterns, max_tracked_layers, accumulator_dtype)
         self.damp_ratio = damp_ratio
         self.layer_patterns = layer_patterns
         self.exclude_patterns = [
@@ -2118,6 +2152,7 @@ class HessianCollector:
             model: PyTorch or MLX model with named_modules() method.
         """
         # Lazy import to avoid torch dependency when not needed
+        logger.debug("register_hooks called with model=%s", model)
         import torch.nn as nn
 
         for name, module in model.named_modules():
@@ -2137,6 +2172,7 @@ class HessianCollector:
 
     def _should_track_layer(self, name: str) -> bool:
         """Determine if a layer should have Hessian tracked."""
+        logger.debug("_should_track_layer called with name=%s", name)
         name_lower = name.lower()
 
         # Always skip these
@@ -2165,6 +2201,7 @@ class HessianCollector:
 
     def _make_hook(self, layer_name: str):
         """Create forward hook for Hessian accumulation."""
+        logger.debug("_make_hook called with layer_name=%s", layer_name)
         import torch
 
         accumulator_torch_dtype = (
@@ -2173,6 +2210,7 @@ class HessianCollector:
 
         def hook(module, input, output):
             # Get input activations
+            logger.debug("hook called with module=%s, input=%s, output=%s", module, input, output)
             if isinstance(input, tuple):
                 x = input[0]
             else:
@@ -2224,6 +2262,7 @@ class HessianCollector:
 
     def remove_hooks(self) -> None:
         """Remove all registered hooks."""
+        logger.debug("remove_hooks called")
         for hook in self._hooks:
             hook.remove()
         self._hooks.clear()
@@ -2237,6 +2276,7 @@ class HessianCollector:
         Returns:
             Dict mapping layer names to HessianInfo objects.
         """
+        logger.debug("get_hessians called with apply_damping=%s", apply_damping)
         results = {}
 
         for name, (H_sum, n_samples) in self._hessians.items():
@@ -2277,6 +2317,7 @@ class HessianCollector:
             path: Directory to save Hessian files (.pt).
             prefix: Optional prefix for filenames.
         """
+        logger.info("save_checkpoint called with path=%s, prefix=%s", path, prefix)
         import torch
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
@@ -2311,6 +2352,7 @@ class HessianCollector:
         Returns:
             HessianInfo or None if layer not found.
         """
+        logger.debug("get_single_hessian called with layer_name=%s, apply_damping=%s", layer_name, apply_damping)
         if layer_name not in self._hessians:
             return None
 
@@ -2339,6 +2381,7 @@ class HessianCollector:
 
     def clear(self) -> None:
         """Clear accumulated Hessians (but keep hooks)."""
+        logger.debug("clear called")
         import torch
 
         accumulator_torch_dtype = (
@@ -2364,6 +2407,7 @@ class HessianCollector:
     @property
     def skipped_due_limit(self) -> int:
         """Number of hook calls skipped due to max_tracked_layers limit."""
+        logger.debug("skipped_due_limit called")
         return self._skipped_due_limit
 
 
@@ -2394,6 +2438,7 @@ class QuantizationCheckpoint:
     @classmethod
     def create(cls, checkpoint_dir: Path, model_path: str) -> QuantizationCheckpoint:
         """Create new checkpoint."""
+        logger.debug("create called with checkpoint_dir=%s, model_path=%s", checkpoint_dir, model_path)
         checkpoint_dir = Path(checkpoint_dir)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         return cls(checkpoint_dir=checkpoint_dir, model_path=model_path)
@@ -2401,6 +2446,7 @@ class QuantizationCheckpoint:
     @classmethod
     def load(cls, checkpoint_dir: Path) -> QuantizationCheckpoint | None:
         """Load checkpoint from directory, or None if not found."""
+        logger.info("load called with checkpoint_dir=%s", checkpoint_dir)
         checkpoint_dir = Path(checkpoint_dir)
         state_file = checkpoint_dir / "state.json"
         if not state_file.exists():
@@ -2426,6 +2472,7 @@ class QuantizationCheckpoint:
 
     def save(self) -> None:
         """Save checkpoint state to disk."""
+        logger.info("save called")
         state = {
             "model_path": self.model_path,
             "completed_layers": self.completed_layers,
@@ -2442,6 +2489,7 @@ class QuantizationCheckpoint:
 
     def mark_layer_complete(self, layer_name: str) -> None:
         """Mark a layer as completed."""
+        logger.debug("mark_layer_complete called with layer_name=%s", layer_name)
         if layer_name not in self.completed_layers:
             self.completed_layers.append(layer_name)
         self.current_layer = None
@@ -2449,6 +2497,7 @@ class QuantizationCheckpoint:
 
     def is_layer_complete(self, layer_name: str) -> bool:
         """Check if a layer has been completed."""
+        logger.debug("is_layer_complete called with layer_name=%s", layer_name)
         return layer_name in self.completed_layers
 
 
@@ -2486,6 +2535,7 @@ class MoEMRGPTQQuantizer(MRGPTQQuantizer):
         router_precision: str = "bf16",
         shared_expert_group_size: int | None = None,
     ):
+        logger.debug("initializing %s with bits=%s, format=%s, group_size=%s, use_hadamard=%s, hadamard_block_size=%s", type(self).__name__, bits, format, group_size, use_hadamard, hadamard_block_size)
         super().__init__(
             bits=bits,
             format=format,
@@ -2508,6 +2558,7 @@ class MoEMRGPTQQuantizer(MRGPTQQuantizer):
         """Override to handle MoE-specific patterns."""
         # Keep routing logits projections in full precision.
         # Do not block expert projections such as experts.gate_up_proj.
+        logger.info("_should_quantize_tensor called with name=%s, tensor=%s, layers_to_quantize=%s", name, tensor, layers_to_quantize)
         name_lower = name.lower()
         if any(
             marker in name_lower
@@ -2532,6 +2583,7 @@ class MoEMRGPTQQuantizer(MRGPTQQuantizer):
 
 def main():
     """CLI entry point for MR-GPTQ quantization."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -2669,6 +2721,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
             remote_address: Address for remote CUDA server (host:port)
             **kwargs: Additional arguments passed to MRGPTQQuantizer
         """
+        logger.debug("initializing %s with backend_name=%s, remote_address=%s", type(self).__name__, backend_name, remote_address)
         super().__init__(**kwargs)
 
         self._backend_name = backend_name
@@ -2693,6 +2746,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         Returns:
             Configured AcceleratedMRGPTQQuantizer
         """
+        logger.debug("create called with backend=%s, remote_address=%s", backend, remote_address)
         return cls(
             backend_name=backend,
             remote_address=remote_address,
@@ -2701,6 +2755,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
 
     def _get_backend(self):
         """Lazily initialize the accelerated backend."""
+        logger.debug("_get_backend called")
         if self._accelerated_backend is None:
             from .gptq_accelerated import Backend, GPTQAccelerated, GPTQConfig
 
@@ -2732,6 +2787,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
 
     def _get_synthetic_hessian(self, in_features: int) -> NDArray[np.float32]:
         """Return cached identity Hessian used for no-calibration acceleration."""
+        logger.debug("_get_synthetic_hessian called with in_features=%s", in_features)
         cached = self._synthetic_hessian_cache.get(in_features)
         if cached is not None:
             return cached
@@ -2753,6 +2809,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         the accelerated backend using a synthetic identity Hessian. This keeps large
         no-calibration jobs on MPS/CUDA instead of CPU-only RTN loops.
         """
+        logger.info("quantize_layer called with weights=%s, hessian=%s, layer_name=%s, use_hadamard=%s", weights, hessian, layer_name, use_hadamard)
         synthetic_hessian = False
         if hessian is None:
             hessian = self._get_synthetic_hessian(int(weights.shape[1]))
@@ -2787,6 +2844,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
         Returns:
             (packed_weights, scales, metadata)
         """
+        logger.info("quantize_layer_accelerated called with weights=%s, hessian=%s, layer_name=%s, use_hadamard=%s", weights, hessian, layer_name, use_hadamard)
         W = weights.astype(np.float32)
 
         if use_hadamard is None:
@@ -2876,6 +2934,7 @@ class AcceleratedMRGPTQQuantizer(MRGPTQQuantizer):
             QuantizationReport with quality metrics
         """
 
+        logger.info("quantize_model_parallel called with model_path=%s, calibration_data=%s, output_path=%s, tokenizer=%s", model_path, calibration_data, output_path, tokenizer)
         model_path = Path(model_path)
         output_path = Path(
             output_path) if output_path else model_path / "quantized"

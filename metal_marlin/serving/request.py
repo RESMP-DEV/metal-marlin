@@ -42,8 +42,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import logging
 from time import time
 
+
+
+logger = logging.getLogger(__name__)
 
 class RequestStatus(Enum):
     """Lifecycle states for a generation request."""
@@ -117,6 +121,7 @@ class RunningRequest:
 
     def __init__(self, request_id: str) -> None:
         """Initialize a new running request in PREFILLING state."""
+        logger.debug("initializing %s with request_id=%s", type(self).__name__, request_id)
         self._request_id: str = request_id
         self._state: RunningRequestState = RunningRequestState.PREFILLING
         self._state_history: list[tuple[float, RunningRequestState]] = [
@@ -129,16 +134,19 @@ class RunningRequest:
     @property
     def request_id(self) -> str:
         """Unique identifier for this request."""
+        logger.debug("request_id called")
         return self._request_id
 
     @property
     def state(self) -> RunningRequestState:
         """Current state of the request."""
+        logger.debug("state called")
         return self._state
 
     @property
     def is_terminal(self) -> bool:
         """Whether the request has reached a terminal state."""
+        logger.debug("is_terminal called")
         return self._state in (
             RunningRequestState.COMPLETED,
             RunningRequestState.FAILED,
@@ -148,31 +156,37 @@ class RunningRequest:
     @property
     def is_prefilling(self) -> bool:
         """Whether the request is currently prefilling."""
+        logger.debug("is_prefilling called")
         return self._state == RunningRequestState.PREFILLING
 
     @property
     def is_decoding(self) -> bool:
         """Whether the request is currently decoding."""
+        logger.debug("is_decoding called")
         return self._state == RunningRequestState.DECODING
 
     @property
     def error_message(self) -> str | None:
         """Error message if in FAILED state, None otherwise."""
+        logger.debug("error_message called")
         return self._error_message
 
     @property
     def prefill_tokens_processed(self) -> int:
         """Number of prompt tokens processed during prefill."""
+        logger.debug("prefill_tokens_processed called")
         return self._prefill_tokens_processed
 
     @property
     def decode_tokens_generated(self) -> int:
         """Number of output tokens generated during decode."""
+        logger.debug("decode_tokens_generated called")
         return self._decode_tokens_generated
 
     @property
     def state_history(self) -> list[tuple[float, RunningRequestState]]:
         """History of state transitions with timestamps."""
+        logger.debug("state_history called")
         return self._state_history.copy()
 
     def start_decoding(self, prefill_tokens: int) -> None:
@@ -184,6 +198,7 @@ class RunningRequest:
         Raises:
             RunningRequestTransitionError: If not currently in PREFILLING state.
         """
+        logger.debug("start_decoding called with prefill_tokens=%s", prefill_tokens)
         self._transition(RunningRequestState.DECODING)
         self._prefill_tokens_processed = prefill_tokens
 
@@ -196,6 +211,7 @@ class RunningRequest:
         Raises:
             RunningRequestTransitionError: If not currently in DECODING state.
         """
+        logger.debug("complete called with decode_tokens=%s", decode_tokens)
         self._transition(RunningRequestState.COMPLETED)
         self._decode_tokens_generated = decode_tokens
 
@@ -208,6 +224,7 @@ class RunningRequest:
         Raises:
             RunningRequestTransitionError: If already in a terminal state.
         """
+        logger.debug("fail called with message=%s", message)
         self._transition(RunningRequestState.FAILED)
         self._error_message = message
 
@@ -219,6 +236,7 @@ class RunningRequest:
         Raises:
             RunningRequestTransitionError: If already in a terminal state.
         """
+        logger.debug("cancel called")
         self._transition(RunningRequestState.CANCELLED)
 
     def _transition(self, new_state: RunningRequestState) -> None:
@@ -230,6 +248,7 @@ class RunningRequest:
         Raises:
             RunningRequestTransitionError: If the transition is invalid.
         """
+        logger.debug("_transition called with new_state=%s", new_state)
         if new_state not in self._VALID_TRANSITIONS[self._state]:
             raise RunningRequestTransitionError(
                 f"Invalid transition from {self._state.name} "
@@ -286,21 +305,25 @@ class GenerationRequest:
     @property
     def num_tokens(self) -> int:
         """Total tokens currently held (prompt + generated)."""
+        logger.debug("num_tokens called")
         return len(self.prompt_tokens) + len(self.output_tokens)
 
     @property
     def num_prompt_tokens(self) -> int:
         """Number of prompt tokens."""
+        logger.debug("num_prompt_tokens called")
         return len(self.prompt_tokens)
 
     @property
     def num_output_tokens(self) -> int:
         """Number of generated output tokens."""
+        logger.debug("num_output_tokens called")
         return len(self.output_tokens)
 
     @property
     def time_to_first_token(self) -> float | None:
         """Latency from arrival to first generated token, in seconds."""
+        logger.debug("time_to_first_token called")
         if self.first_token_time is not None:
             return self.first_token_time - self.arrival_time
         return None
@@ -308,6 +331,7 @@ class GenerationRequest:
     @property
     def generation_time(self) -> float | None:
         """Total time from arrival to completion, in seconds."""
+        logger.debug("generation_time called")
         if self.completion_time is not None:
             return self.completion_time - self.arrival_time
         return None
@@ -315,6 +339,7 @@ class GenerationRequest:
     @property
     def decode_throughput(self) -> float | None:
         """Tokens per second during decode phase (after first token)."""
+        logger.debug("decode_throughput called")
         if (
             self.completion_time is not None
             and self.first_token_time is not None
@@ -328,6 +353,7 @@ class GenerationRequest:
     @property
     def is_finished(self) -> bool:
         """Whether this request has reached a stopping condition."""
+        logger.debug("is_finished called")
         if self.status == RequestStatus.FINISHED:
             return True
         if len(self.output_tokens) >= self.max_tokens:
@@ -336,6 +362,7 @@ class GenerationRequest:
 
     def append_token(self, token_id: int) -> None:
         """Append a generated token and update timing/status."""
+        logger.debug("append_token called with token_id=%s", token_id)
         if self.status == RequestStatus.PENDING:
             self.status = RequestStatus.RUNNING
             self.first_token_time = time()
@@ -348,15 +375,18 @@ class GenerationRequest:
 
     def preempt(self) -> None:
         """Mark request as preempted (KV blocks will be swapped out)."""
+        logger.debug("preempt called")
         self.status = RequestStatus.PREEMPTED
 
     def resume(self) -> None:
         """Resume a preempted request."""
+        logger.debug("resume called")
         if self.status == RequestStatus.PREEMPTED:
             self.status = RequestStatus.RUNNING
 
     def finish(self) -> None:
         """Explicitly mark request as finished (e.g., EOS or stop sequence)."""
+        logger.debug("finish called")
         self.status = RequestStatus.FINISHED
         if self.completion_time is None:
             self.completion_time = time()
@@ -379,19 +409,23 @@ class SchedulerOutput:
     @property
     def num_prefill_tokens(self) -> int:
         """Total tokens to process in prefill phase."""
+        logger.debug("num_prefill_tokens called")
         return sum(r.num_prompt_tokens for r in self.prefill_requests)
 
     @property
     def num_decode_tokens(self) -> int:
         """Total tokens to process in decode phase (1 per request)."""
+        logger.debug("num_decode_tokens called")
         return len(self.decode_requests)
 
     @property
     def total_tokens(self) -> int:
         """Total tokens this iteration will process."""
+        logger.debug("total_tokens called")
         return self.num_prefill_tokens + self.num_decode_tokens
 
     @property
     def is_empty(self) -> bool:
         """Whether there's nothing to schedule."""
+        logger.debug("is_empty called")
         return not self.prefill_requests and not self.decode_requests

@@ -9,6 +9,10 @@ This adds overhead but reduces KV cache memory significantly.
 WRONG specs used previously (DO NOT USE):
 - hidden=4608, intermediate=14336, 8 experts, top-k=2  # WRONG
 """
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 # ========== Core Dimensions ==========
 GLM47_HIDDEN_SIZE = 2048

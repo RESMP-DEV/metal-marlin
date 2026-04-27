@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Benchmark unified memory optimizations."""
+import logging
 import time
 import torch
 from metal_marlin.trellis.model import TrellisForCausalLM
 from transformers import AutoTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 print('Loading model...')
 model = TrellisForCausalLM.from_pretrained(

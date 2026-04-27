@@ -40,6 +40,7 @@ import argparse
 import gc
 import json
 import resource
+import logging
 import shutil
 import sys
 import time
@@ -56,6 +57,9 @@ import torch
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_numpy_file
 from safetensors.torch import save_file as save_torch_file
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -114,6 +118,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
     Returns:
         Packed uint8 array with header byte containing bits value
     """
+    logger.info("pack_indices_vectorized called with indices=%s, bits=%s", indices, bits)
     if bits < 2 or bits > 8:
         raise ValueError(f"bits must be in range [2, 8], got {bits}")
 
@@ -258,16 +263,19 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
 
 def get_memory_mb() -> float:
     """Get current RSS memory usage in MB."""
+    logger.debug("get_memory_mb called")
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
 
 
 def cuda_sync() -> None:
     """Synchronize CUDA."""
+    logger.debug("cuda_sync called")
     torch.cuda.synchronize()
 
 
 def cuda_memory_gb() -> tuple[float, float]:
     """Return (allocated_gb, reserved_gb) CUDA memory."""
+    logger.debug("cuda_memory_gb called")
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
     return allocated, reserved
@@ -283,6 +291,7 @@ def hadamard_matrix_cuda(n: int, device: torch.device) -> torch.Tensor:
 
     Uses Sylvester construction: H_2n = [[H_n, H_n], [H_n, -H_n]].
     """
+    logger.debug("hadamard_matrix_cuda called with n=%s, device=%s", n, device)
     if n == 1:
         return torch.ones(1, 1, device=device, dtype=torch.float32)
 
@@ -305,6 +314,7 @@ def blockwise_hadamard_cuda(
         block_size: Size of Hadamard blocks (power of 2)
         axis: 0 for rows, 1 for columns
     """
+    logger.debug("blockwise_hadamard_cuda called with X=%s, block_size=%s, axis=%s", X, block_size, axis)
     H = hadamard_matrix_cuda(block_size, X.device)
 
     if axis == 1:
@@ -341,6 +351,7 @@ def compute_hessian_cuda(
     Returns:
         Hessian [in_features, in_features] on CUDA
     """
+    logger.debug("compute_hessian_cuda called with activations=%s, sigma_reg=%s", activations, sigma_reg)
     X = activations.float()
     n_samples = X.shape[0]
     H = torch.mm(X.T, X) / n_samples
@@ -362,6 +373,7 @@ def preprocess_hessian_cuda(
         H_rotated: Rotated Hessian
         su: Random sign flips for weight rotation
     """
+    logger.debug("preprocess_hessian_cuda called with H=%s, had_k=%s", H, had_k)
     k = H.shape[0]
 
     # Random sign flips
@@ -389,6 +401,7 @@ def block_ldl(H: np.ndarray, block_size: int = 16) -> tuple[np.ndarray, np.ndarr
     Uses scipy's LDL decomposition with block structure.
     Falls back to identity if numerically unstable.
     """
+    logger.debug("block_ldl called with H=%s, block_size=%s", H, block_size)
     try:
         from scipy.linalg import ldl
 
@@ -418,6 +431,7 @@ class TrellisCodebook:
 
     def get_grid(self, device: torch.device | None = None) -> torch.Tensor:
         """Return quantization grid as CUDA tensor."""
+        logger.debug("get_grid called with device=%s", device)
         n_levels = 2**self.bits
         grid = torch.linspace(
             -(n_levels - 1) / 2,
@@ -431,6 +445,7 @@ class TrellisCodebook:
         return grid
 
     def get_n_levels(self) -> int:
+        logger.debug("get_n_levels called")
         return 2**self.bits
 
 
@@ -455,6 +470,7 @@ def quantize_tiles_cuda_batched(
         indices: [n_tiles, 16, 16] uint8 (packed)
         dequant: [n_tiles, 16, 16] float32
     """
+    logger.info("quantize_tiles_cuda_batched called with tiles=%s, tile_scales=%s, grid=%s", tiles, tile_scales, grid)
     n_tiles = tiles.shape[0]
 
     # Normalize tiles by scales
@@ -482,6 +498,7 @@ def compute_sensitivity(
     H: np.ndarray,
 ) -> float:
     """Compute sensitivity score for bit allocation."""
+    logger.debug("compute_sensitivity called with weight=%s, H=%s", weight, H)
     if isinstance(weight, torch.Tensor):
         w = weight.abs().cpu().numpy()
     else:
@@ -509,6 +526,7 @@ def determine_bits(
     max_bits: int = 8,
 ) -> tuple[int, float]:
     """Determine optimal bit width based on tensor name and statistics."""
+    logger.debug("determine_bits called with tensor_name=%s, weight=%s, H=%s", tensor_name, weight, H)
     name_lower = tensor_name.lower()
 
     for pattern, bits in SENSITIVE_PATTERNS.items():
@@ -572,6 +590,7 @@ class WeightPrefetcher:
         weight_map: dict[str, str],
         prefetch_ahead: int = 2,
     ):
+        logger.debug("initializing %s with model_path=%s, weight_map=%s, prefetch_ahead=%s", type(self).__name__, model_path, weight_map, prefetch_ahead)
         self.model_path = model_path
         self.weight_map = weight_map
         self.prefetch_ahead = prefetch_ahead
@@ -581,6 +600,7 @@ class WeightPrefetcher:
         self._stop = False
 
     def start(self, layer_indices: list[int]) -> None:
+        logger.debug("start called with layer_indices=%s", layer_indices)
         self._stop = False
         self.thread = Thread(
             target=self._prefetch_loop, args=(layer_indices,), daemon=True
@@ -588,17 +608,20 @@ class WeightPrefetcher:
         self.thread.start()
 
     def stop(self) -> None:
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=5)
 
     def get_layer(self, timeout: float = 120.0) -> PrefetchedLayer | None:
+        logger.debug("get_layer called with timeout=%s", timeout)
         try:
             return self.queue.get(timeout=timeout)
         except Empty:
             return None
 
     def _prefetch_loop(self, layer_indices: list[int]) -> None:
+        logger.debug("_prefetch_loop called with layer_indices=%s", layer_indices)
         for layer_idx in layer_indices:
             if self._stop:
                 break
@@ -608,6 +631,7 @@ class WeightPrefetcher:
 
     def _load_layer(self, layer_idx: int) -> PrefetchedLayer:
         """Load a single layer's weight tensors."""
+        logger.info("_load_layer called with layer_idx=%s", layer_idx)
         prefix = f"model.layers.{layer_idx}."
         layer = PrefetchedLayer(layer_idx=layer_idx)
 
@@ -698,6 +722,7 @@ class GPULayerPrefetcher:
         max_bits: int,
         gpu_batch_size: int = 64,  # Tensors to process per GPU batch
     ):
+        logger.debug("initializing %s with weight_prefetcher=%s, config=%s, min_bits=%s, max_bits=%s, gpu_batch_size=%s", type(self).__name__, weight_prefetcher, config, min_bits, max_bits, gpu_batch_size)
         self.weight_prefetcher = weight_prefetcher
         self.config = config
         self.min_bits = min_bits
@@ -715,16 +740,19 @@ class GPULayerPrefetcher:
         self._streams = [torch.cuda.Stream() for _ in range(4)]
 
     def start(self) -> None:
+        logger.debug("start called")
         self._stop = False
         self.thread = Thread(target=self._prefetch_loop, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=30)
 
     def get_prepared_layer(self, timeout: float = 300.0) -> PreparedLayer | None:
+        logger.debug("get_prepared_layer called with timeout=%s", timeout)
         try:
             return self.queue.get(timeout=timeout)
         except Empty:
@@ -732,6 +760,7 @@ class GPULayerPrefetcher:
 
     def _prefetch_loop(self) -> None:
         """GPU-FIRST: Load weights to GPU, process entirely on GPU."""
+        logger.debug("_prefetch_loop called")
         while not self._stop:
             layer = self.weight_prefetcher.get_layer(timeout=180)
             if layer is None:
@@ -806,6 +835,7 @@ class GPULayerPrefetcher:
 
     def _rotate_weights_gpu(self, W: torch.Tensor) -> torch.Tensor:
         """Apply Hadamard rotation to weights on GPU."""
+        logger.debug("_rotate_weights_gpu called with W=%s", W)
         W = W.float()
         in_feat = W.shape[1]
         num_blocks = in_feat // HADAMARD_K
@@ -829,6 +859,7 @@ class GPULayerPrefetcher:
         self, name: str, W: torch.Tensor
     ) -> tuple[int, float]:
         """Determine bits based on GPU tensor statistics."""
+        logger.debug("_determine_bits_gpu called with name=%s, W=%s", name, W)
         name_lower = name.lower()
 
         # Pattern-based override
@@ -937,6 +968,7 @@ class CUDAQuantizer:
         group_size: int = GROUP_SIZE,
         expert_workers: int = 16,
     ):
+        logger.debug("initializing %s with min_bits=%s, max_bits=%s, group_size=%s, expert_workers=%s", type(self).__name__, min_bits, max_bits, group_size, expert_workers)
         self.min_bits = min_bits
         self.max_bits = max_bits
         self.group_size = group_size
@@ -955,6 +987,7 @@ class CUDAQuantizer:
 
     def initialize(self, calibration_samples: int | None = None) -> None:
         """Download model and initialize configuration."""
+        logger.debug("initialize called with calibration_samples=%s", calibration_samples)
         from huggingface_hub import snapshot_download
         from transformers import AutoConfig
 
@@ -981,6 +1014,7 @@ class CUDAQuantizer:
         self, hd: HessianData, worker_id: int = 0
     ) -> tuple[LayerResult, QuantizedTensor | None]:
         """Quantize a single tensor ENTIRELY on GPU (no CPU numpy loops)."""
+        logger.info("quantize_tensor called with hd=%s, worker_id=%s", hd, worker_id)
         start = time.perf_counter()
         name = hd.name
         bits = hd.bits
@@ -1118,6 +1152,7 @@ class CUDAQuantizer:
         - Processing multiple tensors with same bit-width together
         - Using CUDA streams for async transfers
         """
+        logger.info("quantize_batch_gpu called with tensors=%s, stream=%s", tensors, stream)
         results = []
 
         # Group by bits for batched processing
@@ -1254,6 +1289,7 @@ class CUDAQuantizer:
         output_path: Path,
     ) -> list[LayerResult]:
         """Quantize a layer using batched GPU processing."""
+        logger.info("quantize_prepared_layer called with prepared=%s, executor=%s, output_path=%s", prepared, executor, output_path)
         total = len(prepared.hessian_data)
 
         # Use multiple CUDA streams for pipelining
@@ -1279,6 +1315,7 @@ class CUDAQuantizer:
         io_futures: list[Future] = []
 
         def save_batch(tensors: dict, batch_idx: int) -> str:
+            logger.info("save_batch called with tensors=%s, batch_idx=%s", tensors, batch_idx)
             batch_file = temp_dir / f"batch_{batch_idx:04d}.safetensors"
             save_numpy_file(tensors, str(batch_file))
             return str(batch_file)
@@ -1383,6 +1420,7 @@ class CUDAQuantizer:
         total_bytes: int,
     ) -> None:
         """Rename temp dir to final layer directory and create index."""
+        logger.debug("_finalize_layer called with layer_idx=%s, temp_dir=%s, output_path=%s", layer_idx, temp_dir, output_path)
         final_dir = output_path / f"layer_{layer_idx:04d}"
         if final_dir.exists():
             shutil.rmtree(final_dir)
@@ -1421,6 +1459,7 @@ class CUDAQuantizer:
 
     def extract_base_weights(self, output_path: Path, num_layers: int) -> None:
         """Extract non-quantized weights (embeddings, norms, lm_head)."""
+        logger.debug("extract_base_weights called with output_path=%s, num_layers=%s", output_path, num_layers)
         print("\nExtracting base weights...")
         base_tensors: dict[str, torch.Tensor] = {}
 
@@ -1470,6 +1509,7 @@ class CUDAQuantizer:
         max_seq_len: int = 512,
     ) -> list[LayerResult]:
         """Run full model quantization with deep pipelining."""
+        logger.info("quantize_model called with output_path=%s, max_layers=%s, calibration_samples=%s, max_seq_len=%s", output_path, max_layers, calibration_samples, max_seq_len)
         self.initialize(calibration_samples=calibration_samples)
 
         num_layers = getattr(self.config, "num_hidden_layers", NUM_LAYERS)
@@ -1581,6 +1621,7 @@ class CUDAQuantizer:
         self, output_path: Path, num_layers: int, max_shard_gb: float = 2.0
     ) -> None:
         """Consolidate layer folders into HF-style sharded safetensors (streaming)."""
+        logger.debug("_consolidate_to_shards called with output_path=%s, num_layers=%s, max_shard_gb=%s", output_path, num_layers, max_shard_gb)
         print("\nConsolidating to HuggingFace sharded format (streaming)...")
 
         max_shard_bytes = int(max_shard_gb * 1024 * 1024 * 1024)
@@ -1618,6 +1659,7 @@ class CUDAQuantizer:
 
         def flush_shard() -> None:
             """Write current shard to disk and clear memory."""
+            logger.debug("flush_shard called")
             nonlocal current_shard, current_size, shard_num, shard_files
 
             if not current_shard:
@@ -1704,6 +1746,7 @@ class CUDAQuantizer:
         self, results: list[LayerResult], output_path: Path, total_time: float
     ) -> None:
         """Save model index and configuration."""
+        logger.info("_save_model_index called with results=%s, output_path=%s, total_time=%s", results, output_path, total_time)
         successful = [r for r in results if r.success]
         bit_counts = Counter(r.actual_bits for r in successful)
         total_params = sum(r.shape[0] * r.shape[1] for r in successful)
@@ -1752,6 +1795,7 @@ class CUDAQuantizer:
 
     def _print_summary(self, results: list[LayerResult], total_time: float) -> None:
         """Print quantization summary statistics."""
+        logger.debug("_print_summary called with results=%s, total_time=%s", results, total_time)
         successful = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
 
@@ -1808,6 +1852,7 @@ class CUDAQuantizer:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="CUDA-accelerated Trellis quantization for GLM-4.7-Flash",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

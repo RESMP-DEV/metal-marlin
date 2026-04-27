@@ -1,3 +1,4 @@
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +11,14 @@ from metal_marlin.layers.mmfp4_fused_moe import MMFP4FusedMoE
 from metal_marlin.layers.mmfp4_moe import MMFP4MoE
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestExpertParallel:
     @pytest.fixture
     def mock_dispatch(self):
         """Mock the dispatch module."""
+        logger.debug("mock_dispatch called")
         mock = MagicMock()
         with patch.object(mmfp4_moe, '_moe_dispatch_module', mock):
             yield mock
@@ -21,7 +26,9 @@ class TestExpertParallel:
     @pytest.fixture(autouse=True)
     def setup_router_mock(self):
         """Setup router mock."""
+        logger.info("setup_router_mock starting")
         def mock_fused_router(hidden, gate, top_k, **kwargs):
+            logger.debug("mock_fused_router called with hidden=%s, gate=%s, top_k=%s", hidden, gate, top_k)
             batch_size = hidden.shape[0]
             return (
                 torch.ones(batch_size, top_k) * 0.5,
@@ -32,6 +39,7 @@ class TestExpertParallel:
 
     def test_mmfp4_moe_uses_parallel_dispatch(self, mock_dispatch):
         """Test MMFP4MoE uses parallel dispatch when configured."""
+        logger.info("running test_mmfp4_moe_uses_parallel_dispatch")
         layer = MMFP4MoE(
             n_experts=4,
             n_experts_per_tok=2,
@@ -58,6 +66,7 @@ class TestExpertParallel:
 
     def test_mmfp4_fused_moe_uses_parallel_dispatch(self, mock_dispatch):
         """Test MMFP4FusedMoE uses parallel dispatch when configured."""
+        logger.info("running test_mmfp4_fused_moe_uses_parallel_dispatch")
         layer = MMFP4FusedMoE(
             n_experts=4,
             n_experts_per_tok=2,
@@ -81,6 +90,7 @@ class TestExpertParallel:
 
     def test_mmfp4_moe_prioritizes_parallel_over_mps(self, mock_dispatch):
         """Test MMFP4MoE prioritizes parallel dispatch even on MPS if requested."""
+        logger.info("running test_mmfp4_moe_prioritizes_parallel_over_mps")
         layer = MMFP4MoE(
             n_experts=4,
             n_experts_per_tok=2,

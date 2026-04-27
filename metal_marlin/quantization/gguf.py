@@ -11,6 +11,7 @@ This module provides:
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +20,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # GGUF File Format Constants
@@ -72,6 +76,7 @@ class GGUFHeader:
     """GGUF file header information."""
 
     def __init__(self, magic: bytes, version: int, tensor_count: int, metadata_kv_count: int):
+        logger.debug("initializing %s with magic=%s, version=%s, tensor_count=%s, metadata_kv_count=%s", type(self).__name__, magic, version, tensor_count, metadata_kv_count)
         self.magic = magic
         self.version = version
         self.tensor_count = tensor_count
@@ -80,6 +85,7 @@ class GGUFHeader:
     @classmethod
     def from_bytes(cls, data: bytes) -> GGUFHeader:
         """Parse GGUF header from bytes."""
+        logger.debug("from_bytes called with data=%s", data)
         if len(data) < 16:
             raise ValueError("GGUF header too short")
 
@@ -109,6 +115,7 @@ class GGUFTensorInfo:
         ggml_type: int,
         offset: int,
     ):
+        logger.debug("initializing %s with name=%s, dimensions=%s, ggml_type=%s, offset=%s", type(self).__name__, name, dimensions, ggml_type, offset)
         self.name = name
         self.dimensions = dimensions
         self.ggml_type = ggml_type
@@ -117,6 +124,7 @@ class GGUFTensorInfo:
     @property
     def num_elements(self) -> int:
         """Total number of elements in the tensor."""
+        logger.debug("num_elements called")
         result = 1
         for dim in self.dimensions:
             result *= dim
@@ -125,6 +133,7 @@ class GGUFTensorInfo:
     @property
     def is_q4_k(self) -> bool:
         """Check if this tensor uses Q4_K quantization."""
+        logger.debug("is_q4_k called")
         return self.ggml_type == GGML_TYPE_Q4_K
 
 
@@ -137,6 +146,7 @@ class GGUFFile:
     """Parser for GGUF quantized model files."""
 
     def __init__(self, filepath: str | Path):
+        logger.debug("initializing %s with filepath=%s", type(self).__name__, filepath)
         self.filepath = Path(filepath)
         self._file = None
         self.header: GGUFHeader | None = None
@@ -156,11 +166,13 @@ class GGUFFile:
 
     def _parse_header(self):
         """Parse GGUF file header."""
+        logger.debug("_parse_header called")
         header_data = self._file.read(24)
         self.header = GGUFHeader.from_bytes(header_data)
 
     def _parse_metadata(self):
         """Parse GGUF metadata key-value pairs."""
+        logger.debug("_parse_metadata called")
         for _ in range(self.header.metadata_kv_count):
             key_len = struct.unpack("<Q", self._file.read(8))[0]
             key = self._file.read(key_len).decode("utf-8")
@@ -171,6 +183,7 @@ class GGUFFile:
 
     def _parse_tensor_info(self):
         """Parse tensor information."""
+        logger.debug("_parse_tensor_info called")
         for _ in range(self.header.tensor_count):
             name_len = struct.unpack("<Q", self._file.read(8))[0]
             name = self._file.read(name_len).decode("utf-8")
@@ -185,6 +198,7 @@ class GGUFFile:
 
     def _read_value(self, value_type: int) -> any:
         """Read a GGUF value of the given type."""
+        logger.debug("_read_value called with value_type=%s", value_type)
         if value_type == GGUF_TYPE_UINT8:
             return struct.unpack("<B", self._file.read(1))[0]
         elif value_type == GGUF_TYPE_INT8:
@@ -220,12 +234,14 @@ class GGUFFile:
 
     def get_tensor_data(self, tensor_info: GGUFTensorInfo) -> bytes:
         """Read raw tensor data from file."""
+        logger.debug("get_tensor_data called with tensor_info=%s", tensor_info)
         self._file.seek(tensor_info.offset)
         size = self._get_tensor_size(tensor_info)
         return self._file.read(size)
 
     def _get_tensor_size(self, tensor_info: GGUFTensorInfo) -> int:
         """Calculate the size of a tensor in bytes."""
+        logger.debug("_get_tensor_size called with tensor_info=%s", tensor_info)
         if tensor_info.ggml_type == GGML_TYPE_Q4_K:
             n_elements = tensor_info.num_elements
             n_blocks = (n_elements + Q4_K_BLOCK_SIZE - 1) // Q4_K_BLOCK_SIZE
@@ -235,6 +251,7 @@ class GGUFFile:
 
     def find_tensor(self, name: str) -> GGUFTensorInfo | None:
         """Find a tensor by name."""
+        logger.debug("find_tensor called with name=%s", name)
         for tensor in self.tensors:
             if tensor.name == name:
                 return tensor
@@ -251,6 +268,7 @@ def decode_q4_k_scale(scale_bits: int) -> np.float16:
 
     scale = exp2(scale_bits) / 16.0
     """
+    logger.debug("decode_q4_k_scale called with scale_bits=%s", scale_bits)
     return np.float16(np.exp2(scale_bits) / 16.0)
 
 
@@ -259,6 +277,7 @@ def decode_q4_k_min(min_bits: int) -> np.float16:
 
     min = -exp2(min_bits)
     """
+    logger.debug("decode_q4_k_min called with min_bits=%s", min_bits)
     return np.float16(-np.exp2(min_bits))
 
 
@@ -272,6 +291,7 @@ class Q4KWeights:
         mins: NDArray[np.float16],
         num_elements: int,
     ):
+        logger.debug("initializing %s with packed_data=%s, scales=%s, mins=%s, num_elements=%s", type(self).__name__, packed_data, scales, mins, num_elements)
         self.packed_data = packed_data
         self.scales = scales
         self.mins = mins
@@ -295,6 +315,7 @@ def unpack_q4_k_block(
         scales: 2 FP16 scale values
         min: 1 FP16 minimum value
     """
+    logger.info("unpack_q4_k_block called with block_data=%s", block_data)
     if len(block_data) != Q4_K_PACKED_SIZE:
         raise ValueError(f"Q4_K block must be {Q4_K_PACKED_SIZE} bytes, got {len(block_data)}")
 
@@ -339,6 +360,7 @@ def extract_q4_k_weights(tensor_data: bytes, num_elements: int) -> Q4KWeights:
     Returns:
         Q4KWeights object with packed data, scales, and mins
     """
+    logger.debug("extract_q4_k_weights called with tensor_data=%s, num_elements=%s", tensor_data, num_elements)
     n_blocks = (num_elements + Q4_K_BLOCK_SIZE - 1) // Q4_K_BLOCK_SIZE
 
     if len(tensor_data) != n_blocks * Q4_K_PACKED_SIZE:
@@ -375,6 +397,7 @@ def dequantize_q4_k_cpu(weights: Q4KWeights) -> NDArray[np.float16]:
     Returns:
         Dequantized FP16 weights
     """
+    logger.info("dequantize_q4_k_cpu called with weights=%s", getattr(weights, "shape", weights))
     n_elements = weights.num_elements
     output = np.zeros(n_elements, dtype=np.float16)
 
@@ -418,6 +441,7 @@ def load_gguf_model(filepath: str | Path) -> GGUFFile:
     Returns:
         GGUFFile object
     """
+    logger.info("load_gguf_model called with filepath=%s", filepath)
     return GGUFFile(filepath)
 
 
@@ -430,6 +454,7 @@ def get_q4_k_tensors(gguf_file: GGUFFile) -> list[GGUFTensorInfo]:
     Returns:
         List of GGUFTensorInfo objects for Q4_K tensors
     """
+    logger.debug("get_q4_k_tensors called with gguf_file=%s", gguf_file)
     return [t for t in gguf_file.tensors if t.is_q4_k]
 
 
@@ -449,4 +474,5 @@ def prepare_q4_k_for_metal(
     Returns:
         (packed_data, scales, mins) tuple suitable for Metal buffers
     """
+    logger.debug("prepare_q4_k_for_metal called with weights=%s", weights)
     return weights.packed_data, weights.scales, weights.mins

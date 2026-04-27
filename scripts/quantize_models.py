@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -19,6 +20,9 @@ from time import perf_counter
 import numpy as np
 from safetensors import safe_open
 from safetensors.numpy import save_file
+
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path for metal_marlin imports
 _ROOT = Path(__file__).parent.parent
@@ -32,6 +36,7 @@ def quantize_to_fp4(
 
     Returns (packed, scales, mins) where packed is uint8 with 2 values per byte.
     """
+    logger.info("quantize_to_fp4 called with weight=%s, group_size=%s", weight, group_size)
     from metal_marlin.quantize import pack_fp4_weights
 
     return pack_fp4_weights(weight, group_size)
@@ -44,6 +49,7 @@ def quantize_to_int4(
 
     Returns (packed, scales, zeros).
     """
+    logger.info("quantize_to_int4 called with weight=%s, group_size=%s", weight, group_size)
     K, N = weight.shape
 
     # Pad K to multiple of group_size
@@ -91,6 +97,7 @@ def quantize_safetensors_file(
     Returns dict with stats: {original_bytes, quantized_bytes, num_weights_quantized}
     """
 
+    logger.info("quantize_safetensors_file called with input_path=%s, output_path=%s, quant_type=%s, group_size=%s", input_path, output_path, quant_type, group_size)
     stats = {"original_bytes": 0, "quantized_bytes": 0, "num_quantized": 0}
     output_tensors: dict[str, np.ndarray] = {}
 
@@ -171,6 +178,7 @@ def quantize_model(
         resume: Skip already-quantized files
     """
 
+    logger.info("quantize_model called with model_dir=%s, output_dir=%s, quant_type=%s, group_size=%s", model_dir, output_dir, quant_type, group_size)
     if output_dir is None:
         output_dir = model_dir.parent / f"{model_dir.name}-{quant_type.upper()}"
 
@@ -247,6 +255,7 @@ def quantize_model(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Quantize safetensors models to Marlin FP4/INT4 format"
     )

@@ -2,10 +2,14 @@
 """Profile without per-call syncs to get accurate timing."""
 from transformers import AutoTokenizer
 from metal_marlin.trellis.model import TrellisForCausalLM
+import logging
 import time
 import warnings
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')
 

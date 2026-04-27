@@ -1,5 +1,9 @@
+import logging
 import threading
 from typing import TYPE_CHECKING
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -19,6 +23,7 @@ class BufferRecycler:
     """
     
     def __init__(self, max_pool_size_mb: int = 1024) -> None:
+        logger.debug("initializing %s with max_pool_size_mb=%s", type(self).__name__, max_pool_size_mb)
         self.max_pool_size = max_pool_size_mb * 1024 * 1024
         self.current_size = 0
         self.pools: dict[int, list[bytearray]] = {}
@@ -39,6 +44,7 @@ class BufferRecycler:
         Returns:
             A recycled buffer if available, None otherwise
         """
+        logger.debug("get_buffer called with size_bytes=%s", size_bytes)
         with self._lock:
             # Try exact size match first
             if size_bytes in self.pools and self.pools[size_bytes]:
@@ -64,6 +70,7 @@ class BufferRecycler:
         Args:
             buffer: The buffer to recycle
         """
+        logger.debug("return_buffer called with buffer=%s", buffer)
         size_bytes = len(buffer)
         with self._lock:
             self._returns += 1
@@ -85,6 +92,7 @@ class BufferRecycler:
     
     def _evict_to_make_room(self, needed_bytes: int) -> None:
         """Evict buffers to make room for new entry."""
+        logger.debug("_evict_to_make_room called with needed_bytes=%s", needed_bytes)
         target_size = self.max_pool_size - needed_bytes
         
         # Evict from largest pools first to free space quickly
@@ -107,6 +115,7 @@ class BufferRecycler:
             
     def get_stats(self) -> dict:
         """Get recycling statistics."""
+        logger.debug("get_stats called")
         with self._lock:
             total_requests = self._hits + self._misses
             return {
@@ -124,6 +133,7 @@ class BufferRecycler:
             
     def clear(self) -> None:
         """Clear all pooled buffers."""
+        logger.debug("clear called")
         with self._lock:
             self.pools.clear()
             self.current_size = 0
@@ -142,6 +152,7 @@ def get_global_buffer_recycler(max_pool_size_mb: int = 1024) -> "BufferRecycler"
     Returns:
         Global BufferRecycler instance
     """
+    logger.debug("get_global_buffer_recycler called with max_pool_size_mb=%s", max_pool_size_mb)
     global _global_buffer_recycler
     with _global_recycler_lock:
         if _global_buffer_recycler is None:
@@ -151,6 +162,7 @@ def get_global_buffer_recycler(max_pool_size_mb: int = 1024) -> "BufferRecycler"
 
 def reset_global_buffer_recycler() -> None:
     """Reset the global buffer recycler."""
+    logger.debug("reset_global_buffer_recycler called")
     global _global_buffer_recycler
     with _global_recycler_lock:
         if _global_buffer_recycler is not None:

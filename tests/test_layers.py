@@ -3,11 +3,15 @@
 Tests the MarlinLinear layer and model quantization functionality
 when running on PyTorch backend with MPS (Metal Performance Shaders).
 """
+import logging
 
 import pytest
 import torch
 import torch.nn as nn
 
+
+
+logger = logging.getLogger(__name__)
 
 class TestMarlinLinear:
     """Tests for MarlinLinear layer functionality.
@@ -19,6 +23,7 @@ class TestMarlinLinear:
 
     def test_basic_forward(self):
         """Test basic forward pass through a linear layer."""
+        logger.info("running test_basic_forward")
         layer = nn.Linear(512, 256)
         x = torch.randn(8, 512)
         out = layer(x)
@@ -26,6 +31,7 @@ class TestMarlinLinear:
 
     def test_from_linear_accuracy(self):
         """Test that a linear layer produces correct output shapes."""
+        logger.info("running test_from_linear_accuracy")
         linear = nn.Linear(512, 256)
 
         x = torch.randn(8, 512)
@@ -43,6 +49,7 @@ class TestMarlinLinear:
 
     def test_batched_input(self):
         """Test 3D batched input through linear layer."""
+        logger.info("running test_batched_input")
         layer = nn.Linear(512, 256)
         x = torch.randn(4, 8, 512)  # 3D input: [batch, seq, features]
         out = layer(x)
@@ -50,6 +57,7 @@ class TestMarlinLinear:
 
     def test_bias(self):
         """Test linear layers with and without bias."""
+        logger.info("running test_bias")
         layer_bias = nn.Linear(512, 256, bias=True)
         layer_no_bias = nn.Linear(512, 256, bias=False)
 
@@ -68,13 +76,16 @@ class TestQuantizeModel:
     def test_quantize_simple_model(self):
         """Test that quantize_model correctly identifies linear layers."""
 
+        logger.info("running test_quantize_simple_model")
         class SimpleModel(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 self.fc1 = nn.Linear(512, 256)
                 self.fc2 = nn.Linear(256, 128)
 
             def forward(self, x):
+                logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
                 return self.fc2(torch.relu(self.fc1(x)))
 
         model = SimpleModel()
@@ -91,13 +102,16 @@ class TestQuantizeModel:
     def test_skip_layers(self):
         """Test that skip_layers correctly excludes specified layers."""
 
+        logger.info("running test_skip_layers")
         class ModelWithEmbed(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 self.embed = nn.Linear(1000, 512)  # Treat as embedding
                 self.fc = nn.Linear(512, 256)
 
             def forward(self, x):
+                logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
                 return self.fc(torch.relu(self.embed(x)))
 
         model = ModelWithEmbed()
@@ -114,8 +128,10 @@ class TestQuantizeModel:
     def test_layer_dimensions(self):
         """Test that linear layer dimensions are preserved through quantization."""
 
+        logger.info("running test_layer_dimensions")
         class DimensionTestModel(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 # Various dimension combinations
                 self.layer_128_64 = nn.Linear(128, 64)
@@ -124,6 +140,7 @@ class TestQuantizeModel:
 
             def forward(self, x):
                 # Not used, just for structure testing
+                logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
                 return x
 
         model = DimensionTestModel()
@@ -139,23 +156,28 @@ class TestQuantizeModel:
     def test_nested_module_structure(self):
         """Test models with nested module hierarchies."""
 
+        logger.info("running test_nested_module_structure")
         class Block(nn.Module):
             def __init__(self, dim):
+                logger.debug("initializing %s with dim=%s", type(self).__name__, dim)
                 super().__init__()
                 self.linear1 = nn.Linear(dim, dim * 4)
                 self.linear2 = nn.Linear(dim * 4, dim)
 
             def forward(self, x):
+                logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
                 return self.linear2(torch.relu(self.linear1(x)))
 
         class NestedModel(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 self.embed = nn.Linear(1000, 256)
                 self.blocks = nn.ModuleList([Block(256) for _ in range(3)])
                 self.head = nn.Linear(256, 100)
 
             def forward(self, x):
+                logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
                 x = self.embed(x)
                 for block in self.blocks:
                     x = block(x)

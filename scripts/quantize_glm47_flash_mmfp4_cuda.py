@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import math
 import os
 import shutil
@@ -39,6 +40,9 @@ from metal_marlin.mr_gptq import (
     MRGPTQQuantizer,
     QuantizationFormat,
 )
+
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "zai-org/GLM-4.7-Flash"
 DEFAULT_OUTPUT = REPO_ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4-CUDA"
@@ -73,6 +77,7 @@ class CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
         layer_name: str = "",
         use_hadamard: bool | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+        logger.info("quantize_layer called with weights=%s, hessian=%s, layer_name=%s, use_hadamard=%s", weights, hessian, layer_name, use_hadamard)
         if hessian is None:
             return MRGPTQQuantizer.quantize_layer(
                 self,
@@ -104,6 +109,7 @@ class CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
 
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="CUDA MMFP4 quantization for GLM-4.7-Flash (non-NVFP4 interoperable)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -229,6 +235,7 @@ def resolve_model_path(
     download_dir: Path | None,
     verbose: bool,
 ) -> Path:
+    logger.debug("resolve_model_path called with model_ref=%s, revision=%s, token=%s", model_ref, revision, token)
     local_path = Path(model_ref)
     if local_path.exists():
         return local_path
@@ -244,6 +251,7 @@ def resolve_model_path(
 
 
 def load_tokenizer(model_path: Path):
+    logger.info("load_tokenizer called with model_path=%s", model_path)
     from transformers import AutoTokenizer
 
     try:
@@ -261,6 +269,7 @@ def load_tokenizer(model_path: Path):
 
 
 def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
+    logger.debug("copy_model_artifacts called with src_dir=%s, dst_dir=%s", src_dir, dst_dir)
     for name in COPY_ARTIFACTS:
         src = src_dir / name
         if src.exists() and src.is_file():
@@ -272,6 +281,7 @@ def configure_runtime_profile(
     total_vram_gb: float,
 ) -> tuple[bool, str]:
     """Apply conservative defaults for 24GB-class GPUs."""
+    logger.info("configure_runtime_profile starting")
     low_vram = total_vram_gb <= LOW_VRAM_THRESHOLD_GB
     profile_applied = False
 
@@ -304,6 +314,7 @@ def configure_runtime_profile(
 
 def get_total_system_ram_gb() -> float:
     """Return total system RAM in GiB."""
+    logger.debug("get_total_system_ram_gb called")
     page_size = os.sysconf("SC_PAGE_SIZE")
     phys_pages = os.sysconf("SC_PHYS_PAGES")
     return (page_size * phys_pages) / (1024 ** 3)
@@ -321,6 +332,7 @@ def save_quantization_config(
     quantization_mode: str,
     system_ram_gb: float,
 ) -> None:
+    logger.info("save_quantization_config called with output_dir=%s, model_path=%s, report=%s, args=%s", output_dir, model_path, report, args)
     payload: dict[str, Any] = {
         "format": "mmfp4_e2m1_marlin",
         "method": "mr_gptq_cuda",
@@ -364,6 +376,7 @@ def save_quantization_config(
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     verbose = not args.quiet
 

@@ -5,8 +5,12 @@ Transformers + layer replacement.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 LEGACY_PATTERNS = [
     "QuantizedLlamaAttention",
@@ -27,6 +31,7 @@ LEGACY_PATTERNS = [
 
 def find_legacy_code(root: Path) -> dict:
     """Find all legacy model class definitions and usages."""
+    logger.debug("find_legacy_code called with root=%s", root)
     results = {
         "definitions": [],  # Class definitions
         "usages": [],  # Imports/instantiations
@@ -64,6 +69,7 @@ def find_legacy_code(root: Path) -> dict:
 
 
 def resolve_root(repo_root: Path) -> Path:
+    logger.debug("resolve_root called with repo_root=%s", repo_root)
     direct = repo_root / "metal_marlin"
     if direct.exists():
         return direct

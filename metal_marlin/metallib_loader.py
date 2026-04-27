@@ -50,6 +50,7 @@ except ImportError:
 
 def require_metal() -> None:
     """Raise if Metal is not available."""
+    logger.debug("require_metal called")
     if not HAS_METAL:
         raise RuntimeError(
             "PyObjC Metal framework not available. "
@@ -74,6 +75,7 @@ def load_metallib(path: str | Path | None = None) -> Any:
         This function populates the module cache, so subsequent calls to
         get_precompiled_library() will return the same object.
     """
+    logger.info("load_metallib called with path=%s", path)
     global _cached_library, _cached_path
 
     require_metal()
@@ -122,6 +124,7 @@ def _check_metallib_staleness(path: Path) -> None:
     Args:
         path: Path to the metallib file.
     """
+    logger.debug("_check_metallib_staleness called with path=%s", path)
     details = get_staleness_details(path)
     if not details["is_stale"]:
         return
@@ -154,6 +157,7 @@ def get_metallib_version(path: str | Path | None = None) -> dict[str, Any]:
     Returns:
         Dict with version info or error message.
     """
+    logger.debug("get_metallib_version called with path=%s", path)
     if path is None:
         path = DEFAULT_METALLIB
     path = Path(path)
@@ -191,6 +195,7 @@ def _extract_metallib_version_info(path: Path) -> dict[str, Any]:
     Returns:
         Dict with extracted version info (may be empty).
     """
+    logger.debug("_extract_metallib_version_info called with path=%s", path)
     result: dict[str, Any] = {}
     try:
         # Read first 64KB of file to look for embedded metadata
@@ -231,6 +236,7 @@ def get_precompiled_library(path: str | Path | None = None) -> Any | None:
 
     Returns None on failure (allows fallback to JIT).
     """
+    logger.info("get_precompiled_library starting")
     global _cached_library, _cached_path
 
     if path is None:
@@ -253,6 +259,7 @@ def get_precompiled_library(path: str | Path | None = None) -> Any | None:
 
 def clear_cache() -> None:
     """Clear cached metallib (for hot-reload during development)."""
+    logger.debug("clear_cache called")
     global _cached_library, _cached_path
     _cached_library = None
     _cached_path = None
@@ -271,6 +278,7 @@ def get_kernel_from_metallib(
     Returns:
         MTLFunction or None if not found.
     """
+    logger.debug("get_kernel_from_metallib called with kernel_name=%s, library=%s", kernel_name, library)
     if library is None:
         library = get_precompiled_library()
 
@@ -294,6 +302,7 @@ def _get_metal_source_dirs(metallib_path: Path) -> list[Path]:
     Returns:
         List of directories to scan for .metal files.
     """
+    logger.debug("_get_metal_source_dirs called with metallib_path=%s", metallib_path)
     dirs = []
 
     # Main src/ directory (contrib/metal_marlin/src)
@@ -320,6 +329,7 @@ def _compute_file_checksum(file_path: Path) -> str:
     Returns:
         Hex-encoded SHA-256 hash.
     """
+    logger.debug("_compute_file_checksum called with file_path=%s", file_path)
     hasher = hashlib.sha256()
     with open(file_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -336,6 +346,7 @@ def _collect_metal_files(source_dirs: list[Path]) -> list[Path]:
     Returns:
         Sorted list of .metal file paths.
     """
+    logger.debug("_collect_metal_files called with source_dirs=%s", source_dirs)
     metal_files = []
     for src_dir in source_dirs:
         metal_files.extend(src_dir.glob("**/*.metal"))
@@ -353,6 +364,7 @@ def compute_source_hash(metallib_path: Path | None = None) -> str:
     Returns:
         Hex-encoded SHA-256 aggregate hash.
     """
+    logger.debug("compute_source_hash called with metallib_path=%s", metallib_path)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -379,6 +391,7 @@ def get_source_hash_path(metallib_path: Path) -> Path:
     Returns:
         Path to the corresponding .metallib_hash file.
     """
+    logger.debug("get_source_hash_path called with metallib_path=%s", metallib_path)
     return metallib_path.parent / ".metallib_hash"
 
 
@@ -391,6 +404,7 @@ def save_source_hash(metallib_path: Path | None = None) -> Path:
     Returns:
         Path to the saved hash file.
     """
+    logger.info("save_source_hash called with metallib_path=%s", metallib_path)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -412,6 +426,7 @@ def load_source_hash(metallib_path: Path | None = None) -> str | None:
     Returns:
         Stored hash string, or None if file missing/invalid.
     """
+    logger.info("load_source_hash called with metallib_path=%s", metallib_path)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -438,6 +453,7 @@ def compute_source_checksums(
     Returns:
         Dict mapping relative file paths to their SHA-256 checksums.
     """
+    logger.debug("compute_source_checksums called with metallib_path=%s", metallib_path)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -471,6 +487,7 @@ def get_checksum_manifest_path(metallib_path: Path) -> Path:
     Returns:
         Path to the corresponding .checksums.json file.
     """
+    logger.debug("get_checksum_manifest_path called with metallib_path=%s", metallib_path)
     return metallib_path.with_suffix(".checksums.json")
 
 
@@ -487,6 +504,7 @@ def save_checksum_manifest(
     Returns:
         Path to the saved manifest file.
     """
+    logger.info("save_checksum_manifest called with metallib_path=%s, checksums=%s", metallib_path, checksums)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -519,6 +537,7 @@ def load_checksum_manifest(metallib_path: Path | None = None) -> dict[str, str] 
     Returns:
         Dict mapping file paths to checksums, or None if manifest missing/invalid.
     """
+    logger.info("load_checksum_manifest called with metallib_path=%s", metallib_path)
     if metallib_path is None:
         metallib_path = DEFAULT_METALLIB
     metallib_path = Path(metallib_path)
@@ -553,6 +572,7 @@ def is_metallib_stale(path: str | Path | None = None) -> bool:
     Returns:
         True if metallib should be rebuilt, False otherwise.
     """
+    logger.debug("is_metallib_stale called with path=%s", path)
     if path is None:
         path = DEFAULT_METALLIB
     path = Path(path)
@@ -569,6 +589,7 @@ def get_staleness_details(path: str | Path | None = None) -> dict[str, Any]:
     Returns:
         Dict with staleness details including added/removed/modified files.
     """
+    logger.debug("get_staleness_details called with path=%s", path)
     if path is None:
         path = DEFAULT_METALLIB
     path = Path(path)

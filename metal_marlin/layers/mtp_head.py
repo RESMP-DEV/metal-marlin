@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
 import torch.nn as nn
 
+
+
+logger = logging.getLogger(__name__)
 
 class GLMMTPHead(nn.Module):
     """MTP head that predicts N future tokens in parallel."""
@@ -17,6 +21,7 @@ class GLMMTPHead(nn.Module):
         vocab_size: int,
         num_tokens: int = 4,
     ) -> None:
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_tokens=%s", type(self).__name__, hidden_size, vocab_size, num_tokens)
         super().__init__()
         self.num_tokens = num_tokens
         self.hidden_size = hidden_size
@@ -37,11 +42,13 @@ class GLMMTPHead(nn.Module):
         Returns:
             List of [batch, seq, vocab_size] logits for each future token
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden.shape if hasattr(hidden, "shape") else type(hidden).__name__, hidden.dtype if hasattr(hidden, "dtype") else "N/A")
         return [head(hidden) for head in self.heads]
 
     @classmethod
     def from_model(cls, model: Any) -> GLMMTPHead | None:
         """Extract MTP head from a loaded model if available."""
+        logger.debug("from_model called with model=%s", model)
         config = getattr(model, "config", None)
         hidden_size = getattr(config, "hidden_size", None) or getattr(
             model, "hidden_size", None
@@ -61,6 +68,7 @@ class GLMMTPHead(nn.Module):
         candidates: list[nn.Module] = []
 
         def _collect(obj: Any) -> None:
+            logger.debug("_collect called with obj=%s", obj)
             if obj is None:
                 return
 

@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,9 @@ except ImportError:
     HAS_SAFETENSORS = False
 
 
+
+logger = logging.getLogger(__name__)
+
 def require_safetensors(feature: str = "this operation") -> None:
     """Raise RuntimeError if safetensors is not available.
 
@@ -53,6 +57,7 @@ def require_safetensors(feature: str = "this operation") -> None:
     Raises:
         RuntimeError: If safetensors is not installed.
     """
+    logger.debug("require_safetensors called with feature=%s", feature)
     if not HAS_SAFETENSORS:
         raise RuntimeError(
             f"safetensors is required for {feature}. Install with: pip install safetensors"
@@ -82,6 +87,7 @@ class CheckpointMetadata:
     @property
     def num_parameters(self) -> int:
         """Estimate number of parameters based on size and dtype."""
+        logger.debug("num_parameters called")
         bytes_per_param = {"float32": 4, "float16": 2, "bfloat16": 2, "int8": 1, "int4": 0.5}
         return int(self.total_size_bytes / bytes_per_param.get(self.dtype, 2))
 
@@ -109,6 +115,7 @@ def load_checkpoint(
         RuntimeError: If PyTorch or safetensors is not installed.
         FileNotFoundError: If the checkpoint file doesn't exist.
     """
+    logger.info("load_checkpoint called with path=%s", path)
     require_torch("load_checkpoint")
     require_safetensors("load_checkpoint")
 
@@ -151,6 +158,7 @@ def load_sharded_checkpoint(
         FileNotFoundError: If the index file or any shard doesn't exist.
         ValueError: If the index file format is invalid.
     """
+    logger.info("load_sharded_checkpoint called with index_path=%s", index_path)
     require_torch("load_sharded_checkpoint")
     require_safetensors("load_sharded_checkpoint")
 
@@ -210,6 +218,7 @@ def get_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
         RuntimeError: If safetensors is not installed.
         FileNotFoundError: If the file doesn't exist.
     """
+    logger.debug("get_checkpoint_metadata called with path=%s", path)
     require_safetensors("get_checkpoint_metadata")
 
     path = Path(path)
@@ -254,6 +263,7 @@ def get_checkpoint_metadata(path: str | Path) -> CheckpointMetadata:
 
 def _get_sharded_metadata(index_path: Path) -> CheckpointMetadata:
     """Get metadata for a sharded checkpoint."""
+    logger.debug("_get_sharded_metadata called with index_path=%s", index_path)
     with open(index_path) as f:
         index = json.load(f)
 
@@ -301,6 +311,7 @@ class LazyCheckpoint:
     """
 
     def __init__(self, path: str | Path, device: str = "cpu"):
+        logger.debug("initializing %s with path=%s, device=%s", type(self).__name__, path, device)
         require_torch("LazyCheckpoint")
         require_safetensors("LazyCheckpoint")
 
@@ -322,6 +333,7 @@ class LazyCheckpoint:
 
     def _open(self) -> None:
         """Open checkpoint file(s) for reading."""
+        logger.debug("_open called")
         if self.path.suffix == ".json" or self.path.name.endswith(".index.json"):
             self._open_sharded()
         else:
@@ -329,6 +341,7 @@ class LazyCheckpoint:
 
     def _open_single(self) -> None:
         """Open a single safetensors file."""
+        logger.debug("_open_single called")
         handle = safe_open(str(self.path), framework="pt", device=self.device)
         self._handles["main"] = handle
         self._weight_to_shard = {k: "main" for k in handle.keys()}
@@ -336,6 +349,7 @@ class LazyCheckpoint:
 
     def _open_sharded(self) -> None:
         """Open sharded checkpoint files."""
+        logger.debug("_open_sharded called")
         with open(self.path) as f:
             index = json.load(f)
 
@@ -357,11 +371,13 @@ class LazyCheckpoint:
 
     def _close(self) -> None:
         """Close all open file handles."""
+        logger.debug("_close called")
         self._handles.clear()
         self._weight_to_shard.clear()
 
     def keys(self) -> list[str]:
         """Get all weight names in the checkpoint."""
+        logger.debug("keys called")
         return list(self._weight_to_shard.keys())
 
     def __contains__(self, key: str) -> bool:
@@ -382,6 +398,7 @@ class LazyCheckpoint:
             KeyError: If the weight name doesn't exist.
         """
 
+        logger.debug("get_tensor called with key=%s, dtype=%s", key, dtype)
         if key not in self._weight_to_shard:
             raise KeyError(f"Weight not found: {key}")
 
@@ -406,6 +423,7 @@ class LazyCheckpoint:
         Returns:
             Dictionary mapping names to tensors.
         """
+        logger.debug("get_tensors called with keys=%s, dtype=%s", keys, dtype)
         return {k: self.get_tensor(k, dtype=dtype) for k in keys}
 
 
@@ -424,6 +442,7 @@ def save_checkpoint(
     Raises:
         RuntimeError: If PyTorch or safetensors is not installed.
     """
+    logger.info("save_checkpoint called with tensors=%s, path=%s, metadata=%s", tensors, path, metadata)
     require_torch("save_checkpoint")
     require_safetensors("save_checkpoint")
 
@@ -458,6 +477,7 @@ def remap_weight_keys(
             remove_prefixes=["base_model."],
         )
     """
+    logger.debug("remap_weight_keys called with weights=%s, mapping=%s, prefix_map=%s", weights, mapping, prefix_map)
     result: dict[str, torch.Tensor] = {}
 
     for key, tensor in weights.items():
@@ -508,6 +528,7 @@ def filter_weights(
         # Exclude embedding layers
         no_embed = filter_weights(weights, exclude_patterns=[r".*embed.*"])
     """
+    logger.debug("filter_weights called with weights=%s, patterns=%s, exclude_patterns=%s", weights, patterns, exclude_patterns)
     result: dict[str, torch.Tensor] = {}
 
     for key, tensor in weights.items():
@@ -570,6 +591,7 @@ def load_model_checkpoint(
         )
         weights = load_model_checkpoint("model.safetensors", config)
     """
+    logger.info("load_model_checkpoint called with path=%s, config=%s", path, config)
     require_torch("load_model_checkpoint")
 
     import torch

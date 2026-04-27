@@ -10,6 +10,7 @@ Tests cover:
 - mla_attention correctness
 - Memory comparison utilities
 """
+import logging
 
 import numpy as np
 import pytest
@@ -28,6 +29,9 @@ from metal_marlin.paged.mla_cache import (
     mla_attention,
 )
 
+
+logger = logging.getLogger(__name__)
+
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 
 
@@ -40,6 +44,7 @@ class TestMLACacheConfig:
     """Test configuration and memory calculations."""
 
     def test_defaults(self):
+        logger.info("running test_defaults")
         cfg = MLACacheConfig()
         assert cfg.block_size == 16
         assert cfg.kv_lora_rank == 512
@@ -48,49 +53,59 @@ class TestMLACacheConfig:
         assert cfg.quantize_mode == "none"
 
     def test_latent_bytes_per_token_full_precision(self):
+        logger.info("running test_latent_bytes_per_token_full_precision")
         cfg = MLACacheConfig(kv_lora_rank=512)
         # 512 * 2 bytes (fp16/bf16) = 1024 bytes
         assert cfg.latent_bytes_per_token == 1024
 
     def test_latent_bytes_per_token_fp8(self):
+        logger.info("running test_latent_bytes_per_token_fp8")
         cfg = MLACacheConfig(kv_lora_rank=512, quantize_mode="fp8")
         # 512 * 1 byte = 512 bytes
         assert cfg.latent_bytes_per_token == 512
 
     def test_latent_bytes_per_token_fp4(self):
+        logger.info("running test_latent_bytes_per_token_fp4")
         cfg = MLACacheConfig(kv_lora_rank=512, quantize_mode="fp4")
         # 512 * 0.5 bytes = 256 bytes
         assert cfg.latent_bytes_per_token == 256
 
     def test_standard_bytes_per_token(self):
+        logger.info("running test_standard_bytes_per_token")
         cfg = MLACacheConfig(num_kv_heads=8, head_dim=128)
         # 2 * 8 * 128 * 2 bytes = 4096 bytes
         assert cfg.standard_bytes_per_token == 4096
 
     def test_memory_savings_ratio(self):
+        logger.info("running test_memory_savings_ratio")
         cfg = MLACacheConfig(kv_lora_rank=512, num_kv_heads=8, head_dim=128)
         # 4096 / 1024 = 4.0x
         assert cfg.memory_savings_ratio == 4.0
 
     def test_memory_savings_ratio_fp8(self):
+        logger.info("running test_memory_savings_ratio_fp8")
         cfg = MLACacheConfig(kv_lora_rank=512, num_kv_heads=8, head_dim=128, quantize_mode="fp8")
         # 4096 / 512 = 8.0x
         assert cfg.memory_savings_ratio == 8.0
 
     def test_memory_bytes(self):
+        logger.info("running test_memory_bytes")
         cfg = MLACacheConfig(block_size=16, kv_lora_rank=512)
         # 16 tokens * 1024 bytes/token = 16384 bytes
         assert cfg.memory_bytes == 16384
 
     def test_latent_shape(self):
+        logger.info("running test_latent_shape")
         cfg = MLACacheConfig(block_size=8, kv_lora_rank=256)
         assert cfg.latent_shape == (8, 256)
 
     def test_decompressed_shape(self):
+        logger.info("running test_decompressed_shape")
         cfg = MLACacheConfig(block_size=8, num_kv_heads=4, head_dim=64)
         assert cfg.decompressed_shape == (2, 8, 4, 64)
 
     def test_frozen(self):
+        logger.info("running test_frozen")
         cfg = MLACacheConfig()
         with pytest.raises(Exception):
             cfg.block_size = 32  # type: ignore[misc]
@@ -105,6 +120,7 @@ class TestCompareMemoryUsage:
     """Test memory comparison utility."""
 
     def test_basic_comparison(self):
+        logger.info("running test_basic_comparison")
         stats = compare_memory_usage(
             seq_len=4096,
             num_layers=32,
@@ -124,6 +140,7 @@ class TestCompareMemoryUsage:
         assert pytest.approx(stats["savings_ratio"], rel=0.01) == 4.0
 
     def test_savings_per_layer(self):
+        logger.info("running test_savings_per_layer")
         stats = compare_memory_usage(
             seq_len=4096,
             num_layers=1,
@@ -140,6 +157,7 @@ class TestCompareMemoryUsage:
         assert pytest.approx(stats["mla_per_layer_mb"], rel=0.01) == 4.0
 
     def test_bytes_saved(self):
+        logger.info("running test_bytes_saved")
         stats = compare_memory_usage(
             seq_len=4096,
             num_layers=32,
@@ -162,6 +180,7 @@ class TestMLABlockLifecycle:
     """Test block lifecycle: allocation, reset, copy."""
 
     def test_init_unallocated(self):
+        logger.info("running test_init_unallocated")
         block = MLABlock()
         assert block.latents is None
         assert block.token_count == 0
@@ -169,6 +188,7 @@ class TestMLABlockLifecycle:
         assert not block.is_full
 
     def test_allocate(self):
+        logger.info("running test_allocate")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64)
         block = MLABlock(config=cfg)
         block.allocate()
@@ -176,6 +196,7 @@ class TestMLABlockLifecycle:
         assert block.latents.shape == (4, 64)
 
     def test_allocate_fp8(self):
+        logger.info("running test_allocate_fp8")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64, quantize_mode="fp8")
         block = MLABlock(config=cfg)
         block.allocate()
@@ -184,6 +205,7 @@ class TestMLABlockLifecycle:
         assert block.latents.dtype == np.uint8
 
     def test_allocate_fp4(self):
+        logger.info("running test_allocate_fp4")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64, quantize_mode="fp4")
         block = MLABlock(config=cfg)
         block.allocate()
@@ -193,6 +215,7 @@ class TestMLABlockLifecycle:
         assert block.latents.dtype == np.uint32
 
     def test_reset(self):
+        logger.info("running test_reset")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64)
         block = MLABlock(config=cfg)
         block.allocate()
@@ -213,12 +236,14 @@ class TestMLABlockAppend:
 
     @pytest.fixture
     def small_block(self):
+        logger.debug("small_block called")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64)
         block = MLABlock(config=cfg)
         block.allocate()
         return block
 
     def test_append_single(self, small_block: MLABlock):
+        logger.info("running test_append_single")
         latent = np.ones((64,), dtype=np.float16)
         remaining = small_block.append_latent(latent)
         assert remaining == 3
@@ -226,6 +251,7 @@ class TestMLABlockAppend:
         assert not small_block.is_full
 
     def test_append_until_full(self, small_block: MLABlock):
+        logger.info("running test_append_until_full")
         for i in range(4):
             latent = np.full((64,), float(i), dtype=np.float16)
             remaining = small_block.append_latent(latent)
@@ -234,6 +260,7 @@ class TestMLABlockAppend:
         assert small_block.remaining == 0
 
     def test_append_overflow_raises(self, small_block: MLABlock):
+        logger.info("running test_append_overflow_raises")
         for _ in range(4):
             latent = np.ones((64,), dtype=np.float16)
             small_block.append_latent(latent)
@@ -241,11 +268,13 @@ class TestMLABlockAppend:
             small_block.append_latent(np.ones((64,), dtype=np.float16))
 
     def test_append_unallocated_raises(self):
+        logger.info("running test_append_unallocated_raises")
         block = MLABlock()
         with pytest.raises(RuntimeError, match="not allocated"):
             block.append_latent(np.ones((64,), dtype=np.float16))
 
     def test_append_preserves_values(self, small_block: MLABlock):
+        logger.info("running test_append_preserves_values")
         l0 = np.full((64,), 1.0, dtype=np.float16)
         l1 = np.full((64,), 2.0, dtype=np.float16)
 
@@ -264,23 +293,27 @@ class TestMLABlockBatchAppend:
 
     @pytest.fixture
     def block(self):
+        logger.debug("block called")
         cfg = MLACacheConfig(block_size=8, kv_lora_rank=64)
         block = MLABlock(config=cfg)
         block.allocate()
         return block
 
     def test_batch_append(self, block: MLABlock):
+        logger.info("running test_batch_append")
         latents = np.ones((3, 64), dtype=np.float16)
         remaining = block.append_latent_batch(latents)
         assert remaining == 5
         assert block.token_count == 3
 
     def test_batch_overflow_raises(self, block: MLABlock):
+        logger.info("running test_batch_overflow_raises")
         latents = np.ones((9, 64), dtype=np.float16)
         with pytest.raises(RuntimeError, match="exceeds remaining"):
             block.append_latent_batch(latents)
 
     def test_batch_preserves_values(self, block: MLABlock):
+        logger.info("running test_batch_preserves_values")
         latents = np.arange(3 * 64, dtype=np.float16).reshape(3, 64)
 
         block.append_latent_batch(latents)
@@ -294,6 +327,7 @@ class TestMLABlockDecompression:
     """Test latent decompression to K, V."""
 
     def test_decompress_basic(self):
+        logger.info("running test_decompress_basic")
         cfg = MLACacheConfig(
             block_size=4,
             kv_lora_rank=64,
@@ -321,6 +355,7 @@ class TestMLABlockDecompression:
         assert values.shape == (2, 2, 32)
 
     def test_decompress_unallocated_raises(self):
+        logger.info("running test_decompress_unallocated_raises")
         cfg = MLACacheConfig(kv_lora_rank=64, num_kv_heads=2, head_dim=32)
         block = MLABlock(config=cfg)
         kv_b_proj = np.eye(64, dtype=np.float16)
@@ -334,6 +369,7 @@ class TestMLABlockQuantization:
     """Test FP8 and FP4 quantization modes."""
 
     def test_fp8_round_trip(self):
+        logger.info("running test_fp8_round_trip")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64, quantize_mode="fp8")
         block = MLABlock(config=cfg)
         block.allocate()
@@ -350,6 +386,7 @@ class TestMLABlockQuantization:
         assert np.mean(rel_error) < 0.05  # 5% mean relative error
 
     def test_fp4_round_trip(self):
+        logger.info("running test_fp4_round_trip")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64, quantize_mode="fp4")
         block = MLABlock(config=cfg)
         block.allocate()
@@ -375,6 +412,7 @@ class TestMLABlockAllocator:
     """Test block allocator pool management."""
 
     def test_allocate_free(self):
+        logger.info("running test_allocate_free")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=10, config=config)
 
@@ -391,6 +429,7 @@ class TestMLABlockAllocator:
         assert allocator.num_allocated == 0
 
     def test_allocate_exhaustion(self):
+        logger.info("running test_allocate_exhaustion")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=3, config=config)
 
@@ -408,6 +447,7 @@ class TestMLABlockAllocator:
         assert allocator.allocate() is not None
 
     def test_get_block(self):
+        logger.info("running test_get_block")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
@@ -418,6 +458,7 @@ class TestMLABlockAllocator:
         assert block.latents is not None
 
     def test_copy_on_write_exclusive(self):
+        logger.info("running test_copy_on_write_exclusive")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
@@ -427,6 +468,7 @@ class TestMLABlockAllocator:
         assert new_idx == idx
 
     def test_copy_on_write_shared(self):
+        logger.info("running test_copy_on_write_shared")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
@@ -444,6 +486,7 @@ class TestMLABlockAllocatorPrefixCache:
     """Test prefix caching functionality."""
 
     def test_register_and_lookup_prefix(self):
+        logger.info("running test_register_and_lookup_prefix")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
@@ -459,12 +502,14 @@ class TestMLABlockAllocatorPrefixCache:
         assert allocator.blocks[idx].ref_count == 2
 
     def test_lookup_nonexistent(self):
+        logger.info("running test_lookup_nonexistent")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
         assert allocator.lookup_prefix(12345) is None
 
     def test_prefix_invalidation_on_free(self):
+        logger.info("running test_prefix_invalidation_on_free")
         config = MLACacheConfig(block_size=4, kv_lora_rank=64)
         allocator = MLABlockAllocator(num_blocks=5, config=config)
 
@@ -479,6 +524,7 @@ class TestMLABlockAllocatorPrefixCache:
         assert allocator.lookup_prefix(prefix_hash) is None
 
     def test_memory_usage_stats(self):
+        logger.info("running test_memory_usage_stats")
         config = MLACacheConfig(
             block_size=16,
             kv_lora_rank=512,
@@ -507,6 +553,7 @@ class TestMLAAttention:
     """Test MLA attention computation."""
 
     def test_mla_attention_basic(self):
+        logger.info("running test_mla_attention_basic")
         num_seqs = 2
         num_heads = 4
         num_kv_heads = 2
@@ -550,6 +597,7 @@ class TestMLAAttention:
     )
     def test_mla_attention_prefill(self):
         """Test MLA attention with multiple query positions (prefill)."""
+        logger.info("running test_mla_attention_prefill")
         num_seqs = 1
         num_heads = 4
         num_kv_heads = 2
@@ -593,12 +641,14 @@ class TestMLABlockRepr:
     """Test block string representation."""
 
     def test_repr_unallocated(self):
+        logger.info("running test_repr_unallocated")
         block = MLABlock()
         r = repr(block)
         assert "allocated=no" in r
         assert "tokens=0/16" in r
 
     def test_repr_allocated(self):
+        logger.info("running test_repr_allocated")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64)
         block = MLABlock(config=cfg)
         block.allocate()
@@ -608,6 +658,7 @@ class TestMLABlockRepr:
         assert "rank=64" in r
 
     def test_repr_quantized(self):
+        logger.info("running test_repr_quantized")
         cfg = MLACacheConfig(block_size=4, kv_lora_rank=64, quantize_mode="fp8")
         block = MLABlock(config=cfg)
         r = repr(block)
@@ -624,11 +675,13 @@ class TestMLAKVCacheTorch:
     """Tests for torch-based MLAKVCache implementation."""
 
     def _device(self) -> str:
+        logger.debug("_device called")
         if torch is None:
             return "cpu"
         return "mps" if torch.backends.mps.is_available() else "cpu"
 
     def test_cache_growth(self):
+        logger.info("running test_cache_growth")
         from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
@@ -655,6 +708,7 @@ class TestMLAKVCacheTorch:
         assert k_full.shape == (1, 7, 4)
 
     def test_fp8_quantization_round_trip(self):
+        logger.info("running test_fp8_quantization_round_trip")
         from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
@@ -681,6 +735,7 @@ class TestMLAKVCacheTorch:
         assert torch.mean(rel_error).item() < 0.05
 
     def test_layer_independent_lengths(self):
+        logger.info("running test_layer_independent_lengths")
         from metal_marlin.kv_cache import MLAKVCache
 
         device = self._device()
@@ -714,6 +769,7 @@ class TestMLAKVCacheCore:
     """Test MLAKVCache growth and FP8 latent storage."""
 
     def test_init_shapes(self):
+        logger.info("running test_init_shapes")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -730,6 +786,7 @@ class TestMLAKVCacheCore:
         assert cache.seq_lens == [0, 0]
 
     def test_append_and_growth(self):
+        logger.info("running test_append_and_growth")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -751,6 +808,7 @@ class TestMLAKVCacheCore:
         assert k_pe_full.shape == (1, 6, 4)
 
     def test_fp8_quantized_storage(self):
+        logger.info("running test_fp8_quantized_storage")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(

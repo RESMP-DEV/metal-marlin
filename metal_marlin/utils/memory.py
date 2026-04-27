@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -67,6 +71,7 @@ def get_system_memory(*, refresh: bool = False) -> MemoryInfo:
         On Apple Silicon, GPU memory is unified with RAM. The gpu_available_gb
         estimate accounts for typical Metal/MLX allocation overhead.
     """
+    logger.debug("get_system_memory called")
     if refresh:
         _get_system_memory_impl.cache_clear()
     return _get_system_memory_impl()
@@ -75,6 +80,7 @@ def get_system_memory(*, refresh: bool = False) -> MemoryInfo:
 @lru_cache(maxsize=1)
 def _get_system_memory_impl() -> MemoryInfo:
     """Internal implementation with caching."""
+    logger.debug("_get_system_memory_impl called")
     system = platform.system()
 
     if system == "Darwin":
@@ -101,6 +107,7 @@ def _query_macos_memory() -> MemoryInfo:
     - GPU shares Unified Memory with CPU
     """
     # Get total memory via sysctl
+    logger.debug("_query_macos_memory called")
     try:
         result = subprocess.run(
             ["sysctl", "-n", "hw.memsize"],
@@ -137,6 +144,7 @@ def _query_macos_memory() -> MemoryInfo:
 
 def _parse_vm_stat_available(total_gb: float) -> float:
     """Parse vm_stat output to estimate available memory."""
+    logger.debug("_parse_vm_stat_available called with total_gb=%s", total_gb)
     try:
         result = subprocess.run(
             ["vm_stat"],
@@ -192,6 +200,7 @@ def _parse_vm_stat_available(total_gb: float) -> float:
 
 def _query_linux_memory() -> MemoryInfo:
     """Query memory on Linux via /proc/meminfo."""
+    logger.debug("_query_linux_memory called")
     try:
         with open("/proc/meminfo") as f:
             meminfo = {}
@@ -246,6 +255,7 @@ def _estimate_batch_count(available_gb: float) -> int:
     """
     # Rough estimate: 2GB per batch of typical transformer weights
     # Includes model weights, activations, and working memory
+    logger.debug("_estimate_batch_count called with available_gb=%s", available_gb)
     gb_per_batch = 2.0
     count = int(available_gb / gb_per_batch)
     return max(1, min(count, 16))  # Clamp to [1, 16]
@@ -268,6 +278,7 @@ def estimate_tensor_memory(
         >>> estimate_tensor_memory((4096, 4096), np.float16)
         33554432  # 32 MB
     """
+    logger.debug("estimate_tensor_memory called with shape=%s, dtype=%s", shape, dtype)
     dtype = np.dtype(dtype)
     num_elements = 1
     for dim in shape:
@@ -302,6 +313,7 @@ def compute_optimal_batch_size(
         >>> compute_optimal_batch_size(shapes, available_memory_gb=12.0)
         54
     """
+    logger.debug("compute_optimal_batch_size called with tensor_shapes=%s, available_memory_gb=%s, dtype=%s", tensor_shapes, available_memory_gb, dtype)
     if not tensor_shapes:
         return 1
 
@@ -327,6 +339,7 @@ def get_metal_memory_pressure() -> str | None:
     Returns:
         One of "normal", "warn", "critical", or None if unavailable.
     """
+    logger.debug("get_metal_memory_pressure called")
     if platform.system() != "Darwin":
         return None
 
@@ -362,6 +375,7 @@ def should_reduce_allocation(threshold: str = "warn") -> bool:
     Returns:
         True if current pressure meets or exceeds threshold.
     """
+    logger.debug("should_reduce_allocation called with threshold=%s", threshold)
     pressure = get_metal_memory_pressure()
     if pressure is None:
         return False

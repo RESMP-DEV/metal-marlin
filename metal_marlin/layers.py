@@ -23,6 +23,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, overload
 
 from ._compat import HAS_TORCH, torch
@@ -456,6 +457,9 @@ else:
         def from_linear(linear: Any, quant_type: str = "fp4", group_size: int = 32) -> MarlinLinear:
             raise RuntimeError("MarlinLinear requires PyTorch")
 
+
+
+logger = logging.getLogger(__name__)
 
 if HAS_TORCH and torch is not None:
     class MixedPrecisionLinear(nn.Module):

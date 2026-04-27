@@ -23,6 +23,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -47,6 +48,9 @@ except ImportError:
     _HAS_CPP_EXT = False
 
 
+
+logger = logging.getLogger(__name__)
+
 class LayerNormOp:
     """Python wrapper for C++ LayerNorm operation.
     
@@ -59,6 +63,7 @@ class LayerNormOp:
     """
     
     def __init__(self, num_tokens: int, hidden_dim: int, eps: float = 1e-5):
+        logger.debug("initializing %s with num_tokens=%s, hidden_dim=%s, eps=%s", type(self).__name__, num_tokens, hidden_dim, eps)
         if not _HAS_CPP_EXT:
             raise ImportError(
                 "C++ extension not available. "
@@ -90,16 +95,19 @@ class LayerNormOp:
         Returns:
             NormResult with normalized output
         """
+        logger.debug("forward: input shape=%s dtype=%s", input.shape if hasattr(input, "shape") else type(input).__name__, input.dtype if hasattr(input, "dtype") else "N/A")
         if beta is None:
             beta = []
         return self._op.forward(input, gamma, beta)
     
     @property
     def num_tokens(self) -> int:
+        logger.debug("num_tokens called")
         return self._num_tokens
     
     @property
     def hidden_dim(self) -> int:
+        logger.debug("hidden_dim called")
         return self._hidden_dim
 
 
@@ -115,6 +123,7 @@ class RMSNormOp:
     """
     
     def __init__(self, num_tokens: int, hidden_dim: int, eps: float = 1e-6):
+        logger.debug("initializing %s with num_tokens=%s, hidden_dim=%s, eps=%s", type(self).__name__, num_tokens, hidden_dim, eps)
         if not _HAS_CPP_EXT:
             raise ImportError(
                 "C++ extension not available. "
@@ -144,6 +153,7 @@ class RMSNormOp:
         Returns:
             NormResult with normalized output
         """
+        logger.debug("forward: input shape=%s dtype=%s", input.shape if hasattr(input, "shape") else type(input).__name__, input.dtype if hasattr(input, "dtype") else "N/A")
         return self._op.forward(input, gamma)
     
     def forward_fused(
@@ -164,19 +174,23 @@ class RMSNormOp:
         Returns:
             NormResult with normalized output and residual output
         """
+        logger.debug("forward_fused called with input=%s, residual=%s, gamma=%s", input, residual, gamma)
         return self._op.forward_fused(input, residual, gamma)
     
     @property
     def num_tokens(self) -> int:
+        logger.debug("num_tokens called")
         return self._num_tokens
     
     @property
     def hidden_dim(self) -> int:
+        logger.debug("hidden_dim called")
         return self._hidden_dim
 
 
 def compute_mean(data: list[float]) -> float:
     """Compute mean of a float array."""
+    logger.debug("compute_mean called with data=%s", data)
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.compute_mean(data, len(data))
@@ -184,6 +198,7 @@ def compute_mean(data: list[float]) -> float:
 
 def compute_variance(data: list[float], mean: float) -> float:
     """Compute variance of a float array."""
+    logger.debug("compute_variance called with data=%s, mean=%s", data, mean)
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.compute_variance(data, len(data), mean)
@@ -191,6 +206,7 @@ def compute_variance(data: list[float], mean: float) -> float:
 
 def compute_rms(data: list[float]) -> float:
     """Compute RMS (root mean square) of a float array."""
+    logger.debug("compute_rms called with data=%s", data)
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.compute_rms(data, len(data))
@@ -198,6 +214,7 @@ def compute_rms(data: list[float]) -> float:
 
 def is_hidden_dim_supported(hidden_dim: int) -> bool:
     """Check if hidden dimension is supported by optimized kernels."""
+    logger.debug("is_hidden_dim_supported called with hidden_dim=%s", hidden_dim)
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.is_hidden_dim_supported(hidden_dim)
@@ -205,6 +222,7 @@ def is_hidden_dim_supported(hidden_dim: int) -> bool:
 
 def get_recommended_threadgroup_size(hidden_dim: int) -> int:
     """Get recommended threadgroup size for given hidden dimension."""
+    logger.debug("get_recommended_threadgroup_size called with hidden_dim=%s", hidden_dim)
     if not _HAS_CPP_EXT:
         raise ImportError("C++ extension not available")
     return _norm_utils.get_recommended_threadgroup_size(hidden_dim)

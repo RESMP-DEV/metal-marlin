@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,9 @@ import torch
 
 from ..mmap_loader import MmapSafetensorsLoader
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TrellisWeight:
@@ -71,11 +75,13 @@ class TrellisWeight:
     @property
     def K(self) -> int:
         """Input dimension."""
+        logger.debug("K called")
         return self.original_shape[0]
 
     @property
     def N(self) -> int:
         """Output dimension."""
+        logger.debug("N called")
         return self.original_shape[1]
 
 
@@ -90,6 +96,7 @@ def detect_trellis_format(model_path: Path) -> str:
         "v2_layers": Layer-based directory structure
         "unknown": Unrecognized format
     """
+    logger.debug("detect_trellis_format called with model_path=%s", model_path)
     model_path = Path(model_path)
 
     # Check for HF-style shards (v3)
@@ -112,6 +119,7 @@ def _parse_hf_weight_map(index_path: Path) -> dict[str, str]:
     Returns:
         Dict mapping tensor names to shard filenames
     """
+    logger.debug("_parse_hf_weight_map called with index_path=%s", index_path)
     with open(index_path) as f:
         index = json.load(f)
     return index.get("weight_map", {})
@@ -126,6 +134,7 @@ def _parse_quantization_index(index_path: Path) -> dict[str, dict]:
     Returns:
         Dict mapping tensor names to {"bits": int, "mse": float, "shape": tuple}
     """
+    logger.info("_parse_quantization_index called with index_path=%s", index_path)
     if not index_path.exists():
         return {}
 
@@ -176,6 +185,7 @@ class TrellisModelLoader:
         Raises:
             FileNotFoundError: If the model path doesn't exist or has no layers.
         """
+        logger.debug("initializing %s with model_path=%s", type(self).__name__, model_path)
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model path not found: {model_path}")
@@ -196,6 +206,7 @@ class TrellisModelLoader:
     def _init_hf_shards(self) -> None:
         """Initialize loader for HF-style sharded safetensors (v3 format)."""
         # Parse weight map
+        logger.debug("_init_hf_shards called")
         index_path = self.model_path / "model.safetensors.index.json"
         self._hf_weight_map = _parse_hf_weight_map(index_path)
 
@@ -230,6 +241,7 @@ class TrellisModelLoader:
 
     def _init_layer_dirs(self) -> None:
         """Initialize loader for layer-based directory structure (v2 format)."""
+        logger.debug("_init_layer_dirs called")
         self._layer_indices: list[int] = []
         for item in self.model_path.iterdir():
             if item.is_dir() and item.name.startswith("layer_"):
@@ -253,10 +265,12 @@ class TrellisModelLoader:
 
     def _get_layer_path(self, layer_idx: int) -> Path:
         """Get the path to a layer directory."""
+        logger.debug("_get_layer_path called with layer_idx=%s", layer_idx)
         return self.model_path / f"layer_{layer_idx:04d}"
 
     def _load_layer_metadata(self, layer_idx: int) -> dict[str, Any]:
         """Load and cache the index.json for a layer."""
+        logger.info("_load_layer_metadata called with layer_idx=%s", layer_idx)
         if layer_idx not in self._layer_metadata:
             layer_path = self._get_layer_path(layer_idx)
             index_path = layer_path / "index.json"
@@ -274,6 +288,7 @@ class TrellisModelLoader:
         Example: "model.layers.0.mlp.down_proj.weight" ->
                  "model__layers__0__mlp__down_proj__weight"
         """
+        logger.debug("_tensor_name_to_key called with tensor_name=%s", tensor_name)
         return tensor_name.replace(".", "__")
 
     def _get_base_weight_name(self, tensor_name: str) -> str:
@@ -284,6 +299,7 @@ class TrellisModelLoader:
         - exllamav3: "weight.indices" or "weight.scale" -> "weight"
         """
         # Remove component suffixes
+        logger.debug("_get_base_weight_name called with tensor_name=%s", tensor_name)
         for suffix in [
             "__indices",
             "__scales",
@@ -309,6 +325,7 @@ class TrellisModelLoader:
         Returns normalized component name: "indices", "scales", "su", "sv"
         """
         # metal_marlin format
+        logger.debug("_get_component_name called with tensor_name=%s", tensor_name)
         if tensor_name.endswith("__indices"):
             return "indices"
         if tensor_name.endswith("__scales"):
@@ -340,6 +357,7 @@ class TrellisModelLoader:
         """
         # Default to 4 bits if we can't determine
         # In practice, this should come from metadata
+        logger.debug("_infer_bits called with indices_tensor=%s", indices_tensor)
         return 4
 
     def _infer_shape(self, components: dict) -> tuple[int, int]:
@@ -348,6 +366,7 @@ class TrellisModelLoader:
         Uses su shape for K and sv shape for N, or falls back to
         indices shape computation.
         """
+        logger.debug("_infer_shape called with components=%s", components)
         if "su" in components:
             K = components["su"].shape[0]
         elif "row_scale" in components:
@@ -373,6 +392,7 @@ class TrellisModelLoader:
 
         Groups __indices, __scales, __su, __sv components into TrellisWeight.
         """
+        logger.debug("_tensors_to_weights called with all_tensors=%s, layer_idx=%s", all_tensors, layer_idx)
         weights: dict[str, TrellisWeight] = {}
 
         # Group tensors by base weight name
@@ -454,6 +474,7 @@ class TrellisModelLoader:
         - tensor_*.safetensors (from quantize_single_layer.py)
         - batch_*.safetensors (from quantize_layerwise_parallel.py)
         """
+        logger.debug("_find_tensor_files called with layer_idx=%s", layer_idx)
         layer_path = self._get_layer_path(layer_idx)
         # Try tensor_* first (single-layer quantizer)
         tensor_files = sorted(layer_path.glob("tensor_*.safetensors"))
@@ -464,6 +485,7 @@ class TrellisModelLoader:
 
     def _load_layer_hf_shards(self, layer_idx: int) -> dict[str, TrellisWeight]:
         """Load layer from HF-style sharded safetensors (v3 format)."""
+        logger.info("_load_layer_hf_shards called with layer_idx=%s", layer_idx)
         prefix = f"model.layers.{layer_idx}."
         alt_prefix = f"model__layers__{layer_idx}__"
 
@@ -506,6 +528,7 @@ class TrellisModelLoader:
             FileNotFoundError: If the layer doesn't exist.
             ValueError: If a tensor is missing required components.
         """
+        logger.info("load_layer called with layer_idx=%s", layer_idx)
         if self._format == "v3_hf_shards":
             return self._load_layer_hf_shards(layer_idx)
 
@@ -536,6 +559,7 @@ class TrellisModelLoader:
         - uint8: trellis_v2 format, ~5x smaller, first byte is bits value
         - int16: legacy format, indices stored directly
         """
+        logger.info("_load_metal_marlin_format called with all_tensors=%s, metadata=%s", all_tensors, metadata)
         weights: dict[str, TrellisWeight] = {}
         tensor_infos = metadata.get("tensors", [])
 
@@ -630,10 +654,12 @@ class TrellisModelLoader:
 
     def get_num_layers(self) -> int:
         """Return the number of layers in the model."""
+        logger.debug("get_num_layers called")
         return len(self._layer_indices)
 
     def get_layer_indices(self) -> list[int]:
         """Return the list of available layer indices."""
+        logger.debug("get_layer_indices called")
         return self._layer_indices.copy()
 
     def get_config(self) -> dict[str, Any]:
@@ -644,6 +670,7 @@ class TrellisModelLoader:
             returns a config inferred from layer metadata.
         """
         # Try to load config.json from model root
+        logger.debug("get_config called")
         config_path = self.model_path / "config.json"
         if config_path.exists():
             with open(config_path) as f:
@@ -680,6 +707,7 @@ class TrellisModelLoader:
         Returns:
             Dictionary mapping layer indices to their weight dictionaries.
         """
+        logger.info("load_all_layers called")
         return {idx: self.load_layer(idx) for idx in self._layer_indices}
 
     def get_layer_tensor_names(self, layer_idx: int) -> list[str]:
@@ -691,6 +719,7 @@ class TrellisModelLoader:
         Returns:
             List of tensor names in the layer.
         """
+        logger.debug("get_layer_tensor_names called with layer_idx=%s", layer_idx)
         metadata = self._load_layer_metadata(layer_idx)
         return [t["name"] for t in metadata.get("tensors", [])]
 
@@ -704,6 +733,7 @@ class TrellisModelLoader:
         Returns:
             Tensor metadata dictionary or None if not found.
         """
+        logger.debug("get_tensor_info called with layer_idx=%s, tensor_name=%s", layer_idx, tensor_name)
         metadata = self._load_layer_metadata(layer_idx)
         for tensor_info in metadata.get("tensors", []):
             if tensor_info["name"] == tensor_name:
@@ -726,6 +756,7 @@ class TrellisModelLoader:
         Returns:
             Dictionary mapping router weight names to tensors.
         """
+        logger.info("load_router_weights called")
         router_path = self.model_path / "router_weights.safetensors"
         if router_path.exists():
             # Use mmap for lazy loading - weights are paged in by OS on demand
@@ -765,6 +796,7 @@ class TrellisModelLoader:
         Returns:
             Dictionary mapping weight names to tensors.
         """
+        logger.info("load_base_weights called with patterns=%s", patterns)
         if self._format == "v3_hf_shards":
             return self._load_base_weights_hf_shards(patterns)
 
@@ -794,6 +826,7 @@ class TrellisModelLoader:
     ) -> dict[str, torch.Tensor]:
         """Load base weights from HF-style shards."""
         # First try dedicated base_weights.safetensors
+        logger.info("_load_base_weights_hf_shards called with patterns=%s", patterns)
         base_path = self.model_path / "base_weights.safetensors"
         if base_path.exists():
             loader = MmapSafetensorsLoader(base_path, device="cpu")
@@ -843,6 +876,7 @@ class TrellisModelLoader:
             - self_attn.q_a_layernorm.weight (if present)
             - self_attn.kv_a_layernorm.weight (if present)
         """
+        logger.info("load_layernorm_weights called with layer_idx=%s", layer_idx)
         prefix = f"model.layers.{layer_idx}."
         patterns = [
             "input_layernorm",
@@ -882,6 +916,7 @@ class TrellisModelLoader:
             FileNotFoundError: If the layer doesn't exist.
             ValueError: If the tensor is not found in the layer.
         """
+        logger.info("load_weight called with layer_idx=%s, tensor_name=%s", layer_idx, tensor_name)
         layer_weights = self.load_layer(layer_idx)
 
         # Try the name as-is first
@@ -911,5 +946,6 @@ class TrellisModelLoader:
         Args:
             layer_idx: Layer index to clear from cache.
         """
+        logger.debug("clear_layer_cache called with layer_idx=%s", layer_idx)
         if layer_idx in self._layer_metadata:
             del self._layer_metadata[layer_idx]

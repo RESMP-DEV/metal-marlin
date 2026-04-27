@@ -20,11 +20,15 @@ Quantization scheme:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RouterQuantConfig:
@@ -78,6 +82,7 @@ class Int8RouterLinear(nn.Module):
             scales: Per-channel scale factors [out_features].
             device: Device to place tensors on.
         """
+        logger.debug("initializing %s with in_features=%s, out_features=%s, weights_int8=%s, scales=%s, device=%s", type(self).__name__, in_features, out_features, weights_int8, scales, device)
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -110,6 +115,7 @@ class Int8RouterLinear(nn.Module):
         """
         # For now, use dequantized weights (MPS doesn't have native int8 matmul)
         # Future: Use Metal int8 GEMV kernel for even more speedup
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         weights_int8: torch.Tensor = self.weights_int8  # type: ignore[assignment]
         scales: torch.Tensor = self.scales  # type: ignore[assignment]
 
@@ -130,6 +136,7 @@ class Int8RouterLinear(nn.Module):
 
         Call this if weights are modified (e.g., during fine-tuning).
         """
+        logger.debug("invalidate_cache called")
         self._cache_valid = False
         self._dequant_cache = None
 
@@ -152,6 +159,7 @@ class Int8RouterLinear(nn.Module):
         Returns:
             Quantized Int8RouterLinear.
         """
+        logger.debug("from_float called with linear=%s, device=%s", linear, device)
         weight = linear.weight.data  # [out_features, in_features]
 
         # Compute per-channel scales (max abs value per output channel)
@@ -188,6 +196,7 @@ class Int8RouterLinear(nn.Module):
         Returns:
             Quantized Int8RouterLinear.
         """
+        logger.debug("from_weight called with weight=%s, device=%s", weight, device)
         out_features, in_features = weight.shape
 
         # Compute per-channel scales
@@ -210,6 +219,7 @@ class Int8RouterLinear(nn.Module):
         )
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return f"in_features={self.in_features}, out_features={self.out_features}, dtype=int8"
 
 
@@ -249,6 +259,7 @@ class Int8Router(nn.Module):
             top_k: Number of experts to select per token.
             normalize_weights: If True, renormalize top-k weights to sum to 1.
         """
+        logger.debug("initializing %s with linear=%s, top_k=%s, normalize_weights=%s", type(self).__name__, linear, top_k, normalize_weights)
         super().__init__()
         self.linear = linear
         self.top_k = top_k
@@ -268,6 +279,7 @@ class Int8Router(nn.Module):
             - selected_experts: Selected expert indices [..., top_k].
         """
         # Project to expert logits
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         router_logits = self.linear(x)  # [..., num_experts]
 
         # Softmax over experts
@@ -288,10 +300,12 @@ class Int8Router(nn.Module):
 
     @property
     def num_experts(self) -> int:
+        logger.debug("num_experts called")
         return self.linear.out_features
 
     @property
     def hidden_dim(self) -> int:
+        logger.debug("hidden_dim called")
         return self.linear.in_features
 
     @classmethod
@@ -311,6 +325,7 @@ class Int8Router(nn.Module):
         Returns:
             Int8Router with quantized weights.
         """
+        logger.debug("from_linear called with linear=%s, top_k=%s, device=%s", linear, top_k, device)
         int8_linear = Int8RouterLinear.from_float(linear, device=device)
         return cls(int8_linear, top_k=top_k)
 
@@ -331,6 +346,7 @@ class Int8Router(nn.Module):
         Returns:
             Int8Router with quantized weights.
         """
+        logger.debug("from_weight called with weight=%s, top_k=%s, device=%s", weight, top_k, device)
         int8_linear = Int8RouterLinear.from_weight(weight, device=device)
         return cls(int8_linear, top_k=top_k)
 
@@ -352,6 +368,7 @@ def quantize_router_weights(
         - scales: Per-channel scales [num_experts].
     """
     # Compute per-channel scales
+    logger.info("quantize_router_weights called with weight=%s", getattr(weight, "shape", weight))
     scales = weight.abs().max(dim=1).values / 127.0
     scales = scales.clamp(min=1e-8)
 
@@ -388,6 +405,7 @@ def measure_quantization_error(
         - snr_db: Signal-to-noise ratio in dB
     """
     # Reconstruct from quantized
+    logger.info("measure_quantization_error called with original=%s, weights_int8=%s, scales=%s", original, getattr(weights_int8, "shape", weights_int8), scales)
     reconstructed = weights_int8.float() * scales.unsqueeze(1)
 
     # Compute errors

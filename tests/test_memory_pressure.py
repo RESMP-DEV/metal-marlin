@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import unittest
@@ -16,8 +17,12 @@ from metal_marlin.memory.mmfp4_memory import (
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader, WeightPrefetcher
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMemoryPressure(unittest.TestCase):
     def setUp(self):
+        logger.info("setUp starting")
         self.loader = MagicMock(spec=MMFP4ModelLoader)
         self.loader.load_tensor.return_value = torch.zeros(1)
         
@@ -29,6 +34,7 @@ class TestMemoryPressure(unittest.TestCase):
     @patch('metal_marlin.memory.mmfp4_memory.psutil.virtual_memory')
     def test_pressure_critical(self, mock_vm):
         # Mock critical memory (e.g. 100MB free)
+        logger.info("running test_pressure_critical")
         mock_vm.return_value.available = 100 * 1024 * 1024
         mock_vm.return_value.total = 16 * 1024 * 1024 * 1024
         
@@ -47,6 +53,7 @@ class TestMemoryPressure(unittest.TestCase):
     @patch('metal_marlin.memory.mmfp4_memory.psutil.virtual_memory')
     def test_pressure_normal(self, mock_vm):
         # Mock normal memory (e.g. 8GB free)
+        logger.info("running test_pressure_normal")
         mock_vm.return_value.available = 8 * 1024 * 1024 * 1024
         mock_vm.return_value.total = 16 * 1024 * 1024 * 1024
         

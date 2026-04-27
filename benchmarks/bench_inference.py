@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Inference benchmark for GLM-4.7-Flash on MPS."""
 
+import logging
 import time
 
 import torch
@@ -8,6 +9,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -19,6 +23,7 @@ MODEL_PATH = "zai-org/GLM-4.7-Flash"
 
 
 def main():
+    logger.info("main starting")
     print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Time GPU wait separately from Python overhead."""
 
+import logging
 import time
 from contextlib import contextmanager
 
@@ -10,10 +11,14 @@ from metal_marlin.metal_dispatch import MetalKernelLibrary
 from metal_marlin.trellis.model import TrellisForCausalLM
 
 
+
+logger = logging.getLogger(__name__)
+
 # Patch batch_dispatch to time the GPU wait
 @contextmanager
 def timed_batch_dispatch(self):
     """Timed version of batch_dispatch."""
+    logger.debug("timed_batch_dispatch called")
     self._batch_mode = True
     self._batch_command_buffer = self.command_queue.commandBuffer()
     self._batch_encoder = self._batch_command_buffer.computeCommandEncoder()
@@ -36,6 +41,7 @@ def timed_batch_dispatch(self):
 
 def main():
     # Patch before loading model
+    logger.info("main starting")
     MetalKernelLibrary.batch_dispatch = timed_batch_dispatch
 
     print("Loading model...")

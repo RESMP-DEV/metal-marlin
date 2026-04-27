@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
+
+
+logger = logging.getLogger(__name__)
 
 class ChatMessage(BaseModel):
     role: Literal["system", "user", "assistant"]

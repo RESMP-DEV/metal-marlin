@@ -1,3 +1,4 @@
+import logging
 import pytest
 import torch
 import torch.nn as nn
@@ -5,8 +6,12 @@ import torch.nn as nn
 from metal_marlin.layers import MarlinLinear, MixedPrecisionLinear
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestBatchAwareLoRA:
     def test_marlin_linear_lora_dispatch(self):
+        logger.info("running test_marlin_linear_lora_dispatch")
         in_features = 32
         out_features = 16
         group_size = 16
@@ -51,6 +56,7 @@ class TestBatchAwareLoRA:
         assert torch.allclose(out_marlin, expected, atol=1e-4)
 
     def test_mixed_precision_linear_lora_dispatch(self):
+        logger.info("running test_mixed_precision_linear_lora_dispatch")
         in_features = 128
         out_features = 16
         
@@ -88,6 +94,7 @@ class TestBatchAwareLoRA:
 
     def test_packed_input_dispatch(self):
         """Test MixedPrecisionLinear with packed FP4 input (uint32)."""
+        logger.info("running test_packed_input_dispatch")
         in_features = 128
         out_features = 16
         

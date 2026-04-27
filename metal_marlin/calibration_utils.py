@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import urllib.request
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -31,6 +32,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+logger = logging.getLogger(__name__)
 
 # Multi-domain calibration v3 URL
 _CALIBRATION_V3_URL = (
@@ -71,11 +75,13 @@ class CalibrationDataset:
     @property
     def total_chars(self) -> int:
         """Total character count across all samples."""
+        logger.debug("total_chars called")
         return sum(len(s) for s in self.samples)
 
     @property
     def avg_sample_length(self) -> float:
         """Average sample length in characters."""
+        logger.debug("avg_sample_length called")
         if not self.samples:
             return 0.0
         return self.total_chars / len(self.samples)
@@ -92,6 +98,7 @@ class CalibrationDataset:
         Returns:
             Filtered dataset (self if in_place, new instance otherwise).
         """
+        logger.debug("filter called with predicate=%s, in_place=%s", predicate, in_place)
         filtered = [s for s in self.samples if predicate(s)]
         if in_place:
             self.samples = filtered
@@ -113,6 +120,7 @@ class CalibrationDataset:
         Returns:
             New dataset with truncated samples.
         """
+        logger.debug("truncate called with max_tokens=%s, tokenizer=%s", max_tokens, tokenizer)
         truncated = []
         for sample in self.samples:
             ids = tokenizer.encode(sample, add_special_tokens=False)
@@ -159,6 +167,7 @@ class CalibrationDatasetLoader:
         Returns:
             CalibrationDataset with loaded samples.
         """
+        logger.debug("v3 called with max_samples=%s, cache_dir=%s, force_download=%s", max_samples, cache_dir, force_download)
         cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -205,6 +214,7 @@ class CalibrationDatasetLoader:
         Returns:
             CalibrationDataset with loaded samples.
         """
+        logger.debug("from_local called with path=%s", path)
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
@@ -238,6 +248,7 @@ class CalibrationDatasetLoader:
     @staticmethod
     def _download_file(url: str, dest: Path) -> None:
         """Download file from URL with progress."""
+        logger.info("_download_file called with url=%s, dest=%s", url, dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         req = urllib.request.Request(
@@ -256,6 +267,7 @@ class CalibrationDatasetLoader:
 
         Consecutive non-blank lines are joined into samples.
         """
+        logger.debug("_parse_v3_text called with text=%s, min_length=%s", text, min_length)
         samples = []
         current = []
 
@@ -282,6 +294,7 @@ class CalibrationDatasetLoader:
     @staticmethod
     def _parse_json_data(data) -> list[str]:
         """Parse JSON data into list of strings."""
+        logger.debug("_parse_json_data called with data=%s", data)
         if isinstance(data, list):
             samples = []
             for item in data:
@@ -330,6 +343,7 @@ def compute_activation_ranges(
     Raises:
         ImportError: If transformers is not installed.
     """
+    logger.debug("compute_activation_ranges called with model_path=%s, calibration=%s, layers=%s", model_path, calibration, layers)
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError as e:
@@ -358,8 +372,10 @@ def compute_activation_ranges(
     hooks = []
 
     def make_hook(name: str):
+        logger.debug("make_hook called with name=%s", name)
         def hook(module, input, output):
             # Get input activations (what feeds into the layer)
+            logger.debug("hook called with module=%s, input=%s, output=%s", module, input, output)
             if isinstance(input, tuple):
                 x = input[0]
             else:
@@ -444,6 +460,7 @@ def ranges_to_scales(
     Returns:
         Dict mapping layer names to optimal scale values.
     """
+    logger.debug("ranges_to_scales called with ranges=%s, quant_type=%s", ranges, quant_type)
     scales = {}
 
     for name, (rmin, rmax) in ranges.items():
@@ -478,6 +495,7 @@ def save_ranges(
     path: str | Path,
 ) -> None:
     """Save activation ranges to JSON file."""
+    logger.info("save_ranges called with ranges=%s, path=%s", ranges, path)
     path = Path(path)
     data = {name: {"min": rmin, "max": rmax} for name, (rmin, rmax) in ranges.items()}
     path.write_text(json.dumps(data, indent=2))
@@ -485,6 +503,7 @@ def save_ranges(
 
 def load_ranges(path: str | Path) -> dict[str, tuple[float, float]]:
     """Load activation ranges from JSON file."""
+    logger.info("load_ranges called with path=%s", path)
     path = Path(path)
     data = json.loads(path.read_text())
     return {name: (v["min"], v["max"]) for name, v in data.items()}

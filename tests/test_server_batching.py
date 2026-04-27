@@ -1,13 +1,18 @@
 """Test the continuous batching server implementation."""
 
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import pytest
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_server_batching_imports():
     """Test that _server_batching can be imported."""
+    logger.info("running test_server_batching_imports")
     from metal_marlin.serving.mmfp4_server import MMFP4Server, _server_batching
 
     assert callable(_server_batching)
@@ -16,6 +21,7 @@ def test_server_batching_imports():
 
 def test_mmfp4server_has_continuous_batching_methods():
     """Test that MMFP4Server has the continuous batching methods."""
+    logger.info("running test_mmfp4server_has_continuous_batching_methods")
     from metal_marlin.serving.mmfp4_server import MMFP4Server
 
     # Check methods exist
@@ -28,6 +34,7 @@ def test_mmfp4server_has_continuous_batching_methods():
 
 def test_server_batching_signature():
     """Test that _server_batching has the correct signature."""
+    logger.info("running test_server_batching_signature")
     import inspect
 
     from metal_marlin.serving.mmfp4_server import _server_batching
@@ -44,6 +51,7 @@ def test_server_batching_signature():
 @pytest.mark.asyncio
 async def test_continuous_batching_queues_initialized():
     """Test that continuous batching properly initializes queues."""
+    logger.info("running test_continuous_batching_queues_initialized")
     from metal_marlin.serving.mmfp4_server import MMFP4Server
 
     # Mock engine
@@ -61,6 +69,7 @@ async def test_continuous_batching_queues_initialized():
 @pytest.mark.asyncio
 async def test_submit_request_to_queue_raises_when_not_started():
     """Test that submit_request_to_queue raises when continuous batching not started."""
+    logger.info("running test_submit_request_to_queue_raises_when_not_started")
     from metal_marlin.serving.mmfp4_server import GenerationRequest, MMFP4Server
 
     # Mock engine
@@ -78,6 +87,7 @@ async def test_submit_request_to_queue_raises_when_not_started():
 
 def test_server_batching_docstring():
     """Test that _server_batching has proper documentation."""
+    logger.info("running test_server_batching_docstring")
     from metal_marlin.serving.mmfp4_server import _server_batching
 
     assert _server_batching.__doc__ is not None

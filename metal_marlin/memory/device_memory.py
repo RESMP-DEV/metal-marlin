@@ -6,9 +6,13 @@ platform-optimal tensor transfers (MPS / CUDA / CPU).
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import logging
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class DeviceKind(Enum):
     MPS = auto()
@@ -27,6 +31,7 @@ class DeviceCapabilities:
 
 
 def _parse_device(device: str | torch.device) -> torch.device:
+    logger.debug("_parse_device called with device=%s", device)
     if isinstance(device, str):
         return torch.device(device)
     return device
@@ -34,6 +39,7 @@ def _parse_device(device: str | torch.device) -> torch.device:
 
 def detect_device(device: str | torch.device) -> DeviceCapabilities:
     """Detect capabilities of the given device."""
+    logger.debug("detect_device called with device=%s", device)
     dev = _parse_device(device)
 
     if dev.type == "mps":
@@ -77,6 +83,7 @@ def detect_device(device: str | torch.device) -> DeviceCapabilities:
 
 def is_unified_memory(device: str | torch.device) -> bool:
     """Check if device uses unified memory architecture (Apple Silicon)."""
+    logger.debug("is_unified_memory called with device=%s", device)
     return detect_device(device).unified_memory
 
 
@@ -100,6 +107,7 @@ def optimal_transfer(
     Returns:
         Tensor on *target_device*.
     """
+    logger.debug("optimal_transfer called with tensor=%s, target_device=%s, zero_copy=%s", tensor, target_device, zero_copy)
     target = torch.device(target_device)
 
     # No-op when already on the right device

@@ -6,11 +6,15 @@ Isolates: num_experts, hidden_dim, intermediate_dim, batch_size, top_k.
 """
 
 import argparse
+import logging
 import time
 from dataclasses import dataclass
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MoEConfig:
@@ -35,6 +39,7 @@ def test_moe_config(config: MoEConfig, timeout_sec: float = 5.0, use_fast: bool 
 
     Returns dict with: success, nan, time_ms, error
     """
+    logger.info("running test_moe_config")
     from metal_marlin.trellis.testing import create_mock_moe_mlp
 
     result = {
@@ -64,6 +69,7 @@ def test_moe_config(config: MoEConfig, timeout_sec: float = 5.0, use_fast: bool 
         import signal
 
         def timeout_handler(signum, frame):
+            logger.debug("timeout_handler called with signum=%s, frame=%s", signum, frame)
             raise TimeoutError(f"Kernel exceeded {timeout_sec}s")
 
         signal.signal(signal.SIGALRM, timeout_handler)
@@ -97,6 +103,7 @@ def test_moe_config(config: MoEConfig, timeout_sec: float = 5.0, use_fast: bool 
 
 def run_scaling_tests(max_experts: int = 64, verbose: bool = True) -> list[dict]:
     """Run scaling tests to find where kernel breaks."""
+    logger.info("running run_scaling_tests")
     results = []
 
     # Test configurations in increasing order of complexity
@@ -161,6 +168,7 @@ def run_scaling_tests(max_experts: int = 64, verbose: bool = True) -> list[dict]
 
 def test_single_expert(config: MoEConfig) -> None:
     """Test a single expert in isolation (no routing)."""
+    logger.info("running test_single_expert")
     import torch.nn.functional as F
 
     from metal_marlin.trellis.testing import create_mock_moe_mlp
@@ -202,6 +210,7 @@ def test_single_expert(config: MoEConfig) -> None:
 
 def test_dispatch_parameters(config: MoEConfig) -> None:
     """Print dispatch parameters for debugging."""
+    logger.info("running test_dispatch_parameters")
     print(f"\nDispatch parameters for: {config}")
 
     MOE_TILE_N = 64
@@ -253,6 +262,7 @@ def test_dispatch_parameters(config: MoEConfig) -> None:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Debug MoE kernel scaling")
     parser.add_argument("--max-experts", type=int, default=64, help="Max experts to test")
     parser.add_argument("--real-model", action="store_true", help="Test with real model dimensions")

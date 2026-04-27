@@ -14,6 +14,7 @@ compared to FP16 storage while maintaining acceptable accuracy for attention.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -33,6 +34,9 @@ from metal_marlin.cache.quantized_kv import (
     decompress_kv,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # =============================================================================
 # FP8 E4M3 Roundtrip Tests
 # =============================================================================
@@ -43,11 +47,13 @@ class TestFP8E4M3Roundtrip:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=42)
 
     def test_fp8_roundtrip_randn(self, rng: np.random.Generator) -> None:
         """FP8 roundtrip MSE on standard normal data should be low."""
         # Shape: [batch, num_kv_heads, seq_len, head_dim]
+        logger.info("running test_fp8_roundtrip_randn")
         k = rng.standard_normal((1, 32, 512, 128)).astype(np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -61,6 +67,7 @@ class TestFP8E4M3Roundtrip:
 
     def test_fp8_roundtrip_uniform(self, rng: np.random.Generator) -> None:
         """FP8 roundtrip on uniform [-1, 1] data."""
+        logger.info("running test_fp8_roundtrip_uniform")
         k = rng.uniform(-1.0, 1.0, (1, 8, 256, 64)).astype(np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -72,6 +79,7 @@ class TestFP8E4M3Roundtrip:
     def test_fp8_roundtrip_extreme_values(self) -> None:
         """FP8 roundtrip preserves extreme values (near FP8 max)."""
         # Create tensor with values near FP8 E4M3 max (448)
+        logger.info("running test_fp8_roundtrip_extreme_values")
         k = np.array([[[[400.0, -400.0, 1.0, -1.0, 0.0]]]], dtype=np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -89,6 +97,7 @@ class TestFP8E4M3Roundtrip:
 
     def test_fp8_roundtrip_zeros(self) -> None:
         """FP8 roundtrip handles zero values correctly."""
+        logger.info("running test_fp8_roundtrip_zeros")
         k = np.zeros((1, 4, 16, 32), dtype=np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -110,6 +119,7 @@ class TestFP8E4M3Roundtrip:
     )
     def test_fp8_roundtrip_shapes(self, rng: np.random.Generator, shape: tuple[int, ...]) -> None:
         """FP8 roundtrip works correctly for various tensor shapes."""
+        logger.info("running test_fp8_roundtrip_shapes")
         k = rng.standard_normal(shape).astype(np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -120,6 +130,7 @@ class TestFP8E4M3Roundtrip:
 
     def test_fp8_per_token_scaling(self, rng: np.random.Generator) -> None:
         """FP8 roundtrip with per-token (shared across heads) scaling."""
+        logger.info("running test_fp8_per_token_scaling")
         k = rng.standard_normal((1, 8, 256, 64)).astype(np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=False)
@@ -141,10 +152,12 @@ class TestINT8SymmetricRoundtrip:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=43)
 
     def test_int8_roundtrip_randn(self, rng: np.random.Generator) -> None:
         """INT8 roundtrip MSE on standard normal data should be low."""
+        logger.info("running test_int8_roundtrip_randn")
         v = rng.standard_normal((1, 32, 512, 128)).astype(np.float16)
 
         v_int8, scale = _quantize_int8_symmetric(v, per_head=True)
@@ -157,6 +170,7 @@ class TestINT8SymmetricRoundtrip:
 
     def test_int8_roundtrip_uniform(self, rng: np.random.Generator) -> None:
         """INT8 roundtrip on uniform [-1, 1] data."""
+        logger.info("running test_int8_roundtrip_uniform")
         v = rng.uniform(-1.0, 1.0, (1, 8, 256, 64)).astype(np.float16)
 
         v_int8, scale = _quantize_int8_symmetric(v, per_head=True)
@@ -167,6 +181,7 @@ class TestINT8SymmetricRoundtrip:
 
     def test_int8_vs_fp8_precision(self, rng: np.random.Generator) -> None:
         """INT8 should have comparable or better precision than FP8."""
+        logger.info("running test_int8_vs_fp8_precision")
         data = rng.standard_normal((1, 16, 256, 128)).astype(np.float16)
 
         # FP8 roundtrip
@@ -204,6 +219,7 @@ def _reference_attention(q: np.ndarray, k: np.ndarray, v: np.ndarray, scale: flo
     Returns:
         Attention output [batch, num_heads, seq_len, head_dim]
     """
+    logger.debug("_reference_attention called with q=%s, k=%s, v=%s", q, k, v)
     q_f32 = q.astype(np.float32)
     k_f32 = k.astype(np.float32)
     v_f32 = v.astype(np.float32)
@@ -236,10 +252,12 @@ class TestFP8AttentionAccuracy:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=44)
 
     def test_fp8_attention_accuracy_small(self, rng: np.random.Generator) -> None:
         """FP8 KV cache maintains attention accuracy for small sequences."""
+        logger.info("running test_fp8_attention_accuracy_small")
         batch, num_heads, num_kv_heads, seq_len, head_dim = 1, 32, 8, 64, 128
         scale = 1.0 / np.sqrt(head_dim)
 
@@ -272,6 +290,7 @@ class TestFP8AttentionAccuracy:
         self, rng: np.random.Generator, seq_len: int
     ) -> None:
         """FP8 KV cache accuracy across different sequence lengths."""
+        logger.info("running test_fp8_attention_accuracy_varying_seq")
         batch, num_heads, num_kv_heads, head_dim = 1, 32, 8, 128
         scale = 1.0 / np.sqrt(head_dim)
 
@@ -304,6 +323,7 @@ class TestFP8AttentionAccuracy:
         self, rng: np.random.Generator, strategy: ScalingStrategy
     ) -> None:
         """Compare attention accuracy across different scaling strategies."""
+        logger.info("running test_scaling_strategies_accuracy")
         batch, num_heads, num_kv_heads, seq_len, head_dim = 1, 16, 4, 256, 64
         scale = 1.0 / np.sqrt(head_dim)
 
@@ -335,6 +355,7 @@ class TestFP8MemorySavings:
 
     def test_memory_savings_50_percent(self) -> None:
         """Verify approximately 50% memory reduction with FP8 cache."""
+        logger.info("running test_memory_savings_50_percent")
         num_layers = 32
         num_kv_heads = 8
         head_dim = 128
@@ -382,6 +403,7 @@ class TestFP8MemorySavings:
         self, scaling: ScalingStrategy, min_ratio: float
     ) -> None:
         """Memory savings vary slightly by scaling strategy."""
+        logger.info("running test_memory_savings_by_strategy")
         cache = QuantizedKVCache(
             num_layers=32,
             num_kv_heads=8,
@@ -401,6 +423,7 @@ class TestFP8MemorySavings:
 
     def test_memory_saved_mb_calculation(self) -> None:
         """Verify memory_saved_mb calculation is correct."""
+        logger.info("running test_memory_saved_mb_calculation")
         cache = QuantizedKVCache(
             num_layers=32,
             num_kv_heads=8,
@@ -447,6 +470,7 @@ class TestFP8MemorySavings:
         self, seq_len: int, expected_fp16_mb: int
     ) -> None:
         """Memory usage scales linearly with context length."""
+        logger.info("running test_memory_scaling_with_context")
         cache = QuantizedKVCache(
             num_layers=32,
             num_kv_heads=8,
@@ -476,10 +500,12 @@ class TestQuantizedKVCacheIntegration:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=45)
 
     def test_cache_update_and_retrieve(self, rng: np.random.Generator) -> None:
         """Test basic cache update and retrieval flow."""
+        logger.info("running test_cache_update_and_retrieve")
         cache = QuantizedKVCache(
             num_layers=2,
             num_kv_heads=4,
@@ -510,6 +536,7 @@ class TestQuantizedKVCacheIntegration:
 
     def test_cache_incremental_update(self, rng: np.random.Generator) -> None:
         """Test incremental token-by-token updates."""
+        logger.info("running test_cache_incremental_update")
         cache = QuantizedKVCache(
             num_layers=1,
             num_kv_heads=4,
@@ -535,6 +562,7 @@ class TestQuantizedKVCacheIntegration:
 
     def test_cache_update_method(self, rng: np.random.Generator) -> None:
         """Test the update() method that combines store and retrieve."""
+        logger.info("running test_cache_update_method")
         cache = QuantizedKVCache(
             num_layers=1,
             num_kv_heads=4,
@@ -566,6 +594,7 @@ class TestQuantizedKVCacheIntegration:
 
     def test_cache_reset(self, rng: np.random.Generator) -> None:
         """Test cache reset clears sequence position."""
+        logger.info("running test_cache_reset")
         cache = QuantizedKVCache(
             num_layers=1,
             num_kv_heads=4,
@@ -591,6 +620,7 @@ class TestQuantizedKVCacheIntegration:
 
     def test_cache_overflow_error(self, rng: np.random.Generator) -> None:
         """Test cache raises error on overflow."""
+        logger.info("running test_cache_overflow_error")
         cache = QuantizedKVCache(
             num_layers=1,
             num_kv_heads=4,
@@ -625,12 +655,14 @@ class TestFP8WithPyTorch:
 
     @pytest.fixture
     def device(self) -> str:
+        logger.debug("device called")
         if HAS_MPS:
             return "mps"
         return "cpu"
 
     def test_numpy_torch_consistency(self, device: str) -> None:
         """Verify numpy implementation matches PyTorch expectations."""
+        logger.info("running test_numpy_torch_consistency")
         if torch is None:
             pytest.skip("PyTorch not available")
 
@@ -661,6 +693,7 @@ class TestFP8EdgeCases:
     def test_fp8_nan_handling(self) -> None:
         """FP8 should not produce NaN from valid inputs."""
         # Normal values
+        logger.info("running test_fp8_nan_handling")
         k = np.random.randn(1, 4, 16, 32).astype(np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -672,6 +705,7 @@ class TestFP8EdgeCases:
     def test_fp8_small_values(self) -> None:
         """FP8 handles small values (near min positive) correctly."""
         # Values near FP8 E4M3 min positive (~0.002)
+        logger.info("running test_fp8_small_values")
         k = np.full((1, 4, 8, 16), 0.001, dtype=np.float16)
 
         k_fp8, scale = _quantize_fp8_e4m3(k, per_head=True)
@@ -684,6 +718,7 @@ class TestFP8EdgeCases:
 
     def test_fp8_mixed_scales(self) -> None:
         """FP8 handles heads with very different magnitudes."""
+        logger.info("running test_fp8_mixed_scales")
         rng = np.random.default_rng(46)
         k = np.zeros((1, 4, 32, 64), dtype=np.float16)
 
@@ -718,8 +753,10 @@ class TestFP8Constants:
 
     def test_fp8_e4m3_max(self) -> None:
         """FP8 E4M3 max value should be 448."""
+        logger.info("running test_fp8_e4m3_max")
         assert FP8_E4M3_MAX == 448.0
 
     def test_int8_max(self) -> None:
         """INT8 symmetric max should be 127."""
+        logger.info("running test_int8_max")
         assert INT8_MAX == 127

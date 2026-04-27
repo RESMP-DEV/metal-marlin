@@ -1,6 +1,7 @@
 """Tests for ring buffer transient allocations."""
 
 from __future__ import annotations
+import logging
 
 import gc
 
@@ -25,11 +26,15 @@ except ImportError:
     RingBuffer = None
 
 
+
+logger = logging.getLogger(__name__)
+
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required (Apple Silicon)")
 requires_ring_buffer = pytest.mark.skipif(RingBuffer is None, reason="RingBuffer module required")
 
 
 def clear_mps_memory():
+    logger.debug("clear_mps_memory called")
     gc.collect()
     if HAS_MPS:
         torch.mps.empty_cache()
@@ -39,6 +44,7 @@ def clear_mps_memory():
 
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
+    logger.info("running cleanup_after_test")
     yield
     clear_mps_memory()
     reset_ring_buffer()
@@ -46,6 +52,7 @@ def cleanup_after_test():
 
 @pytest.fixture
 def metal_device():
+    logger.debug("metal_device called")
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -59,6 +66,7 @@ class TestRingBufferBasics:
     """Test basic ring buffer operations."""
 
     def test_initialization(self, metal_device):
+        logger.info("running test_initialization")
         ring = RingBuffer(metal_device, capacity=1024 * 1024)
 
         assert ring.capacity > 0
@@ -68,11 +76,13 @@ class TestRingBufferBasics:
         assert ring.buffer is not None
 
     def test_default_capacity(self, metal_device):
+        logger.info("running test_default_capacity")
         ring = RingBuffer(metal_device)
 
         assert ring.capacity >= 256 * 1024 * 1024
 
     def test_single_allocation(self, metal_device):
+        logger.info("running test_single_allocation")
         ring = RingBuffer(metal_device, capacity=4096)
 
         buf, offset = ring.alloc(1024)
@@ -83,6 +93,7 @@ class TestRingBufferBasics:
         assert buf is ring.buffer
 
     def test_sequential_allocations(self, metal_device):
+        logger.info("running test_sequential_allocations")
         ring = RingBuffer(metal_device, capacity=4096)
 
         buf1, offset1 = ring.alloc(512)
@@ -93,6 +104,7 @@ class TestRingBufferBasics:
         assert buf1 is buf2 is buf3 is ring.buffer
 
     def test_reset_clears_offset(self, metal_device):
+        logger.info("running test_reset_clears_offset")
         ring = RingBuffer(metal_device, capacity=4096)
 
         _, offset1 = ring.alloc(1024)
@@ -108,6 +120,7 @@ class TestRingBufferBasics:
         assert ring.used >= 1024
 
     def test_capacity_enforced(self, metal_device):
+        logger.info("running test_capacity_enforced")
         ring = RingBuffer(metal_device, capacity=1024)
 
         _, offset1 = ring.alloc(512)
@@ -120,6 +133,7 @@ class TestRingBufferBasics:
             ring.alloc(512)
 
     def test_can_alloc_prediction(self, metal_device):
+        logger.info("running test_can_alloc_prediction")
         ring = RingBuffer(metal_device, capacity=4096)
 
         assert ring.can_alloc(2048) is True
@@ -131,6 +145,7 @@ class TestRingBufferBasics:
         assert ring.can_alloc(2048) is False
 
     def test_high_water_mark(self, metal_device):
+        logger.info("running test_high_water_mark")
         ring = RingBuffer(metal_device, capacity=4096)
 
         ring.alloc(1024)
@@ -144,6 +159,7 @@ class TestRingBufferBasics:
         assert ring.high_water_mark >= 1024 + 512
 
     def test_allocation_count(self, metal_device):
+        logger.info("running test_allocation_count")
         ring = RingBuffer(metal_device, capacity=4096)
 
         assert ring.stats()["allocation_count"] == 0
@@ -165,6 +181,7 @@ class TestRingBufferAlignment:
     """Test cache line and page alignment."""
 
     def test_cache_line_alignment(self, metal_device):
+        logger.info("running test_cache_line_alignment")
         ring = RingBuffer(metal_device, capacity=8192)
 
         offsets = []
@@ -178,6 +195,7 @@ class TestRingBufferAlignment:
                 assert gap >= 128, f"Allocation {i} not cache-line aligned: gap={gap}"
 
     def test_small_buffer_alignment(self, metal_device):
+        logger.info("running test_small_buffer_alignment")
         ring = RingBuffer(metal_device, capacity=4096)
 
         _, offset1 = ring.alloc(1)
@@ -187,6 +205,7 @@ class TestRingBufferAlignment:
         assert offset2 == 128
 
     def test_large_buffer_page_alignment(self, metal_device):
+        logger.info("running test_large_buffer_page_alignment")
         ring = RingBuffer(metal_device, capacity=1024 * 1024)
 
         large_size = 128 * 1024  # 128KB, triggers page alignment
@@ -200,6 +219,7 @@ class TestRingBufferAllocBytes:
     """Test alloc_bytes for CPU-side access."""
 
     def test_alloc_bytes_returns_memoryview(self, metal_device):
+        logger.info("running test_alloc_bytes_returns_memoryview")
         ring = RingBuffer(metal_device, capacity=4096)
 
         view, offset = ring.alloc_bytes(256)
@@ -209,6 +229,7 @@ class TestRingBufferAllocBytes:
         assert offset == 0
 
     def test_alloc_bytes_writable(self, metal_device):
+        logger.info("running test_alloc_bytes_writable")
         ring = RingBuffer(metal_device, capacity=4096)
 
         view, offset = ring.alloc_bytes(256)
@@ -220,6 +241,7 @@ class TestRingBufferAllocBytes:
             assert view[i] == i % 256, f"Data corruption at byte {i}"
 
     def test_alloc_bytes_no_overlap(self, metal_device):
+        logger.info("running test_alloc_bytes_no_overlap")
         ring = RingBuffer(metal_device, capacity=4096)
 
         view1, offset1 = ring.alloc_bytes(256)
@@ -236,6 +258,7 @@ class TestRingBufferAllocBytes:
             assert view2[i] == 0xBB, f"view2 corrupted at {i}"
 
     def test_alloc_bytes_overflow(self, metal_device):
+        logger.info("running test_alloc_bytes_overflow")
         ring = RingBuffer(metal_device, capacity=1024)
 
         ring.alloc_bytes(512)
@@ -249,6 +272,7 @@ class TestRingBufferStats:
     """Test ring buffer statistics."""
 
     def test_stats_structure(self, metal_device):
+        logger.info("running test_stats_structure")
         ring = RingBuffer(metal_device, capacity=4096)
 
         stats = ring.stats()
@@ -262,6 +286,7 @@ class TestRingBufferStats:
         assert "peak_utilization" in stats
 
     def test_utilization_tracking(self, metal_device):
+        logger.info("running test_utilization_tracking")
         ring = RingBuffer(metal_device, capacity=4096)
 
         stats1 = ring.stats()
@@ -282,6 +307,7 @@ class TestRingBufferStats:
         assert stats3["peak_utilization"] > 0.0  # Peak persists
 
     def test_capacity_consistency(self, metal_device):
+        logger.info("running test_capacity_consistency")
         ring = RingBuffer(metal_device, capacity=4096)
 
         assert ring.capacity == ring.stats()["capacity_bytes"]
@@ -294,12 +320,14 @@ class TestGlobalRingBuffer:
     """Test global ring buffer singleton functions."""
 
     def test_get_ring_buffer_singleton(self, metal_device):
+        logger.info("running test_get_ring_buffer_singleton")
         ring1 = get_ring_buffer(metal_device, capacity=1024 * 1024)
         ring2 = get_ring_buffer(metal_device, capacity=1024 * 1024)
 
         assert ring1 is ring2
 
     def test_get_ring_buffer_different_device(self, metal_device):
+        logger.info("running test_get_ring_buffer_different_device")
         import Metal
 
         ring1 = get_ring_buffer(metal_device, capacity=1024 * 1024)
@@ -314,6 +342,7 @@ class TestGlobalRingBuffer:
             assert ring1 is not ring2
 
     def test_reset_ring_buffer_global(self, metal_device):
+        logger.info("running test_reset_ring_buffer_global")
         ring = get_ring_buffer(metal_device, capacity=1024 * 1024)
 
         _, _ = ring.alloc(1024)
@@ -324,6 +353,7 @@ class TestGlobalRingBuffer:
         assert ring.used == 0
 
     def test_ring_buffer_stats_global(self, metal_device):
+        logger.info("running test_ring_buffer_stats_global")
         reset_ring_buffer()
         ring = get_ring_buffer(metal_device, capacity=1024 * 1024)
 
@@ -341,6 +371,7 @@ class TestRingBufferEdgeCases:
     """Test edge cases and error handling."""
 
     def test_zero_size_allocation(self, metal_device):
+        logger.info("running test_zero_size_allocation")
         ring = RingBuffer(metal_device, capacity=4096)
 
         _, offset = ring.alloc(0)
@@ -349,6 +380,7 @@ class TestRingBufferEdgeCases:
         assert ring.used == 0  # Zero-size uses no space
 
     def test_exact_capacity_allocation(self, metal_device):
+        logger.info("running test_exact_capacity_allocation")
         ring = RingBuffer(metal_device, capacity=4096)
 
         _, _ = ring.alloc(4096)
@@ -356,6 +388,7 @@ class TestRingBufferEdgeCases:
         assert ring.available == 0
 
     def test_repeated_reset_no_leak(self, metal_device):
+        logger.info("running test_repeated_reset_no_leak")
         ring = RingBuffer(metal_device, capacity=1024 * 1024)
 
         initial_capacity = ring.capacity
@@ -368,6 +401,7 @@ class TestRingBufferEdgeCases:
         assert ring.capacity == initial_capacity
 
     def test_large_number_of_allocations(self, metal_device):
+        logger.info("running test_large_number_of_allocations")
         ring = RingBuffer(metal_device, capacity=1024 * 1024)
 
         ring.reset()
@@ -380,9 +414,11 @@ class TestRingBufferEdgeCases:
         assert ring.stats()["allocation_count"] == 100
 
     def test_reset_between_forward_passes(self, metal_device):
+        logger.info("running test_reset_between_forward_passes")
         ring = RingBuffer(metal_device, capacity=1024 * 1024)
 
         def forward_pass(pass_id):
+            logger.debug("forward_pass called with pass_id=%s", pass_id)
             ring.reset()
 
             allocations = []

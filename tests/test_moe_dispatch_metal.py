@@ -1,7 +1,11 @@
+import logging
 import pytest
 import torch
 
 from metal_marlin.moe_dispatch import _USE_METAL
+
+
+logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.skipif(not _USE_METAL, reason="Metal not available")
 
@@ -11,6 +15,7 @@ pytestmark = pytest.mark.skipif(not _USE_METAL, reason="Metal not available")
     (256, 4, 64),
 ])
 def test_group_tokens_matches_pytorch(batch, top_k, num_experts):
+    logger.info("running test_group_tokens_matches_pytorch")
     import metal_marlin.moe_dispatch as mod
     from metal_marlin.moe_dispatch_metal import group_tokens_by_expert_metal
 
@@ -41,6 +46,7 @@ def test_group_tokens_matches_pytorch(batch, top_k, num_experts):
 
 def test_gather_scatter_roundtrip():
     """Test gather + expert compute + scatter gives correct result."""
+    logger.info("running test_gather_scatter_roundtrip")
     from metal_marlin.moe_dispatch import (
         gather_for_experts,
         group_tokens_by_expert_full,

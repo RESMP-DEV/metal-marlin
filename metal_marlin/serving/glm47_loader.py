@@ -9,6 +9,7 @@ This module provides:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import warnings
 from pathlib import Path
@@ -26,7 +27,11 @@ except Exception:
     GLM4MoEExperts = None  # type: ignore[assignment]
 
 
+
+logger = logging.getLogger(__name__)
+
 def _load_config_dict(model_path: str | Path) -> dict[str, Any]:
+    logger.info("_load_config_dict called with model_path=%s", model_path)
     path = Path(model_path)
     config_path = path / "config.json" if path.is_dir() else path
     if config_path.name != "config.json":
@@ -42,6 +47,7 @@ def _load_config_dict(model_path: str | Path) -> dict[str, Any]:
 
 
 def _coerce_int(config: dict[str, Any], *keys: str) -> int | None:
+    logger.debug("_coerce_int called with config=%s", config)
     for key in keys:
         value = config.get(key)
         if isinstance(value, bool):
@@ -55,6 +61,7 @@ def _coerce_int(config: dict[str, Any], *keys: str) -> int | None:
 
 def is_glm47_model(model_path: str | Path) -> bool:
     """Return True if `config.json` identifies a GLM-4.7 model checkpoint."""
+    logger.debug("is_glm47_model called with model_path=%s", model_path)
     try:
         config = _load_config_dict(model_path)
     except (FileNotFoundError, ValueError, json.JSONDecodeError, OSError):
@@ -84,6 +91,7 @@ class GLM47Loader:
         trust_remote_code: bool = True,
         kv_quantize_mode: str = DEFAULT_KV_QUANTIZE_MODE,
     ) -> None:
+        logger.debug("initializing %s with model_path=%s", type(self).__name__, model_path)
         self.model_path = Path(model_path)
         self.device = device
         self.max_seq_len = int(max_seq_len)
@@ -99,6 +107,7 @@ class GLM47Loader:
         self.expert_layers: list[Any] = []
 
     def _warn_if_unexpected_shape(self, config: dict[str, Any]) -> None:
+        logger.debug("_warn_if_unexpected_shape called with config=%s", config)
         num_layers = _coerce_int(config, "num_hidden_layers")
         if num_layers is not None and num_layers != self.expected_num_layers:
             warnings.warn(
@@ -121,6 +130,7 @@ class GLM47Loader:
             )
 
     def _resolve_tokenizer_id(self, config: dict[str, Any]) -> str:
+        logger.debug("_resolve_tokenizer_id called with config=%s", config)
         if self.tokenizer_id:
             return self.tokenizer_id
 
@@ -132,6 +142,7 @@ class GLM47Loader:
         return GLM47_DEFAULT_TOKENIZER_ID
 
     def _load_tokenizer(self, config: dict[str, Any]) -> Any:
+        logger.info("_load_tokenizer called with config=%s", config)
         from transformers import AutoTokenizer
 
         tokenizer_id = self._resolve_tokenizer_id(config)
@@ -155,11 +166,13 @@ class GLM47Loader:
         return tokenizer
 
     def _find_glm4_expert_layers(self, model: Any) -> list[Any]:
+        logger.debug("_find_glm4_expert_layers called with model=%s", model)
         if GLM4MoEExperts is None:
             return []
         return [module for module in model.modules() if isinstance(module, GLM4MoEExperts)]
 
     def _initialize_glm4_experts(self, model: Any) -> list[Any]:
+        logger.debug("_initialize_glm4_experts called with model=%s", model)
         expert_layers = self._find_glm4_expert_layers(model)
         if expert_layers:
             return expert_layers
@@ -185,6 +198,7 @@ class GLM47Loader:
         batch_size: int | None = None,
         max_seq_len: int | None = None,
     ) -> Any:
+        logger.debug("_create_mla_kv_cache called with model=%s", model)
         require_torch("GLM47Loader KV cache setup")
         assert torch is not None
 
@@ -229,6 +243,7 @@ class GLM47Loader:
         max_seq_len: int | None = None,
     ) -> Any:
         """Create a fresh MLAKVCache instance for serving requests."""
+        logger.debug("create_kv_cache called with batch_size=%s, max_seq_len=%s", batch_size, max_seq_len)
         if self.model is None:
             raise RuntimeError("Model has not been loaded yet.")
         return self._create_mla_kv_cache(
@@ -239,6 +254,7 @@ class GLM47Loader:
 
     def load(self) -> Any:
         """Load GLM-4.7-Flash model, tokenizer, experts, and MLA KV cache."""
+        logger.info("load called")
         config = _load_config_dict(self.model_path)
         if not is_glm47_model(self.model_path):
             architectures = config.get("architectures", [])
@@ -293,6 +309,7 @@ def load_glm47(
     kv_quantize_mode: str = DEFAULT_KV_QUANTIZE_MODE,
 ) -> Any:
     """Load a GLM-4.7-Flash MMFP4 checkpoint and return a model ready for inference."""
+    logger.info("load_glm47 called with model_path=%s", model_path)
     loader = GLM47Loader(
         model_path=model_path,
         device=device,

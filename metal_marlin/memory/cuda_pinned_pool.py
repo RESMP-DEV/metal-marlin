@@ -7,6 +7,7 @@ semaphore-guarded pool, eliminating per-tensor pin/unpin overhead.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from collections.abc import Generator
@@ -14,6 +15,9 @@ from contextlib import contextmanager
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class CUDAPinnedPool:
     """Pool of pre-allocated pinned CPU buffers for fast H2D DMA transfers.
@@ -27,6 +31,7 @@ class CUDAPinnedPool:
     """
 
     def __init__(self, num_buffers: int = 4, buffer_size_mb: float = 64.0) -> None:
+        logger.debug("initializing %s with num_buffers=%s, buffer_size_mb=%s", type(self).__name__, num_buffers, buffer_size_mb)
         if not torch.cuda.is_available():
             raise RuntimeError(
                 "CUDAPinnedPool requires CUDA. torch.cuda.is_available() returned False."
@@ -59,6 +64,7 @@ class CUDAPinnedPool:
         Yields:
             A pinned CPU ``torch.uint8`` tensor with at least *size_bytes* elements.
         """
+        logger.debug("get_buffer called with size_bytes=%s", size_bytes)
         if size_bytes > self._buffer_size:
             # Oversized request: allocate a one-off pinned tensor.
             yield torch.empty(size_bytes, dtype=torch.uint8, pin_memory=True)

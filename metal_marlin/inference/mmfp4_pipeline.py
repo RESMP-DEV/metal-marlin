@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
@@ -69,6 +70,7 @@ class PersistentKVCache:
         This method returns allocated tensors to the global buffer pool
         for reuse, avoiding GPU memory fragmentation.
         """
+        logger.debug("clear called")
         if self.kv_cache is not None:
             if hasattr(self.kv_cache, 'reset'):
                 # Reset returns buffers to pool internally
@@ -95,6 +97,7 @@ class PersistentKVCache:
     
     def get_cache_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
+        logger.debug("get_cache_stats called")
         total = self.hit_count + self.miss_count
         hit_rate = self.hit_count / total if total > 0 else 0.0
         memory_mb = 0.0
@@ -116,6 +119,7 @@ class PersistentKVCache:
         Args:
             new_seq_len: New sequence length to allocate for
         """
+        logger.debug("_resize_cached_ids called with new_seq_len=%s", new_seq_len)
         batch_size = self.cached_ids.shape[0]
         device = self.cached_ids.device
         dtype = self.cached_ids.dtype
@@ -147,6 +151,7 @@ class PersistentKVCache:
         Args:
             new_len: New sequence length to truncate to
         """
+        logger.debug("truncate called with new_len=%s", new_len)
         if new_len < 0:
             new_len = 0
         
@@ -193,21 +198,27 @@ class PersistentKVCache:
     
     def reset(self) -> None:
         """Reset the cache to empty state. Alias for clear()."""
+        logger.debug("reset called")
         self.clear()
     
     def memory_usage_mb(self) -> float:
         """Get current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         if self.kv_cache is not None and hasattr(self.kv_cache, 'memory_usage_mb'):
             return self.kv_cache.memory_usage_mb()
         return 0.0
     
     def exceeds_memory_limit(self) -> bool:
         """Check if cache exceeds the configured memory limit."""
+        logger.debug("exceeds_memory_limit called")
         return self.memory_usage_mb() > (self.max_memory_gb * 1024)
 
 if TYPE_CHECKING:
     import torch as torch_typing
 
+
+
+logger = logging.getLogger(__name__)
 
 def _fused_sampling(
     probs: torch_typing.Tensor,
@@ -259,6 +270,7 @@ def _fused_sampling(
     Returns:
         Sampled token IDs [batch, 1]
     """
+    logger.debug("_fused_sampling called with probs=%s, temperature=%s, top_p=%s", probs, temperature, top_p)
     if temperature <= 0:
         # Greedy decode path can reuse top-k buffers for allocation-free argmax.
         if (
@@ -462,6 +474,7 @@ def _optimized_generate(
         Output token IDs [batch, seq_len + generated_tokens].
         If return_past_key_values=True, returns (output_ids, past_key_values).
     """
+    logger.debug("_optimized_generate called with model=%s, input_ids=%s, max_new_tokens=%s", model, input_ids, max_new_tokens)
     require_torch()
     assert torch is not None
     
@@ -476,6 +489,7 @@ def _optimized_generate(
         *,
         fill_value: int | float | None = None,
     ) -> torch.Tensor:
+        logger.debug("_acquire_buffer called with name=%s, shape=%s, dtype=%s", name, shape, dtype)
         if buffer_pool is None:
             if fill_value == 0:
                 return torch.zeros(shape, dtype=dtype, device=device)
@@ -834,16 +848,20 @@ class MMFP4ForCausalLM(Protocol):
     """Minimal protocol required by MMFP4Pipeline."""
 
     def to(self, device: str) -> MMFP4ForCausalLM:
+        logger.debug("to called with device=%s", device)
         ...
 
     def eval(self) -> MMFP4ForCausalLM:
+        logger.debug("eval called")
         ...
 
     def generate(self, input_ids: torch_typing.Tensor, **kwargs: Any) -> torch_typing.Tensor:
+        logger.debug("generate called with input_ids=%s", input_ids)
         ...
 
 
 def _require_transformers() -> None:
+    logger.debug("_require_transformers called")
     try:
         import transformers  # noqa: F401
     except ImportError as exc:  # pragma: no cover - import guard
@@ -853,6 +871,7 @@ def _require_transformers() -> None:
 
 
 def _default_dtype_for_device(device: str) -> Any:
+    logger.debug("_default_dtype_for_device called with device=%s", device)
     if torch is None:
         return None
     if device in {"mps", "cuda"}:
@@ -861,6 +880,7 @@ def _default_dtype_for_device(device: str) -> Any:
 
 
 def _resolve_device(requested_device: str) -> str:
+    logger.debug("_resolve_device called with requested_device=%s", requested_device)
     require_torch()
     assert torch is not None
 
@@ -873,18 +893,21 @@ def _resolve_device(requested_device: str) -> str:
 
 def _tensor_scalar_to_bool_cpu(tensor: torch_typing.Tensor) -> bool:
     """Convert a single-value tensor to bool via explicit CPU transfer."""
+    logger.debug("_tensor_scalar_to_bool_cpu called with tensor=%s", tensor)
     cpu_view = tensor.detach().to(device="cpu", dtype=torch.bool).reshape(-1).numpy()
     return bool(cpu_view[0])
 
 
 def _tensor_scalar_to_int_cpu(tensor: torch_typing.Tensor) -> int:
     """Convert a single-value tensor to int via explicit CPU transfer."""
+    logger.debug("_tensor_scalar_to_int_cpu called with tensor=%s", tensor)
     cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
     return int(cpu_view[0])
 
 
 def _tensor_to_int_list_cpu(tensor: torch_typing.Tensor) -> list[int]:
     """Convert a tensor of token IDs to a Python list via explicit CPU transfer."""
+    logger.debug("_tensor_to_int_list_cpu called with tensor=%s", tensor)
     cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
     return [int(v) for v in cpu_view]
 
@@ -906,6 +929,7 @@ def _truncate_kv_cache_optimized(
     Returns:
         Truncated past_key_values with contiguous tensors
     """
+    logger.debug("_truncate_kv_cache_optimized called with past_key_values=%s, num_draft=%s, num_accepted=%s", past_key_values, num_draft, num_accepted)
     cutoff_offset = num_draft - num_accepted
     
     new_past_kv = []
@@ -920,6 +944,7 @@ def _truncate_kv_cache_optimized(
 
 
 def _infer_model_device(model: Any) -> str:
+    logger.debug("_infer_model_device called with model=%s", model)
     if hasattr(model, "device"):
         return str(model.device)
     if hasattr(model, "parameters"):
@@ -934,6 +959,7 @@ def _infer_model_device(model: Any) -> str:
 
 
 def _apply_chat_template(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
+    logger.debug("_apply_chat_template called with tokenizer=%s, messages=%s", tokenizer, messages)
     if hasattr(tokenizer, "apply_chat_template"):
         return tokenizer.apply_chat_template(
             messages,
@@ -987,6 +1013,7 @@ def _speculative_generate(
         - Generated token IDs [batch, seq_len + generated_tokens]
         - Final past_key_values for persistent caching
     """
+    logger.debug("_speculative_generate called with pipeline=%s, input_ids=%s, max_new_tokens=%s", pipeline, input_ids, max_new_tokens)
     require_torch()
     assert torch is not None
     
@@ -1005,6 +1032,7 @@ def _speculative_generate(
         shape: tuple[int, ...],
         dtype: torch.dtype,
     ) -> torch.Tensor:
+        logger.debug("_acquire_buffer called with name=%s, shape=%s, dtype=%s", name, shape, dtype)
         if isinstance(pool, BufferPool):
             return pool.get(name=name, shape=shape, dtype=dtype)
         return torch.empty(shape, dtype=dtype, device=device)
@@ -1226,6 +1254,7 @@ class MMFP4Pipeline:
         kv_cache_dtype: str | None = None,
         kv_cache_quant_group_size: int = 128,
     ):
+        logger.debug("initializing %s with model=%s, tokenizer=%s, max_cache_memory_gb=%s, enable_persistent_cache=%s, use_paged_attention=%s", type(self).__name__, model, tokenizer, max_cache_memory_gb, enable_persistent_cache, use_paged_attention)
         self.model = model
         self.tokenizer = tokenizer
         self.device = _infer_model_device(model)
@@ -1297,6 +1326,7 @@ class MMFP4Pipeline:
             weight_sharing: Enable weight sharing with target model (default False)
             adaptive_depth: Enable adaptive speculation depth (default True)
         """
+        logger.debug("enable_speculative_decoding called with num_predictions=%s, hidden_size=%s, vocab_size=%s", num_predictions, hidden_size, vocab_size)
         require_torch()
         assert torch is not None
         
@@ -1336,6 +1366,7 @@ class MMFP4Pipeline:
         Returns:
             Dict with memory statistics, or None if weight sharing is not enabled
         """
+        logger.debug("get_speculative_memory_savings called")
         if (
             self._draft_model is not None
             and hasattr(self._draft_model, "get_memory_savings")
@@ -1346,6 +1377,7 @@ class MMFP4Pipeline:
     @property
     def adaptive_depth_enabled(self) -> bool:
         """Whether adaptive speculation depth is enabled."""
+        logger.debug("adaptive_depth_enabled called")
         return self._adaptive_depth_enabled
     
     def get_speculation_stats(self) -> dict:
@@ -1360,6 +1392,7 @@ class MMFP4Pipeline:
         """
         # These stats are accumulated during generation
         # For now, return basic info
+        logger.debug("get_speculation_stats called")
         return {
             "adaptive_depth_enabled": self._adaptive_depth_enabled,
             "draft_model_initialized": self._draft_model is not None,
@@ -1368,6 +1401,7 @@ class MMFP4Pipeline:
 
     def _has_glm4_mla_decode_kernel(self) -> bool:
         """Check whether `mla_fused_attention_decode_glm4` is available."""
+        logger.debug("_has_glm4_mla_decode_kernel called")
         if not str(self.device).startswith("mps"):
             return False
         kernel_name = "mla_fused_attention_decode_glm4"
@@ -1392,6 +1426,7 @@ class MMFP4Pipeline:
 
     def _configure_mla_fused_attention_layers(self) -> bool:
         """Enable fused MLA decode and GLM4 kernel preference on attention layers."""
+        logger.info("_configure_mla_fused_attention_layers starting")
         layer_stack = getattr(getattr(self.model, "model", None), "layers", None)
         if layer_stack is None:
             return False
@@ -1412,6 +1447,7 @@ class MMFP4Pipeline:
 
     def _configure_paged_attention_layers(self) -> bool:
         """Propagate use_paged_attention to model config/layers and warm adapter."""
+        logger.info("_configure_paged_attention_layers starting")
         enabled = bool(self.use_paged_attention)
         self._glm4_mla_decode_kernel_available = self._has_glm4_mla_decode_kernel()
         requested_dtype = (self._kv_cache_dtype or "").lower()
@@ -1456,6 +1492,7 @@ class MMFP4Pipeline:
 
     def _supports_paged_forward_decode(self) -> bool:
         """Check whether model.forward likely supports HF-style decode kwargs."""
+        logger.debug("_supports_paged_forward_decode called")
         forward_fn = getattr(self.model, "forward", None)
         if forward_fn is None:
             return False
@@ -1483,6 +1520,7 @@ class MMFP4Pipeline:
         eos_token_id: int | None = None,
     ) -> tuple[torch.Tensor | None, Any]:
         """Try paged decode loop; return (None, None) on unsupported/failure."""
+        logger.debug("_try_paged_forward_generate called with input_ids=%s, max_new_tokens=%s, attention_mask=%s", input_ids, max_new_tokens, attention_mask)
         require_torch()
         assert torch is not None
 
@@ -1533,6 +1571,7 @@ class MMFP4Pipeline:
         Returns:
             Initialized PersistentKVCache instance with pooled buffers
         """
+        logger.debug("_init_persistent_kv_cache called with batch_size=%s, max_seq_len=%s", batch_size, max_seq_len)
         require_torch()
         assert torch is not None
         
@@ -1562,6 +1601,7 @@ class MMFP4Pipeline:
         when switching between unrelated conversations or when memory
         needs to be reclaimed.
         """
+        logger.debug("clear_persistent_kv_cache called")
         if self._persistent_kv is not None:
             self._persistent_kv.clear()
             # Explicitly return cached_ids to pool
@@ -1575,6 +1615,7 @@ class MMFP4Pipeline:
         Returns:
             Dict with cache statistics, or None if persistent cache is not initialized
         """
+        logger.debug("get_persistent_cache_stats called")
         if self._persistent_kv is None:
             return None
         return self._persistent_kv.get_cache_stats()
@@ -1596,6 +1637,7 @@ class MMFP4Pipeline:
         Returns:
             Tuple of (input_ids to process, kv_cache to use, cached_prefix_len)
         """
+        logger.debug("_match_cache_prefix called with input_ids=%s", input_ids)
         if self._persistent_kv is None or not self._enable_persistent_cache:
             return input_ids, None, 0
         
@@ -1701,6 +1743,7 @@ class MMFP4Pipeline:
 
     def _create_kv_cache(self, batch_size: int, max_seq_len: int = 4096) -> Any:
         """Create a new KV cache object based on model configuration."""
+        logger.debug("_create_kv_cache called with batch_size=%s, max_seq_len=%s", batch_size, max_seq_len)
         require_torch()
         config = getattr(self.model, "config", None)
         if config is None:
@@ -1789,6 +1832,7 @@ class MMFP4Pipeline:
         Returns:
             MMFP4Pipeline instance with loaded model and tokenizer
         """
+        logger.debug("from_pretrained called with model_path=%s, device=%s, max_cache_memory_gb=%s", model_path, device, max_cache_memory_gb)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -1852,6 +1896,7 @@ class MMFP4Pipeline:
         stream: bool = False,
     ) -> str | Iterator[str]:
         """Generate text from prompt."""
+        logger.debug("generate called with prompt=%s, max_new_tokens=%s, temperature=%s", prompt, max_new_tokens, temperature)
         self._configure_paged_attention_layers()
 
         # Check cache for exact match (non-streaming only)
@@ -2033,6 +2078,7 @@ class MMFP4Pipeline:
 
     def chat(self, messages: list[dict], **kwargs: Any) -> str:
         """Chat completion with message history."""
+        logger.debug("chat called with messages=%s", messages)
         prompt = _apply_chat_template(self.tokenizer, messages)
         result = self(prompt, **kwargs)
         if isinstance(result, str):
@@ -2056,6 +2102,7 @@ class MMFP4Pipeline:
         Optimization: Batched token queueing with reduced cross-thread overhead.
         Yields StreamingOutput objects with text, finish reason, and token count.
         """
+        logger.debug("_streaming_generate called with input_ids=%s, attention_mask=%s, max_new_tokens=%s", input_ids, attention_mask, max_new_tokens)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -2081,6 +2128,7 @@ class MMFP4Pipeline:
                 batch_size: int = 10,  # Number of tokens to buffer
                 **decode_kwargs: Any,
             ):
+                logger.debug("initializing %s with tokenizer=%s, queue=%s, loop=%s, skip_prompt=%s, batch_size=%s", type(self).__name__, tokenizer, queue, loop, skip_prompt, batch_size)
                 self.tokenizer = tokenizer
                 self.queue = queue
                 self.loop = loop
@@ -2091,6 +2139,7 @@ class MMFP4Pipeline:
                 self.token_ids_buffer: list[int] = []
 
             def _flush_buffer(self) -> None:
+                logger.debug("_flush_buffer called")
                 if not self.token_ids_buffer:
                     return
 
@@ -2101,6 +2150,7 @@ class MMFP4Pipeline:
                 self.token_ids_buffer = []
 
             def put(self, value: torch_typing.Tensor) -> None:
+                logger.debug("put called with value=%s", value)
                 if self.skip_prompt and self.next_tokens_are_prompt:
                     self.next_tokens_are_prompt = False
                     return
@@ -2117,6 +2167,7 @@ class MMFP4Pipeline:
                     self._flush_buffer()
 
             def end(self) -> None:
+                logger.debug("end called")
                 self._flush_buffer()
                 self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
 
@@ -2170,6 +2221,7 @@ class MMFP4Pipeline:
 
         def generate_thread() -> None:
             """Run sync generation in thread, feed tokens to async queue."""
+            logger.debug("generate_thread called")
             try:
                 with torch.inference_mode():
                     outputs = self.model.generate(
@@ -2308,6 +2360,7 @@ class MMFP4Pipeline:
             - speculate_from_hidden(hidden_states, num_tokens): Generate draft tokens
             - speculate_fast(): Ultra-fast path with fused operations
         """
+        logger.debug("_draft_model called with input_ids=%s, num_draft_tokens=%s", input_ids, num_draft_tokens)
         require_torch()
         assert torch is not None
 
@@ -2422,6 +2475,7 @@ class MMFP4Pipeline:
             - updated_past_kv: Updated KV cache for next iteration
             - num_generated: Number of tokens actually generated
         """
+        logger.debug("_speculative_decode called with input_ids=%s, past_key_values=%s, num_draft_tokens=%s", input_ids, past_key_values, num_draft_tokens)
         require_torch()
         assert torch is not None
         
@@ -2590,6 +2644,7 @@ class MMFP4Pipeline:
             - accepted_mask: Boolean tensor [batch, draft_len]
             - next_token: Tensor [batch] with the sampled next token
         """
+        logger.debug("_draft_verify called with draft_tokens=%s, target_logits=%s, temperature=%s", draft_tokens, target_logits, temperature)
         require_torch()
         assert torch is not None
 
@@ -2642,6 +2697,7 @@ class MMFP4Pipeline:
         Yields StreamingOutput objects containing text segments, finish reason,
         and token counts for structured streaming consumption.
         """
+        logger.debug("chat_stream called with messages=%s, max_new_tokens=%s, temperature=%s", messages, max_new_tokens, temperature)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -2703,6 +2759,7 @@ class MMFP4Pipeline:
             >>> for batch in pipeline._dynamic_batch(requests, max_batch_size=4):
             ...     results = self._process_batch(batch)
         """
+        logger.debug("_dynamic_batch called with requests=%s, max_batch_size=%s, min_batch_size=%s", requests, max_batch_size, min_batch_size)
         require_torch()
         assert torch is not None
 
@@ -2715,6 +2772,7 @@ class MMFP4Pipeline:
 
         def get_memory_usage() -> float:
             """Get current GPU memory usage ratio."""
+            logger.debug("get_memory_usage called")
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated()
                 reserved = torch.cuda.memory_reserved()
@@ -2727,6 +2785,7 @@ class MMFP4Pipeline:
 
         def estimate_memory_per_request(request: dict[str, Any]) -> int:
             """Estimate memory needed for a request based on sequence length."""
+            logger.debug("estimate_memory_per_request called with request=%s", request)
             input_ids = request.get("input_ids")
             if input_ids is None:
                 return 0
@@ -2801,6 +2860,7 @@ class MMFP4Pipeline:
         Returns:
             List of generated text strings
         """
+        logger.debug("_process_batch called with batch=%s, temperature=%s, top_p=%s", batch, temperature, top_p)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -2915,6 +2975,7 @@ class MMFP4Pipeline:
         Yields:
             Tuple of (request_index, generated_text) for each completed request.
         """
+        logger.debug("_continuous_batching called with requests=%s, batch_size=%s", requests, batch_size)
         require_torch()
         assert torch is not None
         

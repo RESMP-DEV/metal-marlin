@@ -7,6 +7,7 @@ This is the foundation layer that other profiling modules build upon.
 from __future__ import annotations
 
 import statistics
+import logging
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -19,6 +20,7 @@ from .trace import ChromeTrace, TraceEvent
 
 def _gpu_sync() -> None:
     """Synchronize GPU if torch MPS is available."""
+    logger.debug("_gpu_sync called")
     if HAS_TORCH and torch is not None and torch.backends.mps.is_available():
         torch.mps.synchronize()
 
@@ -44,6 +46,7 @@ class KernelProfile:
     @property
     def memory_allocated_mb(self) -> float:
         """Memory allocated in megabytes."""
+        logger.debug("memory_allocated_mb called")
         return self.memory_allocated_bytes / (1024 * 1024)
 
 
@@ -78,6 +81,7 @@ class ProfileAggregate:
     @classmethod
     def from_profiles(cls, profiles: list[KernelProfile]) -> ProfileAggregate:
         """Compute aggregate statistics from a list of profiles."""
+        logger.debug("from_profiles called with profiles=%s", profiles)
         if not profiles:
             raise ValueError("Cannot aggregate empty profile list")
 
@@ -126,6 +130,7 @@ class Profiler:
         sync_after: bool = True,
         collect_memory: bool = False,
     ):
+        logger.debug("initializing %s", type(self).__name__)
         self.sync_before = sync_before
         self.sync_after = sync_after
         self.collect_memory = collect_memory
@@ -150,6 +155,7 @@ class Profiler:
             with profiler.profile("gemm_fp4", {"M": 4096, "N": 4096}):
                 result = kernel(...)
         """
+        logger.debug("profile called with name=%s, metadata=%s", name, metadata)
         if self.sync_before:
             _gpu_sync()
 
@@ -173,15 +179,18 @@ class Profiler:
 
     def add_profile(self, profile: KernelProfile) -> None:
         """Add a pre-constructed profile to the collection."""
+        logger.debug("add_profile called with profile=%s", profile)
         self._profiles.append(profile)
 
     @property
     def profiles(self) -> list[KernelProfile]:
         """All collected profiles."""
+        logger.debug("profiles called")
         return list(self._profiles)
 
     def get_profiles(self, name: str | None = None) -> list[KernelProfile]:
         """Get profiles, optionally filtered by name."""
+        logger.debug("get_profiles called with name=%s", name)
         if name is None:
             return list(self._profiles)
         return [p for p in self._profiles if p.name == name]
@@ -195,6 +204,7 @@ class Profiler:
         Returns:
             Dictionary mapping kernel names to their aggregated stats.
         """
+        logger.debug("aggregate called with name=%s", name)
         from collections import defaultdict
 
         by_name: dict[str, list[KernelProfile]] = defaultdict(list)
@@ -206,10 +216,12 @@ class Profiler:
 
     def clear(self) -> None:
         """Clear all collected profiles."""
+        logger.debug("clear called")
         self._profiles.clear()
 
     def print_summary(self) -> None:
         """Print formatted summary table to stdout."""
+        logger.debug("print_summary called")
         aggregates = self.aggregate()
         if not aggregates:
             print("No profiles collected")
@@ -230,6 +242,7 @@ class Profiler:
 
     def to_dict(self) -> list[dict[str, Any]]:
         """Export profiles as list of dictionaries."""
+        logger.debug("to_dict called")
         return [
             {
                 "name": p.name,
@@ -257,6 +270,7 @@ class KernelCapture:
     perf_state: Any | None = None
 
     def to_trace_events(self, *, pid: int = 0, tid: int = 0) -> list[TraceEvent]:
+        logger.debug("to_trace_events called")
         events: list[TraceEvent] = []
         events.append(
             TraceEvent(
@@ -308,6 +322,7 @@ class MetalProfileSession:
         tid: int = 0,
         enable_counters: bool = True,
     ) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         from .gpu_counters import GPUProfiler
 
         self._pid = pid
@@ -327,6 +342,7 @@ class MetalProfileSession:
         threadgroup_config: Any | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Iterator[KernelCapture]:
+        logger.debug("capture called with name=%s", name)
         from .gpu_counters import read_gpu_performance_state
         from .memory_bandwidth import BandwidthMeasurement, MemoryBandwidthProfiler
         from .occupancy import OccupancyAnalyzer
@@ -377,12 +393,15 @@ class MetalProfileSession:
 
     @property
     def captures(self) -> list[KernelCapture]:
+        logger.debug("captures called")
         return list(self._captures)
 
     def clear(self) -> None:
+        logger.debug("clear called")
         self._captures.clear()
 
     def to_trace(self) -> ChromeTrace:
+        logger.debug("to_trace called")
         trace = ChromeTrace(pid=self._pid, tid=self._tid)
         for capture in self._captures:
             for event in capture.to_trace_events(pid=self._pid, tid=self._tid):
@@ -390,6 +409,7 @@ class MetalProfileSession:
         return trace
 
     def export_trace(self, output_path: str) -> None:
+        logger.info("export_trace called with output_path=%s", output_path)
         trace = self.to_trace()
         trace.export_json(output_path)
 
@@ -419,19 +439,25 @@ def profile_kernel(
             result = marlin_gemm_fp4(A, B, scales)
 
         from metal_marlin.profiling import get_global_profiler
+
+logger = logging.getLogger(__name__)
+
         get_global_profiler().print_summary()
     """
+    logger.debug("profile_kernel called with name=%s, metadata=%s", name, metadata)
     with _global_profiler.profile(name, metadata) as profile:
         yield profile
 
 
 def get_global_profiler() -> Profiler:
     """Get the global profiler instance."""
+    logger.debug("get_global_profiler called")
     return _global_profiler
 
 
 def clear_global_profiles() -> None:
     """Clear all profiles from the global profiler."""
+    logger.debug("clear_global_profiles called")
     _global_profiler.clear()
 
 
@@ -464,6 +490,7 @@ def bench(
         )
         print(f"Mean: {stats.mean_ms:.3f} ms")
     """
+    logger.info("bench starting with name=%s, fn=%s", name, fn)
     profiler = Profiler(sync_before=True, sync_after=True)
 
     # Warmup (still uses GPU sync, but results discarded)

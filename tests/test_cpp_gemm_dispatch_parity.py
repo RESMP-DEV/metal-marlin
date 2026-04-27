@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest import mock
 
 import pytest
@@ -9,6 +10,9 @@ import pytest
 from metal_marlin._compat import HAS_CPP_EXT, HAS_MPS, HAS_TORCH, _metal_dispatch_ext
 from metal_marlin._compat import torch as _torch
 from metal_marlin.metal_dispatch import dispatch_gemm_fp4, dispatch_gemm_fp8, get_default_library
+
+
+logger = logging.getLogger(__name__)
 
 if not HAS_TORCH or _torch is None:
     pytest.skip("PyTorch not available", allow_module_level=True)
@@ -30,6 +34,7 @@ class _PythonFallbackUsed(RuntimeError):
 
 @pytest.fixture(scope="module")
 def metal_lib():
+    logger.debug("metal_lib called")
     try:
         return get_default_library()
     except Exception as exc:
@@ -38,6 +43,7 @@ def metal_lib():
 
 def _pack_fp4_codes_k_axis(codes: torch.Tensor) -> torch.Tensor:
     """Pack FP4 codes [K, N] into [K//8, N] uint32 (K-axis packing)."""
+    logger.info("_pack_fp4_codes_k_axis called with codes=%s", codes)
     k_dim, n_dim = codes.shape
     assert k_dim % 8 == 0
 
@@ -49,6 +55,7 @@ def _pack_fp4_codes_k_axis(codes: torch.Tensor) -> torch.Tensor:
 
 def _pack_fp8_codes_n_axis(codes: torch.Tensor) -> torch.Tensor:
     """Pack FP8 bytes [K, N] into [K, N//4] uint32 (N-axis packing)."""
+    logger.info("_pack_fp8_codes_n_axis called with codes=%s", codes)
     k_dim, n_dim = codes.shape
     assert n_dim % 4 == 0
 
@@ -59,6 +66,7 @@ def _pack_fp8_codes_n_axis(codes: torch.Tensor) -> torch.Tensor:
 
 
 def _make_fp4_case():
+    logger.debug("_make_fp4_case called")
     torch.manual_seed(7)
     m_dim, k_dim, n_dim, group_size = 4, 32, 16, 32
 
@@ -81,6 +89,7 @@ def _make_fp4_case():
 
 
 def _make_fp8_case():
+    logger.debug("_make_fp8_case called")
     torch.manual_seed(17)
     m_dim, k_dim, n_dim, group_size = 3, 32, 16, 32
 
@@ -103,12 +112,14 @@ def _make_fp8_case():
 
 
 def _dispatch_python_only(dispatch_fn, lib, *args):
+    logger.debug("_dispatch_python_only called with dispatch_fn=%s, lib=%s", dispatch_fn, lib)
     with mock.patch("metal_marlin.metal_dispatch._get_fast_path_context", return_value=None):
         return dispatch_fn(lib, *args, enable_padding=False)
 
 
 def _dispatch_cpp_only(dispatch_fn, lib, *args, case_name: str):
     # If this patched function is called, execution fell back to Python dispatch.
+    logger.debug("_dispatch_cpp_only called with dispatch_fn=%s, lib=%s", dispatch_fn, lib)
     with mock.patch(
         "metal_marlin.metal_dispatch.dispatch_kernel",
         side_effect=_PythonFallbackUsed(f"{case_name}: Python fallback was used"),
@@ -122,11 +133,13 @@ def _dispatch_cpp_only(dispatch_fn, lib, *args, case_name: str):
 
 
 def _assert_shape_and_close(python_out: torch.Tensor, cpp_out: torch.Tensor):
+    logger.debug("_assert_shape_and_close called with python_out=%s, cpp_out=%s", python_out, cpp_out)
     assert python_out.shape == cpp_out.shape
     torch.testing.assert_close(python_out.cpu(), cpp_out.cpu(), rtol=1e-2, atol=1e-2)
 
 
 def test_fp4_cpp_vs_python_dispatch_parity(metal_lib):
+    logger.info("running test_fp4_cpp_vs_python_dispatch_parity")
     case = _make_fp4_case()
     try:
         python_out = _dispatch_python_only(dispatch_gemm_fp4, metal_lib, *case)
@@ -138,6 +151,7 @@ def test_fp4_cpp_vs_python_dispatch_parity(metal_lib):
 
 
 def test_fp8_cpp_vs_python_dispatch_parity(metal_lib):
+    logger.info("running test_fp8_cpp_vs_python_dispatch_parity")
     case = _make_fp8_case()
     try:
         python_out = _dispatch_python_only(dispatch_gemm_fp8, metal_lib, *case)

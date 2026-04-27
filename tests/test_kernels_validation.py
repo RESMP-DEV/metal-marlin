@@ -1,3 +1,4 @@
+import logging
 
 import pytest
 import torch
@@ -5,9 +6,13 @@ import torch
 from metal_marlin.kernels import HAS_METAL, HAS_MPS, mmfp4_gemm
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not (HAS_MPS and HAS_METAL), reason="Requires MPS and Metal")
 def test_mmfp4_gemm_validation_m_zero():
     """Test that mmfp4_gemm asserts M > 0."""
+    logger.info("running test_mmfp4_gemm_validation_m_zero")
     device = torch.device("mps")
     M = 0
     K = 32
@@ -25,6 +30,7 @@ def test_mmfp4_gemm_validation_m_zero():
 @pytest.mark.skipif(not (HAS_MPS and HAS_METAL), reason="Requires MPS and Metal")
 def test_mmfp4_gemm_validation_n_zero():
     """Test that mmfp4_gemm asserts N > 0."""
+    logger.info("running test_mmfp4_gemm_validation_n_zero")
     device = torch.device("mps")
     M = 1
     K = 32

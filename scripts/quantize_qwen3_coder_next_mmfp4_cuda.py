@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import math
 import os
 import shutil
@@ -69,6 +70,9 @@ from metal_marlin.mr_gptq import (  # noqa: E402
     MRGPTQQuantizer,
     QuantizationFormat,
 )
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Model Configuration - Qwen3-Coder-Next
@@ -143,12 +147,14 @@ class Qwen3CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
         expert_batch_size: int = EXPERT_VRAM_BATCH_SIZE,
         **kwargs: Any,
     ):
+        logger.debug("initializing %s with expert_batch_size=%s", type(self).__name__, expert_batch_size)
         super().__init__(**kwargs)
         self.expert_batch_size = expert_batch_size
         self._layer_idx = 0
 
     def _is_deltanet_layer(self, layer_idx: int) -> bool:
         """Check if layer uses DeltaNet (linear) attention."""
+        logger.debug("_is_deltanet_layer called with layer_idx=%s", layer_idx)
         return (layer_idx % FULL_ATTENTION_INTERVAL) != (FULL_ATTENTION_INTERVAL - 1)
 
     def _get_layer_bits_for_component(
@@ -157,6 +163,7 @@ class Qwen3CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
         layer_idx: int,
     ) -> int | None:
         """Get override bits for sensitive components. Returns None for default."""
+        logger.debug("_get_layer_bits_for_component called with layer_name=%s, layer_idx=%s", layer_name, layer_idx)
         name_lower = layer_name.lower()
 
         # Critical components - keep high precision
@@ -190,6 +197,7 @@ class Qwen3CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
         use_hadamard: bool | None = None,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         """Quantize with Marlin scale layout fix and component-aware bits."""
+        logger.info("quantize_layer called with weights=%s, hessian=%s, layer_name=%s, use_hadamard=%s", weights, hessian, layer_name, use_hadamard)
         if hessian is None:
             return MRGPTQQuantizer.quantize_layer(
                 self,
@@ -226,6 +234,7 @@ class Qwen3CUDAMMFP4Quantizer(AcceleratedMRGPTQQuantizer):
 
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="CUDA MMFP4 quantization for Qwen3-Coder-Next (non-NVFP4 interoperable)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -383,6 +392,7 @@ def resolve_model_path(
     verbose: bool,
 ) -> Path:
     """Resolve model path, downloading if necessary."""
+    logger.debug("resolve_model_path called with model_ref=%s, revision=%s, token=%s", model_ref, revision, token)
     local_path = Path(model_ref)
     if local_path.exists():
         return local_path
@@ -399,6 +409,7 @@ def resolve_model_path(
 
 def load_tokenizer(model_path: Path):
     """Load tokenizer with fast fallback."""
+    logger.info("load_tokenizer called with model_path=%s", model_path)
     from transformers import AutoTokenizer
 
     try:
@@ -417,6 +428,7 @@ def load_tokenizer(model_path: Path):
 
 def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
     """Copy tokenizer and config files."""
+    logger.debug("copy_model_artifacts called with src_dir=%s, dst_dir=%s", src_dir, dst_dir)
     for name in COPY_ARTIFACTS:
         src = src_dir / name
         if src.exists() and src.is_file():
@@ -425,6 +437,7 @@ def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
 
 def get_total_system_ram_gb() -> float:
     """Return total system RAM in GiB."""
+    logger.debug("get_total_system_ram_gb called")
     page_size = os.sysconf("SC_PAGE_SIZE")
     phys_pages = os.sysconf("SC_PHYS_PAGES")
     return (page_size * phys_pages) / (1024**3)
@@ -440,6 +453,7 @@ def configure_runtime_profile(
     Returns:
         (profile_applied, hessian_dtype, force_layer_stream)
     """
+    logger.info("configure_runtime_profile starting")
     low_vram = total_vram_gb <= LOW_VRAM_THRESHOLD_GB
     ultra_low_ram = system_ram_gb < ULTRA_LOW_RAM_THRESHOLD_GB
     low_ram = system_ram_gb < LOW_SYSTEM_RAM_THRESHOLD_GB
@@ -492,6 +506,7 @@ def save_quantization_config(
     system_ram_gb: float,
 ) -> None:
     """Save quantization configuration and metadata."""
+    logger.info("save_quantization_config called with output_dir=%s, model_path=%s, report=%s, args=%s", output_dir, model_path, report, args)
     payload: dict[str, Any] = {
         "format": "mmfp4_e2m1_marlin",
         "method": "mr_gptq_cuda",
@@ -550,6 +565,7 @@ def save_quantization_config(
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     verbose = not args.quiet
 

@@ -1,6 +1,7 @@
 """Test sharded model conversion for EXL3 loader."""
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,9 @@ from metal_marlin.hf_exl3_loader import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def create_mock_sharded_model(model_dir: Path, num_shards: int = 2, num_layers: int = 4):
     """Create a mock sharded EXL3 model for testing.
     
@@ -25,6 +29,7 @@ def create_mock_sharded_model(model_dir: Path, num_shards: int = 2, num_layers: 
         num_layers: Number of transformer layers
     """
     # Create config
+    logger.debug("create_mock_sharded_model called with model_dir=%s, num_shards=%s, num_layers=%s", model_dir, num_shards, num_layers)
     config = {
         "quantization": {"format": "exl3"},
         "num_hidden_layers": num_layers,
@@ -78,12 +83,14 @@ class TestParseLayerIndex:
 
     def test_parses_standard_layer_names(self):
         """Test parsing standard transformer layer names."""
+        logger.info("running test_parses_standard_layer_names")
         assert _parse_layer_index("model.layers.42.mlp.gate_proj.weight") == 42
         assert _parse_layer_index("model.layers.0.self_attn.q_proj.weight") == 0
         assert _parse_layer_index("model.layers.123.input_layernorm.weight") == 123
 
     def test_returns_none_for_non_layer_tensors(self):
         """Test that non-layer tensors return None."""
+        logger.info("running test_returns_none_for_non_layer_tensors")
         assert _parse_layer_index("model.embed_tokens.weight") is None
         assert _parse_layer_index("model.norm.weight") is None
         assert _parse_layer_index("lm_head.weight") is None
@@ -92,6 +99,7 @@ class TestParseLayerIndex:
     def test_handles_edge_cases(self):
         """Test edge cases in layer parsing."""
         # Large layer indices
+        logger.info("running test_handles_edge_cases")
         assert _parse_layer_index("model.layers.999.mlp.down_proj.weight") == 999
         # Single digit
         assert _parse_layer_index("model.layers.9.output.weight") == 9
@@ -103,6 +111,7 @@ class TestConvertShardedToLayerwise:
     def test_converts_sharded_model_correctly(self, tmp_path: Path):
         """Test full conversion of sharded model to layerwise format."""
         # Create mock model
+        logger.info("running test_converts_sharded_model_correctly")
         model_dir = tmp_path / "mock_model"
         model_dir.mkdir()
         create_mock_sharded_model(model_dir, num_shards=2, num_layers=4)
@@ -154,6 +163,7 @@ class TestConvertShardedToLayerwise:
 
     def test_uses_default_output_path(self, tmp_path: Path):
         """Test that default output path is model_path/layerwise."""
+        logger.info("running test_uses_default_output_path")
         model_dir = tmp_path / "mock_model"
         model_dir.mkdir()
         create_mock_sharded_model(model_dir, num_shards=1, num_layers=2)
@@ -166,6 +176,7 @@ class TestConvertShardedToLayerwise:
 
     def test_single_shard_conversion(self, tmp_path: Path):
         """Test conversion with a single shard."""
+        logger.info("running test_single_shard_conversion")
         model_dir = tmp_path / "mock_model"
         model_dir.mkdir()
         create_mock_sharded_model(model_dir, num_shards=1, num_layers=4)

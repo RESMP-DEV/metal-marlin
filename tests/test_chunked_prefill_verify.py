@@ -6,13 +6,18 @@ It checks:
 2. The MMFP4MLA layer has chunked prefill configured
 3. The forward path uses chunked prefill when appropriate
 """
+import logging
 
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_chunked_prefill_imports():
     """Test that chunked prefill components can be imported."""
+    logger.info("running test_chunked_prefill_imports")
     from metal_marlin.layers.mmfp4_mla import MMFP4MLA
     from metal_marlin.mla_fused import mla_chunked_prefill_attention
     # If we get here, imports work
@@ -22,6 +27,7 @@ def test_chunked_prefill_imports():
 
 def test_chunked_prefill_configuration():
     """Test that MMFP4MLA has chunked prefill configured."""
+    logger.info("running test_chunked_prefill_configuration")
     from metal_marlin.layers.mmfp4_mla import MMFP4MLA
     
     model = MMFP4MLA(
@@ -45,6 +51,7 @@ def test_chunked_prefill_configuration():
 
 def test_chunked_prefill_kernel_exists():
     """Test that the Metal kernel for chunked prefill exists."""
+    logger.info("running test_chunked_prefill_kernel_exists")
     import os
     
     # Check the shader file directly
@@ -62,6 +69,7 @@ def test_chunked_prefill_kernel_exists():
 
 def test_forward_chunked_prefill_method_exists():
     """Test that _forward_chunked_prefill method exists and is callable."""
+    logger.info("running test_forward_chunked_prefill_method_exists")
     from metal_marlin.layers.mmfp4_mla import MMFP4MLA
     
     model = MMFP4MLA(

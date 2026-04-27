@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -41,10 +42,14 @@ except Exception as exc:  # pragma: no cover - surfaces missing integration modu
         "Ensure layer_replacement is available."
     ) from exc
 
+
+logger = logging.getLogger(__name__)
+
 MISTRAL_7B = "mistralai/Mistral-7B-v0.1"
 
 
 def _load_mistral_model():
+    logger.info("_load_mistral_model called")
     try:
         model = AutoModelForCausalLM.from_pretrained(
             MISTRAL_7B,
@@ -64,16 +69,19 @@ def _load_mistral_model():
 
 @pytest.fixture(scope="session")
 def mistral_model():
+    logger.debug("mistral_model called")
     return _load_mistral_model()
 
 
 @pytest.fixture(scope="session")
 def mistral_tokenizer():
+    logger.debug("mistral_tokenizer called")
     return AutoTokenizer.from_pretrained(MISTRAL_7B)
 
 
 class TestMistralTransformersIntegration:
     def test_mistral_config(self):
+        logger.info("running test_mistral_config")
         config = AutoConfig.from_pretrained(MISTRAL_7B)
         assert config.model_type == "mistral"
         if config.architectures:
@@ -85,6 +93,7 @@ class TestMistralTransformersIntegration:
     @pytest.mark.slow
     def test_mistral_quantization_sliding_window(self, mistral_model, mistral_tokenizer):
         """Verify Mistral sliding window attention survives quantization."""
+        logger.info("running test_mistral_quantization_sliding_window")
         window = getattr(mistral_model.config, "sliding_window", None)
         assert window is not None
 

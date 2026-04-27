@@ -48,6 +48,7 @@ _moe_dispatch_module: Any = None
 
 
 def _get_dispatch_module() -> Any:
+    logger.debug("_get_dispatch_module called")
     global _moe_dispatch_module
     if _moe_dispatch_module is None:
         from .. import moe_dispatch as md
@@ -83,6 +84,7 @@ def _expert_cache_lru(
     Returns:
         True if the expert was moved to GPU (or already resident).
     """
+    logger.debug("_expert_cache_lru called with expert_idx=%s, experts=%s, active_experts=%s", expert_idx, experts, active_experts)
     n_experts = len(experts)
     
     if cache_size is None:
@@ -138,6 +140,7 @@ def _expert_cache_lru(
 
 def _get_config_value(config: Any, names: Sequence[str], default: int) -> int:
     """Read the first available integer-like value from config."""
+    logger.debug("_get_config_value called with config=%s, names=%s, default=%s", config, names, default)
     if isinstance(config, dict):
         for name in names:
             value = config.get(name)
@@ -155,6 +158,7 @@ def _get_config_value(config: Any, names: Sequence[str], default: int) -> int:
 
 def _copy_linear_weight(linear: nn.Linear, tensor: torch.Tensor, key: str) -> None:
     """Copy a weight tensor into a linear layer, auto-handling transposed layout."""
+    logger.debug("_copy_linear_weight called with linear=%s, tensor=%s, key=%s", linear, tensor, key)
     if tensor.ndim != 2:
         raise ValueError(
             f"Expected 2D tensor for {key}, got shape={tuple(tensor.shape)}")
@@ -181,6 +185,7 @@ def _copy_mmfp4_weight(
 ) -> None:
     """Copy MMFP4 packed weights and scales into an MMFP4Linear layer."""
     # Handle packed weights
+    logger.debug("_copy_mmfp4_weight called with mmfp4_linear=%s, packed_tensor=%s, scales_tensor=%s", mmfp4_linear, packed_tensor, scales_tensor)
     expected_packed = mmfp4_linear.packed_weights.shape
     if packed_tensor.shape == expected_packed:
         src_packed = packed_tensor
@@ -222,6 +227,7 @@ class MMFP4Expert(nn.Module):
         moe_intermediate_size: int,
         group_size: int = 128,
     ) -> None:
+        logger.debug("initializing %s with hidden_size=%s, moe_intermediate_size=%s, group_size=%s", type(self).__name__, hidden_size, moe_intermediate_size, group_size)
         super().__init__()
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
@@ -240,6 +246,7 @@ class MMFP4Expert(nn.Module):
 
     def prefetch(self) -> None:
         """Prefetch expert weights into cache."""
+        logger.debug("prefetch called")
         _ = self.gate_proj.packed_weights.data_ptr()
         _ = self.up_proj.packed_weights.data_ptr()
         _ = self.down_proj.packed_weights.data_ptr()
@@ -251,6 +258,7 @@ class MMFP4Expert(nn.Module):
             Dictionary with keys 'gate', 'up', 'down' containing dequantized
             FP16 weight tensors, or None if dequantization is not available.
         """
+        logger.info("get_dequantized_weights called")
         try:
             from ..kernels import mmfp4_dequantize_weights
             
@@ -286,6 +294,7 @@ class MMFP4Expert(nn.Module):
         Falls back to standard 3-layer path for compatibility.
         """
         # Try fused path first for better performance
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         if x.device.type == "mps":
             try:
                 from ..moe_dispatch import _fused_expert_mlp
@@ -324,6 +333,7 @@ def _make_placeholder_mmfp4_linear(
     group_size: int,
 ) -> MMFP4Linear:
     """Create MMFP4Linear with placeholder (zeros) weights."""
+    logger.debug("_make_placeholder_mmfp4_linear called with in_features=%s, out_features=%s, group_size=%s", in_features, out_features, group_size)
     in_features_aligned = ((in_features + 7) // 8) * 8
     n_groups = (in_features + group_size - 1) // group_size
     packed_weights = torch.zeros(
@@ -366,6 +376,7 @@ class MMFP4MoE(nn.Module):
         prefetch_k: int = 4,
         prefetch_strategy: PrefetchStrategy = PrefetchStrategy.TOP_K_RECENCY,
     ) -> None:
+        logger.debug("initializing %s with n_experts=%s, n_experts_per_tok=%s, hidden_size=%s, moe_intermediate_size=%s, group_size=%s", type(self).__name__, n_experts, n_experts_per_tok, hidden_size, moe_intermediate_size, group_size)
         super().__init__()
         if n_experts <= 0:
             raise ValueError("n_experts must be > 0")
@@ -426,6 +437,7 @@ class MMFP4MoE(nn.Module):
         This wires MMFP4FusedMoE dispatch logic into the standard MMFP4MoE
         forward pass when use_fused_dispatch=True (default).
         """
+        logger.debug("_get_fused_moe called")
         if self._fused_moe is None:
             from .mmfp4_fused_moe import MMFP4FusedMoE
             # Create fused MoE from current weights
@@ -494,6 +506,7 @@ class MMFP4MoE(nn.Module):
         - _fused_expert_combine: In-place weighted combination of expert outputs
         - _expert_fusion_decode: Fused gate+up+down kernel for single-kernel expert execution
         """
+        logger.debug("_forward_decode_optimized called with hidden_flat=%s, topk_indices=%s, topk_weights=%s", hidden_flat, topk_indices, topk_weights)
         dispatch = _get_dispatch_module()
 
         shared_expert = (
@@ -537,6 +550,7 @@ class MMFP4MoE(nn.Module):
         4. _expert_fusion_decode: Fused gate+up+down in single kernel per expert
         """
         # _decode_output_buffer: Use pre-allocated buffer or allocate
+        logger.debug("_forward_decode_optimized_inline called with hidden_flat=%s, topk_indices=%s, topk_weights=%s", hidden_flat, topk_indices, topk_weights)
         if self._decode_output_buffer is not None:
             output = self._decode_output_buffer
             output.zero_()
@@ -642,6 +656,7 @@ class MMFP4MoE(nn.Module):
         expert_prefetch: Creates ExpertPrefetcher for predictive expert loading
         based on routing history and activation patterns.
         """
+        logger.debug("_init_prefetcher called")
         if not self.enable_prefetch or self._prefetcher is not None:
             return
         
@@ -685,6 +700,7 @@ class MMFP4MoE(nn.Module):
             Dictionary with dequantized expert weights
         """
         # Get the expert
+        logger.info("_load_expert_for_prefetch called with layer_idx=%s, expert_id=%s", layer_idx, expert_id)
         if expert_id < 0 or expert_id >= self.n_experts:
             return {}
         
@@ -717,6 +733,7 @@ class MMFP4MoE(nn.Module):
             current_indices: Current token's selected expert indices
             layer_idx: Layer index for multi-layer models
         """
+        logger.debug("_prefetch_experts_for_next_token called with current_indices=%s, layer_idx=%s", current_indices, layer_idx)
         if not self.enable_prefetch:
             return
         
@@ -737,6 +754,7 @@ class MMFP4MoE(nn.Module):
         With expert_prefetch: After routing, predicts and prefetches experts
         for the next token to reduce memory transfer latency.
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         global _first_call
 
         if _first_call:
@@ -903,12 +921,14 @@ class MMFP4MoE(nn.Module):
             Dictionary with prefetch hit rates, prediction accuracy,
             and other expert_prefetch metrics.
         """
+        logger.debug("get_prefetch_stats called")
         if self._prefetcher is None:
             return {"enabled": False, "message": "Prefetcher not initialized"}
         return self._prefetcher.get_stats()
     
     def reset_prefetch(self) -> None:
         """Reset prefetcher state and clear history."""
+        logger.debug("reset_prefetch called")
         if self._prefetcher is not None:
             self._prefetcher.clear_history()
 
@@ -918,6 +938,7 @@ class MMFP4MoE(nn.Module):
         Args:
             strategy: New prefetch strategy to use
         """
+        logger.debug("set_prefetch_strategy called with strategy=%s", strategy)
         self._prefetch_strategy = strategy
         if self._prefetcher is not None:
             self._prefetcher.config.strategy = strategy
@@ -940,6 +961,7 @@ class MMFP4MoE(nn.Module):
         Returns:
             Number of experts cached
         """
+        logger.debug("populate_expert_cache called with expert_ids=%s, layer_idx=%s", expert_ids, layer_idx)
         if self._expert_cache is None:
             self._init_prefetcher()
         
@@ -991,10 +1013,12 @@ class MMFP4MoE(nn.Module):
         Returns:
             Number of experts cached
         """
+        logger.debug("warm_prefetch_cache called with top_k=%s", top_k)
         return self.populate_expert_cache(expert_ids=list(range(min(top_k, self.n_experts))))
 
     @staticmethod
     def _layer_key_matches(key: str, layer_idx: int) -> bool:
+        logger.debug("_layer_key_matches called with key=%s, layer_idx=%s", key, layer_idx)
         tokens = (
             f".layers.{layer_idx}.",
             f"layers.{layer_idx}.",
@@ -1012,6 +1036,7 @@ class MMFP4MoE(nn.Module):
         suffixes: Sequence[str],
         layer_idx: int,
     ) -> tuple[str, torch.Tensor] | None:
+        logger.debug("_find_tensor called with tensors=%s", tensors)
         for key in keys:
             if key in tensors:
                 return key, tensors[key]
@@ -1030,6 +1055,7 @@ class MMFP4MoE(nn.Module):
         hidden_size: int,
         key: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        logger.debug("_split_gate_up called with gate_up=%s, hidden_size=%s, key=%s", gate_up, hidden_size, key)
         if gate_up.ndim != 2:
             raise ValueError(
                 f"Expected 2D tensor for {key}, got shape={tuple(gate_up.shape)}")
@@ -1052,6 +1078,7 @@ class MMFP4MoE(nn.Module):
     @classmethod
     def from_hf_weights(cls, layer_idx: int, tensors: dict, config) -> MMFP4MoE:
         """Load MoE router + experts from a HuggingFace tensor dictionary."""
+        logger.debug("from_hf_weights called with layer_idx=%s, tensors=%s, config=%s", layer_idx, tensors, config)
         layer_prefixes = (
             f"model.layers.{layer_idx}.mlp",
             f"model.layers.{layer_idx}.block_sparse_moe",
@@ -1293,6 +1320,7 @@ class MMFP4FusedExpert(nn.Module):
         moe_intermediate_size: int,
         group_size: int = 128,
     ) -> None:
+        logger.debug("initializing %s with hidden_size=%s, moe_intermediate_size=%s, group_size=%s", type(self).__name__, hidden_size, moe_intermediate_size, group_size)
         super().__init__()
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
@@ -1344,6 +1372,7 @@ class MMFP4FusedExpert(nn.Module):
         Returns:
             [batch, hidden_size] output tensor
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         dispatch = _get_dispatch_module()
         return dispatch._fused_expert_mlp(
             x,
@@ -1371,6 +1400,7 @@ class MMFP4FusedExpert(nn.Module):
         Returns:
             MMFP4FusedExpert with weights fused into stacked format
         """
+        logger.debug("from_separate_weights called with gate_proj=%s, up_proj=%s, down_proj=%s", gate_proj, up_proj, down_proj)
         hidden_size = gate_proj.in_features
         moe_intermediate_size = gate_proj.out_features
         group_size = gate_proj.group_size

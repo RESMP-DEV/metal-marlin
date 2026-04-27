@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import mmap
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,9 @@ from safetensors import safe_open
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+
+
+logger = logging.getLogger(__name__)
 
 class MmapSafetensorsLoader:
     """Memory-mapped loader for safetensors files.
@@ -66,6 +70,7 @@ class MmapSafetensorsLoader:
                     Memory mapping only works with CPU tensors initially.
             framework: Safetensors framework ("pt" for PyTorch, "np" for numpy).
         """
+        logger.debug("initializing %s with path=%s, device=%s, framework=%s", type(self).__name__, path, device, framework)
         self.path = Path(path)
         self.device = device
         self.framework = framework
@@ -77,6 +82,7 @@ class MmapSafetensorsLoader:
 
     def _discover_and_open(self) -> None:
         """Discover safetensor files and open them with mmap."""
+        logger.debug("_discover_and_open called")
         if self.path.is_file():
             files = [self.path]
         else:
@@ -103,6 +109,7 @@ class MmapSafetensorsLoader:
 
     def keys(self) -> Iterator[str]:
         """Iterate over all tensor names."""
+        logger.debug("keys called")
         self._check_closed()
         return iter(self._tensor_to_file.keys())
 
@@ -131,6 +138,7 @@ class MmapSafetensorsLoader:
             KeyError: If tensor name not found.
             RuntimeError: If loader has been closed.
         """
+        logger.debug("get_tensor called with name=%s", name)
         self._check_closed()
 
         if name not in self._tensor_to_file:
@@ -160,6 +168,7 @@ class MmapSafetensorsLoader:
         Returns:
             TensorSlice object with shape, dtype properties.
         """
+        logger.debug("get_slice called with name=%s", name)
         self._check_closed()
 
         if name not in self._tensor_to_file:
@@ -178,6 +187,7 @@ class MmapSafetensorsLoader:
         Returns:
             Shape tuple.
         """
+        logger.debug("get_shape called with name=%s", name)
         slice_obj = self.get_slice(name)
         return tuple(slice_obj.get_shape())
 
@@ -190,6 +200,7 @@ class MmapSafetensorsLoader:
         Returns:
             PyTorch dtype.
         """
+        logger.debug("get_dtype called with name=%s", name)
         slice_obj = self.get_slice(name)
         dtype_str = slice_obj.get_dtype()
         return _safetensors_dtype_to_torch(dtype_str)
@@ -211,6 +222,7 @@ class MmapSafetensorsLoader:
         Returns:
             Dictionary of loaded tensors.
         """
+        logger.info("load_subset called with names=%s, device=%s", names, device)
         device = device or self.device
         result = {}
         for name in names:
@@ -235,12 +247,14 @@ class MmapSafetensorsLoader:
         Returns:
             Dictionary of tensors for the layer.
         """
+        logger.info("load_layer called with layer_idx=%s, pattern=%s", layer_idx, pattern)
         prefix = pattern.format(layer=layer_idx)
         names = [n for n in self._tensor_to_file if n.startswith(prefix)]
         return self.load_subset(names)
 
     def close(self) -> None:
         """Close all file handles and release mmaps."""
+        logger.debug("close called")
         if self._closed:
             return
 
@@ -254,6 +268,7 @@ class MmapSafetensorsLoader:
 
     def _check_closed(self) -> None:
         """Raise if loader has been closed."""
+        logger.debug("_check_closed called")
         if self._closed:
             raise RuntimeError("MmapSafetensorsLoader has been closed")
 
@@ -269,6 +284,7 @@ class MmapSafetensorsLoader:
 
 def _safetensors_dtype_to_torch(dtype_str: str) -> torch.dtype:
     """Convert safetensors dtype string to torch dtype."""
+    logger.debug("_safetensors_dtype_to_torch called with dtype_str=%s", dtype_str)
     dtype_map = {
         "F32": torch.float32,
         "F16": torch.float16,
@@ -300,6 +316,7 @@ def load_safetensors_mmap(
     Returns:
         State dict with all tensors.
     """
+    logger.info("load_safetensors_mmap called with path=%s, device=%s", path, device)
     with MmapSafetensorsLoader(path, device=device) as loader:
         return {name: loader.get_tensor(name) for name in loader.keys()}
 
@@ -319,6 +336,7 @@ def estimate_mmap_overhead(
         Dict with mmap_bytes, virtual_bytes, and page_size.
     """
 
+    logger.debug("estimate_mmap_overhead called with path=%s", path)
     path = Path(path)
     if path.is_file():
         files = [path]

@@ -5,13 +5,18 @@ This script generates HTML API documentation without importing the module,
 avoiding torch initialization issues during doc generation.
 """
 
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 
+
+logger = logging.getLogger(__name__)
+
 def main():
+    logger.info("main starting")
     repo_root = Path(__file__).parent.parent
     docs_api = repo_root / "docs" / "api"
     docs_api.mkdir(parents=True, exist_ok=True)
@@ -45,6 +50,7 @@ def main():
 
 def generate_stubs(docs_api: Path):
     """Generate minimal API documentation from source analysis."""
+    logger.debug("generate_stubs called with docs_api=%s", docs_api)
     import ast
     from pathlib import Path
     

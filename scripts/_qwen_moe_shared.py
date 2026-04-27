@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 from metal_marlin.hf_loader import download_model
 
+
+
+logger = logging.getLogger(__name__)
 
 def resolve_model_path(
     model_ref: str,
@@ -24,6 +28,7 @@ def resolve_model_path(
     verbose: bool = True,
 ) -> Path:
     """Return a local path, downloading from HuggingFace if necessary."""
+    logger.debug("resolve_model_path called with model_ref=%s, revision=%s, token=%s", model_ref, revision, token)
     local_path = Path(model_ref)
     if local_path.exists():
         return local_path
@@ -68,6 +73,7 @@ QwenMoE_COPY_ARTIFACTS = (
 
 def add_shared_args(parser: argparse.ArgumentParser) -> None:
     """Add arguments common to both Qwen3.5 and Qwen3.6 quantisation scripts."""
+    logger.debug("add_shared_args called with parser=%s", parser)
     parser.add_argument("--model", type=str)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--revision", type=str, default="main")
@@ -115,6 +121,7 @@ def add_shared_args(parser: argparse.ArgumentParser) -> None:
 
 def load_weight_map(model_path: Path) -> dict[str, str]:
     """Load the safetensors weight-map index if present."""
+    logger.info("load_weight_map called with model_path=%s", model_path)
     index_path = model_path / "model.safetensors.index.json"
     if not index_path.exists():
         return {}
@@ -124,6 +131,7 @@ def load_weight_map(model_path: Path) -> dict[str, str]:
 
 def infer_layer_prefixes(weight_map: dict[str, str]) -> list[str]:
     """Heuristically find the transformer-layer name prefix."""
+    logger.debug("infer_layer_prefixes called with weight_map=%s", weight_map)
     candidates = (
         "model.language_model.layers.",
         "model.layers.",
@@ -143,6 +151,7 @@ def infer_layer_prefixes(weight_map: dict[str, str]) -> list[str]:
 
 def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
     """Copy tokenizer / config artefacts from source to output directory."""
+    logger.debug("copy_model_artifacts called with src_dir=%s, dst_dir=%s", src_dir, dst_dir)
     for name in QwenMoE_COPY_ARTIFACTS:
         src = src_dir / name
         if src.exists() and src.is_file():
@@ -151,6 +160,7 @@ def copy_model_artifacts(src_dir: Path, dst_dir: Path) -> None:
 
 def load_model_config(model_path: Path) -> dict[str, Any]:
     """Load the model config.json as a flat dict, unwrapping ``text_config``."""
+    logger.info("load_model_config called with model_path=%s", model_path)
     config_path = model_path / "config.json"
     if not config_path.exists():
         return {}
@@ -175,6 +185,7 @@ def save_quantization_config(
     extra: dict[str, Any] | None = None,
 ) -> None:
     """Write ``quantization_config.json`` into the output directory."""
+    logger.info("save_quantization_config called with output_dir=%s, model_path=%s, report=%s, args=%s", output_dir, model_path, report, args)
     payload: dict[str, Any] = {
         "format": "mmfp4_e2m1_marlin",
         "method": method,

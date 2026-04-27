@@ -7,10 +7,14 @@ directly to tensor core operations.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TrellisTile:
@@ -41,6 +45,7 @@ class TrellisTile:
         Returns:
             List of TrellisTile objects covering the matrix
         """
+        logger.debug("extract_tiles called with weights=%s, tile_size=%s", weights, tile_size)
         if weights.ndim != 2:
             raise ValueError(f"weights must be 2D, got {weights.ndim}D")
 
@@ -94,6 +99,7 @@ class TrellisTile:
         Returns:
             Reconstructed weight matrix
         """
+        logger.debug("reconstruct called with tiles=%s, shape=%s", tiles, shape)
         if not tiles:
             raise ValueError("tiles list cannot be empty")
 
@@ -132,6 +138,7 @@ def tensor_core_perm(device: str = "metal") -> NDArray[np.int64]:
     """
     # Standard tensor core permutation for 16x16 tiles
     # Maps row-major to tensor core-friendly layout
+    logger.debug("tensor_core_perm called with device=%s", device)
     perm = np.zeros(256, dtype=np.int64)
 
     if device.lower() in ("metal", "cuda"):
@@ -166,6 +173,7 @@ def tensor_core_perm_i(device: str = "metal") -> NDArray[np.int64]:
     Returns:
         Inverse permutation indices [256] mapping permuted -> flat index
     """
+    logger.debug("tensor_core_perm_i called with device=%s", device)
     perm = tensor_core_perm(device)
     # Inverse permutation: argsort gives us the inverse mapping
     inv_perm = np.zeros_like(perm)
@@ -186,6 +194,7 @@ def apply_tensor_core_perm(
     Returns:
         Permuted tile [16, 16] in tensor core layout
     """
+    logger.debug("apply_tensor_core_perm called with tile=%s, device=%s", tile, device)
     if tile.shape != (16, 16):
         raise ValueError(f"tile must be (16, 16), got {tile.shape}")
 
@@ -207,6 +216,7 @@ def apply_tensor_core_perm_i(
     Returns:
         Tile in row-major layout [16, 16]
     """
+    logger.debug("apply_tensor_core_perm_i called with tile=%s, device=%s", tile, device)
     if tile.shape != (16, 16):
         raise ValueError(f"tile must be (16, 16), got {tile.shape}")
 

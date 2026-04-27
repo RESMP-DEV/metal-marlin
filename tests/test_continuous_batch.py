@@ -1,4 +1,5 @@
 """Tests for continuous batching scheduler."""
+import logging
 
 import pytest
 
@@ -15,10 +16,14 @@ from metal_marlin.serving.continuous_batch import (
 from metal_marlin.serving.request import GenerationRequest, RequestStatus
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestKVCacheManager:
     """Tests for KVCacheManager."""
 
     def test_init(self):
+        logger.info("running test_init")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         assert manager.num_blocks == 64
         assert manager.block_size == 16
@@ -27,6 +32,7 @@ class TestKVCacheManager:
         assert len(manager) == 0
 
     def test_allocate_success(self):
+        logger.info("running test_allocate_success")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         region_id = manager.allocate("req-1", num_tokens=32)
         assert region_id is not None
@@ -37,6 +43,7 @@ class TestKVCacheManager:
         assert manager.num_allocated_blocks == 2
 
     def test_allocate_oom(self):
+        logger.info("running test_allocate_oom")
         manager = KVCacheManager(num_blocks=2, block_size=16)
         # First allocation: 32 tokens = 2 blocks, uses all
         region_id = manager.allocate("req-1", num_tokens=32)
@@ -47,12 +54,14 @@ class TestKVCacheManager:
         assert len(manager) == 1
 
     def test_allocate_duplicate_raises(self):
+        logger.info("running test_allocate_duplicate_raises")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         manager.allocate("req-1", num_tokens=16)
         with pytest.raises(ValueError, match="already exists"):
             manager.allocate("req-1", num_tokens=16)
 
     def test_extend(self):
+        logger.info("running test_extend")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         manager.allocate("req-1", num_tokens=15)
         assert manager.get_num_tokens("req-1") == 15
@@ -65,6 +74,7 @@ class TestKVCacheManager:
         assert manager.num_allocated_blocks == 2
 
     def test_extend_oom(self):
+        logger.info("running test_extend_oom")
         manager = KVCacheManager(num_blocks=1, block_size=16)
         manager.allocate("req-1", num_tokens=16)
         # Block is full, extending needs new block which we don't have
@@ -72,6 +82,7 @@ class TestKVCacheManager:
         assert manager.get_num_tokens("req-1") == 16
 
     def test_free(self):
+        logger.info("running test_free")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         manager.allocate("req-1", num_tokens=32)
         assert manager.num_allocated_blocks == 2
@@ -81,6 +92,7 @@ class TestKVCacheManager:
         assert manager.get_num_tokens("req-1") == 0
 
     def test_get_block_table(self):
+        logger.info("running test_get_block_table")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         manager.allocate("req-1", num_tokens=32)
         block_table = manager.get_block_table("req-1")
@@ -88,6 +100,7 @@ class TestKVCacheManager:
         assert len(block_table) == 2
 
     def test_memory_pressure(self):
+        logger.info("running test_memory_pressure")
         manager = KVCacheManager(num_blocks=4, block_size=16)
         assert manager.memory_pressure == 0.0
         manager.allocate("req-1", num_tokens=32)  # 2 blocks
@@ -96,6 +109,7 @@ class TestKVCacheManager:
         assert manager.memory_pressure == 1.0
 
     def test_can_allocate(self):
+        logger.info("running test_can_allocate")
         manager = KVCacheManager(num_blocks=4, block_size=16)
         assert manager.can_allocate(64)  # 4 blocks needed, 4 available
         assert not manager.can_allocate(65)  # 5 blocks needed, 4 available
@@ -104,6 +118,7 @@ class TestKVCacheManager:
         assert not manager.can_allocate(33)
 
     def test_preempt(self):
+        logger.info("running test_preempt")
         manager = KVCacheManager(num_blocks=64, block_size=16)
         manager.allocate("req-1", num_tokens=32)
         state = manager.preempt("req-1")
@@ -118,6 +133,7 @@ class TestRequestState:
     """Tests for RequestState."""
 
     def test_remaining_prefill(self):
+        logger.info("running test_remaining_prefill")
         req = GenerationRequest(
             request_id="req-1",
             prompt_tokens=[1, 2, 3, 4, 5],
@@ -131,6 +147,7 @@ class TestRequestState:
         assert state.remaining_prefill == 3
 
     def test_is_prefill_complete(self):
+        logger.info("running test_is_prefill_complete")
         req = GenerationRequest(
             request_id="req-1",
             prompt_tokens=[1, 2, 3, 4, 5],
@@ -144,6 +161,7 @@ class TestRequestState:
         assert state.is_prefill_complete
 
     def test_effective_priority_ordering(self):
+        logger.info("running test_effective_priority_ordering")
         req1 = GenerationRequest(request_id="req-1", prompt_tokens=[1])
         req2 = GenerationRequest(request_id="req-2", prompt_tokens=[1])
         req3 = GenerationRequest(request_id="req-3", prompt_tokens=[1])
@@ -162,6 +180,7 @@ class TestIterationPlanner:
     """Tests for IterationPlanner."""
 
     def test_plan_decode_only(self):
+        logger.info("running test_plan_decode_only")
         config = SchedulerConfig(
             max_num_batched_tokens=100,
             max_prefill_tokens=50,
@@ -187,6 +206,7 @@ class TestIterationPlanner:
         assert plan.decode_tokens_used == 1
 
     def test_plan_prefill_only(self):
+        logger.info("running test_plan_prefill_only")
         config = SchedulerConfig(
             max_num_batched_tokens=100,
             max_prefill_tokens=50,
@@ -208,6 +228,7 @@ class TestIterationPlanner:
         assert plan.prefill_tokens_used == 4
 
     def test_plan_chunked_prefill(self):
+        logger.info("running test_plan_chunked_prefill")
         config = SchedulerConfig(
             max_num_batched_tokens=100,
             max_prefill_tokens=10,  # Limit prefill
@@ -235,6 +256,7 @@ class TestIterationPlanner:
         assert num_toks == 5  # Limited by max_chunk_size
 
     def test_plan_respects_token_budget(self):
+        logger.info("running test_plan_respects_token_budget")
         config = SchedulerConfig(
             max_num_batched_tokens=5,
             max_prefill_tokens=5,
@@ -263,6 +285,7 @@ class TestIterationPlanner:
         assert chunk2_size == 2
 
     def test_plan_respects_budget_without_chunking(self):
+        logger.info("running test_plan_respects_budget_without_chunking")
         config = SchedulerConfig(
             max_num_batched_tokens=5,
             max_prefill_tokens=5,
@@ -288,6 +311,7 @@ class TestBatchScheduler:
     """Tests for BatchScheduler."""
 
     def test_add_request(self):
+        logger.info("running test_add_request")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -300,6 +324,7 @@ class TestBatchScheduler:
         assert req.status == RequestStatus.PENDING
 
     def test_add_duplicate_raises(self):
+        logger.info("running test_add_duplicate_raises")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -310,6 +335,7 @@ class TestBatchScheduler:
             scheduler.add_request(req)
 
     def test_schedule_prefill(self):
+        logger.info("running test_schedule_prefill")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -325,6 +351,7 @@ class TestBatchScheduler:
         assert scheduler.num_waiting == 0
 
     def test_schedule_decode_after_prefill(self):
+        logger.info("running test_schedule_decode_after_prefill")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -347,6 +374,7 @@ class TestBatchScheduler:
         assert len(output2.decode_requests) == 1
 
     def test_abort_request(self):
+        logger.info("running test_abort_request")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -360,6 +388,7 @@ class TestBatchScheduler:
         assert kv_manager.num_allocated_blocks == 0
 
     def test_step_finishes_requests(self):
+        logger.info("running test_step_finishes_requests")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -379,6 +408,7 @@ class TestBatchScheduler:
         assert scheduler.num_running == 0
 
     def test_priority_ordering(self):
+        logger.info("running test_priority_ordering")
         config = SchedulerConfig(max_num_batched_tokens=100, max_num_seqs=1, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -397,6 +427,7 @@ class TestBatchScheduler:
         assert output.prefill_requests[0].request_id == "req-high"
 
     def test_get_stats(self):
+        logger.info("running test_get_stats")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -412,6 +443,7 @@ class TestBatchScheduler:
         assert "kv_memory_pressure" in stats
 
     def test_has_pending_work(self):
+        logger.info("running test_has_pending_work")
         config = SchedulerConfig(max_num_batched_tokens=100, block_size=16)
         kv_manager = KVCacheManager(num_blocks=64, block_size=16)
         scheduler = BatchScheduler(config, kv_manager)
@@ -427,6 +459,7 @@ class TestPreemptionPolicy:
     """Tests for different preemption policies."""
 
     def test_lowest_priority_preemption(self):
+        logger.info("running test_lowest_priority_preemption")
         config = SchedulerConfig(
             max_num_batched_tokens=5,
             preemption_policy=PreemptionPolicy.LOWEST_PRIORITY,
@@ -457,6 +490,7 @@ class TestKVRegion:
     """Tests for KVRegion dataclass."""
 
     def test_num_blocks(self):
+        logger.info("running test_num_blocks")
         region = KVRegion(
             region_id=0,
             request_id="req-1",
@@ -470,6 +504,7 @@ class TestIntegration:
     """Integration tests for the full continuous batching flow."""
 
     def test_multiple_requests_flow(self):
+        logger.info("running test_multiple_requests_flow")
         config = SchedulerConfig(
             max_num_batched_tokens=100,
             max_prefill_tokens=50,
@@ -519,6 +554,7 @@ class TestIntegration:
 
     def test_continuous_request_addition(self):
         """Test adding new requests while others are decoding."""
+        logger.info("running test_continuous_request_addition")
         config = SchedulerConfig(
             max_num_batched_tokens=100,
             max_num_seqs=10,

@@ -68,6 +68,7 @@ class FastInferenceContext:
             metallib_paths: Optional list of paths to .metallib files to load.
                            If None, searches default locations.
         """
+        logger.debug("initializing %s with metallib_paths=%s", type(self).__name__, metallib_paths)
         self._ctx: Any = None
         self._available = False
         self._pipelines: dict[str, Any] = {}
@@ -99,6 +100,7 @@ class FastInferenceContext:
 
     def _find_metallibs(self) -> list[str]:
         """Find metallib files in standard locations."""
+        logger.debug("_find_metallibs called")
         paths = []
 
         # Check relative to this file
@@ -118,6 +120,7 @@ class FastInferenceContext:
     @property
     def available(self) -> bool:
         """Return True if the fast path is available."""
+        logger.debug("available called")
         return self._available
 
     def get_pipeline(self, kernel_name: str) -> Any:
@@ -129,6 +132,7 @@ class FastInferenceContext:
         Returns:
             Pipeline capsule from C++ extension.
         """
+        logger.debug("get_pipeline called with kernel_name=%s", kernel_name)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -145,6 +149,7 @@ class FastInferenceContext:
         Returns:
             ManagedBuffer from C++ extension.
         """
+        logger.debug("create_buffer called with size=%s", size)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -159,6 +164,7 @@ class FastInferenceContext:
         Returns:
             ManagedBuffer pointing to the tensor's data.
         """
+        logger.debug("wrap_tensor called with tensor=%s", tensor)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -188,6 +194,7 @@ class FastInferenceContext:
             buffers: List of ManagedBuffer objects.
             wait: If True, wait for kernel completion.
         """
+        logger.debug("dispatch called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -235,6 +242,7 @@ class FastInferenceContext:
         Returns:
             Output matrix [M, N] float16, MPS tensor
         """
+        logger.info("gemm_trellis_packed called with A=%s, packed_indices=%s, scales=%s, grid=%s", A, packed_indices, scales, grid)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -263,6 +271,7 @@ class FastInferenceContext:
 
         # Create separate buffers for each constant parameter
         def make_uint_buffer(val: int) -> Any:
+            logger.debug("make_uint_buffer called with val=%s", val)
             data = np.array([val], dtype=np.uint32)
             return _metal_dispatch_ext.create_buffer_from_bytes(
                 self._ctx, data.tobytes(), False
@@ -336,6 +345,7 @@ class FastInferenceContext:
         Optimized for small batch sizes (M <= 16).
         Uses TILE_M=32, TILE_N=128 for better decode throughput.
         """
+        logger.debug("gemm_trellis_decode called with A=%s, packed_indices=%s, scales=%s", A, packed_indices, scales)
         if not self._available:
             raise RuntimeError("Fast inference context not available")
 
@@ -386,6 +396,7 @@ def get_fast_context() -> FastInferenceContext:
     Returns:
         FastInferenceContext singleton.
     """
+    logger.debug("get_fast_context called")
     global _global_ctx
     if _global_ctx is None:
         _global_ctx = FastInferenceContext()
@@ -398,6 +409,7 @@ def fast_dispatch_available() -> bool:
     Returns:
         True if C++ extension is available and initialized.
     """
+    logger.debug("fast_dispatch_available called")
     return get_fast_context().available
 
 
@@ -416,6 +428,7 @@ class BatchDispatchContext:
     """
 
     def __init__(self, ctx: FastInferenceContext):
+        logger.debug("initializing %s with ctx=%s", type(self).__name__, ctx)
         if not ctx.available:
             raise RuntimeError("Fast inference context not available")
         self._ctx = ctx
@@ -437,6 +450,7 @@ class BatchDispatchContext:
             threadgroup: Threadgroup dimensions (threads).
             buffers: List of ManagedBuffer objects.
         """
+        logger.debug("add_kernel called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         pipeline = self._ctx.get_pipeline(kernel_name)
         self._batch.add_kernel(pipeline, grid, threadgroup, buffers)
 
@@ -446,4 +460,5 @@ class BatchDispatchContext:
         Args:
             wait: If True, wait for batch completion.
         """
+        logger.debug("commit called with wait=%s", wait)
         self._batch.commit(wait)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from collections.abc import AsyncGenerator, Generator
@@ -15,6 +16,9 @@ import pytest_asyncio
 from metal_marlin.serving import server as serving_server
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass(frozen=True)
 class _ServerInfo:
     model_name: str
@@ -22,6 +26,7 @@ class _ServerInfo:
 
 @contextmanager
 def _mock_model_env(model_name: str) -> Generator[None, None, None]:
+    logger.debug("_mock_model_env called with model_name=%s", model_name)
     keys = ("METAL_MARLIN_MOCK_MODEL", "METAL_MARLIN_MOCK_MODEL_NAME")
     previous = {key: os.environ.get(key) for key in keys}
 
@@ -40,6 +45,7 @@ def _mock_model_env(model_name: str) -> Generator[None, None, None]:
 
 @pytest_asyncio.fixture
 async def openai_client() -> AsyncGenerator[tuple[httpx.AsyncClient, _ServerInfo], None]:
+    logger.debug("openai_client called")
     model_name = "glm47-mock"
 
     with tempfile.TemporaryDirectory() as model_dir, _mock_model_env(model_name):
@@ -58,6 +64,7 @@ async def openai_client() -> AsyncGenerator[tuple[httpx.AsyncClient, _ServerInfo
 
 @pytest_asyncio.fixture
 async def timeout_client() -> AsyncGenerator[tuple[httpx.AsyncClient, _ServerInfo], None]:
+    logger.debug("timeout_client called")
     model_name = "glm47-timeout-mock"
 
     with tempfile.TemporaryDirectory() as model_dir, _mock_model_env(model_name):
@@ -72,6 +79,7 @@ async def timeout_client() -> AsyncGenerator[tuple[httpx.AsyncClient, _ServerInf
             temperature: float,
             top_p: float,
         ) -> str:
+            logger.debug("_slow_run_pipeline called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
             _ = (prompt, max_tokens, temperature, top_p)
             await asyncio.sleep(0.2)
             return "delayed"
@@ -93,6 +101,7 @@ async def timeout_client() -> AsyncGenerator[tuple[httpx.AsyncClient, _ServerInf
 
 @pytest.mark.asyncio
 async def test_v1_models_endpoint(openai_client: tuple[httpx.AsyncClient, _ServerInfo]) -> None:
+    logger.info("running test_v1_models_endpoint")
     client, server_info = openai_client
     response = await client.get("/v1/models")
     assert response.status_code == 200
@@ -112,6 +121,7 @@ async def test_v1_models_endpoint(openai_client: tuple[httpx.AsyncClient, _Serve
 async def test_chat_completions_non_streaming(
     openai_client: tuple[httpx.AsyncClient, _ServerInfo],
 ) -> None:
+    logger.info("running test_chat_completions_non_streaming")
     client, server_info = openai_client
     payload = {
         "model": server_info.model_name,
@@ -146,6 +156,7 @@ async def test_chat_completions_non_streaming(
 async def test_chat_completions_streaming(
     openai_client: tuple[httpx.AsyncClient, _ServerInfo],
 ) -> None:
+    logger.info("running test_chat_completions_streaming")
     client, server_info = openai_client
     payload = {
         "model": server_info.model_name,
@@ -181,6 +192,7 @@ async def test_chat_completions_streaming(
 async def test_completions_non_streaming(
     openai_client: tuple[httpx.AsyncClient, _ServerInfo],
 ) -> None:
+    logger.info("running test_completions_non_streaming")
     client, server_info = openai_client
     payload = {
         "model": server_info.model_name,
@@ -206,6 +218,7 @@ async def test_completions_non_streaming(
 
 @pytest.mark.asyncio
 async def test_error_model_not_found(openai_client: tuple[httpx.AsyncClient, _ServerInfo]) -> None:
+    logger.info("running test_error_model_not_found")
     client, _ = openai_client
     response = await client.post(
         "/v1/chat/completions",
@@ -225,6 +238,7 @@ async def test_error_model_not_found(openai_client: tuple[httpx.AsyncClient, _Se
 
 @pytest.mark.asyncio
 async def test_error_timeout(timeout_client: tuple[httpx.AsyncClient, _ServerInfo]) -> None:
+    logger.info("running test_error_timeout")
     client, server_info = timeout_client
     response = await client.post(
         "/v1/chat/completions",

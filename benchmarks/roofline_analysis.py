@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,9 @@ from metal_marlin._compat import HAS_MATPLOTLIB, plt  # noqa: E402
 
 import os
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -58,6 +62,7 @@ class HardwareConfig:
 
     @property
     def ridge_point(self) -> float:
+        logger.debug("ridge_point called")
         return (self.peak_fp16_tflops * 1000.0) / self.memory_bw_gbs
 
 
@@ -68,6 +73,7 @@ def _gemm_ai(
     *,
     bytes_per_element: float = 2.0,
 ) -> tuple[float, float, float]:
+    logger.debug("_gemm_ai called with M=%s, N=%s, K=%s", M, N, K)
     flops = 2.0 * M * N * K
     bytes_total = bytes_per_element * (M * K + K * N + M * N)
     ai = flops / bytes_total if bytes_total > 0 else 0.0
@@ -83,6 +89,7 @@ def _attention_ai(
     head_dim: int,
     bytes_per_element: float = 2.0,
 ) -> tuple[float, float, float]:
+    logger.debug("_attention_ai called")
     flops = 4.0 * batch * heads * seq_q * seq_k * head_dim
     bytes_total = (
         bytes_per_element
@@ -101,6 +108,7 @@ def _compute_tflops(
     flops: float,
     ai: float,
 ) -> float:
+    logger.debug("_compute_tflops called")
     if "tflops" in entry and entry["tflops"] is not None:
         return float(entry["tflops"])
     if "elapsed_ms" in entry and entry["elapsed_ms"]:
@@ -118,6 +126,7 @@ def _analyze_point(
     tflops: float,
     config: HardwareConfig,
 ) -> dict[str, Any]:
+    logger.debug("_analyze_point called")
     ridge = config.ridge_point
     if ai < ridge:
         bound = "memory"
@@ -139,6 +148,7 @@ def _analyze_point(
 
 
 def _load_kernels_from_results(results_dir: Path) -> list[dict[str, Any]]:
+    logger.info("_load_kernels_from_results called with results_dir=%s", results_dir)
     kernels: list[dict[str, Any]] = []
     for path in sorted(results_dir.glob("*.json")):
         try:
@@ -165,6 +175,7 @@ def _load_kernels_from_results(results_dir: Path) -> list[dict[str, Any]]:
 
 
 def _parse_inputs(input_path: Path | None, results_dir: Path) -> list[dict[str, Any]]:
+    logger.debug("_parse_inputs called with input_path=%s, results_dir=%s", input_path, results_dir)
     if input_path is not None:
         with open(input_path) as f:
             payload = json.load(f)
@@ -189,6 +200,7 @@ def _plot_roofline(
     config: HardwareConfig,
     output_path: Path,
 ) -> None:
+    logger.debug("_plot_roofline called")
     if not HAS_MATPLOTLIB or plt is None:
         raise RuntimeError("matplotlib is required for plotting")
 
@@ -263,6 +275,7 @@ def _plot_roofline(
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Roofline analysis for Metal Marlin kernels")
     parser.add_argument("--input", type=Path, help="Optional JSON file with kernel definitions")
     parser.add_argument(

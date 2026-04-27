@@ -12,6 +12,7 @@ All tests use mock models to avoid requiring trained weights or Metal hardware.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import torch
@@ -27,6 +28,9 @@ from metal_marlin.speculative.engine import (
 from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel
 from metal_marlin.speculative.verify import verify_speculative
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Test utilities and mock models
 # ---------------------------------------------------------------------------
@@ -34,6 +38,7 @@ from metal_marlin.speculative.verify import verify_speculative
 
 def _make_cache_config(vocab_size: int = 100) -> CacheConfig:
     """Create a minimal CacheConfig for testing."""
+    logger.debug("_make_cache_config called with vocab_size=%s", vocab_size)
     return CacheConfig(
         num_layers=1,
         num_heads=1,
@@ -57,6 +62,7 @@ class MockCausalLM(torch.nn.Module):
         logit_scale: float = 1.0,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with vocab_size=%s, bias_tokens=%s, logit_scale=%s, device=%s", type(self).__name__, vocab_size, bias_tokens, logit_scale, device)
         super().__init__()
         self.vocab_size = vocab_size
         self.bias_tokens = bias_tokens or {}
@@ -82,9 +88,11 @@ class MockCausalLM(torch.nn.Module):
         return logits
     
     def modules(self):
+        logger.debug("modules called")
         return []
 
     def create_kv_cache(self) -> KVCache:
+        logger.debug("create_kv_cache called")
         return KVCache(self._cache_config, batch_size=1, device="cpu")
 
 
@@ -101,6 +109,7 @@ class DeterministicDraft(DraftModel):
         vocab_size: int = 100,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with tokens=%s, prob_mass=%s, vocab_size=%s, device=%s", type(self).__name__, tokens, prob_mass, vocab_size, device)
         self._tokens = tokens
         self._prob_mass = prob_mass
         self._vocab_size = vocab_size
@@ -112,6 +121,7 @@ class DeterministicDraft(DraftModel):
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         batch_size = input_ids.shape[0]
         num_tokens = min(num_tokens, len(self._tokens))
 
@@ -135,6 +145,7 @@ class DeterministicDraft(DraftModel):
         return DraftOutput(tokens=tokens, probs=probs)
 
     def reset(self) -> None:
+        logger.debug("reset called")
         pass
 
 
@@ -148,6 +159,7 @@ class TestVerification:
 
     def test_perfect_match_accepts_all(self):
         """When draft == target distributions, all tokens should be accepted."""
+        logger.info("running test_perfect_match_accepts_all")
         torch.manual_seed(42)
         batch, num_spec, vocab = 2, 4, 50
         device = torch.device("cpu")
@@ -186,6 +198,7 @@ class TestVerification:
 
     def test_complete_mismatch_rejects_first(self):
         """When draft puts all mass on wrong token, first token should be rejected."""
+        logger.info("running test_complete_mismatch_rejects_first")
         torch.manual_seed(123)
         batch, num_spec, vocab = 1, 4, 50
         device = torch.device("cpu")
@@ -213,6 +226,7 @@ class TestVerification:
 
     def test_output_shapes(self):
         """Verify all output shapes are correct."""
+        logger.info("running test_output_shapes")
         batch, num_spec, vocab = 3, 5, 200
         device = torch.device("cpu")
 
@@ -228,6 +242,7 @@ class TestVerification:
 
     def test_num_accepted_range(self):
         """num_accepted should be in [0, num_spec] for all batch elements."""
+        logger.info("running test_num_accepted_range")
         torch.manual_seed(99)
         batch, num_spec, vocab = 4, 6, 100
         device = torch.device("cpu")
@@ -244,6 +259,7 @@ class TestVerification:
 
     def test_accepted_tokens_match_draft(self):
         """Accepted token values should match the corresponding draft tokens."""
+        logger.info("running test_accepted_tokens_match_draft")
         torch.manual_seed(77)
         batch, num_spec, vocab = 2, 4, 50
         device = torch.device("cpu")
@@ -281,6 +297,7 @@ class TestVerification:
 
     def test_temperature_zero_is_greedy(self):
         """Temperature=0 should behave as greedy decoding for next_token."""
+        logger.info("running test_temperature_zero_is_greedy")
         torch.manual_seed(55)
         batch, num_spec, vocab = 1, 3, 50
         device = torch.device("cpu")
@@ -304,6 +321,7 @@ class TestVerification:
         With higher temperature, target distribution becomes more uniform,
         increasing p_target for non-peak tokens, boosting acceptance.
         """
+        logger.info("running test_temperature_affects_acceptance")
         torch.manual_seed(200)
         batch, num_spec, vocab = 4, 5, 50
         device = torch.device("cpu")
@@ -332,6 +350,7 @@ class TestVerification:
 
     def test_top_p_filtering(self):
         """Top-p < 1.0 should still produce valid tokens."""
+        logger.info("running test_top_p_filtering")
         torch.manual_seed(303)
         batch, num_spec, vocab = 2, 3, 50
         device = torch.device("cpu")
@@ -355,6 +374,7 @@ class TestVerification:
         converge to the target. Uses chi-squared test for proper statistical
         validation.
         """
+        logger.info("running test_distribution_preserving_statistical")
         torch.manual_seed(42)
         vocab = 3
         num_trials = 5000
@@ -398,6 +418,7 @@ class TestVerification:
 
     def test_batch_independence(self):
         """Different batch elements should be verified independently."""
+        logger.info("running test_batch_independence")
         torch.manual_seed(500)
         batch, num_spec, vocab = 2, 4, 50
         device = torch.device("cpu")
@@ -431,6 +452,7 @@ class TestVerification:
 
     def test_single_speculative_token(self):
         """Edge case: num_spec=1 should work correctly."""
+        logger.info("running test_single_speculative_token")
         torch.manual_seed(600)
         batch, vocab = 2, 30
         device = torch.device("cpu")
@@ -457,6 +479,7 @@ class TestDraftModels:
 
     def test_small_model_draft_output_shape(self):
         """SmallModelDraft should produce correct output shapes."""
+        logger.info("running test_small_model_draft_output_shape")
         vocab_size = 100
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=vocab_size, device=device)
@@ -470,6 +493,7 @@ class TestDraftModels:
 
     def test_small_model_draft_respects_max_speculative(self):
         """Requesting more tokens than max_speculative should be clamped."""
+        logger.info("running test_small_model_draft_respects_max_speculative")
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=50, device=device)
         draft = SmallModelDraft(model, max_speculative=2, device=device)
@@ -483,6 +507,7 @@ class TestDraftModels:
 
     def test_small_model_draft_probabilities_sum_to_one(self):
         """Draft probability distributions should be normalized."""
+        logger.info("running test_small_model_draft_probabilities_sum_to_one")
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=50, device=device)
         draft = SmallModelDraft(model, max_speculative=4, device=device)
@@ -498,6 +523,7 @@ class TestDraftModels:
 
     def test_small_model_draft_tokens_are_argmax(self):
         """SmallModelDraft uses greedy decoding, so tokens should match argmax of probs."""
+        logger.info("running test_small_model_draft_tokens_are_argmax")
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=50, logit_scale=5.0, device=device)
         draft = SmallModelDraft(model, max_speculative=3, device=device)
@@ -513,6 +539,7 @@ class TestDraftModels:
 
     def test_small_model_draft_batched(self):
         """SmallModelDraft should handle batch_size > 1."""
+        logger.info("running test_small_model_draft_batched")
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=50, device=device)
         draft = SmallModelDraft(model, max_speculative=4, device=device)
@@ -525,6 +552,7 @@ class TestDraftModels:
 
     def test_small_model_draft_reset(self):
         """Reset should clear the internal cache."""
+        logger.info("running test_small_model_draft_reset")
         device = torch.device("cpu")
         model = MockCausalLM(vocab_size=50, device=device)
         draft = SmallModelDraft(model, max_speculative=4, device=device)
@@ -539,6 +567,7 @@ class TestDraftModels:
 
     def test_ngram_draft_output_shape(self):
         """NGramDraft should produce correct output shapes."""
+        logger.info("running test_ngram_draft_output_shape")
         vocab_size = 100
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=3, vocab_size=vocab_size, device=device)
@@ -552,6 +581,7 @@ class TestDraftModels:
 
     def test_ngram_updates_and_prediction(self):
         """After learning n-grams, predictions should use learned patterns."""
+        logger.info("running test_ngram_updates_and_prediction")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=2, vocab_size=50, device=device)
 
@@ -569,6 +599,7 @@ class TestDraftModels:
 
     def test_ngram_updates_accumulate(self):
         """Multiple update_ngrams calls should accumulate statistics."""
+        logger.info("running test_ngram_updates_accumulate")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=2, vocab_size=50, device=device)
 
@@ -586,6 +617,7 @@ class TestDraftModels:
 
     def test_ngram_fallback_with_short_context(self):
         """With insufficient context, NGramDraft should fall back to uniform."""
+        logger.info("running test_ngram_fallback_with_short_context")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=3, vocab_size=50, device=device)
 
@@ -601,6 +633,7 @@ class TestDraftModels:
 
     def test_ngram_reset_clears_state(self):
         """Reset should clear all n-gram statistics and history."""
+        logger.info("running test_ngram_reset_clears_state")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=2, vocab_size=50, device=device)
         draft.update_ngrams([1, 2, 3, 4, 5])
@@ -614,6 +647,7 @@ class TestDraftModels:
 
     def test_ngram_probabilities_normalized(self):
         """NGramDraft probabilities should sum to 1."""
+        logger.info("running test_ngram_probabilities_normalized")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=2, vocab_size=50, device=device)
         draft.update_ngrams([1, 2, 3, 1, 2, 4, 1, 2, 5])
@@ -631,6 +665,7 @@ class TestDraftModels:
 
     def test_ngram_batched_broadcasts(self):
         """NGramDraft with batch_size > 1 should broadcast predictions."""
+        logger.info("running test_ngram_batched_broadcasts")
         device = torch.device("cpu")
         draft = NGramDraft(ngram_size=2, vocab_size=50, device=device)
         draft.update_ngrams([10, 20, 30, 10, 20, 30])
@@ -648,6 +683,7 @@ class TestMMFP4DraftModel:
 
     def test_init(self):
         """MMFP4DraftModel should initialize correctly."""
+        logger.info("running test_init")
         draft = MMFP4DraftModel(
             hidden_size=64,
             vocab_size=100,
@@ -661,6 +697,7 @@ class TestMMFP4DraftModel:
 
     def test_speculate_from_hidden(self):
         """MMFP4DraftModel should generate tokens from hidden states."""
+        logger.info("running test_speculate_from_hidden")
         hidden_size = 32
         vocab_size = 50
         num_predictions = 4
@@ -690,6 +727,7 @@ class TestMMFP4DraftModel:
 
     def test_from_target_model(self):
         """Factory method should extract config from target model."""
+        logger.info("running test_from_target_model")
         target = MockCausalLM(vocab_size=100)
         draft = MMFP4DraftModel.from_target_model(target, num_predictions=3)
         
@@ -699,6 +737,7 @@ class TestMMFP4DraftModel:
 
     def test_weight_sharing(self):
         """Weight sharing factory should enable weight sharing flag."""
+        logger.info("running test_weight_sharing")
         target = MockCausalLM(vocab_size=100)
         draft = MMFP4DraftModel.from_target_model_with_weight_sharing(
             target,

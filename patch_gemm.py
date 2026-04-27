@@ -1,3 +1,7 @@
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 with open('./metal_marlin/shaders/mmfp4_gemm.metal') as f:
     code = f.read()

@@ -54,6 +54,7 @@ Requirements:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -89,6 +90,9 @@ from .metal_dispatch import (
     mps_tensor_to_metal_buffer,
     require_mps,
 )
+
+
+logger = logging.getLogger(__name__)
 
 # Constants matching tree_attention.metal
 TILE_KV_TREE = 32
@@ -137,6 +141,7 @@ def build_tree_mask(
         Tree mask tensor [tree_size, tree_size] with uint32 dtype.
         mask[i][j] = 1 if node i can attend to node j.
     """
+    logger.info("build_tree_mask starting")
     if not HAS_TORCH:
         raise RuntimeError("PyTorch required for tree_attention")
 
@@ -178,6 +183,7 @@ def build_tree_mask_packed(
     Returns:
         Packed tree mask tensor [tree_size, (tree_size+63)//64] with uint64 dtype.
     """
+    logger.info("build_tree_mask_packed called with parents=%s, device=%s", parents, device)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch required for tree_attention")
 
@@ -238,6 +244,7 @@ def tree_attention_forward(
     Returns:
         Output tensor [batch, heads, tree_size, head_dim].
     """
+    logger.debug("tree_attention_forward called with Q=%s, K=%s, V=%s", Q, K, V)
     require_mps()
 
     if lib is None:
@@ -265,11 +272,13 @@ def tree_attention_forward(
 
     # Create constant buffers
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.float32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
@@ -335,6 +344,7 @@ def tree_attention_forward_with_positions(
     Returns:
         Output tensor [batch, heads, tree_size, head_dim].
     """
+    logger.debug("tree_attention_forward_with_positions called with Q=%s, K=%s, V=%s", Q, K, V)
     require_mps()
 
     if lib is None:
@@ -357,11 +367,13 @@ def tree_attention_forward_with_positions(
     O_buf = mps_tensor_to_metal_buffer(output, device)
 
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.float32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
@@ -424,6 +436,7 @@ def tree_attention_forward_packed(
     Returns:
         Output tensor [batch, heads, tree_size, head_dim].
     """
+    logger.info("tree_attention_forward_packed called with Q=%s, K=%s, V=%s, tree_mask_packed=%s", Q, K, V, tree_mask_packed)
     require_mps()
 
     if lib is None:
@@ -444,11 +457,13 @@ def tree_attention_forward_packed(
     O_buf = mps_tensor_to_metal_buffer(output, device)
 
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         return device.newBufferWithBytes_length_options_(
             np.array([val], dtype=np.float32).tobytes(), 4, Metal.MTLResourceStorageModeShared
         )
@@ -512,6 +527,7 @@ def tree_attention_numpy(
     Returns:
         Output array [batch, heads, tree_size, head_dim].
     """
+    logger.debug("tree_attention_numpy called with Q=%s, K=%s, V=%s", Q, K, V)
     batch, num_heads, tree_size, head_dim = Q.shape
     total_kv_len = K.shape[2]
 
@@ -560,6 +576,7 @@ def tree_attention_numpy(
 
 def _test_tree_attention() -> None:
     """Test tree attention implementation."""
+    logger.info("running _test_tree_attention")
     if not HAS_MPS:
         print("Skipping tree attention test (MPS not available)")
         return

@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -42,11 +43,15 @@ from .metal_dispatch import (
 if HAS_METAL:
     import Metal
 
+
+logger = logging.getLogger(__name__)
+
 _lib: MetalKernelLibrary | None = None
 
 
 def _get_library() -> MetalKernelLibrary:
     """Get or create the Metal kernel library."""
+    logger.debug("_get_library called")
     global _lib
     if _lib is None:
         _lib = MetalKernelLibrary.from_source_dir()
@@ -55,6 +60,7 @@ def _get_library() -> MetalKernelLibrary:
 
 def _make_uint_buffer(device: Any, value: int) -> Any:
     """Create a Metal buffer containing a single uint32 value."""
+    logger.debug("_make_uint_buffer called with device=%s, value=%s", device, value)
     data = np.array([value], dtype=np.uint32)
     return device.newBufferWithBytes_length_options_(
         data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -92,6 +98,7 @@ def expert_gather(
         >>> gathered = expert_gather(expert_weights, expert_indices)
         >>> assert gathered.shape == (32, 2, 14336)
     """
+    logger.debug("expert_gather called with expert_weights=%s, expert_indices=%s, output=%s", expert_weights, expert_indices, output)
     num_experts, hidden_dim, out_dim = expert_weights.shape
     batch_size, top_k = expert_indices.shape
 
@@ -116,6 +123,7 @@ def _expert_gather_cpu(
     output: torch.Tensor,
 ) -> None:
     """CPU fallback for expert_gather using PyTorch indexing."""
+    logger.debug("_expert_gather_cpu called with expert_weights=%s, expert_indices=%s, output=%s", expert_weights, expert_indices, output)
     batch_size, top_k = expert_indices.shape
     flat_indices = expert_indices.reshape(-1)
     selected = torch.index_select(expert_weights, dim=0, index=flat_indices.long())
@@ -129,6 +137,7 @@ def _expert_gather_metal(
     output: torch.Tensor,
 ) -> None:
     """Metal-accelerated expert gather using index_select kernel."""
+    logger.debug("_expert_gather_metal called with expert_weights=%s, expert_indices=%s, output=%s", expert_weights, expert_indices, output)
     lib = _get_library()
     device = lib.device
 
@@ -202,6 +211,7 @@ def expert_scatter_add(
         >>> combined = expert_scatter_add(expert_outputs, expert_indices, routing_weights)
         >>> assert combined.shape == (32, 14336)
     """
+    logger.debug("expert_scatter_add called with expert_outputs=%s, expert_indices=%s, routing_weights=%s", expert_outputs, expert_indices, routing_weights)
     batch_size, top_k, out_dim = expert_outputs.shape
 
     if output is None:
@@ -226,6 +236,7 @@ def _expert_scatter_add_cpu(
     output: torch.Tensor,
 ) -> None:
     """CPU fallback for expert_scatter_add using PyTorch operations."""
+    logger.debug("_expert_scatter_add_cpu called with expert_outputs=%s, expert_indices=%s, routing_weights=%s", expert_outputs, expert_indices, routing_weights)
     batch_size, top_k, out_dim = expert_outputs.shape
     weighted = expert_outputs * routing_weights.unsqueeze(-1)
     combined = weighted.sum(dim=1)
@@ -239,6 +250,7 @@ def _expert_scatter_add_metal(
     output: torch.Tensor,
 ) -> None:
     """Metal-accelerated scatter-add using optimized SIMD kernels."""
+    logger.debug("_expert_scatter_add_metal called with expert_outputs=%s, expert_indices=%s, routing_weights=%s", expert_outputs, expert_indices, routing_weights)
     from .moe_scatter_gather import ScatterGatherDispatcher
 
     lib = _get_library()

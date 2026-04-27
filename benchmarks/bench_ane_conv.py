@@ -14,6 +14,7 @@ Measures:
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,6 +45,9 @@ except ImportError:
     HAS_ANE = False
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class ConvBenchmarkResult:
     """Result from convolution benchmark."""
@@ -65,6 +69,7 @@ class ConformerConv1d(nn.Module):
     """Conformer-style convolution module with GLU activation."""
 
     def __init__(self, hidden: int, kernel: int = 31, expansion: int = 2):
+        logger.debug("initializing %s with hidden=%s, kernel=%s, expansion=%s", type(self).__name__, hidden, kernel, expansion)
         super().__init__()
         self.hidden = hidden
         self.kernel = kernel
@@ -103,6 +108,7 @@ class ConformerConv1d(nn.Module):
             Output tensor [batch, seq_len, hidden]
         """
         # Store residual
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         residual = x
 
         # Layer norm
@@ -137,6 +143,7 @@ def time_mps_conv(
 ) -> float:
     """Time a convolution function on MPS."""
 
+    logger.debug("time_mps_conv called with fn=%s, warmup=%s, iterations=%s", fn, warmup, iterations)
     if not HAS_TORCH or not HAS_MPS:
         return float("inf")
 
@@ -164,11 +171,13 @@ def time_ane_conv(
 ) -> float:
     """Time a convolution function on ANE."""
 
+    logger.debug("time_ane_conv called with fn=%s, warmup=%s, iterations=%s", fn, warmup, iterations)
     if not HAS_TORCH or not HAS_ANE:
         return float("inf")
 
     # Transfer to CPU first (simulating typical workflow)
     def cpu_to_ane_wrapper():
+        logger.debug("cpu_to_ane_wrapper called")
         result = fn()
         # Force transfer to CPU then back to ANE
         cpu_result = result.cpu()
@@ -195,6 +204,7 @@ def measure_memory_usage(
 ) -> float:
     """Measure memory usage in GB for a function."""
 
+    logger.debug("measure_memory_usage called with fn=%s, device=%s", fn, device)
     if device == "mps":
         torch.mps.empty_cache()
         initial_memory = torch.mps.current_allocated_memory()
@@ -221,6 +231,7 @@ def benchmark_pointwise_conv(
 ) -> ConvBenchmarkResult:
     """Benchmark pointwise convolution."""
 
+    logger.info("benchmark_pointwise_conv starting with seq_len=%s, hidden=%s, warmup=%s, iterations=%s", seq_len, hidden, warmup, iterations)
     if not HAS_TORCH:
         return ConvBenchmarkResult(
             name="pointwise_conv",
@@ -238,6 +249,7 @@ def benchmark_pointwise_conv(
     conv = nn.Conv1d(hidden, hidden, kernel_size=1).to("mps")
 
     def mps_fn():
+        logger.debug("mps_fn called")
         x_conv = x_mps.transpose(1, 2)  # [batch, hidden, seq_len]
         return conv(x_conv).transpose(1, 2)
 
@@ -253,6 +265,7 @@ def benchmark_pointwise_conv(
         conv_ane = nn.Conv1d(hidden, hidden, kernel_size=1).to("ane")
 
         def ane_fn():
+            logger.debug("ane_fn called")
             x_conv = x_ane.transpose(1, 2)
             return conv_ane(x_conv).transpose(1, 2)
 
@@ -294,6 +307,7 @@ def benchmark_depthwise_conv(
 ) -> ConvBenchmarkResult:
     """Benchmark depthwise convolution."""
 
+    logger.info("benchmark_depthwise_conv starting with seq_len=%s, hidden=%s, kernel=%s, warmup=%s", seq_len, hidden, kernel, warmup)
     if not HAS_TORCH:
         return ConvBenchmarkResult(
             name="depthwise_conv",
@@ -313,6 +327,7 @@ def benchmark_depthwise_conv(
     )
 
     def mps_fn():
+        logger.debug("mps_fn called")
         x_conv = x_mps.transpose(1, 2)  # [batch, hidden, seq_len]
         return conv(x_conv).transpose(1, 2)
 
@@ -330,6 +345,7 @@ def benchmark_depthwise_conv(
         ).to("ane")
 
         def ane_fn():
+            logger.debug("ane_fn called")
             x_conv = x_ane.transpose(1, 2)
             return conv_ane(x_conv).transpose(1, 2)
 
@@ -371,6 +387,7 @@ def benchmark_conformer_conv(
 ) -> ConvBenchmarkResult:
     """Benchmark full Conformer convolution module."""
 
+    logger.info("benchmark_conformer_conv starting with seq_len=%s, hidden=%s, kernel=%s, warmup=%s", seq_len, hidden, kernel, warmup)
     if not HAS_TORCH:
         return ConvBenchmarkResult(
             name="conformer_conv",
@@ -388,6 +405,7 @@ def benchmark_conformer_conv(
     conformer_conv = ConformerConv1d(hidden, kernel).to("mps")
 
     def mps_fn():
+        logger.debug("mps_fn called")
         return conformer_conv(x_mps)
 
     # Benchmark MPS
@@ -402,6 +420,7 @@ def benchmark_conformer_conv(
         conformer_conv_ane = ConformerConv1d(hidden, kernel).to("ane")
 
         def ane_fn():
+            logger.debug("ane_fn called")
             return conformer_conv_ane(x_ane)
 
         ane_time = time_ane_conv(ane_fn, warmup, iterations)
@@ -436,6 +455,7 @@ def benchmark_conformer_conv(
 def benchmark_ane_vs_mps_conv():
     """Main benchmark function comparing ANE vs MPS for conv1d operations."""
 
+    logger.info("benchmark_ane_vs_mps_conv starting")
     print("ANE vs MPS Conv1D Benchmark")
     print("=" * 50)
     print(f"PyTorch Available: {HAS_TORCH}")

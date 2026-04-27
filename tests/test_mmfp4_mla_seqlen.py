@@ -3,6 +3,7 @@
 This test verifies that causal masking works correctly for all sequence lengths,
 especially for seq_len >= 4 where issues were previously observed.
 """
+import logging
 
 import pytest
 import torch
@@ -11,8 +12,12 @@ import torch.nn.functional as F
 from metal_marlin.layers.mmfp4_mla import MMFP4MLA
 
 
+
+logger = logging.getLogger(__name__)
+
 def create_test_model(device: str = "cpu") -> MMFP4MLA:
     """Create a test MMFP4MLA model with small dimensions for testing."""
+    logger.info("running create_test_model")
     model = MMFP4MLA(
         hidden_size=128,
         num_heads=4,
@@ -37,6 +42,7 @@ def test_mla_varying_seqlen(seq_len: int) -> None:
     
     This test specifically targets the causal masking issue that occurred with seq_len >= 4.
     """
+    logger.info("running test_mla_varying_seqlen")
     device = "cpu"
     batch_size = 2
     hidden_size = 128
@@ -79,6 +85,7 @@ def test_mla_causal_property(seq_len: int) -> None:
     
     We verify this by checking that changing a future token doesn't affect past outputs.
     """
+    logger.info("running test_mla_causal_property")
     device = "cpu"
     batch_size = 1
     hidden_size = 128
@@ -124,6 +131,7 @@ def test_mla_vs_manual_sdpa(seq_len: int) -> None:
     
     This verifies that our causal masking matches PyTorch's standard behavior.
     """
+    logger.info("running test_mla_vs_manual_sdpa")
     device = "cpu"
     batch_size = 1
     num_heads = 4
@@ -185,6 +193,7 @@ def test_mla_vs_manual_sdpa(seq_len: int) -> None:
 @pytest.mark.skip(reason="MLAKVCache has device mismatch issue unrelated to causal masking")
 def test_mla_with_cache_decode() -> None:
     """Test MMFP4MLA with KV cache for decode (seq_len=1)."""
+    logger.info("running test_mla_with_cache_decode")
     from metal_marlin.kv_cache import MLAKVCache
     
     device = "cpu"
@@ -233,6 +242,7 @@ def test_mla_non_power_of_2(seq_len: int) -> None:
     
     This is important because some implementations have issues with padding.
     """
+    logger.info("running test_mla_non_power_of_2")
     device = "cpu"
     batch_size = 1
     hidden_size = 128

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 import sys
@@ -16,6 +17,7 @@ from metal_marlin.trellis.model import TrellisDenseMLP, TrellisMoEMLP
 
 
 def create_dummy_moe():
+    logger.debug("create_dummy_moe called")
     router = nn.Linear(64, 4, bias=False, device='cpu', dtype=torch.float16)
     experts = []
     for _ in range(4):
@@ -68,6 +70,7 @@ def create_dummy_moe():
 
 def test_cache_logic():
     # Setup cache dir
+    logger.info("running test_cache_logic")
     cache_dir = Path.home() / ".cache" / "metal_marlin"
     # Ensure dir exists or clean it
     if cache_dir.exists():
@@ -128,3 +131,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+logger = logging.getLogger(__name__)

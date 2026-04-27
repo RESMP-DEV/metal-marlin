@@ -1,3 +1,4 @@
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -9,11 +10,16 @@ from metal_marlin.trellis.kernel_selection_mixed import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMixedKernelSelector(unittest.TestCase):
     def setUp(self):
+        logger.info("setUp starting")
         self.selector = MixedKernelSelector(history_len=10, initial_exploration_rate=0.0)
 
     def test_heuristics_dominant_2bit(self):
+        logger.info("running test_heuristics_dominant_2bit")
         bits = [2, 2, 2, 4]  # >50% 2-bit
 
         kernel, info = self.selector.select_kernel(batch_size=1, active_expert_bits=bits)
@@ -25,6 +31,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["heuristic_family"], FAST_2BIT_FAMILY)
 
     def test_heuristics_mixed_2_3_4(self):
+        logger.info("running test_heuristics_mixed_2_3_4")
         bits = [2, 3, 4, 2]
 
         kernel, info = self.selector.select_kernel(batch_size=1, active_expert_bits=bits)
@@ -36,12 +43,14 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["heuristic_family"], MIXED_BPW_FAMILY)
 
     def test_heuristics_standard_mostly_4bit(self):
+        logger.info("running test_heuristics_standard_mostly_4bit")
         bits = [4, 4, 4, 3]  # mostly 4-bit
         kernel, info = self.selector.select_kernel(batch_size=40, active_expert_bits=bits)
         self.assertEqual(kernel, "moe_trellis_swiglu_large_batch")
         self.assertEqual(info["heuristic_family"], STANDARD_FAMILY)
 
     def test_decode_fp32acc_uses_decode_kernel(self):
+        logger.info("running test_decode_fp32acc_uses_decode_kernel")
         kernel, info = self.selector.select_kernel(
             batch_size=1,
             active_expert_bits=[4, 4, 4, 4],
@@ -51,6 +60,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["baseline_kernel"], "moe_trellis_swiglu_decode")
 
     def test_memory_pressure_override(self):
+        logger.info("running test_memory_pressure_override")
         bits = [2, 3, 4, 2]
         kernel, info = self.selector.select_kernel(
             batch_size=1,
@@ -61,6 +71,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["reason"], "memory_pressure")
 
     def test_feedback_loop_exploitation(self):
+        logger.info("running test_feedback_loop_exploitation")
         bits = [4, 4, 4, 4]
         decode = "moe_trellis_swiglu_decode"
         base = "moe_trellis_swiglu"
@@ -81,11 +92,13 @@ class TestMixedKernelSelector(unittest.TestCase):
     @patch("random.random")
     @patch("random.choice")
     def test_ab_testing_runtime_selects_faster(self, mock_choice, mock_random):
+        logger.info("running test_ab_testing_runtime_selects_faster")
         selector = MixedKernelSelector(history_len=10, initial_exploration_rate=1.0)
         mock_random.return_value = 0.0
         mock_choice.return_value = "moe_trellis_swiglu"
 
         def benchmark(kernel_name: str) -> float:
+            logger.info("benchmark starting with kernel_name=%s", kernel_name)
             if kernel_name == "moe_trellis_swiglu_decode":
                 return 4.0
             if kernel_name == "moe_trellis_swiglu":
@@ -109,11 +122,13 @@ class TestMixedKernelSelector(unittest.TestCase):
     @patch("random.random")
     @patch("random.choice")
     def test_ab_testing_accuracy_tracking(self, mock_choice, mock_random):
+        logger.info("running test_ab_testing_accuracy_tracking")
         selector = MixedKernelSelector(history_len=10, initial_exploration_rate=1.0)
         mock_random.return_value = 0.0
         mock_choice.return_value = "moe_trellis_swiglu"
 
         def benchmark(kernel_name: str) -> float:
+            logger.info("benchmark starting with kernel_name=%s", kernel_name)
             if kernel_name == "moe_trellis_swiglu_decode":
                 return 2.0
             if kernel_name == "moe_trellis_swiglu":
@@ -133,6 +148,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(stats["selection_accuracy"], 1.0)
 
     def test_activation_pattern_adjustment(self):
+        logger.info("running test_activation_pattern_adjustment")
         bits = [2, 3, 4, 2]
         kernel, info = self.selector.select_kernel(
             batch_size=1,
@@ -143,6 +159,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["reason"], "activation_pattern_skewed")
 
     def test_availability_fallback(self):
+        logger.info("running test_availability_fallback")
         bits = [2, 3, 4, 2]
         kernel, info = self.selector.select_kernel(
             batch_size=1,
@@ -153,6 +170,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(info["reason"], "availability_fallback")
 
     def test_statistics_and_reset(self):
+        logger.info("running test_statistics_and_reset")
         for _ in range(3):
             self.selector.select_kernel(batch_size=1, active_expert_bits=[4, 4, 4, 4])
 
@@ -168,6 +186,7 @@ class TestMixedKernelSelector(unittest.TestCase):
         self.assertEqual(len(self.selector.timings), 0)
 
     def test_exploration_rate_update(self):
+        logger.info("running test_exploration_rate_update")
         selector = MixedKernelSelector(history_len=10, initial_exploration_rate=0.3)
         selector.set_exploration_rate(0.2)
         self.assertEqual(selector.exploration_rate, 0.2)

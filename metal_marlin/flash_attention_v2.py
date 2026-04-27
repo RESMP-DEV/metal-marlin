@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -61,6 +62,9 @@ if TYPE_CHECKING:
     import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 # Tile dimensions matching the Metal kernel
 TILE_Q = 16
 TILE_KV = 64
@@ -70,6 +74,7 @@ THREADS_PER_TG = NUM_SIMDGROUPS * 32  # 128
 
 def _require_metal_attention() -> None:
     """Raise if Metal dispatch is not available."""
+    logger.debug("_require_metal_attention called")
     if not HAS_TORCH:
         raise RuntimeError(
             "Flash Attention V2 requires PyTorch. Install with: pip install torch")
@@ -108,6 +113,7 @@ class AttentionParams:
         """
         # Pack as uint32 array (is_causal as 0/1)
         # Note: scale is reinterpreted as uint32 for the Metal struct
+        logger.debug("to_buffer called with device=%s", device)
         data = np.array(
             [
                 self.batch,
@@ -131,6 +137,7 @@ class AttentionParams:
 
 def _get_kernel_source() -> str:
     """Load Flash Attention V2 Metal kernel source."""
+    logger.debug("_get_kernel_source called")
     kernel_path = Path(__file__).parent.parent / \
         "src" / "flash_attention_v2.metal"
     if kernel_path.exists():
@@ -141,6 +148,7 @@ def _get_kernel_source() -> str:
 
 def _compute_grid(params: AttentionParams, kernel_type: str) -> tuple[int, int, int]:
     """Compute Metal grid dimensions for dispatch."""
+    logger.debug("_compute_grid called with params=%s, kernel_type=%s", params, kernel_type)
     if kernel_type == "decode":
         # Decode: one threadgroup per (sequence, head) pair
         return (params.batch * params.num_heads_q, 1, 1)
@@ -181,6 +189,7 @@ def select_kernel(
     Returns:
         Kernel name to use
     """
+    logger.debug("select_kernel called with seq_q=%s, num_heads_q=%s, num_heads_kv=%s", seq_q, num_heads_q, num_heads_kv)
     gqa_ratio = num_heads_q // num_heads_kv if num_heads_kv > 0 else 1
 
     if seq_q == 1:
@@ -215,6 +224,7 @@ _kernel_lib: Any = None
 
 def _get_kernel_library() -> Any:
     """Get or create the Flash Attention kernel library."""
+    logger.debug("_get_kernel_library called")
     global _kernel_lib
     if _kernel_lib is None:
         from .metal_dispatch import MetalKernelLibrary
@@ -232,6 +242,7 @@ def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     a copy-based approach. The original zero-copy newBufferWithBytesNoCopy
     fails with "converting to a C array" error in newer PyObjC.
     """
+    logger.debug("_mps_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     import ctypes
 
     if not tensor.is_mps:
@@ -277,6 +288,7 @@ def _dispatch_attention_kernel(
     wait: bool = True,
 ) -> None:
     """Dispatch a Flash Attention Metal kernel."""
+    logger.debug("_dispatch_attention_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
     pipeline = lib.get_pipeline(
         function_name, library_name="flash_attention_v2")
 
@@ -325,6 +337,7 @@ def flash_attention_v2(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim], MPS device
     """
+    logger.debug("flash_attention_v2 called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -358,6 +371,7 @@ def _flash_attention_v2_prefill(
     causal: bool,
 ) -> torch.Tensor:
     """Flash Attention V2 prefill kernel dispatch."""
+    logger.debug("_flash_attention_v2_prefill called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -431,6 +445,7 @@ def flash_attention_v2_decode(
     Returns:
         Output tensor [num_seqs, heads_q, 1, head_dim] or [num_seqs, heads_q, head_dim]
     """
+    logger.debug("flash_attention_v2_decode called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     # Handle 3D input (squeeze seq_q dimension)
@@ -466,12 +481,14 @@ def flash_attention_v2_decode(
     # Create scalar constant buffers for decode kernel
     # The decode kernel uses separate buffer arguments, not a struct
     def make_uint32_buffer(val: int) -> Any:
+        logger.debug("make_uint32_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         data = np.array([val], dtype=np.float32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -541,6 +558,7 @@ def flash_attention_v2_decode_fast(
     Returns:
         Output tensor [1, heads_q, 1, head_dim] or [heads_q, head_dim]
     """
+    logger.debug("flash_attention_v2_decode_fast called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     # Handle various input shapes
@@ -607,12 +625,14 @@ def flash_attention_v2_decode_fast(
 
     # Create scalar constant buffers
     def make_uint32_buffer(val: int) -> Any:
+        logger.debug("make_uint32_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         data = np.array([val], dtype=np.float32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -679,6 +699,7 @@ def flash_attention_v2_gqa(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("flash_attention_v2_gqa called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -759,6 +780,7 @@ def flash_attention_v2_mqa(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("flash_attention_v2_mqa called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -842,6 +864,7 @@ def benchmark_flash_attention(
     Returns:
         Dictionary with timing statistics and bandwidth utilization
     """
+    logger.info("benchmark_flash_attention starting with batch=%s, num_heads_q=%s, num_heads_kv=%s, seq_q=%s", batch, num_heads_q, num_heads_kv, seq_q)
     _require_metal_attention()
 
     import time

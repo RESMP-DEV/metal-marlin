@@ -1,12 +1,17 @@
 """Tests for MoE buffer creation from CPU tensors."""
+import logging
 
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def metal_device():
     """Get Metal device."""
+    logger.debug("metal_device called")
     import Metal
     return Metal.MTLCreateSystemDefaultDevice()
 
@@ -14,6 +19,7 @@ def metal_device():
 @pytest.fixture
 def mock_cpu_weights():
     """Create mock CPU weight tensors for MoE."""
+    logger.debug("mock_cpu_weights called")
     num_experts = 4
     hidden_dim = 256
     intermediate_dim = 512
@@ -71,6 +77,7 @@ class TestMoEBuffersFromCPU:
 
     def test_creates_buffers_from_cpu(self, metal_device, mock_cpu_weights):
         """Test buffer creation from CPU tensors."""
+        logger.info("running test_creates_buffers_from_cpu")
         from metal_marlin.trellis.moe_dispatch import create_cached_weight_buffers_from_cpu
 
         buffers = create_cached_weight_buffers_from_cpu(
@@ -86,6 +93,7 @@ class TestMoEBuffersFromCPU:
 
     def test_rejects_mps_tensors(self, metal_device, mock_cpu_weights):
         """Test that MPS tensors are rejected."""
+        logger.info("running test_rejects_mps_tensors")
         from metal_marlin.trellis.moe_dispatch import create_cached_weight_buffers_from_cpu
 
         # Move one tensor to MPS

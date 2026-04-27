@@ -19,6 +19,7 @@ import argparse
 import gc
 import hashlib
 import json
+import logging
 import os
 import platform
 import subprocess
@@ -31,6 +32,9 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -98,6 +102,7 @@ class BenchmarkReport:
 
 def _git_rev() -> tuple[str | None, str | None, bool]:
     """Return (commit, branch, dirty) or None on failure."""
+    logger.debug("_git_rev called")
     try:
         commit = (
             subprocess.check_output(
@@ -131,12 +136,14 @@ def _git_rev() -> tuple[str | None, str | None, bool]:
 
 def _env_hash() -> str:
     """Deterministic hash of environment variables that affect reproducibility."""
+    logger.debug("_env_hash called")
     keys = sorted(k for k in os.environ if "TORCH" in k or "MPS" in k or "OMP" in k or "MKL" in k)
     blob = json.dumps({k: os.environ[k] for k in keys}, sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _memory_gb() -> float:
+    logger.debug("_memory_gb called")
     try:
         import psutil
 
@@ -146,6 +153,7 @@ def _memory_gb() -> float:
 
 
 def _capture_meta() -> EnvMeta:
+    logger.debug("_capture_meta called")
     import numpy as np
 
     try:
@@ -183,11 +191,13 @@ def _capture_meta() -> EnvMeta:
 
 def _hash_samples(samples: list[TimingSample]) -> str:
     """Produce tamper-evident hash of raw timing series."""
+    logger.debug("_hash_samples called with samples=%s", samples)
     blob = json.dumps([s.wall_ms for s in samples])
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
 def _stats(samples: list[float]) -> dict[str, float]:
+    logger.debug("_stats called with samples=%s", samples)
     arr = np.array(samples, dtype=np.float64)
     return {
         "n": int(len(arr)),
@@ -202,6 +212,7 @@ def _stats(samples: list[float]) -> dict[str, float]:
 
 
 def _mps_gc():
+    logger.debug("_mps_gc called")
     gc.collect()
     try:
         import torch
@@ -217,6 +228,7 @@ def _mps_gc():
 # ---------------------------------------------------------------------------
 
 def _import_torch():
+    logger.debug("_import_torch called")
     import torch
 
     return torch
@@ -224,6 +236,7 @@ def _import_torch():
 
 def bench_matmul_fp16(M: int, K: int, N: int, iters: int = MIN_BENCH_ITERS) -> BenchResult:
     """Baseline FP16 GEMM on MPS (or CPU fallback)."""
+    logger.info("bench_matmul_fp16 starting with M=%s, K=%s, N=%s, iters=%s", M, K, N, iters)
     torch = _import_torch()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -270,6 +283,7 @@ def bench_moe_expert_dispatch(
     iters: int = MIN_BENCH_ITERS,
 ) -> BenchResult:
     """Benchmark MoE-style expert weight scatter/gather dispatch."""
+    logger.info("bench_moe_expert_dispatch starting with num_experts=%s, d_model=%s, hidden=%s, top_k=%s", num_experts, d_model, hidden, top_k)
     torch = _import_torch()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -327,6 +341,7 @@ def bench_attention_decode(
     iters: int = MIN_BENCH_ITERS,
 ) -> BenchResult:
     """Single-token decode attention: Q @ K^T @ V."""
+    logger.info("bench_attention_decode starting with seq_len=%s, n_heads=%s, head_dim=%s, iters=%s", seq_len, n_heads, head_dim, iters)
     torch = _import_torch()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -368,6 +383,7 @@ def bench_attention_decode(
 
 def bench_layer_norm(hidden: int = 2048, seq_len: int = 512, iters: int = MIN_BENCH_ITERS) -> BenchResult:
     """LayerNorm on a typical activation tensor."""
+    logger.info("bench_layer_norm starting with hidden=%s, seq_len=%s, iters=%s", hidden, seq_len, iters)
     torch = _import_torch()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -414,6 +430,7 @@ def bench_quantized_matmul(
     iters: int = MIN_BENCH_ITERS,
 ) -> BenchResult:
     """Simulated GPTQ-style INT4 dequant + matmul."""
+    logger.info("bench_quantized_matmul starting with M=%s, K=%s, N=%s, group_size=%s", M, K, N, group_size)
     torch = _import_torch()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -426,6 +443,7 @@ def bench_quantized_matmul(
     x = torch.randn(M, K, device=device, dtype=torch.float16)
 
     def dequant():
+        logger.info("dequant called")
         w = qweight.to(torch.float16)
         # apply per-group scale/zero
         for g in range(num_groups):
@@ -478,6 +496,7 @@ def bench_quantized_matmul(
 # ---------------------------------------------------------------------------
 
 def run_all(quick: bool = False) -> BenchmarkReport:
+    logger.debug("run_all called with quick=%s", quick)
     meta = _capture_meta()
     print(f"Benchmark UUID: {meta.benchmark_uuid}")
     print(f"Timestamp: {meta.timestamp_utc}")
@@ -529,6 +548,7 @@ def run_all(quick: bool = False) -> BenchmarkReport:
 
 
 def _serialize(obj: Any) -> Any:
+    logger.debug("_serialize called with obj=%s", obj)
     if isinstance(obj, (str, int, float, bool, type(None))):
         return obj
     if isinstance(obj, list):
@@ -541,6 +561,7 @@ def _serialize(obj: Any) -> Any:
 
 
 def write_report(report: BenchmarkReport) -> Path:
+    logger.info("write_report called with report=%s", report)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     out_path = REPORTS_DIR / f"bench_{ts}.json"
@@ -564,6 +585,7 @@ def write_report(report: BenchmarkReport) -> Path:
 
 def validate_report(path: Path) -> bool:
     """Recompute integrity hash and verify it matches."""
+    logger.debug("validate_report called with path=%s", path)
     with open(path) as f:
         data = json.load(f)
 
@@ -581,6 +603,7 @@ def validate_report(path: Path) -> bool:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--quick", action="store_true", help="Run abbreviated benchmark (fewer iterations)")
     parser.add_argument("--validate", type=Path, metavar="PATH", help="Validate an existing report JSON")

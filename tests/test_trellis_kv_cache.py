@@ -1,6 +1,7 @@
 """Tests for TrellisKVCache - MLA compressed KV cache."""
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -8,12 +9,16 @@ import torch
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
 from metal_marlin.kv_cache import TrellisKVCache
 
+
+logger = logging.getLogger(__name__)
+
 # Skip entire module if PyTorch unavailable
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 
 
 def _get_device() -> str:
     """Get appropriate device for tests."""
+    logger.debug("_get_device called")
     return "mps" if HAS_MPS else "cpu"
 
 
@@ -23,6 +28,7 @@ class TestTrellisKVCache:
     @pytest.fixture
     def cache_params(self):
         """Default cache parameters."""
+        logger.debug("cache_params called")
         return {
             "num_layers": 4,
             "batch_size": 2,
@@ -36,6 +42,7 @@ class TestTrellisKVCache:
     @pytest.fixture
     def cache(self, cache_params):
         """Create a TrellisKVCache instance."""
+        logger.debug("cache called with cache_params=%s", cache_params)
         device = _get_device()
         return TrellisKVCache(
             num_layers=cache_params["num_layers"],
@@ -50,6 +57,7 @@ class TestTrellisKVCache:
 
     def test_init(self, cache, cache_params):
         """Test cache initialization."""
+        logger.info("running test_init")
         assert cache.num_layers == cache_params["num_layers"]
         assert cache.batch_size == cache_params["batch_size"]
         assert cache.max_seq_len == cache_params["max_seq_len"]
@@ -78,6 +86,7 @@ class TestTrellisKVCache:
     def test_memory_layout_mps_optimal(self, cache):
         """Verify MPS-optimal memory layout (contiguous, half precision)."""
         # Check tensors are contiguous
+        logger.info("running test_memory_layout_mps_optimal")
         assert cache.kv_cache.is_contiguous()
 
         # Check half precision for MPS
@@ -86,6 +95,7 @@ class TestTrellisKVCache:
 
     def test_update_single_token(self, cache, cache_params):
         """Test updating cache with a single token."""
+        logger.info("running test_update_single_token")
         device = _get_device()
         cache_dim = cache_params["kv_lora_rank"] + cache_params["qk_rope_head_dim"]
 
@@ -105,6 +115,7 @@ class TestTrellisKVCache:
 
     def test_update_incremental_generation(self, cache, cache_params):
         """Test incremental generation with position_ids handling."""
+        logger.info("running test_update_incremental_generation")
         device = _get_device()
         cache_dim = cache_params["kv_lora_rank"] + cache_params["qk_rope_head_dim"]
 
@@ -139,6 +150,7 @@ class TestTrellisKVCache:
 
     def test_update_returns_correct_format(self, cache, cache_params):
         """Test that update returns cached states in correct format for decompression."""
+        logger.info("running test_update_returns_correct_format")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -167,6 +179,7 @@ class TestTrellisKVCache:
 
     def test_get_method(self, cache, cache_params):
         """Test the get method returns cached states correctly."""
+        logger.info("running test_get_method")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -193,6 +206,7 @@ class TestTrellisKVCache:
 
     def test_reset(self, cache, cache_params):
         """Test cache reset functionality."""
+        logger.info("running test_reset")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -219,6 +233,7 @@ class TestTrellisKVCache:
     def test_memory_usage_calculation(self, cache, cache_params):
         """Test memory usage calculation."""
         # Calculate expected memory
+        logger.info("running test_memory_usage_calculation")
         bytes_per_element = 2  # float16
 
         # c_kv elements: [num_layers, batch, max_seq, kv_lora_rank]
@@ -243,6 +258,7 @@ class TestTrellisKVCache:
 
     def test_dimension_mismatch_error(self, cache):
         """Test that wrong input dimension raises error."""
+        logger.info("running test_dimension_mismatch_error")
         device = _get_device()
 
         # Create compressed KV with wrong dimension
@@ -254,6 +270,7 @@ class TestTrellisKVCache:
 
     def test_exceed_max_seq_len(self, cache, cache_params):
         """Test that exceeding max_seq_len raises error."""
+        logger.info("running test_exceed_max_seq_len")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -268,6 +285,7 @@ class TestTrellisKVCache:
 
     def test_batch_item_independence(self, cache, cache_params):
         """Test that different batch items are stored independently."""
+        logger.info("running test_batch_item_independence")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -296,6 +314,7 @@ class TestTrellisKVCache:
 
     def test_layer_independence(self, cache, cache_params):
         """Test that different layers store data independently."""
+        logger.info("running test_layer_independence")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -336,6 +355,7 @@ class TestTrellisKVCache:
 
     def test_output_contiguous(self, cache, cache_params):
         """Test that output tensors are contiguous for MPS efficiency."""
+        logger.info("running test_output_contiguous")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -365,6 +385,7 @@ class TestTrellisKVCacheQuantization:
     @pytest.fixture
     def cache_params(self):
         """Default cache parameters."""
+        logger.debug("cache_params called")
         return {
             "num_layers": 2,
             "batch_size": 2,
@@ -376,6 +397,7 @@ class TestTrellisKVCacheQuantization:
     @pytest.fixture
     def cache(self, cache_params):
         """Create a quantized TrellisKVCache instance."""
+        logger.debug("cache called with cache_params=%s", cache_params)
         device = _get_device()
         return TrellisKVCache(
             num_layers=cache_params["num_layers"],
@@ -390,6 +412,7 @@ class TestTrellisKVCacheQuantization:
 
     def test_init_quantized(self, cache, cache_params):
         """Test quantized cache initialization."""
+        logger.info("running test_init_quantized")
         assert cache.quantize_mode == "int8"
         assert cache.kv_cache.dtype == torch.int8
         assert cache.kv_scales is not None
@@ -404,6 +427,7 @@ class TestTrellisKVCacheQuantization:
 
     def test_quantization_accuracy(self, cache, cache_params):
         """Test that quantization preserves values with reasonable accuracy."""
+        logger.info("running test_quantization_accuracy")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -423,6 +447,7 @@ class TestTrellisKVCacheQuantization:
 
     def test_memory_usage_reduction(self, cache_params):
         """Test that quantized cache uses less memory."""
+        logger.info("running test_memory_usage_reduction")
         device = _get_device()
 
         # Create unquantized cache
@@ -444,6 +469,7 @@ class TestTrellisKVCacheQuantization:
 
     def test_incremental_update_scales(self, cache, cache_params):
         """Test that scales are updated incrementally for each token."""
+        logger.info("running test_incremental_update_scales")
         device = _get_device()
         cache_dim = cache.cache_dim
 
@@ -469,6 +495,7 @@ class TestTrellisKVCacheQuantization:
 
     def test_get_layer_slices_and_attention_quantized(self, cache, cache_params):
         """Test get_layer_slices and get_layer_for_attention with quantization."""
+        logger.info("running test_get_layer_slices_and_attention_quantized")
         device = _get_device()
         cache_dim = cache.cache_dim
 

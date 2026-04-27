@@ -50,6 +50,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from typing import TYPE_CHECKING, Literal
 
 from ._compat import require_torch, torch
@@ -57,6 +58,9 @@ from ._compat import require_torch, torch
 if TYPE_CHECKING:
     import torch as torch_typing
 
+
+
+logger = logging.getLogger(__name__)
 
 class QuantType(Enum):
     """Quantization type for KV cache storage."""
@@ -130,6 +134,7 @@ class MetalKVCache:
             dtype: Storage dtype.
             device: Device to allocate tensors on.
         """
+        logger.debug("initializing %s with num_layers=%s, num_heads=%s, head_dim=%s, max_seq_len=%s, num_kv_heads=%s", type(self).__name__, num_layers, num_heads, head_dim, max_seq_len, num_kv_heads)
         require_torch("MetalKVCache")
 
         self.num_layers = num_layers
@@ -175,6 +180,7 @@ class MetalKVCache:
         Returns:
             Tuple of (k_full, v_full) including cached history.
         """
+        logger.debug("update called with layer_idx=%s, key=%s, value=%s", layer_idx, key, value)
         new_seq_len = key.shape[2]
         current_len = self.seq_lens[layer_idx]
 
@@ -236,6 +242,7 @@ class MetalKVCache:
         Returns:
             Tuple of (key, value) tensors.
         """
+        logger.debug("get called with layer_idx=%s, positions=%s", layer_idx, positions)
         if positions is None:
             # Return full cache up to current length
             end = self.seq_lens[layer_idx]
@@ -264,6 +271,7 @@ class MetalKVCache:
         """
         # Direct indexing is faster than index_select on MPS
         # Shape: [batch, num_kv_heads, num_positions, head_dim]
+        logger.debug("_direct_kv_index called with layer_idx=%s, positions=%s", layer_idx, positions)
         k = self.k_cache[layer_idx][..., positions, :]
         v = self.v_cache[layer_idx][..., positions, :]
         return k, v
@@ -271,6 +279,7 @@ class MetalKVCache:
     @property
     def seq_len(self) -> int:
         """Current sequence length (assumes all layers in sync)."""
+        logger.debug("seq_len called")
         return self.seq_lens[0] if self.seq_lens else 0
 
     def reset(self, layer_idx: int | None = None) -> None:
@@ -279,6 +288,7 @@ class MetalKVCache:
         Args:
             layer_idx: Specific layer to reset, or None for all layers.
         """
+        logger.debug("reset called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             self.seq_lens[layer_idx] = 0
         else:
@@ -286,6 +296,7 @@ class MetalKVCache:
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         bytes_per_element = 2  # FP16/BF16
         elements = (
             self.batch_size * self.num_kv_heads * sum(self.seq_lens) * self.head_dim * 2  # K and V
@@ -294,6 +305,7 @@ class MetalKVCache:
 
     def max_memory_mb(self) -> float:
         """Return maximum memory allocation in MB."""
+        logger.debug("max_memory_mb called")
         bytes_per_element = 2
         elements = (
             self.batch_size
@@ -326,6 +338,7 @@ class PagedSequence:
 
     @property
     def num_blocks(self) -> int:
+        logger.debug("num_blocks called")
         return len(self.block_indices)
 
 
@@ -373,6 +386,7 @@ class MetalPagedKVCache:
             dtype: Storage dtype.
             device: Device to allocate tensors on.
         """
+        logger.debug("initializing %s with num_layers=%s, num_heads=%s, head_dim=%s, block_size=%s, num_blocks=%s", type(self).__name__, num_layers, num_heads, head_dim, block_size, num_blocks)
         require_torch("MetalPagedKVCache")
 
         self.num_layers = num_layers
@@ -406,11 +420,13 @@ class MetalPagedKVCache:
     @property
     def num_free_blocks(self) -> int:
         """Number of unallocated blocks."""
+        logger.debug("num_free_blocks called")
         return len(self._free_blocks)
 
     @property
     def num_allocated_blocks(self) -> int:
         """Number of allocated blocks."""
+        logger.debug("num_allocated_blocks called")
         return self.num_blocks - len(self._free_blocks)
 
     def allocate_sequence(self, seq_id: int) -> PagedSequence:
@@ -425,6 +441,7 @@ class MetalPagedKVCache:
         Raises:
             ValueError: If seq_id already exists.
         """
+        logger.debug("allocate_sequence called with seq_id=%s", seq_id)
         if seq_id in self._sequences:
             raise ValueError(f"Sequence {seq_id} already exists")
 
@@ -438,6 +455,7 @@ class MetalPagedKVCache:
         Args:
             seq_id: Sequence to free.
         """
+        logger.debug("free_sequence called with seq_id=%s", seq_id)
         if seq_id not in self._sequences:
             return
 
@@ -453,6 +471,7 @@ class MetalPagedKVCache:
         Returns:
             Block index or None if pool is exhausted.
         """
+        logger.debug("_allocate_block called")
         if not self._free_blocks:
             return None
 
@@ -462,6 +481,7 @@ class MetalPagedKVCache:
 
     def _release_block(self, block_idx: int) -> None:
         """Release a block back to the pool."""
+        logger.debug("_release_block called with block_idx=%s", block_idx)
         self._block_ref_counts[block_idx] -= 1
         if self._block_ref_counts[block_idx] <= 0:
             self._block_ref_counts[block_idx] = 0
@@ -477,6 +497,7 @@ class MetalPagedKVCache:
         Returns:
             True if capacity available, False if OOM.
         """
+        logger.debug("_ensure_capacity called with seq_id=%s, new_tokens=%s", seq_id, new_tokens)
         seq = self._sequences[seq_id]
         current_capacity = seq.num_blocks * self.block_size
         needed_capacity = seq.token_count + new_tokens
@@ -508,6 +529,7 @@ class MetalPagedKVCache:
         Returns:
             True if successful, False if OOM.
         """
+        logger.debug("append called with seq_id=%s, layer_idx=%s, key=%s", seq_id, layer_idx, key)
         if seq_id not in self._sequences:
             raise ValueError(f"Sequence {seq_id} not registered")
 
@@ -548,6 +570,7 @@ class MetalPagedKVCache:
         Returns:
             Tuple of (key, value) with shape [num_kv_heads, seq_len, head_dim].
         """
+        logger.debug("get_kv called with seq_id=%s, layer_idx=%s", seq_id, layer_idx)
         if seq_id not in self._sequences:
             raise ValueError(f"Sequence {seq_id} not registered")
 
@@ -598,6 +621,7 @@ class MetalPagedKVCache:
         Returns:
             PagedSequence for the forked sequence.
         """
+        logger.debug("fork_sequence called with src_seq_id=%s, dst_seq_id=%s", src_seq_id, dst_seq_id)
         if src_seq_id not in self._sequences:
             raise ValueError(f"Source sequence {src_seq_id} not found")
         if dst_seq_id in self._sequences:
@@ -627,12 +651,14 @@ class MetalPagedKVCache:
         Returns:
             List of physical block indices.
         """
+        logger.debug("get_block_table called with seq_id=%s", seq_id)
         if seq_id not in self._sequences:
             return []
         return self._sequences[seq_id].block_indices.copy()
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         bytes_per_element = 2
         elements_per_block = self.block_size * self.num_kv_heads * self.head_dim * 2  # K and V
         allocated_blocks = self.num_allocated_blocks
@@ -696,6 +722,7 @@ class MetalQuantizedKVCache:
             scale_granularity: Scale computation granularity.
             device: Device to allocate tensors on.
         """
+        logger.debug("initializing %s with num_layers=%s, num_heads=%s, head_dim=%s, max_seq_len=%s, num_kv_heads=%s", type(self).__name__, num_layers, num_heads, head_dim, max_seq_len, num_kv_heads)
         require_torch("MetalQuantizedKVCache")
 
         self.num_layers = num_layers
@@ -747,6 +774,7 @@ class MetalQuantizedKVCache:
             Tuple of (quantized, scales).
         """
         # Compute scales based on granularity
+        logger.info("_quantize called with tensor=%s", getattr(tensor, "shape", tensor))
         if self.scale_granularity == "per_head":
             # Max abs per head per position
             abs_max = torch.amax(torch.abs(tensor), dim=-1, keepdim=True)
@@ -789,6 +817,7 @@ class MetalQuantizedKVCache:
             Dequantized tensor in FP16.
         """
         # Map [0, 255] back to signed range
+        logger.info("_dequantize called with quantized=%s, scales=%s", quantized, scales)
         signed = quantized.to(torch.float16) - 128.0
 
         if self.quant_type == QuantType.FP8:
@@ -814,6 +843,7 @@ class MetalQuantizedKVCache:
         Returns:
             Tuple of dequantized (k_full, v_full).
         """
+        logger.debug("update called with layer_idx=%s, key=%s, value=%s", layer_idx, key, value)
         new_seq_len = key.shape[2]
         start_pos = self.seq_lens[layer_idx]
         end_pos = start_pos + new_seq_len
@@ -859,6 +889,7 @@ class MetalQuantizedKVCache:
         Returns:
             Tuple of dequantized (key, value).
         """
+        logger.debug("get called with layer_idx=%s, positions=%s", layer_idx, positions)
         end = self.seq_lens[layer_idx]
         if end == 0:
             return (
@@ -897,10 +928,12 @@ class MetalQuantizedKVCache:
     @property
     def seq_len(self) -> int:
         """Current sequence length (assumes all layers in sync)."""
+        logger.debug("seq_len called")
         return self.seq_lens[0] if self.seq_lens else 0
 
     def reset(self, layer_idx: int | None = None) -> None:
         """Reset cache for new sequence."""
+        logger.debug("reset called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             self.seq_lens[layer_idx] = 0
         else:
@@ -909,6 +942,7 @@ class MetalQuantizedKVCache:
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB (quantized)."""
         # uint8 storage: 1 byte per element
+        logger.debug("memory_usage_mb called")
         base_elements = (
             self.batch_size * self.num_kv_heads * sum(self.seq_lens) * self.head_dim * 2  # K and V
         )
@@ -925,6 +959,7 @@ class MetalQuantizedKVCache:
 
     def compression_ratio(self) -> float:
         """Compression ratio vs FP16."""
+        logger.debug("compression_ratio called")
         fp16_bytes = (
             self.batch_size
             * self.num_kv_heads
@@ -972,6 +1007,7 @@ class ContinuousBatchManager:
             cache: Paged KV cache for storage.
             max_batch_size: Maximum concurrent sequences.
         """
+        logger.debug("initializing %s with cache=%s, max_batch_size=%s", type(self).__name__, cache, max_batch_size)
         self.cache = cache
         self.max_batch_size = max_batch_size
         self._sequences: dict[int, ContinuousBatchState] = {}
@@ -980,15 +1016,18 @@ class ContinuousBatchManager:
     @property
     def batch_size(self) -> int:
         """Current number of active sequences."""
+        logger.debug("batch_size called")
         return len(self._sequences)
 
     @property
     def active_seq_ids(self) -> list[int]:
         """List of active sequence IDs."""
+        logger.debug("active_seq_ids called")
         return [sid for sid, s in self._sequences.items() if not s.is_finished]
 
     def can_add_sequence(self) -> bool:
         """Check if batch has capacity for another sequence."""
+        logger.debug("can_add_sequence called")
         return self.batch_size < self.max_batch_size
 
     def add_sequence(self, initial_tokens: int = 0) -> int:
@@ -1003,6 +1042,7 @@ class ContinuousBatchManager:
         Raises:
             RuntimeError: If batch is at capacity.
         """
+        logger.debug("add_sequence called with initial_tokens=%s", initial_tokens)
         if not self.can_add_sequence():
             raise RuntimeError(f"Batch at capacity ({self.max_batch_size})")
 
@@ -1024,6 +1064,7 @@ class ContinuousBatchManager:
         Args:
             seq_id: Sequence to remove.
         """
+        logger.debug("remove_sequence called with seq_id=%s", seq_id)
         if seq_id not in self._sequences:
             return
 
@@ -1036,6 +1077,7 @@ class ContinuousBatchManager:
         Args:
             seq_id: Sequence that completed.
         """
+        logger.debug("mark_finished called with seq_id=%s", seq_id)
         if seq_id in self._sequences:
             self._sequences[seq_id].is_finished = True
 
@@ -1045,6 +1087,7 @@ class ContinuousBatchManager:
         Returns:
             List of removed sequence IDs.
         """
+        logger.debug("cleanup_finished called")
         finished = [sid for sid, s in self._sequences.items() if s.is_finished]
         for seq_id in finished:
             self.remove_sequence(seq_id)
@@ -1059,6 +1102,7 @@ class ContinuousBatchManager:
         Returns:
             Sequence state or None if not found.
         """
+        logger.debug("get_sequence_state called with seq_id=%s", seq_id)
         return self._sequences.get(seq_id)
 
     def advance_sequence(self, seq_id: int, num_tokens: int = 1) -> None:
@@ -1068,6 +1112,7 @@ class ContinuousBatchManager:
             seq_id: Sequence ID.
             num_tokens: Number of tokens generated.
         """
+        logger.debug("advance_sequence called with seq_id=%s, num_tokens=%s", seq_id, num_tokens)
         if seq_id in self._sequences:
             state = self._sequences[seq_id]
             state.token_count += num_tokens
@@ -1079,6 +1124,7 @@ class ContinuousBatchManager:
         Returns:
             Dict mapping seq_id to block indices.
         """
+        logger.debug("get_block_tables called")
         return {seq_id: self.cache.get_block_table(seq_id) for seq_id in self.active_seq_ids}
 
     def get_context_lengths(self) -> dict[int, int]:
@@ -1087,4 +1133,5 @@ class ContinuousBatchManager:
         Returns:
             Dict mapping seq_id to token count.
         """
+        logger.debug("get_context_lengths called")
         return {seq_id: self._sequences[seq_id].token_count for seq_id in self.active_seq_ids}

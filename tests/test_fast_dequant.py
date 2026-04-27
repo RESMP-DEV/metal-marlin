@@ -1,4 +1,5 @@
 """Test _fast_dequant optimization maintains numerical accuracy."""
+import logging
 import pytest
 import torch
 
@@ -9,6 +10,9 @@ from metal_marlin.layers.mmfp4_linear import (
 )
 from metal_marlin.quantize_fp4 import quantize_fp4
 
+
+
+logger = logging.getLogger(__name__)
 
 def create_test_weights(K: int, N: int, group_size: int = 128):
     """Create properly formatted test weights for MMFP4Linear.
@@ -24,6 +28,7 @@ def create_test_weights(K: int, N: int, group_size: int = 128):
         - scales: [n_groups, N] float16
     """
     # Create weight matrix
+    logger.info("running create_test_weights")
     W = torch.randn(N, K, dtype=torch.float32)
     
     # quantize_fp4 expects [out_features, in_features] and returns Marlin layout
@@ -48,6 +53,7 @@ def create_test_weights(K: int, N: int, group_size: int = 128):
 def test_fast_dequant_accuracy_cpu():
     """Verify _fast_dequant matches _dequantize_rowwise_mmfp4 on CPU."""
     # Create test weights
+    logger.info("running test_fast_dequant_accuracy_cpu")
     K, N = 512, 256  # in_features, out_features
     W_packed, scales = create_test_weights(K, N, group_size=128)
     
@@ -80,6 +86,7 @@ def test_fast_dequant_accuracy_cpu():
 def test_fast_dequant_accuracy_mps():
     """Verify _fast_dequant matches _dequantize_rowwise_mmfp4 on MPS."""
     # Create test weights
+    logger.info("running test_fast_dequant_accuracy_mps")
     K, N = 512, 256
     W_packed, scales = create_test_weights(K, N, group_size=128)
     
@@ -110,6 +117,7 @@ def test_fast_dequant_accuracy_mps():
 
 def test_fast_dequant_shape_variations():
     """Test _fast_dequant with various input shapes."""
+    logger.info("running test_fast_dequant_shape_variations")
     test_cases = [
         (128, 64),    # Small
         (512, 256),   # Medium
@@ -135,6 +143,7 @@ def test_fast_dequant_shape_variations():
 
 def test_fast_dequant_different_group_sizes():
     """Test _fast_dequant with different group sizes."""
+    logger.info("running test_fast_dequant_different_group_sizes")
     K, N = 512, 256
     
     for group_size in [32, 64, 128, 256]:
@@ -152,6 +161,7 @@ def test_fast_dequant_different_group_sizes():
 
 def test_mmfp4_linear_with_fast_dequant():
     """Test that MMFP4Linear works correctly with _fast_dequant."""
+    logger.info("running test_mmfp4_linear_with_fast_dequant")
     K, N = 512, 256  # in_features, out_features
     W_packed, scales = create_test_weights(K, N, group_size=128)
     
@@ -175,6 +185,7 @@ def test_mmfp4_linear_with_fast_dequant():
 
 def test_fast_dequant_produces_correct_dtype():
     """Verify _fast_dequant produces float16 output."""
+    logger.info("running test_fast_dequant_produces_correct_dtype")
     K, N = 512, 256
     W_packed, scales = create_test_weights(K, N, group_size=128)
     
@@ -186,6 +197,7 @@ def test_fast_dequant_produces_correct_dtype():
 
 def test_fast_dequant_produces_contiguous():
     """Verify _fast_dequant produces contiguous output."""
+    logger.info("running test_fast_dequant_produces_contiguous")
     K, N = 512, 256
     W_packed, scales = create_test_weights(K, N, group_size=128)
     

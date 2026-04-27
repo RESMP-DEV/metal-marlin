@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -33,6 +34,9 @@ from .verify import VerifyResult, verify_speculative
 if TYPE_CHECKING:
     from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 class TargetModel:
     """Protocol for target models used in speculative decoding.
@@ -48,6 +52,7 @@ class TargetModel:
 
     def create_kv_cache(self) -> KVCache:
         """Create a fresh KV cache for this model."""
+        logger.debug("create_kv_cache called")
         raise NotImplementedError
 
 
@@ -131,6 +136,7 @@ class GenerationStats:
     @property
     def tokens_per_target_call(self) -> float:
         """Average tokens produced per expensive target forward pass."""
+        logger.debug("tokens_per_target_call called")
         if self.total_target_calls == 0:
             return 0.0
         return self.total_tokens / self.total_target_calls
@@ -138,6 +144,7 @@ class GenerationStats:
     @property
     def overall_acceptance_rate(self) -> float:
         """Fraction of all proposed draft tokens that were accepted."""
+        logger.debug("overall_acceptance_rate called")
         if self.total_proposed == 0:
             return 0.0
         return self.total_accepted / self.total_proposed
@@ -182,6 +189,7 @@ class SpeculativeEngine:
         config: SpeculativeConfig | None = None,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with target_model=%s, draft_model=%s, config=%s, device=%s", type(self).__name__, target_model, draft_model, config, device)
         self.target = target_model
         self.config = config or SpeculativeConfig()
         self.device = device or torch.device("cpu")
@@ -203,6 +211,7 @@ class SpeculativeEngine:
 
     def _create_draft_model(self) -> DraftModel:
         """Create draft model based on config.draft_type."""
+        logger.debug("_create_draft_model called")
         if self.config.draft_type == "eagle":
             return EagleHead.from_target_model(
                 self.target,
@@ -246,16 +255,19 @@ class SpeculativeEngine:
         Returns:
             Configured SpeculativeEngine instance.
         """
+        logger.debug("from_config called with target_model=%s, config=%s, device=%s", target_model, config, device)
         return cls(target_model=target_model, config=config, device=device)
 
     @property
     def current_num_spec(self) -> int:
         """Current adaptive speculation length."""
+        logger.debug("current_num_spec called")
         return self._current_num_spec
 
     @property
     def stats(self) -> GenerationStats:
         """Cumulative generation statistics for the current run."""
+        logger.debug("stats called")
         return self._stats
 
     @property
@@ -272,6 +284,7 @@ class SpeculativeEngine:
             - recent_acceptance_rate: Acceptance rate over recent steps
             - acceptance_trend: "improving", "declining", or "stable"
         """
+        logger.debug("acceptance_stats called")
         return create_acceptance_report(self._acceptance_tracker)
 
     def get_accepted_sequence(self, input_ids: torch.Tensor, step_result: StepResult) -> torch.Tensor:
@@ -288,6 +301,7 @@ class SpeculativeEngine:
             Full sequence with accepted tokens appended, shape [batch, seq_len + num_new].
         """
         # If we have detailed acceptance result, use tracker to assemble
+        logger.debug("get_accepted_sequence called with input_ids=%s, step_result=%s", input_ids, step_result)
         if step_result.acceptance_result is not None:
             return self._acceptance_tracker.assemble_sequence(
                 input_ids, step_result.acceptance_result, include_next=True
@@ -364,6 +378,7 @@ class SpeculativeEngine:
 
     def reset(self) -> None:
         """Reset engine state for a new sequence."""
+        logger.debug("reset called")
         self._current_num_spec = self.config.num_speculative_tokens
         self._stats = GenerationStats()
         self._acceptance_tracker.reset()
@@ -392,6 +407,7 @@ class SpeculativeEngine:
         Returns:
             StepResult with new tokens, counts, and diagnostics.
         """
+        logger.debug("generate_step called with input_ids=%s, target_cache=%s", input_ids, target_cache)
         batch_size = input_ids.shape[0]
         num_spec = self._current_num_spec
 
@@ -496,6 +512,7 @@ class SpeculativeEngine:
         Yields:
             StepResult per generation step. Each contains 1 to K+1 new tokens.
         """
+        logger.debug("generate called with input_ids=%s, max_tokens=%s, target_cache=%s", input_ids, max_tokens, target_cache)
         self.reset()
         batch_size = input_ids.shape[0]
 
@@ -593,6 +610,7 @@ class SpeculativeEngine:
         Returns:
             Full sequence (prompt + generated) as [1, total_len].
         """
+        logger.debug("generate_all called with input_ids=%s, max_tokens=%s, target_cache=%s", input_ids, max_tokens, target_cache)
         all_tokens: list[int] = input_ids[0].tolist()
 
         for step in self.generate(input_ids, max_tokens=max_tokens, target_cache=target_cache):
@@ -615,6 +633,7 @@ class SpeculativeEngine:
         For NGramDraft: update n-gram statistics with produced tokens.
         For EagleHead: update adaptive width based on acceptance rate.
         """
+        logger.debug("_sync_draft called with step=%s", step)
         if isinstance(self.draft, SmallModelDraft):
             # Feed accepted tokens to keep draft cache in sync
             # Use tracker utility if acceptance result is available
@@ -656,6 +675,7 @@ class SpeculativeEngine:
         """
         # Note: self._acceptance_tracker tracks acceptance history internally
 
+        logger.debug("_update_num_spec called with acceptance_rate=%s", acceptance_rate)
         effective_max = min(self.config.max_speculative_tokens, self.config.num_speculative_tokens)
 
         if self.config.adaptive_depth:
@@ -711,6 +731,7 @@ def _sample_token(logits: Tensor, temperature: float, device: torch.device) -> T
     Returns:
         [batch] sampled token IDs.
     """
+    logger.debug("_sample_token called with logits=%s, temperature=%s, device=%s", logits, temperature, device)
     if temperature <= 0:
         return logits.argmax(dim=-1).long()
     scaled = logits / max(temperature, 1e-8)
@@ -720,6 +741,7 @@ def _sample_token(logits: Tensor, temperature: float, device: torch.device) -> T
 
 def _contains_eos(tokens: Tensor, eos_id: int) -> bool:
     """Check if any element in a 1D token array equals eos_id."""
+    logger.debug("_contains_eos called with tokens=%s, eos_id=%s", tokens, eos_id)
     return bool((tokens == eos_id).any().item())
 
 
@@ -733,6 +755,7 @@ def _find_eos(
     Returns (batch_idx, position) of first EOS within valid token range,
     or None if no EOS found.
     """
+    logger.debug("_find_eos called with new_tokens=%s, num_new_tokens=%s, eos_id=%s", new_tokens, num_new_tokens, eos_id)
     batch_size = new_tokens.shape[0]
     for b in range(batch_size):
         n_new = int(num_new_tokens[b].item())

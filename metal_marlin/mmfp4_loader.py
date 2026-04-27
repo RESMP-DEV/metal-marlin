@@ -60,10 +60,12 @@ class PrefetchStats:
     
     @property
     def hit_rate(self) -> float:
+        logger.debug("hit_rate called")
         total = self.hits + self.misses
         return self.hits / total if total > 0 else 0.0
     
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "hits": self.hits,
             "misses": self.misses,
@@ -100,6 +102,7 @@ class WeightPrefetcher:
             config: Prefetch configuration
             device: Target device for prefetched weights
         """
+        logger.debug("initializing %s with loader=%s, config=%s, device=%s", type(self).__name__, loader, config, device)
         self._loader = loader
         self.config = config or PrefetchConfig()
         self._device = device
@@ -141,6 +144,7 @@ class WeightPrefetcher:
         Returns:
             The tensor if in cache, None otherwise
         """
+        logger.debug("get called with tensor_name=%s", tensor_name)
         with self._cache_lock:
             if tensor_name in self._cache:
                 tensor, _ = self._cache[tensor_name]
@@ -165,6 +169,7 @@ class WeightPrefetcher:
         Returns:
             List of futures for the prefetch operations
         """
+        logger.debug("prefetch called with tensor_names=%s", tensor_names)
         if not self.config.enable_prefetch:
             return []
             
@@ -197,6 +202,7 @@ class WeightPrefetcher:
             start_name: Starting tensor name
             count: Number of tensors to prefetch (default: lookahead_count)
         """
+        logger.debug("prefetch_sequential called with start_name=%s, count=%s", start_name, count)
         if not self.config.enable_prefetch:
             return
         
@@ -222,6 +228,7 @@ class WeightPrefetcher:
         Args:
             layer_idx: Layer index to prefetch
         """
+        logger.debug("prefetch_layer called with layer_idx=%s", layer_idx)
         if not self.config.enable_prefetch:
             return
         
@@ -239,6 +246,7 @@ class WeightPrefetcher:
             Loaded tensor or None if failed
         """
         # Abort if critical pressure
+        logger.info("_load_tensor called with tensor_name=%s", tensor_name)
         _, is_critical = self._pressure_monitor.check_pressure()
         if is_critical:
             return None
@@ -269,6 +277,7 @@ class WeightPrefetcher:
             name: Tensor name
             tensor: Tensor to cache
         """
+        logger.debug("_add_to_cache called with name=%s, tensor=%s", name, tensor)
         tensor_bytes = tensor.numel() * tensor.element_size()
         
         with self._cache_lock:
@@ -284,6 +293,7 @@ class WeightPrefetcher:
     
     def _evict_lru(self) -> None:
         """Evict least recently used tensor from cache."""
+        logger.debug("_evict_lru called")
         if not self._cache:
             return
         
@@ -304,6 +314,7 @@ class WeightPrefetcher:
         Args:
             tensor_name: Name of tensor that was accessed
         """
+        logger.debug("record_access called with tensor_name=%s", tensor_name)
         with self._access_history_lock:
             self._access_history.append(tensor_name)
             if len(self._access_history) > self._max_history:
@@ -314,6 +325,7 @@ class WeightPrefetcher:
     
     def get_stats(self) -> dict[str, Any]:
         """Get prefetch statistics."""
+        logger.debug("get_stats called")
         with self._stats_lock:
             stats = self._stats.to_dict()
         
@@ -327,6 +339,7 @@ class WeightPrefetcher:
     
     def clear_cache(self) -> None:
         """Clear prefetch cache."""
+        logger.debug("clear_cache called")
         with self._cache_lock:
             self._cache.clear()
             self._current_cache_bytes = 0
@@ -334,6 +347,7 @@ class WeightPrefetcher:
     def shutdown(self) -> None:
         """Shutdown prefetcher and release resources."""
         # Cancel pending prefetches
+        logger.debug("shutdown called")
         with self._cache_lock:
             for future in self._pending_prefetches.values():
                 future.cancel()
@@ -385,6 +399,7 @@ class MMFP4ModelLoader:
     }
     
     def __init__(self, model_path: Path):
+        logger.debug("initializing %s with model_path=%s", type(self).__name__, model_path)
         self.model_path = Path(model_path)
         self._tensor_metadata: dict[str, TensorMetadata] = {}
         self._shard_headers: dict[Path, dict] = {}
@@ -392,6 +407,7 @@ class MMFP4ModelLoader:
         
     def _parse_index(self) -> None:
         """Parse model.safetensors.index.json for tensor->shard mapping."""
+        logger.debug("_parse_index called")
         index_path = self.model_path / "model.safetensors.index.json"
         
         if not index_path.exists():
@@ -430,6 +446,7 @@ class MMFP4ModelLoader:
     
     def _register_shard(self, shard_path: Path) -> None:
         """Register all tensors in a single shard."""
+        logger.debug("_register_shard called with shard_path=%s", shard_path)
         with safe_open(shard_path, framework="pt") as f:
             for name in f.keys():
                 self._tensor_to_shard[name] = shard_path
@@ -440,6 +457,7 @@ class MMFP4ModelLoader:
     def _parse_shard_headers(self) -> None:
         """Parse safetensors headers to extract tensor metadata for streaming."""
         # Get unique shard paths
+        logger.debug("_parse_shard_headers called")
         shard_paths = set(self._tensor_to_shard.values())
         
         for shard_path in shard_paths:
@@ -483,6 +501,7 @@ class MMFP4ModelLoader:
         Returns:
             Tuple of (header_dict, header_length_bytes)
         """
+        logger.debug("_read_safetensors_header called with shard_path=%s", shard_path)
         with open(shard_path, "rb") as f:
             # Read header length (first 8 bytes as little-endian unsigned long long)
             header_len_bytes = f.read(8)
@@ -504,6 +523,7 @@ class MMFP4ModelLoader:
         - `h.{idx}.` - Legacy transformer style
         - `blocks.{idx}.` - Alternative block-style naming
         """
+        logger.debug("_extract_layer_index called with name=%s", name)
         patterns = [
             r"layers\.(\d+)\.",
             r"h\.(\d+)\.",
@@ -528,6 +548,7 @@ class MMFP4ModelLoader:
         Returns:
             List of candidate names to try
         """
+        logger.debug("_generate_name_variants called with name=%s", name)
         variants: list[str] = [name]
 
         # Strip common suffixes for lookup
@@ -573,6 +594,7 @@ class MMFP4ModelLoader:
         return unique
     
     def _get_shard_handle(self, shard_path: Path) -> Any:
+        logger.debug("_get_shard_handle called with shard_path=%s", shard_path)
         if shard_path not in self._shard_handles:
             self._shard_handles[shard_path] = safe_open(shard_path, framework="pt")
         return self._shard_handles[shard_path]
@@ -601,6 +623,7 @@ class MMFP4ModelLoader:
             KeyError: If tensor not found with any naming variant
         """
         # Try original name and cross-naming variants
+        logger.info("load_tensor called with tensor_name=%s, device=%s, zero_copy=%s", tensor_name, device, zero_copy)
         candidate_names = self._generate_name_variants(tensor_name)
 
         shard_path = None
@@ -661,6 +684,7 @@ class MMFP4ModelLoader:
             KeyError: If *tensor_name* is not found in the model checkpoint.
             RuntimeError: If tensor metadata is unavailable (headers not parsed).
         """
+        logger.info("_load_tensor_mps_zerocopy called with tensor_name=%s", tensor_name)
         import mmap as _mmap
 
         metadata = self._tensor_metadata.get(tensor_name)
@@ -737,6 +761,7 @@ class MMFP4ModelLoader:
         Returns:
             The loaded tensor
         """
+        logger.info("load_tensor_streaming called with tensor_name=%s, device=%s, use_mmap=%s", tensor_name, device, use_mmap)
         import mmap
 
         # Fast path: MPS zero-copy via mmap'd frombuffer
@@ -927,6 +952,7 @@ class MMFP4ModelLoader:
     
     def get_tensor_metadata(self, tensor_name: str) -> TensorMetadata | None:
         """Get metadata for a tensor without loading it."""
+        logger.debug("get_tensor_metadata called with tensor_name=%s", tensor_name)
         return self._tensor_metadata.get(tensor_name)
     
     def get_layer_shard_info(self, layer_idx: int) -> dict[str, Any]:
@@ -940,6 +966,7 @@ class MMFP4ModelLoader:
             - dtype: Tensor dtype string
             - shape: Tensor shape tuple
         """
+        logger.debug("get_layer_shard_info called with layer_idx=%s", layer_idx)
         info = {}
         tensor_names = self._layer_to_tensors.get(layer_idx, [])
         
@@ -960,6 +987,7 @@ class MMFP4ModelLoader:
     
     def estimate_layer_size(self, layer_idx: int) -> int:
         """Estimate the total size of a layer in bytes."""
+        logger.debug("estimate_layer_size called with layer_idx=%s", layer_idx)
         tensor_names = self._layer_to_tensors.get(layer_idx, [])
         total_size = 0
         
@@ -996,6 +1024,7 @@ class MMFP4ModelLoader:
         Returns:
             Dictionary of tensor_name -> tensor
         """
+        logger.info("load_layer called with layer_idx=%s, device=%s, zero_copy=%s", layer_idx, device, zero_copy)
         tensor_names = self._layer_to_tensors.get(layer_idx, [])
 
         # Phase 1: Load all tensors from shards into CPU memory
@@ -1082,6 +1111,7 @@ class MMFP4ModelLoader:
             # Load all at once
             weights = loader.mmap_weights(device="mps", lazy=False)
         """
+        logger.debug("mmap_weights called with device=%s, lazy=%s, cache_size_gb=%s", device, lazy, cache_size_gb)
         from metal_marlin.memory.mmfp4_memory import MMAPWeightConfig, MMAPWeightManager
 
         config = MMAPWeightConfig(
@@ -1121,6 +1151,7 @@ class MMFP4ModelLoader:
         Yields:
             Tuples of (tensor_name, tensor)
         """
+        logger.debug("_mmap_weights_iterator called with manager=%s", manager)
         try:
             for tensor_name in self._tensor_metadata:
                 try:
@@ -1151,6 +1182,7 @@ class MMFP4ModelLoader:
         Returns:
             MMAPWeightManager instance
         """
+        logger.debug("create_mmap_manager called with device=%s, cache_size_gb=%s, buffer_recycler=%s", device, cache_size_gb, buffer_recycler)
         from metal_marlin.memory.mmfp4_memory import MMAPWeightConfig, MMAPWeightManager
 
         config = MMAPWeightConfig(
@@ -1175,6 +1207,7 @@ class MMFP4ModelLoader:
             Tuple of (qweight, scales) tensors
         """
         # Look for packed weights (uint32 [K, N//8] where 8 FP4 nibbles packed per uint32)
+        logger.info("get_quantized_weight called with name=%s", name)
         qweight_suffixes = [".qweight", ".weight", ".packed_weight"]
         scales_suffixes = [".scales", ".weight_scale", ".scales_fp4"]
 
@@ -1244,6 +1277,7 @@ class MMFP4ModelLoader:
         Returns:
             WeightPrefetcher instance
         """
+        logger.debug("create_prefetcher called with config=%s, device=%s", config, device)
         return WeightPrefetcher(self, config=config, device=device)
     
     def load_with_prefetch(
@@ -1268,6 +1302,7 @@ class MMFP4ModelLoader:
             The loaded tensor
         """
         # Try prefetcher cache first
+        logger.info("load_with_prefetch called with tensor_name=%s, prefetcher=%s, device=%s", tensor_name, prefetcher, device)
         if prefetcher is not None:
             cached = prefetcher.get(tensor_name)
             if cached is not None:
@@ -1307,6 +1342,7 @@ class MMFP4ModelLoader:
         Returns:
             Dictionary of weight tensors for the layer
         """
+        logger.info("load_layer_with_prefetch called with layer_idx=%s, prefetcher=%s, device=%s", layer_idx, prefetcher, device)
         tensors = {}
         tensor_names = self._layer_to_tensors.get(layer_idx, [])
         
@@ -1345,6 +1381,7 @@ class MMFP4ModelLoader:
         Returns:
             The loaded tensor
         """
+        logger.debug("stream_weight called with tensor_name=%s, device=%s, use_mmap=%s", tensor_name, device, use_mmap)
         return self.load_tensor_streaming(
             tensor_name,
             device=device,

@@ -1,3 +1,4 @@
+import logging
 #!/usr/bin/env python3
 """Benchmark after MoE optimizations.
 
@@ -9,8 +10,12 @@ Usage:
 import argparse
 
 
+
+logger = logging.getLogger(__name__)
+
 def run_full_benchmark():
     """Run the full benchmark with model loading and inference."""
+    logger.info("run_full_benchmark starting")
     import time
 
     import torch
@@ -66,6 +71,7 @@ def run_full_benchmark():
 
 def run_quick_validation():
     """Quick validation: check imports and basic functionality."""
+    logger.info("run_quick_validation starting")
     print("Running quick validation...")
 
     # Check core imports
@@ -97,6 +103,7 @@ def run_quick_validation():
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description='Benchmark MoE optimizations',
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -15,6 +15,7 @@ NOTE: MLAAttention class tests are skipped when MarlinLinear is unavailable
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -23,17 +24,22 @@ import torch
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH
 
+
+logger = logging.getLogger(__name__)
+
 # Skip entire module if PyTorch unavailable
 pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 
 
 def _get_device() -> str:
     """Get appropriate device for tests."""
+    logger.debug("_get_device called")
     return "mps" if HAS_MPS else "cpu"
 
 
 def _check_marlin_linear_available() -> bool:
     """Check if MarlinLinear (Metal kernels) is available and usable."""
+    logger.debug("_check_marlin_linear_available called")
     try:
         from metal_marlin.layers import MarlinLinear
 
@@ -65,6 +71,7 @@ requires_marlin = pytest.mark.skipif(
 @pytest.fixture
 def mla_config():
     """Standard GLM-4.7-Flash-like MLA configuration."""
+    logger.debug("mla_config called")
     return {
         "hidden_size": 256,  # Smaller for fast tests
         "num_heads": 4,
@@ -83,6 +90,7 @@ def mla_config():
 @pytest.fixture
 def device() -> str:
     """Return appropriate device."""
+    logger.debug("device called")
     return _get_device()
 
 
@@ -100,6 +108,7 @@ class TestMLARoPE:
 
     def test_rope_initialization(self):
         """Test RoPE module initializes correctly."""
+        logger.info("running test_rope_initialization")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, base=10000.0, rope_ratio=1.0, max_seq_len=256)
@@ -114,6 +123,7 @@ class TestMLARoPE:
 
     def test_rope_with_ratio_scaling(self):
         """Test that rope_ratio scales frequencies correctly."""
+        logger.info("running test_rope_with_ratio_scaling")
         from metal_marlin.mla_attention import MLARoPE
 
         rope_standard = MLARoPE(dim=64, rope_ratio=1.0, max_seq_len=16)
@@ -129,6 +139,7 @@ class TestMLARoPE:
 
     def test_rope_forward_shape(self, device):
         """Test RoPE forward pass preserves shape."""
+        logger.info("running test_rope_forward_shape")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=256)
@@ -143,6 +154,7 @@ class TestMLARoPE:
 
     def test_rope_with_position_offset(self, device):
         """Test RoPE with position offset for KV cache."""
+        logger.info("running test_rope_with_position_offset")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=256)
@@ -161,6 +173,7 @@ class TestMLARoPE:
 
     def test_rope_deterministic(self, device):
         """Test that RoPE output is deterministic."""
+        logger.info("running test_rope_deterministic")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=256)
@@ -177,6 +190,7 @@ class TestMLARoPE:
 
     def test_rope_position_sensitivity(self, device):
         """Test that different positions produce different outputs."""
+        logger.info("running test_rope_position_sensitivity")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=256)
@@ -193,6 +207,7 @@ class TestMLARoPE:
 
     def test_rope_cache_extension(self, device):
         """Test that RoPE cache extends automatically for longer sequences."""
+        logger.info("running test_rope_cache_extension")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=16)
@@ -220,6 +235,7 @@ class TestMLAKVCache:
 
     def test_cache_initialization(self, device):
         """Test MLA KV cache initializes correctly."""
+        logger.info("running test_cache_initialization")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -240,6 +256,7 @@ class TestMLAKVCache:
 
     def test_cache_update(self, device):
         """Test MLA KV cache update operation."""
+        logger.info("running test_cache_update")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -274,6 +291,7 @@ class TestMLAKVCache:
 
     def test_cache_seq_len_property(self, device):
         """Test seq_len property returns correct value."""
+        logger.info("running test_cache_seq_len_property")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -295,6 +313,7 @@ class TestMLAKVCache:
 
     def test_cache_multi_layer(self, device):
         """Test cache updates work correctly across multiple layers."""
+        logger.info("running test_cache_multi_layer")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -318,6 +337,7 @@ class TestMLAKVCache:
 
     def test_cache_reset(self, device):
         """Test cache reset functionality."""
+        logger.info("running test_cache_reset")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -342,6 +362,7 @@ class TestMLAKVCache:
 
     def test_cache_memory_usage(self, device):
         """Test memory usage calculation."""
+        logger.info("running test_cache_memory_usage")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -387,6 +408,7 @@ class TestMLAAttention:
 
     def test_attention_initialization(self, mla_config):
         """Test MLA attention initializes with correct shapes."""
+        logger.info("running test_attention_initialization")
         from metal_marlin.mla_attention import MLAAttention
 
         attn = MLAAttention(**mla_config)
@@ -399,6 +421,7 @@ class TestMLAAttention:
 
     def test_attention_without_query_compression(self, mla_config):
         """Test MLA attention without query compression."""
+        logger.info("running test_attention_without_query_compression")
         from metal_marlin.mla_attention import MLAAttention
 
         config = mla_config.copy()
@@ -413,6 +436,7 @@ class TestMLAAttention:
 
     def test_attention_forward_shape(self, mla_config, device):
         """Test MLA attention forward pass produces correct output shape."""
+        logger.info("running test_attention_forward_shape")
         from metal_marlin.mla_attention import MLAAttention
 
         attn = MLAAttention(**mla_config).to(device)
@@ -426,6 +450,7 @@ class TestMLAAttention:
 
     def test_attention_with_cache(self, mla_config, device):
         """Test MLA attention with KV cache."""
+        logger.info("running test_attention_with_cache")
         from metal_marlin.kv_cache import MLAKVCache
         from metal_marlin.mla_attention import MLAAttention
 
@@ -456,6 +481,7 @@ class TestMLAAttention:
 
     def test_from_config(self, mla_config):
         """Test creating MLAAttention from MLAConfig."""
+        logger.info("running test_from_config")
         from metal_marlin.mla_attention import MLAAttention, MLAConfig
 
         config = MLAConfig(**mla_config)
@@ -466,6 +492,7 @@ class TestMLAAttention:
 
     def test_from_hf_config(self, mla_config):
         """Test creating MLAAttention from HuggingFace config dict."""
+        logger.info("running test_from_hf_config")
         from metal_marlin.mla_attention import create_mla_from_hf_config
 
         hf_config = {
@@ -498,6 +525,7 @@ class TestMLAMemorySavings:
     def test_kv_cache_memory_reduction(self):
         """Verify MLA KV cache is smaller than standard KV cache."""
         # GLM-4.7-Flash-like dimensions
+        logger.info("running test_kv_cache_memory_reduction")
         num_layers = 32
         batch_size = 1
         max_seq_len = 4096
@@ -530,6 +558,7 @@ class TestMLAMemorySavings:
 
     def test_memory_savings_various_configs(self):
         """Test memory savings across different model configurations."""
+        logger.info("running test_memory_savings_various_configs")
         configs = [
             # (kv_lora_rank, qk_rope_head_dim, num_heads, head_dim, expected_min_reduction)
             (512, 64, 32, 128, 10),  # GLM-4.7-Flash
@@ -562,6 +591,7 @@ class TestGLMRopeRatio:
 
     def test_rope_ratio_effect(self, device):
         """Test that different rope_ratio values produce different results."""
+        logger.info("running test_rope_ratio_effect")
         from metal_marlin.mla_attention import MLARoPE
 
         rope_1 = MLARoPE(dim=64, rope_ratio=1.0, max_seq_len=256).to(device)
@@ -585,6 +615,7 @@ class TestGLMRopeRatio:
 
     def test_rope_ratio_inverse_frequency_scaling(self):
         """Test that rope_ratio correctly scales inverse frequencies."""
+        logger.info("running test_rope_ratio_inverse_frequency_scaling")
         from metal_marlin.mla_attention import MLARoPE
 
         rope_1 = MLARoPE(dim=64, rope_ratio=1.0, max_seq_len=16)
@@ -595,6 +626,7 @@ class TestGLMRopeRatio:
 
     def test_rope_ratio_frequency_halving(self):
         """Test that rope_ratio=0.5 halves the frequencies."""
+        logger.info("running test_rope_ratio_frequency_halving")
         from metal_marlin.mla_attention import MLARoPE
 
         rope_1 = MLARoPE(dim=64, rope_ratio=1.0, max_seq_len=16)
@@ -615,6 +647,7 @@ class TestPyTorchMPSIntegration:
 
     def test_rope_on_mps(self):
         """Test RoPE works correctly on MPS device."""
+        logger.info("running test_rope_on_mps")
         from metal_marlin.mla_attention import MLARoPE
 
         rope = MLARoPE(dim=64, max_seq_len=256).to("mps")
@@ -628,6 +661,7 @@ class TestPyTorchMPSIntegration:
 
     def test_kv_cache_on_mps(self):
         """Test MLA KV cache works correctly on MPS device."""
+        logger.info("running test_kv_cache_on_mps")
         from metal_marlin.kv_cache import MLAKVCache
 
         cache = MLAKVCache(
@@ -658,6 +692,7 @@ class TestPyTorchMPSIntegration:
 
     def test_rope_mps_cpu_consistency(self):
         """Test RoPE produces consistent results on MPS vs CPU."""
+        logger.info("running test_rope_mps_cpu_consistency")
         from metal_marlin.mla_attention import MLARoPE
 
         rope_cpu = MLARoPE(dim=64, max_seq_len=256)
@@ -683,6 +718,7 @@ class TestMLAConfig:
 
     def test_config_defaults(self):
         """Test MLAConfig has sensible defaults."""
+        logger.info("running test_config_defaults")
         from metal_marlin.mla_attention import MLAConfig
 
         config = MLAConfig(hidden_size=256, num_heads=4)
@@ -698,6 +734,7 @@ class TestMLAConfig:
 
     def test_config_custom_values(self):
         """Test MLAConfig with custom values."""
+        logger.info("running test_config_custom_values")
         from metal_marlin.mla_attention import MLAConfig
 
         config = MLAConfig(
@@ -718,6 +755,7 @@ class TestMLAConfig:
 
     def test_config_no_query_compression(self):
         """Test MLAConfig with query compression disabled."""
+        logger.info("running test_config_no_query_compression")
         from metal_marlin.mla_attention import MLAConfig
 
         config = MLAConfig(

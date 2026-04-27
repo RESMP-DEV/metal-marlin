@@ -15,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -31,8 +32,12 @@ if TYPE_CHECKING:
     import torch as torch_types
 
 
+
+logger = logging.getLogger(__name__)
+
 def _has_metal_attention() -> bool:
     """Check if Metal attention kernels are available."""
+    logger.debug("_has_metal_attention called")
     if not HAS_TORCH or not HAS_MPS:
         return False
     try:
@@ -44,6 +49,7 @@ def _has_metal_attention() -> bool:
 
 def _has_moe_dispatch() -> bool:
     """Check if MoE dispatch is available."""
+    logger.debug("_has_moe_dispatch called")
     if not HAS_TORCH or not HAS_MPS:
         return False
     try:
@@ -78,6 +84,7 @@ FP16_RTOL = 1e-2
 @pytest.fixture(scope="session")
 def device() -> str:
     """Return the test device: 'mps' if available, otherwise 'cpu'."""
+    logger.debug("device called")
     if HAS_MPS:
         return "mps"
     return "cpu"
@@ -86,12 +93,14 @@ def device() -> str:
 @pytest.fixture(scope="session")
 def seed() -> int:
     """Fixed seed for reproducible tests."""
+    logger.debug("seed called")
     return 42
 
 
 @pytest.fixture
 def torch_rng(seed: int, device: str) -> None:
     """Set PyTorch random seed for reproducible tests."""
+    logger.debug("torch_rng called with seed=%s, device=%s", seed, device)
     if not HAS_TORCH:
         pytest.skip("PyTorch not available")
     torch.manual_seed(seed)
@@ -100,6 +109,7 @@ def torch_rng(seed: int, device: str) -> None:
 @pytest.fixture
 def rng(seed: int) -> np.random.Generator:
     """NumPy random generator with fixed seed."""
+    logger.debug("rng called with seed=%s", seed)
     return np.random.default_rng(seed)
 
 
@@ -124,6 +134,7 @@ def ref_scaled_dot_product_attention(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("ref_scaled_dot_product_attention called with Q=%s, K=%s, V=%s", Q, K, V)
     batch, heads_q, seq_q, head_dim = Q.shape
     _, heads_kv, seq_k, _ = K.shape
 
@@ -167,6 +178,7 @@ def generate_qkv(
     head_dim: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate random Q, K, V tensors."""
+    logger.debug("generate_qkv called with rng=%s, batch=%s, heads_q=%s", rng, batch, heads_q)
     Q = rng.standard_normal((batch, heads_q, seq_q, head_dim)).astype(np.float16)
     K = rng.standard_normal((batch, heads_kv, seq_k, head_dim)).astype(np.float16)
     V = rng.standard_normal((batch, heads_kv, seq_k, head_dim)).astype(np.float16)
@@ -216,6 +228,7 @@ class TestFlashAttentionAccuracy:
         is_causal: bool,
     ):
         """Verify flash_attention_v2 matches F.scaled_dot_product_attention."""
+        logger.info("running test_flash_attention_vs_sdpa")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         Q_np, K_np, V_np = generate_qkv(rng, batch, heads_q, heads_kv, seq_q, seq_k, head_dim)
@@ -259,6 +272,7 @@ class TestFlashAttentionAccuracy:
     @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_flash_attention_vs_numpy_reference(self, rng: np.random.Generator):
         """Verify flash_attention_v2 matches NumPy reference implementation."""
+        logger.info("running test_flash_attention_vs_numpy_reference")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         batch, heads_q, heads_kv, seq, head_dim = 1, 32, 2, 128, 64
@@ -290,6 +304,7 @@ class TestFlashAttentionAccuracy:
     @pytest.mark.parametrize("seq_k", [64, 256, 512, 1024, 2048])
     def test_decode_kernel_accuracy(self, rng: np.random.Generator, seq_k: int):
         """Test decode kernel (seq_q=1) accuracy across different context lengths."""
+        logger.info("running test_decode_kernel_accuracy")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         batch, heads_q, heads_kv, head_dim = 1, 32, 2, 64
@@ -334,6 +349,7 @@ class TestFusedAttentionDispatch:
     @pytest.mark.xfail(reason="Metal kernels may exceed threadgroup memory limit")
     def test_fused_attention_produces_valid_output(self, rng: np.random.Generator):
         """Test fused_attention returns valid tensor regardless of backend."""
+        logger.info("running test_fused_attention_produces_valid_output")
         try:
             from metal_marlin.fused_attention_mps import fused_attention
         except ImportError:
@@ -357,6 +373,7 @@ class TestFusedAttentionDispatch:
     @pytest.mark.xfail(reason="Metal kernels may exceed threadgroup memory limit")
     def test_fused_attention_matches_sdpa(self, rng: np.random.Generator):
         """Test fused_attention output matches PyTorch SDPA."""
+        logger.info("running test_fused_attention_matches_sdpa")
         try:
             from metal_marlin.fused_attention_mps import fused_attention
         except ImportError:
@@ -397,6 +414,7 @@ class TestMoERoutingCorrectness:
 
         Tests the _fused_router_topk function which may use Metal or CPU.
         """
+        logger.info("running test_moe_routing_matches_cpu_reference")
         num_tokens = 32
         num_experts = 8
         top_k = 2
@@ -446,6 +464,7 @@ class TestMoERoutingCorrectness:
     @requires_mps
     def test_moe_routing_expert_frequency_distribution(self, rng: np.random.Generator):
         """Test that MoE routing produces a reasonable expert frequency distribution."""
+        logger.info("running test_moe_routing_expert_frequency_distribution")
         num_tokens = 256
         num_experts = 64
         top_k = 8
@@ -493,6 +512,7 @@ class TestMoERoutingCorrectness:
     @requires_moe
     def test_moe_auxiliary_balance_loss(self, rng: np.random.Generator):
         """Test MoE auxiliary balance loss computation."""
+        logger.info("running test_moe_auxiliary_balance_loss")
         num_tokens = 64
         num_experts = 8
         hidden_dim = 256
@@ -529,6 +549,7 @@ class TestGenerationCoherence:
     @pytest.mark.slow
     def test_greedy_decode_deterministic(self, torch_rng: None):
         """Test that greedy decode is deterministic."""
+        logger.info("running test_greedy_decode_deterministic")
         try:
             from transformers import AutoTokenizer
 
@@ -549,6 +570,7 @@ class TestGenerationCoherence:
     @pytest.mark.slow
     def test_softmax_sampling_distribution(self, rng: np.random.Generator):
         """Test softmax sampling produces valid probability distribution."""
+        logger.info("running test_softmax_sampling_distribution")
         vocab_size = 32000
         batch_size = 1
 
@@ -573,6 +595,7 @@ class TestGenerationCoherence:
     @requires_mps
     def test_repetition_penalty_effect(self, rng: np.random.Generator):
         """Test repetition penalty correctly modifies logits."""
+        logger.info("running test_repetition_penalty_effect")
         vocab_size = 1000
         seq_len = 10
 
@@ -636,6 +659,7 @@ class TestKernelSelection:
         expected_kernel: str,
     ):
         """Test correct kernel is selected based on configuration."""
+        logger.info("running test_kernel_selection")
         from metal_marlin.flash_attention_v2 import select_kernel
 
         kernel = select_kernel(
@@ -663,6 +687,7 @@ class TestNumericalStability:
     @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_with_large_values(self, rng: np.random.Generator):
         """Test attention handles large input values without overflow."""
+        logger.info("running test_attention_with_large_values")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         batch, heads, seq, head_dim = 1, 8, 64, 64
@@ -687,6 +712,7 @@ class TestNumericalStability:
     @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_with_small_values(self, rng: np.random.Generator):
         """Test attention handles small input values without underflow."""
+        logger.info("running test_attention_with_small_values")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         batch, heads, seq, head_dim = 1, 8, 64, 64
@@ -712,6 +738,7 @@ class TestNumericalStability:
     @pytest.mark.skip(reason="Metal kernels exceed threadgroup memory limit")
     def test_attention_softmax_stability(self, rng: np.random.Generator):
         """Test softmax normalization is correct."""
+        logger.info("running test_attention_softmax_stability")
         from metal_marlin.flash_attention_v2 import flash_attention_v2
 
         batch, heads, seq, head_dim = 1, 4, 32, 64

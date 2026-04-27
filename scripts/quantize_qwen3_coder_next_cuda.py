@@ -43,6 +43,7 @@ import argparse
 import gc
 import json
 import resource
+import logging
 import shutil
 import sys
 import time
@@ -59,6 +60,9 @@ import torch
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_numpy_file
 from safetensors.torch import save_file as save_torch_file
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -159,6 +163,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
     Packs N-bit indices into uint8 array with header byte.
     Supports 2, 3, 4, 5, 6, 8 bit packing.
     """
+    logger.info("pack_indices_vectorized called with indices=%s, bits=%s", indices, bits)
     if bits < 2 or bits > 8:
         raise ValueError(f"bits must be in range [2, 8], got {bits}")
 
@@ -298,6 +303,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
 
 def cuda_memory_gb() -> tuple[float, float]:
     """Return (allocated_GB, reserved_GB) on current CUDA device."""
+    logger.debug("cuda_memory_gb called")
     allocated = torch.cuda.memory_allocated() / 1e9
     reserved = torch.cuda.memory_reserved() / 1e9
     return allocated, reserved
@@ -305,6 +311,7 @@ def cuda_memory_gb() -> tuple[float, float]:
 
 def wait_for_vram(threshold_gb: float, timeout: float = 60.0) -> bool:
     """Wait until VRAM drops below threshold. Returns True if successful."""
+    logger.debug("wait_for_vram called with threshold_gb=%s, timeout=%s", threshold_gb, timeout)
     start = time.perf_counter()
     while True:
         torch.cuda.empty_cache()
@@ -319,6 +326,7 @@ def wait_for_vram(threshold_gb: float, timeout: float = 60.0) -> bool:
 
 def get_adaptive_batch_size(base_batch: int = EXPERT_BATCH_SIZE) -> int:
     """Return adaptive batch size based on available VRAM (conservative)."""
+    logger.debug("get_adaptive_batch_size called with base_batch=%s", base_batch)
     allocated, _ = cuda_memory_gb()
     available = _TOTAL_VRAM_GB - allocated
 
@@ -337,6 +345,7 @@ def get_adaptive_batch_size(base_batch: int = EXPERT_BATCH_SIZE) -> int:
 
 def get_memory_mb() -> float:
     """Return current process RSS in MB."""
+    logger.debug("get_memory_mb called")
     try:
         return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     except Exception:
@@ -345,6 +354,7 @@ def get_memory_mb() -> float:
 
 def hadamard_matrix_cuda(n: int, device: torch.device) -> torch.Tensor:
     """Generate normalized Hadamard matrix on GPU."""
+    logger.debug("hadamard_matrix_cuda called with n=%s, device=%s", n, device)
     if n == 1:
         return torch.tensor([[1.0]], device=device)
 
@@ -359,6 +369,7 @@ def blockwise_hadamard_cuda(
     X: torch.Tensor, had_k: torch.Tensor, axis: int = 1
 ) -> torch.Tensor:
     """Apply Hadamard transform blockwise on GPU."""
+    logger.debug("blockwise_hadamard_cuda called with X=%s, had_k=%s, axis=%s", X, had_k, axis)
     k = had_k.shape[0]
     if axis == 1:
         n_blocks = X.shape[1] // k
@@ -382,6 +393,7 @@ def apply_hadamard_rotation_cuda(
     H: torch.Tensor, had_k: torch.Tensor
 ) -> torch.Tensor:
     """Apply double-sided Hadamard rotation to Hessian on GPU."""
+    logger.debug("apply_hadamard_rotation_cuda called with H=%s, had_k=%s", H, had_k)
     n = H.shape[0]
     num_blocks = n // had_k.shape[0]
     if num_blocks == 0:
@@ -399,6 +411,7 @@ def apply_hadamard_rotation_cuda(
 
 def compute_ldl_cpu(H: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Compute LDL decomposition on CPU (scipy)."""
+    logger.debug("compute_ldl_cpu called with H=%s", H)
     try:
         from scipy.linalg import ldl
         H = H + 1e-6 * np.eye(H.shape[0])
@@ -425,6 +438,7 @@ def quantize_tiles_cuda_batched(
 
     Uses Viterbi-style nearest-neighbor quantization.
     """
+    logger.info("quantize_tiles_cuda_batched called with W=%s, scales=%s, bits=%s, tile_size=%s", W, scales, bits, tile_size)
     n_levels = 2 ** bits
     out_features, in_features = W.shape
 
@@ -515,6 +529,7 @@ class WeightPrefetcher:
         weight_map: dict[str, str],
         prefetch_ahead: int = 2,
     ):
+        logger.debug("initializing %s with model_path=%s, weight_map=%s, prefetch_ahead=%s", type(self).__name__, model_path, weight_map, prefetch_ahead)
         self.model_path = Path(model_path)
         self.weight_map = weight_map
         self.prefetch_ahead = prefetch_ahead
@@ -524,17 +539,20 @@ class WeightPrefetcher:
         self._layer_indices: list[int] = []
 
     def start(self, layer_indices: list[int]) -> None:
+        logger.debug("start called with layer_indices=%s", layer_indices)
         self._layer_indices = layer_indices
         self._stop = False
         self.thread = Thread(target=self._prefetch_loop, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=60)
 
     def get_layer(self, timeout: float = 180.0) -> LayerData | None:
+        logger.debug("get_layer called with timeout=%s", timeout)
         try:
             return self.queue.get(timeout=timeout)
         except Empty:
@@ -542,6 +560,7 @@ class WeightPrefetcher:
 
     def _get_layer_tensors(self, layer_idx: int) -> dict[str, str]:
         """Get tensor names for a layer (including all 512 experts)."""
+        logger.debug("_get_layer_tensors called with layer_idx=%s", layer_idx)
         layer_tensors = {}
         prefix = f"model.layers.{layer_idx}."
 
@@ -553,6 +572,7 @@ class WeightPrefetcher:
 
     def _prefetch_loop(self) -> None:
         """Load layers sequentially from disk."""
+        logger.debug("_prefetch_loop called")
         for layer_idx in self._layer_indices:
             if self._stop:
                 break
@@ -610,6 +630,7 @@ class GPULayerPrefetcher:
         max_bits: int,
         expert_batch_size: int = EXPERT_BATCH_SIZE,
     ):
+        logger.debug("initializing %s with weight_prefetcher=%s, config=%s, min_bits=%s, max_bits=%s, expert_batch_size=%s", type(self).__name__, weight_prefetcher, config, min_bits, max_bits, expert_batch_size)
         self.weight_prefetcher = weight_prefetcher
         self.config = config
         self.min_bits = min_bits
@@ -627,16 +648,19 @@ class GPULayerPrefetcher:
         self._streams = [torch.cuda.Stream() for _ in range(4)]
 
     def start(self) -> None:
+        logger.debug("start called")
         self._stop = False
         self.thread = Thread(target=self._prefetch_loop, daemon=True)
         self.thread.start()
 
     def stop(self) -> None:
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=60)
 
     def get_prepared_layer(self, timeout: float = 600.0) -> PreparedLayer | None:
+        logger.debug("get_prepared_layer called with timeout=%s", timeout)
         try:
             return self.queue.get(timeout=timeout)
         except Empty:
@@ -644,10 +668,12 @@ class GPULayerPrefetcher:
 
     def _is_deltanet_layer(self, layer_idx: int) -> bool:
         """Check if layer uses DeltaNet (linear) attention."""
+        logger.debug("_is_deltanet_layer called with layer_idx=%s", layer_idx)
         return (layer_idx % FULL_ATTENTION_INTERVAL) != (FULL_ATTENTION_INTERVAL - 1)
 
     def _prefetch_loop(self) -> None:
         """Load weights to GPU with memory-aware batching."""
+        logger.debug("_prefetch_loop called")
         while not self._stop:
             # Wait for VRAM to be available before starting next layer
             allocated, _ = cuda_memory_gb()
@@ -791,6 +817,7 @@ class GPULayerPrefetcher:
 
     def _rotate_weights_gpu(self, W: torch.Tensor) -> torch.Tensor:
         """Apply Hadamard rotation to weights on GPU."""
+        logger.debug("_rotate_weights_gpu called with W=%s", W)
         W = W.float()
         in_feat = W.shape[1]
         num_blocks = in_feat // HADAMARD_K
@@ -812,6 +839,7 @@ class GPULayerPrefetcher:
         self, name: str, W: torch.Tensor, is_deltanet: bool
     ) -> tuple[int, float]:
         """Determine bits based on GPU tensor statistics."""
+        logger.debug("_determine_bits_gpu called with name=%s, W=%s, is_deltanet=%s", name, W, is_deltanet)
         name_lower = name.lower()
 
         # Pattern-based override
@@ -895,6 +923,7 @@ class CUDAQuantizer:
         group_size: int = GROUP_SIZE,
         expert_batch_size: int = EXPERT_BATCH_SIZE,
     ):
+        logger.debug("initializing %s with model_path=%s, weight_map=%s, config=%s, min_bits=%s, max_bits=%s", type(self).__name__, model_path, weight_map, config, min_bits, max_bits)
         self.model_path = Path(model_path)
         self.weight_map = weight_map
         self.config = config
@@ -912,6 +941,7 @@ class CUDAQuantizer:
 
     def initialize(self, calibration_samples: int = 64) -> None:
         """Initialize quantizer (no calibration needed for sensitivity-based)."""
+        logger.debug("initialize called with calibration_samples=%s", calibration_samples)
         print(f"\n{'=' * 60}")
         print("CUDA TRELLIS QUANTIZATION FOR QWEN3-CODER-NEXT")
         print(f"{'=' * 60}")
@@ -932,6 +962,7 @@ class CUDAQuantizer:
         self, hd: HessianData, idx: int
     ) -> tuple[LayerResult, QuantizedTensor | None]:
         """Quantize a single tensor on GPU."""
+        logger.info("quantize_tensor called with hd=%s, idx=%s", hd, idx)
         try:
             W = hd.weight  # Already on GPU
             out_feat, in_feat = W.shape
@@ -1009,6 +1040,7 @@ class CUDAQuantizer:
         stream_idx: int,
     ) -> list[tuple[int, LayerResult, QuantizedTensor | None]]:
         """Quantize a batch of tensors on a specific CUDA stream."""
+        logger.info("quantize_batch_gpu called with hessian_batch=%s, stream_idx=%s", hessian_batch, stream_idx)
         results = []
         stream = self._streams[stream_idx % len(self._streams)]
 
@@ -1037,6 +1069,7 @@ class CUDAQuantizer:
         output_path: Path,
     ) -> list[LayerResult]:
         """Quantize all tensors in a prepared layer."""
+        logger.info("quantize_prepared_layer called with prepared=%s, executor=%s, output_path=%s", prepared, executor, output_path)
         layer_start = time.perf_counter()
         results: list[LayerResult] = []
         quant_count = 0
@@ -1056,6 +1089,7 @@ class CUDAQuantizer:
         io_futures: list[Future[str]] = []
 
         def save_batch(tensors: dict[str, np.ndarray], batch_idx: int) -> str:
+            logger.info("save_batch called with tensors=%s, batch_idx=%s", tensors, batch_idx)
             batch_file = temp_dir / f"batch_{batch_idx:04d}.safetensors"
             save_numpy_file(tensors, str(batch_file))
             return str(batch_file)
@@ -1162,6 +1196,7 @@ class CUDAQuantizer:
         total_bytes: int,
     ) -> None:
         """Rename temp dir to final layer directory and create index."""
+        logger.debug("_finalize_layer called with layer_idx=%s, temp_dir=%s, output_path=%s", layer_idx, temp_dir, output_path)
         final_dir = output_path / f"layer_{layer_idx:04d}"
         if final_dir.exists():
             shutil.rmtree(final_dir)
@@ -1200,6 +1235,7 @@ class CUDAQuantizer:
 
     def extract_base_weights(self, output_path: Path, num_layers: int) -> None:
         """Extract non-quantized weights (embeddings, norms, lm_head)."""
+        logger.debug("extract_base_weights called with output_path=%s, num_layers=%s", output_path, num_layers)
         print("\nExtracting base weights...")
         base_tensors: dict[str, torch.Tensor] = {}
 
@@ -1264,6 +1300,7 @@ class CUDAQuantizer:
         calibration_samples: int = 64,
     ) -> list[LayerResult]:
         """Run full model quantization."""
+        logger.info("quantize_model called with output_path=%s, max_layers=%s, calibration_samples=%s", output_path, max_layers, calibration_samples)
         self.initialize(calibration_samples=calibration_samples)
 
         num_layers = NUM_LAYERS
@@ -1372,6 +1409,7 @@ class CUDAQuantizer:
         self, output_path: Path, num_layers: int, max_shard_gb: float = 2.0
     ) -> None:
         """Consolidate layer folders into HF-style sharded safetensors (streaming)."""
+        logger.debug("_consolidate_to_shards called with output_path=%s, num_layers=%s, max_shard_gb=%s", output_path, num_layers, max_shard_gb)
         print("\nConsolidating to HuggingFace sharded format (streaming)...")
 
         max_shard_bytes = int(max_shard_gb * 1024 * 1024 * 1024)
@@ -1404,6 +1442,7 @@ class CUDAQuantizer:
         shard_files: list[str] = []
 
         def flush_shard() -> None:
+            logger.debug("flush_shard called")
             nonlocal current_shard, current_size, shard_num, shard_files
 
             if not current_shard:
@@ -1484,6 +1523,7 @@ class CUDAQuantizer:
         self, results: list[LayerResult], output_path: Path, total_time: float
     ) -> None:
         """Save model index and configuration."""
+        logger.info("_save_model_index called with results=%s, output_path=%s, total_time=%s", results, output_path, total_time)
         successful = [r for r in results if r.success]
         bit_counts = Counter(r.actual_bits for r in successful)
         total_params = sum(r.shape[0] * r.shape[1] for r in successful)
@@ -1525,6 +1565,7 @@ class CUDAQuantizer:
         self, results: list[LayerResult], total_time: float
     ) -> None:
         """Print quantization summary."""
+        logger.debug("_print_summary called with results=%s, total_time=%s", results, total_time)
         successful = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
 
@@ -1580,6 +1621,7 @@ class CUDAQuantizer:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Quantize Qwen3-Coder-Next with CUDA acceleration"
     )

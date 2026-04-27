@@ -9,6 +9,7 @@ Tests verify:
 
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -24,6 +25,9 @@ try:
     HAS_GPTQ_METAL = True
 except ImportError:
     HAS_GPTQ_METAL = False
+
+logger = logging.getLogger(__name__)
+
 _FORCE_TORCH_MATMUL_ENV = "METAL_MARLIN_GPTQ_FORCE_TORCH_MATMUL"
 
 # Skip all tests if Metal is not available
@@ -35,6 +39,7 @@ pytestmark = pytest.mark.skipif(
 
 def _hessian_reference(X: torch.Tensor, *, normalize: bool) -> torch.Tensor:
     """Reference Hessian computation using torch matmul on MPS."""
+    logger.debug("_hessian_reference called with X=%s", X)
     x_fp32 = X.to(device="mps", dtype=torch.float32)
     hessian = (2.0 * (x_fp32.T @ x_fp32)).to(device="mps", dtype=torch.float32).contiguous()
     if normalize:
@@ -47,6 +52,7 @@ class TestGPTQMetalInit:
 
     def test_init_success(self):
         """GPTQMetal should initialize without error on Apple Silicon."""
+        logger.info("running test_init_success")
         gptq = GPTQMetal()
         assert gptq is not None
         assert gptq._device is not None
@@ -54,6 +60,7 @@ class TestGPTQMetalInit:
 
     def test_init_with_device(self):
         """GPTQMetal should accept explicit device."""
+        logger.info("running test_init_with_device")
         import Metal
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -66,10 +73,12 @@ class TestHessianComputation:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def test_hessian_shape(self, gptq):
         """Hessian should have shape [in_features, in_features]."""
+        logger.info("running test_hessian_shape")
         n_samples, in_features = 100, 256
         X = torch.randn(n_samples, in_features, device="mps")
         H = gptq.compute_hessian(X)
@@ -77,6 +86,7 @@ class TestHessianComputation:
 
     def test_hessian_symmetry(self, gptq):
         """Hessian should be symmetric."""
+        logger.info("running test_hessian_symmetry")
         X = torch.randn(50, 128, device="mps")
         H = gptq.compute_hessian(X)
         # H should equal H^T
@@ -85,6 +95,7 @@ class TestHessianComputation:
 
     def test_hessian_positive_semidefinite(self, gptq):
         """Hessian should be positive semi-definite."""
+        logger.info("running test_hessian_positive_semidefinite")
         X = torch.randn(100, 64, device="mps")
         H = gptq.compute_hessian(X)
         # All eigenvalues should be >= 0
@@ -94,6 +105,7 @@ class TestHessianComputation:
 
     def test_hessian_vs_cpu(self, gptq):
         """Metal Hessian should match CPU reference."""
+        logger.info("running test_hessian_vs_cpu")
         X_np = np.random.randn(100, 128).astype(np.float32)
 
         # CPU reference
@@ -110,6 +122,7 @@ class TestHessianComputation:
 
     def test_hessian_normalization(self, gptq):
         """Test normalize parameter."""
+        logger.info("running test_hessian_normalization")
         X = torch.randn(100, 64, device="mps")
         H_norm = gptq.compute_hessian(X, normalize=True)
         H_unnorm = gptq.compute_hessian(X, normalize=False)
@@ -124,10 +137,12 @@ class TestCholeskyDecomposition:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def test_cholesky_lower_triangular(self, gptq):
         """Cholesky L should be lower triangular."""
+        logger.info("running test_cholesky_lower_triangular")
         X = torch.randn(100, 64, device="mps")
         H = gptq.compute_hessian(X)
         L = gptq.cholesky_decompose(H)
@@ -139,6 +154,7 @@ class TestCholeskyDecomposition:
 
     def test_cholesky_reconstruction(self, gptq):
         """L @ L^T should reconstruct H."""
+        logger.info("running test_cholesky_reconstruction")
         X = torch.randn(100, 64, device="mps")
         H = gptq.compute_hessian(X)
         L = gptq.cholesky_decompose(H)
@@ -153,6 +169,7 @@ class TestCholeskyDecomposition:
     def test_cholesky_with_regularization(self, gptq):
         """Test regularization parameter."""
         # Create near-singular matrix
+        logger.info("running test_cholesky_with_regularization")
         X = torch.randn(10, 64, device="mps")  # rank-deficient
         H = gptq.compute_hessian(X)
 
@@ -167,22 +184,26 @@ class TestEdgeCases:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def test_single_sample(self, gptq):
         """Should handle single sample."""
+        logger.info("running test_single_sample")
         X = torch.randn(1, 64, device="mps")
         H = gptq.compute_hessian(X)
         assert H.shape == (64, 64)
 
     def test_large_features(self, gptq):
         """Should handle large feature dimension."""
+        logger.info("running test_large_features")
         X = torch.randn(50, 1024, device="mps")
         H = gptq.compute_hessian(X)
         assert H.shape == (1024, 1024)
 
     def test_numpy_input(self, gptq):
         """Should accept numpy array input."""
+        logger.info("running test_numpy_input")
         X_np = np.random.randn(100, 64).astype(np.float32)
         H = gptq.compute_hessian(X_np)
         assert isinstance(H, torch.Tensor)
@@ -190,6 +211,7 @@ class TestEdgeCases:
 
     def test_invalid_input_shape(self, gptq):
         """Should raise error for non-2D input."""
+        logger.info("running test_invalid_input_shape")
         X = torch.randn(10, 64, 32, device="mps")
         with pytest.raises((ValueError, RuntimeError)):
             gptq.compute_hessian(X)
@@ -200,10 +222,12 @@ class TestPathSelectionStability:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def test_path_selection_consistency_across_calls(self, gptq):
         """Same input should make a consistent path decision across repeated calls."""
+        logger.info("running test_path_selection_consistency_across_calls")
         X_aligned = torch.randn(100, 64, device="mps")
 
         dispatch_called: list[bool] = []
@@ -230,6 +254,7 @@ class TestPathSelectionStability:
         Same seed should always produce the same Hessian, even across
         different GPTQMetal instances.
         """
+        logger.info("running test_deterministic_results_with_seeded_inputs")
         torch.manual_seed(42)
         X1 = torch.randn(64, 64, device="mps")
         
@@ -254,6 +279,7 @@ class TestPathSelectionStability:
 
     def test_env_override_forces_torch_path(self, gptq):
         """Env override should disable Metal dispatch and force torch fallback."""
+        logger.info("running test_env_override_forces_torch_path")
         x = torch.randn(64, 64, device="mps")
         with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "1"}, clear=False):
             with patch.object(
@@ -279,6 +305,7 @@ class TestPathSelectionStability:
 
     def test_small_shape_fallback_boundary_policy(self, gptq):
         """Verify below-threshold fallback and policy-safe boundary behavior."""
+        logger.info("running test_small_shape_fallback_boundary_policy")
         x_small = torch.randn(8, 31, device="mps")
         with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "0"}, clear=False):
             with patch.object(
@@ -314,6 +341,7 @@ class TestNumericalStability:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def test_numerical_stability_near_thresholds(self, gptq):
@@ -323,6 +351,7 @@ class TestNumericalStability:
         likely to occur.
         """
         # Test shapes just above and below threshold
+        logger.info("running test_numerical_stability_near_thresholds")
         threshold_shapes = [
             (32, 32),   # Exactly at threshold
             (33, 32),   # Just above
@@ -349,6 +378,7 @@ class TestNumericalStability:
         
         Very small or very large values can cause numerical instability.
         """
+        logger.info("running test_stability_with_extreme_values")
         in_features = 64
         
         # Very small values (near FP16 underflow)
@@ -375,6 +405,7 @@ class TestNumericalStability:
         crashing or producing incorrect results.
         """
         # Zero dimensions
+        logger.info("running test_error_handling_with_invalid_shapes")
         with pytest.raises((ValueError, RuntimeError)):
             X = torch.randn(0, 64, device="mps")
             gptq.compute_hessian(X)
@@ -391,6 +422,7 @@ class TestNumericalStability:
         
         Multiple iterations should not accumulate errors.
         """
+        logger.info("running test_stability_with_repeated_computations")
         X = torch.randn(100, 64, device="mps")
         
         # First computation
@@ -418,10 +450,12 @@ class TestHessianPathEquivalence:
 
     @pytest.fixture
     def gptq(self):
+        logger.debug("gptq called")
         return GPTQMetal()
 
     def _run_paths(self, gptq, X, normalize):
         # Run with Metal kernel (default)
+        logger.debug("_run_paths called with gptq=%s, X=%s, normalize=%s", gptq, X, normalize)
         with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "0"}, clear=False):
             H_metal = gptq.compute_hessian(X, normalize=normalize)
 
@@ -449,6 +483,7 @@ class TestHessianPathEquivalence:
         rtol,
     ):
         """Default and forced-fallback paths should remain numerically close."""
+        logger.info("running test_equivalence_default_vs_forced_fallback")
         X = torch.randn(n_samples, in_features, device="mps", dtype=dtype)
         H_metal, H_torch = self._run_paths(gptq, X, normalize=True)
 
@@ -459,6 +494,7 @@ class TestHessianPathEquivalence:
 
     def test_equivalence_bfloat16(self, gptq):
         """BF16 inputs should remain close across default and fallback paths."""
+        logger.info("running test_equivalence_bfloat16")
         X = torch.randn(64, 128, device="mps", dtype=torch.bfloat16)
         H_metal, H_torch = self._run_paths(gptq, X, normalize=True)
         torch.testing.assert_close(H_metal, H_torch, atol=8e-2, rtol=8e-2)

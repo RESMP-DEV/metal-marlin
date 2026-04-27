@@ -25,12 +25,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -120,6 +124,7 @@ def _gather_kv_from_blocks(
         Tuple of (keys, values) in linear layout
         [num_seqs, max_context_len, num_kv_heads, head_dim]
     """
+    logger.debug("_gather_kv_from_blocks called with k_cache=%s, v_cache=%s, block_tables=%s", k_cache, v_cache, block_tables)
     num_seqs = block_tables.shape[0]
     max_blocks = block_tables.shape[1]
     num_kv_heads = k_cache.shape[2]
@@ -169,6 +174,7 @@ def compute_linear_attention(
     Returns:
         Attention output [num_seqs, num_heads, q_len, head_dim]
     """
+    logger.debug("compute_linear_attention called with query=%s, keys=%s, values=%s", query, keys, values)
     from scipy.special import softmax
     
     num_seqs, num_heads, q_len, head_dim = query.shape
@@ -219,6 +225,7 @@ def validate_paged_linear_parity(
     Returns:
         ParityValidationResult with detailed comparison information
     """
+    logger.debug("validate_paged_linear_parity called with paged_output=%s, linear_output=%s, config=%s", paged_output, linear_output, config)
     if config is None:
         config = ValidationConfig()
     
@@ -337,6 +344,7 @@ def validate_paged_v1_parity(
     Returns:
         ParityValidationResult
     """
+    logger.debug("validate_paged_v1_parity called with query=%s, k_cache=%s, v_cache=%s", query, k_cache, v_cache)
     from .attention import paged_attention_v1
     
     if config is None:
@@ -412,6 +420,7 @@ def validate_paged_block_pool_parity(
     Returns:
         ParityValidationResult
     """
+    logger.debug("validate_paged_block_pool_parity called with query=%s, block_pool=%s, block_tables=%s", query, block_pool, block_tables)
     from .attention import paged_attention
     
     if config is None:
@@ -510,6 +519,7 @@ class ParityValidator:
         Args:
             config: Validation configuration (uses defaults if None)
         """
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or ValidationConfig()
         self.results: list[ParityValidationResult] = []
     
@@ -535,6 +545,7 @@ class ParityValidator:
         Returns:
             ParityValidationResult
         """
+        logger.debug("validate_v1 called with query=%s, k_cache=%s, v_cache=%s", query, k_cache, v_cache)
         result = validate_paged_v1_parity(
             query, k_cache, v_cache, block_tables, context_lens,
             scale, self.config
@@ -566,6 +577,7 @@ class ParityValidator:
         Returns:
             ParityValidationResult
         """
+        logger.debug("validate_block_pool called with query=%s, block_pool=%s, block_tables=%s", query, block_pool, block_tables)
         result = validate_paged_block_pool_parity(
             query, block_pool, block_tables, context_lens,
             scale, num_kv_heads, block_size, self.config
@@ -579,6 +591,7 @@ class ParityValidator:
         Returns:
             Dictionary with statistics
         """
+        logger.debug("get_statistics called")
         if not self.results:
             return {"total": 0, "passed": 0, "failed": 0}
         
@@ -596,4 +609,5 @@ class ParityValidator:
     
     def reset(self) -> None:
         """Clear all recorded results."""
+        logger.debug("reset called")
         self.results.clear()

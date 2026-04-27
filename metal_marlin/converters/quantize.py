@@ -8,6 +8,7 @@ file with marlin_config.json metadata.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,9 @@ import torch
 from .calibration import CalibrationStats, compute_scales
 from .safetensors_loader import load_mapped_safetensors
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerReport:
@@ -49,6 +53,7 @@ class QuantizationReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to plain dict."""
+        logger.debug("to_dict called")
         return {
             "num_quantized": self.num_quantized,
             "num_skipped": self.num_skipped,
@@ -110,6 +115,7 @@ def quantize_model(
     Returns:
         QuantizationReport with per-layer error stats.
     """
+    logger.info("quantize_model called with model_path=%s, output_path=%s, calibration_data=%s, quant_type=%s", model_path, output_path, calibration_data, quant_type)
     from safetensors.numpy import save_file
 
     # Import pack_fp4_weights from the sibling metal_marlin package
@@ -240,6 +246,7 @@ def _should_skip(
 ) -> bool:
     """Determine whether a layer should be skipped (kept in FP16)."""
     # Skip non-2D tensors (biases, norms, embeddings with 1D)
+    logger.debug("_should_skip called with name=%s, weight=%s, skip_layers=%s", name, weight, skip_layers)
     if len(weight.shape) != 2:
         return True
     # Skip by name fragment matching
@@ -260,6 +267,7 @@ def _run_calibration(
     calibrated scales that account for weight distribution shape.
     """
     # Weight-only calibration: compute stats from weight tensors directly
+    logger.debug("_run_calibration called with state_dict=%s, calibration_data=%s, quant_type=%s", state_dict, calibration_data, quant_type)
     stats: dict[str, CalibrationStats] = {}
     for name, weight in state_dict.items():
         if len(weight.shape) != 2:
@@ -277,6 +285,7 @@ def _run_calibration(
 
 def _percentile(x: torch.Tensor, p: float) -> torch.Tensor:
     """Compute the p-th percentile of a 1D tensor."""
+    logger.debug("_percentile called with x=%s, p=%s", x, p)
     sorted_x, _ = torch.sort(x)
     idx = min(int(len(sorted_x) * p), len(sorted_x) - 1)
     return sorted_x[idx]
@@ -292,6 +301,7 @@ def _compute_layer_error(
     quant_type: str,
 ) -> LayerReport:
     """Compute reconstruction error for a quantized layer."""
+    logger.debug("_compute_layer_error called with name=%s, original=%s, packed=%s", name, original, packed)
     from ..metal_marlin.quantize import unpack_fp4_weights
 
     # Reconstruct

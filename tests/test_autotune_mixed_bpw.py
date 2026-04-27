@@ -1,6 +1,7 @@
 """Tests for mixed bit-width kernel auto-tuning system."""
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 
@@ -16,11 +17,15 @@ from metal_marlin.trellis.autotune_mixed_bpw import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestKernelConfig:
     """Test KernelConfig dataclass."""
 
     def test_kernel_config_creation(self):
         """Test creating a KernelConfig."""
+        logger.info("running test_kernel_config_creation")
         config = KernelConfig(
             kernel_name="test_kernel",
             tile_size_m=64,
@@ -42,6 +47,7 @@ class TestBenchmarkResult:
 
     def test_benchmark_result_creation(self):
         """Test creating a BenchmarkResult."""
+        logger.info("test_benchmark_result_creation starting")
         config = KernelConfig(
             kernel_name="test",
             tile_size_m=64,
@@ -65,6 +71,7 @@ class TestAutotuneConfig:
 
     def test_default_config(self):
         """Test default AutotuneConfig."""
+        logger.info("running test_default_config")
         config = AutotuneConfig(device_name="M4 Max", device_family="M4")
         assert config.device_name == "M4 Max"
         assert config.device_family == "M4"
@@ -75,6 +82,7 @@ class TestAutotuneConfig:
 
     def test_tile_size_mapping(self):
         """Test tile size mapping for different bit widths."""
+        logger.info("running test_tile_size_mapping")
         config = AutotuneConfig(device_name="M4 Max", device_family="M4")
 
         # 2-bit should have larger tiles
@@ -92,6 +100,7 @@ class TestMixedBPWAutoTuner:
 
     def test_initialization(self):
         """Test tuner initialization."""
+        logger.info("running test_initialization")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
         assert tuner.device_name == "M4 Max"
         assert tuner.device_family == "M4"
@@ -99,12 +108,14 @@ class TestMixedBPWAutoTuner:
 
     def test_device_detection(self):
         """Test automatic device detection."""
+        logger.info("running test_device_detection")
         tuner = MixedBPWAutoTuner()  # No device_name specified
         assert tuner.device_name is not None
         assert tuner.device_family in ["M1", "M2", "M3", "M4", "Unknown"]
 
     def test_kernel_name_generation(self):
         """Test kernel name generation."""
+        logger.info("running test_kernel_name_generation")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Base variant
@@ -121,6 +132,7 @@ class TestMixedBPWAutoTuner:
 
     def test_config_generation_single_bit(self):
         """Test config generation for single bit width."""
+        logger.info("running test_config_generation_single_bit")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
         configs = tuner._generate_configs(bit_widths=[4], use_decode=True, use_prefill=True)
 
@@ -137,6 +149,7 @@ class TestMixedBPWAutoTuner:
 
     def test_config_generation_mixed_bits(self):
         """Test config generation for mixed bit widths."""
+        logger.info("running test_config_generation_mixed_bits")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
         configs = tuner._generate_configs(bit_widths=[2, 3, 4], use_decode=True)
 
@@ -156,6 +169,7 @@ class TestMixedBPWAutoTuner:
 
     def test_synthetic_input_creation(self):
         """Test synthetic input tensor creation."""
+        logger.info("running test_synthetic_input_creation")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         batch_size = 4
@@ -173,6 +187,7 @@ class TestMixedBPWAutoTuner:
 
     def test_nearest_key_finding(self):
         """Test finding nearest key in a set."""
+        logger.info("running test_nearest_key_finding")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         keys = {1, 4, 8, 16, 32}
@@ -197,6 +212,7 @@ class TestMixedBPWAutoTuner:
 
     def test_kernel_selection_with_lookup_table(self):
         """Test kernel selection from lookup table."""
+        logger.info("running test_kernel_selection_with_lookup_table")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate lookup table
@@ -222,6 +238,7 @@ class TestMixedBPWAutoTuner:
 
     def test_kernel_selection_nearest_batch(self):
         """Test kernel selection with nearest batch size."""
+        logger.info("running test_kernel_selection_nearest_batch")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate lookup table for batch_size=4
@@ -247,6 +264,7 @@ class TestMixedBPWAutoTuner:
 
     def test_kernel_selection_fallback(self):
         """Test kernel selection with fallback to default."""
+        logger.info("running test_kernel_selection_fallback")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Empty lookup table
@@ -264,6 +282,7 @@ class TestMixedBPWAutoTuner:
 
     def test_kernel_selection_no_fallback(self):
         """Test kernel selection without fallback."""
+        logger.info("running test_kernel_selection_no_fallback")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Empty lookup table
@@ -278,6 +297,7 @@ class TestMixedBPWAutoTuner:
 
     def test_latency_recording(self):
         """Test recording kernel latency."""
+        logger.info("running test_latency_recording")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         kernel_name = "test_kernel"
@@ -293,6 +313,7 @@ class TestMixedBPWAutoTuner:
 
     def test_latency_recording_with_context(self):
         """Test recording latency with hidden_dim and bit_widths context."""
+        logger.info("running test_latency_recording_with_context")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         kernel_name = "test_kernel"
@@ -309,6 +330,7 @@ class TestMixedBPWAutoTuner:
 
     def test_adaptation_history_trimming(self):
         """Test that adaptation history is trimmed to max length."""
+        logger.info("running test_adaptation_history_trimming")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
         tuner.config.adaptation_history_len = 5
 
@@ -326,6 +348,7 @@ class TestMixedBPWAutoTuner:
 
     def test_adaptation_selection_no_history(self):
         """Test adaptation selection with no history."""
+        logger.info("running test_adaptation_selection_no_history")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # No adaptation history
@@ -339,6 +362,7 @@ class TestMixedBPWAutoTuner:
 
     def test_adaptation_selection_insufficient_samples(self):
         """Test adaptation selection with insufficient samples."""
+        logger.info("running test_adaptation_selection_insufficient_samples")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate lookup table
@@ -359,6 +383,7 @@ class TestMixedBPWAutoTuner:
 
     def test_adaptation_selection_sufficient_samples(self):
         """Test adaptation selection with sufficient samples."""
+        logger.info("running test_adaptation_selection_sufficient_samples")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate lookup table
@@ -380,6 +405,7 @@ class TestMixedBPWAutoTuner:
 
     def test_clear_adaptation_history(self):
         """Test clearing adaptation history."""
+        logger.info("running test_clear_adaptation_history")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Record some latencies
@@ -394,6 +420,7 @@ class TestMixedBPWAutoTuner:
 
     def test_reset(self):
         """Test resetting tuner to initial state."""
+        logger.info("running test_reset")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate state
@@ -417,6 +444,7 @@ class TestMixedBPWAutoTuner:
 
     def test_export_config(self):
         """Test exporting config to JSON."""
+        logger.info("running test_export_config")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate some state
@@ -447,6 +475,7 @@ class TestMixedBPWAutoTuner:
 
     def test_export_and_load_config(self):
         """Test exporting and loading config roundtrip."""
+        logger.info("running test_export_and_load_config")
         tuner1 = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate state
@@ -484,6 +513,7 @@ class TestMixedBPWAutoTuner:
 
     def test_get_statistics(self, tmp_path):
         """Test getting tuner statistics."""
+        logger.info("running test_get_statistics")
         config_file = tmp_path / "test.json"
         tuner = MixedBPWAutoTuner(device_name="M4 Max", config_path=str(config_file))
 
@@ -509,6 +539,7 @@ class TestMixedBPWAutoTuner:
 
     def test_empty_statistics(self):
         """Test statistics for empty tuner."""
+        logger.info("running test_empty_statistics")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         stats = tuner.get_statistics()
@@ -521,6 +552,7 @@ class TestMixedBPWAutoTuner:
 
     def test_config_path_attribute(self):
         """Test config_path is properly set."""
+        logger.info("running test_config_path_attribute")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "test.json"
             tuner = MixedBPWAutoTuner(config_path=config_path)
@@ -532,6 +564,7 @@ class TestMixedBPWAutoTuner:
 
     def test_multiple_bit_widths_in_lookup(self):
         """Test lookup table with multiple bit-width combinations."""
+        logger.info("running test_multiple_bit_widths_in_lookup")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Add entries for different bit-width combinations
@@ -562,6 +595,7 @@ class TestMixedBPWAutoTuner:
 
     def test_hidden_dim_fallback(self):
         """Test kernel selection with nearest hidden_dim."""
+        logger.info("running test_hidden_dim_fallback")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         # Populate lookup table for hidden_dim=4096
@@ -581,6 +615,7 @@ class TestMixedBPWAutoTuner:
 
     def test_mixed_bit_width_config_mapping(self):
         """Test that config mapping has entries for all bit widths."""
+        logger.info("running test_mixed_bit_width_config_mapping")
         config = AutotuneConfig(device_name="M4 Max", device_family="M4")
 
         # Check tile size mapping
@@ -597,6 +632,7 @@ class TestMixedBPWAutoTuner:
 
     def test_bit_width_priority_in_tile_sizes(self):
         """Test that lower bit-widths get larger tiles."""
+        logger.info("running test_bit_width_priority_in_tile_sizes")
         tuner = MixedBPWAutoTuner(device_name="M4 Max")
 
         configs = tuner._generate_configs(bit_widths=[2, 4], use_decode=False)

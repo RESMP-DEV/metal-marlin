@@ -33,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,9 @@ if TYPE_CHECKING:
     import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 # Tile dimensions matching the Metal kernel
 TILE_Q_SW = 8
 TILE_KV_SW = 32
@@ -59,6 +63,7 @@ THREADS_PER_TG_SW = NUM_SIMDGROUPS_SW * 32  # 128
 
 def _require_metal_sliding_window() -> None:
     """Raise if Metal dispatch is not available."""
+    logger.debug("_require_metal_sliding_window called")
     if not HAS_TORCH:
         raise RuntimeError(
             "Sliding Window Attention requires PyTorch. Install with: pip install torch"
@@ -99,6 +104,7 @@ class SlidingWindowParams:
             MTLBuffer containing packed parameters
         """
         # Pack as uint32 array (scale as reinterpreted float, is_causal as 0/1)
+        logger.debug("to_buffer called with device=%s", device)
         data = np.array(
             [
                 self.batch,
@@ -122,6 +128,7 @@ class SlidingWindowParams:
 
 def _get_kernel_source() -> str:
     """Load Sliding Window Attention Metal kernel source."""
+    logger.debug("_get_kernel_source called")
     kernel_path = Path(__file__).parent.parent / "src" / "sliding_window_attention.metal"
     if kernel_path.exists():
         return kernel_path.read_text()
@@ -130,6 +137,7 @@ def _get_kernel_source() -> str:
 
 def _compute_grid(params: SlidingWindowParams, kernel_type: str) -> tuple[int, int, int]:
     """Compute Metal grid dimensions for dispatch."""
+    logger.debug("_compute_grid called with params=%s, kernel_type=%s", params, kernel_type)
     if kernel_type == "decode":
         # Decode: one threadgroup per (sequence, head) pair
         return (params.batch * params.num_heads_q, 1, 1)
@@ -160,6 +168,7 @@ def select_kernel(
     Returns:
         Kernel name to use
     """
+    logger.debug("select_kernel called with seq_q=%s, num_heads_q=%s, num_heads_kv=%s", seq_q, num_heads_q, num_heads_kv)
     gqa_ratio = num_heads_q // num_heads_kv if num_heads_kv > 0 else 1
 
     if seq_q == 1:
@@ -186,6 +195,7 @@ _kernel_lib: Any = None
 
 def _get_kernel_library() -> Any:
     """Get or create the Sliding Window Attention kernel library."""
+    logger.debug("_get_kernel_library called")
     global _kernel_lib
     if _kernel_lib is None:
         from .metal_dispatch import MetalKernelLibrary
@@ -198,6 +208,7 @@ def _get_kernel_library() -> Any:
 
 def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     """Get Metal buffer from PyTorch MPS tensor (shared memory, no copy)."""
+    logger.debug("_mps_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     if not tensor.is_mps:
         raise ValueError("Tensor must be on MPS device")
 
@@ -227,6 +238,7 @@ def _dispatch_attention_kernel(
     wait: bool = True,
 ) -> None:
     """Dispatch a Sliding Window Attention Metal kernel."""
+    logger.debug("_dispatch_attention_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
     pipeline = lib.get_pipeline(function_name, library_name="sliding_window_attention")
 
     command_buffer = lib.command_queue.commandBuffer()
@@ -279,6 +291,7 @@ def sliding_window_attention(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim], MPS device
     """
+    logger.debug("sliding_window_attention called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_sliding_window()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -307,6 +320,7 @@ def _sliding_window_attention_prefill(
     causal: bool,
 ) -> torch.Tensor:
     """Sliding Window Attention prefill kernel dispatch."""
+    logger.debug("_sliding_window_attention_prefill called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_sliding_window()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -385,6 +399,7 @@ def sliding_window_attention_decode(
     Returns:
         Output tensor [num_seqs, heads_q, 1, head_dim] or [num_seqs, heads_q, head_dim]
     """
+    logger.debug("sliding_window_attention_decode called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_sliding_window()
 
     # Handle 3D input (squeeze seq_q dimension)
@@ -418,12 +433,14 @@ def sliding_window_attention_decode(
 
     # Create scalar constant buffers for decode kernel
     def make_uint32_buffer(val: int) -> Any:
+        logger.debug("make_uint32_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
         )
 
     def make_float_buffer(val: float) -> Any:
+        logger.debug("make_float_buffer called with val=%s", val)
         data = np.array([val], dtype=np.float32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -494,6 +511,7 @@ def sliding_window_attention_gqa(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("sliding_window_attention_gqa called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_sliding_window()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape
@@ -581,6 +599,7 @@ def benchmark_sliding_window_attention(
     Returns:
         Dictionary with timing statistics and bandwidth utilization
     """
+    logger.info("benchmark_sliding_window_attention starting with batch=%s, num_heads_q=%s, num_heads_kv=%s, seq_q=%s", batch, num_heads_q, num_heads_kv, seq_q)
     _require_metal_sliding_window()
 
     import time

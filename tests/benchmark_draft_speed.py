@@ -5,6 +5,7 @@ Verifies >2x speedup on decode with speculative decoding optimizations.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import torch
@@ -12,8 +13,12 @@ import torch
 from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel
 
 
+
+logger = logging.getLogger(__name__)
+
 def benchmark_draft_speed():
     """Benchmark draft model inference speed."""
+    logger.info("benchmark_draft_speed starting")
     print("=" * 60)
     print("Draft Model Speed Benchmark")
     print("=" * 60)

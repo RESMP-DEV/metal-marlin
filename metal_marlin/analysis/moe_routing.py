@@ -30,11 +30,15 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ExpertLoadStats:
@@ -65,6 +69,7 @@ class ExpertLoadStats:
     @property
     def primary_selection_rate(self) -> float:
         """Fraction of activations where this expert was top-1 choice."""
+        logger.debug("primary_selection_rate called")
         if self.total_activations == 0:
             return 0.0
         return self.rank_distribution.get(0, 0) / self.total_activations
@@ -124,14 +129,17 @@ class LayerRoutingProfile:
 
     def get_hot_experts(self, threshold: float = 1.5) -> list[int]:
         """Get experts with activation rate > threshold * average."""
+        logger.debug("get_hot_experts called with threshold=%s", threshold)
         return [eid for eid, stats in self.expert_stats.items() if stats.is_hot]
 
     def get_cold_experts(self, threshold: float = 0.5) -> list[int]:
         """Get experts with activation rate < threshold * average."""
+        logger.debug("get_cold_experts called with threshold=%s", threshold)
         return [eid for eid, stats in self.expert_stats.items() if stats.is_cold]
 
     def get_dead_experts(self) -> list[int]:
         """Get experts that were never selected."""
+        logger.debug("get_dead_experts called")
         return [eid for eid, stats in self.expert_stats.items() if stats.is_dead]
 
 
@@ -189,6 +197,7 @@ class MoERoutingProfiler:
         hot_threshold: float = 1.5,
         cold_threshold: float = 0.5,
     ):
+        logger.debug("initializing %s with num_experts=%s, num_layers=%s, top_k=%s, hot_threshold=%s, cold_threshold=%s", type(self).__name__, num_experts, num_layers, top_k, hot_threshold, cold_threshold)
         self.num_experts = num_experts
         self.num_layers = num_layers
         self.top_k = top_k
@@ -220,6 +229,7 @@ class MoERoutingProfiler:
             expert_probs: Optional [batch_size, top_k] routing probabilities.
                 If not provided, uniform weights are assumed.
         """
+        logger.debug("record_routing called with layer_idx=%s, expert_ids=%s, expert_probs=%s", layer_idx, expert_ids, expert_probs)
         if layer_idx < 0 or layer_idx >= self.num_layers:
             raise ValueError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")
 
@@ -251,6 +261,7 @@ class MoERoutingProfiler:
 
     def _compute_layer_profiles(self) -> dict[int, LayerRoutingProfile]:
         """Compute per-layer routing statistics."""
+        logger.debug("_compute_layer_profiles called")
         profiles = {}
 
         for layer_idx in range(self.num_layers):
@@ -366,6 +377,7 @@ class MoERoutingProfiler:
 
     def _compute_cooccurrence(self) -> ExpertCooccurrence:
         """Compute expert co-occurrence matrix across all layers."""
+        logger.debug("_compute_cooccurrence called")
         cooccurrence = ExpertCooccurrence(num_experts=self.num_experts)
 
         # Aggregate co-occurrences across all layers
@@ -421,6 +433,7 @@ class MoERoutingProfiler:
         Computes correlation between expert selections at different layers
         to determine if early-layer routing predicts later-layer routing.
         """
+        logger.debug("_compute_predictability called")
         predictability = RoutingPredictability(num_layers=self.num_layers)
 
         # Build expert selection vectors per layer
@@ -500,6 +513,7 @@ class MoERoutingProfiler:
     @property
     def layer_profiles(self) -> dict[int, LayerRoutingProfile]:
         """Get per-layer routing profiles (computed on first access)."""
+        logger.debug("layer_profiles called")
         if self._layer_profiles is None:
             self._layer_profiles = self._compute_layer_profiles()
         return self._layer_profiles
@@ -507,6 +521,7 @@ class MoERoutingProfiler:
     @property
     def cooccurrence(self) -> ExpertCooccurrence:
         """Get expert co-occurrence analysis (computed on first access)."""
+        logger.debug("cooccurrence called")
         if self._cooccurrence is None:
             self._cooccurrence = self._compute_cooccurrence()
         return self._cooccurrence
@@ -514,6 +529,7 @@ class MoERoutingProfiler:
     @property
     def predictability(self) -> RoutingPredictability:
         """Get routing predictability analysis (computed on first access)."""
+        logger.debug("predictability called")
         if self._predictability is None:
             self._predictability = self._compute_predictability()
         return self._predictability
@@ -525,6 +541,7 @@ class MoERoutingProfiler:
             layer_idx: If provided, get hot experts for specific layer.
                 If None, get experts that are hot in any layer.
         """
+        logger.debug("get_hot_experts called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             return self.layer_profiles[layer_idx].get_hot_experts()
 
@@ -540,6 +557,7 @@ class MoERoutingProfiler:
             layer_idx: If provided, get cold experts for specific layer.
                 If None, get experts that are cold in any layer.
         """
+        logger.debug("get_cold_experts called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             return self.layer_profiles[layer_idx].get_cold_experts()
 
@@ -555,6 +573,7 @@ class MoERoutingProfiler:
             layer_idx: If provided, get dead experts for specific layer.
                 If None, get experts that are dead in ALL layers (prunable).
         """
+        logger.debug("get_dead_experts called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             return self.layer_profiles[layer_idx].get_dead_experts()
 
@@ -583,6 +602,7 @@ class MoERoutingProfiler:
         Returns:
             List of expert IDs sorted by likelihood of activation
         """
+        logger.debug("get_prefetch_recommendations called with layer_idx=%s, num_experts=%s", layer_idx, num_experts)
         profile = self.layer_profiles[layer_idx]
 
         # Sort experts by activation rate
@@ -601,6 +621,7 @@ class MoERoutingProfiler:
             Dictionary containing all analysis results suitable for JSON export.
         """
         # Force computation
+        logger.debug("generate_report called")
         _ = self.layer_profiles
         _ = self.cooccurrence
         _ = self.predictability
@@ -682,6 +703,7 @@ class MoERoutingProfiler:
 
     def save_report(self, path: str | Path) -> None:
         """Save analysis report to JSON file."""
+        logger.info("save_report called with path=%s", path)
         report = self.generate_report()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -690,6 +712,7 @@ class MoERoutingProfiler:
 
     def print_summary(self) -> None:
         """Print a human-readable summary to stdout."""
+        logger.debug("print_summary called")
         report = self.generate_report()
         summary = report["summary"]
         balance = report["load_balance"]
@@ -754,6 +777,7 @@ class MoERoutingProfiler:
             output_path: Path to save the figure (PNG, PDF, etc.)
             show: If True, display the plot interactively
         """
+        logger.debug("plot_routing_heatmap called with output_path=%s, show=%s", output_path, show)
         try:
             import matplotlib.pyplot as plt
         except ImportError:
@@ -863,6 +887,7 @@ def analyze_routing_from_file(
     Returns:
         Configured MoERoutingProfiler with loaded data
     """
+    logger.debug("analyze_routing_from_file called with routing_log_path=%s, num_experts=%s, num_layers=%s", routing_log_path, num_experts, num_layers)
     profiler = MoERoutingProfiler(
         num_experts=num_experts,
         num_layers=num_layers,
@@ -906,6 +931,7 @@ def simulate_routing_for_model(
     Returns:
         MoERoutingProfiler with simulated routing data
     """
+    logger.debug("simulate_routing_for_model called with model_name=%s, num_samples=%s, seed=%s", model_name, num_samples, seed)
     configs = {
         "qwen3_30b": {"num_experts": 128, "num_layers": 48, "top_k": 8},
         "mixtral": {"num_experts": 8, "num_layers": 32, "top_k": 2},
@@ -972,6 +998,7 @@ def simulate_routing_for_model(
 
 def main() -> int:
     """CLI entry point for MoE routing analysis."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

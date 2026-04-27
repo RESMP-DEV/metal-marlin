@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -10,7 +11,11 @@ from metal_marlin.hf_loader import ModelConfig, load_layer_weights
 from metal_marlin.mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_model_config_parses_nested_text_config() -> None:
+    logger.info("running test_model_config_parses_nested_text_config")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_5_moe",
@@ -51,6 +56,7 @@ def test_model_config_parses_nested_text_config() -> None:
 
 def test_model_config_qwen36_official_config() -> None:
     """Test parsing official Qwen3.6-35B-A3B style config with nested text_config."""
+    logger.info("running test_model_config_qwen36_official_config")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_6_moe",
@@ -121,6 +127,7 @@ def test_model_config_qwen36_official_config() -> None:
 
 def test_model_config_qwen36_dense_fallback() -> None:
     """Test Qwen3.6 dense model config without MoE fields."""
+    logger.info("running test_model_config_qwen36_dense_fallback")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_6",
@@ -149,6 +156,7 @@ def test_model_config_qwen36_dense_fallback() -> None:
 
 def test_model_config_preserves_outer_fields_when_no_text_config() -> None:
     """Test that outer fields are used when text_config is absent."""
+    logger.info("running test_model_config_preserves_outer_fields_when_no_text_config")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "llama",
@@ -171,6 +179,7 @@ def test_model_config_preserves_outer_fields_when_no_text_config() -> None:
 
 def test_model_config_shared_expert_alternate_names() -> None:
     """Test shared_expert_intermediate_size with alternate field name."""
+    logger.info("running test_model_config_shared_expert_alternate_names")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_5_moe",
@@ -199,6 +208,7 @@ def test_model_config_shared_expert_alternate_names() -> None:
 def test_model_config_layer_types_normalization() -> None:
     """Test that layer_types is properly normalized to list of strings."""
     # Test with mixed types (int and str)
+    logger.info("running test_model_config_layer_types_normalization")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_6_moe",
@@ -221,6 +231,7 @@ def test_model_config_layer_types_normalization() -> None:
 
 def test_model_config_full_attention_interval_int() -> None:
     """Test that full_attention_interval as int is normalized to list."""
+    logger.info("running test_model_config_full_attention_interval_int")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_6_moe",
@@ -243,6 +254,7 @@ def test_model_config_full_attention_interval_int() -> None:
 
 def test_model_config_moe_intermediate_size_alternate_names() -> None:
     """Test moe_intermediate_size with alternate field name expert_intermediate_size."""
+    logger.info("running test_model_config_moe_intermediate_size_alternate_names")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_5_moe",
@@ -269,6 +281,7 @@ def test_model_config_moe_intermediate_size_alternate_names() -> None:
 
 
 def test_load_layer_weights_supports_language_model_prefix(tmp_path) -> None:
+    logger.info("running test_load_layer_weights_supports_language_model_prefix")
     tensor_name = "model.language_model.layers.0.mlp.experts.gate_up_proj"
     shard_path = tmp_path / "model-00001-of-00001.safetensors"
     save_file(
@@ -287,6 +300,7 @@ def test_load_layer_weights_supports_language_model_prefix(tmp_path) -> None:
 
 
 def test_mrgptq_quantizes_stacked_expert_tensor(tmp_path) -> None:
+    logger.info("running test_mrgptq_quantizes_stacked_expert_tensor")
     model_dir = tmp_path / "model"
     out_dir = tmp_path / "out"
     model_dir.mkdir(parents=True, exist_ok=True)

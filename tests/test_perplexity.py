@@ -14,6 +14,7 @@ Requires:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import sys
@@ -36,6 +37,9 @@ from metal_marlin.eval import load_wikitext2
 if TYPE_CHECKING:
     import torch as torch_types
 
+
+logger = logging.getLogger(__name__)
+
 torch: Any = _torch
 
 # ---------------------------------------------------------------------------
@@ -45,12 +49,14 @@ torch: Any = _torch
 
 def _require_torch() -> None:
     """Skip test if torch unavailable."""
+    logger.debug("_require_torch called")
     if not HAS_TORCH or torch is None:
         pytest.skip("torch not available")
 
 
 def _require_transformers() -> Any:
     """Import transformers, skip if unavailable."""
+    logger.debug("_require_transformers called")
     try:
         import transformers
 
@@ -61,6 +67,7 @@ def _require_transformers() -> Any:
 
 def _load_wikitext2_samples(max_samples: int = 100) -> list[str]:
     """Load wikitext-2 test set, skipping empty lines."""
+    logger.info("_load_wikitext2_samples called with max_samples=%s", max_samples)
     try:
         return load_wikitext2(max_samples)
     except Exception as e:
@@ -86,6 +93,7 @@ def compute_perplexity_torch(
     Returns:
         Perplexity (exp of mean cross-entropy loss).
     """
+    logger.debug("compute_perplexity_torch called with model=%s, tokenizer=%s, texts=%s", model, tokenizer, texts)
     _require_torch()
     assert torch is not None
 
@@ -155,6 +163,7 @@ def compute_perplexity_numpy(
     Returns:
         Perplexity (exp of mean cross-entropy)
     """
+    logger.debug("compute_perplexity_numpy called with logits_fn=%s, tokenizer=%s, texts=%s", logits_fn, tokenizer, texts)
     total_nll = 0.0
     total_tokens = 0
 
@@ -201,6 +210,7 @@ def replace_linear_with_marlin_torch(model: Any, group_size: int = 32) -> int:
     Returns:
         Number of layers replaced.
     """
+    logger.debug("replace_linear_with_marlin_torch called with model=%s, group_size=%s", model, group_size)
     _require_torch()
     assert torch is not None
 
@@ -210,6 +220,7 @@ def replace_linear_with_marlin_torch(model: Any, group_size: int = 32) -> int:
 
     def _replace_recursive(module: torch.nn.Module, path: str = "") -> int:
         """Recursively replace quantized linear layers. Returns count replaced."""
+        logger.debug("_replace_recursive called with module=%s, path=%s", module, path)
         nonlocal replaced
         count = 0
 
@@ -279,6 +290,7 @@ class TestPerplexity:
         then replaces all layers with MarlinLinear and re-measures. The
         degradation from quantization (FP16 -> FP4 E2M1) should be bounded.
         """
+        logger.info("running test_fp4_perplexity_degradation")
         _require_torch()
         _require_transformers()
         assert torch is not None
@@ -324,6 +336,7 @@ class TestPerplexity:
         in range [4, 30]. Values outside indicate dequantization or
         accumulation bugs.
         """
+        logger.info("running test_perplexity_absolute_bound")
         _require_torch()
         _require_transformers()
         assert torch is not None
@@ -355,6 +368,7 @@ class TestPerplexity:
         Group size 32 should be at least as good as group size 128
         (more scale parameters = finer granularity = less quantization error).
         """
+        logger.info("running test_group_size_sensitivity")
         _require_torch()
         _require_transformers()
         assert torch is not None

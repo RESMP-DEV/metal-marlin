@@ -1,6 +1,7 @@
 """Compatibility facade for the split kernel modules."""
 
 from __future__ import annotations
+import logging
 
 from .. import kernels_core as _core
 from ..kernels_core import *  # noqa: F401,F403
@@ -15,6 +16,9 @@ try:
 except ImportError:
     _build_moe_exports = None
 
+
+
+logger = logging.getLogger(__name__)
 
 _ATTENTION_EXPORT_DEPENDENCIES = (
     "torch",

@@ -26,6 +26,7 @@ class MetalProfiler:
         Args:
             enabled: whether to enable profiling.
         """
+        logger.debug("initializing %s with enabled=%s", type(self).__name__, enabled)
         self.enabled = enabled and HAS_PYOBJC_METAL
         self.events: list[dict[str, Any]] = []
         self._region_stack: list[str] = []
@@ -42,12 +43,14 @@ class MetalProfiler:
         Any command buffers profiled while this region is active will be
         tagged with this name.
         """
+        logger.debug("start_region called with name=%s", name)
         if not self.enabled:
             return
         self._region_stack.append(name)
 
     def end_region(self) -> None:
         """End the current profiling region."""
+        logger.debug("end_region called")
         if not self.enabled:
             return
         if self._region_stack:
@@ -62,6 +65,7 @@ class MetalProfiler:
             buffer: The MTLCommandBuffer to profile.
             name: Optional override for region name.
         """
+        logger.debug("profile_buffer called with buffer=%s, name=%s", buffer, name)
         if not self.enabled:
             return
 
@@ -70,6 +74,7 @@ class MetalProfiler:
 
         def handler(cmd_buf: Any) -> None:
             # This callback runs on a background thread when GPU work completes
+            logger.debug("handler called with cmd_buf=%s", cmd_buf)
             if cmd_buf.status() == 5:  # MTLCommandBufferStatusError
                 return
 
@@ -103,6 +108,7 @@ class MetalProfiler:
         Args:
             path: Output path for the JSON trace file.
         """
+        logger.info("export_trace called with path=%s", path)
         if not self.events:
             logger.warning("No profiling events to export")
             return

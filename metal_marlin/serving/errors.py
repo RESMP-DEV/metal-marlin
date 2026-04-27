@@ -1,4 +1,8 @@
 """Custom exceptions for the Metal Marlin serving layer."""
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 class ServingError(Exception):
     """Base exception for serving errors."""
@@ -12,6 +16,7 @@ class ModelNotLoadedError(ServingError):
     error_type = "model_not_loaded"
 
     def __init__(self, message: str = "Model not loaded"):
+        logger.debug("initializing %s with message=%s", type(self).__name__, message)
         super().__init__(message)
 
 

@@ -29,6 +29,7 @@ Precision Notes:
 
 from __future__ import annotations
 
+import logging
 import warnings
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,6 +37,9 @@ from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 class Precision(Enum):
     """Quantization precision levels."""
@@ -55,6 +59,7 @@ class Precision(Enum):
 
 
 def _is_m1_or_m2() -> bool:
+    logger.debug("_is_m1_or_m2 called")
     try:
         from .profiling.occupancy import AppleSiliconGPU, detect_gpu
     except Exception:
@@ -74,6 +79,7 @@ def _is_m1_or_m2() -> bool:
 
 
 def _is_m3_or_newer() -> bool:
+    logger.debug("_is_m3_or_newer called")
     try:
         from .profiling.occupancy import AppleSiliconGPU, detect_gpu
     except Exception:
@@ -175,10 +181,12 @@ class MixedPrecisionConfig:
     @classmethod
     def default_dense(cls) -> MixedPrecisionConfig:
         """Config for standard dense transformer (Llama, Mistral, etc.)."""
+        logger.debug("default_dense called")
         return cls()
 
     def select_activation_dtype(self) -> str:
         """Select activation dtype string based on config and hardware."""
+        logger.debug("select_activation_dtype called")
         if self.activation_precision not in (Precision.BF16, Precision.FP16):
             return self.activation_precision.value
 
@@ -194,6 +202,7 @@ class MixedPrecisionConfig:
 
     def select_gemm_kernel_variant(self) -> str:
         """Return GEMM kernel variant name based on activation precision."""
+        logger.debug("select_gemm_kernel_variant called")
         activation_dtype = self.select_activation_dtype()
         if activation_dtype == Precision.BF16.value and _is_m3_or_newer():
             return "bf16_fp32acc"
@@ -202,6 +211,7 @@ class MixedPrecisionConfig:
     @classmethod
     def default_moe(cls) -> MixedPrecisionConfig:
         """Config optimized for MoE models (Mixtral, GLM-4.7-Flash, etc.)."""
+        logger.debug("default_moe called")
         return cls(
             # Router is critical - determines which experts fire (BF16 for dynamic range)
             moe_router=LayerQuantConfig(Precision.BF16),
@@ -226,6 +236,7 @@ class MixedPrecisionConfig:
         Use NF3 (NormalFloat 3-bit) for cold experts as transformer weights
         are approximately Gaussian distributed.
         """
+        logger.debug("aggressive_moe called")
         return cls(
             # Router still critical
             moe_router=LayerQuantConfig(Precision.BF16),
@@ -245,6 +256,7 @@ class MixedPrecisionConfig:
         Maximum compression for deployment on memory-constrained devices.
         Use with caution - quality may degrade on complex tasks.
         """
+        logger.debug("extreme_moe called")
         return cls(
             # Router is sacred
             moe_router=LayerQuantConfig(Precision.BF16),
@@ -259,6 +271,7 @@ class MixedPrecisionConfig:
     @classmethod
     def default_moe_mtp(cls) -> MixedPrecisionConfig:
         """Config for MoE + MTP models like GLM-4.7-Flash."""
+        logger.debug("default_moe_mtp called")
         return cls(
             # Router precision is absolute priority (BF16 for large attention values)
             moe_router=LayerQuantConfig(Precision.BF16),
@@ -288,6 +301,7 @@ class MixedPrecisionConfig:
         - KV latent layers benefit significantly from Hadamard rotation
         - Tighter group sizes (64) recommended for latent projections
         """
+        logger.debug("default_mla called")
         return cls(
             # MLA latent projections - critical for attention quality
             mla_q_a=LayerQuantConfig(Precision.FP4_E2M1, 64),  # Most sensitive
@@ -310,6 +324,7 @@ class MixedPrecisionConfig:
         For applications where attention quality is critical.
         Uses BF16 for the query down-projection (most sensitive layer).
         """
+        logger.debug("quality_mla called")
         return cls(
             # Keep q_a_proj at BF16 - directly affects attention scores
             mla_q_a=LayerQuantConfig(Precision.BF16),
@@ -325,6 +340,7 @@ class MixedPrecisionConfig:
     @classmethod
     def quality_first(cls) -> MixedPrecisionConfig:
         """Prioritize quality over compression."""
+        logger.debug("quality_first called")
         return cls(
             default=LayerQuantConfig(Precision.FP4_E2M1, 64),
             attention_qkv=LayerQuantConfig(Precision.FP4_E2M1, 32),
@@ -338,6 +354,7 @@ class MixedPrecisionConfig:
     @classmethod
     def speed_first(cls) -> MixedPrecisionConfig:
         """Prioritize speed/compression over quality."""
+        logger.debug("speed_first called")
         return cls(
             default=LayerQuantConfig(Precision.FP4_E2M1, 256),
             attention_qkv=LayerQuantConfig(Precision.FP4_E2M1, 128),
@@ -395,6 +412,7 @@ class MoEPrecisionConfig:
     @classmethod
     def quality(cls) -> MoEPrecisionConfig:
         """Prioritize accuracy - tighter quantization with smaller groups."""
+        logger.debug("quality called")
         return cls(
             router_precision=Precision.BF16,
             router_group_size=0,
@@ -413,11 +431,13 @@ class MoEPrecisionConfig:
     @classmethod
     def balanced(cls) -> MoEPrecisionConfig:
         """Default trade-off between quality and size."""
+        logger.debug("balanced called")
         return cls()  # Use default values
 
     @classmethod
     def size(cls) -> MoEPrecisionConfig:
         """Minimize memory - aggressive quantization."""
+        logger.debug("size called")
         return cls(
             router_precision=Precision.BF16,  # Router stays precise
             router_group_size=0,
@@ -435,6 +455,7 @@ class MoEPrecisionConfig:
 
     def to_mixed_precision_config(self) -> MixedPrecisionConfig:
         """Convert to MixedPrecisionConfig for compatibility."""
+        logger.debug("to_mixed_precision_config called")
         return MixedPrecisionConfig(
             embeddings=LayerQuantConfig(self.embed_precision),
             lm_head=LayerQuantConfig(Precision.BF16),
@@ -494,11 +515,13 @@ class LayerPrecisionSelector:
                                  Falls back to DEFAULT_SENSITIVITY for unmatched layers.
             moe_config: MoE-specific precision config to use instead of defaults.
         """
+        logger.debug("initializing %s with sensitivity_profile=%s, moe_config=%s", type(self).__name__, sensitivity_profile, moe_config)
         self.sensitivity_profile = sensitivity_profile or {}
         self.moe_config = moe_config
 
     def _get_sensitivity(self, layer_name: str) -> LayerSensitivity:
         """Determine layer sensitivity from name patterns."""
+        logger.debug("_get_sensitivity called with layer_name=%s", layer_name)
         name_lower = layer_name.lower()
 
         # Check custom profile first
@@ -519,6 +542,7 @@ class LayerPrecisionSelector:
 
         Uses MoE config if available, otherwise falls back to sensitivity-based lookup.
         """
+        logger.debug("get_precision called with layer_name=%s", layer_name)
         name_lower = layer_name.lower()
 
         # Use MoE config for specific layer types if available
@@ -555,6 +579,7 @@ class LayerPrecisionSelector:
 
     def get_layer_config(self, layer_name: str) -> LayerQuantConfig:
         """Get LayerQuantConfig for compatibility with existing APIs."""
+        logger.debug("get_layer_config called with layer_name=%s", layer_name)
         precision, group_size = self.get_precision(layer_name)
         return LayerQuantConfig(precision=precision, group_size=group_size)
 
@@ -674,6 +699,7 @@ def classify_layer(name: str) -> str:
 
     Returns the category key (e.g., 'attention_qkv', 'moe_router') or 'default'.
     """
+    logger.debug("classify_layer called with name=%s", name)
     name_lower = name.lower()
 
     for category, patterns in LAYER_PATTERNS.items():
@@ -689,6 +715,7 @@ def get_layer_config(
     config: MixedPrecisionConfig,
 ) -> LayerQuantConfig:
     """Get quantization config for a specific layer."""
+    logger.debug("get_layer_config called with name=%s, config=%s", name, config)
     category = classify_layer(name)
     return getattr(config, category, config.default)
 
@@ -704,6 +731,7 @@ def should_quantize(
     Returns:
         (should_quantize, config) - False if precision is BF16/FP16 or tensor not suitable
     """
+    logger.info("should_quantize called with name=%s, tensor=%s, config=%s", name, tensor, config)
     layer_config = get_layer_config(name, config)
 
     # FP16/BF16 means no quantization (just precision format)
@@ -753,6 +781,7 @@ def quantize_tensor(
 
     Returns dict with packed data and metadata (scales, zeros, etc.)
     """
+    logger.info("quantize_tensor called with tensor=%s, config=%s", tensor, config)
     from .quantize_fp4 import quantize_fp4
 
     if config.precision == Precision.FP16:
@@ -868,6 +897,7 @@ def quantize_int4(
     Returns:
         (packed_uint32, scales, zeros or None)
     """
+    logger.info("quantize_int4 called with tensor=%s, group_size=%s, symmetric=%s", tensor, group_size, symmetric)
     out_feat, in_feat = tensor.shape
     num_groups = in_feat // group_size
 
@@ -918,6 +948,7 @@ def quantize_fp8(
     E4M3 format: sign(1) | exp(4, bias=7) | mantissa(3)
     Range: [-448, 448], precision: 3 mantissa bits
     """
+    logger.info("quantize_fp8 called with tensor=%s, group_size=%s", tensor, group_size)
     out_feat, in_feat = tensor.shape
     num_groups = in_feat // group_size
 
@@ -955,6 +986,7 @@ def quantize_int8(
 
     Per-channel quantization uses one scale per output row.
     """
+    logger.info("quantize_int8 called with tensor=%s, symmetric=%s", tensor, symmetric)
     out_feat, in_feat = tensor.shape
     t = tensor.astype(np.float32)
 
@@ -1002,6 +1034,7 @@ def analyze_model_layers(
 
     Returns statistics on how many parameters go to each precision level.
     """
+    logger.debug("analyze_model_layers called with model_path=%s, config=%s", model_path, config)
     from .hf_loader import iter_safetensors_weights
 
     if config is None:
@@ -1049,6 +1082,7 @@ def analyze_model_layers(
 
 def print_analysis(stats: dict[str, Any]) -> None:
     """Pretty-print model analysis."""
+    logger.debug("print_analysis called with stats=%s", stats)
     total = stats["total_params"]
     print(f"\nTotal parameters: {total / 1e9:.2f}B")
 
@@ -1090,6 +1124,7 @@ def print_analysis(stats: dict[str, Any]) -> None:
 
 
 def main():
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Mixed-precision analysis and conversion")

@@ -3,6 +3,7 @@
 Tests the MMFP4 MLA (Multi-head Latent Attention) layer with fused decode kernel,
 using GLM-style dimensions.
 """
+import logging
 
 import pytest
 import torch
@@ -13,6 +14,9 @@ from metal_marlin.kv_cache import MLAKVCache
 from metal_marlin.layers.mmfp4_mla import MMFP4MLA
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not HAS_MPS, reason="MPS required")
 class TestMMFP4MLAFused:
     """Test MMFP4MLA layer with fused decode."""
@@ -21,6 +25,7 @@ class TestMMFP4MLAFused:
     def glm_mla_layer(self):
         """Create MMFP4MLA layer with GLM dimensions."""
         # GLM-4 style dimensions (scaled down for tests)
+        logger.debug("glm_mla_layer called")
         layer = MMFP4MLA(
             hidden_size=2048,
             num_heads=16,
@@ -43,6 +48,7 @@ class TestMMFP4MLAFused:
     @pytest.fixture
     def mla_kv_cache(self, glm_mla_layer):
         """Create MLAKVCache for testing."""
+        logger.debug("mla_kv_cache called with glm_mla_layer=%s", glm_mla_layer)
         return MLAKVCache(
             num_layers=1,
             batch_size=1,
@@ -56,6 +62,7 @@ class TestMMFP4MLAFused:
     def test_fused_decode_no_nan(self, glm_mla_layer, mla_kv_cache):
         """Verify fused decode doesn't produce NaN/Inf."""
         # Create input: batch=1, seq=1
+        logger.info("running test_fused_decode_no_nan")
         x = torch.randn(1, 1, 2048, dtype=torch.float16, device="mps")
         position_ids = torch.tensor([[0]], dtype=torch.long, device="mps")
 
@@ -69,6 +76,7 @@ class TestMMFP4MLAFused:
     def test_fused_decode_output_shape(self, glm_mla_layer, mla_kv_cache):
         """Verify output shape is correct for decode."""
         # Create input: batch=1, seq=1
+        logger.info("running test_fused_decode_output_shape")
         x = torch.randn(1, 1, 2048, dtype=torch.float16, device="mps")
         position_ids = torch.tensor([[0]], dtype=torch.long, device="mps")
 
@@ -81,6 +89,7 @@ class TestMMFP4MLAFused:
     def test_fused_decode_sequence_accumulation(self, glm_mla_layer, mla_kv_cache):
         """Verify fused decode handles sequence accumulation correctly."""
         # Simulate multiple decode steps
+        logger.info("running test_fused_decode_sequence_accumulation")
         for step in range(5):
             x = torch.randn(1, 1, 2048, dtype=torch.float16, device="mps")
             position_ids = torch.tensor([[step]], dtype=torch.long, device="mps")
@@ -93,6 +102,7 @@ class TestMMFP4MLAFused:
 
     def test_fused_decode_with_larger_position_ids(self, glm_mla_layer, mla_kv_cache):
         """Verify fused decode with non-zero position ids."""
+        logger.info("running test_fused_decode_with_larger_position_ids")
         x = torch.randn(1, 1, 2048, dtype=torch.float16, device="mps")
         position_ids = torch.tensor([[10]], dtype=torch.long, device="mps")
 
@@ -105,6 +115,7 @@ class TestMMFP4MLAFused:
 
     def test_fused_decode_dtype_preservation(self, glm_mla_layer, mla_kv_cache):
         """Verify output dtype matches input dtype."""
+        logger.info("running test_fused_decode_dtype_preservation")
         x = torch.randn(1, 1, 2048, dtype=torch.float16, device="mps")
         position_ids = torch.tensor([[0]], dtype=torch.long, device="mps")
 
@@ -115,6 +126,7 @@ class TestMMFP4MLAFused:
 
     def test_mla_layer_creation(self):
         """Test that MMFP4MLA layer can be created with GLM dimensions."""
+        logger.info("running test_mla_layer_creation")
         layer = MMFP4MLA(
             hidden_size=2048,
             num_heads=16,
@@ -138,6 +150,7 @@ class TestMMFP4MLAFused:
 
     def test_fused_decode_different_batch_sizes(self):
         """Test that batch=1 is required for fused decode path."""
+        logger.info("running test_fused_decode_different_batch_sizes")
         layer = MMFP4MLA(
             hidden_size=512,  # Smaller for faster test
             num_heads=4,

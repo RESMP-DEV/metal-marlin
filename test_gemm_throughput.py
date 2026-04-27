@@ -1,11 +1,16 @@
+import logging
 import time
 
 import torch
 from metal_marlin.core import _marlin_gemm
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_prefill():
     # Large prefill dimensions
+    logger.info("running test_prefill")
     M = 2048
     K = 8192
     N = 8192

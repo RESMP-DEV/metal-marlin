@@ -15,6 +15,7 @@ Validates:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,9 @@ else:
     pytest.skip("PyTorch required for differential attention tests", allow_module_level=True)
 
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Config parsing tests
 # ---------------------------------------------------------------------------
@@ -45,6 +49,7 @@ class TestConfigParsing:
 
     def test_parse_basic_config(self):
         """Parse a basic differential transformer config."""
+        logger.info("running test_parse_basic_config")
         config_dict = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -66,6 +71,7 @@ class TestConfigParsing:
 
     def test_parse_config_defaults(self):
         """Verify default values are applied."""
+        logger.info("running test_parse_config_defaults")
         config_dict = {
             "hidden_size": 2048,
             "num_attention_heads": 16,
@@ -82,6 +88,7 @@ class TestConfigParsing:
 
     def test_parse_config_with_all_options(self):
         """Parse config with all differential attention options."""
+        logger.info("running test_parse_config_with_all_options")
         config_dict = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -109,6 +116,7 @@ class TestConfigParsing:
     def test_config_validation_gqa(self):
         """Verify GQA validation (num_heads divisible by num_kv_heads)."""
         # Valid GQA
+        logger.info("running test_config_validation_gqa")
         config = DifferentialAttentionConfig(
             hidden_size=4096,
             num_attention_heads=32,
@@ -136,6 +144,7 @@ class TestDifferentialAttentionCore:
     @pytest.fixture
     def basic_config(self):
         """Basic test configuration."""
+        logger.debug("basic_config called")
         return {
             "batch_size": 2,
             "num_heads": 4,
@@ -155,6 +164,7 @@ class TestDifferentialAttentionCore:
         mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """Reference NumPy implementation of differential attention."""
+        logger.debug("reference_diff_attention called with q1=%s, k1=%s, v=%s", q1, k1, v)
         batch, num_heads, seq_q, head_dim = q1.shape
         _seq_k = k1.shape[2]  # Unused but documents expected shape
         scale = head_dim**-0.5
@@ -169,6 +179,7 @@ class TestDifferentialAttentionCore:
 
         # Stable softmax
         def softmax(x, axis=-1):
+            logger.debug("softmax called with x=%s, axis=%s", x, axis)
             x_max = np.max(x, axis=axis, keepdims=True)
             exp_x = np.exp(x - x_max)
             return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
@@ -185,6 +196,7 @@ class TestDifferentialAttentionCore:
 
     def test_basic_differential_attention(self, basic_config):
         """Test basic differential attention computation."""
+        logger.info("running test_basic_differential_attention")
         batch = basic_config["batch_size"]
         heads = basic_config["num_heads"]
         seq = basic_config["seq_len"]
@@ -232,6 +244,7 @@ class TestDifferentialAttentionCore:
 
     def test_lambda_zero(self, basic_config):
         """Lambda=0 should equal standard attention on path 1."""
+        logger.info("running test_lambda_zero")
         batch = basic_config["batch_size"]
         heads = basic_config["num_heads"]
         seq = basic_config["seq_len"]
@@ -249,6 +262,7 @@ class TestDifferentialAttentionCore:
         scores = (q1 @ k1.transpose(0, 1, 3, 2)) * scale
 
         def softmax(x, axis=-1):
+            logger.debug("softmax called with x=%s, axis=%s", x, axis)
             x_max = np.max(x, axis=axis, keepdims=True)
             exp_x = np.exp(x - x_max)
             return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
@@ -282,6 +296,7 @@ class TestDifferentialAttentionCore:
 
     def test_lambda_one_identical_paths(self, basic_config):
         """Lambda=1 with identical Q1/K1 and Q2/K2 should give near-zero output."""
+        logger.info("running test_lambda_one_identical_paths")
         batch = basic_config["batch_size"]
         heads = basic_config["num_heads"]
         seq = basic_config["seq_len"]
@@ -320,6 +335,7 @@ class TestDifferentialAttentionCore:
 
     def test_per_head_lambda(self, basic_config):
         """Test per-head lambda values."""
+        logger.info("running test_per_head_lambda")
         batch = basic_config["batch_size"]
         heads = basic_config["num_heads"]
         seq = basic_config["seq_len"]
@@ -360,6 +376,7 @@ class TestDifferentialAttentionCore:
 
     def test_gqa_differential_attention(self):
         """Test differential attention with GQA (fewer KV heads)."""
+        logger.info("running test_gqa_differential_attention")
         batch = 2
         num_q_heads = 8
         num_kv_heads = 2
@@ -418,6 +435,7 @@ class TestDifferentialMarlinAttention:
 
     def test_creation_from_config(self):
         """Create layer from config."""
+        logger.info("running test_creation_from_config")
         config = DifferentialAttentionConfig(
             hidden_size=512,
             num_attention_heads=8,
@@ -435,6 +453,7 @@ class TestDifferentialMarlinAttention:
 
     def test_forward_shape(self):
         """Test output shape from forward pass."""
+        logger.info("running test_forward_shape")
         batch = 2
         seq_len = 16
         hidden_size = 256
@@ -461,6 +480,7 @@ class TestDifferentialMarlinAttention:
 
     def test_with_causal_mask(self):
         """Test with causal attention mask."""
+        logger.info("running test_with_causal_mask")
         batch = 2
         seq_len = 8
         hidden_size = 256
@@ -489,6 +509,7 @@ class TestDifferentialMarlinAttention:
 
     def test_gqa_layer(self):
         """Test full layer with GQA."""
+        logger.info("running test_gqa_layer")
         batch = 2
         seq_len = 16
         hidden_size = 512
@@ -525,6 +546,7 @@ class TestCausalMask:
 
     def test_causal_mask_shape(self):
         """Test causal mask has correct shape."""
+        logger.info("running test_causal_mask_shape")
         seq_len = 8
         mask = create_causal_mask(seq_len, device=torch.device("cpu"))
 
@@ -537,6 +559,7 @@ class TestCausalMask:
 
     def test_causal_mask_values(self):
         """Test causal mask has correct values (upper triangle is -inf)."""
+        logger.info("running test_causal_mask_values")
         seq_len = 4
         mask = create_causal_mask(seq_len, device=torch.device("cpu"))
 
@@ -557,6 +580,7 @@ class TestCausalMask:
 
     def test_single_token_mask(self):
         """Single token should return None (no masking needed)."""
+        logger.info("running test_single_token_mask")
         mask = create_causal_mask(1)
         assert mask is None
 
@@ -571,6 +595,7 @@ class TestLambdaParameter:
 
     def test_learnable_lambda(self):
         """Test that learnable lambda is stored as log and exp'd."""
+        logger.info("running test_learnable_lambda")
         attn = DifferentialAttention(
             num_heads=4,
             head_dim=64,
@@ -590,6 +615,7 @@ class TestLambdaParameter:
 
     def test_fixed_lambda(self):
         """Test fixed lambda is stored directly."""
+        logger.info("running test_fixed_lambda")
         attn = DifferentialAttention(
             num_heads=4,
             head_dim=64,
@@ -608,6 +634,7 @@ class TestLambdaParameter:
 
     def test_per_head_lambda_shape(self):
         """Test per-head lambda has correct shape."""
+        logger.info("running test_per_head_lambda_shape")
         num_heads = 8
         attn = DifferentialAttention(
             num_heads=num_heads,
@@ -628,6 +655,7 @@ class TestLambdaParameter:
 
     def test_shared_lambda_shape(self):
         """Test shared lambda has correct shape."""
+        logger.info("running test_shared_lambda_shape")
         attn = DifferentialAttention(
             num_heads=8,
             head_dim=64,
@@ -656,6 +684,7 @@ class TestNumericalStability:
 
     def test_large_attention_scores(self):
         """Test stability with large attention scores."""
+        logger.info("running test_large_attention_scores")
         batch = 2
         heads = 4
         seq = 8
@@ -696,6 +725,7 @@ class TestNumericalStability:
 
     def test_small_inputs(self):
         """Test stability with very small inputs."""
+        logger.info("running test_small_inputs")
         batch = 2
         heads = 4
         seq = 8

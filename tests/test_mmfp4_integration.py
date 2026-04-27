@@ -14,6 +14,7 @@ Verify:
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,9 @@ _MODEL_MISSING = not MODEL_DIR.exists()
 
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = [
     pytest.mark.requires_mps,
     pytest.mark.slow,
@@ -50,11 +54,13 @@ pytestmark = [
 
 
 def _is_oom_error(exc: RuntimeError) -> bool:
+    logger.debug("_is_oom_error called with exc=%s", exc)
     message = str(exc).lower()
     return "out of memory" in message or "insufficient memory" in message
 
 
 def _build_long_input_ids(tokenizer: Any, seq_len: int, device: str) -> Any:
+    logger.info("_build_long_input_ids starting")
     seed_text = "Long context handling for MMFP4 integration tests."
     token_ids = tokenizer.encode(seed_text, add_special_tokens=False)
     if not token_ids:
@@ -72,6 +78,7 @@ def _compute_perplexity(
     device: str,
     max_length: int = 512,
 ) -> float:
+    logger.debug("_compute_perplexity called with model=%s, tokenizer=%s, texts=%s", model, tokenizer, texts)
     total_nll = 0.0
     total_tokens = 0
 
@@ -116,17 +123,20 @@ def _compute_perplexity(
 
 @pytest.fixture(scope="module")
 def mmfp4_pipeline() -> MMFP4Pipeline:
+    logger.debug("mmfp4_pipeline called")
     pytest.importorskip("transformers")
     return MMFP4Pipeline.from_pretrained(str(MODEL_DIR), device="mps")
 
 
 @pytest.fixture(scope="module")
 def model(mmfp4_pipeline: MMFP4Pipeline) -> Any:
+    logger.debug("model called with mmfp4_pipeline=%s", mmfp4_pipeline)
     return mmfp4_pipeline.model
 
 
 @pytest.fixture(scope="module")
 def tokenizer(mmfp4_pipeline: MMFP4Pipeline) -> Any:
+    logger.debug("tokenizer called with mmfp4_pipeline=%s", mmfp4_pipeline)
     tokenizer = mmfp4_pipeline.tokenizer
     if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token", None):
         tokenizer.pad_token = tokenizer.eos_token
@@ -135,12 +145,14 @@ def tokenizer(mmfp4_pipeline: MMFP4Pipeline) -> Any:
 
 @pytest.fixture(scope="module")
 def model_device(model: Any) -> str:
+    logger.debug("model_device called with model=%s", model)
     return str(next(model.parameters()).device)
 
 
 class TestMMFP4Integration:
     def test_01_full_model_loading(self, mmfp4_pipeline: MMFP4Pipeline) -> None:
         """Test 1: Full model loading from models/GLM-4.7-Flash-Marlin-MMFP4."""
+        logger.info("running test_01_full_model_loading")
         assert mmfp4_pipeline.model is not None
         assert mmfp4_pipeline.tokenizer is not None
         assert hasattr(mmfp4_pipeline.model, "generate")
@@ -160,6 +172,7 @@ class TestMMFP4Integration:
         model_device: str,
     ) -> None:
         """Test 2: Single forward pass correctness."""
+        logger.info("running test_02_single_forward_pass_correctness")
         encoded = tokenizer("The capital of France is", return_tensors="pt")
         input_ids = encoded["input_ids"].to(model_device)
         attention_mask = encoded.get("attention_mask")
@@ -196,6 +209,7 @@ class TestMMFP4Integration:
         model_device: str,
     ) -> None:
         """Test 3: Generation quality (perplexity benchmark)."""
+        logger.info("test_03_generation_quality_perplexity_benchmark starting with model=%s, tokenizer=%s, model_device=%s", model, tokenizer, model_device)
         perplexity = _compute_perplexity(
             model,
             tokenizer,
@@ -219,6 +233,7 @@ class TestMMFP4Integration:
         seq_len: int,
     ) -> None:
         """Test 4: Long context handling (4K, 8K tokens)."""
+        logger.info("running test_04_long_context_handling")
         input_ids = _build_long_input_ids(tokenizer, seq_len, model_device)
         attention_mask = torch.ones_like(input_ids)
 
@@ -247,6 +262,7 @@ class TestMMFP4Integration:
         model_device: str,
     ) -> None:
         """Test 5: Batch inference."""
+        logger.info("running test_05_batch_inference")
         prompts = [
             "Explain what a cache is.",
             "What is the capital of Japan?",

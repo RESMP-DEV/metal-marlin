@@ -18,6 +18,7 @@ Bandwidth measurement approaches:
 from __future__ import annotations
 
 import statistics
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,8 +29,12 @@ from .occupancy import AppleSiliconGPU, detect_gpu
 from .trace import TraceEvent
 
 
+
+logger = logging.getLogger(__name__)
+
 def _gpu_sync() -> None:
     """Synchronize GPU if torch MPS is available."""
+    logger.debug("_gpu_sync called")
     if HAS_TORCH and torch is not None and torch.backends.mps.is_available():
         torch.mps.synchronize()
 
@@ -73,6 +78,7 @@ class BandwidthMeasurement:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
+        logger.debug("to_dict called")
         return {
             "name": self.name,
             "bytes_read": self.bytes_read,
@@ -95,6 +101,7 @@ class BandwidthMeasurement:
         tid: int = 0,
     ) -> TraceEvent:
         """Convert to a Chrome trace counter event."""
+        logger.debug("to_trace_event called")
         return TraceEvent(
             name="memory_bandwidth",
             cat="memory",
@@ -142,6 +149,7 @@ class MemoryBandwidthProfiler:
         *,
         peak_bandwidth_gbs: float | None = None,
     ):
+        logger.debug("initializing %s with gpu=%s", type(self).__name__, gpu)
         self.gpu = gpu or detect_gpu()
         self.peak_bandwidth_gbs = peak_bandwidth_gbs or self.gpu.peak_bw_gbs
         self._measurements: list[BandwidthMeasurement] = []
@@ -172,6 +180,7 @@ class MemoryBandwidthProfiler:
             BandwidthMeasurement with statistics.
         """
         # Warmup
+        logger.debug("measure called with name=%s, fn=%s, bytes_read=%s", name, fn, bytes_read)
         for _ in range(warmup):
             fn()
             _gpu_sync()
@@ -224,6 +233,7 @@ class MemoryBandwidthProfiler:
         Returns:
             BandwidthMeasurement.
         """
+        logger.debug("measure_transfer called with size_bytes=%s, direction=%s", size_bytes, direction)
         if not HAS_TORCH or torch is None or not torch.backends.mps.is_available():
             return BandwidthMeasurement(
                 name=f"transfer_{direction}_{size_bytes}",
@@ -239,12 +249,15 @@ class MemoryBandwidthProfiler:
         torch.mps.synchronize()
 
         def read_kernel() -> Any:
+            logger.debug("read_kernel called")
             return data.sum()
 
         def write_kernel() -> Any:
+            logger.info("write_kernel called")
             return torch.zeros_like(data)
 
         def both_kernel() -> Any:
+            logger.debug("both_kernel called")
             return data + 1.0
 
         kernel = {"read": read_kernel, "write": write_kernel, "both": both_kernel}[direction]
@@ -263,14 +276,17 @@ class MemoryBandwidthProfiler:
     @property
     def measurements(self) -> list[BandwidthMeasurement]:
         """All collected measurements."""
+        logger.debug("measurements called")
         return list(self._measurements)
 
     def clear(self) -> None:
         """Clear collected measurements."""
+        logger.debug("clear called")
         self._measurements.clear()
 
     def print_summary(self) -> None:
         """Print formatted summary table."""
+        logger.debug("print_summary called")
         if not self._measurements:
             print("No measurements collected")
             return
@@ -321,6 +337,7 @@ def measure_bandwidth(
         )
         print(f"Achieved: {bw.total_bandwidth_gbs:.1f} GB/s")
     """
+    logger.debug("measure_bandwidth called with fn=%s, bytes_read=%s, bytes_written=%s", fn, bytes_read, bytes_written)
     profiler = MemoryBandwidthProfiler()
     return profiler.measure(
         name="kernel",
@@ -366,6 +383,7 @@ def estimate_gemm_bytes(
         )
     """
     # Bytes read
+    logger.debug("estimate_gemm_bytes called with M=%s, N=%s, K=%s", M, N, K)
     a_bytes = M * K * a_dtype_bytes
     b_bytes = int(K * N * b_dtype_bytes)
     num_groups = (K + group_size - 1) // group_size
@@ -400,6 +418,7 @@ def benchmark_peak_bandwidth(
         for name, m in results.items():
             print(f"{name}: {m.total_bandwidth_gbs:.1f} GB/s")
     """
+    logger.info("benchmark_peak_bandwidth starting with sizes_mb=%s, iterations=%s", sizes_mb, iterations)
     if sizes_mb is None:
         sizes_mb = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
 
@@ -440,6 +459,7 @@ def analyze_bandwidth_bottleneck(
         Dictionary with analysis results.
     """
     # Ridge point: where compute and memory intersect
+    logger.debug("analyze_bandwidth_bottleneck called with achieved_gbs=%s, peak_gbs=%s, arithmetic_intensity=%s", achieved_gbs, peak_gbs, arithmetic_intensity)
     ridge_point = (peak_tflops * 1000) / peak_gbs  # GFLOP/GB = FLOP/byte
 
     if arithmetic_intensity < ridge_point:

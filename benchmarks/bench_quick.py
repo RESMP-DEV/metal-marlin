@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Quick benchmark for GLM-4.7-Flash-Marlin-MMFP4 decode speed."""
+import logging
 import time
 import warnings
 
 import torch
 from metal_marlin.trellis.model import TrellisForCausalLM
 from transformers import AutoTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')
 

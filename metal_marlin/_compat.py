@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 from types import ModuleType
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -31,21 +32,32 @@ if TYPE_CHECKING:
         shape: tuple[int, ...]
         ndim: int
         device: Any
+        logger.debug("contiguous called")
         def contiguous(self) -> Tensor: ...
+        logger.debug("detach called")
         def detach(self) -> Tensor: ...
+        logger.debug("cpu called")
         def cpu(self) -> Tensor: ...
+        logger.debug("numpy called")
         def numpy(self) -> Any: ...
+        logger.debug("to called with dtype=%s", dtype)
         def to(self, dtype: Any) -> Tensor: ...
+        logger.debug("permute called")
         def permute(self, *dims: int) -> Tensor: ...
+        logger.debug("squeeze called with dim=%s", dim)
         def squeeze(self, dim: int | None = None) -> Tensor: ...
+        logger.debug("unsqueeze called with dim=%s", dim)
         def unsqueeze(self, dim: int) -> Tensor: ...
+        logger.debug("numel called")
         def numel(self) -> int: ...
+        logger.debug("element_size called")
         def element_size(self) -> int: ...
 
 
 # Feature flags - declared with type annotations to allow reassignment
 def _init_flags() -> tuple[bool, bool, bool, bool, bool, bool]:
     """Initialize feature flags."""
+    logger.debug("_init_flags called")
     return False, False, False, False, False, False
 
 
@@ -136,6 +148,7 @@ def to_numpy(arr: Any) -> NDArray[Any]:
         numpy.ndarray
     """
     # PyTorch tensors
+    logger.debug("to_numpy called with arr=%s", arr)
     if HAS_TORCH and torch is not None:
         if isinstance(arr, torch.Tensor):
             return arr.detach().cpu().numpy()
@@ -158,6 +171,7 @@ def from_numpy(arr: ArrayLike, backend: str = "numpy", dtype: Any = None) -> Any
     Raises:
         ValueError: If backend is unavailable
     """
+    logger.debug("from_numpy called with arr=%s, backend=%s, dtype=%s", arr, backend, dtype)
     np_arr = np.asarray(arr)
 
     if backend == "numpy":
@@ -183,6 +197,7 @@ def get_array_backend(arr: Any) -> str:
     Returns:
         'torch' or 'numpy'
     """
+    logger.debug("get_array_backend called with arr=%s", arr)
     if HAS_TORCH and torch is not None and isinstance(arr, torch.Tensor):
         return "torch"
     return "numpy"
@@ -197,6 +212,7 @@ def ensure_contiguous(arr: Any) -> Any:
     Returns:
         Contiguous array (may be a copy)
     """
+    logger.debug("ensure_contiguous called with arr=%s", arr)
     backend = get_array_backend(arr)
 
     if backend == "torch" and torch is not None:
@@ -215,6 +231,7 @@ def get_default_backend() -> str:
     Returns:
         Backend name: 'torch' or 'numpy'
     """
+    logger.debug("get_default_backend called")
     if HAS_TORCH:
         return "torch"
     return "numpy"
@@ -229,6 +246,7 @@ def require_torch(feature: str = "this operation") -> None:
     Raises:
         RuntimeError: If PyTorch is not installed.
     """
+    logger.debug("require_torch called with feature=%s", feature)
     if not HAS_TORCH:
         raise RuntimeError(f"PyTorch is required for {feature}. Install with: pip install torch")
 
@@ -244,6 +262,7 @@ def require_backend(backend: str, feature: str = "this operation") -> None:
         RuntimeError: If the backend is not available.
         ValueError: If backend name is invalid.
     """
+    logger.debug("require_backend called with backend=%s, feature=%s", backend, feature)
     if backend == "torch":
         require_torch(feature)
     elif backend == "numpy":
@@ -304,6 +323,7 @@ def get_e2m1_torch_table() -> Any:
         >>> table = get_e2m1_torch_table()
         >>> values = table[torch.tensor([0, 1, 15])]  # [0.0, 0.5, -6.0]
     """
+    logger.debug("get_e2m1_torch_table called")
     global _E2M1_VALUES_TORCH
     if _E2M1_VALUES_TORCH is None:
         if not HAS_TORCH or torch is None:
@@ -319,6 +339,9 @@ E2M1_VALUES_TORCH = get_e2m1_torch_table
 if TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 def dequantize_e2m1(indices: torch.Tensor) -> torch.Tensor:
     """Dequantize 4-bit indices to E2M1 values (unscaled) using PyTorch.
@@ -337,6 +360,7 @@ def dequantize_e2m1(indices: torch.Tensor) -> torch.Tensor:
         >>> values = dequantize_e2m1(indices)
         >>> print(values)  # [0.0, 0.5, -0.0, -0.5]
     """
+    logger.info("dequantize_e2m1 called with indices=%s", indices)
     if not HAS_TORCH or torch is None:
         raise RuntimeError("PyTorch is required for dequantize_e2m1")
 

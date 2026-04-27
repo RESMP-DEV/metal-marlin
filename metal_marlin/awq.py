@@ -29,12 +29,16 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 
 from ._compat import from_numpy, to_numpy
+
+
+logger = logging.getLogger(__name__)
 
 # Constants for AWQ
 AWQ_SALIENT_RATIO = 0.01  # Protect top 1% of salient weights
@@ -83,6 +87,7 @@ def compute_activation_stats(
     Returns:
         Channel-wise importance scores [in_features]
     """
+    logger.debug("compute_activation_stats called with activations=%s, method=%s", activations, method)
     if method == "mean":
         importance = np.mean(np.abs(activations), axis=(0, 1))
     elif method == "max":
@@ -115,6 +120,7 @@ def find_salient_weights(
             salient_mask: Boolean mask [in_features, out_features]
             per_channel_importance: Importance scores per channel [in_features]
     """
+    logger.debug("find_salient_weights called with weights=%s, activation_stats=%s, salient_ratio=%s", weights, activation_stats, salient_ratio)
     in_features, out_features = weights.shape
 
     # Compute per-channel importance
@@ -173,6 +179,7 @@ def compute_salient_scaling(
     Returns:
         Per-channel scaling factors [out_features]
     """
+    logger.debug("compute_salient_scaling called with weights=%s, salient_mask=%s, scales=%s", weights, salient_mask, scales)
     in_features, out_features = weights.shape
     num_groups = in_features // group_size
 
@@ -223,6 +230,7 @@ def pack_awq_weights(
             packed: Packed uint32 weights [in_features // 8, out_features]
             meta: Metadata dictionary
     """
+    logger.info("pack_awq_weights called with weights=%s, scales=%s, zeros=%s, group_size=%s", weights, scales, zeros, group_size)
     in_features, out_features = weights.shape
     assert in_features % FP4_PER_U32 == 0, f"in_features must be divisible by {FP4_PER_U32}"
     assert in_features % group_size == 0, (
@@ -272,6 +280,7 @@ def awq_quantize(
     Returns:
         AWQResult with quantized weights and metadata
     """
+    logger.info("awq_quantize called with weights=%s, activations=%s, group_size=%s, salient_ratio=%s", weights, activations, group_size, salient_ratio)
     in_features, out_features = weights.shape
     weights_fp32 = to_numpy(weights).astype(np.float32)
 
@@ -374,6 +383,7 @@ def awq_dequantize(
     Returns:
         Dequantized float weights
     """
+    logger.info("awq_dequantize called with packed=%s, scales=%s, zeros=%s, q_scale=%s", packed, scales, zeros, q_scale)
     if weights_dtype is None:
         weights_dtype = np.dtype(np.float16)
 
@@ -436,6 +446,7 @@ def awq_quantize_model(
     Returns:
         Stats dictionary
     """
+    logger.info("awq_quantize_model called with model_path=%s, output_path=%s, activations_path=%s, group_size=%s", model_path, output_path, activations_path, group_size)
     from pathlib import Path as PathlibPath
 
     from safetensors import safe_open

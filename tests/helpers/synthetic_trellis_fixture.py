@@ -14,6 +14,7 @@ runtime dispatch paths, not model quality.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,9 @@ from typing import Any
 import torch
 from safetensors.torch import save_file as save_safetensors
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class SyntheticTrellisFixtureMetadata:
@@ -38,10 +42,12 @@ class SyntheticTrellisFixtureMetadata:
 
 def _dot_to_safetensors_key(tensor_name: str) -> str:
     """Convert dotted tensor names to metal_marlin trellis key format."""
+    logger.debug("_dot_to_safetensors_key called with tensor_name=%s", tensor_name)
     return tensor_name.replace(".", "__")
 
 
 def _packed_tile_bytes(bits: int) -> int:
+    logger.info("_packed_tile_bytes called with bits=%s", bits)
     return (256 * bits + 7) // 8
 
 
@@ -52,6 +58,7 @@ def _validate_fixture_shape(
     num_experts: int,
     bits: int,
 ) -> None:
+    logger.debug("_validate_fixture_shape called")
     if hidden_size <= 0:
         raise ValueError("hidden_size must be positive")
     if hidden_size > 64:
@@ -88,6 +95,7 @@ def _iter_layer_weight_specs(
     num_experts: int,
 ) -> list[tuple[str, int, int]]:
     """List (tensor_name, out_features, in_features) for one transformer layer."""
+    logger.debug("_iter_layer_weight_specs called")
     prefix = f"model.layers.{layer_idx}"
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
 
@@ -153,6 +161,7 @@ def _make_quantized_weight_components(
     rng: torch.Generator,
 ) -> dict[str, torch.Tensor]:
     """Create deterministic synthetic trellis components for one quantized weight."""
+    logger.info("_make_quantized_weight_components called")
     tiles_out = (out_features + 15) // 16
     tiles_in = (in_features + 15) // 16
     packed_len = tiles_out * tiles_in * _packed_tile_bytes(bits)
@@ -195,6 +204,7 @@ def build_synthetic_trellis_fixture(
     - It intentionally keeps dimensions tiny for CI/runtime speed.
     - ``layer_count`` is accepted as an alias for ``num_hidden_layers``.
     """
+    logger.info("build_synthetic_trellis_fixture starting")
     if layer_count is not None:
         num_hidden_layers = layer_count
 
@@ -408,6 +418,7 @@ def create_synthetic_trellis_fixture(
     bits: int = 4,
 ) -> SyntheticTrellisFixtureMetadata:
     """Convenience wrapper for tests that need a one-call tiny fixture builder."""
+    logger.debug("create_synthetic_trellis_fixture called with tmp_path=%s", tmp_path)
     return build_synthetic_trellis_fixture(
         tmp_path=tmp_path,
         num_experts=num_experts,
@@ -422,6 +433,7 @@ def create_synthetic_trellis_fixture(
 
 def get_checked_in_synthetic_trellis_fixture_path() -> Path:
     """Return path to the checked-in tiny synthetic Trellis fixture."""
+    logger.debug("get_checked_in_synthetic_trellis_fixture_path called")
     return Path(__file__).resolve().parents[1] / "fixtures" / "synthetic_trellis_smoke"
 
 

@@ -6,6 +6,7 @@ in FP16 precision (values like [-1000, 1200] from q_a_proj output).
 The fix: variance computation uses FP32 accumulation via x.float().pow(2).mean()
 to prevent overflow when squared values exceed FP16 max (~65504).
 """
+import logging
 
 import pytest
 import torch
@@ -13,8 +14,12 @@ import torch
 from metal_marlin.transformer import RMSNorm
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def device():
+    logger.debug("device called")
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
@@ -32,6 +37,7 @@ class TestRMSNormOverflow:
         Expected behavior: Non-zero normalized output due to FP32 accumulation.
         Bug behavior (if unfixed): All zeros due to rsqrt(inf) = 0.
         """
+        logger.info("running test_rmsnorm_large_values_non_zero_output")
         hidden_size = 768
         eps = 1e-6
 
@@ -66,6 +72,7 @@ class TestRMSNormOverflow:
         1000**2 = 1,000,000 which far exceeds FP16 max (65504).
         With FP32 accumulation, this should still produce valid output.
         """
+        logger.info("running test_rmsnorm_value_1000_works")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)
@@ -92,6 +99,7 @@ class TestRMSNormOverflow:
 
         Manually compute what would happen with naive FP16 vs FP32 accumulation.
         """
+        logger.info("running test_rmsnorm_fp32_accumulation_verified")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)
@@ -118,6 +126,7 @@ class TestRMSNormOverflow:
 
     def test_rmsnorm_fp32_input_baseline(self, device):
         """Verify RMSNorm works correctly with FP32 input as baseline."""
+        logger.info("running test_rmsnorm_fp32_input_baseline")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)
@@ -134,6 +143,7 @@ class TestRMSNormOverflow:
 
     def test_rmsnorm_small_values_fp16(self, device):
         """Verify RMSNorm works correctly with small FP16 values (no overflow concern)."""
+        logger.info("running test_rmsnorm_small_values_fp16")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)
@@ -148,6 +158,7 @@ class TestRMSNormOverflow:
 
     def test_rmsnorm_mixed_magnitudes(self, device):
         """Test RMSNorm with mixed small and large values."""
+        logger.info("running test_rmsnorm_mixed_magnitudes")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)
@@ -175,6 +186,7 @@ class TestRMSNormOverflow:
         The weight is initialized as FP32 by default, so output will be FP32
         even with FP16 input due to weight * x promotion.
         """
+        logger.info("running test_rmsnorm_output_dtype")
         hidden_size = 768
         norm = RMSNorm(hidden_size=hidden_size, device=device)
 
@@ -195,6 +207,7 @@ class TestRMSNormOverflow:
         Values > 256 have x**2 > 65504 which overflows in FP16.
         Both should produce valid output with FP32 accumulation.
         """
+        logger.info("running test_rmsnorm_boundary_values")
         hidden_size = 768
         eps = 1e-6
         norm = RMSNorm(hidden_size, eps=eps, device=device)

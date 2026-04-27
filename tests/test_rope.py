@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
@@ -17,11 +18,15 @@ from metal_marlin.rope import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestYaRNConfig:
     """Tests for YaRNConfig dataclass."""
 
     def test_basic_config(self):
         """Test basic config creation."""
+        logger.info("running test_basic_config")
         config = YaRNConfig(
             original_max_position=4096,
             scale_factor=4.0,
@@ -34,11 +39,13 @@ class TestYaRNConfig:
 
     def test_invalid_scale_factor(self):
         """Test that scale_factor < 1 raises error."""
+        logger.info("running test_invalid_scale_factor")
         with pytest.raises(ValueError, match="scale_factor must be >= 1.0"):
             YaRNConfig(original_max_position=4096, scale_factor=0.5)
 
     def test_invalid_beta_range(self):
         """Test that beta_fast <= beta_slow raises error."""
+        logger.info("running test_invalid_beta_range")
         with pytest.raises(ValueError, match="beta_fast .* must be > beta_slow"):
             YaRNConfig(
                 original_max_position=4096,
@@ -49,6 +56,7 @@ class TestYaRNConfig:
 
     def test_from_hf_config_yarn(self):
         """Test parsing HF config with YaRN scaling."""
+        logger.info("running test_from_hf_config_yarn")
         hf_config = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -74,6 +82,7 @@ class TestYaRNConfig:
 
     def test_from_hf_config_no_scaling(self):
         """Test parsing HF config without rope_scaling."""
+        logger.info("running test_from_hf_config_no_scaling")
         hf_config = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -84,6 +93,7 @@ class TestYaRNConfig:
 
     def test_from_hf_config_linear_scaling(self):
         """Test that linear scaling returns None (not YaRN)."""
+        logger.info("running test_from_hf_config_linear_scaling")
         hf_config = {
             "rope_scaling": {
                 "type": "linear",
@@ -95,6 +105,7 @@ class TestYaRNConfig:
 
     def test_from_hf_config_legacy_fields(self):
         """Test parsing legacy top-level rope_scaling fields."""
+        logger.info("running test_from_hf_config_legacy_fields")
         hf_config = {
             "rope_scaling_type": "yarn",
             "rope_scaling_factor": 4.0,
@@ -113,12 +124,14 @@ class TestGetYarnMscale:
 
     def test_mscale_no_scaling(self):
         """Test mscale with scale_factor=1 returns 1."""
+        logger.info("running test_mscale_no_scaling")
         assert get_yarn_mscale(1.0) == 1.0
         assert get_yarn_mscale(0.5) == 1.0  # Below 1 also returns 1
 
     def test_mscale_basic(self):
         """Test basic mscale computation."""
         # mscale = 0.1 * log(4) + 1 ≈ 1.139
+        logger.info("running test_mscale_basic")
         mscale = get_yarn_mscale(4.0)
         expected = 0.1 * math.log(4.0) + 1.0
         assert abs(mscale - expected) < 1e-6
@@ -126,12 +139,14 @@ class TestGetYarnMscale:
     def test_mscale_with_all_dim(self):
         """Test mscale with mscale_all_dim."""
         # mscale = 0.1 * 0.707 * log(4) + 1 ≈ 1.098
+        logger.info("running test_mscale_with_all_dim")
         mscale = get_yarn_mscale(4.0, mscale_all_dim=0.707)
         expected = 0.1 * 0.707 * math.log(4.0) + 1.0
         assert abs(mscale - expected) < 1e-6
 
     def test_mscale_increases_with_scale(self):
         """Test that mscale increases with larger scale factors."""
+        logger.info("running test_mscale_increases_with_scale")
         mscale_2x = get_yarn_mscale(2.0)
         mscale_4x = get_yarn_mscale(4.0)
         mscale_8x = get_yarn_mscale(8.0)
@@ -143,12 +158,14 @@ class TestComputeYarnInvFreq:
 
     def test_output_shape(self):
         """Test output shape is [dim // 2]."""
+        logger.info("running test_output_shape")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         inv_freq = compute_yarn_inv_freq(128, 10000.0, config, device="cpu")
         assert inv_freq.shape == (64,)
 
     def test_inv_freq_range(self):
         """Test inv_freq values are in expected range."""
+        logger.info("running test_inv_freq_range")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         inv_freq = compute_yarn_inv_freq(128, 10000.0, config, device="cpu")
         # Inverse frequencies should be positive and <= 1
@@ -157,6 +174,7 @@ class TestComputeYarnInvFreq:
 
     def test_scale_factor_1_matches_standard(self):
         """Test that scale_factor=1 produces standard RoPE inv_freq."""
+        logger.info("running test_scale_factor_1_matches_standard")
         config = YaRNConfig(original_max_position=4096, scale_factor=1.0)
         inv_freq = compute_yarn_inv_freq(128, 10000.0, config, device="cpu")
 
@@ -171,6 +189,7 @@ class TestComputeYarnInvFreq:
 
     def test_scaled_inv_freq_modified(self):
         """Test that scaled inv_freq differs from standard."""
+        logger.info("running test_scaled_inv_freq_modified")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         scaled_inv_freq = compute_yarn_inv_freq(128, 10000.0, config, device="cpu")
 
@@ -186,6 +205,7 @@ class TestComputeYarnCosSinCache:
 
     def test_cache_shapes(self):
         """Test cache shapes match expected."""
+        logger.info("running test_cache_shapes")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         cos, sin = compute_yarn_cos_sin_cache(128, 1024, 10000.0, config, device="cpu")
         assert cos.shape == (1024, 64)
@@ -193,6 +213,7 @@ class TestComputeYarnCosSinCache:
 
     def test_cos_sin_bounded(self):
         """Test cos/sin values are properly bounded."""
+        logger.info("running test_cos_sin_bounded")
         config = YaRNConfig(original_max_position=4096, scale_factor=1.0)
         cos, sin = compute_yarn_cos_sin_cache(128, 1024, 10000.0, config, device="cpu")
         # Without mscale, values should be in [-1, 1]
@@ -201,6 +222,7 @@ class TestComputeYarnCosSinCache:
 
     def test_mscale_applied(self):
         """Test that mscale is applied to cache values."""
+        logger.info("running test_mscale_applied")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         cos, sin = compute_yarn_cos_sin_cache(128, 1024, 10000.0, config, device="cpu")
         mscale = get_yarn_mscale(4.0)
@@ -214,6 +236,7 @@ class TestYaRNRoPE:
 
     def test_basic_creation(self):
         """Test basic YaRNRoPE creation."""
+        logger.info("running test_basic_creation")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=8192, config=config, device="cpu")
         assert rope.dim == 128
@@ -221,6 +244,7 @@ class TestYaRNRoPE:
 
     def test_apply_shape(self):
         """Test apply preserves input shape."""
+        logger.info("running test_apply_shape")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=8192, config=config, device="cpu")
 
@@ -230,6 +254,7 @@ class TestYaRNRoPE:
 
     def test_apply_dtype_preserved(self):
         """Test apply preserves input dtype."""
+        logger.info("running test_apply_dtype_preserved")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=8192, config=config, device="cpu")
 
@@ -239,6 +264,7 @@ class TestYaRNRoPE:
 
     def test_apply_with_offset(self):
         """Test apply with position offset."""
+        logger.info("running test_apply_with_offset")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=8192, config=config, device="cpu")
 
@@ -250,6 +276,7 @@ class TestYaRNRoPE:
 
     def test_extend_cache(self):
         """Test cache extension."""
+        logger.info("running test_extend_cache")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=1024, config=config, device="cpu")
         assert rope.cos_cache.shape[0] == 1024
@@ -259,6 +286,7 @@ class TestYaRNRoPE:
 
     def test_no_config_uses_standard_rope(self):
         """Test that None config produces standard RoPE."""
+        logger.info("running test_no_config_uses_standard_rope")
         rope = YaRNRoPE(dim=128, max_seq_len=4096, config=None, device="cpu")
         assert rope.config.scale_factor == 1.0
 
@@ -268,6 +296,7 @@ class TestCreateRopeFromConfig:
 
     def test_with_yarn_config(self):
         """Test factory with YaRN config."""
+        logger.info("running test_with_yarn_config")
         hf_config = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -285,6 +314,7 @@ class TestCreateRopeFromConfig:
 
     def test_without_scaling_returns_none(self):
         """Test factory returns None without rope_scaling."""
+        logger.info("running test_without_scaling_returns_none")
         hf_config = {
             "hidden_size": 4096,
             "num_attention_heads": 32,
@@ -299,6 +329,7 @@ class TestRoPECorrectness:
 
     def test_rotation_properties(self):
         """Test that RoPE rotation preserves vector norms."""
+        logger.info("running test_rotation_properties")
         config = YaRNConfig(original_max_position=4096, scale_factor=1.0)
         rope = YaRNRoPE(dim=128, max_seq_len=4096, config=config, device="cpu")
 
@@ -312,6 +343,7 @@ class TestRoPECorrectness:
 
     def test_position_sensitivity(self):
         """Test that different positions get different rotations."""
+        logger.info("running test_position_sensitivity")
         config = YaRNConfig(original_max_position=4096, scale_factor=4.0)
         rope = YaRNRoPE(dim=128, max_seq_len=8192, config=config, device="cpu")
 

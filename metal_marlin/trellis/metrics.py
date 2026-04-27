@@ -15,6 +15,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -23,12 +24,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 
+
+logger = logging.getLogger(__name__)
+
 def metrics_enabled() -> bool:
     """Check if metrics collection is enabled.
 
     Returns:
         True if METAL_MARLIN_METRICS=1, False otherwise.
     """
+    logger.debug("metrics_enabled called")
     return os.environ.get("METAL_MARLIN_METRICS", "0") == "1"
 
 
@@ -42,6 +47,7 @@ class HistogramBucket:
 
 def _default_buckets() -> list[HistogramBucket]:
     """Create default latency buckets: 1ms to 10s."""
+    logger.debug("_default_buckets called")
     boundaries = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
     buckets = [HistogramBucket(le=b) for b in boundaries]
     buckets.append(HistogramBucket(le=float("inf")))
@@ -69,6 +75,7 @@ class Histogram:
         Args:
             value: The observed value (e.g., latency in seconds).
         """
+        logger.debug("observe called with value=%s", value)
         with self._lock:
             for bucket in self.buckets:
                 if value <= bucket.le:
@@ -82,6 +89,7 @@ class Histogram:
         Returns:
             Prometheus-compatible metric string.
         """
+        logger.debug("to_prometheus called")
         lines = [
             f"# HELP {self.name} {self.help_text}",
             f"# TYPE {self.name} histogram",
@@ -115,6 +123,7 @@ class Counter:
         Args:
             amount: Amount to increment (default 1).
         """
+        logger.debug("inc called with amount=%s", amount)
         with self._lock:
             self.value += amount
 
@@ -124,6 +133,7 @@ class Counter:
         Returns:
             Prometheus-compatible metric string.
         """
+        logger.debug("to_prometheus called")
         with self._lock:
             return f"# HELP {self.name} {self.help_text}\n# TYPE {self.name} counter\n{self.name} {self.value}"
 
@@ -146,6 +156,7 @@ class Gauge:
         Args:
             value: New value to set.
         """
+        logger.debug("set called with value=%s", value)
         with self._lock:
             self.value = value
 
@@ -155,6 +166,7 @@ class Gauge:
         Args:
             amount: Amount to increment (default 1.0).
         """
+        logger.debug("inc called with amount=%s", amount)
         with self._lock:
             self.value += amount
 
@@ -164,6 +176,7 @@ class Gauge:
         Args:
             amount: Amount to decrement (default 1.0).
         """
+        logger.debug("dec called with amount=%s", amount)
         with self._lock:
             self.value -= amount
 
@@ -173,6 +186,7 @@ class Gauge:
         Returns:
             Prometheus-compatible metric string.
         """
+        logger.debug("to_prometheus called")
         with self._lock:
             return f"# HELP {self.name} {self.help_text}\n# TYPE {self.name} gauge\n{self.name} {self.value}"
 
@@ -193,6 +207,7 @@ class MoEMetrics:
 
     def __init__(self) -> None:
         """Initialize metrics collectors."""
+        logger.debug("initializing %s", type(self).__name__)
         self.forward_latency = Histogram(
             name="moe_forward_seconds",
             help_text="MoE forward pass latency in seconds",
@@ -230,6 +245,7 @@ class MoEMetrics:
             >>> with moe_metrics.time_forward():
             ...     output = model.forward(x)
         """
+        logger.debug("time_forward called")
         if not metrics_enabled():
             yield
             return
@@ -249,21 +265,25 @@ class MoEMetrics:
         Args:
             count: Number of tokens processed.
         """
+        logger.debug("inc_tokens called with count=%s", count)
         if metrics_enabled():
             self.tokens_processed.inc(count)
 
     def inc_fast_path(self) -> None:
         """Increment fast path usage counter."""
+        logger.debug("inc_fast_path called")
         if metrics_enabled():
             self.fast_path_used.inc()
 
     def inc_fallback(self) -> None:
         """Increment fallback path usage counter."""
+        logger.debug("inc_fallback called")
         if metrics_enabled():
             self.fallback_used.inc()
 
     def inc_nan(self) -> None:
         """Increment NaN detection counter."""
+        logger.debug("inc_nan called")
         if metrics_enabled():
             self.nan_detected.inc()
 
@@ -273,11 +293,13 @@ class MoEMetrics:
         Args:
             bytes_used: Memory usage in bytes.
         """
+        logger.debug("set_memory called with bytes_used=%s", bytes_used)
         if metrics_enabled():
             self.memory_bytes.set(float(bytes_used))
 
     def update_memory_from_mps(self) -> None:
         """Update memory gauge from MPS allocator if available."""
+        logger.debug("update_memory_from_mps called")
         if not metrics_enabled():
             return
         try:
@@ -294,6 +316,7 @@ class MoEMetrics:
         Returns:
             Prometheus-compatible metrics string.
         """
+        logger.debug("to_prometheus called")
         if not metrics_enabled():
             return "# Metrics disabled. Set METAL_MARLIN_METRICS=1 to enable.\n"
 
@@ -313,6 +336,7 @@ class MoEMetrics:
 
         Useful for testing.
         """
+        logger.debug("reset called")
         self.forward_latency = Histogram(
             name="moe_forward_seconds",
             help_text="MoE forward pass latency in seconds",

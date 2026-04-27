@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import logging
 import sys
 import time
 from collections.abc import Callable
@@ -36,6 +37,9 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 # GLM-4.7-Flash MoE configuration
 NUM_EXPERTS = 64
@@ -71,6 +75,7 @@ def create_mock_expert_weights(
     Returns:
         (gate_weights, up_weights, down_weights) each with shape [num_experts, ...]
     """
+    logger.debug("create_mock_expert_weights called with num_experts=%s, hidden_dim=%s, intermediate_dim=%s", num_experts, hidden_dim, intermediate_dim)
     gate_weights = torch.randn(
         num_experts, hidden_dim, intermediate_dim, device=device, dtype=dtype
     ) * 0.02
@@ -95,6 +100,7 @@ def create_mock_routing(
     Returns:
         (expert_ids, expert_weights) for routing
     """
+    logger.debug("create_mock_routing called with batch_size=%s, num_experts=%s, top_k=%s", batch_size, num_experts, top_k)
     expert_ids = torch.randint(
         0, num_experts, (batch_size, top_k), device=device, dtype=torch.int64
     )
@@ -116,6 +122,7 @@ class SequentialMoEDispatch(nn.Module):
         up_weights: torch.Tensor,
         down_weights: torch.Tensor,
     ) -> None:
+        logger.debug("initializing %s with gate_weights=%s, up_weights=%s, down_weights=%s", type(self).__name__, gate_weights, up_weights, down_weights)
         super().__init__()
         self.num_experts = gate_weights.shape[0]
         self.register_buffer("gate_weights", gate_weights)
@@ -129,6 +136,7 @@ class SequentialMoEDispatch(nn.Module):
         expert_ids: torch.Tensor,
         expert_weights: torch.Tensor,
     ) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_size, hidden_dim = x.shape
         top_k = expert_ids.shape[1]
         output = torch.zeros_like(x)
@@ -163,6 +171,7 @@ class BatchedExpertMoEDispatch(nn.Module):
         up_weights: torch.Tensor,
         down_weights: torch.Tensor,
     ) -> None:
+        logger.debug("initializing %s with gate_weights=%s, up_weights=%s, down_weights=%s", type(self).__name__, gate_weights, up_weights, down_weights)
         super().__init__()
         self.num_experts = gate_weights.shape[0]
         self.register_buffer("gate_weights", gate_weights)
@@ -176,6 +185,7 @@ class BatchedExpertMoEDispatch(nn.Module):
         expert_ids: torch.Tensor,
         expert_weights: torch.Tensor,
     ) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_size, hidden_dim = x.shape
         top_k = expert_ids.shape[1]
         output = torch.zeros_like(x)
@@ -232,6 +242,7 @@ class FusedMoEDispatch(nn.Module):
         up_weights: torch.Tensor,
         down_weights: torch.Tensor,
     ) -> None:
+        logger.debug("initializing %s with gate_weights=%s, up_weights=%s, down_weights=%s", type(self).__name__, gate_weights, up_weights, down_weights)
         super().__init__()
         self.num_experts = gate_weights.shape[0]
         self.register_buffer("gate_weights", gate_weights)
@@ -245,6 +256,7 @@ class FusedMoEDispatch(nn.Module):
         expert_ids: torch.Tensor,
         expert_weights: torch.Tensor,
     ) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_size, hidden_dim = x.shape
         top_k = expert_ids.shape[1]
 
@@ -281,6 +293,7 @@ def benchmark_dispatch(
     Returns:
         (list of iteration times in ms, number of kernel launches)
     """
+    logger.info("benchmark_dispatch starting with dispatch_fn=%s, x=%s, expert_ids=%s, expert_weights=%s", dispatch_fn, x, expert_ids, expert_weights)
     for _ in range(num_warmup):
         _ = dispatch_fn(x, expert_ids, expert_weights)
         torch.mps.synchronize()
@@ -311,6 +324,7 @@ def run_benchmark(
 ) -> list[BenchmarkResult]:
     """Run full benchmark suite."""
 
+    logger.info("run_benchmark starting with batch_sizes=%s, top_k_values=%s, num_experts=%s, hidden_dim=%s", batch_sizes, top_k_values, num_experts, hidden_dim)
     results: list[BenchmarkResult] = []
 
     print(f"Creating mock expert weights: {num_experts} experts, "
@@ -433,6 +447,7 @@ def run_benchmark(
 
 def print_summary(results: list[BenchmarkResult]) -> None:
     """Print benchmark summary with speedups."""
+    logger.debug("print_summary called with results=%s", results)
     print("\n" + "=" * 80)
     print("BENCHMARK SUMMARY: Fused MoE vs Sequential Dispatch")
     print("=" * 80)
@@ -492,6 +507,7 @@ def print_summary(results: list[BenchmarkResult]) -> None:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Benchmark Fused MoE vs Sequential Dispatch for GLM-4.7-Flash"
     )

@@ -22,6 +22,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -53,17 +54,22 @@ except ImportError:
     mla_fused_kv_proj_fp4 = None
 
 
+
+logger = logging.getLogger(__name__)
+
 def is_available() -> bool:
     """Check if C++ MLA attention is available.
     
     Returns:
         True if the C++ extension is built and available.
     """
+    logger.debug("is_available called")
     return _has_cpp_ext and mla_proj_fp4 is not None
 
 
 def require_cpp_ext() -> None:
     """Raise RuntimeError if C++ extension is not available."""
+    logger.debug("require_cpp_ext called")
     if not is_available():
         raise RuntimeError(
             "C++ MLA attention not available. "
@@ -100,6 +106,7 @@ class MLAAttentionCpp:
         Raises:
             RuntimeError: If C++ extension is not available.
         """
+        logger.debug("initializing %s", type(self).__name__)
         require_cpp_ext()
     
     def mla_proj_fp4(
@@ -134,6 +141,7 @@ class MLAAttentionCpp:
         Raises:
             RuntimeError: If C++ extension is not available.
         """
+        logger.debug("mla_proj_fp4 called with ctx=%s, A=%s, B_packed=%s", ctx, A, B_packed)
         require_cpp_ext()
         mla_proj_fp4(ctx, A, B_packed, scales, C, M, N, K, group_size, wait)
     
@@ -168,6 +176,7 @@ class MLAAttentionCpp:
         Raises:
             RuntimeError: If C++ extension is not available.
         """
+        logger.debug("mla_decode_proj_fp4 called with ctx=%s, x=%s, W_packed=%s", ctx, x, W_packed)
         require_cpp_ext()
         mla_decode_proj_fp4(ctx, x, W_packed, scales, out, K, N, group_size, wait)
     
@@ -214,6 +223,7 @@ class MLAAttentionCpp:
         Raises:
             RuntimeError: If C++ extension is not available.
         """
+        logger.debug("mla_fused_kv_proj_fp4 called with ctx=%s, hidden=%s, W_a_packed=%s", ctx, hidden, W_a_packed)
         require_cpp_ext()
         mla_fused_kv_proj_fp4(
             ctx, hidden, W_a_packed, scales_a, W_b_packed, scales_b, out,

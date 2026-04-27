@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 
@@ -5,7 +6,11 @@ import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def _has_metal() -> bool:
+    logger.debug("_has_metal called")
     try:
         from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
         return HAS_METAL and HAS_MPS
@@ -16,6 +21,7 @@ pytestmark = pytest.mark.skipif(not _has_metal(), reason="Metal not available")
 
 @pytest.fixture
 def mock_moe_weights():
+    logger.debug("mock_moe_weights called")
     num_experts = 4
     hidden = 256
     intermediate = 192
@@ -58,6 +64,7 @@ def mock_moe_weights():
     }
 
 def test_dispatch_moe_trellis_swiglu_batched_executes(mock_moe_weights):
+    logger.info("running test_dispatch_moe_trellis_swiglu_batched_executes")
     from metal_marlin.metal_dispatch import MetalKernelLibrary
     from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu_batched
 

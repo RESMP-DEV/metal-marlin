@@ -10,6 +10,7 @@ This is a temporary bridge until native EXL3 inference kernels exist.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,9 @@ from numpy.typing import NDArray
 
 from metal_marlin.hadamard import hadamard_matrix
 from metal_marlin.quantization.trellis_codebook import TrellisCodebook
+
+
+logger = logging.getLogger(__name__)
 
 # FP4 E2M1 representable values (NVFP4/MXFP4 format)
 # Bits: [sign(1) | exponent(2, bias=1) | mantissa(1)]
@@ -63,6 +67,7 @@ def _blockwise_hadamard_transform(
     Returns:
         Transformed array with same shape as input
     """
+    logger.debug("_blockwise_hadamard_transform called with X=%s, block_size=%s, axis=%s", X, block_size, axis)
     if axis not in (0, 1):
         raise ValueError(f"axis must be 0 or 1, got {axis}")
 
@@ -140,6 +145,7 @@ def _decode_trellis_indices(
     # 2. Looking up values in MCG/Mul1 codebooks
     # 3. Applying dequantization scales
 
+    logger.debug("_decode_trellis_indices called with trellis_indices=%s, codebook=%s", trellis_indices, codebook)
     n_levels = 2**codebook.bits
 
     # Map indices to [-1, 1] range (standard symmetric quantization)
@@ -173,6 +179,7 @@ def _inverse_hadamard_weight_rotation(
     Returns:
         Weights in original space
     """
+    logger.debug("_inverse_hadamard_weight_rotation called with weights=%s, su=%s, had_k=%s", weights, su, had_k)
     k, n = weights.shape
 
     # Convert to float64 for precision
@@ -230,6 +237,7 @@ def _quantize_to_fp4_indices(values: np.ndarray) -> np.ndarray:
     Returns:
         uint8 array of same shape with values in [0, 15]
     """
+    logger.info("_quantize_to_fp4_indices called with values=%s", values)
     flat = values.flatten().astype(np.float32)
     result = np.zeros(len(flat), dtype=np.uint8)
 
@@ -283,6 +291,7 @@ def _pack_fp4_to_marlin(
     Returns:
         (packed_weights, marlin_scales) in Marlin layout
     """
+    logger.info("_pack_fp4_to_marlin called with weights=%s, scales=%s, group_size=%s", getattr(weights, "shape", weights), scales, group_size)
     out_feat, in_feat = weights.shape
 
     # Transpose to [K, N] = [in_feat, out_feat] for Marlin layout
@@ -359,6 +368,7 @@ def exl3_layer_to_marlin(
 
     # For simplicity, assume indices can be reshaped to [out_feat, in_feat]
     # In practice, EXL3 tile layout may need more complex reconstruction
+    logger.debug("exl3_layer_to_marlin called with trellis_indices=%s, scales=%s, su=%s", trellis_indices, scales, su)
     decoded = _decode_trellis_indices(trellis_indices, codebook)
 
     # Flatten and reshape to weight matrix
@@ -439,6 +449,7 @@ def convert_exl3_to_marlin(
         ... )
         >>> print(f"Converted {stats['layers_converted']} layers")
     """
+    logger.info("convert_exl3_to_marlin called with exl3_path=%s, output_path=%s, verbose=%s", exl3_path, output_path, verbose)
     exl3_path = Path(exl3_path)
     output_path = Path(output_path)
 

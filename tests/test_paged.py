@@ -1,4 +1,5 @@
 """Tests for paged KV cache block."""
+import logging
 
 import numpy as np
 import pytest
@@ -6,8 +7,12 @@ import pytest
 from metal_marlin.paged import KVBlock, KVBlockConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestKVBlockConfig:
     def test_defaults(self):
+        logger.info("running test_defaults")
         cfg = KVBlockConfig()
         assert cfg.block_size == 16
         assert cfg.num_heads == 32
@@ -15,19 +20,23 @@ class TestKVBlockConfig:
         assert cfg.dtype == np.dtype(np.float16)
 
     def test_memory_bytes_fp16(self):
+        logger.info("running test_memory_bytes_fp16")
         cfg = KVBlockConfig(block_size=16, num_heads=32, head_dim=128)
         # 2 * 16 * 32 * 128 * 2 = 262144
         assert cfg.memory_bytes == 2 * 16 * 32 * 128 * 2
 
     def test_memory_bytes_fp32(self):
+        logger.info("running test_memory_bytes_fp32")
         cfg = KVBlockConfig(block_size=16, num_heads=32, head_dim=128, dtype=np.dtype(np.float32))
         assert cfg.memory_bytes == 2 * 16 * 32 * 128 * 4
 
     def test_shape(self):
+        logger.info("running test_shape")
         cfg = KVBlockConfig(block_size=8, num_heads=4, head_dim=64)
         assert cfg.shape == (2, 8, 4, 64)
 
     def test_frozen(self):
+        logger.info("running test_frozen")
         cfg = KVBlockConfig()
         with pytest.raises(Exception):
             cfg.block_size = 32  # type: ignore[misc]
@@ -35,6 +44,7 @@ class TestKVBlockConfig:
 
 class TestKVBlockLifecycle:
     def test_init_unallocated(self):
+        logger.info("running test_init_unallocated")
         block = KVBlock()
         assert block.data is None
         assert block.token_count == 0
@@ -42,6 +52,7 @@ class TestKVBlockLifecycle:
         assert not block.is_full
 
     def test_allocate(self):
+        logger.info("running test_allocate")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
@@ -50,6 +61,7 @@ class TestKVBlockLifecycle:
         assert block.data.dtype == np.float16
 
     def test_allocate_resets_count(self):
+        logger.info("running test_allocate_resets_count")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
@@ -60,6 +72,7 @@ class TestKVBlockLifecycle:
         assert block.token_count == 0
 
     def test_reset(self):
+        logger.info("running test_reset")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
@@ -76,12 +89,14 @@ class TestKVBlockLifecycle:
 class TestKVBlockAppend:
     @pytest.fixture
     def small_block(self):
+        logger.debug("small_block called")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
         return block
 
     def test_append_single(self, small_block: KVBlock):
+        logger.info("running test_append_single")
         k = np.ones((2, 8), dtype=np.float16)
         v = np.full((2, 8), 2.0, dtype=np.float16)
         remaining = small_block.append_kv(k, v)
@@ -90,6 +105,7 @@ class TestKVBlockAppend:
         assert not small_block.is_full
 
     def test_append_until_full(self, small_block: KVBlock):
+        logger.info("running test_append_until_full")
         for i in range(4):
             k = np.full((2, 8), float(i), dtype=np.float16)
             v = np.full((2, 8), float(i + 10), dtype=np.float16)
@@ -99,6 +115,7 @@ class TestKVBlockAppend:
         assert small_block.remaining == 0
 
     def test_append_overflow_raises(self, small_block: KVBlock):
+        logger.info("running test_append_overflow_raises")
         for _ in range(4):
             k = np.ones((2, 8), dtype=np.float16)
             v = np.ones((2, 8), dtype=np.float16)
@@ -110,6 +127,7 @@ class TestKVBlockAppend:
             )
 
     def test_append_unallocated_raises(self):
+        logger.info("running test_append_unallocated_raises")
         block = KVBlock()
         with pytest.raises(RuntimeError, match="not allocated"):
             block.append_kv(
@@ -118,6 +136,7 @@ class TestKVBlockAppend:
             )
 
     def test_append_preserves_values(self, small_block: KVBlock):
+        logger.info("running test_append_preserves_values")
         k0 = np.full((2, 8), 1.0, dtype=np.float16)
         v0 = np.full((2, 8), 2.0, dtype=np.float16)
         k1 = np.full((2, 8), 3.0, dtype=np.float16)
@@ -139,12 +158,14 @@ class TestKVBlockAppend:
 class TestKVBlockBatchAppend:
     @pytest.fixture
     def block(self):
+        logger.debug("block called")
         cfg = KVBlockConfig(block_size=8, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
         return block
 
     def test_batch_append(self, block: KVBlock):
+        logger.info("running test_batch_append")
         keys = np.ones((3, 2, 8), dtype=np.float16)
         values = np.full((3, 2, 8), 2.0, dtype=np.float16)
         remaining = block.append_kv_batch(keys, values)
@@ -152,12 +173,14 @@ class TestKVBlockBatchAppend:
         assert block.token_count == 3
 
     def test_batch_overflow_raises(self, block: KVBlock):
+        logger.info("running test_batch_overflow_raises")
         keys = np.ones((9, 2, 8), dtype=np.float16)
         values = np.ones((9, 2, 8), dtype=np.float16)
         with pytest.raises(RuntimeError, match="exceeds remaining"):
             block.append_kv_batch(keys, values)
 
     def test_batch_preserves_values(self, block: KVBlock):
+        logger.info("running test_batch_preserves_values")
         keys = np.arange(3 * 2 * 8, dtype=np.float16).reshape(3, 2, 8)
         values = np.arange(3 * 2 * 8, dtype=np.float16).reshape(3, 2, 8) + 100
 
@@ -169,6 +192,7 @@ class TestKVBlockBatchAppend:
         assert np.allclose(got_v, values)
 
     def test_batch_after_single(self, block: KVBlock):
+        logger.info("running test_batch_after_single")
         k0 = np.full((2, 8), 99.0, dtype=np.float16)
         v0 = np.full((2, 8), 88.0, dtype=np.float16)
         block.append_kv(k0, v0)
@@ -185,6 +209,7 @@ class TestKVBlockBatchAppend:
 
 class TestKVBlockGetKV:
     def test_get_kv_empty(self):
+        logger.info("running test_get_kv_empty")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
@@ -193,6 +218,7 @@ class TestKVBlockGetKV:
         assert values.shape == (0, 2, 8)
 
     def test_get_kv_unallocated_raises(self):
+        logger.info("running test_get_kv_unallocated_raises")
         block = KVBlock()
         with pytest.raises(RuntimeError, match="not allocated"):
             block.get_kv()
@@ -200,6 +226,7 @@ class TestKVBlockGetKV:
 
 class TestKVBlockRefCount:
     def test_acquire_release(self):
+        logger.info("running test_acquire_release")
         block = KVBlock()
         assert block.ref_count == 0
         block.acquire()
@@ -211,6 +238,7 @@ class TestKVBlockRefCount:
         assert block.ref_count == 1
 
     def test_release_floor_zero(self):
+        logger.info("running test_release_floor_zero")
         block = KVBlock()
         remaining = block.release()
         assert remaining == 0
@@ -219,6 +247,7 @@ class TestKVBlockRefCount:
 
 class TestKVBlockCopy:
     def test_copy_shares_initial_data(self):
+        logger.info("running test_copy_shares_initial_data")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()
@@ -238,6 +267,7 @@ class TestKVBlockCopy:
         assert block.token_count == 1
 
     def test_copy_unallocated(self):
+        logger.info("running test_copy_unallocated")
         block = KVBlock()
         clone = block.copy()
         assert clone.data is None
@@ -246,12 +276,14 @@ class TestKVBlockCopy:
 
 class TestKVBlockRepr:
     def test_repr_unallocated(self):
+        logger.info("running test_repr_unallocated")
         block = KVBlock()
         r = repr(block)
         assert "allocated=no" in r
         assert "tokens=0/16" in r
 
     def test_repr_allocated(self):
+        logger.info("running test_repr_allocated")
         cfg = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         block = KVBlock(config=cfg)
         block.allocate()

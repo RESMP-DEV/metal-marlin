@@ -10,6 +10,7 @@ This test verifies:
 2. The decode path achieves reasonable latency
 3. The fused Q/KV projection path is taken during decode (can_fuse=True)
 """
+import logging
 import time
 
 import torch
@@ -20,8 +21,12 @@ from metal_marlin.kv_cache import TrellisKVCache
 from metal_marlin.trellis.linear import TrellisLinear
 
 
+
+logger = logging.getLogger(__name__)
+
 def create_test_attention() -> tuple[TrellisMLAttention, TrellisMLAConfig]:
     """Create a TrellisMLAttention module with random weights for testing."""
+    logger.info("running create_test_attention")
     config = TrellisMLAConfig(
         hidden_size=2048,
         num_attention_heads=20,
@@ -75,6 +80,7 @@ def create_test_attention() -> tuple[TrellisMLAttention, TrellisMLAConfig]:
 
 
 def main():
+    logger.info("main starting")
     print("Creating TrellisMLAttention module...")
     attn, config = create_test_attention()
     attn.eval()

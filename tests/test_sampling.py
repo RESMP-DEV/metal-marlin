@@ -1,10 +1,15 @@
+import logging
 
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def fused_sampling(logits, temperature=1.0, top_p=0.9, top_k=-1):
     """Fused sampling logic to be tested."""
     # 1. Greedy decoding (Argmax) optimization
+    logger.debug("fused_sampling called with logits=%s, temperature=%s, top_p=%s", logits, temperature, top_p)
     if temperature < 1e-5 or top_p < 1e-8:
         return torch.argmax(logits, dim=-1, keepdim=True)
 
@@ -37,6 +42,7 @@ def fused_sampling(logits, temperature=1.0, top_p=0.9, top_k=-1):
     return torch.multinomial(probs, num_samples=1)
 
 def test_argmax():
+    logger.info("running test_argmax")
     logits = torch.tensor([[1.0, 2.0, 3.0]])
     # Low temp -> Argmax
     out = fused_sampling(logits, temperature=0.0)
@@ -47,6 +53,7 @@ def test_argmax():
     assert out.item() == 2
 
 def test_top_k():
+    logger.info("running test_top_k")
     torch.manual_seed(42)
     logits = torch.tensor([[10.0, 9.0, 1.0, 2.0]])
     # Top-k=1 -> should pick index 0
@@ -61,6 +68,7 @@ def test_top_k():
     assert out.item() in [0, 1]
 
 def test_top_p():
+    logger.info("running test_top_p")
     torch.manual_seed(42)
     # 0.6, 0.3, 0.1
     # top_p=0.5 -> Only 0.6 should be selected?

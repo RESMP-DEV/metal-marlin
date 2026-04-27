@@ -9,6 +9,7 @@ Validates:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -19,7 +20,11 @@ if TYPE_CHECKING:
     import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def _check_torch_available() -> bool:
+    logger.debug("_check_torch_available called")
     try:
         import torch  # noqa: F401
         return True
@@ -28,6 +33,7 @@ def _check_torch_available() -> bool:
 
 
 def _check_metal_available() -> bool:
+    logger.debug("_check_metal_available called")
     try:
         import Metal  # noqa: F401
         return True
@@ -38,6 +44,7 @@ def _check_metal_available() -> bool:
 @pytest.fixture
 def rng():
     """Reproducible random number generator."""
+    logger.debug("rng called")
     return np.random.default_rng(42)
 
 
@@ -47,6 +54,7 @@ class TestBlockSparseMask:
 
     def test_sliding_window_mask_creation(self):
         """Test creation of sliding window block-sparse mask."""
+        logger.info("running test_sliding_window_mask_creation")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -72,6 +80,7 @@ class TestBlockSparseMask:
 
     def test_sliding_window_mask_pattern(self):
         """Verify sliding window mask has correct pattern."""
+        logger.info("running test_sliding_window_mask_pattern")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -106,6 +115,7 @@ class TestBlockSparseMask:
 
     def test_bigbird_mask_creation(self):
         """Test creation of BigBird-style block-sparse mask."""
+        logger.info("running test_bigbird_mask_creation")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -125,6 +135,7 @@ class TestBlockSparseMask:
 
     def test_bigbird_global_blocks(self):
         """Verify BigBird mask includes global blocks for all positions."""
+        logger.info("running test_bigbird_global_blocks")
         from metal_marlin.attention import BlockSparseMask
 
         seq_len = 256
@@ -152,6 +163,7 @@ class TestBlockSparseMask:
 
     def test_longformer_mask_creation(self):
         """Test creation of Longformer-style block-sparse mask."""
+        logger.info("running test_longformer_mask_creation")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -170,6 +182,7 @@ class TestBlockSparseMask:
 
     def test_from_dense_mask(self):
         """Test conversion from dense mask to block-sparse."""
+        logger.info("running test_from_dense_mask")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -189,6 +202,7 @@ class TestBlockSparseMask:
 
     def test_from_dense_mask_pattern(self):
         """Verify block-sparse mask matches dense mask pattern."""
+        logger.info("running test_from_dense_mask_pattern")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -222,6 +236,7 @@ class TestBlockSparseAttentionAccuracy:
         is_causal: bool = False,
     ) -> np.ndarray:
         """NumPy reference implementation of attention."""
+        logger.debug("_reference_attention called with q=%s, k=%s, v=%s", q, k, v)
         batch, heads_q, seq_q, head_dim = q.shape
         _, heads_kv, seq_k, _ = k.shape
 
@@ -258,6 +273,7 @@ class TestBlockSparseAttentionAccuracy:
 
     def test_block_sparse_mask_sliding_window_accuracy(self, rng):
         """Test that sliding window block-sparse produces correct attention pattern."""
+        logger.info("running test_block_sparse_mask_sliding_window_accuracy")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -341,6 +357,7 @@ class TestBlockSparseAttentionAccuracy:
 
     def test_block_sparse_vs_dense_sliding_window(self, rng):
         """Compare block-sparse sliding window to dense sliding window."""
+        logger.info("running test_block_sparse_vs_dense_sliding_window")
         import torch
         import torch.nn.functional as F
 
@@ -393,6 +410,7 @@ class TestBlockSparseMetalDispatch:
 
     def test_block_sparse_attention_metal_basic(self, rng):
         """Test basic block-sparse attention dispatch."""
+        logger.info("running test_block_sparse_attention_metal_basic")
         import torch
 
         from metal_marlin.attention import BlockSparseMask, block_sparse_attention_metal
@@ -426,6 +444,7 @@ class TestBlockSparseMetalDispatch:
 
     def test_block_sparse_attention_metal_output_shape(self, rng):
         """Verify output shape of block-sparse attention."""
+        logger.info("running test_block_sparse_attention_metal_output_shape")
         import torch
 
         from metal_marlin.attention import BlockSparseMask, block_sparse_attention_metal
@@ -453,6 +472,7 @@ class TestBlockSparseMetalDispatch:
 
     def test_block_sparse_attention_vs_reference(self, rng):
         """Compare block-sparse attention to reference implementation."""
+        logger.info("running test_block_sparse_attention_vs_reference")
         import torch
         import torch.nn.functional as F
 
@@ -502,6 +522,7 @@ class TestBlockSparseEdgeCases:
 
     def test_empty_mask(self):
         """Test behavior with completely empty mask."""
+        logger.info("running test_empty_mask")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -524,6 +545,7 @@ class TestBlockSparseEdgeCases:
 
     def test_sequence_not_divisible_by_block(self):
         """Test mask creation when seq_len is not divisible by block_size."""
+        logger.info("running test_sequence_not_divisible_by_block")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -543,6 +565,7 @@ class TestBlockSparseEdgeCases:
 
     def test_single_block(self):
         """Test mask creation with single block."""
+        logger.info("running test_single_block")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -567,6 +590,7 @@ class TestBlockSparseEdgeCases:
 
     def test_very_small_window(self):
         """Test sliding window with very small window size."""
+        logger.info("running test_very_small_window")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -586,6 +610,7 @@ class TestBlockSparseEdgeCases:
 
     def test_large_num_blocks_warning(self):
         """Test that we handle cases with many blocks."""
+        logger.info("running test_large_num_blocks_warning")
         import torch
 
         from metal_marlin.attention import BlockSparseMask
@@ -612,6 +637,7 @@ class TestMarlinAttentionIntegration:
 
     def test_block_sparse_dispatch(self):
         """Verify BlockSparseMask dispatches to block_sparse_attention_metal."""
+        logger.info("running test_block_sparse_dispatch")
         from unittest.mock import MagicMock, patch
 
         import torch

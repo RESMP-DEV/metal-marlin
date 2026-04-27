@@ -1,3 +1,4 @@
+import logging
 
 import pytest
 import torch
@@ -10,14 +11,19 @@ from metal_marlin.speculative.token_acceptance import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestTokenAcceptanceTracker:
     def test_initialization(self):
+        logger.info("running test_initialization")
         tracker = TokenAcceptanceTracker()
         assert tracker.stats.total_accepted == 0
         assert tracker.stats.step_count == 0
         assert tracker.track_history is True
 
     def test_compute_acceptance(self):
+        logger.info("running test_compute_acceptance")
         tracker = TokenAcceptanceTracker()
         batch_size = 2
         num_spec = 4
@@ -48,6 +54,7 @@ class TestTokenAcceptanceTracker:
         assert result.accepted_mask[1, 3].item() is True
 
     def test_update_stats(self):
+        logger.info("running test_update_stats")
         tracker = TokenAcceptanceTracker()
         batch_size = 1
         num_spec = 4
@@ -71,6 +78,7 @@ class TestTokenAcceptanceTracker:
         assert tracker.stats.acceptance_history[0] == 0.75
 
     def test_assemble_sequence(self):
+        logger.info("running test_assemble_sequence")
         tracker = TokenAcceptanceTracker()
         device = torch.device("cpu")
         
@@ -92,6 +100,7 @@ class TestTokenAcceptanceTracker:
         assert torch.equal(output, expected)
 
     def test_adaptive_speculation_length(self):
+        logger.info("running test_adaptive_speculation_length")
         tracker = TokenAcceptanceTracker()
         # Mock history with high acceptance
         tracker.stats.acceptance_history = [0.9] * 10
@@ -110,6 +119,7 @@ class TestTokenAcceptanceTracker:
         assert new_len < current
 
 def test_compute_acceptance_probabilities():
+    logger.info("running test_compute_acceptance_probabilities")
     batch = 1
     num_spec = 2
     vocab = 4
@@ -134,6 +144,7 @@ def test_compute_acceptance_probabilities():
 
 def test_estimate_optimal_speculation_length():
     # If acceptance is 1.0 everywhere, optimal length should be high
+    logger.info("running test_estimate_optimal_speculation_length")
     probs = torch.ones(1, 10)
     length = estimate_optimal_speculation_length(probs)
     assert length == 10

@@ -1,4 +1,5 @@
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -6,6 +7,9 @@ import torch
 
 from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager
 
+
+
+logger = logging.getLogger(__name__)
 
 class TestMMFP4MemoryZeroCopy:
     
@@ -15,6 +19,7 @@ class TestMMFP4MemoryZeroCopy:
     def test_load_layer_uses_zero_copy(self, mock_machine, mock_system, mock_loader_cls):
         """Test that load_layer is called with zero_copy=True on unified memory systems."""
         # Setup mock loader - make the class return our mock instance
+        logger.info("running test_load_layer_uses_zero_copy")
         mock_loader_instance = MagicMock()
         mock_loader_instance.load_layer.return_value = {"weight": torch.zeros(1)}
         mock_loader_cls.return_value = mock_loader_instance
@@ -57,6 +62,7 @@ class TestMMFP4MemoryZeroCopy:
     def test_zero_copy_method(self, mock_machine, mock_system):
         """Test that _zero_copy method works correctly."""
         # Initialize manager (no loader needed)
+        logger.info("running test_zero_copy_method")
         with patch('pathlib.Path.exists', return_value=False):
             manager = MMFP4MemoryManager(
                 model_path="dummy_path",
@@ -80,6 +86,7 @@ class TestMMFP4MemoryZeroCopy:
     def test_zero_copy_mock_path(self):
         """Test the _zero_copy path when loader is not available."""
         # Test the else branch in _load_layer_impl where loader is None
+        logger.info("running test_zero_copy_mock_path")
         with patch('metal_marlin.memory.mmfp4_memory.MMFP4ModelLoader', side_effect=Exception("No loader")):
             with patch('platform.system', return_value="Darwin"), \
                  patch('platform.machine', return_value="arm64"), \

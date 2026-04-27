@@ -13,9 +13,13 @@ Extracts the common ``MMFP4Pipeline`` -> serving-adapter bridge so that
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "QwenDeltaServeConfig",
@@ -32,6 +36,7 @@ __all__ = [
 
 def env_int(name: str, default: int) -> int:
     """Parse a required integer from ``os.environ``; exit on bad value."""
+    logger.debug("env_int called with name=%s, default=%s", name, default)
     value = os.getenv(name)
     if value is None or value == "":
         return default
@@ -76,6 +81,7 @@ def _enable_paged_attention_on_layers(pipeline_model: object) -> None:
     This mirrors the per-layer patching performed by the adapter classes in
     both ``serve_qwen35.py`` and ``serve_glm47.py``.
     """
+    logger.debug("_enable_paged_attention_on_layers called with pipeline_model=%s", pipeline_model)
     model = getattr(pipeline_model, "model", pipeline_model)
     model_stack = getattr(model, "model", model)
     layers = getattr(model_stack, "layers", [])
@@ -108,6 +114,7 @@ class _QwenDeltaServingPipeline:
         pipeline: object,  # MMFP4Pipeline but avoid circular import
         use_paged_attention: bool = True,
     ) -> None:
+        logger.debug("initializing %s with pipeline=%s, use_paged_attention=%s", type(self).__name__, pipeline, use_paged_attention)
         self._pipeline = pipeline
         self.tokenizer = getattr(pipeline, "tokenizer")
         self.model = getattr(pipeline, "model")
@@ -129,6 +136,7 @@ class _QwenDeltaServingPipeline:
         ``use_paged_attention`` is forwarded to the wrapper so paged KV
         management can be toggled independently of the pipeline.
         """
+        logger.debug("from_pretrained called with model_path=%s, device=%s, use_paged_attention=%s", model_path, device, use_paged_attention)
         from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 
         pipeline = MMFP4Pipeline.from_pretrained(
@@ -174,6 +182,7 @@ def install_mmfp4_adapter(
         use_paged_attention: If True, enables paged attention on all
             MMFP4 attention layers that support the flag.
     """
+    logger.debug("install_mmfp4_adapter called with enable_persistent_cache=%s, use_paged_attention=%s", enable_persistent_cache, use_paged_attention)
     from metal_marlin.serving import engine as serving_engine
 
     # Create a closure that captures the configuration
@@ -185,6 +194,7 @@ def install_mmfp4_adapter(
             device: str = "mps",
             use_paged_attention: bool = use_paged_attention,
         ) -> _ConfiguredPipeline:
+            logger.debug("from_pretrained called with model_path=%s, device=%s, use_paged_attention=%s", model_path, device, use_paged_attention)
             from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 
             pipeline = MMFP4Pipeline.from_pretrained(
@@ -214,6 +224,7 @@ def add_serving_args(
         env_prefix: Upper-case prefix for environment variables, e.g. ``QWEN35``.
         default_model_path: Fallback model directory when the env var is unset.
     """
+    logger.debug("add_serving_args called with parser=%s, env_prefix=%s, default_model_path=%s", parser, env_prefix, default_model_path)
     env_path = f"{env_prefix}_MODEL_PATH"
     env_port = f"{env_prefix}_PORT"
     env_batch = f"{env_prefix}_BATCH_SIZE"
@@ -269,6 +280,7 @@ def validate_serving_args(args: argparse.Namespace, env_prefix: str) -> None:
         args: Parsed argument namespace.
         env_prefix: Upper-case prefix used in error messages.
     """
+    logger.debug("validate_serving_args called with args=%s, env_prefix=%s", args, env_prefix)
     if not args.model_path:
         raise SystemExit(
             f"Missing model path. Provide --model-path or set {env_prefix}_MODEL_PATH."
@@ -293,6 +305,7 @@ def build_config(
         args: Parsed argument namespace.
         env_prefix: Upper-case prefix (unused but kept for API symmetry).
     """
+    logger.info("build_config starting")
     _ = env_prefix  # Prefix already applied during parsing
     return QwenDeltaServeConfig(
         model_path=str(args.model_path),
@@ -321,6 +334,7 @@ def run_serving_server(config: QwenDeltaServeConfig) -> int:
     Returns:
         Exit code (0 for success, non-zero for failure).
     """
+    logger.debug("run_serving_server called with config=%s", config)
     from metal_marlin.serving.server import run_server
 
     run_server(

@@ -1,4 +1,5 @@
 """Tests for pipelined quantization."""
+import logging
 
 import numpy as np
 import pytest
@@ -12,8 +13,12 @@ from metal_marlin.quantization.pipelined_quant import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def dummy_hessian_fn(activations: torch.Tensor) -> np.ndarray:
     """Simple Hessian approximation for testing."""
+    logger.debug("dummy_hessian_fn called with activations=%s", activations)
     X = activations.numpy()
     H = 2 * X.T @ X / X.shape[0]
     H += 0.01 * np.eye(H.shape[0])
@@ -23,6 +28,7 @@ def dummy_hessian_fn(activations: torch.Tensor) -> np.ndarray:
 class TestLayerSensitivity:
     def test_sensitivity_increases_with_weight_norm(self):
         """Larger weights should have higher sensitivity."""
+        logger.info("running test_sensitivity_increases_with_weight_norm")
         act = torch.randn(100, 64)
         
         small_weight = torch.randn(32, 64) * 0.1
@@ -35,6 +41,7 @@ class TestLayerSensitivity:
     
     def test_sensitivity_increases_with_activation_variance(self):
         """Higher activation variance should increase sensitivity."""
+        logger.info("running test_sensitivity_increases_with_activation_variance")
         weight = torch.randn(32, 64)
         
         low_var_act = torch.randn(100, 64) * 0.1
@@ -50,6 +57,7 @@ class TestMoEQuantization:
     @pytest.fixture
     def small_experts(self):
         """Create small expert weights for testing."""
+        logger.debug("small_experts called")
         return {
             "expert_0": torch.randn(64, 128),
             "expert_1": torch.randn(64, 128) * 0.5,
@@ -60,6 +68,7 @@ class TestMoEQuantization:
     @pytest.fixture
     def expert_activations(self, small_experts):
         """Generate activations for each expert."""
+        logger.debug("expert_activations called with small_experts=%s", small_experts)
         return {
             name: torch.randn(256, w.shape[1])
             for name, w in small_experts.items()
@@ -67,6 +76,7 @@ class TestMoEQuantization:
     
     def test_sensitive_experts_get_higher_bits(self, small_experts, expert_activations):
         """Most sensitive experts should use higher precision."""
+        logger.info("running test_sensitive_experts_get_higher_bits")
         quantizer = EXL3Quantizer(bits=3, group_size=64, use_metal=False)
         
         results, metadata = quantize_moe_experts_fast(
@@ -90,6 +100,7 @@ class TestMoEQuantization:
     
     def test_all_experts_quantized(self, small_experts, expert_activations):
         """All experts should have results."""
+        logger.info("running test_all_experts_quantized")
         quantizer = EXL3Quantizer(bits=3, group_size=64, use_metal=False)
         
         results, metadata = quantize_moe_experts_fast(

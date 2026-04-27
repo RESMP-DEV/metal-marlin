@@ -16,6 +16,7 @@ Key patterns detected:
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,9 @@ try:
 except ImportError:
     HAS_TORCH = False
 
+
+
+logger = logging.getLogger(__name__)
 
 class AccessPattern(Enum):
     """Classification of memory access patterns."""
@@ -70,10 +74,12 @@ class ShaderAnalysis:
 
     @property
     def critical_count(self) -> int:
+        logger.debug("critical_count called")
         return sum(1 for a in self.accesses if a.severity == "critical")
 
     @property
     def warning_count(self) -> int:
+        logger.debug("warning_count called")
         return sum(1 for a in self.accesses if a.severity == "warning")
 
 
@@ -87,6 +93,7 @@ class MemoryAuditReport:
 
     def summary(self) -> str:
         """Generate human-readable summary."""
+        logger.debug("summary called")
         total_critical = sum(a.critical_count for a in self.analyses)
         total_warning = sum(a.warning_count for a in self.analyses)
         total_kernels = sum(len(a.kernel_names) for a in self.analyses)
@@ -167,6 +174,7 @@ class MemoryAuditor:
 
     def __init__(self, shader_dir: Path | str | None = None):
         """Initialize auditor with optional shader directory."""
+        logger.debug("initializing %s with shader_dir=%s", type(self).__name__, shader_dir)
         if shader_dir is None:
             # Default to metal_marlin/src
             self.shader_dir = Path(__file__).parent.parent.parent / "src"
@@ -175,6 +183,7 @@ class MemoryAuditor:
 
     def analyze_file(self, file_path: Path | str) -> ShaderAnalysis:
         """Analyze a single Metal shader file for memory access patterns."""
+        logger.debug("analyze_file called with file_path=%s", file_path)
         file_path = Path(file_path)
         analysis = ShaderAnalysis(file_path=file_path)
 
@@ -239,6 +248,7 @@ class MemoryAuditor:
         """Classify a memory access pattern."""
 
         # Check for known good patterns first
+        logger.debug("_classify_access called with line_num=%s, code=%s, buffer_name=%s", line_num, code, buffer_name)
         for pattern in self.COALESCED_PATTERNS:
             if re.search(pattern, f"[{index_expr}]"):
                 return None  # Good access, don't report
@@ -300,6 +310,7 @@ class MemoryAuditor:
 
     def _get_strided_suggestion(self, buffer_name: str, kernel_context: str | None) -> str:
         """Get context-specific suggestion for strided access."""
+        logger.debug("_get_strided_suggestion called with buffer_name=%s, kernel_context=%s", buffer_name, kernel_context)
         ctx = (kernel_context or "").lower()
         buf = buffer_name.lower()
 
@@ -336,6 +347,7 @@ class MemoryAuditor:
 
     def _add_kernel_suggestions(self, analysis: ShaderAnalysis) -> None:
         """Add kernel-specific optimization suggestions."""
+        logger.debug("_add_kernel_suggestions called with analysis=%s", analysis)
         for kernel in analysis.kernel_names:
             kernel_lower = kernel.lower()
 
@@ -362,6 +374,7 @@ class MemoryAuditor:
 
     def audit_all(self) -> MemoryAuditReport:
         """Audit all Metal shader files in the configured directory."""
+        logger.debug("audit_all called")
         report = MemoryAuditReport(timestamp=time.strftime("%Y-%m-%d %H:%M:%S"))
 
         if not self.shader_dir.exists():
@@ -375,6 +388,7 @@ class MemoryAuditor:
 
     def audit_priority_kernels(self) -> MemoryAuditReport:
         """Audit only the priority kernels: dequant, attention, MoE."""
+        logger.debug("audit_priority_kernels called")
         report = MemoryAuditReport(timestamp=time.strftime("%Y-%m-%d %H:%M:%S"))
 
         priority_files = [
@@ -397,6 +411,7 @@ class MemoryAuditor:
 
 def analyze_shader_file(file_path: str | Path) -> ShaderAnalysis:
     """Convenience function to analyze a single shader file."""
+    logger.debug("analyze_shader_file called with file_path=%s", file_path)
     auditor = MemoryAuditor()
     return auditor.analyze_file(file_path)
 
@@ -421,6 +436,7 @@ def run_coalescing_benchmark(
 
     Returns timing and bandwidth measurements.
     """
+    logger.info("run_coalescing_benchmark starting with pattern=%s, sizes=%s, device=%s", pattern, sizes, device)
     if not HAS_TORCH:
         return {"error": "torch not available for runtime benchmarks"}
 
@@ -444,6 +460,7 @@ def run_coalescing_benchmark(
 
 def _benchmark_pattern(pattern: str, sizes: list[int], device: str) -> dict[str, float]:
     """Benchmark a specific access pattern."""
+    logger.info("_benchmark_pattern starting with pattern=%s, sizes=%s, device=%s", pattern, sizes, device)
     import torch
 
     results = {}
@@ -523,6 +540,7 @@ def analyze_dequant_patterns() -> dict[str, Any]:
        - output[tid * 2] with half4 stores is coalesced
        - 8-byte aligned stores utilize full memory transaction width
     """
+    logger.info("analyze_dequant_patterns called")
     return {
         "kernel": "dequant_int4_kernel / dequant_fp4_kernel",
         "critical_issues": [
@@ -576,6 +594,7 @@ def analyze_attention_patterns() -> dict[str, Any]:
        - K vectors loaded into threadgroup memory
        - Amortizes global memory access across all threads
     """
+    logger.debug("analyze_attention_patterns called")
     return {
         "kernel": "attention_qk_softmax / attention_fused_qkv",
         "critical_issues": [
@@ -638,6 +657,7 @@ def analyze_moe_patterns() -> dict[str, Any]:
        Problem: Atomic adds or separate buffers needed
        Better: Use expert-local output then reduce, or sort to avoid conflicts
     """
+    logger.debug("analyze_moe_patterns called")
     return {
         "kernel": "moe_router_fused / moe_expert_gemm_fp4_grouped",
         "critical_issues": [
@@ -680,6 +700,7 @@ def generate_full_report(output_path: str | Path | None = None) -> str:
     - Runtime benchmark results (if available)
     - Actionable recommendations
     """
+    logger.debug("generate_full_report called with output_path=%s", output_path)
     auditor = MemoryAuditor()
 
     # Static analysis

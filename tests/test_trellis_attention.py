@@ -1,6 +1,7 @@
 """Tests for Trellis Multi-head Latent Attention (MLA) implementation."""
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -11,6 +12,9 @@ from metal_marlin.kv_cache import CacheConfig, KVCache
 from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
 from metal_marlin.trellis.linear import TrellisLinear
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = [
     pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch"),
 ]
@@ -18,12 +22,14 @@ pytestmark = [
 
 def _get_device() -> str:
     """Get appropriate device for tests."""
+    logger.debug("_get_device called")
     return "mps" if HAS_MPS else "cpu"
 
 
 def _create_mock_linear(in_features: int, out_features: int, device: str) -> TrellisLinear:
     """Create a mock TrellisLinear for testing."""
     # Create a simple linear layer with mock quantization
+    logger.debug("_create_mock_linear called with in_features=%s, out_features=%s, device=%s", in_features, out_features, device)
     weight = torch.randn(out_features, in_features, dtype=torch.float16, device=device)
     # For testing, we'll use a regular linear layer wrapped as TrellisLinear
     linear = torch.nn.Linear(
@@ -35,6 +41,7 @@ def _create_mock_linear(in_features: int, out_features: int, device: str) -> Tre
     # Note: This is a simplified mock - real TrellisLinear would have quantized weights
     class MockTrellisLinear:
         def __init__(self, linear_layer):
+            logger.debug("initializing %s with linear_layer=%s", type(self).__name__, linear_layer)
             self.linear = linear_layer
             self.in_features = linear_layer.in_features
             self.out_features = linear_layer.out_features
@@ -50,6 +57,7 @@ class TestTrellisMLAttention:
     @pytest.fixture
     def config(self):
         """Create a TrellisMLAConfig for testing."""
+        logger.debug("config called")
         return TrellisMLAConfig(
             hidden_size=2048,
             num_attention_heads=20,
@@ -64,6 +72,7 @@ class TestTrellisMLAttention:
     @pytest.fixture
     def attention(self, config):
         """Create a TrellisMLAttention instance for testing."""
+        logger.debug("attention called with config=%s", config)
         device = _get_device()
 
         # Create mock linear layers
@@ -95,6 +104,7 @@ class TestTrellisMLAttention:
 
     def test_forward_shape(self, attention):
         """Test forward pass preserves input shape."""
+        logger.info("running test_forward_shape")
         device = _get_device()
         x = torch.randn(1, 32, attention.config.hidden_size, dtype=torch.float16, device=device)
         out = attention(x)
@@ -103,6 +113,7 @@ class TestTrellisMLAttention:
 
     def test_with_kv_cache(self, attention):
         """Test forward pass with KV cache."""
+        logger.info("running test_with_kv_cache")
         device = _get_device()
         from metal_marlin.kv_cache import TrellisKVCache
         
@@ -129,6 +140,7 @@ class TestTrellisMLAttention:
 
     def test_causal_mask(self, attention):
         """Verify causal masking prevents attending to future."""
+        logger.info("running test_causal_mask")
         device = _get_device()
         seq_len = 16
         x = torch.randn(

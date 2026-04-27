@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from metal_marlin.metal_dispatch import MetalKernelLibrary
+
+
+logger = logging.getLogger(__name__)
 
 KERNEL_SYMBOLS = [
     "moe_trellis_swiglu_decode",
@@ -37,6 +41,7 @@ DEFAULT_OUTPUT_PATH = (
 
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Inspect MoE Metal kernel symbol availability."
     )
@@ -51,6 +56,7 @@ def parse_args() -> argparse.Namespace:
 
 def inspect_kernel_symbols(lib: MetalKernelLibrary) -> dict[str, Any]:
     """Check whether each target kernel symbol resolves to a Metal pipeline."""
+    logger.debug("inspect_kernel_symbols called with lib=%s", lib)
     available_kernels: list[str] = []
     missing_kernels: list[str] = []
 
@@ -73,6 +79,7 @@ def inspect_kernel_symbols(lib: MetalKernelLibrary) -> dict[str, Any]:
 
 def main() -> int:
     """Run kernel availability inspection and write JSON output."""
+    logger.info("main starting")
     args = parse_args()
     output_path = args.output.expanduser()
     if not output_path.is_absolute():

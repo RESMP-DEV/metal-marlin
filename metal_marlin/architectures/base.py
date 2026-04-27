@@ -14,6 +14,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
+import logging
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -24,6 +25,9 @@ if TYPE_CHECKING:
     # Type alias for tensor-like objects (torch.Tensor or numpy.ndarray)
     TensorLike = torch.Tensor | Any
 
+
+
+logger = logging.getLogger(__name__)
 
 class HybridLayerType(Enum):
     """Supported layer types in hybrid architectures."""
@@ -81,11 +85,13 @@ class LayerState:
     @classmethod
     def empty(cls, layer_idx: int, state_type: StateType) -> LayerState:
         """Create empty state for initialization."""
+        logger.debug("empty called with layer_idx=%s, state_type=%s", layer_idx, state_type)
         return cls(state_type=state_type, layer_idx=layer_idx)
 
     @classmethod
     def for_attention(cls, layer_idx: int, kv_cache: KVCache) -> LayerState:
         """Create state container for attention layer."""
+        logger.debug("for_attention called with layer_idx=%s, kv_cache=%s", layer_idx, kv_cache)
         return cls(
             state_type=StateType.KV_CACHE,
             layer_idx=layer_idx,
@@ -100,6 +106,7 @@ class LayerState:
         conv_state: Any | None = None,
     ) -> LayerState:
         """Create state container for Mamba layer."""
+        logger.debug("for_mamba called with layer_idx=%s, ssm_state=%s, conv_state=%s", layer_idx, ssm_state, conv_state)
         return cls(
             state_type=StateType.SSM_STATE if conv_state is None else StateType.HYBRID,
             layer_idx=layer_idx,
@@ -109,6 +116,7 @@ class LayerState:
 
     def update_ssm(self, new_ssm_state: Any) -> LayerState:
         """Return new state with updated SSM state."""
+        logger.debug("update_ssm called with new_ssm_state=%s", new_ssm_state)
         return LayerState(
             state_type=self.state_type,
             layer_idx=self.layer_idx,
@@ -120,6 +128,7 @@ class LayerState:
 
     def update_conv(self, new_conv_state: Any) -> LayerState:
         """Return new state with updated conv state."""
+        logger.debug("update_conv called with new_conv_state=%s", new_conv_state)
         return LayerState(
             state_type=self.state_type,
             layer_idx=self.layer_idx,
@@ -177,6 +186,7 @@ class LayerProtocol(Protocol):
         Returns:
             Initialized LayerState appropriate for this layer type.
         """
+        logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
         ...
 
 
@@ -202,6 +212,7 @@ def get_layer_state_size(
     Returns:
         Dict with state component sizes in bytes (assuming float16).
     """
+    logger.debug("get_layer_state_size called with layer_type=%s, hidden_size=%s, d_state=%s", layer_type, hidden_size, d_state)
     inner_dim = hidden_size * expand
 
     if layer_type == HybridLayerType.ATTENTION:
@@ -272,6 +283,7 @@ def estimate_hybrid_state_memory(
     Returns:
         Dict with memory estimates in bytes.
     """
+    logger.debug("estimate_hybrid_state_memory called with layer_types=%s, hidden_size=%s, batch_size=%s", layer_types, hidden_size, batch_size)
     total_fixed = 0
     total_per_seq = 0
 

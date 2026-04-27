@@ -1,9 +1,13 @@
+import logging
 import torch
 import torch.nn as nn
 
 from .metal_dispatch import MetalKernelLibrary
 from .quantized_loader import QuantizedTensor
 
+
+
+logger = logging.getLogger(__name__)
 
 class QuantizedLinear(nn.Module):
     """Linear layer with FP4/INT4 quantized weights using Metal kernels."""
@@ -13,6 +17,7 @@ class QuantizedLinear(nn.Module):
         quantized_weight: QuantizedTensor,
         bias: torch.Tensor | None = None,
     ):
+        logger.debug("initializing %s with quantized_weight=%s, bias=%s", type(self).__name__, quantized_weight, bias)
         super().__init__()
         self.weight_data = quantized_weight.data
         self.weight_scales = quantized_weight.scales
@@ -30,6 +35,7 @@ class QuantizedLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [batch, seq, in_features]
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_shape = x.shape[:-1]
         x_flat = x.view(-1, self.in_features)
 
@@ -50,6 +56,7 @@ class QuantizedLinear(nn.Module):
 
     def _dispatch_quantized_gemm(self, x: torch.Tensor) -> torch.Tensor:
         """Dispatch to appropriate Metal kernel based on format."""
+        logger.info("_dispatch_quantized_gemm called with x=%s", x)
         if self.format == "fp4":
             return self._lib.fp4_gemm(
                 x,

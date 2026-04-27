@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -11,8 +12,12 @@ from metal_marlin.memory.mmfp4_memory import WeightStreamConfig, WeightStreamer
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def dummy_model_dir():
+    logger.debug("dummy_model_dir called")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         
@@ -39,6 +44,7 @@ def dummy_model_dir():
         yield tmp_path
 
 def test_loader_stream_weight(dummy_model_dir):
+    logger.info("running test_loader_stream_weight")
     loader = MMFP4ModelLoader(dummy_model_dir)
     
     # Test streaming a weight
@@ -53,6 +59,7 @@ def test_loader_stream_weight(dummy_model_dir):
     assert torch.allclose(tensor, expected)
 
 def test_weight_streamer_mmap_load(dummy_model_dir):
+    logger.info("running test_weight_streamer_mmap_load")
     config = WeightStreamConfig(enable_mmap=True)
     streamer = WeightStreamer(dummy_model_dir, config=config)
     

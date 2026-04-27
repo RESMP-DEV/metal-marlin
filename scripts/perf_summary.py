@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Print performance summary."""
 
+import logging
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ try:
 except ImportError:
     # Fallback if dependencies are missing
     def detect_gpu():
+        logger.debug("detect_gpu called")
         class MockGPU:
             peak_bw_gbs = 400
             name = "M4 Max (Fallback)"
@@ -21,6 +23,7 @@ except ImportError:
         return MockGPU()
 
     def analyze_bandwidth_bottleneck(achieved, peak, ai, peak_tflops=32.0):
+        logger.debug("analyze_bandwidth_bottleneck called with achieved=%s, peak=%s, ai=%s", achieved, peak, ai)
         util = (achieved / peak) * 100
         return {
             "bound": "memory" if ai < 75 else "compute",
@@ -28,6 +31,9 @@ except ImportError:
             "headroom_pct": 100 - util,
             "arithmetic_intensity": ai
         }
+
+
+logger = logging.getLogger(__name__)
 
 print("=" * 60)
 print("GLM-4.7-Flash Performance Summary")

@@ -14,6 +14,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import struct
 import sys
 from pathlib import Path
@@ -49,6 +50,7 @@ class TestGGUFFormat:
 
     def test_header_magic(self):
         """Verify GGUF magic number detection."""
+        logger.info("running test_header_magic")
         magic = b"GGUF"
         version = 3
         tensor_count = 100
@@ -69,6 +71,7 @@ class TestGGUFFormat:
 
     def test_header_invalid_magic(self):
         """Reject GGUF files with invalid magic."""
+        logger.info("running test_header_invalid_magic")
         invalid_magic = b"BADF"
         header_bytes = (
             invalid_magic + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", 0)
@@ -79,6 +82,7 @@ class TestGGUFFormat:
 
     def test_header_too_short(self):
         """Reject GGUF headers that are too short."""
+        logger.info("running test_header_too_short")
         short_header = b"GGUF" + b"\x03\x00\x00\x00"
         with pytest.raises(ValueError, match="GGUF header too short"):
             GGUFHeader.from_bytes(short_header)
@@ -94,6 +98,7 @@ class TestQ4KBlockUnpacking:
 
     def test_unpack_zero_block(self):
         """Unpack a block with all zero weights."""
+        logger.info("running test_unpack_zero_block")
         block_data = bytes(18)  # All zeros
 
         weights, scales, min_val = unpack_q4_k_block(block_data)
@@ -105,6 +110,7 @@ class TestQ4KBlockUnpacking:
 
     def test_unpack_max_weights(self):
         """Unpack a block with maximum weight values."""
+        logger.info("running test_unpack_max_weights")
         block_data = bytearray(18)
         # All 0xFF in packed weights (all 0xF nibbles)
         for i in range(16):
@@ -122,6 +128,7 @@ class TestQ4KBlockUnpacking:
 
     def test_unpack_alternating_weights(self):
         """Unpack a block with alternating weight values."""
+        logger.info("running test_unpack_alternating_weights")
         block_data = bytearray(18)
 
         # Pack weights: 0, 15, 0, 15, ...
@@ -138,6 +145,7 @@ class TestQ4KBlockUnpacking:
     def test_scale_decoding(self):
         """Test scale value decoding."""
         # Test all 16 possible 4-bit scale values
+        logger.info("running test_scale_decoding")
         for scale_bits in range(16):
             scale = decode_q4_k_scale(scale_bits)
             expected = np.float16(np.exp2(scale_bits) / 16.0)
@@ -146,6 +154,7 @@ class TestQ4KBlockUnpacking:
     def test_min_decoding(self):
         """Test min value decoding."""
         # Test all 16 possible 4-bit min values
+        logger.info("running test_min_decoding")
         for min_bits in range(16):
             min_val = decode_q4_k_min(min_bits)
             expected = np.float16(-np.exp2(min_bits))
@@ -162,6 +171,7 @@ class TestQ4KWeightExtraction:
 
     def test_single_block(self):
         """Extract Q4_K weights from a single block."""
+        logger.info("running test_single_block")
         num_elements = 32
         block_data = bytearray(18)
 
@@ -180,6 +190,7 @@ class TestQ4KWeightExtraction:
 
     def test_multiple_blocks(self):
         """Extract Q4_K weights from multiple blocks."""
+        logger.info("running test_multiple_blocks")
         num_elements = 128  # 4 blocks
         tensor_data = bytearray(4 * 18)
 
@@ -201,6 +212,7 @@ class TestQ4KWeightExtraction:
 
     def test_size_mismatch(self):
         """Reject tensor data with incorrect size."""
+        logger.info("running test_size_mismatch")
         num_elements = 64  # 2 blocks expected
         tensor_data = bytes(18)  # Only 1 block provided
 
@@ -209,6 +221,7 @@ class TestQ4KWeightExtraction:
 
     def test_partial_last_block(self):
         """Handle partial last block correctly."""
+        logger.info("running test_partial_last_block")
         num_elements = 50  # 2 blocks, but only 18 weights in last block
         tensor_data = bytearray(2 * 18)
 
@@ -232,6 +245,7 @@ class TestQ4KCPUDequantization:
 
     def test_dequantize_zero_block(self):
         """Dequantize a block with zero weights."""
+        logger.info("running test_dequantize_zero_block")
         block_data = bytes(18)
         scales = np.float16([1.0, 1.0])
         min_val = np.float16(0.0)
@@ -249,6 +263,7 @@ class TestQ4KCPUDequantization:
 
     def test_dequantize_identity_scale(self):
         """Dequantize with scale=1.0."""
+        logger.info("running test_dequantize_identity_scale")
         num_elements = 32
         block_data = bytearray(18)
 
@@ -272,6 +287,7 @@ class TestQ4KCPUDequantization:
 
     def test_dequantize_with_scale(self):
         """Verify scale factor is applied correctly."""
+        logger.info("running test_dequantize_with_scale")
         num_elements = 32
         block_data = bytearray(18)
 
@@ -291,6 +307,7 @@ class TestQ4KCPUDequantization:
 
     def test_dequantize_multiple_blocks(self):
         """Dequantize multiple blocks."""
+        logger.info("running test_dequantize_multiple_blocks")
         num_elements = 128  # 4 blocks
         tensor_data = bytearray(4 * 18)
 
@@ -317,6 +334,7 @@ class TestQ4KMetalDequantization:
     """Test Metal-based Q4_K dequantization."""
 
     def _check_metal_available(self) -> bool:
+        logger.debug("_check_metal_available called")
         try:
             import Metal
 
@@ -326,6 +344,7 @@ class TestQ4KMetalDequantization:
 
     def _compile_gguf_shader(self):
         """Compile dequant_gguf.metal shader."""
+        logger.info("_compile_gguf_shader starting")
         import Metal
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -344,6 +363,7 @@ class TestQ4KMetalDequantization:
     )
     def test_metal_single_block(self):
         """Test Metal dequantization of a single Q4_K block."""
+        logger.info("running test_metal_single_block")
         import ctypes
 
         import Metal
@@ -407,6 +427,7 @@ class TestQ4KMetalDequantization:
     )
     def test_metal_scale_decoding(self):
         """Test Metal scale value decoding."""
+        logger.info("running test_metal_scale_decoding")
         import Metal
 
         device, library = self._compile_gguf_shader()
@@ -444,6 +465,7 @@ class TestQ4KMetalDequantization:
     )
     def test_metal_min_decoding(self):
         """Test Metal min value decoding."""
+        logger.info("running test_metal_min_decoding")
         import Metal
 
         device, library = self._compile_gguf_shader()
@@ -487,6 +509,7 @@ class TestQ4KMetalPreparation:
 
     def test_prepare_for_metal(self):
         """Prepare Q4_K weights for Metal buffers."""
+        logger.info("running test_prepare_for_metal")
         num_elements = 64
         tensor_data = bytearray(2 * 18)
 
@@ -505,6 +528,7 @@ class TestQ4KMetalPreparation:
 
     def test_metal_buffer_layout(self):
         """Verify Metal buffer layout matches kernel expectations."""
+        logger.info("running test_metal_buffer_layout")
         num_elements = 256  # 8 blocks
         tensor_data = bytearray(8 * 18)
 
@@ -534,10 +558,12 @@ class TestQ4KIntegration:
         """Test GGUF model loading."""
         # This would require a real GGUF file
         # For now, just verify the function exists and returns correct type
+        logger.info("running test_load_gguf_model")
         assert callable(load_gguf_model)
 
     def test_get_q4_k_tensors(self):
         """Test filtering Q4_K tensors."""
+        logger.info("running test_get_q4_k_tensors")
         import struct
         import tempfile
 
@@ -588,6 +614,7 @@ class TestGGUFMetadataExtraction:
 
     def test_basic_metadata_properties(self):
         """Test basic metadata property access."""
+        logger.info("running test_basic_metadata_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -606,6 +633,7 @@ class TestGGUFMetadataExtraction:
 
     def test_extended_metadata_properties(self):
         """Test extended metadata properties for config parity."""
+        logger.info("running test_extended_metadata_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -642,6 +670,7 @@ class TestGGUFMetadataExtraction:
 
     def test_rope_scaling_properties(self):
         """Test extended RoPE scaling properties."""
+        logger.info("running test_rope_scaling_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -666,6 +695,7 @@ class TestGGUFMetadataExtraction:
 
     def test_ssm_properties(self):
         """Test SSM (Mamba) metadata properties."""
+        logger.info("running test_ssm_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -684,6 +714,7 @@ class TestGGUFMetadataExtraction:
 
     def test_split_metadata_properties(self):
         """Test split/sharding metadata properties."""
+        logger.info("running test_split_metadata_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -700,6 +731,7 @@ class TestGGUFMetadataExtraction:
 
     def test_extended_tokenizer_properties(self):
         """Test extended tokenizer metadata properties."""
+        logger.info("running test_extended_tokenizer_properties")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -728,6 +760,7 @@ class TestGGUFMetadataExtraction:
 
     def test_extract_config_includes_all_fields(self):
         """Test that extract_config includes all metadata fields."""
+        logger.info("running test_extract_config_includes_all_fields")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -772,6 +805,7 @@ class TestGGUFMetadataExtraction:
 
     def test_summary_includes_extended_metadata(self):
         """Test that summary includes extended metadata when available."""
+        logger.info("running test_summary_includes_extended_metadata")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -794,6 +828,7 @@ class TestGGUFMetadataExtraction:
 
     def test_is_architecture_helper(self):
         """Test the is_architecture helper method."""
+        logger.info("running test_is_architecture_helper")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -808,6 +843,7 @@ class TestGGUFMetadataExtraction:
 
     def test_get_arch_key_helper(self):
         """Test the get_arch_key helper method."""
+        logger.info("running test_get_arch_key_helper")
         from metal_marlin.gguf_loader import GGUFMetadata
 
         meta = GGUFMetadata({
@@ -834,3 +870,6 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+logger = logging.getLogger(__name__)

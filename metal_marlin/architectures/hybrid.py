@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -24,6 +25,9 @@ from .config import (
     HybridLayerConfig,
     MambaLayerConfig,
 )
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -65,6 +69,7 @@ class HybridBlock(nn.Module):
             intermediate_size: MLP intermediate size. Default 4 * hidden_size.
             shared_attention: Optional attention layer for SHARED_ATTENTION type.
         """
+        logger.debug("initializing %s with layer_config=%s, hidden_size=%s, intermediate_size=%s, shared_attention=%s, layer_idx=%s", type(self).__name__, layer_config, hidden_size, intermediate_size, shared_attention, layer_idx)
         require_torch("HybridBlock")
         super().__init__()
 
@@ -96,6 +101,7 @@ class HybridBlock(nn.Module):
         shared_attention: Any | None = None,
     ) -> nn.Module:
         """Build the layer implementation based on type."""
+        logger.info("_build_layer starting")
         if config.layer_type == HybridLayerType.ATTENTION:
             return self._build_attention(config)
 
@@ -132,6 +138,7 @@ class HybridBlock(nn.Module):
 
     def _build_attention(self, config: HybridLayerConfig) -> nn.Module:
         """Build attention-based transformer block."""
+        logger.info("_build_attention starting")
         from ..transformer import MarlinTransformerBlock
 
         attn_cfg = config.attention_config or AttentionLayerConfig()
@@ -161,6 +168,7 @@ class HybridBlock(nn.Module):
         For shared attention, we wrap the shared layer to use its weights
         but maintain separate state.
         """
+        logger.info("_build_shared_attention starting")
         return SharedAttentionWrapper(
             shared_layer=shared_layer,
             norm_eps=config.norm_eps,
@@ -171,6 +179,7 @@ class HybridBlock(nn.Module):
 
     def _build_mamba(self, config: HybridLayerConfig) -> MarlinMambaBlock:  # type: ignore[name-defined]
         """Build Mamba block."""
+        logger.info("_build_mamba starting")
         from .mamba import MarlinMambaBlock
 
         mamba_cfg = config.mamba_config or MambaLayerConfig()
@@ -191,6 +200,7 @@ class HybridBlock(nn.Module):
     def _build_mlp_only(self, config: HybridLayerConfig) -> MLPOnlyBlock:  # type: ignore[name-defined]
         """Build MLP-only block (no attention/SSM)."""
 
+        logger.info("_build_mlp_only starting")
         quant_cfg = config.quant_config or LayerQuantConfig(Precision.FP4_E2M1, 128)
         quant_type = _precision_to_str(quant_cfg.precision)
         activation = cast(Literal["silu", "gelu", "relu"], config.mlp_activation)
@@ -207,6 +217,7 @@ class HybridBlock(nn.Module):
 
     def _build_linear_attention(self, config: HybridLayerConfig) -> RWKVBlock:  # type: ignore[name-defined]
         """Build RWKV block for linear attention."""
+        logger.info("_build_linear_attention starting")
         from .rwkv import RWKVBlock
 
         attn_cfg = config.attention_config or AttentionLayerConfig()
@@ -230,6 +241,7 @@ class HybridBlock(nn.Module):
         MoE is complex enough that it should use existing infrastructure.
         This is a placeholder for integration with MoE dispatch.
         """
+        logger.info("_build_moe starting")
         raise NotImplementedError(
             "MoE blocks should use dedicated MoE infrastructure. "
             "See moe_dispatch.py for token routing."
@@ -255,6 +267,7 @@ class HybridBlock(nn.Module):
         Returns:
             (output, new_state) where output is [batch, seq_len, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if self.layer_type in (HybridLayerType.ATTENTION, HybridLayerType.SHARED_ATTENTION):
             # Attention layers use transformer block interface
             kv_cache = state.kv_cache if state else None
@@ -292,6 +305,7 @@ class HybridBlock(nn.Module):
 
     def init_state(self, batch_size: int, layer_idx: int) -> LayerState | None:
         """Initialize state for this layer."""
+        logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
         if hasattr(self.layer, "init_state"):
             return self.layer.init_state(batch_size, layer_idx)
         return None
@@ -313,6 +327,7 @@ class SharedAttentionWrapper(nn.Module):
         intermediate_size: int,
         quant_config: LayerQuantConfig | None = None,
     ):
+        logger.debug("initializing %s with shared_layer=%s, norm_eps=%s, hidden_size=%s, intermediate_size=%s, quant_config=%s", type(self).__name__, shared_layer, norm_eps, hidden_size, intermediate_size, quant_config)
         require_torch("SharedAttentionWrapper")
         super().__init__()
 
@@ -346,6 +361,7 @@ class SharedAttentionWrapper(nn.Module):
     ) -> torch.Tensor:
         """Forward with shared attention weights."""
         # Attention with residual
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.shared_attention(
@@ -385,6 +401,7 @@ class MLPOnlyBlock(nn.Module):
         gated: bool = True,
         activation: Literal["silu", "gelu", "relu"] = "silu",
     ):
+        logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, quant_type=%s, group_size=%s, norm_eps=%s", type(self).__name__, hidden_size, intermediate_size, quant_type, group_size, norm_eps)
         require_torch("MLPOnlyBlock")
         super().__init__()
 
@@ -402,6 +419,7 @@ class MLPOnlyBlock(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         residual = hidden_states
         hidden_states = self.norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -412,12 +430,14 @@ class RMSNorm(nn.Module):
     """RMSNorm for hybrid blocks."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-6):
+        logger.debug("initializing %s with hidden_size=%s, eps=%s", type(self).__name__, hidden_size, eps)
         require_torch("RMSNorm")
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
@@ -439,6 +459,7 @@ class HybridModel(nn.Module):
         Args:
             config: Full architecture configuration.
         """
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         require_torch("HybridModel")
         super().__init__()
 
@@ -473,6 +494,7 @@ class HybridModel(nn.Module):
 
     def _build_layers(self, config: HybridArchitectureConfig) -> list[HybridBlock]:
         """Build the layer stack respecting weight sharing."""
+        logger.info("_build_layers starting")
         layers: list[HybridBlock] = []
 
         for i, layer_config in enumerate(config.layer_configs or []):
@@ -517,6 +539,7 @@ class HybridModel(nn.Module):
             (logits, new_states) where logits is [batch, seq_len, vocab_size]
         """
         # Embed
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         hidden_states = self.embed_tokens(input_ids)
 
         # Process through layers
@@ -546,11 +569,13 @@ class HybridModel(nn.Module):
 
     def init_states(self, batch_size: int) -> list[LayerState | None]:
         """Initialize states for all layers."""
+        logger.debug("init_states called with batch_size=%s", batch_size)
         return [layer.init_state(batch_size, i) for i, layer in enumerate(self.layers)]
 
     def get_layer_types(self) -> list[HybridLayerType]:
         """Get list of layer types in order."""
         # Use self.layers[i].layer_type which is set in HybridBlock.__init__
+        logger.debug("get_layer_types called")
         typed_layers: list[HybridBlock] = list(self.layers)  # type: ignore[arg-type]
         return [layer.layer_type for layer in typed_layers]
 
@@ -574,6 +599,7 @@ class HybridModelBuilder:
         Returns:
             Initialized HybridModel (weights are random).
         """
+        logger.debug("from_config called with config=%s", config)
         return HybridModel(config)
 
     @staticmethod
@@ -594,6 +620,7 @@ class HybridModelBuilder:
               }
             }
         """
+        logger.debug("from_dict called with config_dict=%s", config_dict)
         config = build_hybrid_config(config_dict)
         return HybridModel(config)
 
@@ -614,6 +641,7 @@ class HybridModelBuilder:
             HybridModel with loaded weights.
         """
         # Load config
+        logger.debug("from_pretrained called with model_path=%s, quant_type=%s, group_size=%s", model_path, quant_type, group_size)
         config = HybridArchitectureConfig.from_pretrained(model_path)
 
         # Override quantization settings
@@ -646,6 +674,7 @@ class HybridModelBuilder:
         Returns:
             Dict with memory estimates in bytes.
         """
+        logger.debug("estimate_memory called with config=%s, batch_size=%s, max_seq_len=%s", config, batch_size, max_seq_len)
         from .base import estimate_hybrid_state_memory
 
         # State memory
@@ -701,6 +730,7 @@ class HybridModelBuilder:
 
 def build_hybrid_config(config_dict: dict[str, Any]) -> HybridArchitectureConfig:
     """Build HybridArchitectureConfig from a simple config dict."""
+    logger.info("build_hybrid_config starting")
     layer_types = config_dict.get("layer_types") or []
     if not layer_types:
         raise ValueError("Hybrid config requires non-empty 'layer_types'.")
@@ -767,6 +797,7 @@ def _resolve_shared_attention(
     layer_idx: int,
 ) -> Any | None:
     """Resolve which attention layer to share weights from."""
+    logger.debug("_resolve_shared_attention called with layers=%s, layer_config=%s, layer_idx=%s", layers, layer_config, layer_idx)
     if layer_config.shared_layer_idx is not None:
         if layer_config.shared_layer_idx >= len(layers):
             raise ValueError(
@@ -794,6 +825,7 @@ def _detect_architecture_from_layer_types(
     layer_types: list[str | HybridLayerType],
 ) -> str:
     """Infer architecture name from layer type list."""
+    logger.debug("_detect_architecture_from_layer_types called with layer_types=%s", layer_types)
     normalized = []
     for lt in layer_types:
         if isinstance(lt, HybridLayerType):
@@ -827,6 +859,7 @@ def _parse_quant_config(
     default: LayerQuantConfig,
 ) -> LayerQuantConfig:
     """Parse a quantization config dictionary or shorthand."""
+    logger.info("_parse_quant_config called with raw=%s, default=%s", raw, default)
     if raw is None:
         return default
     if isinstance(raw, LayerQuantConfig):
@@ -847,6 +880,7 @@ def _parse_quant_config(
 
 def _precision_to_str(precision: Precision) -> str:
     """Convert Precision enum to string for MarlinLinear."""
+    logger.debug("_precision_to_str called with precision=%s", precision)
     mapping = {
         Precision.FP4_E2M1: "fp4",
         Precision.INT4: "int4",
@@ -860,6 +894,7 @@ def _precision_to_str(precision: Precision) -> str:
 
 def _str_to_precision(quant_type: str) -> Precision:
     """Convert string to Precision enum."""
+    logger.debug("_str_to_precision called with quant_type=%s", quant_type)
     mapping = {
         "fp4": Precision.FP4_E2M1,
         "int4": Precision.INT4,
@@ -873,6 +908,7 @@ def _str_to_precision(quant_type: str) -> Precision:
 
 def _precision_to_bits(precision: Precision) -> int:
     """Get bit width for precision."""
+    logger.debug("_precision_to_bits called with precision=%s", precision)
     mapping = {
         Precision.FP16: 16,
         Precision.BF16: 16,
@@ -895,6 +931,7 @@ def _load_weights(model: HybridModel, model_path: Path) -> HybridModel:
     mapping is not implemented yet, so models will initialize with random
     weights when calling from_pretrained.
     """
+    logger.info("_load_weights called with model=%s, model_path=%s", model, model_path)
     import glob
 
     safetensor_files = glob.glob(str(model_path / "*.safetensors"))

@@ -1,6 +1,7 @@
 """Regression tests for grouped routing in dispatch_moe_trellis_swiglu hot path."""
 
 from __future__ import annotations
+import logging
 
 from types import SimpleNamespace
 
@@ -11,19 +12,25 @@ from metal_marlin import moe_dispatch as parent_moe_dispatch
 from metal_marlin.trellis import moe_dispatch as trellis_moe_dispatch
 
 
+
+logger = logging.getLogger(__name__)
+
 class _FakeCommandBuffer:
     def waitUntilCompleted(self) -> None:
+        logger.debug("waitUntilCompleted called")
         return None
 
 
 class _FakeBufferPool:
     def __init__(self, hidden_dim: int) -> None:
+        logger.debug("initializing %s with hidden_dim=%s", type(self).__name__, hidden_dim)
         self.hidden_dim = hidden_dim
         self.last_activations: torch.Tensor | None = None
         self.last_expert_ids: torch.Tensor | None = None
         self.last_expert_probs: torch.Tensor | None = None
 
     def get_activation_buffer(self, batch_size: int, activations: torch.Tensor) -> object:
+        logger.debug("get_activation_buffer called with batch_size=%s, activations=%s", batch_size, activations)
         assert activations.shape[0] == batch_size
         self.last_activations = activations.clone()
         return object()
@@ -34,6 +41,7 @@ class _FakeBufferPool:
         top_k: int,
         expert_ids: torch.Tensor,
     ) -> object:
+        logger.debug("get_expert_ids_buffer called with batch_size=%s, top_k=%s, expert_ids=%s", batch_size, top_k, expert_ids)
         assert expert_ids.shape == (batch_size, top_k)
         self.last_expert_ids = expert_ids.clone()
         return object()
@@ -44,11 +52,13 @@ class _FakeBufferPool:
         top_k: int,
         expert_probs: torch.Tensor,
     ) -> object:
+        logger.debug("get_expert_probs_buffer called with batch_size=%s, top_k=%s, expert_probs=%s", batch_size, top_k, expert_probs)
         assert expert_probs.shape == (batch_size, top_k)
         self.last_expert_probs = expert_probs.clone()
         return object()
 
     def get_output_buffer(self, batch_size: int) -> tuple[torch.Tensor, object]:
+        logger.debug("get_output_buffer called with batch_size=%s", batch_size)
         row_values = torch.arange(1, batch_size + 1, dtype=torch.float32).unsqueeze(1)
         output_fp32 = row_values.repeat(1, self.hidden_dim)
         return output_fp32, object()
@@ -62,6 +72,7 @@ class _FakeBufferPool:
         top_k: int,
         bits: int,
     ) -> object:
+        logger.debug("get_params_buffer called with batch_size=%s, hidden_dim=%s, intermediate_dim=%s", batch_size, hidden_dim, intermediate_dim)
         assert hidden_dim == self.hidden_dim
         assert batch_size > 0
         assert intermediate_dim > 0
@@ -71,6 +82,7 @@ class _FakeBufferPool:
         return object()
 
     def get_output_fp16(self, batch_size: int) -> torch.Tensor:
+        logger.debug("get_output_fp16 called with batch_size=%s", batch_size)
         return torch.zeros(batch_size, self.hidden_dim, dtype=torch.float16)
 
 
@@ -79,6 +91,7 @@ def _build_dispatch_info_no_argsort(
     num_experts: int,
 ) -> parent_moe_dispatch.MoEDispatchInfo:
     """Build MoEDispatchInfo grouped by expert without using torch.argsort."""
+    logger.info("_build_dispatch_info_no_argsort starting")
     batch_size, top_k = expert_ids.shape
     total = batch_size * top_k
     flat_expert_ids = expert_ids.reshape(-1).tolist()
@@ -116,6 +129,7 @@ def test_dispatch_moe_trellis_swiglu_hotpath_uses_grouped_routing(
     top_k: int,
 ) -> None:
     """Hot path should use grouped routing prep (no direct torch.argsort)."""
+    logger.info("running test_dispatch_moe_trellis_swiglu_hotpath_uses_grouped_routing")
     batch_size = 3
     hidden_dim = 6
     intermediate_dim = 12
@@ -142,6 +156,7 @@ def test_dispatch_moe_trellis_swiglu_hotpath_uses_grouped_routing(
         expert_probs: torch.Tensor,
         num_experts: int,
     ) -> parent_moe_dispatch.MoEDispatchInfo:
+        logger.debug("_fake_group_tokens_mixed_bpw_primary_gpu called")
         del expert_probs
         grouped_call_count[0] += 1
         return _build_dispatch_info_no_argsort(expert_ids.to(torch.int64), num_experts)

@@ -9,10 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+import logging
 from typing import Any, Protocol
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class CalibrationDataset(Protocol):
     """Protocol for calibration datasets."""
@@ -75,6 +79,7 @@ class CalibrationStreamer:
         max_seq_len: int = 2048,
         target_memory_gb: float = 8.0,
     ):
+        logger.debug("initializing %s with dataset=%s, tokenizer=%s, max_seq_len=%s, target_memory_gb=%s", type(self).__name__, dataset, tokenizer, max_seq_len, target_memory_gb)
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
@@ -98,6 +103,7 @@ class CalibrationStreamer:
         Returns:
             Maximum batch size (at least 1)
         """
+        logger.debug("estimate_batch_size called with hidden_dim=%s", hidden_dim)
         bytes_per_sample = self.max_seq_len * hidden_dim * 4
         hessian_bytes = hidden_dim * hidden_dim * 8  # float64
         available = int(self.target_memory_gb * 1e9) - hessian_bytes
@@ -119,6 +125,7 @@ class CalibrationStreamer:
         Raises:
             ValueError: If the dataset is empty
         """
+        logger.debug("iter_batches called with hidden_dim=%s", hidden_dim)
         batch_size = self.estimate_batch_size(hidden_dim)
         samples = list(self.dataset)
 

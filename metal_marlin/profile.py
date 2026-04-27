@@ -2,6 +2,7 @@
 Kernel profiling utilities.
 """
 
+import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -10,8 +11,12 @@ from dataclasses import dataclass
 from ._compat import HAS_TORCH, torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def _gpu_sync() -> None:
     """Synchronize GPU if torch MPS is available."""
+    logger.debug("_gpu_sync called")
     if HAS_TORCH and torch is not None and torch.backends.mps.is_available():
         torch.mps.synchronize()
 
@@ -31,6 +36,7 @@ _profiles: list[KernelProfile] = []
 def profile_kernel(name: str) -> Iterator[None]:
     """Profile a kernel execution."""
     # Force sync before
+    logger.debug("profile_kernel called with name=%s", name)
     _gpu_sync()
 
     cpu_start = time.perf_counter()
@@ -52,6 +58,7 @@ def profile_kernel(name: str) -> Iterator[None]:
 
 def print_profiles() -> None:
     """Print collected profiles."""
+    logger.debug("print_profiles called")
     print(f"{'Kernel':<40} {'CPU Time (ms)':>15}")
     print("-" * 55)
     for p in _profiles:
@@ -60,6 +67,7 @@ def print_profiles() -> None:
 
 def clear_profiles() -> None:
     """Clear collected profiles."""
+    logger.debug("clear_profiles called")
     _profiles.clear()
 
 

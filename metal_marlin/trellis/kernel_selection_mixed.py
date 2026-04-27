@@ -34,8 +34,12 @@ Key Features:
 from __future__ import annotations
 
 import random
+import logging
 import time
 from collections import Counter
+
+
+logger = logging.getLogger(__name__)
 
 # --- Existing kernel definitions from kernel_selection.py ---
 M4_MAX_THRESHOLDS = {
@@ -65,11 +69,13 @@ class KernelFeedback:
     """A simple feedback mechanism to track kernel performance."""
 
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.timings = {}  # (kernel_name, batch_size) -> [exec_time, ...]
         self.selection_log = []
 
     def record_timing(self, kernel_name: str, batch_size: int, exec_time: float):
         """Records the execution time for a given kernel and batch size."""
+        logger.debug("record_timing called with kernel_name=%s, batch_size=%s, exec_time=%s", kernel_name, batch_size, exec_time)
         key = (kernel_name, batch_size)
         if key not in self.timings:
             self.timings[key] = []
@@ -77,6 +83,7 @@ class KernelFeedback:
 
     def get_best_for_batch_size(self, batch_size: int):
         """Gets the historically best-performing kernel for a batch size."""
+        logger.debug("get_best_for_batch_size called with batch_size=%s", batch_size)
         best_kernel = None
         min_avg_time = float("inf")
         for (kernel, b_size), times in self.timings.items():
@@ -92,6 +99,7 @@ class KernelABTester:
     """A/B testing framework for comparing kernel performance."""
 
     def __init__(self, feedback_system: KernelFeedback):
+        logger.debug("initializing %s with feedback_system=%s", type(self).__name__, feedback_system)
         self.feedback = feedback_system
         self.enabled = False  # Disabled by default to avoid overhead
 
@@ -103,6 +111,7 @@ class KernelABTester:
         NOTE: This is a placeholder. A real implementation would need to
               execute the Metal kernels and synchronize properly.
         """
+        logger.debug("run_and_select called with kernel_a=%s, kernel_b=%s", kernel_a, kernel_b)
         if not self.enabled:
             # If not enabled, default to the first kernel provided (heuristic choice)
             return kernel_a
@@ -169,6 +178,7 @@ def select_intelligent_kernel(
         A tuple of (kernel_name, tile_size).
     """
     # If no expert BPW data, fall back to standard selection
+    logger.debug("select_intelligent_kernel called with batch_size=%s, expert_bpw=%s, use_fp32_acc=%s", batch_size, expert_bpw, use_fp32_acc)
     if not expert_bpw:
         return get_kernel_for_batch_size(
             batch_size, use_fp32_acc, gate_bits, up_bits, down_bits, available_kernels
@@ -221,6 +231,7 @@ def get_kernel_for_batch_size(
     Select optimal MoE kernel and tile size for given batch size.
     (Based on the implementation in kernel_selection.py)
     """
+    logger.debug("get_kernel_for_batch_size called with batch_size=%s, use_fp32_acc=%s, gate_bits=%s", batch_size, use_fp32_acc, gate_bits)
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     

@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 import torch.nn as nn
@@ -26,6 +27,9 @@ from .layer import TrellisDenseMLP
 from .linear import TrellisLinear
 from .model import TrellisDecoderLayer, TrellisForCausalLM, TrellisMoEMLP
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MockTrellisWeight:
@@ -60,6 +64,7 @@ def create_mock_trellis_linear(
     Returns:
         TrellisLinear with random but valid packed weights.
     """
+    logger.debug("create_mock_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     TILE_DIM = 16
     # TrellisWeight convention: K = out_features, N = in_features
     # This matches how TrellisLinear and loader expect weights
@@ -119,6 +124,7 @@ def create_mock_dense_mlp(
         bits: Quantization bits (2, 3, or 4).
         device: Target device.
     """
+    logger.debug("create_mock_dense_mlp called with hidden_dim=%s, intermediate_dim=%s, bits=%s", hidden_dim, intermediate_dim, bits)
     gate_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     up_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     down_proj = create_mock_trellis_linear(intermediate_dim, hidden_dim, bits, device)
@@ -150,6 +156,7 @@ def create_mock_moe_mlp(
             tensors. Set False for validation scripts that need both fast and
             slow paths to work (slow path uses PyTorch weights directly).
     """
+    logger.debug("create_mock_moe_mlp called with hidden_dim=%s, intermediate_dim=%s, num_experts=%s", hidden_dim, intermediate_dim, num_experts)
     router = nn.Linear(hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32)
     nn.init.xavier_uniform_(router.weight)
 
@@ -191,6 +198,7 @@ def create_mini_config(
         moe_intermediate_size: MoE expert hidden size (default 256).
         vocab_size: Vocabulary size (default 1000).
     """
+    logger.debug("create_mini_config called with hidden_size=%s, num_hidden_layers=%s, num_experts=%s", hidden_size, num_hidden_layers, num_experts)
     return TrellisModelConfig(
         hidden_size=hidden_size,
         num_hidden_layers=num_hidden_layers,
@@ -243,6 +251,7 @@ def create_mini_model(
         >>> logits = model(x)
         >>> assert not logits.isnan().any()
     """
+    logger.debug("create_mini_model called with config=%s, device=%s, seed=%s", config, device, seed)
     torch.manual_seed(seed)
 
     if config is None:
@@ -274,6 +283,7 @@ def _create_mock_decoder_layer(
 ) -> TrellisDecoderLayer:
     """Create a mock decoder layer with random weights."""
 
+    logger.debug("_create_mock_decoder_layer called with config=%s, layer_idx=%s, device=%s", config, layer_idx, device)
     layer = TrellisDecoderLayer(config, layer_idx, device)
 
     # Create attention (simplified - not MLA for testing)
@@ -309,6 +319,7 @@ class _MockAttention(nn.Module):
     """Simplified attention for testing (no MLA complexity)."""
 
     def __init__(self, config: TrellisModelConfig, device: str):
+        logger.debug("initializing %s with config=%s, device=%s", type(self).__name__, config, device)
         super().__init__()
         self.hidden_size = config.hidden_size
         # Simple linear for testing - not real attention
@@ -323,6 +334,7 @@ class _MockAttention(nn.Module):
     ) -> torch.Tensor:
         # Simplified: just project (no actual attention computation)
         # This is sufficient for MoE/MLP kernel testing
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         return self.proj(hidden_states)
 
 

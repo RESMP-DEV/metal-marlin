@@ -1,4 +1,5 @@
 """Performance regression tests for MMFP4 kernels."""
+import logging
 import os
 import time
 
@@ -6,6 +7,9 @@ import pytest
 import torch
 
 from metal_marlin.layers.mmfp4_expert import MMFP4Expert
+
+
+logger = logging.getLogger(__name__)
 
 # Skip in CI (no GPU)
 pytestmark = pytest.mark.skipif(
@@ -23,6 +27,7 @@ THRESHOLDS = {
 class TestMMFP4PerfRegression:
     @pytest.fixture
     def expert(self):
+        logger.debug("expert called")
         return MMFP4Expert(
             hidden_size=2048,
             moe_intermediate_size=1536,
@@ -30,6 +35,7 @@ class TestMMFP4PerfRegression:
         ).to("mps")
 
     def _bench(self, fn, warmup=10, iters=50):
+        logger.info("_bench starting with fn=%s, warmup=%s, iters=%s", fn, warmup, iters)
         for _ in range(warmup):
             fn()
         torch.mps.synchronize()
@@ -40,12 +46,14 @@ class TestMMFP4PerfRegression:
         return (time.perf_counter() - start) / iters * 1000
 
     def test_moe_expert_standard_perf(self, expert):
+        logger.info("running test_moe_expert_standard_perf")
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         ms = self._bench(lambda: expert(x))
         assert ms < THRESHOLDS["moe_expert_standard_ms"], \
             f"MoE standard {ms:.1f}ms > {THRESHOLDS['moe_expert_standard_ms']}ms"
 
     def test_moe_expert_fused_perf(self, expert):
+        logger.info("running test_moe_expert_fused_perf")
         expert.use_fused = True
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         out = expert(x)

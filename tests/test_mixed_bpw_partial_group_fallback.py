@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import pytest
 import torch
@@ -17,6 +18,9 @@ try:
 except ImportError:
     HAS_TRELLIS = False
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class _MockTrellisWeight:
@@ -34,6 +38,7 @@ def _create_mock_trellis_linear(
     bits: int,
     device: str,
 ) -> TrellisLinear:
+    logger.debug("_create_mock_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     tile_dim = 16
     tiles_k = (out_features + tile_dim - 1) // tile_dim
     tiles_n = (in_features + tile_dim - 1) // tile_dim
@@ -72,6 +77,7 @@ def _create_mock_dense_mlp(
     bits: int,
     device: str,
 ) -> TrellisDenseMLP:
+    logger.debug("_create_mock_dense_mlp called with hidden_dim=%s, intermediate_dim=%s, bits=%s", hidden_dim, intermediate_dim, bits)
     gate_proj = _create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     up_proj = _create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     down_proj = _create_mock_trellis_linear(intermediate_dim, hidden_dim, bits, device)
@@ -85,6 +91,7 @@ def _create_mock_moe_mlp_mixed(
     num_experts_per_tok: int = 3,
     device: str = "cpu",
 ) -> TrellisMoEMLP:
+    logger.debug("_create_mock_moe_mlp_mixed called with hidden_dim=%s, intermediate_dim=%s, bits_per_expert=%s", hidden_dim, intermediate_dim, bits_per_expert)
     num_experts = len(bits_per_expert)
     router = nn.Linear(
         hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32
@@ -111,6 +118,7 @@ def test_mixed_bpw_partial_group_fallback_is_tuple_scoped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unavailable bit tuples should fallback locally, not force global fallback."""
+    logger.info("running test_mixed_bpw_partial_group_fallback_is_tuple_scoped")
     import metal_marlin.trellis.moe_dispatch as moe_dispatch_mod
 
     torch.manual_seed(2026)
@@ -140,6 +148,7 @@ def test_mixed_bpw_partial_group_fallback_is_tuple_scoped(
     monkeypatch.setattr(mlp, "_get_cached_buffers", lambda: object())
 
     def _fail_global_fallback(*_args: object, **_kwargs: object) -> torch.Tensor:
+        logger.debug("_fail_global_fallback called")
         raise AssertionError("Global fallback should not run for partial tuple unavailability.")
 
     monkeypatch.setattr(mlp, "_forward_grouped_fallback", _fail_global_fallback)
@@ -158,6 +167,7 @@ def test_mixed_bpw_partial_group_fallback_is_tuple_scoped(
         bit_group_buffers: dict[tuple[int, int, int], tuple[list[int], object]],
         **_kwargs: object,
     ) -> torch.Tensor:
+        logger.debug("_fake_grouped_dispatch called")
         nonlocal grouped_calls
         grouped_calls += 1
 
@@ -190,6 +200,7 @@ def test_mixed_bpw_partial_group_fallback_is_tuple_scoped(
         bits: tuple[int, int, int],
         **_kwargs: object,
     ) -> torch.Tensor:
+        logger.debug("_fake_tuple_fallback called with _lib=%s", _lib)
         nonlocal fallback_calls
         fallback_calls += 1
         fallback_tuples.append(bits)

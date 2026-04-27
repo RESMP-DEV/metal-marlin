@@ -17,6 +17,7 @@ Usage:
 
 import asyncio
 import json
+import logging
 import sys
 import time
 from typing import Any
@@ -28,6 +29,9 @@ except ImportError as e:
     print(f"❌ Missing dependencies: {e}")
     print("Install with: uv add requests openai")
     sys.exit(1)
+
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://127.0.0.1:8000"
 TARGET_TPS = 35.0
@@ -44,6 +48,7 @@ class Colors:
 
 
 def print_header(msg: str) -> None:
+    logger.debug("print_header called with msg=%s", msg)
     print(f"\n{Colors.BOLD}{'='*70}{Colors.END}")
     print(f"{Colors.BOLD}{msg:^70}{Colors.END}")
     print(f"{Colors.BOLD}{'='*70}{Colors.END}\n")
@@ -51,6 +56,7 @@ def print_header(msg: str) -> None:
 
 def print_result(name: str, value: Any, target: Any = None, unit: str = "") -> bool:
     """Print test result with color coding."""
+    logger.debug("print_result called with name=%s, value=%s, target=%s", name, value, target)
     if target is not None:
         passed = value >= target if isinstance(
             target, (int, float)) else value == target
@@ -66,6 +72,7 @@ def print_result(name: str, value: Any, target: Any = None, unit: str = "") -> b
 
 def check_server_health() -> bool:
     """Verify server is running and responsive."""
+    logger.debug("check_server_health called")
     try:
         response = requests.get(f"{BASE_URL}/health", timeout=5)
         return response.status_code == 200
@@ -79,6 +86,7 @@ def test_tps_single_request(client: OpenAI, prompt: str, max_tokens: int = 100) 
     Returns:
         Tuple of (tps, tokens_generated, latency_ms)
     """
+    logger.info("running test_tps_single_request")
     start = time.time()
 
     response = client.chat.completions.create(
@@ -104,6 +112,7 @@ def test_tps_single_request(client: OpenAI, prompt: str, max_tokens: int = 100) 
 
 def test_latency_breakdown(client: OpenAI, prompt: str, max_tokens: int = 50) -> dict[str, float]:
     """Measure TTFT (Time To First Token) and TPOT (Time Per Output Token)."""
+    logger.info("running test_latency_breakdown")
     start = time.time()
     first_token_time = None
     tokens_received = 0
@@ -141,7 +150,9 @@ def test_latency_breakdown(client: OpenAI, prompt: str, max_tokens: int = 50) ->
 async def test_concurrent_tps(client: AsyncOpenAI, num_requests: int = 5, tokens_per_request: int = 50) -> dict[str, float]:
     """Test aggregate TPS with concurrent requests."""
 
+    logger.info("running test_concurrent_tps")
     async def make_request(prompt: str) -> tuple[int, float]:
+        logger.debug("make_request called with prompt=%s", prompt)
         start = time.time()
         response = await client.chat.completions.create(
             model="glm-4.7-flash",
@@ -181,6 +192,7 @@ def test_perplexity(client: OpenAI, test_texts: list[str]) -> float:
     Note: This requires the perplexity endpoint to be implemented.
     Falls back to manual calculation if endpoint not available.
     """
+    logger.info("running test_perplexity")
     try:
         # Try the dedicated perplexity endpoint
         response = requests.post(
@@ -233,6 +245,7 @@ def test_perplexity(client: OpenAI, test_texts: list[str]) -> float:
 
 def test_model_quality(client: OpenAI) -> dict[str, Any]:
     """Test model quality with various prompts."""
+    logger.info("running test_model_quality")
     test_cases = [
         {
             "prompt": "What is 2 + 2?",
@@ -279,6 +292,7 @@ def test_model_quality(client: OpenAI) -> dict[str, Any]:
 
 def main() -> int:
     """Run all validation tests."""
+    logger.info("main starting")
     print_header("GLM-4.7-Flash End-to-End Validation")
 
     # Check server status

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Compare slow vs fast MoE path outputs."""
 
+import logging
 import torch
 
 from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+
+logger = logging.getLogger(__name__)
 
 # Test slow path to verify it's correct
 moe = create_mock_moe_mlp(

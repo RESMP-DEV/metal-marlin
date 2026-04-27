@@ -3,9 +3,13 @@
 Verifies correctness of vectorized scatter/gather operations against
 PyTorch reference implementations.
 """
+import logging
 
 import pytest
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 # Skip all tests if MPS is not available
 pytestmark = pytest.mark.skipif(
@@ -19,6 +23,7 @@ def reference_gather(
     sorted_indices: torch.Tensor,
 ) -> torch.Tensor:
     """Reference gather implementation using PyTorch indexing."""
+    logger.debug("reference_gather called with activations=%s, sorted_indices=%s", activations, sorted_indices)
     return activations[sorted_indices]
 
 
@@ -30,6 +35,7 @@ def reference_scatter_combine(
     top_k: int,
 ) -> torch.Tensor:
     """Reference scatter-combine implementation using PyTorch."""
+    logger.debug("reference_scatter_combine called with expert_outputs=%s, expert_probs=%s, inverse_indices=%s", expert_outputs, expert_probs, inverse_indices)
     hidden_dim = expert_outputs.shape[1]
 
     # Reorder outputs back to original order
@@ -53,6 +59,7 @@ class TestGatherVec8:
     @pytest.fixture
     def metal_lib(self):
         """Load Metal kernel library."""
+        logger.debug("metal_lib called")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
 
         # from_source_dir compiles all .metal files including moe_scatter_gather_optimized.metal
@@ -60,6 +67,7 @@ class TestGatherVec8:
 
     def test_gather_basic(self, metal_lib):
         """Test basic gather operation."""
+        logger.info("running test_gather_basic")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 4
@@ -85,6 +93,7 @@ class TestGatherVec8:
 
     def test_gather_random_indices(self, metal_lib):
         """Test gather with random expert assignments."""
+        logger.info("running test_gather_random_indices")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 32
@@ -106,6 +115,7 @@ class TestGatherVec8:
 
     def test_gather_large_hidden(self, metal_lib):
         """Test gather with large hidden dimension (Qwen3-235B size)."""
+        logger.info("running test_gather_large_hidden")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 8
@@ -130,6 +140,7 @@ class TestScatterCombine:
     @pytest.fixture
     def metal_lib(self):
         """Load Metal kernel library."""
+        logger.debug("metal_lib called")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
 
         # from_source_dir compiles all .metal files including moe_scatter_gather_optimized.metal
@@ -137,6 +148,7 @@ class TestScatterCombine:
 
     def test_scatter_basic_topk2(self, metal_lib):
         """Test scatter-combine with top_k=2."""
+        logger.info("running test_scatter_basic_topk2")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 4
@@ -170,6 +182,7 @@ class TestScatterCombine:
 
     def test_scatter_topk4(self, metal_lib):
         """Test scatter-combine with top_k=4."""
+        logger.info("running test_scatter_topk4")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 8
@@ -200,6 +213,7 @@ class TestScatterCombine:
 
     def test_scatter_topk8(self, metal_lib):
         """Test scatter-combine with top_k=8 (Qwen3-235B)."""
+        logger.info("running test_scatter_topk8")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 16
@@ -233,6 +247,7 @@ class TestCountAndOffsets:
     @pytest.fixture
     def metal_lib(self):
         """Load Metal kernel library."""
+        logger.debug("metal_lib called")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
 
         # from_source_dir compiles all .metal files including moe_scatter_gather_optimized.metal
@@ -240,6 +255,7 @@ class TestCountAndOffsets:
 
     def test_count_tokens(self, metal_lib):
         """Test token counting per expert."""
+        logger.info("running test_count_tokens")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         batch_size = 16
@@ -262,6 +278,7 @@ class TestCountAndOffsets:
 
     def test_prefix_sum(self, metal_lib):
         """Test exclusive prefix sum for offsets."""
+        logger.info("running test_prefix_sum")
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 
         num_experts = 64
@@ -286,6 +303,7 @@ class TestEndToEnd:
     @pytest.fixture
     def metal_lib(self):
         """Load Metal kernel library."""
+        logger.debug("metal_lib called")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
 
         # from_source_dir compiles all .metal files including moe_scatter_gather_optimized.metal
@@ -293,6 +311,7 @@ class TestEndToEnd:
 
     def test_full_pipeline(self, metal_lib):
         """Test complete gather -> expert GEMM (simulated) -> scatter pipeline."""
+        logger.info("running test_full_pipeline")
         from metal_marlin.moe_dispatch import group_tokens_by_expert_full
         from metal_marlin.moe_scatter_gather import ScatterGatherDispatcher
 

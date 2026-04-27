@@ -1,3 +1,4 @@
+import logging
 import pytest
 import torch
 
@@ -11,6 +12,9 @@ try:
 except ImportError:
     HAS_METAL = False
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 
 @pytest.mark.parametrize("shape", [
@@ -19,6 +23,7 @@ pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
     (8, 128, 4096),
 ])
 def test_silu_matches_pytorch(shape):
+    logger.info("running test_silu_matches_pytorch")
     x = torch.randn(shape, device="mps", dtype=torch.float16)
 
     metal_result = silu_metal(x)
@@ -32,6 +37,7 @@ def test_silu_matches_pytorch(shape):
     (8, 128, 4096),
 ])
 def test_gelu_matches_pytorch(shape):
+    logger.info("running test_gelu_matches_pytorch")
     x = torch.randn(shape, device="mps", dtype=torch.float16)
 
     metal_result = gelu_metal(x)
@@ -40,6 +46,7 @@ def test_gelu_matches_pytorch(shape):
     torch.testing.assert_close(metal_result, torch_result, rtol=1e-3, atol=1e-4)
 
 def test_swiglu_fused():
+    logger.info("running test_swiglu_fused")
     gate = torch.randn(32, 4096, device="mps", dtype=torch.float16)
     up = torch.randn(32, 4096, device="mps", dtype=torch.float16)
 

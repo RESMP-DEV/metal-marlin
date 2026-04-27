@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
 
+
+logger = logging.getLogger(__name__)
+
 def _ns_to_us(value_ns: int) -> int:
+    logger.debug("_ns_to_us called with value_ns=%s", value_ns)
     return int(value_ns / 1000)
 
 
@@ -26,6 +31,7 @@ class TraceEvent:
     args: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         event = {
             "name": self.name,
             "cat": self.cat,
@@ -44,15 +50,18 @@ class ChromeTrace:
     """Chrome trace event container."""
 
     def __init__(self, *, pid: int = 0, tid: int = 0):
+        logger.debug("initializing %s", type(self).__name__)
         self._events: list[TraceEvent] = []
         self._pid = pid
         self._tid = tid
 
     @property
     def events(self) -> list[TraceEvent]:
+        logger.debug("events called")
         return list(self._events)
 
     def add_event(self, event: TraceEvent) -> None:
+        logger.debug("add_event called with event=%s", event)
         self._events.append(event)
 
     def add_duration(
@@ -66,6 +75,7 @@ class ChromeTrace:
         pid: int | None = None,
         tid: int | None = None,
     ) -> None:
+        logger.debug("add_duration called")
         self._events.append(
             TraceEvent(
                 name=name,
@@ -89,6 +99,7 @@ class ChromeTrace:
         pid: int | None = None,
         tid: int | None = None,
     ) -> None:
+        logger.debug("add_counter called")
         self._events.append(
             TraceEvent(
                 name=name,
@@ -102,11 +113,13 @@ class ChromeTrace:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "traceEvents": [event.to_dict() for event in self._events],
             "displayTimeUnit": "ms",
         }
 
     def export_json(self, output_path: str | Path) -> None:
+        logger.info("export_json called with output_path=%s", output_path)
         with open(output_path, "w") as handle:
             json.dump(self.to_dict(), handle, indent=2)

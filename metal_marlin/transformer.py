@@ -22,6 +22,7 @@ Requires PyTorch to be installed for actual execution.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ._compat import HAS_TORCH, require_torch, torch
@@ -32,8 +33,12 @@ if TYPE_CHECKING:
     from .kv_cache import KVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_base_class() -> type:
     """Return torch.nn.Module if PyTorch is available, else object."""
+    logger.debug("_get_base_class called")
     if HAS_TORCH and torch is not None:
         return torch.nn.Module
     return object
@@ -48,6 +53,7 @@ class RMSNorm(_get_base_class()):
     """
 
     def __init__(self, hidden_size: int, eps: float = 1e-6, device: str | None = None):
+        logger.debug("initializing %s with hidden_size=%s, eps=%s, device=%s", type(self).__name__, hidden_size, eps, device)
         require_torch("RMSNorm")
         if HAS_TORCH and torch is not None:
             super().__init__()
@@ -59,6 +65,7 @@ class RMSNorm(_get_base_class()):
         self.to(device)
 
     def forward(self, x: Any) -> Any:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         assert torch is not None
         input_dtype = x.dtype
         # Use FP32 accumulation to prevent overflow when squared values exceed FP16 max (~65504)
@@ -105,6 +112,7 @@ class MarlinTransformerBlock(_get_base_class()):
         max_position_embeddings: int = 4096,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, intermediate_size=%s, num_kv_heads=%s, quant_type=%s", type(self).__name__, hidden_size, num_heads, intermediate_size, num_kv_heads, quant_type)
         require_torch("MarlinTransformerBlock")
         if HAS_TORCH and torch is not None:
             super().__init__()
@@ -152,6 +160,7 @@ class MarlinTransformerBlock(_get_base_class()):
             Output tensor [batch, seq_len, hidden_size]
         """
         # Self-attention with residual
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(

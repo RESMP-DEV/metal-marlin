@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,9 @@ from .mmfp4_linear import (
     _try_mmfp4_kernel_gemm,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 def _convert_to_interleaved_weights(
     packed_weights: torch.Tensor,
@@ -46,6 +50,7 @@ def _convert_to_interleaved_weights(
         - interleaved_weights: [in_packed, out_features//8, 8] uint32
         - interleaved_scales: [n_groups, out_features//8, 8] float16
     """
+    logger.info("_convert_to_interleaved_weights called with packed_weights=%s, scales=%s, group_size=%s, is_down_proj=%s", packed_weights, scales, group_size, is_down_proj)
     device = packed_weights.device
     packed_u32 = _minimize_contiguous(_as_u32_tensor(packed_weights))
     out_features, in_packed = packed_u32.shape
@@ -116,6 +121,7 @@ def _prepare_fused_moe_weights(
     """
     # Gate and Up are fused in one linear layer: [2*intermediate, hidden]
     # Split into separate gate and up weights
+    logger.debug("_prepare_fused_moe_weights called with gate_up_proj=%s, down_proj=%s", gate_up_proj, down_proj)
     hidden_size = gate_up_proj.in_features
     intermediate_size = gate_up_proj.out_features // 2
     group_size = gate_up_proj.group_size
@@ -179,6 +185,7 @@ def _expert_norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
         Normalized tensor of same shape as input
     """
     # Compute RMS along the last dimension (hidden_size)
+    logger.debug("_expert_norm called with x=%s, eps=%s", x, eps)
     rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
     return x / rms
 
@@ -223,6 +230,7 @@ class MMFP4Expert(nn.Module):
         use_fused: bool = False,  # Disabled: fused kernel needs tiling fix for intermediate_size > 1536
         use_expert_norm: bool = True,
     ) -> None:
+        logger.debug("initializing %s with hidden_size=%s, moe_intermediate_size=%s, group_size=%s, use_fused=%s, use_expert_norm=%s", type(self).__name__, hidden_size, moe_intermediate_size, group_size, use_fused, use_expert_norm)
         super().__init__()
         self.hidden_size = hidden_size
         self.moe_intermediate_size = moe_intermediate_size
@@ -255,6 +263,7 @@ class MMFP4Expert(nn.Module):
             - 'down_scales': Contiguous down scales [n_groups_intermediate, hidden]
         """
         # Ensure all weights are contiguous for optimal memory access
+        logger.debug("_expert_memory_layout called")
         gate_up_packed = _minimize_contiguous(
             _as_u32_tensor(self.gate_up_proj.packed_weights)
         )
@@ -319,6 +328,7 @@ class MMFP4Expert(nn.Module):
             >>> expert._prefetch_weights(sync=True)
             >>> # Weights are now guaranteed ready on device
         """
+        logger.debug("_prefetch_weights called with device=%s, async_prefetch=%s, sync=%s", device, async_prefetch, sync)
         if device is None:
             device = self.gate_up_proj.packed_weights.device
 
@@ -401,6 +411,7 @@ class MMFP4Expert(nn.Module):
         Args:
             device: Target device. If None, uses current device.
         """
+        logger.debug("_ensure_weights_ready called with device=%s", device)
         self._prefetch_weights(device=device, sync=True, precompute_kernel_layout=True)
 
     def _prefetch_weights_async(
@@ -423,6 +434,7 @@ class MMFP4Expert(nn.Module):
             ...     print("Weights loaded, starting computation")
             >>> expert._prefetch_weights_async(callback=on_weights_ready)
         """
+        logger.debug("_prefetch_weights_async called with device=%s, callback=%s", device, callback)
         self._prefetch_weights(device=device, async_prefetch=True, sync=False)
         if callback is not None:
             callback()
@@ -431,6 +443,7 @@ class MMFP4Expert(nn.Module):
         # Fused path for single token decode or batched (size 8)
         # Ensure 2D input [batch, hidden_size] for fused kernel
         # Always use optimized decode path for single token decode (M=1)
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         if x.ndim == 2 and (x.shape[0] == 1 or (self.use_fused and x.shape[0] == 8)):
             return self._decode_optimized(x)
 
@@ -445,6 +458,7 @@ class MMFP4Expert(nn.Module):
         SwiGLU(x) = gate * SiLU(up) where SiLU(x) = x * sigmoid(x)
         This fused computation minimizes kernel dispatch overhead.
         """
+        logger.debug("_optimized_swiglu called with gate=%s, up=%s", gate, up)
         return gate * torch.nn.functional.silu(up)
 
     def _fused_silu_mul(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
@@ -461,6 +475,7 @@ class MMFP4Expert(nn.Module):
         Returns:
             Activated tensor: gate * SiLU(up)
         """
+        logger.debug("_fused_silu_mul called with gate=%s, up=%s", gate, up)
         return gate * torch.nn.functional.silu(up)
 
     def _fused_gate_up(self, x: torch.Tensor) -> torch.Tensor:
@@ -481,6 +496,7 @@ class MMFP4Expert(nn.Module):
             Output tensor [..., 2*intermediate_size] with gate and up concatenated
         """
         # Flatten for GEMM: [..., hidden] -> [M, hidden]
+        logger.debug("_fused_gate_up called with x=%s", x)
         x_2d = x.reshape(-1, self.hidden_size)
         
         # Try single-kernel fused path for MPS
@@ -526,6 +542,7 @@ class MMFP4Expert(nn.Module):
         Returns:
             2D output tensor [M, 2*intermediate_size] or None if kernel unavailable
         """
+        logger.debug("_fused_gate_up_kernel called with x_2d=%s", x_2d)
         try:
             from ..kernels import fused_gate_up_gemm as _fused_gate_up_kernel_fn
         except Exception:
@@ -612,6 +629,7 @@ class MMFP4Expert(nn.Module):
             Output tensor [batch, seq, hidden_size] or [batch, hidden_size]
         """
         # Fast shape tracking without storing full shape tuple
+        logger.debug("_optimized_down called with x=%s", x)
         original_ndim = x.ndim
         batch_size = x.shape[0] if original_ndim >= 2 else 1
         seq_len = x.shape[1] if original_ndim >= 3 else 1
@@ -678,6 +696,7 @@ class MMFP4Expert(nn.Module):
         Returns:
             Output tensor [1, hidden_size] or None on failure
         """
+        logger.debug("_optimized_down_m1 called with x_2d=%s", x_2d)
         from ..kernels import mmfp4_gemm as _kernel_mmfp4_gemm
         
         # Fast dtype conversion (already float16 on MPS decode path usually)
@@ -712,6 +731,7 @@ class MMFP4Expert(nn.Module):
         Returns:
             Output tensor [M, hidden_size] or None on failure
         """
+        logger.debug("_optimized_down_small_batch called with x_2d=%s, m_size=%s", x_2d, m_size)
         try:
             from ..kernels import mmfp4_gemm as _kernel_mmfp4_gemm
             
@@ -739,6 +759,7 @@ class MMFP4Expert(nn.Module):
         Uses @torch.compile optimized SwiGLU for reduced kernel dispatch overhead
         and better memory bandwidth utilization in the activation computation.
         """
+        logger.debug("_standard_forward called with x=%s", x)
         gate_up = self._fused_gate_up(x)
         gate, up = gate_up.split(self.intermediate_size, dim=-1)
         # Use @torch.compile optimized SwiGLU for reduced dispatch overhead
@@ -765,6 +786,7 @@ class MMFP4Expert(nn.Module):
         5. Kernel fusion: Reduces dispatch overhead from 3 kernels to 1-2 kernels
         """
         # Fast path: Fused Metal kernel with interleaved weights for MPS
+        logger.debug("_decode_optimized called with x=%s", x)
         if x.is_mps and self.use_fused:
             try:
                 return self._fused_moe_mlp_kernel(x)
@@ -797,6 +819,7 @@ class MMFP4Expert(nn.Module):
         - _down_scales_t: Transposed scales [hidden, n_groups]
         """
         # Ensure kernel weight layouts are cached
+        logger.debug("_ensure_decode_cache called")
         if self.gate_up_proj._kernel_packed_weights is None:
             gate_up_u32 = _as_u32_tensor(self.gate_up_proj.packed_weights)
             self.gate_up_proj._kernel_packed_weights = _minimize_contiguous(
@@ -830,6 +853,7 @@ class MMFP4Expert(nn.Module):
         4. In-place activation to reduce memory allocation
         """
         # Import kernel once at module level for speed
+        logger.info("_decode_compiled_fastpath starting")
         from ..kernels import mmfp4_gemm as _kernel_gemm
         
         device = x.device
@@ -883,6 +907,7 @@ class MMFP4Expert(nn.Module):
     def _decode_optimized_fallback(self, x: torch.Tensor) -> torch.Tensor:
         """Fallback 3-kernel path when compiled fast path fails."""
         # Optimized 3-kernel path with cached weight layouts
+        logger.debug("_decode_optimized_fallback called with x=%s", x)
         gate_up = self._decode_gemm_cached(
             x,
             self.gate_up_proj,
@@ -930,6 +955,7 @@ class MMFP4Expert(nn.Module):
             Output tensor [1, out_features]
         """
         # Ensure 2D input for GEMM
+        logger.debug("_decode_gemm_cached called with x=%s, proj=%s, out_features=%s", x, proj, out_features)
         if x.ndim != 2:
             x = x.reshape(1, -1)
         
@@ -985,6 +1011,7 @@ class MMFP4Expert(nn.Module):
         2. Minimizes device transfers by caching on target device
         3. Reuses cached weights across decode calls
         """
+        logger.debug("_fused_moe_mlp_kernel called with x=%s", x)
         from ..kernels import fused_moe_mlp as _fused_moe_mlp_kernel
         
         # Lazy initialization: Prepare and cache interleaved weights on first call
@@ -1054,6 +1081,7 @@ def _make_placeholder_mmfp4_linear(
     group_size: int,
 ) -> MMFP4Linear:
     """Create MMFP4Linear with placeholder (zeros) weights."""
+    logger.debug("_make_placeholder_mmfp4_linear called with in_features=%s, out_features=%s, group_size=%s", in_features, out_features, group_size)
     in_features_aligned = ((in_features + 7) // 8) * 8
     n_groups = (in_features + group_size - 1) // group_size
     packed_weights = torch.zeros(

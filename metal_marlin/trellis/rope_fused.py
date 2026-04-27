@@ -72,6 +72,7 @@ def dispatch_rope_fused_proj_fp16(
     Returns:
         Output tensor [M, N] float16 with RoPE applied, MPS tensor
     """
+    logger.debug("dispatch_rope_fused_proj_fp16 called with lib=%s, input=%s, weight=%s", lib, input, weight)
     require_mps()
 
     device = lib.device
@@ -96,6 +97,7 @@ def dispatch_rope_fused_proj_fp16(
 
     # Create parameter buffers
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -179,6 +181,7 @@ def dispatch_rope_fused_qk_proj_trellis(
     Returns:
         Tuple of (Q, K) output tensors, each [M, N_*] float16 with RoPE applied
     """
+    logger.debug("dispatch_rope_fused_qk_proj_trellis called with lib=%s, input=%s, q_proj=%s", lib, input, q_proj)
     require_mps()
 
     if rope_dim is None:
@@ -238,6 +241,7 @@ def dispatch_rope_fused_qk_proj_trellis(
 
     # Create parameter buffers
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -315,6 +319,7 @@ def apply_rope_fused_linear(
     Returns:
         Output tensor with RoPE applied [..., N]
     """
+    logger.debug("apply_rope_fused_linear called with input=%s, linear=%s, cos_cache=%s", input, linear, cos_cache)
     if not HAS_METAL or not HAS_MPS:
         raise RuntimeError("Metal not available")
 

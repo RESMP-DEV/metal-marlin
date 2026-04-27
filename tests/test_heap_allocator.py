@@ -1,4 +1,5 @@
 """Tests for heap allocator using MTLHeap."""
+import logging
 
 import pytest
 
@@ -8,12 +9,16 @@ if HAS_PYOBJC_METAL:
     import Metal
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not HAS_PYOBJC_METAL, reason="PyObjC Metal not available")
 class TestHeapAllocation:
     """Tests for HeapAllocation dataclass."""
 
     def test_heap_allocation_creation(self):
         """Test HeapAllocation can be created with correct defaults."""
+        logger.info("running test_heap_allocation_creation")
         from metal_marlin.heap_allocator import HeapAllocation
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -41,6 +46,7 @@ class TestHeapAllocatorMetrics:
 
     def test_metrics_initialization(self):
         """Test metrics initialize with correct defaults."""
+        logger.info("running test_metrics_initialization")
         from metal_marlin.heap_allocator import HeapAllocatorMetrics
 
         metrics = HeapAllocatorMetrics()
@@ -55,6 +61,7 @@ class TestHeapAllocatorMetrics:
 
     def test_reuse_rate_calculation(self):
         """Test reuse rate calculation."""
+        logger.info("running test_reuse_rate_calculation")
         from metal_marlin.heap_allocator import HeapAllocatorMetrics
 
         metrics = HeapAllocatorMetrics()
@@ -70,6 +77,7 @@ class TestHeapAllocatorMetrics:
 
     def test_metrics_to_dict(self):
         """Test metrics serialization."""
+        logger.info("running test_metrics_to_dict")
         from metal_marlin.heap_allocator import HeapAllocatorMetrics
 
         metrics = HeapAllocatorMetrics()
@@ -93,6 +101,7 @@ class TestMetalHeapAllocator:
 
     def test_allocator_initialization(self):
         """Test allocator initializes with correct heap size."""
+        logger.info("running test_allocator_initialization")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -107,6 +116,7 @@ class TestMetalHeapAllocator:
 
     def test_allocator_minimum_heap_size(self):
         """Test allocator enforces minimum heap size."""
+        logger.info("running test_allocator_minimum_heap_size")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -118,6 +128,7 @@ class TestMetalHeapAllocator:
 
     def test_alloc_buffer(self):
         """Test buffer allocation from heap."""
+        logger.info("running test_alloc_buffer")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -133,6 +144,7 @@ class TestMetalHeapAllocator:
 
     def test_alloc_returns_aligned_sizes(self):
         """Test allocations return cache-aligned sizes."""
+        logger.info("running test_alloc_returns_aligned_sizes")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -154,6 +166,7 @@ class TestMetalHeapAllocator:
 
     def test_get_offset(self):
         """Test getting buffer offset from allocator."""
+        logger.info("running test_get_offset")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -168,6 +181,7 @@ class TestMetalHeapAllocator:
 
     def test_get_offset_unknown_buffer(self):
         """Test getting offset for unknown buffer returns None."""
+        logger.info("running test_get_offset_unknown_buffer")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -183,6 +197,7 @@ class TestMetalHeapAllocator:
 
     def test_release_and_reuse(self):
         """Test buffer reuse after release."""
+        logger.info("running test_release_and_reuse")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -204,6 +219,7 @@ class TestMetalHeapAllocator:
 
     def test_heap_exhaustion(self):
         """Test allocation fails when heap is exhausted."""
+        logger.info("running test_heap_exhaustion")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -216,6 +232,7 @@ class TestMetalHeapAllocator:
 
     def test_clear_pool(self):
         """Test clearing buffer pool."""
+        logger.info("running test_clear_pool")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -233,6 +250,7 @@ class TestMetalHeapAllocator:
 
     def test_reset_allocator(self):
         """Test resetting allocator clears all state."""
+        logger.info("running test_reset_allocator")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -250,6 +268,7 @@ class TestMetalHeapAllocator:
 
     def test_stats(self):
         """Test allocator statistics."""
+        logger.info("running test_stats")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -266,6 +285,7 @@ class TestMetalHeapAllocator:
 
     def test_alloc_buffer_convenience_method(self):
         """Test alloc_buffer convenience method."""
+        logger.info("running test_alloc_buffer_convenience_method")
         from metal_marlin.heap_allocator import MetalHeapAllocator
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -286,6 +306,7 @@ class TestHeapBufferPool:
 
     def test_pool_initialization(self):
         """Test pool initialization."""
+        logger.info("running test_pool_initialization")
         from metal_marlin.heap_allocator import HeapBufferPool
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -297,6 +318,7 @@ class TestHeapBufferPool:
 
     def test_pool_get_and_release(self):
         """Test getting and releasing buffers from pool."""
+        logger.info("running test_pool_get_and_release")
         from metal_marlin.heap_allocator import HeapBufferPool
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -314,6 +336,7 @@ class TestHeapBufferPool:
 
     def test_pool_stats(self):
         """Test pool statistics."""
+        logger.info("running test_pool_stats")
         from metal_marlin.heap_allocator import HeapBufferPool
 
         device = Metal.MTLCreateSystemDefaultDevice()
@@ -329,6 +352,7 @@ class TestHeapBufferPool:
 
     def test_pool_clear(self):
         """Test clearing pool buffers."""
+        logger.info("running test_pool_clear")
         from metal_marlin.heap_allocator import HeapBufferPool
 
         device = Metal.MTLCreateSystemDefaultDevice()

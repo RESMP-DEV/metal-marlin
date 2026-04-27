@@ -1,5 +1,6 @@
 """Benchmark MoE kernel performance: fast path vs slow path."""
 
+import logging
 import time
 
 import torch
@@ -11,6 +12,9 @@ from metal_marlin.trellis.lm import TrellisForCausalLM
 import os
 import sys
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -19,6 +23,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 def benchmark_forward(model, input_ids, warmup=5, trials=20):
     # Warmup
+    logger.info("benchmark_forward starting with model=%s, input_ids=%s, warmup=%s, trials=%s", model, input_ids, warmup, trials)
     for _ in range(warmup):
         with torch.inference_mode():
             _ = model(input_ids)
@@ -41,6 +46,7 @@ def benchmark_forward(model, input_ids, warmup=5, trials=20):
     }
 
 def main():
+    logger.info("main starting")
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained(
         'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps'

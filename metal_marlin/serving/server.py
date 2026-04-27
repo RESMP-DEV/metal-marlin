@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -16,6 +17,9 @@ from .openai_schemas import (
 )
 from .perplexity import PerplexityTracker, compute_perplexity
 
+
+logger = logging.getLogger(__name__)
+
 engine: ServingEngine | None = None
 metrics = MetricsCollector()
 perplexity_tracker = PerplexityTracker()
@@ -23,6 +27,7 @@ perplexity_tracker = PerplexityTracker()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logger.debug("lifespan called with app=%s", app)
     yield
 
 
@@ -36,6 +41,7 @@ app = FastAPI(
 
 @app.exception_handler(ServingError)
 async def serving_error_handler(request: Request, exc: ServingError):
+    logger.debug("serving_error_handler called with request=%s, exc=%s", request, exc)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -51,6 +57,7 @@ async def serving_error_handler(request: Request, exc: ServingError):
 @app.exception_handler(Exception)
 async def general_error_handler(request: Request, exc: Exception):
     # Log the error for debugging
+    logger.debug("general_error_handler called with request=%s, exc=%s", request, exc)
     import traceback
     traceback.print_exc()
     return JSONResponse(
@@ -66,11 +73,13 @@ async def general_error_handler(request: Request, exc: Exception):
 
 
 def configure(model_path: str, device: str = "mps", **kwargs):
+    logger.info("configure starting")
     global engine
     engine = ServingEngine(EngineConfig(
         model_path=model_path, device=device, **kwargs))
 
     def get_queue_depth() -> int:
+        logger.debug("get_queue_depth called")
         if engine and engine.scheduler:
             return engine.scheduler.num_waiting
         return 0
@@ -80,6 +89,7 @@ def configure(model_path: str, device: str = "mps", **kwargs):
 
 @app.get("/v1/models")
 async def list_models() -> ModelList:
+    logger.debug("list_models called")
     if engine is None:
         raise ModelNotLoadedError()
     return ModelList(data=[ModelInfo(id=engine.model_name, created=0)])
@@ -87,6 +97,7 @@ async def list_models() -> ModelList:
 
 @app.get("/v1/models/{model_id}")
 async def get_model_info(model_id: str):
+    logger.debug("get_model_info called with model_id=%s", model_id)
     if engine is None:
         raise ModelNotLoadedError()
     if model_id != engine.model_name:
@@ -97,6 +108,7 @@ async def get_model_info(model_id: str):
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
+    logger.debug("chat_completions called with request=%s", request)
     if engine is None:
         raise ModelNotLoadedError()
 
@@ -111,6 +123,7 @@ async def chat_completions(request: ChatCompletionRequest):
     if request.stream:
 
         async def stream():
+            logger.debug("stream called")
             async for chunk in result:
                 yield f"data: {chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
@@ -129,6 +142,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
 @app.post("/v1/completions")
 async def completions(request: CompletionRequest) -> CompletionResponse:
+    logger.debug("completions called with request=%s", request)
     if engine is None:
         raise ModelNotLoadedError()
 
@@ -150,6 +164,7 @@ async def completions(request: CompletionRequest) -> CompletionResponse:
 
 @app.get("/health")
 async def health():
+    logger.debug("health called")
     return {"status": "ok", "model_loaded": engine is not None}
 
 
@@ -167,6 +182,7 @@ async def evaluate_perplexity(request: Request):
     Returns:
         PerplexityResult with overall perplexity and optional chunk-level analysis
     """
+    logger.debug("evaluate_perplexity called with request=%s", request)
     if engine is None:
         raise ModelNotLoadedError()
 
@@ -211,11 +227,13 @@ async def evaluate_perplexity(request: Request):
 @app.get("/v1/perplexity/stats")
 async def get_perplexity_stats():
     """Get aggregated perplexity statistics."""
+    logger.debug("get_perplexity_stats called")
     return perplexity_tracker.get_stats()
 
 
 @app.get("/metrics")
 async def get_metrics():
+    logger.debug("get_metrics called")
     from fastapi.responses import PlainTextResponse
 
     from ..trellis.metrics import moe_metrics
@@ -253,6 +271,7 @@ def run_server(
         block_size: Number of tokens per KV cache block
         metrics_port: Dedicated port for Prometheus metrics (default: None, served on main port)
     """
+    logger.debug("run_server called with model_path=%s, host=%s, port=%s", model_path, host, port)
     import signal
     import sys
     import threading
@@ -270,10 +289,12 @@ def run_server(
     metrics_server = None
     if metrics_port:
         def run_metrics_server():
+            logger.debug("run_metrics_server called")
             metrics_app = FastAPI(title="Prometheus Metrics Exporter")
 
             @metrics_app.get("/metrics")
             async def metrics_endpoint():
+                logger.debug("metrics_endpoint called")
                 from fastapi.responses import PlainTextResponse
 
                 from ..trellis.metrics import moe_metrics
@@ -296,6 +317,7 @@ def run_server(
 
     # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
+        logger.debug("signal_handler called with sig=%s, frame=%s", sig, frame)
         print("\nShutting down server...")
         sys.exit(0)
 

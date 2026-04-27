@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import statistics
 import sys
@@ -31,6 +32,9 @@ if str(_ROOT) not in sys.path:
 
 from metal_marlin._compat import HAS_TORCH, torch  # noqa: E402
 from metal_marlin.trellis.lm import TrellisForCausalLM  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 if not HAS_TORCH or torch is None:
     raise RuntimeError("PyTorch is required to run this benchmark.")
@@ -65,6 +69,7 @@ PRESET_CANDIDATES: dict[str, list[str]] = {
 
 
 def _sync_device(device: str) -> None:
+    logger.debug("_sync_device called with device=%s", device)
     if device.startswith("mps") and torch.backends.mps.is_available():
         torch.mps.synchronize()
     elif device.startswith("cuda") and torch.cuda.is_available():
@@ -72,6 +77,7 @@ def _sync_device(device: str) -> None:
 
 
 def _percentile(values: list[float], q: float) -> float:
+    logger.debug("_percentile called with values=%s, q=%s", values, q)
     if not values:
         return 0.0
     sorted_vals = sorted(values)
@@ -80,6 +86,7 @@ def _percentile(values: list[float], q: float) -> float:
 
 
 def _resolve_device(requested: str) -> str:
+    logger.debug("_resolve_device called with requested=%s", requested)
     req = requested.strip().lower()
     if req == "auto":
         if torch.backends.mps.is_available():
@@ -95,6 +102,7 @@ def _resolve_device(requested: str) -> str:
 
 
 def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Callable[[], Any]], list[str]]:
+    logger.debug("_make_fallback_collectors called")
     resetters: list[Callable[[], None]] = []
     collectors: dict[str, Callable[[], Any]] = {}
     unavailable: list[str] = []
@@ -117,6 +125,7 @@ def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Cal
             resetters.append(moe_metrics.reset)
 
         def _collect_moe_metrics() -> dict[str, int]:
+            logger.debug("_collect_moe_metrics called")
             result: dict[str, int] = {}
             fields = ("fallback_used", "fast_path_used", "tokens_processed", "nan_detected")
             for field in fields:
@@ -134,6 +143,7 @@ def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Cal
 
 
 def _collect_diagnostics(collectors: dict[str, Callable[[], Any]]) -> dict[str, Any] | None:
+    logger.debug("_collect_diagnostics called with collectors=%s", collectors)
     result: dict[str, Any] = {}
     for name, fn in collectors.items():
         try:
@@ -146,6 +156,7 @@ def _collect_diagnostics(collectors: dict[str, Callable[[], Any]]) -> dict[str, 
 
 
 def _parse_presets(args: argparse.Namespace) -> list[str]:
+    logger.debug("_parse_presets called with args=%s", args)
     presets: list[str] = []
     for raw in args.presets.split(","):
         value = raw.strip()
@@ -174,6 +185,7 @@ def _parse_presets(args: argparse.Namespace) -> list[str]:
 
 
 def _parse_model_path_mappings(values: list[str]) -> dict[str, str]:
+    logger.debug("_parse_model_path_mappings called with values=%s", values)
     overrides: dict[str, str] = {}
     for raw in values:
         if "=" not in raw:
@@ -193,6 +205,7 @@ def _parse_model_path_mappings(values: list[str]) -> dict[str, str]:
 
 
 def _find_model_path(preset: str, overrides: dict[str, str]) -> tuple[str, str]:
+    logger.debug("_find_model_path called with preset=%s, overrides=%s", preset, overrides)
     override = overrides.get(preset)
     if override:
         return override, "cli-override"
@@ -218,6 +231,7 @@ def run_benchmark_for_preset(
     runs: int,
     seed: int,
 ) -> dict[str, Any]:
+    logger.info("run_benchmark_for_preset starting with preset=%s, model_path=%s, device=%s, prompt_len=%s", preset, model_path, device, prompt_len)
     if not model_path or not Path(model_path).exists():
         return {
             "status": "error",
@@ -307,6 +321,7 @@ def run_benchmark_for_preset(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    logger.info("_build_parser starting")
     parser = argparse.ArgumentParser(description="MoE decode regression benchmark (GLM/Qwen).")
     parser.add_argument(
         "--presets",
@@ -359,6 +374,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = _build_parser()
     args = parser.parse_args()
 

@@ -15,6 +15,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,9 @@ from metal_marlin._compat import HAS_CPP_EXT, _metal_dispatch_ext
 if TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class ServingCppDispatcher:
     """High-performance C++ dispatcher for serving mode.
@@ -56,6 +60,7 @@ class ServingCppDispatcher:
     
     def __init__(self) -> None:
         """Initialize the C++ serving dispatcher."""
+        logger.debug("initializing %s", type(self).__name__)
         self._ctx: Any = None
         self._serving_ctx: Any = None
         self._available = False
@@ -73,6 +78,7 @@ class ServingCppDispatcher:
     @property
     def available(self) -> bool:
         """Return True if the C++ serving path is available."""
+        logger.debug("available called")
         return self._available
     
     def dispatch_sync(
@@ -102,6 +108,7 @@ class ServingCppDispatcher:
             ...     "mmfp4_gemm", (8, 8, 1), (128, 1, 1), buffers
             ... )
         """
+        logger.debug("dispatch_sync called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._available:
             raise RuntimeError("C++ serving path not available")
         
@@ -139,6 +146,7 @@ class ServingCppDispatcher:
             >>> # Do other work...
             >>> dispatcher.wait(handle)
         """
+        logger.debug("dispatch_async called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._available:
             raise RuntimeError("C++ serving path not available")
         
@@ -150,6 +158,7 @@ class ServingCppDispatcher:
         Args:
             handle: The handle returned by dispatch_async().
         """
+        logger.debug("wait called with handle=%s", handle)
         if self._available and handle is not None:
             self._serving_ctx.wait(handle)
     
@@ -162,6 +171,7 @@ class ServingCppDispatcher:
         Returns:
             True if the dispatch is complete, False otherwise.
         """
+        logger.debug("is_complete called with handle=%s", handle)
         if not self._available or handle is None:
             return True
         return self._serving_ctx.is_complete(handle)
@@ -175,6 +185,7 @@ class ServingCppDispatcher:
             - total_dispatch_us: Total dispatch time in microseconds
             - avg_dispatch_us: Average dispatch time in microseconds
         """
+        logger.debug("get_metrics called")
         if not self._available:
             return {"dispatch_count": 0, "total_dispatch_us": 0, "avg_dispatch_us": 0}
         
@@ -182,6 +193,7 @@ class ServingCppDispatcher:
     
     def reset_metrics(self) -> None:
         """Reset serving metrics."""
+        logger.debug("reset_metrics called")
         if self._available:
             self._serving_ctx.reset_metrics()
 
@@ -213,12 +225,14 @@ class ServingCppEngineWrapper:
         Args:
             engine: The ServingEngine instance to wrap.
         """
+        logger.debug("initializing %s with engine=%s", type(self).__name__, engine)
         self._engine = engine
         self._dispatcher = ServingCppDispatcher()
     
     @property
     def available(self) -> bool:
         """Return True if the C++ serving path is available."""
+        logger.debug("available called")
         return self._dispatcher.available
     
     def dispatch_for_decode(
@@ -236,6 +250,7 @@ class ServingCppEngineWrapper:
             threadgroup: Threadgroup dimensions.
             tensors: List of PyTorch MPS tensors.
         """
+        logger.debug("dispatch_for_decode called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._dispatcher.available:
             raise RuntimeError("C++ serving path not available")
         
@@ -263,6 +278,7 @@ class ServingCppEngineWrapper:
         Returns:
             Handle for the async dispatch.
         """
+        logger.debug("dispatch_for_prefill called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._dispatcher.available:
             raise RuntimeError("C++ serving path not available")
         
@@ -276,6 +292,7 @@ class ServingCppEngineWrapper:
     
     def get_metrics(self) -> dict[str, Any]:
         """Get C++ serving metrics."""
+        logger.debug("get_metrics called")
         return self._dispatcher.get_metrics()
 
 
@@ -290,6 +307,7 @@ def create_serving_cpp_dispatcher() -> ServingCppDispatcher | None:
         >>> if dispatcher:
         ...     dispatcher.dispatch_sync("kernel", grid, tg, buffers)
     """
+    logger.debug("create_serving_cpp_dispatcher called")
     dispatcher = ServingCppDispatcher()
     return dispatcher if dispatcher.available else None
 

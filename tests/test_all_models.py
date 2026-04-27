@@ -4,6 +4,7 @@ Comprehensive test suite for all supported model architectures.
 This test downloads small/medium variants of each model family and verifies
 that layer replacement + generation works correctly.
 """
+import logging
 
 import pytest
 import torch
@@ -12,6 +13,9 @@ transformers = pytest.importorskip("transformers")
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from metal_marlin import replace_linear_layers
+
+
+logger = logging.getLogger(__name__)
 
 # Model variants to test (smallest available for speed)
 MODELS_TO_TEST = [
@@ -32,6 +36,7 @@ MODELS_TO_TEST = [
 def test_model_quantization_and_generation(model_id, expected_type):
     """Test that each model can be loaded, quantized, and generate text."""
     # Load
+    logger.info("running test_model_quantization_and_generation")
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,

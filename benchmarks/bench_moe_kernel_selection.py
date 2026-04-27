@@ -16,6 +16,7 @@ Output:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -25,10 +26,14 @@ import torch
 
 def benchmark_kernel_selection() -> dict[str, Any]:
     """Benchmark the kernel selection logic for different batch sizes."""
+    logger.info("benchmark_kernel_selection starting")
     from metal_marlin.trellis.moe_dispatch import select_moe_kernel, get_moe_kernel
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -99,6 +104,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 def print_kernel_selection_table(results: list[dict[str, Any]]) -> None:
     """Print a formatted table of kernel selection results."""
+    logger.debug("print_kernel_selection_table called with results=%s", results)
     print("\n" + "=" * 100)
     print("Kernel Selection Results")
     print("=" * 100)
@@ -119,6 +125,7 @@ def print_kernel_selection_table(results: list[dict[str, Any]]) -> None:
 
 def verify_selection_rules(results: list[dict[str, Any]]) -> list[str]:
     """Verify kernel selection follows expected rules."""
+    logger.debug("verify_selection_rules called with results=%s", results)
     issues = []
 
     for r in results:
@@ -168,6 +175,7 @@ def verify_selection_rules(results: list[dict[str, Any]]) -> list[str]:
 
 def main():
     """Run kernel selection benchmark and verification."""
+    logger.info("main starting")
     print("\n" + "=" * 80)
     print("MoE Kernel Selection Benchmark for M4 Max")
     print("=" * 80)

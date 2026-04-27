@@ -10,6 +10,7 @@ buffers across inference iterations. Features:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -19,6 +20,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PooledBuffer:
@@ -30,6 +34,7 @@ class PooledBuffer:
     
     def touch(self) -> None:
         """Mark buffer as recently used."""
+        logger.debug("touch called")
         self.added_time = time.time()
         self.use_count += 1
 
@@ -47,16 +52,19 @@ class BufferPoolStats:
     @property
     def hit_rate(self) -> float:
         """Calculate cache hit rate."""
+        logger.debug("hit_rate called")
         total = self.hits + self.misses
         return self.hits / total if total > 0 else 0.0
     
     @property
     def current_utilization(self) -> float:
         """Calculate current pool utilization ratio."""
+        logger.debug("current_utilization called")
         return self.total_pooled / self.total_allocated if self.total_allocated > 0 else 0.0
     
     def to_dict(self) -> dict:
         """Convert stats to dictionary."""
+        logger.debug("to_dict called")
         return {
             "hits": self.hits,
             "misses": self.misses,
@@ -102,6 +110,7 @@ class BufferPool:
         max_age_seconds: float = 300.0,
         max_buffers_per_tier: int = 32,
     ) -> None:
+        logger.debug("initializing %s with max_pool_size_bytes=%s, high_watermark=%s, low_watermark=%s, max_age_seconds=%s, max_buffers_per_tier=%s", type(self).__name__, max_pool_size_bytes, high_watermark, low_watermark, max_age_seconds, max_buffers_per_tier)
         self.max_pool_size = max_pool_size_bytes
         self.high_watermark = high_watermark
         self.low_watermark = low_watermark
@@ -124,6 +133,7 @@ class BufferPool:
     
     def _get_tier(self, size_bytes: int) -> tuple[deque[PooledBuffer], str]:
         """Get the appropriate tier for a buffer size."""
+        logger.debug("_get_tier called with size_bytes=%s", size_bytes)
         if size_bytes <= self.TINY_MAX:
             return self._tiny_pool, "tiny"
         elif size_bytes <= self.SMALL_MAX:
@@ -139,6 +149,7 @@ class BufferPool:
         device: str
     ) -> PooledBuffer | None:
         """Find best-fit buffer from appropriate tier."""
+        logger.debug("_get_best_fit called with size_bytes=%s, device=%s", size_bytes, device)
         tier, tier_name = self._get_tier(size_bytes)
         
         # Try exact size match first
@@ -178,6 +189,7 @@ class BufferPool:
         Returns:
             Tensor buffer
         """
+        logger.debug("acquire called with size_bytes=%s, device=%s, dtype=%s", size_bytes, device, dtype)
         import torch
         
         if dtype is None:
@@ -210,6 +222,7 @@ class BufferPool:
             tensor: Buffer to return to pool
             skip_pool: If True, don't pool and let GC collect
         """
+        logger.debug("release called with tensor=%s, skip_pool=%s", tensor, skip_pool)
         if skip_pool or tensor is None:
             return
         
@@ -249,6 +262,7 @@ class BufferPool:
     
     def _evict_to_target(self, target_size: float) -> None:
         """Evict oldest buffers until target size reached."""
+        logger.debug("_evict_to_target called with target_size=%s", target_size)
         current_time = time.time()
         
         # Collect all buffers with their ages
@@ -298,6 +312,7 @@ class BufferPool:
         Returns:
             Number of buffers removed
         """
+        logger.debug("cleanup_old_buffers called")
         current_time = time.time()
         removed = 0
         
@@ -317,6 +332,7 @@ class BufferPool:
     
     def clear(self) -> None:
         """Clear all pooled buffers."""
+        logger.debug("clear called")
         with self._lock:
             self._tiny_pool.clear()
             self._small_pool.clear()
@@ -326,6 +342,7 @@ class BufferPool:
     
     def get_stats(self) -> dict:
         """Get current pool statistics."""
+        logger.debug("get_stats called")
         with self._lock:
             stats = self._stats.to_dict()
             stats.update({
@@ -349,5 +366,6 @@ class BufferPool:
     
     def get_size(self) -> int:
         """Get current pooled memory size in bytes."""
+        logger.debug("get_size called")
         with self._lock:
             return self._current_size

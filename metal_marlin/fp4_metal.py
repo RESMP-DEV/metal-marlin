@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +45,9 @@ try:
 except ImportError:
     HAS_METAL = False
     Metal = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 HAS_MPS = False
 if HAS_TORCH and torch is not None:
@@ -77,6 +81,7 @@ class FP4Metal:
             RuntimeError: If Metal is not available.
         """
         # Initialize lookup tables (always needed for CPU fallback)
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         self._e2m1_table = E2M1_VALUES
         self._e2m1_positive = E2M1_POSITIVE
 
@@ -103,10 +108,12 @@ class FP4Metal:
     @property
     def available(self) -> bool:
         """Return True if Metal FP4 is available and ready."""
+        logger.debug("available called")
         return self._use_metal
 
     def _compile_pipelines(self):
         """Compile Metal compute pipelines."""
+        logger.info("_compile_pipelines starting")
         options = Metal.MTLCompileOptions.new()
         library, error = self._device.newLibraryWithSource_options_error_(
             self._shader_source, options, None
@@ -137,6 +144,7 @@ class FP4Metal:
             - scales: float32 tensor of per-group scales
         """
         # Convert to numpy for processing
+        logger.info("quantize called with values=%s, group_size=%s", values, group_size)
         if HAS_TORCH and isinstance(values, torch.Tensor):
             v = values.cpu().numpy()
             return_torch = True
@@ -197,6 +205,7 @@ class FP4Metal:
         Returns:
             Reconstructed float tensor
         """
+        logger.info("dequantize called with indices=%s, scales=%s, group_size=%s", indices, scales, group_size)
         if HAS_TORCH and isinstance(indices, torch.Tensor):
             # Use PyTorch path to avoid CPU sync
             if scales.device != indices.device:
@@ -278,6 +287,7 @@ class FP4Metal:
         Returns:
             Packed bytes: lo | (hi << 4)
         """
+        logger.info("pack_pair called with lo=%s, hi=%s", lo, hi)
         if HAS_TORCH and isinstance(lo, torch.Tensor):
             lo_np = lo.cpu().numpy().astype(np.uint8)
             hi_np = hi.cpu().numpy().astype(np.uint8)
@@ -292,11 +302,13 @@ class FP4Metal:
 # Convenience functions
 def quantize_fp4_metal(values, group_size: int = 128):
     """Quantize to FP4 using Metal (convenience function)."""
+    logger.info("quantize_fp4_metal called with values=%s, group_size=%s", values, group_size)
     fp4 = FP4Metal()
     return fp4.quantize(values, group_size)
 
 
 def dequantize_fp4_metal(indices, scales, group_size: int = 128):
     """Dequantize FP4 using Metal (convenience function)."""
+    logger.info("dequantize_fp4_metal called with indices=%s, scales=%s, group_size=%s", indices, scales, group_size)
     fp4 = FP4Metal()
     return fp4.dequantize(indices, scales, group_size)

@@ -7,6 +7,7 @@ and specialized functions for estimating FLOPs of quantized operations.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from metal_marlin.utils.profile_ops import (
@@ -17,6 +18,9 @@ from metal_marlin.utils.profile_ops import (
     calculate_matmul_flops,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerProfileConfig:
@@ -64,11 +68,13 @@ class ModuleFLOPsResult:
     @property
     def tflops(self) -> float:
         """FLOPs in trillions."""
+        logger.debug("tflops called")
         return self.flops / 1e12
 
     @property
     def gflops(self) -> float:
         """FLOPs in billions."""
+        logger.debug("gflops called")
         return self.flops / 1e9
 
 
@@ -105,6 +111,7 @@ def estimate_marlin_linear_flops(
         ... )
         >>> print(f"{flops / 1e12:.2f} TFLOPs")
     """
+    logger.debug("estimate_marlin_linear_flops called with in_features=%s, out_features=%s, batch_size=%s", in_features, out_features, batch_size)
     tokens = batch_size * seq_len
 
     # Main GEMM: (tokens, in_features) @ (in_features, out_features)
@@ -171,6 +178,7 @@ def calculate_layer_flops(
         ...     gated=True
         ... )
     """
+    logger.debug("calculate_layer_flops called with layer_type=%s", layer_type)
     layer_type = layer_type.lower()
 
     if layer_type == "linear":
@@ -244,6 +252,7 @@ class LayerFLOPsCalculator:
             quantized: Account for quantization overhead.
             group_size: Quantization group size.
         """
+        logger.debug("initializing %s with batch_size=%s, seq_len=%s, quantized=%s, group_size=%s", type(self).__name__, batch_size, seq_len, quantized, group_size)
         self.config = LayerProfileConfig(
             batch_size=batch_size,
             seq_len=seq_len,
@@ -269,6 +278,7 @@ class LayerFLOPsCalculator:
         Returns:
             ModuleFLOPsResult if the module was recognized, None otherwise.
         """
+        logger.debug("add_module called with name=%s, module=%s, input_shape=%s", name, module, input_shape)
         try:
             result = self._analyze_module(name, module, input_shape)
             if result:
@@ -285,6 +295,7 @@ class LayerFLOPsCalculator:
         input_shape: tuple[int, ...] | None = None,
     ) -> ModuleFLOPsResult | None:
         """Analyze a single module and compute its FLOPs."""
+        logger.debug("_analyze_module called with name=%s, module=%s, input_shape=%s", name, module, input_shape)
         module_type = type(module).__name__
 
         # Handle MarlinLinear
@@ -304,6 +315,7 @@ class LayerFLOPsCalculator:
         module: Any,
     ) -> ModuleFLOPsResult:
         """Analyze a MarlinLinear module."""
+        logger.debug("_analyze_marlin_linear called with name=%s, module=%s", name, module)
         in_features = getattr(module, "in_features", 0)
         out_features = getattr(module, "out_features", 0)
         group_size = getattr(module, "group_size", self.config.group_size)
@@ -349,6 +361,7 @@ class LayerFLOPsCalculator:
         module: Any,
     ) -> ModuleFLOPsResult:
         """Analyze a standard Linear module."""
+        logger.debug("_analyze_linear called with name=%s, module=%s", name, module)
         in_features = getattr(module, "in_features", 0)
         out_features = getattr(module, "out_features", 0)
         has_bias = getattr(module, "bias", None) is not None
@@ -385,24 +398,29 @@ class LayerFLOPsCalculator:
     @property
     def total_flops(self) -> int:
         """Total FLOPs across all analyzed modules."""
+        logger.debug("total_flops called")
         return sum(r.flops for r in self._results)
 
     @property
     def total_params(self) -> int:
         """Total parameters across all analyzed modules."""
+        logger.debug("total_params called")
         return sum(r.params for r in self._results)
 
     @property
     def total_tflops(self) -> float:
         """Total FLOPs in trillions."""
+        logger.debug("total_tflops called")
         return self.total_flops / 1e12
 
     def get_results(self) -> list[ModuleFLOPsResult]:
         """Get all profiling results."""
+        logger.debug("get_results called")
         return list(self._results)
 
     def get_layer(self, name: str) -> ModuleFLOPsResult | None:
         """Get result for a specific layer by name."""
+        logger.debug("get_layer called with name=%s", name)
         for r in self._results:
             if r.name == name:
                 return r
@@ -414,6 +432,7 @@ class LayerFLOPsCalculator:
         Args:
             top_n: Number of top layers to display.
         """
+        logger.debug("print_summary called with top_n=%s", top_n)
         if not self._results:
             print("No layers profiled")
             return
@@ -437,6 +456,7 @@ class LayerFLOPsCalculator:
 
     def clear(self) -> None:
         """Clear all profiling results."""
+        logger.debug("clear called")
         self._results.clear()
         self._counter.clear()
 
@@ -465,6 +485,7 @@ def profile_model_layers(
         >>> calculator.print_summary()
         >>> print(f"Total: {calculator.total_tflops:.2f} TFLOPs")
     """
+    logger.debug("profile_model_layers called with model=%s, batch_size=%s, seq_len=%s", model, batch_size, seq_len)
     calculator = LayerFLOPsCalculator(
         batch_size=batch_size,
         seq_len=seq_len,

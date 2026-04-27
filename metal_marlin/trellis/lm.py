@@ -77,6 +77,7 @@ class TrellisForCausalLM(nn.Module):
         Args:
             config: Model configuration.
         """
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         super().__init__()
         self.config = config
         self.model = TrellisModel(config)
@@ -112,6 +113,7 @@ class TrellisForCausalLM(nn.Module):
         where rope_dim = qk_rope_head_dim (typically 64 for GLM-4 MLA)
         """
         # Determine RoPE dimension (use MLA rope dim if available)
+        logger.info("_build_rope_cache starting")
         rope_dim = getattr(self.config, "qk_rope_head_dim", 64)
         max_seq_len = self.config.max_position_embeddings
         rope_theta = self.config.rope_theta
@@ -161,6 +163,7 @@ class TrellisForCausalLM(nn.Module):
             cos, sin = model.get_rope_cache(position_ids)
             q_rotated = apply_rotary_pos_emb(q, cos, sin)
         """
+        logger.debug("get_rope_cache called with position_ids=%s, seq_len=%s", position_ids, seq_len)
         if position_ids is not None:
             # Gather sin/cos for specific positions
             # position_ids can be [batch, seq] or [seq]
@@ -196,6 +199,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Shared MoEBufferPool, or None if no MoE layers exist.
         """
+        logger.debug("_get_shared_buffer_pool called")
         if self._shared_buffer_pool is not None:
             return self._shared_buffer_pool
 
@@ -223,6 +227,7 @@ class TrellisForCausalLM(nn.Module):
         This reduces mps_tensor_to_metal_buffer overhead by ~45x for models
         with 45 MoE layers.
         """
+        logger.info("_setup_shared_buffer_pool starting")
         shared_pool = self._get_shared_buffer_pool()
         if shared_pool is None:
             return
@@ -243,6 +248,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Shared WorkspaceBufferPool, or None if no MoE layers exist.
         """
+        logger.debug("_get_workspace_buffer_pool called")
         if self._workspace_buffer_pool is not None:
             return self._workspace_buffer_pool
 
@@ -267,6 +273,7 @@ class TrellisForCausalLM(nn.Module):
         This eliminates per-forward allocations for output, accumulator, and intermediate
         buffers.
         """
+        logger.info("_setup_workspace_buffer_pool starting")
         workspace_pool = self._get_workspace_buffer_pool()
         if workspace_pool is None:
             return
@@ -294,6 +301,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             The shared MetalKernelLibrary, or None if no modules need it.
         """
+        logger.info("_setup_shared_lib starting")
         if self._shared_lib is not None:
             return self._shared_lib
 
@@ -322,6 +330,7 @@ class TrellisForCausalLM(nn.Module):
         decisions. The cache is per-layer and accumulates during decode,
         so clearing between generations prevents stale routing decisions.
         """
+        logger.debug("clear_routing_caches called")
         for layer in self.model.layers:
             if isinstance(layer.mlp, TrellisMoEMLP):
                 layer.mlp.clear_routing_cache()
@@ -332,6 +341,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Dict with total hits, misses, hit_rate, and per-layer stats.
         """
+        logger.debug("get_routing_cache_stats called")
         total_hits = 0
         total_misses = 0
         per_layer_stats = []
@@ -353,6 +363,7 @@ class TrellisForCausalLM(nn.Module):
 
     def reset_routing_cache_stats(self) -> None:
         """Reset routing cache statistics in all MoE layers."""
+        logger.debug("reset_routing_cache_stats called")
         for layer in self.model.layers:
             if isinstance(layer.mlp, TrellisMoEMLP):
                 layer.mlp.reset_routing_cache_stats()
@@ -387,6 +398,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             CausalLMOutput with logits tensor [batch, seq_len, vocab_size].
         """
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         hidden_states = self.model.embed_tokens(input_ids)
         # Keep model hidden states on a single fast inference dtype to avoid
         # bf16/fp16 residual promotion to fp32 across layers.
@@ -528,6 +540,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Generated token IDs [batch, seq_len + max_new_tokens].
         """
+        logger.debug("generate called with input_ids=%s, max_new_tokens=%s, temperature=%s", input_ids, max_new_tokens, temperature)
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
@@ -651,6 +664,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Loaded TrellisForCausalLM instance.
         """
+        logger.debug("from_pretrained called with model_path=%s, device=%s, mmap=%s", model_path, device, mmap)
         model_path = Path(model_path)
         config = TrellisModelConfig.from_pretrained(str(model_path))
         model = cls(config)
@@ -737,6 +751,7 @@ class TrellisForCausalLM(nn.Module):
         Returns:
             Dict with memory stats before/after optimization.
         """
+        logger.debug("optimize_memory called with verbose=%s", verbose)
         import gc
 
         stats = {"layers_optimized": 0}
@@ -797,6 +812,7 @@ class TrellisForCausalLM(nn.Module):
             - avg_snr_db: Average signal-to-noise ratio across layers
             - per_layer: Per-layer quantization stats (if verbose)
         """
+        logger.info("quantize_routers_to_int8 called with verbose=%s", verbose)
         stats: dict[str, Any] = {
             "num_layers_quantized": 0,
             "total_memory_saved_bytes": 0,

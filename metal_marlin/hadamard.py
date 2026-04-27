@@ -26,11 +26,15 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HadamardMetadata:
@@ -71,6 +75,7 @@ def hadamard_matrix(n: int) -> NDArray[np.floating[Any]]:
         >>> H.shape
         (4, 4)
     """
+    logger.debug("hadamard_matrix called with n=%s", n)
     if n <= 0:
         raise ValueError(f"n must be positive, got {n}")
     if n & (n - 1) != 0:
@@ -87,6 +92,7 @@ def hadamard_matrix(n: int) -> NDArray[np.floating[Any]]:
 
 def _is_power_of_2(n: int) -> bool:
     """Check if n is a positive power of 2."""
+    logger.debug("_is_power_of_2 called with n=%s", n)
     return n > 0 and (n & (n - 1)) == 0
 
 
@@ -104,6 +110,7 @@ def _get_block_diagonal_decomposition(n: int) -> tuple[int, ...] | None:
     Returns:
         Tuple of power-of-2 block sizes that sum to n, or None if not supported.
     """
+    logger.debug("_get_block_diagonal_decomposition called with n=%s", n)
     if n <= 0:
         return None
 
@@ -153,6 +160,7 @@ def _apply_block_diagonal_hadamard(
     Returns:
         Transformed weight matrix with block-diagonal Hadamard applied.
     """
+    logger.debug("_apply_block_diagonal_hadamard called with w=%s, block_sizes=%s, axis=%s", w, block_sizes, axis)
     if axis == 0:
         # Rotate along K: process each block independently
         K, N = w.shape
@@ -191,6 +199,7 @@ def _pad_to_multiple(
     arr: NDArray[np.floating[Any]], axis: int, multiple: int
 ) -> NDArray[np.floating[Any]]:
     """Pad array along given axis to the next multiple of `multiple`."""
+    logger.debug("_pad_to_multiple called with arr=%s, axis=%s, multiple=%s", arr, axis, multiple)
     current = arr.shape[axis]
     if current % multiple == 0:
         return arr
@@ -256,6 +265,7 @@ def apply_hadamard_rotation(
     """
     # Check if block_size is supported (power-of-2 or decomposable)
     # Power of 2 check
+    logger.debug("apply_hadamard_rotation called with weights=%s, block_size=%s, axis=%s", weights, block_size, axis)
     is_pow2 = (block_size > 0) and ((block_size & (block_size - 1)) == 0)
     
     if is_pow2:
@@ -376,6 +386,7 @@ def inverse_hadamard_rotation(
         >>> np.allclose(W96, W96_recovered)
         True
     """
+    logger.debug("inverse_hadamard_rotation called with weights=%s, metadata=%s", weights, metadata)
     block_size = metadata.block_size
     axis = metadata.axis
     orig_dim = metadata.orig_k
@@ -455,6 +466,7 @@ def compute_outlier_stats(weights: NDArray[np.floating[Any]]) -> dict[str, float
             - std: Standard deviation
             - kurtosis: Excess kurtosis (higher = more outliers)
     """
+    logger.debug("compute_outlier_stats called with weights=%s", weights)
     w = np.abs(weights.ravel()).astype(np.float64)
     mean_abs = float(w.mean())
     max_abs = float(w.max())

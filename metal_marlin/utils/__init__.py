@@ -3,6 +3,7 @@
 This module provides helper utilities for memory management, adaptive batch
 sizing, system introspection, tensor prefetching, and kernel profiling.
 """
+import logging
 
 from .memory import (
     MemoryInfo,
@@ -49,6 +50,9 @@ from .profiling import (
     print_profile_summary,
     profile_kernel,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Memory utilities

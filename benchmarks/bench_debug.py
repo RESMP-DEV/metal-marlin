@@ -2,12 +2,16 @@
 """Debug forward pass for GLM-4.7-Flash-Marlin-MMFP4."""
 from transformers import AutoTokenizer
 from metal_marlin.trellis.model import TrellisForCausalLM
+import logging
 import sys
 import time
 import traceback
 import warnings
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')
 

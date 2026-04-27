@@ -8,13 +8,18 @@ checkpoint. This script creates base_weights.safetensors with:
 - lm_head.weight (from MMFP4 shard 48)
 """
 
+import logging
 from pathlib import Path
 
 from safetensors import safe_open
 from safetensors.torch import save_file
 
 
+
+logger = logging.getLogger(__name__)
+
 def main():
+    logger.info("main starting")
     models_dir = Path(__file__).parent.parent / "models"
 
     # Load original norm weight from HF checkpoint

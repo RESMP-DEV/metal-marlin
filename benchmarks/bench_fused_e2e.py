@@ -1,6 +1,10 @@
+import logging
 import time
 
 from metal_marlin.inference.pipeline import MarlinPipeline
+
+
+logger = logging.getLogger(__name__)
 
 model_path = "benchmarks/results/qwen3_4b_fp4"
 

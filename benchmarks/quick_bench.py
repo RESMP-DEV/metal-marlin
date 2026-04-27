@@ -2,6 +2,7 @@
 """Quick benchmark for GLM-4.7-Flash Trellis model."""
 
 import gc
+import logging
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,9 @@ from metal_marlin.trellis.lm import TrellisForCausalLM
 
 import os
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -27,6 +31,7 @@ TrellisLinear.enable_cache = False
 
 
 def main():
+    logger.info("main starting")
     model_path = _ROOT / "models" / "GLM-4.7-Flash-Marlin-MMFP4"
 
     print("=" * 60)

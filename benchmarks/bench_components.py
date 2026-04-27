@@ -2,10 +2,14 @@
 """Profile all components to find true bottleneck."""
 from transformers import AutoTokenizer
 from metal_marlin.trellis.model import TrellisForCausalLM
+import logging
 import time
 import warnings
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings('ignore')
 
@@ -23,14 +27,17 @@ tokens = tokenizer('Hi', return_tensors='pt').input_ids.to('mps')
 
 class Timer:
     def __init__(self, name):
+        logger.debug("initializing %s with name=%s", type(self).__name__, name)
         self.name = name
         self.times = []
 
     def start(self):
+        logger.debug("start called")
         torch.mps.synchronize()
         self._start = time.perf_counter()
 
     def stop(self):
+        logger.debug("stop called")
         torch.mps.synchronize()
         self.times.append(time.perf_counter() - self._start)
 
@@ -48,7 +55,9 @@ for i, layer in enumerate(model.model.layers):
     orig_mlp = layer.mlp.forward
 
     def make_attn_wrapper(orig):
+        logger.debug("make_attn_wrapper called with orig=%s", orig)
         def wrapper(*args, **kwargs):
+            logger.debug("wrapper called")
             torch.mps.synchronize()
             start = time.perf_counter()
             result = orig(*args, **kwargs)
@@ -58,7 +67,9 @@ for i, layer in enumerate(model.model.layers):
         return wrapper
 
     def make_mlp_wrapper(orig):
+        logger.debug("make_mlp_wrapper called with orig=%s", orig)
         def wrapper(*args, **kwargs):
+            logger.debug("wrapper called")
             torch.mps.synchronize()
             start = time.perf_counter()
             result = orig(*args, **kwargs)

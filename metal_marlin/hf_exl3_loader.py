@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from collections import defaultdict
@@ -14,6 +15,9 @@ if TYPE_CHECKING:
 
     from .trellis.loader import TrellisModelLoader
 
+
+
+logger = logging.getLogger(__name__)
 
 def download_exl3_model(
     model_id: str,
@@ -32,6 +36,7 @@ def download_exl3_model(
     Returns:
         Path to downloaded model directory
     """
+    logger.info("download_exl3_model called with model_id=%s, local_dir=%s, revision=%s, token=%s", model_id, local_dir, revision, token)
     from huggingface_hub import snapshot_download
 
     # Download model files
@@ -59,6 +64,7 @@ def detect_exl3_format(model_path: Path) -> dict:
     - files: list of safetensor files
     - config: loaded config.json
     """
+    logger.debug("detect_exl3_format called with model_path=%s", model_path)
     config_path = model_path / "config.json"
     if not config_path.exists():
         raise FileNotFoundError(f"config.json not found in {model_path}")
@@ -118,6 +124,7 @@ def _parse_layer_index(tensor_name: str) -> int | None:
         Layer index if found, None otherwise
     """
     # Match patterns like "model.layers.42.mlp.gate_proj.weight"
+    logger.debug("_parse_layer_index called with tensor_name=%s", tensor_name)
     match = re.search(r"layers\.(\d+)\.", tensor_name)
     if match:
         return int(match.group(1))
@@ -142,6 +149,7 @@ def convert_sharded_to_layerwise(
     Returns:
         Path to converted model
     """
+    logger.info("convert_sharded_to_layerwise called with model_path=%s, metadata=%s, output_path=%s", model_path, metadata, output_path)
     from safetensors.torch import load_file, save_file
 
     if output_path is None:
@@ -236,6 +244,7 @@ def load_exl3_from_hub(
         FileNotFoundError: If config.json is not found in the model
         NotImplementedError: If the model is sharded and needs conversion
     """
+    logger.info("load_exl3_from_hub called with model_id=%s, device=%s, local_dir=%s, revision=%s", model_id, device, local_dir, revision)
     from .trellis.loader import TrellisModelLoader
 
     # Download model
@@ -277,6 +286,7 @@ def list_exl3_models(
         >>> for model in models:
         ...     print(f"{model['id']}: {model['downloads']} downloads")
     """
+    logger.debug("list_exl3_models called with author=%s, search=%s, limit=%s", author, search, limit)
     from huggingface_hub import list_models
 
     models = list_models(
@@ -314,6 +324,7 @@ def find_exl3_models(
     Returns:
         List of model info dictionaries
     """
+    logger.debug("find_exl3_models called with author=%s, search=%s, limit=%s", author, search, limit)
     return list_exl3_models(author=author, search=search, limit=limit)
 
 
@@ -326,6 +337,7 @@ def parse_model_card(model_id: str) -> dict:
     Returns:
         Dictionary with parsed metadata, including 'base_model' if found
     """
+    logger.debug("parse_model_card called with model_id=%s", model_id)
     try:
         from huggingface_hub import model_info
     except ImportError:

@@ -137,6 +137,7 @@ def get_kernel_for_batch_size(
         on large batches, providing ~20-30% better throughput than the base
         kernel for batch_size >= 33.
     """
+    logger.debug("get_kernel_for_batch_size called with batch_size=%s, use_fp32_acc=%s, gate_bits=%s", batch_size, use_fp32_acc, gate_bits)
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
     
@@ -192,6 +193,7 @@ def get_kernel_info() -> dict:
     Returns:
         Dictionary with kernel selection configuration and performance data.
     """
+    logger.debug("get_kernel_info called")
     return {
         "device": "M4 Max",
         "thresholds": M4_MAX_THRESHOLDS,
@@ -223,6 +225,7 @@ def recommend_kernel(batch_size: int, use_fp32_acc: bool = False) -> dict:
     Returns:
         Dictionary with kernel recommendation details
     """
+    logger.debug("recommend_kernel called with batch_size=%s, use_fp32_acc=%s", batch_size, use_fp32_acc)
     kernel_name, tile_n = get_kernel_for_batch_size(batch_size, use_fp32_acc)
     
     # Determine category

@@ -74,6 +74,7 @@ class _BatchedEncoder:
         Args:
             lib: MetalKernelLibrary to use for command queue
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._command_buffer: Any = None
         self._encoder: Any = None
@@ -112,6 +113,7 @@ class _BatchedEncoder:
             threadgroup: Threadgroup dimensions (threads in X, Y, Z)
             buffers: Sequence of MTLBuffer arguments (in order)
         """
+        logger.debug("dispatch called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
         if self._encoder is None:
             raise RuntimeError(
                 "Batch encoder not active. Use within context manager.")
@@ -145,6 +147,7 @@ class _BatchedEncoder:
         Uses waitUntilCompleted() for fastest single-dispatch latency,
         avoiding Python callback overhead from addCompletedHandler_.
         """
+        logger.debug("commit_and_wait called")
         if self._committed:
             return
 
@@ -184,6 +187,7 @@ def _release_gil():
 
     Allows Python threads to run while Metal GPU computation is in progress.
     """
+    logger.debug("_release_gil called")
     thread_state = _ctypes.PyEval_SaveThread()
     try:
         yield
@@ -259,6 +263,7 @@ class FastPath:
         Args:
             lib: MetalKernelLibrary to dispatch kernels from.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._ctx: Any = None
         self._pipelines: dict[str, Any] = {}
@@ -277,6 +282,7 @@ class FastPath:
     def _load_metallibs(self) -> None:
         """Load metallib files into the C++ context."""
         # Get the source directory from the library
+        logger.info("_load_metallibs called")
         if hasattr(self._lib, "source_dir"):
             source_dir = Path(self._lib.source_dir)
             # Load any .metallib files
@@ -289,6 +295,7 @@ class FastPath:
     @property
     def available(self) -> bool:
         """Return True if the C++ fast path is available."""
+        logger.debug("available called")
         return self._available
 
     def _get_pipeline(self, kernel_name: str) -> Any:
@@ -300,6 +307,7 @@ class FastPath:
         Returns:
             MTLComputePipelineState from C++ extension.
         """
+        logger.debug("_get_pipeline called with kernel_name=%s", kernel_name)
         if kernel_name not in self._pipelines:
             # Get the pipeline from C++ extension (searches all loaded libraries)
             self._pipelines[kernel_name] = self._ctx.get_pipeline(kernel_name)
@@ -327,6 +335,7 @@ class FastPath:
         Raises:
             RuntimeError: If fast path is not available.
         """
+        logger.debug("dispatch called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._available:
             raise RuntimeError(
                 "FastPath not available - use standard dispatch")
@@ -356,6 +365,7 @@ class FastPath:
         Raises:
             RuntimeError: If fast path is not available.
         """
+        logger.debug("dispatch_batched called with dispatches=%s, wait=%s", dispatches, wait)
         if not self._available:
             raise RuntimeError(
                 "FastPath not available - use standard dispatch")
@@ -379,12 +389,14 @@ class FastPath:
             ops: Sequence of (kernel_name, A, B, S, C, M, N, K, group_size) tuples.
             wait: If True, wait for all kernels to complete.
         """
+        logger.debug("batch_mmfp4_gemm called with ops=%s, wait=%s", ops, wait)
         if not self._available:
             raise RuntimeError("FastPath not available")
 
         batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
 
         def to_mb(obj: Any) -> Any:
+            logger.debug("to_mb called with obj=%s", obj)
             if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
                 return obj
             if hasattr(obj, "data_ptr"):
@@ -414,12 +426,14 @@ class FastPath:
             ops: Sequence of (kernel_name, A, B, S, Z, C, M, N, K, group_size) tuples.
             wait: If True, wait for all kernels to complete.
         """
+        logger.debug("batch_int4_gemm called with ops=%s, wait=%s", ops, wait)
         if not self._available:
             raise RuntimeError("FastPath not available")
 
         batch = _metal_dispatch_ext.BatchDispatch(self._ctx)
 
         def to_mb(obj: Any) -> Any:
+            logger.debug("to_mb called with obj=%s", obj)
             if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
                 return obj
             if hasattr(obj, "data_ptr"):
@@ -452,12 +466,14 @@ class FastPath:
         wait: bool = True,
     ) -> None:
         """Dispatch MMFP4 GEMM using C++ extension."""
+        logger.debug("mmfp4_gemm called with kernel_name=%s, A=%s, B=%s", kernel_name, A, B)
         if not self._available:
             raise RuntimeError("FastPath not available")
 
         pipeline = self._get_pipeline(kernel_name)
 
         def to_mb(obj: Any) -> Any:
+            logger.debug("to_mb called with obj=%s", obj)
             if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
                 return obj
             if hasattr(obj, "data_ptr"):
@@ -489,12 +505,14 @@ class FastPath:
         wait: bool = True,
     ) -> None:
         """Dispatch INT4 GEMM using C++ extension."""
+        logger.debug("int4_gemm called with kernel_name=%s, A=%s, B=%s", kernel_name, A, B)
         if not self._available:
             raise RuntimeError("FastPath not available")
 
         pipeline = self._get_pipeline(kernel_name)
 
         def to_mb(obj: Any) -> Any:
+            logger.debug("to_mb called with obj=%s", obj)
             if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
                 return obj
             if hasattr(obj, "data_ptr"):
@@ -525,12 +543,14 @@ class FastPath:
         wait: bool = True,
     ) -> None:
         """Dispatch INT2 GEMM using C++ extension."""
+        logger.debug("int2_gemm called with kernel_name=%s, A=%s, B=%s", kernel_name, A, B)
         if not self._available:
             raise RuntimeError("FastPath not available")
 
         pipeline = self._get_pipeline(kernel_name)
 
         def to_mb(obj: Any) -> Any:
+            logger.debug("to_mb called with obj=%s", obj)
             if isinstance(obj, _metal_dispatch_ext.ManagedBuffer):
                 return obj
             if hasattr(obj, "data_ptr"):
@@ -557,6 +577,7 @@ class FastPath:
         Returns:
             ManagedBuffer from C++ extension.
         """
+        logger.debug("create_buffer called with size=%s, use_pool=%s", size, use_pool)
         if not self._available:
             raise RuntimeError("FastPath not available")
         return _metal_dispatch_ext.create_buffer(self._ctx, size, use_pool)
@@ -573,6 +594,7 @@ class FastPath:
         Returns:
             ManagedBuffer from C++ extension.
         """
+        logger.debug("create_buffer_from_ptr called with ptr=%s, size=%s", ptr, size)
         if not self._available:
             raise RuntimeError("FastPath not available")
         return _metal_dispatch_ext.create_buffer_from_ptr(self._ctx, ptr, size)
@@ -591,6 +613,7 @@ def get_fast_path(lib: MetalKernelLibrary) -> FastPath:
     Returns:
         FastPath instance (may or may not be available).
     """
+    logger.debug("get_fast_path called with lib=%s", lib)
     lib_id = id(lib)
     if lib_id not in _fast_path_cache:
         _fast_path_cache[lib_id] = FastPath(lib)
@@ -609,6 +632,7 @@ if HAS_METAL:
     _ASYNC_TRANSFER_THRESHOLD = 1024 * 1024
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
+        logger.debug("_get_staging_pool called with device=%s", device)
         pool = _STAGING_POOLS.get(id(device))
         if pool is None:
             pool = MetalBufferPool(
@@ -637,6 +661,7 @@ if HAS_METAL:
         )
 
         def __init__(self, lib: MetalKernelLibrary, device: Any):
+            logger.debug("initializing %s with lib=%s, device=%s", type(self).__name__, lib, device)
             self._lib = lib
             self._device = device
             self._staging_buffer = _get_staging_pool(
@@ -656,6 +681,7 @@ if HAS_METAL:
                 Returns:
                     Offset in batch where data was placed
                 """
+                logger.debug("add called with data=%s, private_buf=%s", data, private_buf)
                 size = len(data)
 
                 if size > _BATCH_THRESHOLD:
@@ -686,6 +712,7 @@ if HAS_METAL:
 
         def flush(self) -> None:
             """Flush all pending transfers in a single blit operation."""
+            logger.debug("flush called")
             if not self._pending:
                 return
 
@@ -721,6 +748,7 @@ if HAS_METAL:
                      "_private_buffer", "_completed")
 
         def __init__(self, command_buffer: Any, staging_buffer: Any, private_buffer: Any):
+            logger.debug("initializing %s with command_buffer=%s, staging_buffer=%s, private_buffer=%s", type(self).__name__, command_buffer, staging_buffer, private_buffer)
             self._command_buffer = command_buffer
             self._staging_buffer = staging_buffer
             self._private_buffer = private_buffer
@@ -729,15 +757,18 @@ if HAS_METAL:
         @property
         def destination_buffer(self) -> Any:
             """The private GPU buffer being written to."""
+            logger.debug("destination_buffer called")
             return self._private_buffer
 
         @property
         def staging_buffer(self) -> Any:
             """The staging buffer (managed/shared)."""
+            logger.debug("staging_buffer called")
             return self._staging_buffer
 
         def is_complete(self) -> bool:
             """Check if transfer has completed without blocking."""
+            logger.debug("is_complete called")
             if self._completed:
                 return True
             # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed,
@@ -750,11 +781,13 @@ if HAS_METAL:
 
         def wait(self) -> None:
             """Block until transfer completes."""
+            logger.debug("wait called")
             if not self._completed:
                 self._command_buffer.waitUntilCompleted()
                 self._completed = True
 
     def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
+        logger.debug("_blit_copy called with lib=%s, source=%s, destination=%s", lib, source, destination)
         command_buffer = lib.command_queue.commandBuffer()
         blit = command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
@@ -786,6 +819,7 @@ if HAS_METAL:
         Returns:
             StagingTransferHandle for synchronization
         """
+        logger.debug("_blit_copy_async called with lib=%s, source=%s, destination=%s", lib, source, destination)
         command_buffer = lib.command_queue.commandBuffer()
         blit = command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
@@ -814,6 +848,7 @@ if HAS_METAL:
         Returns:
             Shared MTLBuffer (for small transfers) or StagingTransferHandle (for large)
         """
+        logger.debug("_private_buffer_from_bytes called with lib=%s, device=%s, data=%s", lib, device, data)
         size = len(data)
 
         if size < _ASYNC_TRANSFER_THRESHOLD:
@@ -871,6 +906,7 @@ if HAS_METAL:
         Returns:
             Shared MTLBuffer or StagingTransferHandle for async transfers
         """
+        logger.debug("_private_buffer_from_tensor called with tensor=%s, lib=%s, device=%s", tensor, lib, device)
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
@@ -923,6 +959,7 @@ if HAS_METAL:
 
 def require_metal() -> None:
     """Raise if Metal/PyObjC is not available."""
+    logger.debug("require_metal called")
     if not HAS_METAL:
         raise RuntimeError(
             "Metal dispatch requires PyObjC. Install with:\n"
@@ -932,6 +969,7 @@ def require_metal() -> None:
 
 def require_mps() -> None:
     """Raise if PyTorch MPS is not available."""
+    logger.debug("require_mps called")
     if not HAS_MPS:
         raise RuntimeError(
             "Metal dispatch requires PyTorch with MPS backend.\n"
@@ -941,6 +979,7 @@ def require_mps() -> None:
 
 def get_gpu_family(device: Any) -> int:
     """Return Apple GPU family (7=M1, 8=M2, 9=M3+)."""
+    logger.debug("get_gpu_family called with device=%s", device)
     require_metal()
     apple9 = getattr(Metal, "MTLGPUFamilyApple9", None)
     apple8 = getattr(Metal, "MTLGPUFamilyApple8", None)
@@ -967,6 +1006,7 @@ def get_shader_source(name: str) -> str:
     Returns:
         Shader source code as string.
     """
+    logger.debug("get_shader_source called with name=%s", name)
     path = _SRC_DIR / f"{name}.metal"
     if not path.exists():
         raise FileNotFoundError(f"Metal shader not found: {path}")
@@ -984,6 +1024,7 @@ def load_metallib(metallib_path: str | Path | None = None) -> Any:
     Returns:
         MTLLibrary object with all precompiled kernels.
     """
+    logger.info("load_metallib called with metallib_path=%s", metallib_path)
     require_metal()
 
     if metallib_path is None:
@@ -1020,6 +1061,7 @@ def get_loaded_metallib() -> Any:
 
     Returns None if metallib file doesn't exist (falls back to runtime compilation).
     """
+    logger.info("get_loaded_metallib called")
     global _loaded_metallib
     if _loaded_metallib is None:
         try:
@@ -1052,6 +1094,7 @@ class MetalKernelLibrary:
         Args:
             device: MTLDevice instance. If None, uses default system device.
         """
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         require_metal()
 
         if device is None:
@@ -1098,6 +1141,7 @@ class MetalKernelLibrary:
         Returns:
             MetalKernelLibrary with all shaders compiled.
         """
+        logger.debug("from_source_dir called with src_dir=%s", src_dir)
         lib = cls()
 
         if src_dir is None:
@@ -1116,16 +1160,19 @@ class MetalKernelLibrary:
     @property
     def device(self) -> Any:
         """The MTLDevice used for compilation and dispatch."""
+        logger.debug("device called")
         return self._device
 
     @property
     def command_queue(self) -> Any:
         """The MTLCommandQueue for kernel dispatch (primary/prefill)."""
+        logger.debug("command_queue called")
         return self._command_queue
 
     @property
     def decode_queue(self) -> Any:
         """The MTLCommandQueue for decode operations (secondary stream)."""
+        logger.debug("decode_queue called")
         return self._decode_queue
 
     @contextmanager
@@ -1153,6 +1200,7 @@ class MetalKernelLibrary:
             # ... do other work ...
             batch.wait()  # Block until complete
         """
+        logger.debug("batch_dispatch called with wait=%s", wait)
         self._batch_mode = True
         self._batch_command_buffer = self.command_queue.commandBuffer()
         self._batch_encoder = self._batch_command_buffer.computeCommandEncoder()
@@ -1208,6 +1256,7 @@ class MetalKernelLibrary:
         Creates a new command buffer and encoder for prefill work. Call
         dispatch_prefill() to add kernels, then commit_prefill() to submit.
         """
+        logger.debug("begin_prefill called")
         if self._prefill_buffer is not None:
             raise RuntimeError(
                 "Prefill already in progress. Call commit_prefill() first.")
@@ -1229,6 +1278,7 @@ class MetalKernelLibrary:
             threadgroup: Threads per threadgroup (x, y, z).
             buffers: Metal buffers to bind as kernel arguments.
         """
+        logger.debug("dispatch_prefill called with pipeline=%s, grid=%s, threadgroup=%s", pipeline, grid, threadgroup)
         if self._prefill_encoder is None:
             raise RuntimeError("Must call begin_prefill() first")
 
@@ -1247,6 +1297,7 @@ class MetalKernelLibrary:
         The GPU will begin executing prefill work immediately. Call
         wait_prefill() to block until completion.
         """
+        logger.debug("commit_prefill called")
         if self._prefill_encoder is None:
             raise RuntimeError("Must call begin_prefill() first")
 
@@ -1258,6 +1309,7 @@ class MetalKernelLibrary:
 
     def wait_prefill(self) -> None:
         """Block until in-flight prefill work completes."""
+        logger.debug("wait_prefill called")
         if self._inflight_prefill is not None:
             self._inflight_prefill.waitUntilCompleted()
             self._inflight_prefill = None
@@ -1268,6 +1320,7 @@ class MetalKernelLibrary:
         Creates a new command buffer and encoder for decode work. Call
         dispatch_decode() to add kernels, then commit_decode() to submit.
         """
+        logger.debug("begin_decode called")
         if self._decode_buffer is not None:
             raise RuntimeError(
                 "Decode already in progress. Call commit_decode() first.")
@@ -1289,6 +1342,7 @@ class MetalKernelLibrary:
             threadgroup: Threads per threadgroup (x, y, z).
             buffers: Metal buffers to bind as kernel arguments.
         """
+        logger.debug("dispatch_decode called with pipeline=%s, grid=%s, threadgroup=%s", pipeline, grid, threadgroup)
         if self._decode_encoder is None:
             raise RuntimeError("Must call begin_decode() first")
 
@@ -1307,6 +1361,7 @@ class MetalKernelLibrary:
         The GPU will begin executing decode work immediately. Call
         wait_decode() to block until completion.
         """
+        logger.debug("commit_decode called")
         if self._decode_encoder is None:
             raise RuntimeError("Must call begin_decode() first")
 
@@ -1318,20 +1373,24 @@ class MetalKernelLibrary:
 
     def wait_decode(self) -> None:
         """Block until in-flight decode work completes."""
+        logger.debug("wait_decode called")
         if self._inflight_decode is not None:
             self._inflight_decode.waitUntilCompleted()
             self._inflight_decode = None
 
     def has_inflight_prefill(self) -> bool:
         """Check if prefill work is currently in flight."""
+        logger.debug("has_inflight_prefill called")
         return self._inflight_prefill is not None
 
     def has_inflight_decode(self) -> bool:
         """Check if decode work is currently in flight."""
+        logger.debug("has_inflight_decode called")
         return self._inflight_decode is not None
 
     def wait_all(self) -> None:
         """Block until all in-flight work completes."""
+        logger.debug("wait_all called")
         self.wait_prefill()
         self.wait_decode()
 
@@ -1359,6 +1418,7 @@ class MetalKernelLibrary:
         Returns:
             Configured MTLCompileOptions instance.
         """
+        logger.info("_create_compile_options starting")
         options = Metal.MTLCompileOptions.new()
 
         # Check environment for correctness testing modes
@@ -1431,6 +1491,7 @@ class MetalKernelLibrary:
             MTLLibrary instance.
         """
         # Preprocess includes before compilation (PyObjC Metal doesn't resolve #include).
+        logger.info("compile_source starting")
         source = self._preprocess_includes(source)
 
         options = self._create_compile_options()
@@ -1461,6 +1522,7 @@ class MetalKernelLibrary:
             MTLLibrary instance.
         """
         # Build preprocessor header from defines
+        logger.info("compile_source_with_defines starting")
         define_lines = [f"#define {k} {v}" for k, v in defines.items()]
         define_header = "\n".join(define_lines) + "\n" if define_lines else ""
 
@@ -1502,6 +1564,7 @@ class MetalKernelLibrary:
         System includes (<metal_stdlib>, <simd/simd.h>, etc.) are preserved.
         Local includes ("file.metal") are inlined.
         """
+        logger.debug("_preprocess_includes called with source=%s", source)
         import re
 
         # Only match local includes with double quotes, not system includes with angle brackets
@@ -1509,10 +1572,12 @@ class MetalKernelLibrary:
         processed: set[str] = set()
 
         def resolve(src: str, depth: int = 0) -> str:
+            logger.debug("resolve called with src=%s, depth=%s", src, depth)
             if depth > 10:
                 raise RuntimeError("Include depth exceeded")
 
             def replacer(match: re.Match[str]) -> str:
+                logger.debug("replacer called with match=%s", match)
                 filename = match.group(1)
                 if filename in processed:
                     return ""
@@ -1546,6 +1611,7 @@ class MetalKernelLibrary:
         Returns:
             MTLComputePipelineState for dispatching.
         """
+        logger.debug("get_pipeline called with function_name=%s, library_name=%s", function_name, library_name)
         cache_key = f"{library_name or '*'}::{function_name}"
 
         if cache_key in self._pipelines:
@@ -1586,6 +1652,7 @@ class MetalKernelLibrary:
         Prefers precompiled metallib kernels (including kernels that are not
         present in JIT shader sources), then falls back to JIT pipeline lookup.
         """
+        logger.debug("get_function called with function_name=%s", function_name)
         cache_key = f"*::{function_name}"
         if cache_key in self._pipelines:
             return self._pipelines[cache_key]
@@ -1605,6 +1672,7 @@ class MetalKernelLibrary:
 
     def list_functions(self, library_name: str) -> list[str]:
         """List all function names in a compiled library."""
+        logger.debug("list_functions called with library_name=%s", library_name)
         lib = self._libraries.get(library_name)
         if lib is None:
             return []
@@ -1616,6 +1684,7 @@ class MetalKernelLibrary:
         Tries precompiled metallib first for 100x faster dispatch,
         falling back to JIT compilation if not found.
         """
+        logger.debug("get_kernel called with library_name=%s, function_name=%s", library_name, function_name)
         cache_key = f"precompiled::{function_name}"
 
         # Check cache first
@@ -1640,6 +1709,7 @@ class MetalKernelLibrary:
 
     def _get_metal_buffer(self, tensor: torch.Tensor) -> Any:
         """Get MTLBuffer from MPS tensor (zero-copy)."""
+        logger.debug("_get_metal_buffer called with tensor=%s", tensor)
         require_mps()
 
         if not tensor.is_mps:
@@ -1669,6 +1739,7 @@ class MetalKernelLibrary:
         *args: Any,
     ) -> None:
         """Dispatch a Metal kernel with buffer/constant arguments."""
+        logger.debug("_dispatch called with kernel=%s, grid=%s, threadgroup=%s", kernel, grid, threadgroup)
         command_buffer = self._command_queue.commandBuffer()
         encoder = command_buffer.computeCommandEncoder()
 
@@ -1715,6 +1786,7 @@ class MetalKernelLibrary:
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused FP4 dequantize + GEMM using marlin_gemm kernel."""
+        logger.debug("fp4_gemm called with input=%s, weight=%s, scales=%s", input, weight, scales)
         M = input.shape[0]
         orig_N = N
 
@@ -1786,6 +1858,7 @@ class MetalKernelLibrary:
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused INT4 dequantize + GEMM using marlin_gemm kernel."""
+        logger.debug("int4_gemm called with input=%s, weight=%s, scales=%s", input, weight, scales)
         M = input.shape[0]
         orig_N = N
 
@@ -1861,6 +1934,7 @@ class MetalKernelLibrary:
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused INT2 dequantize + GEMM using marlin_gemm kernel."""
+        logger.debug("int2_gemm called with input=%s, weight=%s, scales=%s", input, weight, scales)
         M = input.shape[0]
         orig_N = N
 
@@ -1924,6 +1998,7 @@ class MetalKernelLibrary:
         Returns:
             SmallTransferBatcher instance for batching <4KB transfers.
         """
+        logger.debug("get_small_transfer_batcher called")
         if self._small_transfer_batcher is None:
             self._small_transfer_batcher = SmallTransferBatcher(
                 self, self._device)
@@ -1931,6 +2006,7 @@ class MetalKernelLibrary:
 
     def flush_small_transfers(self) -> None:
         """Flush pending small transfers from the batcher."""
+        logger.debug("flush_small_transfers called")
         if self._small_transfer_batcher is not None:
             self._small_transfer_batcher.flush()
 
@@ -1940,6 +2016,7 @@ class MetalKernelLibrary:
         Returns:
             BatchedDispatcher instance bound to this library.
         """
+        logger.debug("create_batched_dispatcher called")
         return BatchedDispatcher(self)
 
 
@@ -1995,6 +2072,7 @@ class MetalDispatcher:
         Args:
             lib: MetalKernelLibrary instance for kernel compilation and dispatch.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._device = lib.device
 
@@ -2028,10 +2106,12 @@ class MetalDispatcher:
 
     def _get_buffer_key(self) -> str:
         """Return current buffer key ('buffer_a' or 'buffer_b')."""
+        logger.debug("_get_buffer_key called")
         return "buffer_b" if self._ping_pong else "buffer_a"
 
     def _swap_buffers(self) -> None:
         """Swap A/B buffers for ping-pong operation."""
+        logger.debug("_swap_buffers called")
         self._ping_pong = not self._ping_pong
         self._active_buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
@@ -2041,6 +2121,7 @@ class MetalDispatcher:
         Returns:
             Tuple of (command_buffer, encoder).
         """
+        logger.debug("_create_encoder called")
         cmd_buffer = self._lib.command_queue.commandBuffer()
         encoder = cmd_buffer.computeCommandEncoder()
         return cmd_buffer, encoder
@@ -2053,6 +2134,7 @@ class MetalDispatcher:
         to flip the roles.
         """
         # If GPU is busy, don't wait - encode to the other buffer
+        logger.debug("begin_encode called")
         buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
         if buffer["encoder"] is not None:
@@ -2079,6 +2161,7 @@ class MetalDispatcher:
             buffers: Sequence of MTLBuffer arguments.
             offsets: Optional byte offsets for each buffer.
         """
+        logger.debug("dispatch_kernel called with function_name=%s, grid=%s, threadgroup=%s", function_name, grid, threadgroup)
         buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
         if buffer["encoder"] is None:
@@ -2105,6 +2188,7 @@ class MetalDispatcher:
         This submits the encoded work to GPU and immediately returns,
         allowing CPU to begin encoding the next token.
         """
+        logger.debug("commit called")
         buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
         if buffer["encoder"] is None:
@@ -2124,6 +2208,7 @@ class MetalDispatcher:
         2. Read output tensor
         3. Swap buffers for next iteration
         """
+        logger.debug("sync_and_swap called")
         buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
         if buffer["committed"] and buffer["cmd_buffer"] is not None:
@@ -2165,6 +2250,7 @@ class MetalDispatcher:
         Returns:
             Output tensor [M, N], fp16, MPS.
         """
+        logger.debug("dispatch_prefill_decode called with input_tensor=%s, weight_packed=%s, scales=%s", input_tensor, weight_packed, scales)
         require_mps()
 
         device = self._device
@@ -2195,6 +2281,7 @@ class MetalDispatcher:
         While GPU processes token N, CPU prepares buffers for token N+1.
         Sync only happens when output is actually needed.
         """
+        logger.debug("_dispatch_decode_double_buffered called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         device = self._device
 
         # Sync and swap from previous iteration (brings back output)
@@ -2265,6 +2352,7 @@ class MetalDispatcher:
         """Synchronous prefill dispatch (no double buffering for M>1)."""
         # For prefill, use the standard dispatch_gemm_fp4
         # First sync any pending decode operations
+        logger.debug("_dispatch_prefill_sync called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         self.wait_all()
 
         return dispatch_gemm_fp4(
@@ -2278,6 +2366,7 @@ class MetalDispatcher:
         must be ready for CPU access.
         """
         # Wait for both buffers
+        logger.debug("wait_all called")
         for buf in [self._buffer_a, self._buffer_b]:
             if buf["committed"] and buf["cmd_buffer"] is not None:
                 buf["cmd_buffer"].waitUntilCompleted()
@@ -2294,21 +2383,25 @@ class MetalDispatcher:
     @property
     def double_buffer_enabled(self) -> bool:
         """Return True if double buffering is available."""
+        logger.debug("double_buffer_enabled called")
         return True
 
     @property
     def ping_pong_state(self) -> bool:
         """Return current ping-pong state (False=A, True=B)."""
+        logger.debug("ping_pong_state called")
         return self._ping_pong
 
     @property
     def buffer_a_ready(self) -> bool:
         """Return True if buffer A is ready for encoding."""
+        logger.debug("buffer_a_ready called")
         return self._buffer_a["encoder"] is None and not self._buffer_a["committed"]
 
     @property
     def buffer_b_ready(self) -> bool:
         """Return True if buffer B is ready for encoding."""
+        logger.debug("buffer_b_ready called")
         return self._buffer_b["encoder"] is None and not self._buffer_b["committed"]
 
 
@@ -2347,6 +2440,7 @@ class BatchedDispatcher:
         Args:
             lib: MetalKernelLibrary instance to dispatch kernels from.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self.lib = lib
         self.queue = lib.command_queue
         self._cmd_buffer: Any = None
@@ -2359,6 +2453,7 @@ class BatchedDispatcher:
         Must be called before dispatch(). Creates a new command buffer
         and compute encoder.
         """
+        logger.debug("begin called")
         self._cmd_buffer = self.queue.commandBuffer()
         self._encoder = self._cmd_buffer.computeCommandEncoder()
         self._dispatches = 0
@@ -2380,6 +2475,7 @@ class BatchedDispatcher:
             buffers: List of Metal buffers to bind to kernel arguments.
             offsets: Optional sequence of byte offsets for each buffer.
         """
+        logger.debug("dispatch called with function_name=%s, grid=%s, threadgroup=%s", function_name, grid, threadgroup)
         if self._encoder is None:
             raise RuntimeError("Must call begin() before dispatch()")
 
@@ -2405,6 +2501,7 @@ class BatchedDispatcher:
         Raises:
             RuntimeError: If begin() was not called.
         """
+        logger.debug("commit_and_wait called")
         if self._encoder is None:
             raise RuntimeError("Must call begin() before commit_and_wait()")
 
@@ -2440,12 +2537,14 @@ class BatchDispatchState:
     __slots__ = ("_command_buffer", "_completed")
 
     def __init__(self, command_buffer: Any):
+        logger.debug("initializing %s with command_buffer=%s", type(self).__name__, command_buffer)
         self._command_buffer = command_buffer
         self._completed = False
 
     @property
     def completed(self) -> bool:
         """Check if the batch has completed without blocking."""
+        logger.debug("completed called")
         if self._completed:
             return True
         # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed,
@@ -2458,6 +2557,7 @@ class BatchDispatchState:
 
     def wait(self) -> None:
         """Block until the batch dispatch completes."""
+        logger.debug("wait called")
         if not self._completed:
             self._command_buffer.waitUntilCompleted()
             self._completed = True
@@ -2478,6 +2578,7 @@ class AsyncTransferHandle:
     __slots__ = ("_command_buffer", "_destination", "_completed")
 
     def __init__(self, command_buffer: Any, destination: Any):
+        logger.debug("initializing %s with command_buffer=%s, destination=%s", type(self).__name__, command_buffer, destination)
         self._command_buffer = command_buffer
         self._destination = destination
         self._completed = False
@@ -2485,10 +2586,12 @@ class AsyncTransferHandle:
     @property
     def destination_buffer(self) -> Any:
         """The destination Metal buffer being written to."""
+        logger.debug("destination_buffer called")
         return self._destination
 
     def is_complete(self) -> bool:
         """Check if the transfer has completed without blocking."""
+        logger.debug("is_complete called")
         if self._completed:
             return True
         # MTLCommandBuffer.status: 0=notEnqueued, 1=enqueued, 2=committed, 3=scheduled, 4=completed, 5=error
@@ -2500,6 +2603,7 @@ class AsyncTransferHandle:
 
     def wait(self) -> None:
         """Block until the transfer completes."""
+        logger.debug("wait called")
         if not self._completed:
             self._command_buffer.waitUntilCompleted()
             self._completed = True
@@ -2537,6 +2641,7 @@ class AsyncTransferManager:
         Args:
             lib: MetalKernelLibrary providing device and queues.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._device = lib.device
         # Use the secondary decode_queue for transfers to overlap with compute
@@ -2552,6 +2657,7 @@ class AsyncTransferManager:
         Aligns to cache line boundary (128 bytes) to prevent false sharing.
         """
         # Align to 128-byte cache line for M3 Max optimization
+        logger.debug("_get_private_buffer called with size=%s", size)
         aligned_size = _align_buffer_size(size)
 
         if aligned_size in self._buffer_pool and self._buffer_pool[aligned_size]:
@@ -2571,6 +2677,7 @@ class AsyncTransferManager:
         Size is aligned to cache line boundary (128 bytes) to prevent
         false sharing between adjacent buffers.
         """
+        logger.debug("_return_buffer called with buffer=%s, size=%s", buffer, size)
         aligned_size = _align_buffer_size(size)
         if aligned_size not in self._buffer_pool:
             self._buffer_pool[aligned_size] = []
@@ -2598,6 +2705,7 @@ class AsyncTransferManager:
         Returns:
             AsyncTransferHandle for synchronization and buffer access.
         """
+        logger.debug("start_transfer_async called with source=%s, size=%s, destination=%s", source, size, destination)
         if destination is None:
             destination = self._get_private_buffer(size)
 
@@ -2622,6 +2730,7 @@ class AsyncTransferManager:
         Returns:
             Destination MTLBuffer with copied data.
         """
+        logger.debug("transfer_sync called with source=%s, size=%s, destination=%s", source, size, destination)
         handle = self.start_transfer_async(source, size, destination)
         handle.wait()
         return handle.destination_buffer
@@ -2669,6 +2778,7 @@ class PipelinedLayerDispatcher:
             lib: MetalKernelLibrary for buffer allocation and transfers.
             num_layers: Number of transformer layers (for buffer management).
         """
+        logger.debug("initializing %s with lib=%s, num_layers=%s", type(self).__name__, lib, num_layers)
         self._lib = lib
         self._transfer_manager = AsyncTransferManager(lib)
         self._num_layers = num_layers
@@ -2695,6 +2805,7 @@ class PipelinedLayerDispatcher:
         Returns:
             Dict of weight name -> Metal buffer ready for compute.
         """
+        logger.debug("prefetch_layer_weights_sync called with layer_idx=%s, weight_tensors=%s", layer_idx, weight_tensors)
         if layer_idx in self._layer_buffers:
             return self._layer_buffers[layer_idx]
 
@@ -2726,6 +2837,7 @@ class PipelinedLayerDispatcher:
             layer_idx: Layer index being prefetched.
             weight_tensors: Dict of weight name -> tensor to transfer.
         """
+        logger.debug("start_prefetch_async called with layer_idx=%s, weight_tensors=%s", layer_idx, weight_tensors)
         if layer_idx in self._layer_buffers:
             # Already cached, nothing to do
             return
@@ -2757,6 +2869,7 @@ class PipelinedLayerDispatcher:
         Returns:
             Dict of weight name -> Metal buffer ready for compute.
         """
+        logger.debug("wait_for_prefetch called with layer_idx=%s", layer_idx)
         if layer_idx in self._inflight:
             for handle in self._inflight[layer_idx]:
                 handle.wait()
@@ -2776,6 +2889,7 @@ class PipelinedLayerDispatcher:
         Raises:
             KeyError: If layer has not been prefetched.
         """
+        logger.debug("get_layer_buffers called with layer_idx=%s", layer_idx)
         if layer_idx not in self._layer_buffers:
             raise KeyError(f"Layer {layer_idx} has not been prefetched")
         return self._layer_buffers[layer_idx]
@@ -2788,6 +2902,7 @@ class PipelinedLayerDispatcher:
         Args:
             layer_idx: Layer index to clear.
         """
+        logger.debug("clear_layer_cache called with layer_idx=%s", layer_idx)
         if layer_idx in self._layer_buffers:
             del self._layer_buffers[layer_idx]
         if layer_idx in self._inflight:
@@ -2799,6 +2914,7 @@ class PipelinedLayerDispatcher:
     def clear_all(self) -> None:
         """Clear all cached buffers and pending transfers."""
         # Wait for all in-flight transfers
+        logger.debug("clear_all called")
         for layer_idx in list(self._inflight.keys()):
             for handle in self._inflight[layer_idx]:
                 handle.wait()
@@ -2817,11 +2933,13 @@ class _CopyBackBuffer:
     __slots__ = ("buffer", "tensor")
 
     def __init__(self, buffer: Any, tensor: torch.Tensor) -> None:
+        logger.debug("initializing %s with buffer=%s, tensor=%s", type(self).__name__, buffer, tensor)
         self.buffer = buffer
         self.tensor = tensor
 
 
 def _torch_dtype_to_numpy(dtype: torch.dtype) -> np.dtype:
+    logger.debug("_torch_dtype_to_numpy called with dtype=%s", dtype)
     mapping = {
         torch.float16: np.float16,
         torch.float32: np.float32,
@@ -2840,6 +2958,7 @@ def _torch_dtype_to_numpy(dtype: torch.dtype) -> np.dtype:
 
 
 def _copy_buffer_to_tensor(buffer: Any, tensor: torch.Tensor) -> None:
+    logger.debug("_copy_buffer_to_tensor called with buffer=%s, tensor=%s", buffer, tensor)
     contents = buffer.contents()
     length = buffer.length()
     np_dtype = _torch_dtype_to_numpy(tensor.dtype)
@@ -2864,6 +2983,7 @@ def _get_mps_tensor_iosurface_ptr(tensor: torch.Tensor) -> tuple[int, int] | Non
     Returns:
         Tuple of (iosurface_ptr, offset_in_bytes) or None if not available
     """
+    logger.debug("_get_mps_tensor_iosurface_ptr called with tensor=%s", tensor)
     try:
 
         # Try PyTorch 2.3+ API first
@@ -2936,6 +3056,7 @@ def _create_zero_copy_buffer_from_iosurface(
     Returns:
         MTLBuffer with shared storage or None if zero-copy not possible
     """
+    logger.debug("_create_zero_copy_buffer_from_iosurface called with device=%s, tensor=%s, size=%s", device, tensor, size)
     try:
         # Try to get the IOSurface backing pointer
         iosurface_info = _get_mps_tensor_iosurface_ptr(tensor)
@@ -2986,6 +3107,7 @@ def mps_tensor_to_metal_buffer(
     Returns:
         MTLBuffer or a copy-back wrapper for output tensors.
     """
+    logger.debug("mps_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     require_mps()
 
     if not tensor.is_mps:
@@ -3065,6 +3187,7 @@ def numpy_array_to_metal_buffer(arr: np.ndarray, device: Any) -> Any:
     Returns:
         MTLBuffer containing array data
     """
+    logger.debug("numpy_array_to_metal_buffer called with arr=%s, device=%s", arr, device)
     require_mps()
 
     if not arr.flags["C_CONTIGUOUS"]:
@@ -3097,6 +3220,7 @@ def cpu_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     Returns:
         MTLBuffer containing tensor data
     """
+    logger.debug("cpu_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     require_mps()
 
     if tensor.is_mps or tensor.is_cuda:
@@ -3136,6 +3260,7 @@ def cpu_tensor_to_metal_texture(tensor: torch.Tensor, device: Any) -> Any:
     Returns:
         MTLTexture containing tensor data.
     """
+    logger.debug("cpu_tensor_to_metal_texture called with tensor=%s, device=%s", tensor, device)
     require_mps()
 
     if tensor.is_mps or tensor.is_cuda:
@@ -3206,6 +3331,7 @@ def mps_tensors_to_metal_buffers(
     Returns:
         List of MTLBuffer objects corresponding to input tensors
     """
+    logger.debug("mps_tensors_to_metal_buffers called with tensors=%s, device=%s", tensors, device)
     require_mps()
 
     # Synchronize once for all tensors
@@ -3276,6 +3402,7 @@ def cpu_tensors_to_metal_buffers(tensors: list[torch.Tensor], device: Any) -> li
     Returns:
         List of MTLBuffer objects corresponding to input tensors
     """
+    logger.debug("cpu_tensors_to_metal_buffers called with tensors=%s, device=%s", tensors, device)
     require_mps()
 
     buffers: list[Any] = []
@@ -3314,6 +3441,7 @@ def metal_buffer_to_numpy(buffer: Any, dtype: np.dtype, shape: tuple[int, ...]) 
     Returns:
         numpy array (copy of buffer data)
     """
+    logger.debug("metal_buffer_to_numpy called with buffer=%s, dtype=%s, shape=%s", buffer, dtype, shape)
     require_metal()
 
     # Get raw bytes
@@ -3358,6 +3486,7 @@ def dispatch_kernel(
     Returns:
         None if wait=True or in batch mode, otherwise the command buffer.
     """
+    logger.debug("dispatch_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
     pipeline = lib.get_pipeline(function_name)
 
     # Check for _CopyBackBuffer in buffers (requires Python path for copy-back)
@@ -3466,6 +3595,7 @@ def dispatch_kernel_indirect(
         };
         For MoE: threadgroupsPerGrid[0] = (expert_tokens + threads_per_tg - 1) / threads_per_tg
     """
+    logger.debug("dispatch_kernel_indirect called with lib=%s, function_name=%s, expert_counts=%s", lib, function_name, expert_counts)
     require_mps()
     pipeline = lib.get_pipeline(function_name)
     device = lib.device
@@ -3560,16 +3690,19 @@ _PAD_MULTIPLE = 8
 
 
 def _padding_enabled(override: bool | None) -> bool:
+    logger.debug("_padding_enabled called with override=%s", override)
     if override is None:
         return _ENABLE_GEMM_PADDING
     return override
 
 
 def _round_up(value: int, multiple: int) -> int:
+    logger.debug("_round_up called with value=%s, multiple=%s", value, multiple)
     return ((value + multiple - 1) // multiple) * multiple
 
 
 def _pad_tensor_to_size(tensor: torch.Tensor, dim: int, size: int) -> tuple[torch.Tensor, int]:
+    logger.debug("_pad_tensor_to_size called with tensor=%s, dim=%s, size=%s", tensor, dim, size)
     dim = dim % tensor.dim()
     current = tensor.size(dim)
     if current == size:
@@ -3593,6 +3726,7 @@ def _pad_scales(
     n_target: int,
     group_size: int,
 ) -> torch.Tensor:
+    logger.debug("_pad_scales called with scales=%s, k_target=%s, n_target=%s", scales, k_target, n_target)
     if k_target % group_size != 0:
         raise ValueError(
             f"k_target={k_target} must be divisible by group_size={group_size} for scales"
@@ -3617,6 +3751,7 @@ def _pad_packed_fp4(
     k_target: int,
     n_target: int,
 ) -> torch.Tensor:
+    logger.info("_pad_packed_fp4 called with packed=%s, k_target=%s, n_target=%s", packed, k_target, n_target)
     k_packs_target = k_target // 8
     if packed.shape[0] > k_packs_target or packed.shape[1] > n_target:
         raise ValueError(
@@ -3638,6 +3773,7 @@ def _pad_packed_n(
     n_target: int,
     pack_factor: int,
 ) -> torch.Tensor:
+    logger.info("_pad_packed_n called with packed=%s, k_target=%s, n_target=%s, pack_factor=%s", packed, k_target, n_target, pack_factor)
     n_packed_target = n_target // pack_factor
     if packed.shape[0] > k_target or packed.shape[1] > n_packed_target:
         raise ValueError(
@@ -3689,6 +3825,7 @@ def _dispatch_decode_gemv_fp4(
             constant uint& group_size  // buffer 7
         )
     """
+    logger.debug("_dispatch_decode_gemv_fp4 called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
     device = lib.device
     orig_N = N
     pad_n = 0
@@ -3812,6 +3949,7 @@ def dispatch_gemm_fp4(
     Returns:
         Output tensor [M, N], fp16, MPS
     """
+    logger.debug("dispatch_gemm_fp4 called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
     require_mps()
 
     device = lib.device
@@ -3940,6 +4078,7 @@ def dispatch_gemm_fp8(
     Args:
         out: Optional preallocated output buffer [M, N], fp16, MPS
     """
+    logger.debug("dispatch_gemm_fp8 called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
     require_mps()
 
     device = lib.device
@@ -4024,6 +4163,7 @@ def dispatch_gemm_int2(
     Args:
         out: Optional preallocated output buffer [M, N], fp16, MPS
     """
+    logger.debug("dispatch_gemm_int2 called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
     require_mps()
 
     # PyTorch fallback for INT2 GEMM (Metal kernel not yet implemented)
@@ -4074,6 +4214,7 @@ def _dispatch_gemm_int2_metal(
     enable_padding: bool | None = None,
 ) -> torch.Tensor:
     """Metal kernel dispatch for INT2 GEMM (not yet implemented)."""
+    logger.debug("_dispatch_gemm_int2_metal called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
     require_mps()
 
     device = lib.device
@@ -4170,6 +4311,7 @@ def dispatch_dequant_fp4(
     Returns:
         Dequantized tensor [K, N], fp16, MPS
     """
+    logger.info("dispatch_dequant_fp4 called with lib=%s, packed=%s, scales=%s, K=%s", lib, packed, scales, K)
     require_mps()
 
     device = lib.device
@@ -4235,6 +4377,7 @@ def dispatch_dequant_fp4_linear(
     Returns:
         Dequantized tensor [num_packed * 8], fp16, MPS
     """
+    logger.info("dispatch_dequant_fp4_linear called with lib=%s, packed=%s, scales=%s, num_packed=%s", lib, packed, scales, num_packed)
     require_mps()
 
     device = lib.device
@@ -4297,6 +4440,7 @@ def dispatch_dequant_fp4_bandwidth_max(
     Returns:
         Dequantized tensor [num_packed * 8], fp16, MPS
     """
+    logger.info("dispatch_dequant_fp4_bandwidth_max called with lib=%s, packed=%s, scales=%s, num_packed=%s", lib, packed, scales, num_packed)
     require_mps()
 
     if num_packed % 4 != 0:
@@ -4367,6 +4511,7 @@ def benchmark_dequant_fp4(
             - 'bandwidth_gb_s': Effective memory bandwidth in GB/s
             - 'throughput_gop_s': Dequant throughput in billion ops/sec
     """
+    logger.info("benchmark_dequant_fp4 starting with lib=%s, num_packed=%s, group_size=%s, warmup_iters=%s", lib, num_packed, group_size, warmup_iters)
     require_mps()
     import time
 
@@ -4467,6 +4612,7 @@ def dispatch_moe_optimized(
     Returns:
         Output tensor [batch, out_dim], fp16, MPS
     """
+    logger.debug("dispatch_moe_optimized called with lib=%s, activations=%s, router_weights=%s", lib, activations, router_weights)
     require_mps()
 
     device = lib.device
@@ -4576,6 +4722,7 @@ def dispatch_moe_prerouted(
     Returns:
         Output tensor [batch, out_dim], fp16, MPS
     """
+    logger.debug("dispatch_moe_prerouted called with lib=%s, activations=%s, expert_weights=%s", lib, activations, expert_weights)
     require_mps()
 
     device = lib.device
@@ -4676,6 +4823,7 @@ def dispatch_moe_decode(
     Returns:
         Output tensor [out_dim], fp16, MPS
     """
+    logger.debug("dispatch_moe_decode called with lib=%s, activations=%s, router_weights=%s", lib, activations, router_weights)
     require_mps()
 
     device = lib.device
@@ -4765,6 +4913,7 @@ def benchmark_moe_dispatch(
     Returns:
         Dictionary with performance metrics.
     """
+    logger.info("benchmark_moe_dispatch starting with lib=%s, batch_size=%s, hidden_dim=%s, out_dim=%s", lib, batch_size, hidden_dim, out_dim)
     require_mps()
     import time
 
@@ -4909,6 +5058,7 @@ def dispatch_hessian_compute(
     Returns:
         H: Hessian matrix [hidden_dim, hidden_dim], float32, MPS tensor
     """
+    logger.debug("dispatch_hessian_compute called with lib=%s, X=%s, sigma_reg=%s", lib, X, sigma_reg)
     require_mps()
 
     device = lib.device
@@ -4979,6 +5129,7 @@ def dispatch_hessian_accumulate(
     Returns:
         H: Updated Hessian (same tensor, modified in-place)
     """
+    logger.debug("dispatch_hessian_accumulate called with lib=%s, X=%s, H=%s", lib, X, H)
     require_mps()
 
     device = lib.device
@@ -5047,6 +5198,7 @@ def dispatch_viterbi_quantize(
         indices: Quantized state indices [n_tiles, 256], uint8, MPS tensor
         dequantized: Reconstructed values [n_tiles, 256], float32, or None
     """
+    logger.info("dispatch_viterbi_quantize called with lib=%s, tiles=%s, scales=%s, grid=%s", lib, tiles, scales, grid)
     require_mps()
 
     device = lib.device
@@ -5133,6 +5285,7 @@ def dispatch_viterbi_quantize_naive(
         indices: Quantized state indices [n_tiles, 256], uint8, MPS tensor
         dequantized: Reconstructed values [n_tiles, 256], float32, MPS tensor
     """
+    logger.info("dispatch_viterbi_quantize_naive called with lib=%s, tiles=%s, scales=%s, grid=%s", lib, tiles, scales, grid)
     require_mps()
 
     device = lib.device
@@ -5180,6 +5333,7 @@ _default_library: MetalKernelLibrary | None = None
 
 def get_default_library() -> MetalKernelLibrary:
     """Get or create the default kernel library."""
+    logger.debug("get_default_library called")
     global _default_library
     if _default_library is None:
         _default_library = MetalKernelLibrary.from_source_dir()
@@ -5198,6 +5352,7 @@ def get_kernel(kernel_name: str) -> Any | None:
     Returns:
         MTLFunction or None if not found.
     """
+    logger.debug("get_kernel called with kernel_name=%s", kernel_name)
     return get_kernel_from_metallib(kernel_name)
 
 

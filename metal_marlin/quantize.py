@@ -13,12 +13,16 @@ and only needed if you want MLX arrays as output (use output_backend='mlx').
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
 
 from ._compat import from_numpy, to_numpy
+
+
+logger = logging.getLogger(__name__)
 
 # E2M1 codebook: the 16 representable FP4 values.
 # Nibble encoding: [sign(1) | exp(2) | mant(1)], bias = 1.
@@ -38,6 +42,7 @@ FP4_PER_U32 = 8
 
 def _pad_to_multiple(arr: np.ndarray, axis: int, multiple: int) -> np.ndarray:
     """Pad array along given axis to the next multiple of `multiple`."""
+    logger.debug("_pad_to_multiple called with arr=%s, axis=%s, multiple=%s", arr, axis, multiple)
     current = arr.shape[axis]
     if current % multiple == 0:
         return arr
@@ -59,6 +64,7 @@ def _quantize_to_e2m1(
         uint8 array of nibble indices (0-15) into E2M1_VALUES.
     """
     # Clip to representable range
+    logger.info("_quantize_to_e2m1 called with normalized=%s", normalized)
     clipped = np.clip(normalized, -E2M1_MAX, E2M1_MAX)
 
     # Nearest-neighbor against the 16-element codebook.
@@ -91,6 +97,7 @@ def _pack_nibbles_to_uint32_along_k(indices: np.ndarray) -> np.ndarray:
     Returns:
         [K // 8, N] uint32 array.
     """
+    logger.info("_pack_nibbles_to_uint32_along_k called with indices=%s", indices)
     K, N = indices.shape
     assert K % FP4_PER_U32 == 0, f"K={K} must be divisible by {FP4_PER_U32}"
 
@@ -142,6 +149,7 @@ def pack_fp4_weights(
         ValueError: If output_backend is not available.
     """
     # Default scales dtype
+    logger.info("pack_fp4_weights called with weights=%s, group_size=%s, pad_k=%s, scales_dtype=%s", weights, group_size, pad_k, scales_dtype)
     if scales_dtype is None:
         scales_dtype = np.float16
 
@@ -227,6 +235,7 @@ def unpack_fp4_weights(
         Array [orig_K, orig_N] (padding stripped) in specified dtype and backend.
     """
     # Default weights dtype
+    logger.info("unpack_fp4_weights called with packed=%s, scales=%s, meta=%s, weights_dtype=%s", packed, scales, meta, weights_dtype)
     if weights_dtype is None:
         weights_dtype = np.float16
 
@@ -284,6 +293,7 @@ def _quantize_to_int4_sym(normalized: np.ndarray) -> np.ndarray:
         uint8 array of indices (0-15).
     """
     # Clip and round to nearest integer
+    logger.info("_quantize_to_int4_sym called with normalized=%s", normalized)
     clipped = np.clip(normalized, INT4_SYM_MIN, INT4_SYM_MAX)
     quantized = np.round(clipped).astype(np.int8)
 
@@ -294,6 +304,7 @@ def _quantize_to_int4_sym(normalized: np.ndarray) -> np.ndarray:
 
 def _dequant_int4_sym(indices: np.ndarray) -> np.ndarray:
     """Dequantize INT4 symmetric indices back to float values."""
+    logger.info("_dequant_int4_sym called with indices=%s", indices)
     return (indices.astype(np.int8) + INT4_SYM_MIN).astype(np.float32)
 
 
@@ -322,6 +333,7 @@ def pack_int4_weights(
     Returns:
         Tuple of (packed, scales, meta).
     """
+    logger.info("pack_int4_weights called with weights=%s, group_size=%s, pad_k=%s, scales_dtype=%s", weights, group_size, pad_k, scales_dtype)
     if scales_dtype is None:
         scales_dtype = np.float16
 
@@ -422,6 +434,7 @@ def _quantize_to_nf4(normalized: np.ndarray) -> np.ndarray:
         uint8 array of indices (0-15) into NF4_VALUES.
     """
     # Clip to representable range
+    logger.info("_quantize_to_nf4 called with normalized=%s", normalized)
     clipped = np.clip(normalized, -NF4_MAX, NF4_MAX)
 
     # Nearest-neighbor against NF4 codebook (same approach as FP4)
@@ -462,6 +475,7 @@ def pack_nf4_weights(
     Returns:
         Tuple of (packed, scales, meta).
     """
+    logger.info("pack_nf4_weights called with weights=%s, group_size=%s, pad_k=%s, scales_dtype=%s", weights, group_size, pad_k, scales_dtype)
     if scales_dtype is None:
         scales_dtype = np.float16
 
@@ -541,6 +555,7 @@ def quantize_to_int4(
     Returns:
         Stats dict with compression ratio, error metrics, etc.
     """
+    logger.info("quantize_to_int4 called with model_path=%s, output_path=%s, group_size=%s, symmetric=%s", model_path, output_path, group_size, symmetric)
     from pathlib import Path as PathlibPath
 
     from safetensors import safe_open
@@ -631,6 +646,7 @@ def quantize_to_nf4(
     Returns:
         Stats dict with compression ratio, error metrics, etc.
     """
+    logger.info("quantize_to_nf4 called with model_path=%s, output_path=%s, group_size=%s, verbose=%s", model_path, output_path, group_size, verbose)
     from pathlib import Path as PathlibPath
 
     from safetensors import safe_open
@@ -729,6 +745,7 @@ def compute_fp8_e4m3_values() -> np.ndarray:
     Returns:
         Array of 256 float32 values for codes 0-255.
     """
+    logger.debug("compute_fp8_e4m3_values called")
     values = np.zeros(256, dtype=np.float32)
 
     for code in range(256):
@@ -772,6 +789,7 @@ def _quantize_to_fp8_e4m3(normalized: np.ndarray) -> np.ndarray:
         uint8 array of FP8 E4M3 codes (0-255).
     """
     # Clip to representable range (excluding NaN codes)
+    logger.info("_quantize_to_fp8_e4m3 called with normalized=%s", normalized)
     clipped = np.clip(normalized, -FP8_E4M3_MAX, FP8_E4M3_MAX)
 
     # Get non-NaN codes only (codes 0-119 and 128-247 are valid)
@@ -808,6 +826,7 @@ def _pack_bytes_to_uint32(codes: np.ndarray) -> np.ndarray:
     Returns:
         [K, N // 4] uint32 array.
     """
+    logger.info("_pack_bytes_to_uint32 called with codes=%s", codes)
     K, N = codes.shape
     assert N % FP8_PER_U32 == 0, f"N={N} must be divisible by {FP8_PER_U32}"
 
@@ -856,6 +875,7 @@ def pack_fp8_weights(
         ValueError: If pad_k=False and K is not divisible by group_size.
         ValueError: If format is not "e4m3" or "e5m2".
     """
+    logger.info("pack_fp8_weights called with weights=%s, group_size=%s, format=%s, pad_k=%s", weights, group_size, format, pad_k)
     if format not in ("e4m3", "e5m2"):
         raise ValueError(f"format must be 'e4m3' or 'e5m2', got '{format}'")
 
@@ -943,6 +963,7 @@ def dequant_fp8_e4m3(
     Returns:
         Array [orig_K, orig_N] in specified dtype and backend.
     """
+    logger.info("dequant_fp8_e4m3 called with packed=%s, scales=%s, meta=%s, weights_dtype=%s", packed, scales, meta, weights_dtype)
     if weights_dtype is None:
         weights_dtype = np.float16
 
@@ -1000,6 +1021,7 @@ def compute_fp8_e5m2_values() -> np.ndarray:
     Returns:
         Array of 256 float32 values for codes 0-255.
     """
+    logger.debug("compute_fp8_e5m2_values called")
     values = np.zeros(256, dtype=np.float32)
 
     for code in range(256):
@@ -1047,6 +1069,7 @@ def _quantize_to_fp8_e5m2(normalized: np.ndarray) -> np.ndarray:
         uint8 array of FP8 E5M2 codes (0-255).
     """
     # Clip to finite representable range (excluding Inf/NaN codes)
+    logger.info("_quantize_to_fp8_e5m2 called with normalized=%s", normalized)
     clipped = np.clip(normalized, -FP8_E5M2_MAX, FP8_E5M2_MAX)
 
     # Get finite codes only
@@ -1091,6 +1114,7 @@ def dequant_fp8_e5m2(
     Returns:
         Array [orig_K, orig_N] in specified dtype and backend.
     """
+    logger.info("dequant_fp8_e5m2 called with packed=%s, scales=%s, meta=%s, weights_dtype=%s", packed, scales, meta, weights_dtype)
     if weights_dtype is None:
         weights_dtype = np.float16
 
@@ -1154,6 +1178,7 @@ def quantize_to_fp8(
     Returns:
         Stats dict with compression ratio, error metrics, etc.
     """
+    logger.info("quantize_to_fp8 called with model_path=%s, output_path=%s, group_size=%s, format=%s", model_path, output_path, group_size, format)
     from pathlib import Path as PathlibPath
 
     from safetensors import safe_open

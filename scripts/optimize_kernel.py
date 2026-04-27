@@ -44,6 +44,7 @@ import argparse
 import hashlib
 import json
 import random
+import logging
 import re
 import subprocess
 import sys
@@ -459,6 +460,7 @@ def generate_random_variants(
     parameter ranges to discover non-obvious optima that wouldn't be found
     by predetermined patterns.
     """
+    logger.debug("generate_random_variants called with kernel_type=%s, source=%s, num_variants=%s", kernel_type, source, num_variants)
     if seed is not None:
         random.seed(seed)
 
@@ -534,6 +536,7 @@ class OptimizationVariant:
 
     def get_variant_hash(self) -> str:
         """Get a short hash identifying this variant."""
+        logger.debug("get_variant_hash called")
         return hashlib.sha256(self.variant_source.encode()).hexdigest()[:8]
 
 
@@ -567,6 +570,7 @@ class OptimizationSession:
     best_speedup: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "kernel_path": self.kernel_path,
             "kernel_type": self.kernel_type,
@@ -609,6 +613,7 @@ def run_local_benchmark(
     This provides a standalone way to optimize kernels without AlphaHENG.
     """
     # Add metal_marlin to path
+    logger.info("run_local_benchmark starting with problem_sizes=%s, warmup=%s, iters=%s, group_size=%s", problem_sizes, warmup, iters, group_size)
     sys.path.insert(0, str(METAL_MARLIN_ROOT))
 
     try:
@@ -683,6 +688,7 @@ def benchmark_kernel_variant(
 
     Returns timing and throughput metrics.
     """
+    logger.info("benchmark_kernel_variant starting with kernel_source=%s, problem_size=%s, warmup=%s, iters=%s", kernel_source, problem_size, warmup, iters)
     sys.path.insert(0, str(METAL_MARLIN_ROOT))
 
     try:
@@ -743,6 +749,7 @@ def benchmark_kernel_variant(
 
 def detect_kernel_type(kernel_path: Path) -> str:
     """Detect kernel type from filename."""
+    logger.debug("detect_kernel_type called with kernel_path=%s", kernel_path)
     name = kernel_path.stem.lower()
     if "gemm" in name or "marlin" in name:
         return "gemm"
@@ -771,6 +778,7 @@ def get_applicable_patterns(
         num_random: Number of random variants to generate (entropy injection)
         random_seed: Seed for reproducible random variants
     """
+    logger.debug("get_applicable_patterns called with kernel_type=%s, source=%s, include_exploratory=%s", kernel_type, source, include_exploratory)
     patterns: list[dict[str, Any]] = []
 
     # Standard deterministic patterns
@@ -825,6 +833,7 @@ def generate_variants(
         num_random: Number of random variants to generate
         random_seed: Seed for reproducible random variants
     """
+    logger.debug("generate_variants called with kernel_path=%s, kernel_type=%s, source=%s", kernel_path, kernel_type, source)
     variants: list[OptimizationVariant] = []
     patterns = get_applicable_patterns(
         kernel_type, source, include_exploratory, num_random, random_seed
@@ -879,6 +888,7 @@ def generate_task_yaml(
         include_llm_hypotheses: If True, add tasks for LLM-driven hypothesis generation
     """
 
+    logger.debug("generate_task_yaml called with session=%s, output_dir=%s, include_llm_hypotheses=%s", session, output_dir, include_llm_hypotheses)
     tasks: list[dict[str, Any]] = []
 
     # Default problem sizes (M, N, K) for benchmarking
@@ -1403,6 +1413,9 @@ import json
 import re
 from pathlib import Path
 
+
+logger = logging.getLogger(__name__)
+
 results_dir = Path('agent_workspace/opt_{session.session_id}')
 kernel_path = Path('{session.kernel_path}')
 
@@ -1500,12 +1513,14 @@ tasks:
 
 def _indent(text: str, spaces: int) -> str:
     """Indent all lines of text."""
+    logger.debug("_indent called with text=%s, spaces=%s", text, spaces)
     prefix = " " * spaces
     return "\n".join(prefix + line for line in text.split("\n"))
 
 
 def dispatch_tasks(yaml_path: Path, agents: int) -> None:
     """Dispatch tasks to AlphaHENG."""
+    logger.debug("dispatch_tasks called with yaml_path=%s, agents=%s", yaml_path, agents)
     if ALPHAHENG_ROOT is None:
         print("ERROR: Not running within AlphaHENG monorepo.")
         print("Cannot dispatch tasks. Use --generate-only to create task YAML.")
@@ -1547,6 +1562,7 @@ def dispatch_tasks(yaml_path: Path, agents: int) -> None:
 
 def collect_results(session_id: str) -> OptimizationSession | None:
     """Collect results from a completed optimization session."""
+    logger.debug("collect_results called with session_id=%s", session_id)
     results_dir = METAL_MARLIN_ROOT / "agent_workspace" / f"opt_{session_id}"
 
     if not results_dir.exists():
@@ -1563,6 +1579,7 @@ def collect_results(session_id: str) -> OptimizationSession | None:
         - "(1,4096,4096)" - tuple string without spaces
         """
         # Remove parentheses and spaces
+        logger.debug("normalize_key called with key=%s", key)
         clean = key.replace("(", "").replace(")", "").replace(" ", "")
         # Split on comma or underscore
         if "_" in clean:
@@ -1696,6 +1713,7 @@ def apply_best_optimization(session_id: str) -> bool:
 
     Returns True if optimization was applied, False otherwise.
     """
+    logger.debug("apply_best_optimization called with session_id=%s", session_id)
     results_dir = METAL_MARLIN_ROOT / "agent_workspace" / f"opt_{session_id}"
 
     if not results_dir.exists():
@@ -1790,6 +1808,7 @@ def apply_best_optimization(session_id: str) -> bool:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Optimize Metal kernels using entropy-first exploration via AlphaHENG agent swarm",
         formatter_class=argparse.RawDescriptionHelpFormatter,

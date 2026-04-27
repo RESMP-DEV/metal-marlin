@@ -41,12 +41,16 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import softmax
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MLACacheConfig:
@@ -85,12 +89,14 @@ class MLACacheConfig:
     @property
     def dtype(self) -> np.dtype:
         """Get numpy dtype for storage."""
+        logger.debug("dtype called")
         dtype_map = {"fp16": np.float16, "bf16": np.float16, "fp32": np.float32}
         return np.dtype(dtype_map.get(self._dtype_str, np.float16))
 
     @property
     def latent_bytes_per_token(self) -> int:
         """Bytes per token in latent space."""
+        logger.debug("latent_bytes_per_token called")
         if self.quantize_mode == "fp4":
             return self.kv_lora_rank // 2  # 4 bits per value
         elif self.quantize_mode == "fp8":
@@ -102,26 +108,31 @@ class MLACacheConfig:
     def standard_bytes_per_token(self) -> int:
         """Bytes per token if using standard KV cache (for comparison)."""
         # K and V, each [num_kv_heads, head_dim], 16-bit
+        logger.debug("standard_bytes_per_token called")
         return 2 * self.num_kv_heads * self.head_dim * 2
 
     @property
     def memory_savings_ratio(self) -> float:
         """Memory savings compared to standard KV cache."""
+        logger.debug("memory_savings_ratio called")
         return self.standard_bytes_per_token / self.latent_bytes_per_token
 
     @property
     def memory_bytes(self) -> int:
         """Memory footprint of one block in bytes."""
+        logger.debug("memory_bytes called")
         return self.block_size * self.latent_bytes_per_token
 
     @property
     def latent_shape(self) -> tuple[int, int]:
         """Storage shape per block: [block_size, kv_lora_rank]."""
+        logger.debug("latent_shape called")
         return (self.block_size, self.kv_lora_rank)
 
     @property
     def decompressed_shape(self) -> tuple[int, int, int, int]:
         """Shape after decompression: [2, block_size, num_kv_heads, head_dim]."""
+        logger.debug("decompressed_shape called")
         return (2, self.block_size, self.num_kv_heads, self.head_dim)
 
 
@@ -150,6 +161,7 @@ class MLABlock:
     )
 
     def __init__(self, config: MLACacheConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or MLACacheConfig()
         self._latents: NDArray[Any] | None = None
         self._scales: NDArray[Any] | None = None
@@ -159,6 +171,7 @@ class MLABlock:
 
     def allocate(self) -> None:
         """Allocate block memory for latent storage."""
+        logger.debug("allocate called")
         if self.config.quantize_mode == "fp4":
             # Pack 8 FP4 values per uint32
             packed_dim = self.config.kv_lora_rank // 8
@@ -175,33 +188,40 @@ class MLABlock:
     @property
     def latents(self) -> NDArray[Any] | None:
         """The underlying latent storage array."""
+        logger.debug("latents called")
         return self._latents
 
     @property
     def token_count(self) -> int:
         """Number of tokens currently stored."""
+        logger.debug("token_count called")
         return self._token_count
 
     @property
     def ref_count(self) -> int:
         """Reference count for copy-on-write."""
+        logger.debug("ref_count called")
         return self._ref_count
 
     @property
     def prefix_hash(self) -> int | None:
         """Hash of the prefix for prefix caching."""
+        logger.debug("prefix_hash called")
         return self._prefix_hash
 
     def set_prefix_hash(self, h: int) -> None:
         """Set the prefix hash for this block."""
+        logger.debug("set_prefix_hash called with h=%s", h)
         self._prefix_hash = h
 
     def acquire(self) -> None:
         """Increment reference count."""
+        logger.debug("acquire called")
         self._ref_count += 1
 
     def release(self) -> int:
         """Decrement reference count. Returns new count."""
+        logger.debug("release called")
         self._ref_count = max(0, self._ref_count - 1)
         return self._ref_count
 
@@ -218,6 +238,7 @@ class MLABlock:
         Raises:
             RuntimeError: If block is full or not allocated.
         """
+        logger.debug("append_latent called with latent=%s", latent)
         if self._latents is None:
             raise RuntimeError("Block not allocated")
         if self._token_count >= self.config.block_size:
@@ -254,6 +275,7 @@ class MLABlock:
         Raises:
             RuntimeError: If batch exceeds remaining capacity.
         """
+        logger.debug("append_latent_batch called with latents=%s", latents)
         if self._latents is None:
             raise RuntimeError("Block not allocated")
 
@@ -290,6 +312,7 @@ class MLABlock:
         Raises:
             RuntimeError: If block is not allocated.
         """
+        logger.debug("get_latents called")
         if self._latents is None:
             raise RuntimeError("Block not allocated")
 
@@ -320,6 +343,7 @@ class MLABlock:
         Raises:
             RuntimeError: If block is not allocated.
         """
+        logger.debug("decompress called with kv_b_proj=%s", kv_b_proj)
         if self._latents is None:
             raise RuntimeError("Block not allocated")
 
@@ -344,25 +368,30 @@ class MLABlock:
     @property
     def is_full(self) -> bool:
         """Whether the block has no remaining slots."""
+        logger.debug("is_full called")
         return self._token_count >= self.config.block_size
 
     @property
     def is_empty(self) -> bool:
         """Whether the block has no tokens stored."""
+        logger.debug("is_empty called")
         return self._token_count == 0
 
     @property
     def remaining(self) -> int:
         """Number of empty slots."""
+        logger.debug("remaining called")
         return self.config.block_size - self._token_count
 
     @property
     def memory_bytes(self) -> int:
         """Memory footprint of this block in bytes."""
+        logger.debug("memory_bytes called")
         return self.config.memory_bytes
 
     def reset(self) -> None:
         """Clear block contents without deallocating."""
+        logger.debug("reset called")
         if self._latents is not None:
             self._latents.fill(0)
             if self._scales is not None:
@@ -373,6 +402,7 @@ class MLABlock:
 
     def copy(self) -> MLABlock:
         """Create an independent copy of this block (for CoW)."""
+        logger.debug("copy called")
         new_block = MLABlock(config=self.config)
         if self._latents is not None:
             new_block._latents = self._latents.copy()
@@ -388,6 +418,7 @@ class MLABlock:
 
     def _quantize_fp4(self, latent: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize single latent vector to FP4."""
+        logger.info("_quantize_fp4 called with latent=%s", latent)
         abs_max = np.max(np.abs(latent))
         abs_max = max(abs_max, 1e-8)
         scale = abs_max / 6.0  # FP4 E2M1 max is 6.0
@@ -408,6 +439,7 @@ class MLABlock:
 
     def _quantize_fp4_batch(self, latents: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize batch of latents to FP4."""
+        logger.info("_quantize_fp4_batch called with latents=%s", latents)
         num_tokens = latents.shape[0]
         abs_max = np.max(np.abs(latents), axis=-1, keepdims=True)
         abs_max = np.maximum(abs_max, 1e-8)
@@ -429,6 +461,7 @@ class MLABlock:
 
     def _dequant_fp4(self, packed: NDArray[Any], scales: NDArray[Any]) -> NDArray[Any]:
         """Dequantize FP4 packed latents."""
+        logger.info("_dequant_fp4 called with packed=%s, scales=%s", packed, scales)
         batch_size = packed.shape[0]
         packed_dim = packed.shape[1]
         full_dim = packed_dim * 8
@@ -446,6 +479,7 @@ class MLABlock:
 
     def _quantize_fp8(self, latent: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize single latent vector to FP8 (simulated)."""
+        logger.info("_quantize_fp8 called with latent=%s", latent)
         abs_max = np.max(np.abs(latent))
         abs_max = max(abs_max, 1e-8)
         scale = abs_max / 448.0  # E4M3 max
@@ -459,6 +493,7 @@ class MLABlock:
 
     def _quantize_fp8_batch(self, latents: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
         """Quantize batch of latents to FP8."""
+        logger.info("_quantize_fp8_batch called with latents=%s", latents)
         abs_max = np.max(np.abs(latents), axis=-1, keepdims=True)
         abs_max = np.maximum(abs_max, 1e-8)
         scales = abs_max / 448.0
@@ -472,6 +507,7 @@ class MLABlock:
 
     def _dequant_fp8(self, quantized: NDArray[Any], scales: NDArray[Any]) -> NDArray[Any]:
         """Dequantize FP8 latents."""
+        logger.info("_dequant_fp8 called with quantized=%s, scales=%s", quantized, scales)
         signed = quantized.astype(np.float16) - 128.0
         return signed / 127.0 * 448.0 * scales
 
@@ -508,6 +544,7 @@ class MLABlockAllocator:
     """
 
     def __init__(self, num_blocks: int, config: MLACacheConfig | None = None):
+        logger.debug("initializing %s with num_blocks=%s, config=%s", type(self).__name__, num_blocks, config)
         self.num_blocks = num_blocks
         self.config = config or MLACacheConfig()
 
@@ -524,18 +561,22 @@ class MLABlockAllocator:
 
     @property
     def num_free(self) -> int:
+        logger.debug("num_free called")
         return len(self._free_list)
 
     @property
     def num_allocated(self) -> int:
+        logger.debug("num_allocated called")
         return self.num_blocks - self.num_free
 
     @property
     def num_cached_prefixes(self) -> int:
+        logger.debug("num_cached_prefixes called")
         return len(self._prefix_cache)
 
     def allocate(self) -> int | None:
         """Allocate a single block. Returns block index or None if OOM."""
+        logger.debug("allocate called")
         if not self._free_list:
             return None
         idx = self._free_list.pop()
@@ -555,6 +596,7 @@ class MLABlockAllocator:
 
     def free(self, block_idx: int) -> None:
         """Decrement ref_count; return block to pool when it reaches zero."""
+        logger.debug("free called with block_idx=%s", block_idx)
         state = self.blocks[block_idx]
         state.ref_count -= 1
         if state.ref_count <= 0:
@@ -571,6 +613,7 @@ class MLABlockAllocator:
 
     def get_block(self, block_idx: int) -> MLABlock | None:
         """Get the MLABlock at the given index."""
+        logger.debug("get_block called with block_idx=%s", block_idx)
         return self._storage[block_idx]
 
     def copy_on_write(self, block_idx: int) -> int | None:
@@ -579,6 +622,7 @@ class MLABlockAllocator:
         Returns the new block index (or original if already exclusive).
         Returns None if a copy is needed but pool is exhausted.
         """
+        logger.info("copy_on_write called with block_idx=%s", block_idx)
         state = self.blocks[block_idx]
         if state.ref_count == 1:
             return block_idx  # Already exclusive
@@ -611,6 +655,7 @@ class MLABlockAllocator:
 
         Call this when a block is complete and its prefix can be reused.
         """
+        logger.debug("register_prefix called with block_idx=%s, prefix_hash=%s", block_idx, prefix_hash)
         state = self.blocks[block_idx]
         state.prefix_hash = prefix_hash
         self._prefix_cache[prefix_hash] = block_idx
@@ -625,6 +670,7 @@ class MLABlockAllocator:
 
         Returns block_idx if found (and acquires it), None otherwise.
         """
+        logger.debug("lookup_prefix called with prefix_hash=%s", prefix_hash)
         if prefix_hash not in self._prefix_cache:
             return None
 
@@ -643,11 +689,13 @@ class MLABlockAllocator:
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         allocated = sum(1 for block in self._storage if block is not None)
         return allocated * self.config.memory_bytes / 1024 / 1024
 
     def memory_usage_stats(self) -> dict[str, Any]:
         """Return detailed memory usage statistics."""
+        logger.debug("memory_usage_stats called")
         standard_cache_bytes = (
             self.num_allocated * self.config.block_size * self.config.standard_bytes_per_token
         )
@@ -697,6 +745,7 @@ def mla_attention(
     Returns:
         Attention output [num_seqs, num_heads, seq_len, head_dim].
     """
+    logger.debug("mla_attention called with query=%s, latent_pool=%s, block_tables=%s", query, latent_pool, block_tables)
     num_seqs = query.shape[0]
     num_heads = query.shape[1]
     seq_len = query.shape[2]
@@ -796,6 +845,7 @@ def compare_memory_usage(
         Dictionary with memory comparison statistics.
     """
     # Standard KV cache: 2 (K and V) * seq_len * num_kv_heads * head_dim * dtype_bytes * num_layers
+    logger.debug("compare_memory_usage called with seq_len=%s, num_layers=%s, num_heads=%s", seq_len, num_layers, num_heads)
     standard_bytes_per_layer = 2 * seq_len * num_kv_heads * head_dim * dtype_bytes
     standard_total_bytes = standard_bytes_per_layer * num_layers
 

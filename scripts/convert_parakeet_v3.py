@@ -5,11 +5,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
 
+
+
+logger = logging.getLogger(__name__)
 
 def download_parakeet_v3(output_dir: Path) -> Path:
     """Download Parakeet-TDT 0.6B v3 from HuggingFace.
@@ -20,6 +24,7 @@ def download_parakeet_v3(output_dir: Path) -> Path:
     Returns:
         Path to downloaded model directory
     """
+    logger.info("download_parakeet_v3 called with output_dir=%s", output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     model_id = "nvidia/parakeet-tdt-0.6b-v3"
 
@@ -42,6 +47,7 @@ def convert_weights(nemo_path: Path, output_path: Path) -> None:
         nemo_path: Path to downloaded NeMo model
         output_path: Path to save converted checkpoint
     """
+    logger.info("convert_weights called with nemo_path=%s, output_path=%s", nemo_path, output_path)
     import nemo.collections.asr as nemo_asr
 
     print(f"Loading NeMo model from {nemo_path}...")
@@ -113,6 +119,7 @@ def convert_weights(nemo_path: Path, output_path: Path) -> None:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Convert Parakeet-TDT v3 weights")
     parser.add_argument(
         "--download-dir",

@@ -29,6 +29,7 @@ Test:
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -47,6 +48,9 @@ from qwen_delta_serving_common import (  # noqa: E402
     run_serving_server,
     validate_serving_args,
 )
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Qwen3.6-35B-A3B defaults
@@ -67,6 +71,7 @@ DEFAULT_MODEL_PATH = REPO_ROOT / _DEFAULT_MODEL_PATH
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
+    logger.info("_build_parser starting")
     parser = argparse.ArgumentParser(
         description="Launch Qwen3.6-35B-A3B OpenAI server with MMFP4 + PagedAttention defaults.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -76,6 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logger.info("main starting")
     parser = _build_parser()
     args = parser.parse_args(argv)
     validate_serving_args(args, _ENV_PREFIX)

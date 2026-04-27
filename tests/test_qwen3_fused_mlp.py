@@ -1,4 +1,5 @@
 """Tests for fused Trellis SwiGLU MLP kernel."""
+import logging
 
 import numpy as np
 import pytest
@@ -10,8 +11,12 @@ from metal_marlin.trellis.linear import TrellisLinear
 from metal_marlin.trellis.loader import TrellisWeight
 
 
+
+logger = logging.getLogger(__name__)
+
 def create_mock_trellis_weight(in_features, out_features, bits=4):
     """Create a mock TrellisWeight for testing."""
+    logger.debug("create_mock_trellis_weight called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     TILE_DIM = 16
     tiles_k = (in_features + TILE_DIM - 1) // TILE_DIM
     tiles_n = (out_features + TILE_DIM - 1) // TILE_DIM
@@ -34,6 +39,7 @@ def create_mock_trellis_weight(in_features, out_features, bits=4):
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_trellis_swiglu_mlp_correctness():
     """Verify that TrellisSwiGLUMlp matches the reference implementation."""
+    logger.info("running test_trellis_swiglu_mlp_correctness")
     hidden_size = 256
     intermediate_size = 512
     bits = 4
@@ -74,6 +80,7 @@ def test_trellis_swiglu_mlp_correctness():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_trellis_swiglu_mlp_decode():
     """Verify TrellisSwiGLUMlp for batch=1 (decode)."""
+    logger.info("running test_trellis_swiglu_mlp_decode")
     hidden_size = 2560 # Qwen3-4B size
     intermediate_size = 9728
     bits = 4

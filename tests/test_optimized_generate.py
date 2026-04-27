@@ -1,4 +1,5 @@
 
+import logging
 from unittest.mock import MagicMock
 
 import torch
@@ -7,6 +8,7 @@ from metal_marlin.inference.mmfp4_pipeline import _optimized_generate
 
 
 def test_optimized_generate():
+    logger.info("running test_optimized_generate")
     torch.manual_seed(42)
     device = "cpu"
     batch_size = 1
@@ -73,3 +75,6 @@ if __name__ == "__main__":
         print(f"Test failed: {e}")
         import traceback
         traceback.print_exc()
+
+
+logger = logging.getLogger(__name__)

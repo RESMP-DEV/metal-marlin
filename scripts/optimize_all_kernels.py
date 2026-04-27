@@ -41,10 +41,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).parent
 METAL_MARLIN_ROOT = _SCRIPT_DIR.parent
@@ -234,6 +238,7 @@ PROJECTION_SIZES = [
 
 def categorize_kernel(kernel_path: Path) -> str:
     """Categorize a kernel by its type."""
+    logger.debug("categorize_kernel called with kernel_path=%s", kernel_path)
     name = kernel_path.stem.lower()
 
     if "attention" in name or "flash" in name or "mla" in name:
@@ -259,6 +264,7 @@ def get_problem_sizes_for_kernel(kernel_path: Path) -> list[tuple[int, ...]]:
     Returns shapes from GLM-4.7, Qwen3, Llama-7B, Llama-70B combined.
     Optimization should find configs that work well ACROSS this diversity.
     """
+    logger.debug("get_problem_sizes_for_kernel called with kernel_path=%s", kernel_path)
     category = categorize_kernel(kernel_path)
     name = kernel_path.stem.lower()
 
@@ -285,6 +291,7 @@ def get_problem_sizes_for_kernel(kernel_path: Path) -> list[tuple[int, ...]]:
 
 def find_optimizable_kernels() -> list[Path]:
     """Find all kernels with tunable TILE constants."""
+    logger.debug("find_optimizable_kernels called")
     kernels = []
 
     for metal_file in SRC_DIR.glob("*.metal"):
@@ -304,6 +311,7 @@ def find_optimizable_kernels() -> list[Path]:
 
 def format_problem_sizes(sizes: list[tuple[int, ...]]) -> str:
     """Format problem sizes as CLI argument."""
+    logger.debug("format_problem_sizes called with sizes=%s", sizes)
     return ";".join(",".join(str(x) for x in size) for size in sizes)
 
 
@@ -316,6 +324,7 @@ def run_optimization(
 ) -> tuple[str, bool]:
     """Run optimization for a single kernel."""
 
+    logger.debug("run_optimization called with kernel_path=%s, num_random=%s, generate_only=%s", kernel_path, num_random, generate_only)
     problem_sizes = get_problem_sizes_for_kernel(kernel_path)
 
     # Limit problem sizes to avoid explosion (pick representative subset)
@@ -359,6 +368,7 @@ def run_optimization(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Batch optimize all Metal kernels using entropy-first exploration",
         formatter_class=argparse.RawDescriptionHelpFormatter,

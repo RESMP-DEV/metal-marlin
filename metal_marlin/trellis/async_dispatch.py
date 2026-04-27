@@ -53,6 +53,7 @@ class AsyncCommandBufferManager:
     )
 
     def __init__(self, lib: MetalKernelLibrary):
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self.lib = lib
         self._current_cmd_buf: Any | None = None
         self._pending_dispatches: list[_PendingDispatch] = []
@@ -65,10 +66,12 @@ class AsyncCommandBufferManager:
 
     def begin_batch(self) -> None:
         """Backward-compatible alias for start_batch()."""
+        logger.debug("begin_batch called")
         self.start_batch()
 
     def start_batch(self) -> None:
         """Begin a new batch of kernel dispatches."""
+        logger.debug("start_batch called")
         if not HAS_METAL or Metal is None:
             raise RuntimeError(
                 "Metal is required for AsyncCommandBufferManager.")
@@ -94,6 +97,7 @@ class AsyncCommandBufferManager:
 
     def has_active_batch(self) -> bool:
         """Check if a batch is currently active."""
+        logger.debug("has_active_batch called")
         return self._batch_active
 
     def dispatch_kernel(
@@ -104,6 +108,7 @@ class AsyncCommandBufferManager:
         buffers: list[Any],
     ) -> None:
         """Backward-compatible alias for dispatch()."""
+        logger.debug("dispatch_kernel called with function_name=%s, grid=%s, threadgroup=%s", function_name, grid, threadgroup)
         self.dispatch(function_name, grid, threadgroup, buffers)
 
     def dispatch(
@@ -114,6 +119,7 @@ class AsyncCommandBufferManager:
         buffers: list[Any],
     ) -> None:
         """Queue a kernel dispatch (non-blocking)."""
+        logger.debug("dispatch called with function_name=%s, grid=%s, threadgroup=%s", function_name, grid, threadgroup)
         if os.environ.get(_BATCH_TRACE_ENV_VAR):
             _BATCH_TRACE_LOGGER.info(
                 "DISPATCH: batch_active=%s, id=%s",
@@ -142,6 +148,7 @@ class AsyncCommandBufferManager:
         buffers: list[Any],
     ) -> None:
         """Dispatch kernel and commit immediately (no batching)."""
+        logger.debug("dispatch_immediate called with pipeline=%s, grid=%s, threadgroup=%s", pipeline, grid, threadgroup)
         if not HAS_METAL or Metal is None:
             raise RuntimeError(
                 "Metal is required for AsyncCommandBufferManager.")
@@ -161,6 +168,7 @@ class AsyncCommandBufferManager:
 
     def commit_and_wait(self) -> None:
         """Commit all pending dispatches and wait for completion."""
+        logger.debug("commit_and_wait called")
         if self._current_cmd_buf is not None:
             self.commit_async()
 
@@ -182,14 +190,17 @@ class AsyncCommandBufferManager:
 
     def register_post_commit(self, callback: Callable[[], None]) -> None:
         """Register a callback that runs after commit_and_wait() completes."""
+        logger.debug("register_post_commit called with callback=%s", callback)
         self._post_commit_callbacks.append(callback)
 
     def commit_async(self) -> None:
         """Backward-compatible alias for commit_batch()."""
+        logger.debug("commit_async called")
         self.commit_batch()
 
     def commit_batch(self) -> None:
         """Commit without waiting (for prefetch/pipelining)."""
+        logger.debug("commit_batch called")
         if self._current_cmd_buf is None:
             raise RuntimeError("No active batch. Call begin_batch() first.")
         if self._committed_current_batch:
@@ -245,11 +256,13 @@ class LayerBatchContext:
     """Batch command buffers across multiple MoE layers."""
 
     def __init__(self, model: TrellisModel, batch_size: int = 8):
+        logger.debug("initializing %s with model=%s, batch_size=%s", type(self).__name__, model, batch_size)
         if not HAS_METAL:
             # Return a dummy context manager when Metal is not available
             class DummyContext:
                 def __enter__(self): return self
                 def __exit__(self, *args): pass
+                logger.debug("layer_complete called")
                 def layer_complete(self): pass
             raise RuntimeError(
                 "LayerBatchContext requires Metal (HAS_METAL=True)")
@@ -281,6 +294,7 @@ class LayerBatchContext:
 
     def layer_complete(self):
         """Called after each layer's MoE dispatch."""
+        logger.debug("layer_complete called")
         self._layer_count += 1
         if self._layer_count >= self.batch_size:
             self._shared_cmd_manager.commit_and_wait()
@@ -290,6 +304,7 @@ class LayerBatchContext:
 
     def ensure_batch_active(self) -> None:
         """Ensure a batch is active, starting one if needed."""
+        logger.debug("ensure_batch_active called")
         if self._shared_cmd_manager and not self._shared_cmd_manager.has_active_batch():
             self._shared_cmd_manager.start_batch()
             self._batch_started = True

@@ -16,13 +16,18 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 import numpy as np
 
 
+
+logger = logging.getLogger(__name__)
+
 def parse_args():
     """Parse command-line arguments."""
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Quantize a model using AWQ (Activation-aware Weight Quantization)"
     )
@@ -93,6 +98,7 @@ def generate_calibration_activations(
     Returns:
         Dictionary mapping layer names to activation tensors
     """
+    logger.debug("generate_calibration_activations called with model_path=%s, num_samples=%s, seq_len=%s", model_path, num_samples, seq_len)
     from safetensors import safe_open
 
     activations_dict = {}
@@ -136,6 +142,7 @@ def load_calibration_activations(activations_path: str) -> dict[str, np.ndarray]
     Returns:
         Dictionary mapping layer names to activation tensors
     """
+    logger.info("load_calibration_activations called with activations_path=%s", activations_path)
     activations = np.load(activations_path, allow_pickle=True)
 
     # Convert to dict (npz loads as NpzFile)
@@ -151,12 +158,14 @@ def save_calibration_activations(activations_dict: dict[str, np.ndarray], output
         activations_dict: Dictionary mapping layer names to activation tensors
         output_path: Path to save .npz file
     """
+    logger.info("save_calibration_activations called with activations_dict=%s, output_path=%s", activations_dict, output_path)
     np.savez_compressed(output_path, **activations_dict)
     print(f"  Saved activation statistics to {output_path}")
 
 
 def main():
     """Main quantization pipeline."""
+    logger.info("main starting")
     args = parse_args()
 
     print("\n" + "=" * 70)

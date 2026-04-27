@@ -13,6 +13,7 @@ Also verifies GLM-4.7 detection preservation and API model name normalization.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,6 +33,9 @@ from metal_marlin.serving.engine import (
     _normalize_model_name,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # Fixtures: Qwen3.5/3.6 DeltaNet-style configs
 # ============================================================================
@@ -40,6 +44,7 @@ from metal_marlin.serving.engine import (
 @pytest.fixture
 def qwen35_35b_a3b_config() -> dict:
     """Qwen3.5-35B-A3B style config with DeltaNet hybrid layers and MoE."""
+    logger.debug("qwen35_35b_a3b_config called")
     return {
         "model_type": "qwen3_5_moe",
         "_name_or_path": "Qwen/Qwen3.5-35B-A3B",
@@ -82,6 +87,7 @@ def qwen36_35b_a3b_config() -> dict:
     Qwen3.6 uses hybrid_attention layer type and list-valued
     full_attention_interval, plus use_delta=True.
     """
+    logger.debug("qwen36_35b_a3b_config called")
     return {
         "model_type": "qwen3_6_moe",
         "_name_or_path": "Qwen/Qwen3.6-35B-A3B",
@@ -120,6 +126,7 @@ def qwen36_35b_a3b_config() -> dict:
 @pytest.fixture
 def qwen35_multimodal_config() -> dict:
     """Qwen3.5-VL-MoE style multimodal config with nested text_config."""
+    logger.debug("qwen35_multimodal_config called")
     return {
         "model_type": "qwen3_vl_moe",
         "_name_or_path": "Qwen/Qwen3.5-VL-MoE",
@@ -164,6 +171,7 @@ def qwen36_multimodal_config() -> dict:
 
     Tests that expert counts in text_config are found by _get_config_value.
     """
+    logger.debug("qwen36_multimodal_config called")
     return {
         "model_type": "qwen3_vl_moe",
         "_name_or_path": "Qwen/Qwen3.6-VL-MoE",
@@ -200,6 +208,7 @@ def qwen36_multimodal_config() -> dict:
 @pytest.fixture
 def glm47_flash_config() -> dict:
     """GLM-4.7-Flash style config with MLA + MoE."""
+    logger.debug("glm47_flash_config called")
     return {
         "model_type": "glm4_moe",
         "_name_or_path": "zai-org/GLM-4.7-Flash",
@@ -231,6 +240,7 @@ def glm47_flash_config() -> dict:
 @pytest.fixture
 def qwen3_next_config() -> dict:
     """Qwen3-Next style config with DeltaNet hybrid layers."""
+    logger.debug("qwen3_next_config called")
     return {
         "model_type": "qwen3_next",
         "_name_or_path": "Qwen/Qwen3-Next-30B-A3B",
@@ -273,6 +283,7 @@ def qwen3_next_config() -> dict:
 
 def _write_config(tmp_path: Path, config: dict) -> Path:
     """Write config dict as config.json into tmp_path, return tmp_path."""
+    logger.info("_write_config called with tmp_path=%s, config=%s", tmp_path, config)
     config_path = tmp_path / "config.json"
     with open(config_path, "w") as f:
         json.dump(config, f)
@@ -288,11 +299,13 @@ class TestGetConfigValue:
     """Tests for _get_config_value helper function."""
 
     def test_top_level_key(self):
+        logger.info("running test_top_level_key")
         config = {"model_type": "qwen3_5_moe", "vocab_size": 248320}
         assert _get_config_value(config, "model_type") == "qwen3_5_moe"
 
     def test_nested_text_config_preferred(self):
         """text_config value takes precedence over top-level."""
+        logger.info("running test_nested_text_config_preferred")
         config = {
             "model_type": "qwen3_vl_moe",
             "text_config": {
@@ -303,6 +316,7 @@ class TestGetConfigValue:
         assert _get_config_value(config, "model_type") == "qwen3_5_moe"
 
     def test_fallback_to_top_level(self):
+        logger.info("running test_fallback_to_top_level")
         config = {
             "model_type": "qwen3_vl_moe",
             "text_config": {"vocab_size": 248320},
@@ -310,15 +324,18 @@ class TestGetConfigValue:
         assert _get_config_value(config, "model_type") == "qwen3_vl_moe"
 
     def test_default_value(self):
+        logger.info("running test_default_value")
         config = {"vocab_size": 248320}
         assert _get_config_value(config, "nonexistent", default="default") == "default"
 
     def test_multiple_keys_returns_first_match(self):
+        logger.info("running test_multiple_keys_returns_first_match")
         config = {"num_experts": 64, "num_local_experts": 128}
         assert _get_config_value(config, "num_local_experts", "num_experts") == 128
 
     def test_nested_text_config_for_expert_counts(self):
         """Expert counts in text_config are found via _get_config_value."""
+        logger.info("running test_nested_text_config_for_expert_counts")
         config = {
             "text_config": {
                 "num_local_experts": 256,
@@ -328,6 +345,7 @@ class TestGetConfigValue:
 
     def test_nested_text_config_for_layer_types(self):
         """layer_types in text_config are found via _get_config_value."""
+        logger.info("running test_nested_text_config_for_layer_types")
         config = {
             "text_config": {
                 "layer_types": ["full_attention", "hybrid_attention"],
@@ -340,6 +358,7 @@ class TestGetConfigValue:
 
     def test_nested_text_config_for_use_delta(self):
         """use_delta in text_config is found via _get_config_value."""
+        logger.info("running test_nested_text_config_for_use_delta")
         config = {
             "text_config": {
                 "use_delta": True,
@@ -349,6 +368,7 @@ class TestGetConfigValue:
 
     def test_nested_text_config_for_kv_lora_rank(self):
         """kv_lora_rank in text_config is found for GLM multimodal models."""
+        logger.info("running test_nested_text_config_for_kv_lora_rank")
         config = {
             "text_config": {
                 "kv_lora_rank": 512,
@@ -366,25 +386,32 @@ class TestIsMoeConfig:
     """Tests for _is_moe_config function."""
 
     def test_moe_with_num_local_experts(self):
+        logger.info("running test_moe_with_num_local_experts")
         assert _is_moe_config({"num_local_experts": 128}) is True
 
     def test_moe_with_num_experts(self):
+        logger.info("running test_moe_with_num_experts")
         assert _is_moe_config({"num_experts": 64}) is True
 
     def test_moe_with_n_routed_experts(self):
+        logger.info("running test_moe_with_n_routed_experts")
         assert _is_moe_config({"n_routed_experts": 256}) is True
 
     def test_not_moe_single_expert(self):
+        logger.info("running test_not_moe_single_expert")
         assert _is_moe_config({"num_local_experts": 1}) is False
 
     def test_not_moe_no_expert_keys(self):
+        logger.info("running test_not_moe_no_expert_keys")
         assert _is_moe_config({"hidden_size": 4096}) is False
 
     def test_moe_nested_text_config(self):
+        logger.info("running test_moe_nested_text_config")
         assert _is_moe_config({"text_config": {"num_local_experts": 128}}) is True
 
     def test_moe_text_config_expert_count_zero(self):
         """Expert count of 0 in text_config should not be MoE."""
+        logger.info("running test_moe_text_config_expert_count_zero")
         assert _is_moe_config({"text_config": {"num_local_experts": 0}}) is False
 
 
@@ -398,59 +425,71 @@ class TestHasDeltanetLayers:
 
     def test_linear_attention_layer_type(self):
         """Qwen3.5 style: linear_attention in layer_types."""
+        logger.info("running test_linear_attention_layer_type")
         config = {"layer_types": ["linear_attention", "full_attention"] * 24}
         assert _has_deltanet_layers(config) is True
 
     def test_hybrid_attention_layer_type(self):
         """Qwen3.6 style: hybrid_attention in layer_types."""
+        logger.info("running test_hybrid_attention_layer_type")
         config = {"layer_types": ["full_attention"] * 40 + ["hybrid_attention"] * 8}
         assert _has_deltanet_layers(config) is True
 
     def test_delta_attention_layer_type(self):
         """delta_attention in layer_types."""
+        logger.info("running test_delta_attention_layer_type")
         config = {"layer_types": ["delta_attention"]}
         assert _has_deltanet_layers(config) is True
 
     def test_full_attention_interval_int(self):
         """full_attention_interval as int (Qwen3.5 style)."""
+        logger.info("running test_full_attention_interval_int")
         config = {"full_attention_interval": 7}
         assert _has_deltanet_layers(config) is True
 
     def test_full_attention_interval_list(self):
         """full_attention_interval as list (Qwen3.6 style: [0, 1, 2, 3])."""
+        logger.info("running test_full_attention_interval_list")
         config = {"full_attention_interval": [0, 1, 2, 3]}
         assert _has_deltanet_layers(config) is True
 
     def test_full_attention_interval_empty_list(self):
         """Empty list full_attention_interval should not trigger detection."""
+        logger.info("running test_full_attention_interval_empty_list")
         config = {"full_attention_interval": []}
         assert _has_deltanet_layers(config) is False
 
     def test_full_attention_interval_zero(self):
         """full_attention_interval=0 should not trigger detection."""
+        logger.info("running test_full_attention_interval_zero")
         config = {"full_attention_interval": 0}
         assert _has_deltanet_layers(config) is False
 
     def test_use_delta_marker(self):
         """use_delta=True is a DeltaNet marker (Qwen3.6)."""
+        logger.info("running test_use_delta_marker")
         config = {"use_delta": True}
         assert _has_deltanet_layers(config) is True
 
     def test_use_delta_false(self):
         """use_delta=False should not trigger detection."""
+        logger.info("running test_use_delta_false")
         config = {"use_delta": False}
         assert _has_deltanet_layers(config) is False
 
     def test_not_deltanet_no_markers(self):
+        logger.info("running test_not_deltanet_no_markers")
         config = {"hidden_size": 4096}
         assert _has_deltanet_layers(config) is False
 
     def test_not_deltanet_empty_layer_types(self):
+        logger.info("running test_not_deltanet_empty_layer_types")
         config = {"layer_types": []}
         assert _has_deltanet_layers(config) is False
 
     def test_deltanet_nested_text_config(self):
         """DeltaNet markers in nested text_config are found."""
+        logger.info("running test_deltanet_nested_text_config")
         config = {
             "text_config": {
                 "layer_types": ["linear_attention", "full_attention"],
@@ -460,6 +499,7 @@ class TestHasDeltanetLayers:
 
     def test_use_delta_nested_text_config(self):
         """use_delta in nested text_config is found."""
+        logger.info("running test_use_delta_nested_text_config")
         config = {
             "text_config": {
                 "use_delta": True,
@@ -469,6 +509,7 @@ class TestHasDeltanetLayers:
 
     def test_full_attention_interval_nested_text_config(self):
         """full_attention_interval in nested text_config is found."""
+        logger.info("running test_full_attention_interval_nested_text_config")
         config = {
             "text_config": {
                 "full_attention_interval": 7,
@@ -478,6 +519,7 @@ class TestHasDeltanetLayers:
 
     def test_plain_dense_layer_types_not_deltanet(self):
         """Standard dense layer types should not trigger DeltaNet detection."""
+        logger.info("running test_plain_dense_layer_types_not_deltanet")
         config = {"layer_types": ["dense", "dense"]}
         assert _has_deltanet_layers(config) is False
 
@@ -493,26 +535,32 @@ class TestIsQwenDeltanetFamily:
     # --- model_type detection ---
 
     def test_qwen35_model_type(self):
+        logger.info("running test_qwen35_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_5_moe"}) is True
 
     def test_qwen36_model_type(self):
+        logger.info("running test_qwen36_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_6_moe"}) is True
 
     def test_qwen3_next_model_type(self):
+        logger.info("running test_qwen3_next_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_next"}) is True
 
     def test_qwen_vl_moe_model_type(self):
+        logger.info("running test_qwen_vl_moe_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_vl_moe"}) is True
 
     # --- model name detection ---
 
     def test_qwen35_model_name(self):
+        logger.info("running test_qwen35_model_name")
         assert (
             _is_qwen_deltanet_family({"model_type": "llama"}, model_name="Qwen3.5-35B-A3B")
             is True
         )
 
     def test_qwen36_model_name(self):
+        logger.info("running test_qwen36_model_name")
         assert (
             _is_qwen_deltanet_family({"model_type": "llama"}, model_name="Qwen3.6-35B-A3B")
             is True
@@ -522,6 +570,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_qwen36_architecture_marker(self):
         """Qwen3.6 architectures list contains Qwen3_6MoE marker."""
+        logger.info("running test_qwen36_architecture_marker")
         config = {
             "model_type": "custom",
             "architectures": ["Qwen3_6MoEForCausalLM"],
@@ -530,6 +579,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_qwen35_architecture_marker(self):
         """Qwen3.5 architectures list contains Qwen3_5MoE marker."""
+        logger.info("running test_qwen35_architecture_marker")
         config = {
             "model_type": "custom",
             "architectures": ["Qwen3_5MoEForCausalLM"],
@@ -540,6 +590,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_moe_plus_hybrid_attention_layers(self):
         """MoE + hybrid_attention combination should be Qwen hybrid."""
+        logger.info("running test_moe_plus_hybrid_attention_layers")
         config = {
             "model_type": "custom_moe",
             "num_local_experts": 128,
@@ -549,6 +600,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_moe_plus_linear_attention_layers(self):
         """MoE + linear_attention combination should be Qwen hybrid."""
+        logger.info("running test_moe_plus_linear_attention_layers")
         config = {
             "model_type": "custom_moe",
             "num_local_experts": 128,
@@ -558,6 +610,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_moe_plus_use_delta(self):
         """MoE + use_delta=True should be Qwen hybrid."""
+        logger.info("running test_moe_plus_use_delta")
         config = {
             "model_type": "custom_moe",
             "num_local_experts": 128,
@@ -567,6 +620,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_moe_plus_full_attention_interval_list(self):
         """MoE + list-valued full_attention_interval should be Qwen hybrid."""
+        logger.info("running test_moe_plus_full_attention_interval_list")
         config = {
             "model_type": "custom_moe",
             "num_local_experts": 128,
@@ -576,6 +630,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_shared_expert_intermediate_with_deltanet(self):
         """shared_expert_intermediate_size + DeltaNet layers."""
+        logger.info("running test_shared_expert_intermediate_with_deltanet")
         config = {
             "model_type": "custom",
             "shared_expert_intermediate_size": 5632,
@@ -586,11 +641,13 @@ class TestIsQwenDeltanetFamily:
     # --- negative cases ---
 
     def test_not_qwen_standard_llama(self):
+        logger.info("running test_not_qwen_standard_llama")
         config = {"model_type": "llama", "num_hidden_layers": 32}
         assert _is_qwen_deltanet_family(config) is False
 
     def test_not_qwen_moe_without_deltanet(self):
         """MoE without DeltaNet markers should not match (unless model_type/name hit)."""
+        logger.info("running test_not_qwen_moe_without_deltanet")
         config = {
             "model_type": "mixtral",
             "num_local_experts": 8,
@@ -600,6 +657,7 @@ class TestIsQwenDeltanetFamily:
     def test_not_qwen_deltanet_without_moe(self):
         """DeltaNet layers without MoE markers should not match rule 4/5
         (but might match via model_type — use a non-matching type)."""
+        logger.info("running test_not_qwen_deltanet_without_moe")
         config = {
             "model_type": "custom",
             "layer_types": ["linear_attention", "full_attention"],
@@ -610,6 +668,7 @@ class TestIsQwenDeltanetFamily:
     # --- nested text_config ---
 
     def test_nested_text_config_model_type(self):
+        logger.info("running test_nested_text_config_model_type")
         config = {
             "model_type": "qwen3_vl_moe",
             "text_config": {
@@ -621,6 +680,7 @@ class TestIsQwenDeltanetFamily:
 
     def test_nested_text_config_moe_plus_deltanet(self):
         """MoE in text_config + DeltaNet in text_config triggers hybrid detection."""
+        logger.info("running test_nested_text_config_moe_plus_deltanet")
         config = {
             "model_type": "custom_vl",
             "text_config": {
@@ -643,6 +703,7 @@ class TestDetectModelFormat:
     # --- Qwen3.5-35B-A3B ---
 
     def test_qwen35_mmfp4_detection(self, qwen35_35b_a3b_config, tmp_path):
+        logger.info("running test_qwen35_mmfp4_detection")
         _write_config(tmp_path, qwen35_35b_a3b_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
@@ -650,29 +711,34 @@ class TestDetectModelFormat:
 
     def test_qwen36_mmfp4_detection(self, qwen36_35b_a3b_config, tmp_path):
         """Qwen3.6-35B-A3B with hybrid_attention + list full_attention_interval."""
+        logger.info("running test_qwen36_mmfp4_detection")
         _write_config(tmp_path, qwen36_35b_a3b_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
     # --- GLM-4.7 preservation ---
 
     def test_glm47_mmfp4_detection(self, glm47_flash_config, tmp_path):
+        logger.info("running test_glm47_mmfp4_detection")
         _write_config(tmp_path, glm47_flash_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
     # --- Qwen3-Next ---
 
     def test_qwen3_next_mmfp4_detection(self, qwen3_next_config, tmp_path):
+        logger.info("running test_qwen3_next_mmfp4_detection")
         _write_config(tmp_path, qwen3_next_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
     # --- Multimodal models ---
 
     def test_qwen35_multimodal_mmfp4_detection(self, qwen35_multimodal_config, tmp_path):
+        logger.info("running test_qwen35_multimodal_mmfp4_detection")
         _write_config(tmp_path, qwen35_multimodal_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
     def test_qwen36_multimodal_mmfp4_detection(self, qwen36_multimodal_config, tmp_path):
         """Qwen3.6-VL-MoE with nested text_config should detect as MMFP4."""
+        logger.info("running test_qwen36_multimodal_mmfp4_detection")
         _write_config(tmp_path, qwen36_multimodal_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
 
@@ -681,6 +747,7 @@ class TestDetectModelFormat:
     def test_qwen36_use_delta_only(self, tmp_path):
         """Qwen3.6 model with use_delta=True but no layer_types should still
         be detected via model_type (qwen3_6_moe)."""
+        logger.info("running test_qwen36_use_delta_only")
         config = {
             "model_type": "qwen3_6_moe",
             "_name_or_path": "Qwen/Qwen3.6-35B-A3B",
@@ -700,6 +767,7 @@ class TestDetectModelFormat:
     def test_qwen36_expert_count_in_text_config(self, tmp_path):
         """Verify that _detect_model_format finds expert counts in text_config
         when checking for has_moe in the MMFP4 quant branch."""
+        logger.info("running test_qwen36_expert_count_in_text_config")
         config = {
             "model_type": "qwen3_6_moe",
             "_name_or_path": "Qwen/Qwen3.6-35B-A3B",
@@ -721,11 +789,13 @@ class TestDetectModelFormat:
     # --- Nonexistent path ---
 
     def test_nonexistent_path_returns_marlin(self):
+        logger.info("running test_nonexistent_path_returns_marlin")
         assert _detect_model_format("/nonexistent/path") == "marlin"
 
     # --- Trellis ---
 
     def test_trellis_quantization_detection(self, tmp_path):
+        logger.info("running test_trellis_quantization_detection")
         _write_config(tmp_path, {
             "model_type": "llama",
             "quantization_config": {"quant_method": "trellis"},
@@ -733,16 +803,19 @@ class TestDetectModelFormat:
         assert _detect_model_format(str(tmp_path)) == "trellis"
 
     def test_trellis_format_detection(self, tmp_path):
+        logger.info("running test_trellis_format_detection")
         _write_config(tmp_path, {"model_type": "llama", "format": "trellis"})
         assert _detect_model_format(str(tmp_path)) == "trellis"
 
     def test_trellis_directory_structure(self, tmp_path):
+        logger.info("running test_trellis_directory_structure")
         (tmp_path / "layer_0000").mkdir()
         assert _detect_model_format(str(tmp_path)) == "trellis"
 
     # --- Standard Marlin fallback ---
 
     def test_standard_marlin_fallback(self, tmp_path):
+        logger.info("running test_standard_marlin_fallback")
         _write_config(tmp_path, {
             "model_type": "llama",
             "hidden_size": 4096,
@@ -754,6 +827,7 @@ class TestDetectModelFormat:
 
     def test_qwen_without_mmfp4_quant_returns_marlin(self, tmp_path):
         """Qwen DeltaNet model without MMFP4 quantization → marlin."""
+        logger.info("running test_qwen_without_mmfp4_quant_returns_marlin")
         _write_config(tmp_path, {
             "model_type": "qwen3_5_moe",
             "num_local_experts": 128,
@@ -763,6 +837,7 @@ class TestDetectModelFormat:
 
     def test_qwen36_without_mmfp4_quant_returns_marlin(self, tmp_path):
         """Qwen3.6 without MMFP4 quantization → marlin."""
+        logger.info("running test_qwen36_without_mmfp4_quant_returns_marlin")
         _write_config(tmp_path, {
             "model_type": "qwen3_6_moe",
             "num_local_experts": 256,
@@ -775,6 +850,7 @@ class TestDetectModelFormat:
 
     def test_glm47_multimodal_with_text_config(self, tmp_path):
         """GLM-4.7 multimodal with kv_lora_rank in text_config should detect MMFP4."""
+        logger.info("running test_glm47_multimodal_with_text_config")
         config = {
             "model_type": "glm4_moe",
             "_name_or_path": "zai-org/GLM-4.7-Flash-VL",
@@ -795,6 +871,7 @@ class TestDetectModelFormat:
 
     def test_generic_moe_mla_mmfp4(self, tmp_path):
         """Generic MoE + MLA combination with MMFP4 quant → mmfp4."""
+        logger.info("running test_generic_moe_mla_mmfp4")
         config = {
             "model_type": "custom",
             "num_local_experts": 8,
@@ -811,18 +888,21 @@ class TestDetectModelFormat:
 
     def test_malformed_config_returns_marlin(self, tmp_path):
         """Malformed config.json should not crash, just return marlin."""
+        logger.info("running test_malformed_config_returns_marlin")
         config_path = tmp_path / "config.json"
         config_path.write_text("not valid json{{{")
         assert _detect_model_format(str(tmp_path)) == "marlin"
 
     def test_non_dict_config_returns_marlin(self, tmp_path):
         """config.json that is a list instead of dict → marlin."""
+        logger.info("running test_non_dict_config_returns_marlin")
         config_path = tmp_path / "config.json"
         config_path.write_text("[1, 2, 3]")
         assert _detect_model_format(str(tmp_path)) == "marlin"
 
     def test_empty_dir_returns_marlin(self, tmp_path):
         """Directory with no config.json → marlin."""
+        logger.info("running test_empty_dir_returns_marlin")
         assert _detect_model_format(str(tmp_path)) == "marlin"
 
 
@@ -837,54 +917,68 @@ class TestNormalizeModelName:
     # --- Qwen3.5 variants ---
 
     def test_qwen35_35b_a3b_full_path(self):
+        logger.info("running test_qwen35_35b_a3b_full_path")
         assert _normalize_model_name("Qwen/Qwen3.5-35B-A3B") == "Qwen/Qwen3.5-35B-A3B"
 
     def test_qwen35_35b_a3b_bare(self):
+        logger.info("running test_qwen35_35b_a3b_bare")
         assert _normalize_model_name("Qwen3.5-35B-A3B") == "Qwen/Qwen3.5-35B-A3B"
 
     def test_qwen35_30b_a3b(self):
         """Qwen3.5-30B-A3B: this was previously unreachable; now fixed."""
+        logger.info("running test_qwen35_30b_a3b")
         assert _normalize_model_name("Qwen/Qwen3.5-30B-A3B") == "Qwen/Qwen3.5-30B-A3B"
 
     def test_qwen35_underscore_variant(self):
+        logger.info("running test_qwen35_underscore_variant")
         assert _normalize_model_name("models/qwen3_5_moe") == "Qwen/Qwen3.5"
 
     def test_qwen35_generic(self):
         """Qwen3.5 without specific size → generic Qwen/Qwen3.5."""
+        logger.info("running test_qwen35_generic")
         assert _normalize_model_name("Qwen/Qwen3.5-72B") == "Qwen/Qwen3.5"
 
     # --- Qwen3.6 variants ---
 
     def test_qwen36_35b_a3b_full_path(self):
+        logger.info("running test_qwen36_35b_a3b_full_path")
         assert _normalize_model_name("Qwen/Qwen3.6-35B-A3B") == "Qwen/Qwen3.6-35B-A3B"
 
     def test_qwen36_35b_a3b_bare(self):
+        logger.info("running test_qwen36_35b_a3b_bare")
         assert _normalize_model_name("Qwen3.6-35B-A3B") == "Qwen/Qwen3.6-35B-A3B"
 
     def test_qwen36_underscore_variant(self):
+        logger.info("running test_qwen36_underscore_variant")
         assert _normalize_model_name("models/qwen3_6_moe") == "Qwen/Qwen3.6"
 
     def test_qwen36_generic(self):
         """Qwen3.6 without specific size → generic Qwen/Qwen3.6."""
+        logger.info("running test_qwen36_generic")
         assert _normalize_model_name("Qwen/Qwen3.6-72B") == "Qwen/Qwen3.6"
 
     # --- Non-Qwen paths unchanged ---
 
     def test_non_qwen_path_unchanged(self):
+        logger.info("running test_non_qwen_path_unchanged")
         assert _normalize_model_name("zai-org/GLM-4.7-Flash") == "GLM-4.7-Flash"
 
     def test_llama_path_unchanged(self):
+        logger.info("running test_llama_path_unchanged")
         assert _normalize_model_name("meta-llama/Llama-3-8B") == "Llama-3-8B"
 
     def test_empty_path_returns_mock(self):
+        logger.info("running test_empty_path_returns_mock")
         assert _normalize_model_name("") == "mock-model"
 
     # --- Case insensitivity ---
 
     def test_qwen35_lowercase(self):
+        logger.info("running test_qwen35_lowercase")
         assert _normalize_model_name("qwen/qwen3.5-35b-a3b") == "Qwen/Qwen3.5-35B-A3B"
 
     def test_qwen36_lowercase(self):
+        logger.info("running test_qwen36_lowercase")
         assert _normalize_model_name("qwen/qwen3.6-35b-a3b") == "Qwen/Qwen3.6-35B-A3B"
 
 
@@ -897,12 +991,14 @@ class TestDetectionConstants:
     """Tests for detection constants."""
 
     def test_qwen_deltanet_model_types(self):
+        logger.info("running test_qwen_deltanet_model_types")
         assert "qwen3_5_moe" in QWEN_DELTANET_MODEL_TYPES
         assert "qwen3_6_moe" in QWEN_DELTANET_MODEL_TYPES
         assert "qwen3_next" in QWEN_DELTANET_MODEL_TYPES
         assert "qwen3_vl_moe" in QWEN_DELTANET_MODEL_TYPES
 
     def test_qwen_deltanet_name_patterns(self):
+        logger.info("running test_qwen_deltanet_name_patterns")
         assert "qwen3.5-35b-a3b" in QWEN_DELTANET_MODEL_NAME_PATTERNS
         assert "qwen3.6-35b-a3b" in QWEN_DELTANET_MODEL_NAME_PATTERNS
         assert "qwen3.5" in QWEN_DELTANET_MODEL_NAME_PATTERNS
@@ -910,23 +1006,29 @@ class TestDetectionConstants:
 
     def test_deltanet_layer_types_includes_hybrid(self):
         """hybrid_attention must be recognized as a DeltaNet layer type."""
+        logger.info("running test_deltanet_layer_types_includes_hybrid")
         assert "hybrid_attention" in DELTANET_LAYER_TYPES
 
     def test_deltanet_layer_types_includes_linear(self):
+        logger.info("running test_deltanet_layer_types_includes_linear")
         assert "linear_attention" in DELTANET_LAYER_TYPES
 
     def test_deltanet_layer_types_includes_full(self):
+        logger.info("running test_deltanet_layer_types_includes_full")
         assert "full_attention" in DELTANET_LAYER_TYPES
 
     def test_deltanet_layer_types_includes_delta(self):
+        logger.info("running test_deltanet_layer_types_includes_delta")
         assert "delta_attention" in DELTANET_LAYER_TYPES
 
     def test_moe_expert_counts_keys(self):
+        logger.info("running test_moe_expert_counts_keys")
         assert "num_experts" in MOE_EXPERT_COUNTS
         assert "num_local_experts" in MOE_EXPERT_COUNTS
         assert "n_routed_experts" in MOE_EXPERT_COUNTS
 
     def test_moe_intermediate_keys(self):
+        logger.info("running test_moe_intermediate_keys")
         assert "moe_intermediate_size" in MOE_INTERMEDIATE_KEYS
         assert "expert_intermediate_size" in MOE_INTERMEDIATE_KEYS
 
@@ -941,6 +1043,7 @@ class TestQwenDeltanetFullConfigRoundTrip:
 
     def test_qwen35_35b_a3b_detected_as_mmfp4(self, qwen35_35b_a3b_config, tmp_path):
         """Qwen/Qwen3.5-35B-A3B: config-driven detection → mmfp4 format."""
+        logger.info("running test_qwen35_35b_a3b_detected_as_mmfp4")
         _write_config(tmp_path, qwen35_35b_a3b_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
         assert _is_qwen_deltanet_family(qwen35_35b_a3b_config, "Qwen/Qwen3.5-35B-A3B")
@@ -955,6 +1058,7 @@ class TestQwenDeltanetFullConfigRoundTrip:
         - full_attention_interval as list [0, 1, 2, 3]
         - use_delta: True
         """
+        logger.info("running test_qwen36_35b_a3b_detected_as_mmfp4")
         _write_config(tmp_path, qwen36_35b_a3b_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
         assert _is_qwen_deltanet_family(qwen36_35b_a3b_config, "Qwen/Qwen3.6-35B-A3B")
@@ -962,6 +1066,7 @@ class TestQwenDeltanetFullConfigRoundTrip:
 
     def test_glm47_flash_detected_as_mmfp4(self, glm47_flash_config, tmp_path):
         """GLM-4.7-Flash detection preserved alongside Qwen DeltaNet."""
+        logger.info("running test_glm47_flash_detected_as_mmfp4")
         _write_config(tmp_path, glm47_flash_config)
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
         # GLM should NOT be detected as Qwen DeltaNet family

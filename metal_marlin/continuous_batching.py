@@ -1,9 +1,13 @@
 import asyncio
 import dataclasses
+import logging
 from typing import Any
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclasses.dataclass
 class Request:
@@ -25,6 +29,7 @@ class ContinuousBatchingEngine:
             inference_engine: Instance of MetalInferenceEngine or compatible
             max_batch_size: Maximum number of concurrent requests
         """
+        logger.debug("initializing %s with inference_engine=%s, max_batch_size=%s", type(self).__name__, inference_engine, max_batch_size)
         self.engine = inference_engine
         self.max_batch_size = max_batch_size
         self.queue: asyncio.Queue[Request] = asyncio.Queue()
@@ -34,11 +39,13 @@ class ContinuousBatchingEngine:
 
     async def start(self):
         """Start the processing loop."""
+        logger.debug("start called")
         self.running = True
         self._loop_task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
         """Stop the processing loop."""
+        logger.debug("stop called")
         self.running = False
         if self._loop_task:
             await self._loop_task
@@ -56,6 +63,7 @@ class ContinuousBatchingEngine:
         Returns:
             Generated text
         """
+        logger.debug("add_request called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
         if not self.running:
             raise RuntimeError("Engine is not running. Call start() first.")
 
@@ -77,6 +85,7 @@ class ContinuousBatchingEngine:
         return await future
 
     async def _run_loop(self):
+        logger.debug("_run_loop called")
         while self.running:
             # 1. Fill batch from queue
             while len(self.active_requests) < self.max_batch_size and not self.queue.empty():
@@ -122,6 +131,7 @@ class ContinuousBatchingEngine:
             await asyncio.sleep(0.0)
 
     def _step(self):
+        logger.debug("_step called")
         if not self.active_requests:
             return
 

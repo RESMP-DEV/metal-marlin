@@ -1,6 +1,7 @@
 """Validation tests for dequantization accuracy across all supported formats."""
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -18,6 +19,9 @@ from metal_marlin.neon_dequant import (
     dequant_q4_1_neon,
     dequant_q8_0_neon,
 )
+
+
+logger = logging.getLogger(__name__)
 
 FP4_CODEBOOK = np.array(
     [
@@ -69,11 +73,13 @@ def _rng() -> np.random.Generator:
 
 
 def _expand_scales(scales: np.ndarray, group_size: int, K: int) -> np.ndarray:
+    logger.debug("_expand_scales called with scales=%s, group_size=%s, K=%s", scales, group_size, K)
     expanded = np.repeat(scales.astype(np.float32, copy=False), group_size, axis=0)
     return expanded[:K, :]
 
 
 def _unpack_nibbles_k8(packed: np.ndarray, K: int, N: int) -> np.ndarray:
+    logger.info("_unpack_nibbles_k8 called with packed=%s, K=%s, N=%s", packed, K, N)
     indices = np.empty((K, N), dtype=np.uint8)
     for i in range(8):
         indices[i::8, :] = ((packed >> (i * 4)) & 0xF).astype(np.uint8)
@@ -81,6 +87,7 @@ def _unpack_nibbles_k8(packed: np.ndarray, K: int, N: int) -> np.ndarray:
 
 
 def _unpack_bytes(packed: np.ndarray, K: int, N: int) -> np.ndarray:
+    logger.info("_unpack_bytes called with packed=%s, K=%s, N=%s", packed, K, N)
     codes = np.empty((K, N), dtype=np.uint8)
     for i in range(4):
         codes[:, i::4] = ((packed >> (i * 8)) & 0xFF).astype(np.uint8)
@@ -88,6 +95,7 @@ def _unpack_bytes(packed: np.ndarray, K: int, N: int) -> np.ndarray:
 
 
 def _fp8_e4m3_codebook() -> np.ndarray:
+    logger.debug("_fp8_e4m3_codebook called")
     values = np.zeros(256, dtype=np.float32)
     for code in range(256):
         s = (code >> 7) & 1
@@ -107,6 +115,7 @@ def _fp8_e4m3_codebook() -> np.ndarray:
 
 
 def _fp8_e5m2_codebook() -> np.ndarray:
+    logger.debug("_fp8_e5m2_codebook called")
     values = np.zeros(256, dtype=np.float32)
     for code in range(256):
         s = (code >> 7) & 1
@@ -126,6 +135,7 @@ def _fp8_e5m2_codebook() -> np.ndarray:
 
 
 def _ref_fp4(packed: np.ndarray, scales: np.ndarray, K: int, N: int, group_size: int) -> np.ndarray:
+    logger.debug("_ref_fp4 called with packed=%s, scales=%s, K=%s", packed, scales, K)
     indices = _unpack_nibbles_k8(packed, K, N)
     values = FP4_CODEBOOK[indices]
     scales_expanded = _expand_scales(scales, group_size, K)
@@ -133,6 +143,7 @@ def _ref_fp4(packed: np.ndarray, scales: np.ndarray, K: int, N: int, group_size:
 
 
 def _ref_int4(packed: np.ndarray, scales: np.ndarray, K: int, N: int, group_size: int) -> np.ndarray:
+    logger.debug("_ref_int4 called with packed=%s, scales=%s, K=%s", packed, scales, K)
     indices = _unpack_nibbles_k8(packed, K, N).astype(np.float32)
     values = indices - 8.0
     scales_expanded = _expand_scales(scales, group_size, K)
@@ -147,6 +158,7 @@ def _ref_int4_asym(
     N: int,
     group_size: int,
 ) -> np.ndarray:
+    logger.debug("_ref_int4_asym called with packed=%s, scales=%s, zeros=%s", packed, scales, zeros)
     indices = _unpack_nibbles_k8(packed, K, N).astype(np.float32)
     scales_expanded = _expand_scales(scales, group_size, K)
     zeros_expanded = _expand_scales(zeros, group_size, K)
@@ -154,6 +166,7 @@ def _ref_int4_asym(
 
 
 def _ref_nf4(packed: np.ndarray, scales: np.ndarray, K: int, N: int, group_size: int) -> np.ndarray:
+    logger.debug("_ref_nf4 called with packed=%s, scales=%s, K=%s", packed, scales, K)
     indices = _unpack_nibbles_k8(packed, K, N)
     values = NF4_CODEBOOK[indices]
     scales_expanded = _expand_scales(scales, group_size, K)
@@ -168,6 +181,7 @@ def _ref_fp8(
     group_size: int,
     codebook: np.ndarray,
 ) -> np.ndarray:
+    logger.debug("_ref_fp8 called with packed=%s, scales=%s, K=%s", packed, scales, K)
     codes = _unpack_bytes(packed, K, N)
     values = codebook[codes]
     scales_expanded = _expand_scales(scales, group_size, K)
@@ -175,20 +189,24 @@ def _ref_fp8(
 
 
 def _ref_int8(data: np.ndarray, scales: np.ndarray, K: int, N: int, group_size: int) -> np.ndarray:
+    logger.debug("_ref_int8 called with data=%s, scales=%s, K=%s", data, scales, K)
     values = data.astype(np.float32)
     scales_expanded = _expand_scales(scales, group_size, K)
     return values * scales_expanded
 
 
 def _ref_int8_per_channel(data: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    logger.debug("_ref_int8_per_channel called with data=%s, scales=%s", data, scales)
     return data.astype(np.float32) * scales.astype(np.float32)
 
 
 def _fp16_bytes(value: float) -> np.ndarray:
+    logger.debug("_fp16_bytes called with value=%s", value)
     return np.array([value], dtype=np.float16).view(np.uint8)
 
 
 def _ref_q4_0(data: np.ndarray, n_elements: int) -> np.ndarray:
+    logger.debug("_ref_q4_0 called with data=%s, n_elements=%s", data, n_elements)
     block_size = 32
     block_bytes = 18
     n_blocks = n_elements // block_size
@@ -205,6 +223,7 @@ def _ref_q4_0(data: np.ndarray, n_elements: int) -> np.ndarray:
 
 
 def _ref_q4_1(data: np.ndarray, n_elements: int) -> np.ndarray:
+    logger.debug("_ref_q4_1 called with data=%s, n_elements=%s", data, n_elements)
     block_size = 32
     block_bytes = 20
     n_blocks = n_elements // block_size
@@ -222,6 +241,7 @@ def _ref_q4_1(data: np.ndarray, n_elements: int) -> np.ndarray:
 
 
 def _ref_q8_0(data: np.ndarray, n_elements: int) -> np.ndarray:
+    logger.debug("_ref_q8_0 called with data=%s, n_elements=%s", data, n_elements)
     block_size = 32
     block_bytes = 34
     n_blocks = n_elements // block_size
@@ -235,6 +255,7 @@ def _ref_q8_0(data: np.ndarray, n_elements: int) -> np.ndarray:
 
 
 def test_fp4_dequant_accuracy() -> None:
+    logger.info("running test_fp4_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 64, 32, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -247,6 +268,7 @@ def test_fp4_dequant_accuracy() -> None:
 
 
 def test_int4_dequant_accuracy() -> None:
+    logger.info("running test_int4_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 64, 40, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -259,6 +281,7 @@ def test_int4_dequant_accuracy() -> None:
 
 
 def test_int4_asym_dequant_accuracy() -> None:
+    logger.info("running test_int4_asym_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 64, 24, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -272,6 +295,7 @@ def test_int4_asym_dequant_accuracy() -> None:
 
 
 def test_nf4_dequant_accuracy() -> None:
+    logger.info("running test_nf4_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 64, 32, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -284,6 +308,7 @@ def test_nf4_dequant_accuracy() -> None:
 
 
 def test_fp8_e4m3_dequant_accuracy() -> None:
+    logger.info("running test_fp8_e4m3_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 32, 32, 16
     packed = rng.integers(0, 2**32, size=(K, N // 4), dtype=np.uint32)
@@ -296,6 +321,7 @@ def test_fp8_e4m3_dequant_accuracy() -> None:
 
 
 def test_fp8_e5m2_dequant_accuracy() -> None:
+    logger.info("running test_fp8_e5m2_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 32, 32, 16
     packed = rng.integers(0, 2**32, size=(K, N // 4), dtype=np.uint32)
@@ -308,6 +334,7 @@ def test_fp8_e5m2_dequant_accuracy() -> None:
 
 
 def test_int8_dequant_accuracy() -> None:
+    logger.info("running test_int8_dequant_accuracy")
     rng = _rng()
     K, N, group_size = 64, 48, 16
     data = rng.integers(-128, 128, size=(K, N), dtype=np.int8)
@@ -320,6 +347,7 @@ def test_int8_dequant_accuracy() -> None:
 
 
 def test_int8_per_channel_dequant_accuracy() -> None:
+    logger.info("running test_int8_per_channel_dequant_accuracy")
     rng = _rng()
     K, N = 48, 32
     data = rng.integers(-128, 128, size=(K, N), dtype=np.int8)
@@ -332,6 +360,7 @@ def test_int8_per_channel_dequant_accuracy() -> None:
 
 
 def test_q4_0_dequant_accuracy() -> None:
+    logger.info("running test_q4_0_dequant_accuracy")
     rng = _rng()
     n_blocks = 2
     block_bytes = 18
@@ -351,6 +380,7 @@ def test_q4_0_dequant_accuracy() -> None:
 
 
 def test_q4_1_dequant_accuracy() -> None:
+    logger.info("running test_q4_1_dequant_accuracy")
     rng = _rng()
     n_blocks = 2
     block_bytes = 20
@@ -371,6 +401,7 @@ def test_q4_1_dequant_accuracy() -> None:
 
 
 def test_q8_0_dequant_accuracy() -> None:
+    logger.info("running test_q8_0_dequant_accuracy")
     rng = _rng()
     n_blocks = 2
     block_bytes = 34
@@ -395,6 +426,7 @@ def test_q8_0_dequant_accuracy() -> None:
 @pytest.mark.parametrize("K,N,group_size", [(64, 32, 16), (128, 64, 32), (256, 128, 64)])
 def test_fp4_varying_sizes(K: int, N: int, group_size: int) -> None:
     """Test FP4 dequantization with varying tensor sizes."""
+    logger.info("running test_fp4_varying_sizes")
     rng = _rng()
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
     scales = rng.uniform(0.01, 2.0, size=(K // group_size, N)).astype(np.float32)
@@ -408,6 +440,7 @@ def test_fp4_varying_sizes(K: int, N: int, group_size: int) -> None:
 @pytest.mark.parametrize("K,N,group_size", [(64, 32, 16), (96, 48, 24)])
 def test_int4_varying_sizes(K: int, N: int, group_size: int) -> None:
     """Test INT4 dequantization with varying tensor sizes."""
+    logger.info("running test_int4_varying_sizes")
     rng = _rng()
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
     scales = rng.uniform(0.01, 2.0, size=(K // group_size, N)).astype(np.float32)
@@ -421,6 +454,7 @@ def test_int4_varying_sizes(K: int, N: int, group_size: int) -> None:
 @pytest.mark.parametrize("K,N,group_size", [(32, 32, 16), (64, 64, 32)])
 def test_fp8_e4m3_varying_sizes(K: int, N: int, group_size: int) -> None:
     """Test FP8 E4M3 dequantization with varying tensor sizes."""
+    logger.info("running test_fp8_e4m3_varying_sizes")
     rng = _rng()
     packed = rng.integers(0, 2**32, size=(K, N // 4), dtype=np.uint32)
     scales = rng.uniform(0.01, 2.0, size=(K // group_size, N)).astype(np.float32)
@@ -434,6 +468,7 @@ def test_fp8_e4m3_varying_sizes(K: int, N: int, group_size: int) -> None:
 @pytest.mark.parametrize("K,N,group_size", [(32, 32, 16), (64, 64, 32)])
 def test_fp8_e5m2_varying_sizes(K: int, N: int, group_size: int) -> None:
     """Test FP8 E5M2 dequantization with varying tensor sizes."""
+    logger.info("running test_fp8_e5m2_varying_sizes")
     rng = _rng()
     packed = rng.integers(0, 2**32, size=(K, N // 4), dtype=np.uint32)
     scales = rng.uniform(0.01, 2.0, size=(K // group_size, N)).astype(np.float32)
@@ -446,6 +481,7 @@ def test_fp8_e5m2_varying_sizes(K: int, N: int, group_size: int) -> None:
 
 def test_fp4_extreme_scales() -> None:
     """Test FP4 dequantization with extreme scale values."""
+    logger.info("running test_fp4_extreme_scales")
     rng = _rng()
     K, N, group_size = 64, 32, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -465,6 +501,7 @@ def test_fp4_extreme_scales() -> None:
 
 def test_int4_asym_extreme_zeros() -> None:
     """Test INT4 asymmetric dequantization with edge-case zero points."""
+    logger.info("running test_int4_asym_extreme_zeros")
     rng = _rng()
     K, N, group_size = 64, 24, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -484,6 +521,7 @@ def test_int4_asym_extreme_zeros() -> None:
 
 def test_nf4_codebook_coverage() -> None:
     """Test NF4 dequantization covers all codebook entries."""
+    logger.info("running test_nf4_codebook_coverage")
     K, N, group_size = 64, 32, 16
     scales = np.ones((K // group_size, N), dtype=np.float32)
 
@@ -501,6 +539,7 @@ def test_nf4_codebook_coverage() -> None:
 
 def test_fp8_special_values() -> None:
     """Test FP8 formats handle special values (NaN, inf) correctly."""
+    logger.info("running test_fp8_special_values")
     K, N, group_size = 32, 32, 16
     scales = np.ones((K // group_size, N), dtype=np.float32)
 
@@ -517,6 +556,7 @@ def test_fp8_special_values() -> None:
 
 def test_int8_boundary_values() -> None:
     """Test INT8 dequantization at signed integer boundaries."""
+    logger.info("running test_int8_boundary_values")
     K, N, group_size = 64, 48, 16
     scales = np.ones((K // group_size, N), dtype=np.float32)
 
@@ -532,6 +572,7 @@ def test_int8_boundary_values() -> None:
 
 def test_ggml_q4_0_multiple_blocks() -> None:
     """Test GGML Q4_0 dequantization with multiple blocks."""
+    logger.info("running test_ggml_q4_0_multiple_blocks")
     rng = _rng()
     n_blocks = 8
     block_bytes = 18
@@ -552,6 +593,7 @@ def test_ggml_q4_0_multiple_blocks() -> None:
 
 def test_ggml_q4_1_multiple_blocks() -> None:
     """Test GGML Q4_1 dequantization with multiple blocks."""
+    logger.info("running test_ggml_q4_1_multiple_blocks")
     rng = _rng()
     n_blocks = 8
     block_bytes = 20
@@ -573,6 +615,7 @@ def test_ggml_q4_1_multiple_blocks() -> None:
 
 def test_ggml_q8_0_multiple_blocks() -> None:
     """Test GGML Q8_0 dequantization with multiple blocks."""
+    logger.info("running test_ggml_q8_0_multiple_blocks")
     rng = _rng()
     n_blocks = 8
     block_bytes = 34
@@ -596,6 +639,7 @@ def test_ggml_q8_0_multiple_blocks() -> None:
 
 def test_int4_symmetric_consistency() -> None:
     """Verify INT4 symmetric quantization is consistent with zero-point=8."""
+    logger.info("running test_int4_symmetric_consistency")
     rng = _rng()
     K, N, group_size = 64, 32, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -610,6 +654,7 @@ def test_int4_symmetric_consistency() -> None:
 
 def test_fp8_formats_range_difference() -> None:
     """Verify FP8 E4M3 and E5M2 have expected dynamic range differences."""
+    logger.info("running test_fp8_formats_range_difference")
     K, N, group_size = 32, 32, 16
     scales = np.ones((K // group_size, N), dtype=np.float32)
 
@@ -636,6 +681,7 @@ def test_fp8_formats_range_difference() -> None:
 @pytest.mark.parametrize("seed", [0, 42, 123, 999])
 def test_fp4_reproducibility(seed: int) -> None:
     """Test FP4 dequantization is deterministic across runs."""
+    logger.info("running test_fp4_reproducibility")
     K, N, group_size = 64, 32, 16
     rng = np.random.default_rng(seed)
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -649,6 +695,7 @@ def test_fp4_reproducibility(seed: int) -> None:
 
 def test_all_formats_zero_input() -> None:
     """Test all dequantization formats handle all-zero input correctly."""
+    logger.info("running test_all_formats_zero_input")
     K, N, group_size = 64, 32, 16
 
     # FP4
@@ -674,6 +721,7 @@ def test_all_formats_zero_input() -> None:
 ])
 def test_format_memory_contiguity(format_name: str, dequant_func) -> None:
     """Verify dequantization produces contiguous output arrays."""
+    logger.info("running test_format_memory_contiguity")
     rng = _rng()
     K, N, group_size = 64, 32, 16
     packed = rng.integers(0, 2**32, size=(K // 8, N), dtype=np.uint32)
@@ -690,6 +738,7 @@ def test_format_memory_contiguity(format_name: str, dequant_func) -> None:
 
 def test_all_formats_complete_coverage() -> None:
     """Integration test verifying all major formats are tested."""
+    logger.info("running test_all_formats_complete_coverage")
     tested_formats = [
         "fp4", "int4", "int4_asym", "nf4",
         "fp8_e4m3", "fp8_e5m2",

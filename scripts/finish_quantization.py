@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -26,12 +27,16 @@ from safetensors.torch import save_file
 
 from metal_marlin.mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
+
+logger = logging.getLogger(__name__)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Finish incomplete quantization (streaming RTN)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -57,6 +62,7 @@ def parse_args() -> argparse.Namespace:
 
 def load_checkpoint(output_dir: Path) -> dict:
     """Load checkpoint state."""
+    logger.info("load_checkpoint called with output_dir=%s", output_dir)
     checkpoint_file = output_dir / "checkpoints" / "state.json"
     if not checkpoint_file.exists():
         raise FileNotFoundError(f"No checkpoint found at {checkpoint_file}")
@@ -66,6 +72,7 @@ def load_checkpoint(output_dir: Path) -> dict:
 
 def save_checkpoint(output_dir: Path, state: dict) -> None:
     """Save checkpoint state."""
+    logger.info("save_checkpoint called with output_dir=%s, state=%s", output_dir, state)
     checkpoint_file = output_dir / "checkpoints" / "state.json"
     checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
     with open(checkpoint_file, "w", encoding="utf-8") as f:
@@ -74,6 +81,7 @@ def save_checkpoint(output_dir: Path, state: dict) -> None:
 
 def get_source_index(model_path: Path) -> dict[str, str]:
     """Get mapping of tensor names to source files."""
+    logger.debug("get_source_index called with model_path=%s", model_path)
     index_file = model_path / "model.safetensors.index.json"
     if index_file.exists():
         with open(index_file, encoding="utf-8") as f:
@@ -91,12 +99,14 @@ def get_source_index(model_path: Path) -> dict[str, str]:
 
 def get_all_tensor_names(model_path: Path) -> list[str]:
     """Get ordered list of all tensor names from source model."""
+    logger.debug("get_all_tensor_names called with model_path=%s", model_path)
     index = get_source_index(model_path)
     return sorted(index.keys())
 
 
 def load_tensor(model_path: Path, name: str, index: dict[str, str]) -> torch.Tensor:
     """Load a single tensor from source model."""
+    logger.info("load_tensor called with model_path=%s, name=%s, index=%s", model_path, name, index)
     filename = index[name]
     file_path = model_path / filename
     with safe_open(file_path, framework="pt") as f:
@@ -105,6 +115,7 @@ def load_tensor(model_path: Path, name: str, index: dict[str, str]) -> torch.Ten
 
 def is_quantizable(name: str, tensor: torch.Tensor) -> bool:
     """Check if a tensor should be quantized (linear weight, 2D)."""
+    logger.info("is_quantizable called with name=%s, tensor=%s", name, getattr(tensor, "shape", tensor))
     if not name.endswith(".weight"):
         return False
     if tensor.dim() != 2:
@@ -132,6 +143,7 @@ def quantize_rtn_fp4(
         packed: Packed FP4 weights as uint32
         scales: Per-group scales as float16 [out_features, n_groups]
     """
+    logger.info("quantize_rtn_fp4 called with weight=%s, group_size=%s", getattr(weight, "shape", weight), group_size)
     weight_np = weight.float().cpu().numpy()
     out_features, in_features = weight_np.shape
 
@@ -189,6 +201,7 @@ def quantize_rtn_fp4(
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     output_dir = args.output_dir.resolve()
     verbose = args.verbose

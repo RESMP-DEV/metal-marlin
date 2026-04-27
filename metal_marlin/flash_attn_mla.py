@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,9 @@ if TYPE_CHECKING:
     import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 # Tile dimensions matching the Metal kernel
 TILE_Q = 16
 TILE_KV = 24  # As defined in flash_attention_v3.metal
@@ -47,6 +51,7 @@ THREADS_PER_TG = NUM_SIMDGROUPS * 32  # 128
 
 def _require_metal_attention() -> None:
     """Raise if Metal dispatch is not available."""
+    logger.debug("_require_metal_attention called")
     if not HAS_TORCH:
         raise RuntimeError(
             "Flash Attention V3 MLA requires PyTorch. Install with: pip install torch")
@@ -85,6 +90,7 @@ class AttentionParams:
         """
         # Pack as uint32 array (is_causal as 0/1)
         # Note: scale is reinterpreted as uint32 for the Metal struct
+        logger.debug("to_buffer called with device=%s", device)
         data = np.array(
             [
                 self.batch,
@@ -108,6 +114,7 @@ class AttentionParams:
 
 def _get_kernel_source() -> str:
     """Load Flash Attention V3 Metal kernel source."""
+    logger.debug("_get_kernel_source called")
     kernel_path = Path(__file__).parent.parent / \
         "src" / "flash_attention_v3.metal"
     if kernel_path.exists():
@@ -125,6 +132,7 @@ _kernel_lib: Any = None
 
 def _get_kernel_library() -> Any:
     """Get or create the Flash Attention kernel library."""
+    logger.debug("_get_kernel_library called")
     global _kernel_lib
     if _kernel_lib is None:
         from .metal_dispatch import MetalKernelLibrary
@@ -137,6 +145,7 @@ def _get_kernel_library() -> Any:
 
 def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     """Get Metal buffer from PyTorch MPS tensor."""
+    logger.debug("_mps_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     import ctypes
 
     if not tensor.is_mps:
@@ -182,6 +191,7 @@ def _dispatch_attention_kernel(
     wait: bool = True,
 ) -> None:
     """Dispatch a Flash Attention Metal kernel."""
+    logger.debug("_dispatch_attention_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
     pipeline = lib.get_pipeline(
         function_name, library_name="flash_attention_v3")
 
@@ -235,6 +245,7 @@ def flash_attention_v3_mla(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("flash_attention_v3_mla called with Q=%s, K=%s, V=%s", Q, K, V)
     _require_metal_attention()
 
     batch, num_heads_q, seq_q, head_dim = Q.shape

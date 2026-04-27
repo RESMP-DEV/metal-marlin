@@ -1,17 +1,22 @@
 """Tests for trellis_loader format detection."""
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestTrellisFormatDetection:
     """Tests for _detect_trellis_format method."""
 
     def test_detect_metal_marlin_format(self):
         """Should detect metal_marlin format with __indices keys."""
+        logger.info("running test_detect_metal_marlin_format")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         # Create a mock loader (we don't need a real path for this test)
@@ -30,6 +35,7 @@ class TestTrellisFormatDetection:
 
     def test_detect_unknown_format(self):
         """Should return 'unknown' for unrecognized format."""
+        logger.info("running test_detect_unknown_format")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -49,6 +55,7 @@ class TestTrellisBaseWeightName:
 
     def test_metal_marlin_base_name(self):
         """Should extract base name from metal_marlin format."""
+        logger.info("running test_metal_marlin_base_name")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -60,6 +67,7 @@ class TestTrellisBaseWeightName:
 
     def test_exllamav3_base_name(self):
         """Should extract base name from exllamav3 format."""
+        logger.info("running test_exllamav3_base_name")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -80,6 +88,7 @@ class TestTrellisComponentName:
 
     def test_metal_marlin_component(self):
         """Should extract component from metal_marlin format."""
+        logger.info("running test_metal_marlin_component")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -91,6 +100,7 @@ class TestTrellisComponentName:
 
     def test_exllamav3_component(self):
         """Should extract component from exllamav3 format."""
+        logger.info("running test_exllamav3_component")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -110,6 +120,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_from_su_sv(self):
         """Should infer shape from su/sv components."""
+        logger.info("running test_infer_shape_from_su_sv")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -124,6 +135,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_from_row_col_scale(self):
         """Should infer shape from row_scale/col_scale components."""
+        logger.info("running test_infer_shape_from_row_col_scale")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -138,6 +150,7 @@ class TestTrellisInferShape:
 
     def test_infer_shape_missing_components(self):
         """Should return (0, 0) for missing components."""
+        logger.info("running test_infer_shape_missing_components")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = object.__new__(TrellisModelLoader)
@@ -150,6 +163,7 @@ class TestTrellisInferShape:
 
 def test_load_layer_from_hf_shards(tmp_path: Path) -> None:
     """Test loading a layer from HF-style sharded safetensors."""
+    logger.info("running test_load_layer_from_hf_shards")
     import numpy as np
     from safetensors.numpy import save_file
 
@@ -208,6 +222,7 @@ def test_load_layer_from_hf_shards(tmp_path: Path) -> None:
 
 def test_detect_hf_shards_format(tmp_path: Path) -> None:
     """Test format detection for HF-style shards."""
+    logger.info("running test_detect_hf_shards_format")
     from metal_marlin.trellis.loader import detect_trellis_format
 
     # Create mock HF-style structure
@@ -224,6 +239,7 @@ def test_detect_hf_shards_format(tmp_path: Path) -> None:
 
 def test_detect_v2_layers_format(tmp_path: Path) -> None:
     """Test format detection for v2 layer directories."""
+    logger.info("running test_detect_v2_layers_format")
     from metal_marlin.trellis.loader import detect_trellis_format
 
     # Create mock v2 structure
@@ -235,6 +251,7 @@ def test_detect_v2_layers_format(tmp_path: Path) -> None:
 
 def test_detect_hf_shards_format(tmp_path: Path) -> None:
     """Test format detection for HF-style shards."""
+    logger.info("running test_detect_hf_shards_format")
     from metal_marlin.trellis.loader import detect_trellis_format
 
     # Create mock HF-style structure
@@ -251,6 +268,7 @@ def test_detect_hf_shards_format(tmp_path: Path) -> None:
 
 def test_detect_v2_layers_format(tmp_path: Path) -> None:
     """Test format detection for v2 layer directories."""
+    logger.info("running test_detect_v2_layers_format")
     from metal_marlin.trellis.loader import detect_trellis_format
 
     # Create mock v2 structure

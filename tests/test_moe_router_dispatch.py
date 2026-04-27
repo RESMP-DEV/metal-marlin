@@ -1,3 +1,4 @@
+import logging
 
 import numpy as np
 import pytest
@@ -6,7 +7,11 @@ import torch
 from metal_marlin import _cpp_ext
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_fast_router_dispatcher_creation():
+    logger.info("running test_fast_router_dispatcher_creation")
     num_experts = 16
     hidden_dim = 64
     top_k = 2
@@ -18,6 +23,7 @@ def test_fast_router_dispatcher_creation():
     assert dispatcher.hot_pair_count() == 0
 
 def test_fast_router_dispatcher_route_batch():
+    logger.info("running test_fast_router_dispatcher_route_batch")
     num_experts = 4
     hidden_dim = 8
     top_k = 2
@@ -65,6 +71,7 @@ def test_fast_router_dispatcher_route_batch():
     np.testing.assert_allclose(sums, 1.0, rtol=1e-5)
 
 def test_hot_pair_caching():
+    logger.info("running test_hot_pair_caching")
     num_experts = 16
     hidden_dim = 8
     top_k = 2

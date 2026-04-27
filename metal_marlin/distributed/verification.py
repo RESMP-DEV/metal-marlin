@@ -39,6 +39,7 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -107,6 +108,7 @@ def verify_tensor_parallel_linear(
     Returns:
         VerificationResult with comparison metrics
     """
+    logger.debug("verify_tensor_parallel_linear called with reference=%s, parallel=%s, input_shape=%s", reference, parallel, input_shape)
     rng = np.random.default_rng(seed)
 
     # Generate random input
@@ -180,6 +182,7 @@ def verify_column_parallel(
     Returns:
         VerificationResult
     """
+    logger.debug("verify_column_parallel called with in_features=%s, out_features=%s, batch_size=%s", in_features, out_features, batch_size)
     from ..layers import MarlinLinear
 
     rng = np.random.default_rng(seed)
@@ -247,6 +250,7 @@ def verify_row_parallel(
     Returns:
         VerificationResult
     """
+    logger.debug("verify_row_parallel called with in_features=%s, out_features=%s, batch_size=%s", in_features, out_features, batch_size)
     from ..layers import MarlinLinear
 
     rng = np.random.default_rng(seed)
@@ -303,6 +307,7 @@ def verify_collective_operations(
     Returns:
         Dictionary mapping operation name to VerificationResult
     """
+    logger.debug("verify_collective_operations called with num_shards=%s, tensor_shape=%s, seed=%s", num_shards, tensor_shape, seed)
     from .tensor_parallel import all_gather, all_reduce, scatter
 
     rng = np.random.default_rng(seed)
@@ -386,6 +391,7 @@ def run_verification_suite(
     Returns:
         True if all tests pass
     """
+    logger.debug("run_verification_suite called with verbose=%s", verbose)
     all_passed = True
 
     if verbose:
@@ -499,3 +505,6 @@ if __name__ == "__main__":
 
     success = run_verification_suite(verbose=True)
     sys.exit(0 if success else 1)
+
+
+logger = logging.getLogger(__name__)

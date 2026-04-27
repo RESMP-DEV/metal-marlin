@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import pytest
 import torch
@@ -20,6 +21,9 @@ try:
 except ImportError:
     HAS_TRELLIS = False
 
+
+
+logger = logging.getLogger(__name__)
 
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required")
 requires_trellis = pytest.mark.skipif(
@@ -46,6 +50,7 @@ def create_mock_trellis_linear(
     device: str = "mps",
 ) -> TrellisLinear:
     """Create a TrellisLinear with random packed weights for testing."""
+    logger.debug("create_mock_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     tile_dim = 16
     tiles_k = (out_features + tile_dim - 1) // tile_dim
     tiles_n = (in_features + tile_dim - 1) // tile_dim
@@ -82,6 +87,7 @@ def create_mock_dense_mlp(
     device: str = "mps",
 ) -> TrellisDenseMLP:
     """Create a mock TrellisDenseMLP for testing."""
+    logger.debug("create_mock_dense_mlp called with hidden_dim=%s, intermediate_dim=%s, bits=%s", hidden_dim, intermediate_dim, bits)
     gate_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     up_proj = create_mock_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     down_proj = create_mock_trellis_linear(intermediate_dim, hidden_dim, bits, device)
@@ -96,6 +102,7 @@ def create_mock_moe_mlp_mixed(
     device: str = "mps",
 ) -> TrellisMoEMLP:
     """Create a mock mixed-precision TrellisMoEMLP for grouped dispatch tests."""
+    logger.debug("create_mock_moe_mlp_mixed called with hidden_dim=%s, intermediate_dim=%s, bits_per_expert=%s", hidden_dim, intermediate_dim, bits_per_expert)
     num_experts = len(bits_per_expert)
     router = nn.Linear(
         hidden_dim, num_experts, bias=False, device=device, dtype=torch.float32
@@ -123,6 +130,7 @@ def create_mock_moe_mlp_mixed(
 class TestBitGroupDispatch:
     def test_bit_group_cache_creation(self):
         """Test that _bit_group_cache is created with expected structure."""
+        logger.info("running test_bit_group_cache_creation")
         torch.manual_seed(0)
         mlp = create_mock_moe_mlp_mixed()
 
@@ -140,6 +148,7 @@ class TestBitGroupDispatch:
 
     def test_lazy_buffer_conversion(self):
         """Test that CPU tensors convert to Metal buffers on first use."""
+        logger.info("running test_lazy_buffer_conversion")
         torch.manual_seed(0)
         mlp = create_mock_moe_mlp_mixed()
 
@@ -157,6 +166,7 @@ class TestBitGroupDispatch:
 
     def test_forward_grouped_matches_fallback(self):
         """Test that grouped dispatch matches fallback output."""
+        logger.info("running test_forward_grouped_matches_fallback")
         torch.manual_seed(0)
         mlp = create_mock_moe_mlp_mixed()
         x = torch.randn(2, mlp.hidden_dim, dtype=torch.float16, device="mps")

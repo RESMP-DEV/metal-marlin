@@ -1,4 +1,5 @@
 
+import logging
 from pathlib import Path
 
 from metal_marlin.metal_dispatch import MetalKernelLibrary
@@ -7,6 +8,9 @@ from metal_marlin.metallib_loader import (
     get_metallib_version,
     get_staleness_details,
 )
+
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_METALLIB_VERSION_FILE = (
     Path(__file__).parent.parent / "metal_marlin" / "lib" / ".metallib_version"
@@ -22,6 +26,7 @@ def parse_metallib_version_file(version_file: Path | None = None) -> dict[str, s
     Returns:
         Dict with version info (build_date, git_hash, shader_count, metal_version).
     """
+    logger.debug("parse_metallib_version_file called with version_file=%s", version_file)
     if version_file is None:
         version_file = DEFAULT_METALLIB_VERSION_FILE
 
@@ -50,6 +55,7 @@ def compare_metallib_versions(
 
     Returns a list of error strings for any mismatches or missing metadata.
     """
+    logger.debug("compare_metallib_versions called with expected=%s, actual=%s", expected, actual)
     errors: list[str] = []
 
     expected_hash = expected.get("git_hash")
@@ -104,6 +110,7 @@ def validate_precompiled_library() -> tuple[bool, str]:
         Tuple of (is_valid, message).
     """
     # Step 1: Check if precompiled library exists
+    logger.info("validate_precompiled_library starting")
     if not DEFAULT_METALLIB.exists():
         return (
             False,
@@ -154,6 +161,7 @@ def validate_precompiled_library() -> tuple[bool, str]:
 
 def check_library_exists() -> tuple[bool, str]:
     """Check that the precompiled library exists and matches expected version."""
+    logger.debug("check_library_exists called")
     return validate_precompiled_library()
 
 
@@ -163,6 +171,7 @@ def validate_metallib_version() -> tuple[bool, str]:
     Returns:
         Tuple of (is_valid, message).
     """
+    logger.debug("validate_metallib_version called")
     expected = parse_metallib_version_file()
     if not expected:
         return True, "No expected version file found, skipping version check"
@@ -205,6 +214,7 @@ def validate_metallib() -> bool:
 
     Prints detailed status information about the metallib.
     """
+    logger.debug("validate_metallib called")
     print("\n=== Precompiled Metallib Validation ===")
 
     if not DEFAULT_METALLIB.exists():
@@ -263,6 +273,7 @@ def main() -> int:
         0 if all kernels verified successfully, 1 otherwise.
     """
     # Step 1: Validate precompiled library exists and matches expected version
+    logger.info("main starting")
     print("\n=== Precompiled Library Validation ===")
     lib_valid, lib_msg = validate_precompiled_library()
     if lib_valid:

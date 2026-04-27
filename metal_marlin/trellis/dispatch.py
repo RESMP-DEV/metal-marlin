@@ -66,6 +66,7 @@ def dispatch_trellis_dequant(
     Returns:
         Dequantized weights [K, N] float16, MPS tensor
     """
+    logger.info("dispatch_trellis_dequant called with lib=%s, indices=%s, scales=%s, grid=%s", lib, indices, scales, grid)
     require_mps()
 
     device = lib.device
@@ -138,6 +139,7 @@ def dispatch_sign_flips(
     Returns:
         Same tensor with signs applied (modified in-place)
     """
+    logger.debug("dispatch_sign_flips called with lib=%s, weights=%s, su=%s", lib, weights, su)
     require_mps()
 
     device = lib.device
@@ -205,6 +207,7 @@ def dispatch_trellis_dequant_fused(
     Returns:
         Dequantized weights with signs applied [K, N] float16, MPS tensor
     """
+    logger.info("dispatch_trellis_dequant_fused called with lib=%s, indices=%s, scales=%s, grid=%s", lib, indices, scales, grid)
     require_mps()
 
     device = lib.device
@@ -292,6 +295,7 @@ def dispatch_trellis_dequant_packed(
     Returns:
         Dequantized weights [K, N] float16, MPS tensor
     """
+    logger.info("dispatch_trellis_dequant_packed called with lib=%s, packed_indices=%s, scales=%s, grid=%s", lib, packed_indices, scales, grid)
     require_mps()
 
     device = lib.device
@@ -326,6 +330,7 @@ def dispatch_trellis_dequant_packed(
 
     # Create separate buffers for each constant parameter
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -392,6 +397,7 @@ def dispatch_fused_qkv_trellis(
     Returns:
         Tuple of (Q, K, V) output tensors, each [M, N_*] float16
     """
+    logger.debug("dispatch_fused_qkv_trellis called with lib=%s, A=%s, q_proj=%s", lib, A, q_proj)
     require_mps()
 
     device = lib.device
@@ -417,6 +423,7 @@ def dispatch_fused_qkv_trellis(
 
     # Helpers for dummy buffers
     def get_proj_buffers(proj):
+        logger.debug("get_proj_buffers called with proj=%s", proj)
         if proj is None:
             # Dummy buffers
             dummy_idx = device.newBufferWithLength_options_(
@@ -454,6 +461,7 @@ def dispatch_fused_qkv_trellis(
 
     # Create dimension buffers
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -541,6 +549,7 @@ def dispatch_gemm_trellis_decode(
     Returns:
         Output matrix [M, N] float16, MPS tensor
     """
+    logger.debug("dispatch_gemm_trellis_decode called with lib=%s, A=%s, packed_indices=%s", lib, A, packed_indices)
     require_mps()
 
     device = lib.device
@@ -569,6 +578,7 @@ def dispatch_gemm_trellis_decode(
 
     # Create separate buffers for each constant parameter
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -692,6 +702,7 @@ def dispatch_decode_gemv_trellis(
     Uses decode_gemv_fp4 kernel instead of gemm_trellis_packed_decode.
     Better memory coalescing for vector-matrix multiply.
     '''
+    logger.debug("dispatch_decode_gemv_trellis called with lib=%s, x=%s, packed_weights=%s", lib, x, packed_weights)
     K, N = x.shape[1], output.shape[1]
 
     # Grid: one threadgroup per output column group
@@ -737,6 +748,7 @@ def dispatch_gemm_trellis_packed(
     Returns:
         Output matrix [M, N] float16, MPS tensor
     """
+    logger.info("dispatch_gemm_trellis_packed called with lib=%s, A=%s, packed_indices=%s, scales=%s", lib, A, packed_indices, scales)
     require_mps()
 
     device = lib.device
@@ -765,6 +777,7 @@ def dispatch_gemm_trellis_packed(
 
     # Create separate buffers for each constant parameter
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -851,6 +864,7 @@ def dispatch_gemm_trellis_fused_reg(
     Returns:
         Output matrix [M, N] float16, MPS tensor
     """
+    logger.debug("dispatch_gemm_trellis_fused_reg called with lib=%s, A=%s, packed_indices=%s", lib, A, packed_indices)
     require_mps()
 
     device = lib.device
@@ -879,6 +893,7 @@ def dispatch_gemm_trellis_fused_reg(
 
     # Create separate buffers for each constant parameter
     def make_uint_buffer(val: int) -> Any:
+        logger.debug("make_uint_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -943,6 +958,7 @@ def dequantize_trellis_weight(
     Returns:
         Dequantized weight tensor [K, N] float16
     """
+    logger.info("dequantize_trellis_weight called with weight=%s, lib=%s, use_metal=%s", getattr(weight, "shape", weight), lib, use_metal)
     K, N = weight.original_shape
 
     # Generate codebook grid for this bit width
@@ -996,6 +1012,7 @@ def _dequantize_trellis_cpu(
     Returns:
         Dequantized weight tensor [K, N] float16
     """
+    logger.info("_dequantize_trellis_cpu called with weight=%s, grid=%s", getattr(weight, "shape", weight), grid)
     K, N = weight.original_shape
     n_groups = weight.scales.shape[0]
     # Groups are along input dimension (N), scales are per output column (K)
@@ -1062,6 +1079,7 @@ def dispatch_gemm_trellis_auto(
     Uses C++ extension (~5-15μs) when available, falls back to
     PyObjC (~80-150μs) when not.
     """
+    logger.debug("dispatch_gemm_trellis_auto called with lib=%s, A=%s, packed_indices=%s", lib, A, packed_indices)
     if fast_dispatch_available():
         try:
             ctx = get_fast_context()
@@ -1100,6 +1118,7 @@ def dispatch_gemm_trellis_decode_auto(
     Uses C++ extension (~5-15μs) when available, falls back to
     PyObjC (~80-150μs) when not.
     """
+    logger.debug("dispatch_gemm_trellis_decode_auto called with lib=%s, A=%s, packed_indices=%s", lib, A, packed_indices)
     if fast_dispatch_available():
         try:
             ctx = get_fast_context()
@@ -1155,6 +1174,7 @@ def dispatch_gemm_trellis_mixed_bpw(
     Returns:
         Output tensor [M, N] float16
     """
+    logger.debug("dispatch_gemm_trellis_mixed_bpw called with lib=%s, A=%s, packed_indices=%s", lib, A, packed_indices)
     require_mps()
 
     M, K = A.shape

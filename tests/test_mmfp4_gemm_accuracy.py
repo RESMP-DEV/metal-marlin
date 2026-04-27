@@ -1,4 +1,5 @@
 """Accuracy tests for MMFP4 GEMM and dequantization paths."""
+import logging
 
 import numpy as np
 import pytest
@@ -8,6 +9,9 @@ from metal_marlin.layers.mmfp4_linear import _fast_dequant, mmfp4_gemm
 from metal_marlin.quantize import pack_fp4_weights
 
 
+
+logger = logging.getLogger(__name__)
+
 def pack_mmfp4_rowwise(weights, scales_ignored, group_size):
     """Wrapper to use pack_fp4_weights and return row-packed layout."""
     # pack_fp4_weights expects [K, N] where K is quantization axis.
@@ -15,6 +19,7 @@ def pack_mmfp4_rowwise(weights, scales_ignored, group_size):
     # So pass weights.t() -> [in, out].
     # pack_fp4_weights returns packed [K//8, N] -> [in//8, out]
     # and scales [K//G, N] -> [in//G, out]
+    logger.info("pack_mmfp4_rowwise called with weights=%s, scales_ignored=%s, group_size=%s", getattr(weights, "shape", weights), scales_ignored, group_size)
     packed, scales, _ = pack_fp4_weights(weights.t().cpu().numpy(), group_size=group_size, output_backend="torch")
     
     # Transpose packed to row-packed [out, in // 8]
@@ -31,6 +36,7 @@ def pack_mmfp4_rowwise(weights, scales_ignored, group_size):
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_fast_dequant_accuracy():
     """Test that _fast_dequant produces correct results."""
+    logger.info("running test_fast_dequant_accuracy")
     torch.manual_seed(42)
     
     out_features, in_features = 128, 256
@@ -57,6 +63,7 @@ def test_fast_dequant_accuracy():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_mmfp4_gemm_accuracy():
     """Test MMFP4 GEMM produces correct output shape and finite values."""
+    logger.info("running test_mmfp4_gemm_accuracy")
     torch.manual_seed(42)
     
     batch, in_features, out_features = 8, 256, 128
@@ -82,6 +89,7 @@ def test_mmfp4_gemm_accuracy():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_fast_dequant_different_group_sizes():
     """Test _fast_dequant with various group sizes."""
+    logger.info("running test_fast_dequant_different_group_sizes")
     torch.manual_seed(42)
     
     out_features, in_features = 64, 128
@@ -106,6 +114,7 @@ def test_mmfp4_gemm_small_seq_len():
     
     This tests the boundary check fix for cases where M < TILE_M.
     """
+    logger.info("running test_mmfp4_gemm_small_seq_len")
     torch.manual_seed(42)
     
     seq_len, in_features, out_features = 4, 256, 128
@@ -131,6 +140,7 @@ def test_mmfp4_gemm_small_seq_len():
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_mmfp4_gemm_various_seq_lens():
     """Test MMFP4 GEMM with various sequence lengths to verify boundary handling."""
+    logger.info("running test_mmfp4_gemm_various_seq_lens")
     torch.manual_seed(42)
     
     in_features, out_features = 128, 64

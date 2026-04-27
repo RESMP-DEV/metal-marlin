@@ -7,6 +7,7 @@ metrics don't regress beyond acceptable thresholds.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,9 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 if TYPE_CHECKING:
     import torch as torch_types
 
+
+logger = logging.getLogger(__name__)
+
 # Path to reference outputs fixture
 REFERENCE_OUTPUTS_PATH = Path(__file__).parent / "fixtures" / "glm47_reference_outputs.pt"
 
@@ -24,6 +28,7 @@ REFERENCE_OUTPUTS_PATH = Path(__file__).parent / "fixtures" / "glm47_reference_o
 @pytest.fixture(scope="module")
 def reference_outputs():
     """Pre-computed reference outputs from baseline model."""
+    logger.debug("reference_outputs called")
     if not REFERENCE_OUTPUTS_PATH.exists():
         pytest.skip(f"Reference outputs not found at {REFERENCE_OUTPUTS_PATH}")
 
@@ -40,6 +45,7 @@ def optimized_model(device: str):
     This is a placeholder fixture that should be overridden or implemented
     based on the specific optimization being tested.
     """
+    logger.debug("optimized_model called with device=%s", device)
     pytest.skip("No optimized model available - fixture needs implementation")
 
 
@@ -53,6 +59,7 @@ def compute_perplexity(model, text_samples: list[str]) -> float:
     Returns:
         Perplexity value (lower is better)
     """
+    logger.debug("compute_perplexity called with model=%s, text_samples=%s", model, text_samples)
     if not HAS_TORCH or torch is None:
         raise RuntimeError("PyTorch required for perplexity computation")
 
@@ -96,6 +103,7 @@ class TestOptimizationQuality:
             reference_outputs: Dictionary mapping prompts to reference outputs
             device: Device to run inference on
         """
+        logger.info("running test_output_matches_reference")
         if not HAS_TORCH or torch is None:
             pytest.skip("PyTorch required")
 
@@ -136,6 +144,7 @@ class TestOptimizationQuality:
             optimized_model: The optimized model fixture
             device: Device to run inference on
         """
+        logger.info("running test_perplexity_regression")
         baseline_ppl = 8.5  # From baseline measurement
 
         # Use a small subset of wikitext-2 for fast testing

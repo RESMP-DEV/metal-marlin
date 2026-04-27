@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,9 @@ from metal_marlin.trellis.moe_dispatch import (
     select_moe_kernel,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # Batch sizes to test
 BATCH_SIZES = [1, 2, 4, 8, 16, 32, 64, 128]
 TOP_K = 2
@@ -39,6 +43,7 @@ BENCH_ITERS = 50
 
 def load_model() -> TrellisForCausalLM:
     """Load Trellis model for benchmarking."""
+    logger.info("load_model called")
     model_path = Path("models/GLM-4.7-Flash-Marlin-MMFP4")
     if not model_path.exists():
         raise RuntimeError(f"Model not found at {model_path}")
@@ -50,6 +55,7 @@ def load_model() -> TrellisForCausalLM:
 
 def get_moe_layer(model: TrellisForCausalLM):
     """Find first MoE layer in model."""
+    logger.debug("get_moe_layer called with model=%s", model)
     for layer in model.model.layers:
         if hasattr(layer.mlp, "_is_mixed_precision"):
             return layer.mlp
@@ -68,6 +74,7 @@ def force_kernel_dispatch(
     
     This bypasses select_moe_kernel to test specific kernel variants.
     """
+    logger.debug("force_kernel_dispatch called with moe=%s, x=%s, expert_ids=%s", moe, x, expert_ids)
     from metal_marlin.metal_dispatch import mps_tensor_to_metal_buffer
     import numpy as np
     import Metal
@@ -206,6 +213,7 @@ def benchmark_variant(
 ) -> dict[str, Any] | None:
     """Benchmark a specific kernel variant."""
     
+    logger.info("benchmark_variant starting with moe=%s, batch_size=%s, forced_kernel=%s, use_fp32_acc=%s", moe, batch_size, forced_kernel, use_fp32_acc)
     hidden_dim = moe.hidden_dim
     num_experts = len(moe.experts)
     
@@ -267,6 +275,7 @@ def benchmark_variant(
 
 def run_benchmark():
     """Run kernel variant benchmark."""
+    logger.info("run_benchmark starting")
     print("=" * 80)
     print("MoE Kernel Variant Benchmark for M4 Max")
     print("=" * 80)

@@ -25,6 +25,7 @@ Output:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -47,6 +48,9 @@ from metal_marlin.trellis.moe_dispatch import (  # noqa: E402
     select_moe_kernel,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 # Kernel variants to test for each batch size
 KERNEL_VARIANTS: list[tuple[str, bool, str]] = [
@@ -72,6 +76,7 @@ BENCHMARK_ITERATIONS = 50
 def check_kernel_available(lib, kernel_name: str, use_fp32_acc: bool) -> bool:
     """Check if a kernel is available in the library."""
     # Handle fp32acc suffix
+    logger.debug("check_kernel_available called with lib=%s, kernel_name=%s, use_fp32_acc=%s", lib, kernel_name, use_fp32_acc)
     if use_fp32_acc and "fp32acc" not in kernel_name and "decode" not in kernel_name:
         test_name = kernel_name.replace("moe_trellis_swiglu", "moe_trellis_swiglu_fp32acc")
         test_name = test_name.replace("_fp32acc_fp32acc", "_fp32acc")
@@ -104,6 +109,7 @@ def benchmark_kernel(
     Returns:
         Dict with timing statistics or None if kernel fails.
     """
+    logger.info("benchmark_kernel starting with lib=%s, buffer_pool=%s, cached=%s, batch_size=%s", lib, buffer_pool, cached, batch_size)
     device = torch.device("mps")
     
     # Create test inputs
@@ -206,6 +212,7 @@ def benchmark_kernel(
 
 def find_optimal_thresholds(results: dict[int, dict[str, dict]]) -> dict[str, Any]:
     """Analyze results to find optimal kernel selection thresholds."""
+    logger.debug("find_optimal_thresholds called with results=%s", results)
     thresholds = {
         "decode_max": 1,  # Default: decode only for batch=1
         "prefill4_max": 16,  # Default: prefill4 for 2-16
@@ -256,6 +263,7 @@ def find_optimal_thresholds(results: dict[int, dict[str, dict]]) -> dict[str, An
 
 def generate_recommendations(results: dict[int, dict[str, dict]], thresholds: dict) -> str:
     """Generate markdown report with recommendations."""
+    logger.debug("generate_recommendations called with results=%s, thresholds=%s", results, thresholds)
     lines = [
         "# M4 Max MoE Kernel Selection Benchmark Results\n",
         "## Summary\n",
@@ -378,6 +386,7 @@ def generate_recommendations(results: dict[int, dict[str, dict]], thresholds: di
 
 def main() -> int:
     """Run the benchmark."""
+    logger.info("main starting")
     print("=" * 70)
     print("M4 Max MoE Kernel Selection Optimization Benchmark")
     print("=" * 70)
@@ -519,6 +528,7 @@ def main() -> int:
 
 def run_synthetic_benchmark() -> int:
     """Run a synthetic benchmark without a model."""
+    logger.info("run_synthetic_benchmark starting")
     print("\nSynthetic benchmark mode (no model loaded)")
     print("This provides theoretical kernel selection recommendations.\n")
     

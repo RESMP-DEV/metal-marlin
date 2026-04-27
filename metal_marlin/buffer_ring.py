@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 try:
@@ -37,16 +38,21 @@ except ImportError:
     Metal = None
 
 
+
+logger = logging.getLogger(__name__)
+
 CACHE_LINE_BYTES = 128
 PAGE_SIZE_BYTES = 16384
 LARGE_BUFFER_THRESHOLD = 65536
 
 
 def _round_up(value: int, alignment: int = CACHE_LINE_BYTES) -> int:
+    logger.debug("_round_up called with value=%s, alignment=%s", value, alignment)
     return ((value + alignment - 1) // alignment) * alignment
 
 
 def _align_buffer_size(size: int) -> int:
+    logger.debug("_align_buffer_size called with size=%s", size)
     if size >= LARGE_BUFFER_THRESHOLD:
         return _round_up(size, PAGE_SIZE_BYTES)
     return _round_up(size, CACHE_LINE_BYTES)
@@ -88,6 +94,7 @@ class RingBuffer:
         *,
         storage_mode: int | None = None,
     ) -> None:
+        logger.debug("initializing %s with device=%s, capacity=%s", type(self).__name__, device, capacity)
         if not HAS_METAL:
             raise RuntimeError("Metal required. Install with: pip install pyobjc-framework-Metal")
 
@@ -114,33 +121,41 @@ class RingBuffer:
 
     @property
     def capacity(self) -> int:
+        logger.debug("capacity called")
         return self._capacity
 
     @property
     def used(self) -> int:
+        logger.debug("used called")
         return self._offset
 
     @property
     def available(self) -> int:
+        logger.debug("available called")
         return self._capacity - self._offset
 
     @property
     def high_water_mark(self) -> int:
+        logger.debug("high_water_mark called")
         return self._high_water_mark
 
     @property
     def buffer(self) -> Any:
+        logger.debug("buffer called")
         return self._buffer
 
     def reset(self) -> None:
+        logger.debug("reset called")
         self._offset = 0
         self._allocation_count = 0
 
     def can_alloc(self, size: int) -> bool:
+        logger.debug("can_alloc called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
         return self._offset + aligned_size <= self._capacity
 
     def alloc(self, size: int) -> tuple[Any, int]:
+        logger.debug("alloc called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
 
         if self._offset + aligned_size > self._capacity:
@@ -162,6 +177,7 @@ class RingBuffer:
         return self._buffer, offset
 
     def alloc_bytes(self, size: int) -> tuple[memoryview, int]:
+        logger.debug("alloc_bytes called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
 
         if self._offset + aligned_size > self._capacity:
@@ -182,6 +198,7 @@ class RingBuffer:
         return view, offset
 
     def stats(self) -> dict[str, Any]:
+        logger.debug("stats called")
         return {
             "capacity_bytes": self._capacity,
             "used_bytes": self._offset,
@@ -203,6 +220,7 @@ def get_ring_buffer(
     device: Any,
     capacity: int = RingBuffer.DEFAULT_CAPACITY,
 ) -> RingBuffer:
+    logger.debug("get_ring_buffer called with device=%s, capacity=%s", device, capacity)
     global _ring_buffer, _ring_buffer_device_id
 
     device_id = id(device)
@@ -214,12 +232,14 @@ def get_ring_buffer(
 
 
 def reset_ring_buffer() -> None:
+    logger.debug("reset_ring_buffer called")
     global _ring_buffer
     if _ring_buffer is not None:
         _ring_buffer.reset()
 
 
 def ring_buffer_stats() -> dict[str, Any] | None:
+    logger.debug("ring_buffer_stats called")
     global _ring_buffer
     if _ring_buffer is not None:
         return _ring_buffer.stats()

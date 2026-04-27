@@ -16,9 +16,13 @@ Storage format:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 def pack_indices(indices: np.ndarray, bits: int) -> np.ndarray:
     """Pack N-bit indices into a uint8 array.
@@ -40,6 +44,7 @@ def pack_indices(indices: np.ndarray, bits: int) -> np.ndarray:
         >>> packed.shape  # Much smaller than original
         (3,)  # 1 header byte + 2 data bytes for 8 2-bit indices
     """
+    logger.info("pack_indices called with indices=%s, bits=%s", indices, bits)
     if bits < 2 or bits > 8:
         raise ValueError(f"bits must be in range [2, 8], got {bits}")
 
@@ -136,6 +141,7 @@ def unpack_indices(packed: np.ndarray, n_indices: int) -> np.ndarray:
         >>> unpack_indices(packed, 8)  # 8 2-bit indices
         array([0, 1, 2, 3, 3, 2, 1, 0], dtype=int16)
     """
+    logger.info("unpack_indices called with packed=%s, n_indices=%s", packed, n_indices)
     if len(packed) == 0:
         raise ValueError("Empty packed array")
 
@@ -216,6 +222,7 @@ def pack_trellis_indices(
         - "bits": Bits per index
         - "dtype": "packed_uint8"
     """
+    logger.info("pack_trellis_indices called with indices=%s, bits=%s", indices, bits)
     original_shape = list(indices.shape)
     n_indices = int(np.prod(original_shape))
 
@@ -244,6 +251,7 @@ def unpack_trellis_indices(
     Returns:
         Unpacked indices in original shape as int16
     """
+    logger.info("unpack_trellis_indices called with packed=%s, metadata=%s", packed, metadata)
     n_indices = metadata["n_indices"]
     shape = tuple(metadata["shape"])
 
@@ -261,6 +269,7 @@ def compute_packed_size(n_indices: int, bits: int) -> int:
     Returns:
         Total bytes (including 1-byte header)
     """
+    logger.info("compute_packed_size called with n_indices=%s, bits=%s", n_indices, bits)
     if bits == 8:
         return 1 + n_indices
     return 1 + (n_indices * bits + 7) // 8
@@ -276,6 +285,7 @@ def compute_compression_ratio(shape: tuple, bits: int) -> float:
     Returns:
         Compression ratio (e.g., 5.33 for 3-bit vs 16-bit)
     """
+    logger.debug("compute_compression_ratio called with shape=%s, bits=%s", shape, bits)
     n_indices = int(np.prod(shape))
     int16_bytes = n_indices * 2  # int16 = 2 bytes
     packed_bytes = compute_packed_size(n_indices, bits)
@@ -289,6 +299,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
     Uses numpy operations for faster packing on large arrays.
     Supports 2, 3, 4, 5, 6, 8 bit packing.
     """
+    logger.info("pack_indices_vectorized called with indices=%s, bits=%s", indices, bits)
     if bits < 2 or bits > 8:
         raise ValueError(f"bits must be in range [2, 8], got {bits}")
 
@@ -410,6 +421,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
 
 def unpack_indices_vectorized(packed: np.ndarray, n_indices: int) -> np.ndarray:
     """Vectorized version of unpack_indices for better performance."""
+    logger.info("unpack_indices_vectorized called with packed=%s, n_indices=%s", packed, n_indices)
     if len(packed) == 0:
         raise ValueError("Empty packed array")
 

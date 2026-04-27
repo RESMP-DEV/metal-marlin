@@ -61,6 +61,7 @@ def dispatch_kernel(
     lib, function_name, grid, threadgroup, buffers, **kwargs
 ):
     # Add synchronization support for GPU events
+    logger.debug("dispatch_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
     gpu_event = kwargs.pop("gpu_event", None)
     if gpu_event:
         gpu_event.wait()
@@ -81,9 +82,11 @@ if TYPE_CHECKING:
 
 if HAS_TORCH:
     def _cache_key(tensor: torch.Tensor) -> tuple[int, int, int]:
+        logger.debug("_cache_key called with tensor=%s", tensor)
         return (tensor.data_ptr(), tensor.storage_offset(), id(tensor.untyped_storage()))
 else:
     def _cache_key(tensor: Any) -> tuple[int, int, int]:
+        logger.debug("_cache_key called with tensor=%s", tensor)
         raise ImportError("torch is required for tensor cache keys")
 
 
@@ -97,6 +100,7 @@ mps_tensor_to_metal_buffer: _MpsTensorToMetalBuffer
 
 def _metal_required(*args: Any, **kwargs: Any) -> Any:
     """Stub function that raises ImportError when Metal/MPS is unavailable."""
+    logger.debug("_metal_required called")
     raise ImportError(
         "Metal kernel dispatch requires PyObjC and PyTorch MPS. "
         "Install with: pip install pyobjc-framework-Metal torch"
@@ -155,6 +159,7 @@ if not HAS_METAL or not HAS_MPS:
     # Batch execution utilities
     def reusable_command_buffer():
         """Stub for reusable_command_buffer context manager."""
+        logger.debug("reusable_command_buffer called")
         raise ImportError(
             "reusable_command_buffer requires Metal/PyObjC. "
             "Install with: pip install pyobjc-framework-Metal torch"
@@ -162,6 +167,7 @@ if not HAS_METAL or not HAS_MPS:
 
     def submit_batch(funcs):
         """Stub for submit_batch function."""
+        logger.debug("submit_batch called with funcs=%s", funcs)
         raise ImportError(
             "submit_batch requires Metal/PyObjC. "
             "Install with: pip install pyobjc-framework-Metal torch"
@@ -171,6 +177,7 @@ if not HAS_METAL or not HAS_MPS:
         """Stub MMFP4 kernel wrapper when Metal/MPS is unavailable."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             self._available = False
 
         def dequantize_mmfp4(
@@ -179,6 +186,7 @@ if not HAS_METAL or not HAS_MPS:
             scales: torch.Tensor,
             group_size: int = 128,
         ) -> torch.Tensor:
+            logger.info("dequantize_mmfp4 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
             return _metal_required(packed, scales, group_size)
 
         def mmfp4_gemm(
@@ -188,6 +196,7 @@ if not HAS_METAL or not HAS_MPS:
             B_scales: torch.Tensor,
             group_size: int = 128,
         ) -> torch.Tensor:
+            logger.debug("mmfp4_gemm called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
             return _metal_required(A, B_packed, B_scales, group_size)
 
         def decode_gemv_fp4(
@@ -197,6 +206,7 @@ if not HAS_METAL or not HAS_MPS:
             B_scales: torch.Tensor,
             group_size: int = 128,
         ) -> torch.Tensor:
+            logger.debug("decode_gemv_fp4 called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
             return _metal_required(A, B_packed, B_scales, group_size)
 
         def mmfp4_fused_qkv(
@@ -210,6 +220,7 @@ if not HAS_METAL or not HAS_MPS:
             Wv_scales: torch.Tensor,
             group_size: int = 128,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            logger.debug("mmfp4_fused_qkv called with A=%s, Wq_packed=%s, Wq_scales=%s", A, Wq_packed, Wq_scales)
             return _metal_required(A, Wq_packed, Wq_scales, Wk_packed, Wk_scales, Wv_packed, Wv_scales, group_size)
 
         def mmfp4_fused_gate_up(
@@ -221,6 +232,7 @@ if not HAS_METAL or not HAS_MPS:
             up_scales: torch.Tensor,
             group_size: int = 128,
         ) -> torch.Tensor:
+            logger.debug("mmfp4_fused_gate_up called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
             return _metal_required(x, gate_packed, gate_scales, up_packed, up_scales, group_size)
 
         def mmfp4_softmax_topk(
@@ -228,6 +240,7 @@ if not HAS_METAL or not HAS_MPS:
             logits: torch.Tensor,
             top_k: int = 4,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            logger.debug("mmfp4_softmax_topk called with logits=%s, top_k=%s", logits, top_k)
             return _metal_required(logits, top_k)
 
 # Constants and Metal shader strings don't require Metal - defined unconditionally
@@ -1271,6 +1284,7 @@ _compiled_libraries: dict[str, bool]={}
 
 def _load_extracted_moe_exports(**kwargs: Any) -> dict[str, Callable[..., Any]]:
     """Load MoE dispatch helpers extracted into kernels/moe.py."""
+    logger.info("_load_extracted_moe_exports called")
     module_path=Path(__file__).with_name("kernels") / "moe.py"
     spec=importlib.util.spec_from_file_location(
         f"{__name__}._extracted_moe", module_path)
@@ -1284,6 +1298,7 @@ def _load_extracted_moe_exports(**kwargs: Any) -> dict[str, Callable[..., Any]]:
 
 def _ensure_kernel_compiled(lib: MetalKernelLibrary, name: str, source: str) -> None:
     """Ensure a kernel source is compiled in the library."""
+    logger.info("_ensure_kernel_compiled starting")
     if name not in _compiled_libraries:
         lib.compile_source(name, source)
         _compiled_libraries[name]=True
@@ -1321,6 +1336,7 @@ if HAS_METAL and HAS_MPS:
         """Compile and dispatch dense GEMM kernels with dtype-aware selection."""
 
         def __init__(self, lib: MetalKernelLibrary | None=None) -> None:
+            logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
             require_mps()
             self._lib=lib or get_default_library()
             self._compiled: dict[tuple[str,
@@ -1331,6 +1347,7 @@ if HAS_METAL and HAS_MPS:
 
         @ staticmethod
         def _apply_compile_options(source: str, compile_options: list[str] | None) -> str:
+            logger.info("_apply_compile_options starting")
             if not compile_options:
                 return source
             defines: list[str]=[]
@@ -1354,6 +1371,7 @@ if HAS_METAL and HAS_MPS:
             source_name: str="marlin_gemm",
             compile_options: list[str] | None=None,
         ) -> Any | None:
+            logger.info("_compile_kernel starting")
             key=(function_name, tuple(compile_options)
                    if compile_options else None)
             if key in self._compiled:
@@ -1387,6 +1405,7 @@ if HAS_METAL and HAS_MPS:
             return pipeline
 
         def _compile_gemm_kernels(self) -> None:
+            logger.info("_compile_gemm_kernels starting")
             self._gemm_fp16=self._compile_kernel("marlin_gemm_fp16")
             if self._gemm_fp16 is None:
                 self._gemm_fp16=self._compile_kernel(
@@ -1406,6 +1425,7 @@ if HAS_METAL and HAS_MPS:
             *,
             activation_dtype: str="fp16",
         ) -> torch.Tensor:
+            logger.debug("dispatch_gemm called with A=%s, B=%s, M=%s", A, B, M)
             if activation_dtype == "bf16" and self._gemm_bf16_fp32acc is not None:
                 return self._dispatch_bf16_path(A, B, M, N, K)
             return self._dispatch_fp16_path(A, B, M, N, K)
@@ -1413,11 +1433,13 @@ if HAS_METAL and HAS_MPS:
         def _dispatch_fp16_path(
             self, A: torch.Tensor, B: torch.Tensor, M: int, N: int, K: int
         ) -> torch.Tensor:
+            logger.debug("_dispatch_fp16_path called with A=%s, B=%s, M=%s", A, B, M)
             return self._dispatch_kernel(self._gemm_fp16, A, B, M, N, K, torch.float16)
 
         def _dispatch_bf16_path(
             self, A: torch.Tensor, B: torch.Tensor, M: int, N: int, K: int
         ) -> torch.Tensor:
+            logger.debug("_dispatch_bf16_path called with A=%s, B=%s, M=%s", A, B, M)
             return self._dispatch_kernel(self._gemm_bf16_fp32acc, A, B, M, N, K, torch.bfloat16)
 
         def _dispatch_kernel(
@@ -1430,6 +1452,7 @@ if HAS_METAL and HAS_MPS:
             K: int,
             dtype: torch.dtype,
         ) -> torch.Tensor:
+            logger.debug("_dispatch_kernel called with kernel=%s, A=%s, B=%s", kernel, A, B)
             if kernel is None:
                 raise RuntimeError("GEMM kernel pipeline is unavailable.")
 
@@ -1461,6 +1484,7 @@ if HAS_METAL and HAS_MPS:
             return output
 
     def _get_staging_pool(device: Any) -> MetalBufferPool:
+        logger.debug("_get_staging_pool called with device=%s", device)
         pool=_STAGING_POOLS.get(id(device))
         if pool is None:
             pool=MetalBufferPool(
@@ -1469,6 +1493,7 @@ if HAS_METAL and HAS_MPS:
         return pool
 
     def _blit_copy(lib: MetalKernelLibrary, source: Any, destination: Any, size: int) -> None:
+        logger.debug("_blit_copy called with lib=%s, source=%s, destination=%s", lib, source, destination)
         command_buffer=lib.command_queue.commandBuffer()
         blit=command_buffer.blitCommandEncoder()
         blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size_(
@@ -1479,6 +1504,7 @@ if HAS_METAL and HAS_MPS:
         command_buffer.waitUntilCompleted()
 
     def _private_buffer_from_bytes(lib: MetalKernelLibrary, device: Any, data: bytes) -> Any:
+        logger.debug("_private_buffer_from_bytes called with lib=%s, device=%s, data=%s", lib, device, data)
         size=len(data)
         staging=_get_staging_pool(device).get(size)
         contents=staging.contents()
@@ -1499,6 +1525,7 @@ if HAS_METAL and HAS_MPS:
         *,
         cache: bool=True,
     ) -> Any:
+        logger.debug("_private_buffer_from_tensor called with tensor=%s, lib=%s, device=%s", tensor, lib, device)
         if not tensor.is_contiguous():
             tensor=tensor.contiguous()
 
@@ -1522,6 +1549,7 @@ if HAS_METAL and HAS_MPS:
         return private_buf
 
     def _params_buffer(lib: MetalKernelLibrary, device: Any, params: np.ndarray) -> Any:
+        logger.debug("_params_buffer called with lib=%s, device=%s, params=%s", lib, device, params)
         data=params.tobytes()
         return device.newBufferWithBytes_length_options_(
             data, len(data), Metal.MTLResourceStorageModeShared
@@ -1548,6 +1576,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/8, N] uint32, scales [K/group_size, N]).
         """
+        logger.info("pack_fp4_weights called with weight=%s, group_size=%s", getattr(weight, "shape", weight), group_size)
         w=weight.T.to(torch.float16)  # [K, N]
         K, N=w.shape
 
@@ -1620,6 +1649,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/16, N] uint32, scales [K/group_size, N]).
         """
+        logger.info("pack_int2_weights called with weight=%s, group_size=%s", getattr(weight, "shape", weight), group_size)
         w=weight.T.to(torch.float16)  # [K, N]
         K, N=w.shape
 
@@ -1674,6 +1704,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Tuple of (weight_packed [K/10, N] uint32, scales [K/group_size, N]).
         """
+        logger.info("pack_int3_weights called with weight=%s, group_size=%s", getattr(weight, "shape", weight), group_size)
         w=weight.T.to(torch.float16)  # [K, N]
         K, N=w.shape
 
@@ -1738,6 +1769,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output tensor [M, N] float16.
         """
+        logger.debug("dispatch_gemm_fp4 called with lib=%s, A=%s, B_packed=%s", lib, A, B_packed)
         device=lib.device
 
         # Ensure contiguous and correct dtype
@@ -1811,6 +1843,7 @@ if HAS_METAL and HAS_MPS:
             scales: Per-group scales [K/group_size, N]. MPS tensor.
             group_size: Elements per quantization group (must divide K).
         """
+        logger.debug("marlin_gemm_fp4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         require_mps()
 
         orig_shape=A.shape
@@ -1907,6 +1940,7 @@ if HAS_METAL and HAS_MPS:
         group_size: int=32,
     ) -> torch.Tensor:
         """FP4 fused dequant-GEMM (alias for marlin_gemm_fp4)."""
+        logger.debug("marlin_gemm_fp4_tuned called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         return marlin_gemm_fp4(A, B_packed, scales, group_size)
 
     def marlin_gemm_fused_fp4(
@@ -1916,6 +1950,7 @@ if HAS_METAL and HAS_MPS:
         group_size: int=32,
     ) -> torch.Tensor:
         """Alias for marlin_gemm_fp4; preserves fused kernel naming."""
+        logger.debug("marlin_gemm_fused_fp4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         return marlin_gemm_fp4(A, B_packed, scales, group_size)
 
     def marlin_gemm_int4(
@@ -1938,6 +1973,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output [*, N] as float16 MPS tensor.
         """
+        logger.debug("marlin_gemm_int4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         require_mps()
 
         orig_shape=A.shape
@@ -2034,6 +2070,7 @@ if HAS_METAL and HAS_MPS:
         group_size: int=32,
     ) -> torch.Tensor:
         """Alias for marlin_gemm_int4; preserves fused kernel naming."""
+        logger.debug("marlin_gemm_fused_u4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         return marlin_gemm_int4(A, B_packed, scales, zeros, group_size)
 
     def dequant_fp4(
@@ -2056,6 +2093,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Dequantized weights [K, N] as float16 MPS tensor.
         """
+        logger.info("dequant_fp4 called with B_packed=%s, scales=%s, K=%s, N=%s", B_packed, scales, K, N)
         require_mps()
 
         lib=get_default_library()
@@ -2119,6 +2157,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Output vector [N] float16 on MPS.
         """
+        logger.info("dequant_fp4_decode_gemv called with A=%s, B_packed=%s, scales=%s, K=%s", A, B_packed, scales, K)
         require_mps()
 
         lib=get_default_library()
@@ -2175,6 +2214,7 @@ if HAS_METAL and HAS_MPS:
             1-D tensor of same length with float16, each element = float(input_element).
         """
         # Simple CPU implementation for debugging
+        logger.info("dequant_u4_standalone called with packed=%s", packed)
         packed_np=packed.cpu().numpy().astype(np.uint8)
         out_np=packed_np.astype(np.float16)
         return torch.from_numpy(out_np).to("mps")
@@ -2200,6 +2240,7 @@ if HAS_METAL and HAS_MPS:
             Dequantized weights [K, N] as float16 MPS tensor.
         """
         # CPU fallback implementation
+        logger.info("dequant_int2 called with B_packed=%s, scales=%s, K=%s, N=%s", B_packed, scales, K, N)
         B_np=B_packed.cpu().numpy()
         S_np=scales.cpu().numpy()
 
@@ -2239,6 +2280,7 @@ if HAS_METAL and HAS_MPS:
             Dequantized weights [K, N] as float16 MPS tensor.
         """
         # CPU fallback implementation
+        logger.info("dequant_int3 called with B_packed=%s, scales=%s, K=%s, N=%s", B_packed, scales, K, N)
         B_np=B_packed.cpu().numpy()
         S_np=scales.cpu().numpy()
 
@@ -2281,6 +2323,7 @@ if HAS_METAL and HAS_MPS:
         Returns:
             Attention output [batch, num_heads_q, 1, head_dim] as float16 MPS tensor.
         """
+        logger.debug("paged_attention_v1 called with q=%s, k_cache=%s, v_cache=%s", q, k_cache, v_cache)
         require_mps()
 
         # Extract dimensions
@@ -2536,6 +2579,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Tensor ``[num_heads_q, head_dim]`` on MPS.
         """
+        logger.info("quantized_kv_attention_decode called with query=%s, k_cache=%s, v_cache=%s, k_scales=%s", query, k_cache, v_cache, k_scales)
         require_mps()
 
         if quant_dtype not in {"fp4", "int8"}:
@@ -2684,6 +2728,7 @@ kernel void quantized_kv_attention_decode(
             Attention output [num_seqs, num_heads, seq_len, head_dim].
         """
         # PyTorch fallback implementation
+        logger.debug("paged_attention_fp4 called with query=%s, key_cache=%s, value_cache=%s", query, key_cache, value_cache)
         num_seqs, num_heads, seq_len, head_dim=query.shape
         device=query.device
 
@@ -2792,12 +2837,14 @@ kernel void quantized_kv_attention_decode(
             Output tensor [batch, num_heads_q, seq_q, head_dim]. MPS tensor.
         """
 
+        logger.debug("flash_attention_kv_fp4 called with Q=%s, K_packed=%s, V_packed=%s", Q, K_packed, V_packed)
         def _dequantize_fp4_blockscaled(
             packed: torch.Tensor,
             scales: torch.Tensor,
             head_dim: int,
         ) -> torch.Tensor:
             """CPU fallback dequantization for FP4 KV cache with per-row scales."""
+            logger.info("_dequantize_fp4_blockscaled called with packed=%s, scales=%s, head_dim=%s", packed, scales, head_dim)
             packed_cpu=packed.detach().cpu()
             scales_cpu=scales.detach().cpu()
             if scales_cpu.dim() == 4 and scales_cpu.shape[-1] == 1:
@@ -2870,6 +2917,7 @@ kernel void quantized_kv_attention_decode(
     def _flatten_moe_hidden(
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, int, int, tuple[int, ...]]:
+        logger.debug("_flatten_moe_hidden called with hidden_states=%s", hidden_states)
         if hidden_states.dim() < 2:
             raise ValueError(
                 "hidden_states must be at least 2D [tokens, hidden]")
@@ -2903,6 +2951,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [tokens, intermediate] (or [batch, seq, intermediate]).
         """
+        logger.debug("moe_shared_expert_fused called with hidden_states=%s, shared_expert_w=%s, routed_expert_w=%s", hidden_states, shared_expert_w, routed_expert_w)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -3042,6 +3091,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [tokens, intermediate] (or [batch, seq, intermediate]).
         """
+        logger.debug("moe_shared_expert_fused_fp4 called with hidden_states=%s, shared_expert_packed=%s, shared_expert_scales=%s", hidden_states, shared_expert_packed, shared_expert_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -3201,6 +3251,7 @@ kernel void quantized_kv_attention_decode(
 
         Uses one threadgroup per token and iterates over output dims internally.
         """
+        logger.debug("moe_shared_expert_scatter called with hidden_states=%s, shared_expert_w=%s, routed_expert_w=%s", hidden_states, shared_expert_w, routed_expert_w)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -3316,6 +3367,7 @@ kernel void quantized_kv_attention_decode(
         shared_prob: float=1.0,
     ) -> torch.Tensor:
         """Shared expert forward pass with FP4 quantized weights."""
+        logger.debug("moe_shared_expert_fp4 called with hidden_states=%s, gate_up_packed=%s, gate_up_scales=%s", hidden_states, gate_up_packed, gate_up_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -3373,6 +3425,7 @@ kernel void quantized_kv_attention_decode(
             out_dim: int,
             prob: float,
         ) -> torch.Tensor:
+            logger.debug("_dispatch_shared_gemm called with activations=%s, weights=%s, scales=%s", activations, weights, scales)
             out=torch.zeros((num_tokens, out_dim),
                               dtype=torch.float16, device="mps")
 
@@ -3469,6 +3522,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [batch, hidden_out]. MPS tensor.
         """
+        logger.debug("moe_expert_gemm_fp4 called with activations=%s, expert_weights=%s, scales=%s", activations, expert_weights, scales)
         require_mps()
 
         orig_dtype=activations.dtype
@@ -3625,6 +3679,7 @@ kernel void quantized_kv_attention_decode(
         # Router forward: compute logits and apply softmax
         # hidden: [batch, hidden_dim]
         # router_weights: [hidden_dim, num_experts]
+        logger.debug("moe_router_topk called with hidden=%s, router_weights=%s, top_k=%s", hidden, router_weights, top_k)
         logits=torch.matmul(hidden, router_weights)  # [batch, num_experts]
         probs=torch.softmax(logits, dim=-1)
 
@@ -3652,6 +3707,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Transformed tensor with same shape as input. MPS tensor.
         """
+        logger.debug("hadamard_transform called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
         require_mps()
 
         if block_size not in (32, 64, 128):
@@ -3717,6 +3773,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output vector [N] or [1, N] depending on input shape. MPS tensor.
         """
+        logger.debug("decode_gemv_fp4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         require_mps()
 
         lib=get_default_library()
@@ -3786,6 +3843,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Kernel name recommendation.
         """
+        logger.debug("select_decode_kernel called with M=%s, N=%s, K=%s", M, N, K)
         if M > 8:
             return "marlin_gemm_fp4"
 
@@ -3840,6 +3898,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [tokens, hidden] or [batch, seq, hidden].
         """
+        logger.debug("moe_fused_dispatch_shared_fp4 called with hidden_states=%s, shared_gate_up_packed=%s, shared_gate_up_scales=%s", hidden_states, shared_gate_up_packed, shared_gate_up_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -3865,6 +3924,7 @@ kernel void quantized_kv_attention_decode(
 
         # Prepare tensors
         def _prepare_tensor(t, dtype=torch.float16):
+            logger.debug("_prepare_tensor called with t=%s, dtype=%s", t, dtype)
             t=t.contiguous()
             if t.dtype != dtype:
                 t=t.to(dtype)
@@ -3983,6 +4043,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [tokens, hidden] with shared expert added.
         """
+        logger.debug("moe_add_shared_expert_fp4 called with hidden_states=%s, moe_output=%s, shared_gate_up_packed=%s", hidden_states, moe_output, shared_gate_up_packed)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape=_flatten_moe_hidden(
@@ -4056,11 +4117,13 @@ kernel void quantized_kv_attention_decode(
         """Metal kernel interface for MMFP4 operations."""
 
         def __init__(self) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             require_mps()
             self.lib=get_default_library()
             self._load_kernels()
 
         def _load_kernels(self) -> None:
+            logger.info("_load_kernels called")
             shader_dir=Path(__file__).parent / "shaders"
 
             # Compile MMFP4 GEMM kernel
@@ -4165,6 +4228,7 @@ kernel void quantized_kv_attention_decode(
             group_size: int=128,
         ) -> torch.Tensor:
             """Fused gate+up projection."""
+            logger.debug("fused_gate_up_gemm called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
             M, K=x.shape
             K_packed, N=gate_packed.shape
 
@@ -4223,6 +4287,7 @@ kernel void quantized_kv_attention_decode(
             - `up_packed`: [N, K/8] uint32 (row-packed)
             - `up_scales`: [K/group_size, N] float16
             """
+            logger.debug("mmfp4_fused_gate_up called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
             if x.dim() != 2:
                 raise ValueError(
                     f"x must be 2D [M, K], got shape={tuple(x.shape)}")
@@ -4358,6 +4423,7 @@ kernel void quantized_kv_attention_decode(
         ) -> torch.Tensor:
             """Fused MoE MLP: gate/up -> swiglu -> down."""
             # Normalize input
+            logger.debug("fused_moe_mlp called with x=%s, gate_packed=%s, up_packed=%s", x, gate_packed, up_packed)
             if x.dim() == 1:
                 x=x.reshape(1, -1)
 
@@ -4439,6 +4505,7 @@ kernel void quantized_kv_attention_decode(
 
             Expected speedup: ~3-4x for decode (M=1) cases.
             """
+            logger.debug("decode_gemv_fp4 called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
             M, K=A.shape
             K_packed, N=B_packed.shape
 
@@ -4489,6 +4556,7 @@ kernel void quantized_kv_attention_decode(
             group_size: int=128,
         ) -> torch.Tensor:
             """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
+            logger.debug("mmfp4_gemm called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
             M, K=A.shape
             K_packed, N=B_packed.shape
 
@@ -4584,6 +4652,7 @@ kernel void quantized_kv_attention_decode(
             Returns:
                 Output vector [N] or [1, N] depending on input shape. MPS tensor.
             """
+            logger.debug("decode_gemv_fp4 called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
             M, K=A.shape
             K_packed, N=B_packed.shape
 
@@ -4633,6 +4702,7 @@ kernel void quantized_kv_attention_decode(
             group_size: int=128,
         ) -> torch.Tensor:
             """Dequantize MMFP4 packed weights to FP16 [K, N]."""
+            logger.info("dequantize_mmfp4 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
             K_packed, N=packed.shape
             K=K_packed * 8
 
@@ -4669,6 +4739,7 @@ kernel void quantized_kv_attention_decode(
     _mmfp4_kernels: MetalKernels | None=None
 
     def _get_mmfp4_kernels() -> MetalKernels:
+        logger.debug("_get_mmfp4_kernels called")
         global _mmfp4_kernels
         if _mmfp4_kernels is None:
             _mmfp4_kernels=MetalKernels()
@@ -4682,6 +4753,7 @@ kernel void quantized_kv_attention_decode(
         up_scales: torch.Tensor,
         group_size: int=128,
     ) -> torch.Tensor:
+        logger.debug("fused_gate_up_gemm called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
         return _get_mmfp4_kernels().fused_gate_up_gemm(
             x, gate_packed, gate_scales, up_packed, up_scales, group_size
         )
@@ -4695,6 +4767,7 @@ kernel void quantized_kv_attention_decode(
         group_size: int=128,
     ) -> torch.Tensor:
         """Compute `silu(gate_proj(x)) * up_proj(x)` with one fused MMFP4 dispatch."""
+        logger.debug("mmfp4_fused_gate_up called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
         return _get_mmfp4_kernels().mmfp4_fused_gate_up(
             x, gate_packed, gate_scales, up_packed, up_scales, group_size
         )
@@ -4711,6 +4784,7 @@ kernel void quantized_kv_attention_decode(
         intermediate_size: int,
         group_size: int,
     ) -> torch.Tensor:
+        logger.debug("fused_moe_mlp called with x=%s, gate_packed=%s, up_packed=%s", x, gate_packed, up_packed)
         return _get_mmfp4_kernels().fused_moe_mlp(
             x, gate_packed, up_packed, down_packed,
             gate_scales, up_scales, down_scales,
@@ -4723,6 +4797,7 @@ kernel void quantized_kv_attention_decode(
         group_size: int=128,
     ) -> torch.Tensor:
         """Dequantize MMFP4 packed weights to FP16 [K, N]."""
+        logger.info("dequantize_mmfp4 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
         return _get_mmfp4_kernels().dequantize_mmfp4(packed, scales, group_size)
 
     def mmfp4_gemm(
@@ -4732,6 +4807,7 @@ kernel void quantized_kv_attention_decode(
         group_size: int=128,
     ) -> torch.Tensor:
         """Fused MMFP4 dequant+GEMM: A @ dequant(B_packed, B_scales)."""
+        logger.debug("mmfp4_gemm called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
         return _get_mmfp4_kernels().mmfp4_gemm(A, B_packed, B_scales, group_size)
 
     def decode_gemv_fp4(
@@ -4754,6 +4830,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [1, N] or [N] depending on input shape. MPS tensor.
         """
+        logger.debug("decode_gemv_fp4 called with A=%s, B_packed=%s, B_scales=%s", A, B_packed, B_scales)
         return _get_mmfp4_kernels().decode_gemv_fp4(A, B_packed, B_scales, group_size)
 
     def mmfp4_fused_qkv(
@@ -4789,6 +4866,7 @@ kernel void quantized_kv_attention_decode(
             - K: [M, Nk] float16
             - V: [M, Nv] float16
         """
+        logger.debug("mmfp4_fused_qkv called with A=%s, Wq_packed=%s, Wq_scales=%s", A, Wq_packed, Wq_scales)
         return _get_mmfp4_kernels().mmfp4_fused_qkv(
             A, Wq_packed, Wq_scales, Wk_packed, Wk_scales, Wv_packed, Wv_scales, group_size
         )
@@ -4826,6 +4904,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Tuple of (Q, K, V) tensors each [M, Nq], [M, Nk], [M, Nv] as float16.
         """
+        logger.debug("mmfp4_fused_qkv called with A=%s, Q_packed=%s, Q_scales=%s", A, Q_packed, Q_scales)
         require_mps()
 
         # Normalize input shape
@@ -4884,6 +4963,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Output tensor [M, N] or [N] float16: gate * SiLU(up)
         """
+        logger.debug("swiglu_metal called with gate=%s, up=%s", gate, up)
         require_mps()
 
         # Validate inputs
@@ -4978,6 +5058,7 @@ kernel void quantized_kv_attention_decode(
         group_size: int,
     ) -> torch.Tensor:
         """Fused MoE MLP kernel dispatch."""
+        logger.debug("fused_moe_mlp called with hidden_states=%s, gate_packed=%s, up_packed=%s", hidden_states, gate_packed, up_packed)
         require_mps()
 
         # Flatten input
@@ -5105,6 +5186,7 @@ kernel void quantized_kv_attention_decode(
         group_size: int,
     ) -> torch.Tensor:
         """Fused MoE MLP kernel dispatch."""
+        logger.debug("fused_moe_mlp called with hidden_states=%s, gate_packed=%s, up_packed=%s", hidden_states, gate_packed, up_packed)
         return _get_mmfp4_kernels().fused_moe_mlp(
             hidden_states, gate_packed, up_packed, down_packed,
             gate_scales, up_scales, down_scales,
@@ -5129,6 +5211,7 @@ kernel void quantized_kv_attention_decode(
         """
 
         def __init__(self) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             self._lib: MetalKernelLibrary | None=None
             self._batch_state: Any=None
             self._in_context=False
@@ -5170,6 +5253,7 @@ kernel void quantized_kv_attention_decode(
         @ property
         def lib(self) -> MetalKernelLibrary | None:
             """Access the library being used for batching."""
+            logger.debug("lib called")
             return self._lib
 
         def commit(self) -> None:
@@ -5177,6 +5261,7 @@ kernel void quantized_kv_attention_decode(
 
             Useful for periodic synchronization during long sequences of kernel launches.
             """
+            logger.debug("commit called")
             if not self._in_context or self._lib is None:
                 raise RuntimeError("Cannot commit outside of context")
 
@@ -5222,6 +5307,7 @@ kernel void quantized_kv_attention_decode(
             - Sequential dispatch overhead: N × 100μs
             - Batched dispatch overhead: ~15μs (20x reduction for N=3)
         """
+        logger.debug("reusable_command_buffer called")
         lib=get_default_library()
         with lib.batch_dispatch(wait=True):
             yield
@@ -5259,6 +5345,7 @@ kernel void quantized_kv_attention_decode(
             - Sequential dispatch: 3 × 100μs = 300μs overhead
             - Batched dispatch: ~15μs total overhead (20x reduction)
         """
+        logger.debug("submit_batch called with funcs=%s", funcs)
         if not isinstance(funcs, Sequence):
             raise TypeError(f"funcs must be a sequence, got {type(funcs)}")
 
@@ -5312,6 +5399,7 @@ kernel void quantized_kv_attention_decode(
         Returns:
             Tuple of (Q [M, Nq], K [M, Nk], V [M, Nv]) as float16 MPS tensors.
         """
+        logger.debug("mmfp4_fused_qkv called with A=%s, Wq_packed=%s, Wq_scales=%s", A, Wq_packed, Wq_scales)
         require_mps()
 
         # Get dimensions

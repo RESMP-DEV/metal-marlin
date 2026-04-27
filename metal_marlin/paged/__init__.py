@@ -18,6 +18,7 @@ MLA (Multi-Head Latent Attention) cache components:
 MLA provides ~8x memory reduction by storing compressed latents instead of
 full K, V tensors. See metal_marlin.paged.mla_cache for details.
 """
+import logging
 
 from .allocator import (
     BlockAllocator,
@@ -63,6 +64,9 @@ from .validation import (
     validate_paged_linear_parity,
     validate_paged_v1_parity,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Core allocator

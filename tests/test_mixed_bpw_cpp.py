@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import torch
 
@@ -11,11 +12,15 @@ except ImportError:
 import pytest
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not can_import_cpp_ext, reason="C++ extension not built")
 def test_cpp_dispatch_mixed_bpw_moe_e2e():
     """
     End-to-end test for the C++ dispatch_mixed_bpw_moe function.
     """
+    logger.info("running test_cpp_dispatch_mixed_bpw_moe_e2e")
     num_experts = 4
     top_k = 2
     num_tokens = 16

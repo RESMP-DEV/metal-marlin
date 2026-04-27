@@ -20,6 +20,7 @@ requires_trellis = pytest.mark.skipif(
 )
 
 def _make_mock_moe_layer() -> TrellisMoEMLP:
+    logger.debug("_make_mock_moe_layer called")
     return create_mock_moe_mlp(
         hidden_dim=32,
         intermediate_dim=64,
@@ -38,6 +39,7 @@ def test_caching_log_messages(
     """Verify correct log messages for cache miss (tuning) and cache hit (loading)."""
     
     # 1. Setup mock cache path
+    logger.info("running test_caching_log_messages")
     cache_path = tmp_path / "kernel_tuning_logs_test.json"
     monkeypatch.setattr(
         TrellisMoEMLP, "_get_tuning_cache_path", lambda self: cache_path

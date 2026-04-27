@@ -12,6 +12,7 @@ execution during follow-up work on the DeltaNet integration.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import tempfile
 from pathlib import Path
@@ -32,6 +33,9 @@ from metal_marlin.serving.engine import (
     _is_qwen_deltanet_family,
 )
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.smoke
 
 
@@ -42,6 +46,7 @@ pytestmark = pytest.mark.smoke
 
 def _qwen35_flat_config() -> dict[str, Any]:
     """Qwen3.5-30B-A3B style flat DeltaNet config (no text_config nesting)."""
+    logger.debug("_qwen35_flat_config called")
     return {
         "model_type": "qwen3_next",
         "vocab_size": 151936,
@@ -72,6 +77,7 @@ def _qwen35_flat_config() -> dict[str, Any]:
 
 def _qwen36_multimodal_config() -> dict[str, Any]:
     """Qwen3.6-35B-A3B style multimodal config with nested text_config."""
+    logger.debug("_qwen36_multimodal_config called")
     return {
         "model_type": "qwen3_6_moe",
         "vocab_size": 151936,
@@ -126,6 +132,7 @@ class TestQwen35ConfigParsing:
     """Qwen3.5 flat DeltaNet config via ModelConfig.from_dict."""
 
     def test_core_architecture_fields(self):
+        logger.info("running test_core_architecture_fields")
         cfg = ModelConfig.from_dict(_qwen35_flat_config())
         assert cfg.hidden_size == 2048
         assert cfg.num_hidden_layers == 48
@@ -134,6 +141,7 @@ class TestQwen35ConfigParsing:
         assert cfg.num_key_value_heads == 4
 
     def test_moe_fields(self):
+        logger.info("running test_moe_fields")
         cfg = ModelConfig.from_dict(_qwen35_flat_config())
         assert cfg.is_moe is True
         assert cfg.num_experts == 128
@@ -142,6 +150,7 @@ class TestQwen35ConfigParsing:
         assert cfg.shared_expert_intermediate_size == 5632
 
     def test_deltanet_fields(self):
+        logger.info("running test_deltanet_fields")
         cfg = ModelConfig.from_dict(_qwen35_flat_config())
         assert cfg.layer_types is not None
         assert len(cfg.layer_types) == 48
@@ -152,6 +161,7 @@ class TestQwen35ConfigParsing:
 
     def test_full_attention_interval_normalised_to_list(self):
         """full_attention_interval int -> [int] normalisation."""
+        logger.info("running test_full_attention_interval_normalised_to_list")
         cfg = ModelConfig.from_dict(_qwen35_flat_config())
         assert cfg.full_attention_interval is not None
         if isinstance(cfg.full_attention_interval, list):
@@ -160,6 +170,7 @@ class TestQwen35ConfigParsing:
             assert cfg.full_attention_interval == 7
 
     def test_model_type_resolved(self):
+        logger.info("running test_model_type_resolved")
         cfg = ModelConfig.from_dict(_qwen35_flat_config())
         assert cfg.model_type == "qwen3_next"
 
@@ -169,25 +180,30 @@ class TestQwen36ConfigParsing:
 
     def test_text_config_takes_precedence(self):
         """text_config.hidden_size should override outer wrapper."""
+        logger.info("running test_text_config_takes_precedence")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.hidden_size == 2048
         assert cfg.num_hidden_layers == 36
 
     def test_model_type_from_text_config(self):
+        logger.info("running test_model_type_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.model_type == "qwen3_6_moe_text"
 
     def test_deltanet_layer_types_from_text_config(self):
+        logger.info("running test_deltanet_layer_types_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.layer_types == ["dense", "moe", "dan"]
 
     def test_use_delta_flag_from_text_config(self):
+        logger.info("running test_use_delta_flag_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.use_delta is True
         assert cfg.delta_intermediate_size == 2048
         assert cfg.has_delta is True
 
     def test_full_attention_interval_from_text_config(self):
+        logger.info("running test_full_attention_interval_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.full_attention_interval is not None
         if isinstance(cfg.full_attention_interval, list):
@@ -196,6 +212,7 @@ class TestQwen36ConfigParsing:
             assert cfg.full_attention_interval == 2
 
     def test_mtp_fields_from_text_config(self):
+        logger.info("running test_mtp_fields_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.has_mtp is True
         assert cfg.num_mtp_heads == 1
@@ -203,6 +220,7 @@ class TestQwen36ConfigParsing:
         assert cfg.mtp_expansion_factor == 2
 
     def test_moe_fields_from_text_config(self):
+        logger.info("running test_moe_fields_from_text_config")
         cfg = ModelConfig.from_dict(_qwen36_multimodal_config())
         assert cfg.is_moe is True
         assert cfg.num_experts == 64
@@ -213,6 +231,7 @@ class TestDenseQwenNotDeltaNet:
     """Dense Qwen3 should NOT be mis-detected as DeltaNet hybrid."""
 
     def test_dense_qwen3_no_deltanet(self):
+        logger.info("running test_dense_qwen3_no_deltanet")
         cfg = ModelConfig.from_dict({
             "model_type": "qwen3",
             "vocab_size": 151936,
@@ -239,17 +258,21 @@ class TestGetConfigValue:
     """_get_config_value should prefer text_config then top-level."""
 
     def test_text_config_preferred(self):
+        logger.info("running test_text_config_preferred")
         config = {"hidden_size": 4096, "text_config": {"hidden_size": 2048}}
         assert _get_config_value(config, "hidden_size") == 2048
 
     def test_fallback_to_top_level(self):
+        logger.info("running test_fallback_to_top_level")
         config = {"hidden_size": 4096}
         assert _get_config_value(config, "hidden_size") == 4096
 
     def test_missing_key_returns_default(self):
+        logger.info("running test_missing_key_returns_default")
         assert _get_config_value({}, "missing_key", default=0) == 0
 
     def test_multi_key_lookup(self):
+        logger.info("running test_multi_key_lookup")
         config = {"num_local_experts": 64}
         assert _get_config_value(
             config, "num_experts", "num_local_experts", default=0
@@ -260,17 +283,21 @@ class TestIsMoeConfig:
     """_is_moe_config should detect MoE via expert count keys."""
 
     def test_moe_detected_via_num_local_experts(self):
+        logger.info("running test_moe_detected_via_num_local_experts")
         assert _is_moe_config({"num_local_experts": 128}) is True
 
     def test_moe_detected_via_text_config(self):
+        logger.info("running test_moe_detected_via_text_config")
         assert _is_moe_config({
             "text_config": {"num_local_experts": 64},
         }) is True
 
     def test_single_expert_is_not_moe(self):
+        logger.info("running test_single_expert_is_not_moe")
         assert _is_moe_config({"num_local_experts": 1}) is False
 
     def test_no_expert_key_is_not_moe(self):
+        logger.info("running test_no_expert_key_is_not_moe")
         assert _is_moe_config({}) is False
 
 
@@ -278,28 +305,35 @@ class TestHasDeltanetLayers:
     """_has_deltanet_layers should detect DeltaNet via layer_types or markers."""
 
     def test_linear_attention_detected(self):
+        logger.info("running test_linear_attention_detected")
         assert _has_deltanet_layers({
             "layer_types": ["full_attention", "linear_attention"],
         }) is True
 
     def test_use_delta_flag_detected(self):
+        logger.info("running test_use_delta_flag_detected")
         assert _has_deltanet_layers({"use_delta": True}) is True
 
     def test_full_attention_interval_detected(self):
+        logger.info("running test_full_attention_interval_detected")
         assert _has_deltanet_layers({"full_attention_interval": 7}) is True
 
     def test_full_attention_interval_list_detected(self):
+        logger.info("running test_full_attention_interval_list_detected")
         assert _has_deltanet_layers({"full_attention_interval": [0, 1, 2]}) is True
 
     def test_dan_layer_type_not_in_deltanet_set(self):
         """'dan' is not in DELTANET_LAYER_TYPES set."""
+        logger.info("running test_dan_layer_type_not_in_deltanet_set")
         result = _has_deltanet_layers({"layer_types": ["dense", "moe", "dan"]})
         assert result is False
 
     def test_empty_layer_types_not_detected(self):
+        logger.info("running test_empty_layer_types_not_detected")
         assert _has_deltanet_layers({"layer_types": []}) is False
 
     def test_no_markers_not_detected(self):
+        logger.info("running test_no_markers_not_detected")
         assert _has_deltanet_layers({}) is False
 
 
@@ -307,36 +341,44 @@ class TestIsQwenDeltanetFamily:
     """_is_qwen_deltanet_family should detect Qwen DeltaNet models."""
 
     def test_qwen35_model_type(self):
+        logger.info("running test_qwen35_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_next"}, "") is True
 
     def test_qwen36_model_type(self):
+        logger.info("running test_qwen36_model_type")
         assert _is_qwen_deltanet_family({"model_type": "qwen3_6_moe"}, "") is True
 
     def test_model_name_pattern_qwen35(self):
+        logger.info("running test_model_name_pattern_qwen35")
         assert _is_qwen_deltanet_family({}, "Qwen3.5-30B-A3B") is True
 
     def test_model_name_pattern_qwen36(self):
+        logger.info("running test_model_name_pattern_qwen36")
         assert _is_qwen_deltanet_family({}, "Qwen3.6-35B-A3B") is True
 
     def test_moe_plus_deltanet_combination(self):
+        logger.info("running test_moe_plus_deltanet_combination")
         assert _is_qwen_deltanet_family({
             "num_local_experts": 128,
             "layer_types": ["linear_attention", "full_attention"],
         }, "") is True
 
     def test_shared_expert_plus_deltanet(self):
+        logger.info("running test_shared_expert_plus_deltanet")
         assert _is_qwen_deltanet_family({
             "shared_expert_intermediate_size": 5632,
             "layer_types": ["linear_attention", "full_attention"],
         }, "") is True
 
     def test_dense_qwen3_not_detected(self):
+        logger.info("running test_dense_qwen3_not_detected")
         assert _is_qwen_deltanet_family({
             "model_type": "qwen3",
             "layer_types": ["full_attention"] * 24,
         }, "") is False
 
     def test_glm47_not_detected(self):
+        logger.info("running test_glm47_not_detected")
         assert _is_qwen_deltanet_family({
             "model_type": "glm4_moe",
             "kv_lora_rank": 512,
@@ -347,6 +389,7 @@ class TestDetectModelFormat:
     """_detect_model_format should return 'mmfp4' for Qwen hybrid configs."""
 
     def _make_mmfp4_model_dir(self, tmpdir: str, config: dict[str, Any]) -> str:
+        logger.debug("_make_mmfp4_model_dir called with tmpdir=%s, config=%s", tmpdir, config)
         config.setdefault("quantization_config", {})["quant_method"] = "mmfp4"
         config_path = Path(tmpdir) / "config.json"
         with open(config_path, "w") as f:
@@ -354,16 +397,19 @@ class TestDetectModelFormat:
         return tmpdir
 
     def test_qwen35_mmfp4_detected(self):
+        logger.info("running test_qwen35_mmfp4_detected")
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_mmfp4_model_dir(tmpdir, _qwen35_flat_config())
             assert _detect_model_format(tmpdir) == "mmfp4"
 
     def test_qwen36_mmfp4_detected(self):
+        logger.info("running test_qwen36_mmfp4_detected")
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_mmfp4_model_dir(tmpdir, _qwen36_multimodal_config())
             assert _detect_model_format(tmpdir) == "mmfp4"
 
     def test_qwen35_mmfp4_via_model_name(self):
+        logger.info("running test_qwen35_mmfp4_via_model_name")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "hidden_size": 2048,
@@ -374,6 +420,7 @@ class TestDetectModelFormat:
             assert _detect_model_format(tmpdir) == "mmfp4"
 
     def test_qwen36_mmfp4_via_model_name(self):
+        logger.info("running test_qwen36_mmfp4_via_model_name")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "hidden_size": 2048,
@@ -384,6 +431,7 @@ class TestDetectModelFormat:
             assert _detect_model_format(tmpdir) == "mmfp4"
 
     def test_non_mmfp4_quant_returns_marlin(self):
+        logger.info("running test_non_mmfp4_quant_returns_marlin")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = _qwen35_flat_config()
             config["quantization_config"] = {"quant_method": "bitsandbytes"}
@@ -393,6 +441,7 @@ class TestDetectModelFormat:
             assert _detect_model_format(tmpdir) == "marlin"
 
     def test_glm47_mmfp4_detected(self):
+        logger.info("running test_glm47_mmfp4_detected")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = {
                 "model_type": "glm4_moe",
@@ -404,6 +453,7 @@ class TestDetectModelFormat:
             assert _detect_model_format(tmpdir) == "mmfp4"
 
     def test_missing_path_returns_marlin(self):
+        logger.info("running test_missing_path_returns_marlin")
         assert _detect_model_format("/nonexistent/path") == "marlin"
 
 
@@ -438,6 +488,7 @@ def _extract_layer_index(key: str) -> int | None:
     Handles both ``model.layers.{i}.*`` and
     ``model.language_model.layers.{i}.*`` prefixes.
     """
+    logger.debug("_extract_layer_index called with key=%s", key)
     m = _LAYER_KEY_RE.match(key)
     if m is None:
         return None
@@ -450,6 +501,7 @@ def _normalise_checkpoint_key(key: str) -> str:
     ``model.language_model.layers.{i}.*`` -> ``model.layers.{i}.*``
     Other keys are returned unchanged.
     """
+    logger.debug("_normalise_checkpoint_key called with key=%s", key)
     if key.startswith("model.language_model."):
         return "model." + key[len("model.language_model."):]
     return key
@@ -465,32 +517,39 @@ class TestCheckpointPrefixLanguageModel:
     """
 
     def test_language_model_prefix_layer_index(self):
+        logger.info("running test_language_model_prefix_layer_index")
         key = "model.language_model.layers.3.self_attn.q_proj.weight"
         assert _extract_layer_index(key) == 3
 
     def test_standard_prefix_layer_index(self):
+        logger.info("running test_standard_prefix_layer_index")
         key = "model.layers.7.self_attn.q_proj.weight"
         assert _extract_layer_index(key) == 7
 
     def test_global_key_no_layer_index(self):
+        logger.info("running test_global_key_no_layer_index")
         assert _extract_layer_index("model.embed_tokens.weight") is None
         assert _extract_layer_index("lm_head.weight") is None
         assert _extract_layer_index("model.norm.weight") is None
 
     def test_normalise_language_model_prefix(self):
+        logger.info("running test_normalise_language_model_prefix")
         key = "model.language_model.layers.5.mlp.gate.weight"
         assert _normalise_checkpoint_key(key) == "model.layers.5.mlp.gate.weight"
 
     def test_normalise_standard_prefix_unchanged(self):
+        logger.info("running test_normalise_standard_prefix_unchanged")
         key = "model.layers.5.mlp.gate.weight"
         assert _normalise_checkpoint_key(key) == key
 
     def test_normalise_non_layer_key_unchanged(self):
+        logger.info("running test_normalise_non_layer_key_unchanged")
         assert _normalise_checkpoint_key("model.embed_tokens.weight") == "model.embed_tokens.weight"
         assert _normalise_checkpoint_key("lm_head.weight") == "lm_head.weight"
 
     def test_synthetic_checkpoint_all_keys_parseable(self):
         """Every synthetic key for a 3-layer model should match the regex."""
+        logger.info("running test_synthetic_checkpoint_all_keys_parseable")
         for layer_idx in range(3):
             for suffix in _LAYER_WEIGHT_SUFFIXES:
                 key = f"model.layers.{layer_idx}.{suffix}"
@@ -501,6 +560,7 @@ class TestCheckpointPrefixLanguageModel:
 
     def test_synthetic_checkpoint_normalise_round_trip(self):
         """Normalising language_model keys should yield standard keys."""
+        logger.info("running test_synthetic_checkpoint_normalise_round_trip")
         for layer_idx in range(3):
             for suffix in _LAYER_WEIGHT_SUFFIXES:
                 key_lm = f"model.language_model.layers.{layer_idx}.{suffix}"
@@ -509,6 +569,7 @@ class TestCheckpointPrefixLanguageModel:
 
     def test_deltanet_specific_layer_keys(self):
         """DeltaNet hybrid models may have extra per-layer keys."""
+        logger.info("running test_deltanet_specific_layer_keys")
         deltanet_suffixes = [
             "self_attn.linear_k_proj.weight",
             "self_attn.linear_v_proj.weight",
@@ -521,6 +582,7 @@ class TestCheckpointPrefixLanguageModel:
             assert _normalise_checkpoint_key(key) == f"model.layers.0.{suffix}"
 
     def test_regex_rejects_invalid_prefixes(self):
+        logger.info("running test_regex_rejects_invalid_prefixes")
         bad_keys = [
             "transformer.h.0.attn.weight",
             "language_model.layers.0.attn.weight",

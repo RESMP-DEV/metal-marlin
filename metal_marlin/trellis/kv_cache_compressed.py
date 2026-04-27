@@ -20,6 +20,7 @@ Memory Comparison (seq_len=8192, num_layers=32, dtype=fp16):
 
 from __future__ import annotations
 
+import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ KV_QUANT_MODE = os.environ.get("METAL_MARLIN_KV_QUANT", "int8")
 if TYPE_CHECKING:
     from .config import TrellisModelConfig
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CacheStats:
@@ -96,6 +100,7 @@ class CompressedKVCacheMLA:
         prefetch_enabled: bool = True,
         threadgroup_cache_size: int = 4,
     ):
+        logger.debug("initializing %s with config=%s, max_batch_size=%s, max_seq_len=%s, device=%s, dtype=%s", type(self).__name__, config, max_batch_size, max_seq_len, device, dtype)
         self.config = config
         self.num_layers = config.num_hidden_layers
         self.max_batch_size = max_batch_size
@@ -181,6 +186,7 @@ class CompressedKVCacheMLA:
 
     def _get_pool_dtype(self) -> torch.dtype:
         """Get dtype for memory pool based on quantization mode."""
+        logger.debug("_get_pool_dtype called")
         if self.quantize_mode == "fp8":
             return torch.uint8  # FP8 stored as uint8
         elif self.quantize_mode == "fp4":
@@ -192,6 +198,7 @@ class CompressedKVCacheMLA:
 
     def _allocate_block(self) -> int:
         """Allocate a free physical block with O(1) stack operation."""
+        logger.debug("_allocate_block called")
         if not self.free_blocks:
             # Try to free blocks from completed sequences
             self._defragment_blocks()
@@ -206,12 +213,14 @@ class CompressedKVCacheMLA:
 
     def _free_block(self, block_idx: int) -> None:
         """Free a physical block back to the pool."""
+        logger.debug("_free_block called with block_idx=%s", block_idx)
         self.free_blocks.append(block_idx)
         self.stats.total_deallocations += 1
 
     def _defragment_blocks(self) -> None:
         """Defragment by freeing blocks from completed sequences."""
         # Find blocks that are no longer referenced
+        logger.debug("_defragment_blocks called")
         for b in range(self.max_batch_size):
             seq_len = self.seq_lens[b].item()
             if seq_len == 0:
@@ -238,6 +247,7 @@ class CompressedKVCacheMLA:
         Returns:
             The input compressed_kv (pass-through).
         """
+        logger.debug("update called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         batch_size, num_new_tokens, _ = compressed_kv.shape
 
         # Quantize if enabled
@@ -278,6 +288,7 @@ class CompressedKVCacheMLA:
         layer_idx: int,
     ) -> torch.Tensor:
         """Quantize compressed KV to FP8/FP4/INT8."""
+        logger.info("_quantize_compressed_kv called with compressed_kv=%s, layer_idx=%s", compressed_kv, layer_idx)
         if self.quantize_mode == "fp8":
             # FP8e5m2 quantization (scale factor per block)
             # For simplicity, compute max abs value and scale
@@ -328,6 +339,7 @@ class CompressedKVCacheMLA:
         Returns:
             Compressed KV tensor [batch, max_current_seq_len, cache_dim].
         """
+        logger.debug("get_compressed_kv called with layer_idx=%s, batch_indices=%s", layer_idx, batch_indices)
         batch_size = self.seq_lens.shape[0]
         max_len = self.seq_lens.max().item()
 
@@ -382,6 +394,7 @@ class CompressedKVCacheMLA:
         block_idx: int,
     ) -> torch.Tensor:
         """Dequantize compressed KV from FP8/FP4/INT8."""
+        logger.info("_dequantize_compressed_kv called with compressed_kv=%s, layer_idx=%s, block_idx=%s", compressed_kv, layer_idx, block_idx)
         scale = self._kv_scales[layer_idx, block_idx]
 
         if self.quantize_mode == "fp8":
@@ -431,6 +444,7 @@ class CompressedKVCacheMLA:
             k: Decompressed keys [batch, seq_len, num_kv_heads, qk_nope + qk_rope]
             v: Decompressed values [batch, seq_len, num_kv_heads, v_head_dim]
         """
+        logger.debug("decompress_kv called with layer_idx=%s, kv_b_proj_weight=%s, kv_a_layernorm=%s", layer_idx, kv_b_proj_weight, kv_a_layernorm)
         self.stats.decompression_count += 1
 
         # Get compressed KV: [batch, seq_len, kv_lora_rank + qk_rope]
@@ -481,6 +495,7 @@ class CompressedKVCacheMLA:
             block_indices: Optional list of specific block indices to prefetch.
                 If None, prefetches all active blocks.
         """
+        logger.debug("prefetch_layer_async called with layer_idx=%s, block_indices=%s", layer_idx, block_indices)
         if not self.prefetch_enabled or layer_idx >= self.num_layers:
             return
 
@@ -499,6 +514,7 @@ class CompressedKVCacheMLA:
 
     def _update_threadgroup_cache(self, layer_idx: int, block_idx: int) -> None:
         """Update threadgroup cache with the given block."""
+        logger.debug("_update_threadgroup_cache called with layer_idx=%s, block_idx=%s", layer_idx, block_idx)
         key = (layer_idx, block_idx)
         self._lru_counter += 1
 
@@ -524,6 +540,7 @@ class CompressedKVCacheMLA:
         block_idx: int,
     ) -> torch.Tensor | None:
         """Get block from threadgroup cache if available."""
+        logger.debug("get_cached_block called with layer_idx=%s, block_idx=%s", layer_idx, block_idx)
         key = (layer_idx, block_idx)
         if key in self._threadgroup_cache:
             self.stats.cache_hits += 1
@@ -537,6 +554,7 @@ class CompressedKVCacheMLA:
 
     def get_block_sparse_stats(self) -> dict[str, float]:
         """Return statistics about memory usage and fragmentation."""
+        logger.debug("get_block_sparse_stats called")
         total_slots = self.num_blocks * self.block_size
         used_slots = self.seq_lens.sum().item()
         allocated_blocks = self.num_blocks - len(self.free_blocks)
@@ -559,6 +577,7 @@ class CompressedKVCacheMLA:
 
     def get_performance_stats(self) -> dict[str, int]:
         """Return performance statistics."""
+        logger.debug("get_performance_stats called")
         return {
             "total_allocations": self.stats.total_allocations,
             "total_deallocations": self.stats.total_deallocations,
@@ -573,6 +592,7 @@ class CompressedKVCacheMLA:
 
     def memory_usage_mb(self) -> float:
         """Calculate memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         pool_bytes = self.kv_cache_pool.numel() * self.kv_cache_pool.element_size()
         scale_bytes = 0
         if self._kv_scales is not None:
@@ -584,6 +604,7 @@ class CompressedKVCacheMLA:
     def reset_batch(self, batch_idx: int) -> None:
         """Reset cache for a specific batch entry."""
         # Free all blocks for this batch
+        logger.debug("reset_batch called with batch_idx=%s", batch_idx)
         for logical_block in range(self.max_logical_blocks):
             physical_block = self.page_table[batch_idx, logical_block].item()
             if physical_block >= 0:
@@ -600,6 +621,7 @@ class CompressedKVCacheMLA:
     def reset_all(self) -> None:
         """Reset all cache state."""
         # Free all blocks
+        logger.debug("reset_all called")
         for b in range(self.max_batch_size):
             self.reset_batch(b)
 

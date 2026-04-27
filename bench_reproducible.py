@@ -29,6 +29,7 @@ import argparse
 import gc
 import hashlib
 import json
+import logging
 import math
 import os
 import platform
@@ -42,6 +43,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Project root so that ``metal_marlin`` is importable regardless of cwd.
@@ -125,6 +129,7 @@ class BenchmarkReport:
 # ---------------------------------------------------------------------------
 
 def _git_info() -> tuple[str | None, str | None, bool]:
+    logger.debug("_git_info called")
     try:
         def _run(cmd: list[str]) -> str:
             r = subprocess.run(cmd, capture_output=True, text=True,
@@ -139,6 +144,7 @@ def _git_info() -> tuple[str | None, str | None, bool]:
 
 
 def _env_hash() -> str:
+    logger.debug("_env_hash called")
     keys = sorted(k for k in os.environ
                   if any(x in k for x in
                          ("TORCH", "MPS", "OMP", "MKL", "METAL", "PYTORCH")))
@@ -148,6 +154,7 @@ def _env_hash() -> str:
 
 def _script_sha256() -> str:
     """Compute SHA256 of this script file for tamper detection."""
+    logger.debug("_script_sha256 called")
     script_path = Path(__file__).resolve()
     with open(script_path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -155,6 +162,7 @@ def _script_sha256() -> str:
 
 def _get_model_info(model_path: str) -> ModelInfo:
     """Extract model information including quantization type and parameter count."""
+    logger.debug("_get_model_info called with model_path=%s", model_path)
     model_dir = Path(model_path)
     quant_type = None
     param_count = None
@@ -225,10 +233,12 @@ def _get_model_info(model_path: str) -> ModelInfo:
 
 def capture_environment() -> EnvironmentInfo:
     """Collect full hardware/software environment metadata."""
+    logger.debug("capture_environment called")
     hw: dict[str, Any] = {}
     if sys.platform == "darwin":
         try:
             def _sysctl(key: str) -> str:
+                logger.debug("_sysctl called with key=%s", key)
                 r = subprocess.run(["sysctl", "-n", key],
                                    capture_output=True, text=True, timeout=5)
                 return r.stdout.strip()
@@ -282,6 +292,7 @@ def capture_environment() -> EnvironmentInfo:
 # ---------------------------------------------------------------------------
 
 def _device() -> str:
+    logger.debug("_device called")
     try:
         import torch
         if torch.backends.mps.is_available():
@@ -294,6 +305,7 @@ def _device() -> str:
 
 
 def _sync(device: str) -> None:
+    logger.debug("_sync called with device=%s", device)
     try:
         import torch
         if device == "mps":
@@ -305,6 +317,7 @@ def _sync(device: str) -> None:
 
 
 def _clear(device: str) -> None:
+    logger.debug("_clear called with device=%s", device)
     gc.collect()
     try:
         import torch
@@ -327,6 +340,7 @@ def load_model(model_path: str, device: str):
 
         generate_fn(model, input_ids, max_new_tokens) -> output_ids
     """
+    logger.info("load_model called with model_path=%s, device=%s", model_path, device)
     errors: list[str] = []
 
     # 1. MMFP4Pipeline (from metal_marlin.inference.mmfp4_pipeline)
@@ -408,6 +422,7 @@ def run_decode_benchmark(
     Returns:
         List of DecodeStepTiming for each measured step
     """
+    logger.info("run_decode_benchmark starting with model=%s, tokenizer=%s, generate_fn=%s, device=%s", model, tokenizer, generate_fn, device)
     import torch
 
     # Tokenize prompt once
@@ -452,6 +467,7 @@ def run_decode_benchmark(
 
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
+    logger.debug("_percentile called with sorted_vals=%s, pct=%s", sorted_vals, pct)
     if not sorted_vals:
         return 0.0
     idx = (len(sorted_vals) - 1) * pct
@@ -463,6 +479,7 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 
 def _summarize(values: list[float]) -> dict[str, float]:
     """Compute statistics including mean, median, std, min, max, p5, p95, p99."""
+    logger.debug("_summarize called with values=%s", values)
     if not values:
         return {}
     s = sorted(values)
@@ -481,6 +498,7 @@ def _summarize(values: list[float]) -> dict[str, float]:
 
 def compute_integrity(report_dict: dict) -> str:
     """SHA-256 over environment + configuration + raw run hashes."""
+    logger.debug("compute_integrity called with report_dict=%s", report_dict)
     parts: list[str] = []
     if report_dict.get("environment"):
         parts.append(json.dumps(report_dict["environment"], sort_keys=True, default=str))
@@ -522,6 +540,7 @@ def run_iteration(
     Returns:
         TimingRun with timing breakdown
     """
+    logger.debug("run_iteration called with model=%s, tokenizer=%s, generate_fn=%s", model, tokenizer, generate_fn)
     import torch
 
     # Tokenize prompt
@@ -586,6 +605,7 @@ DEFAULT_NUM_STEPS = 100  # default number of measured decode steps
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Reproducible Metal Marlin decode benchmark with per-step timing",
         formatter_class=argparse.RawDescriptionHelpFormatter,

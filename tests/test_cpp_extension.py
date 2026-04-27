@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import gc
 
 import numpy as np
@@ -18,10 +19,14 @@ except Exception:
     _CPP_EXT_AVAILABLE = False
 
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(not _CPP_EXT_AVAILABLE, reason="C++ extension not available")
 
 
 def _require_context():
+    logger.debug("_require_context called")
     if cpp_ext is None:
         pytest.skip("C++ extension not available")
     try:
@@ -31,10 +36,12 @@ def _require_context():
 
 
 def test_extension_flag_matches_import():
+    logger.info("running test_extension_flag_matches_import")
     assert HAS_CPP_EXT == _CPP_EXT_AVAILABLE
 
 
 def test_module_exports():
+    logger.info("running test_module_exports")
     assert cpp_ext is not None
     assert hasattr(cpp_ext, "MetalContext")
     assert hasattr(cpp_ext, "BufferPool")
@@ -55,6 +62,7 @@ def test_module_exports():
 
 
 def test_align_buffer_size():
+    logger.info("running test_align_buffer_size")
     cache = cpp_ext.CACHE_LINE_SIZE
     page = cpp_ext.PAGE_SIZE
     threshold = cpp_ext.LARGE_BUFFER_THRESHOLD
@@ -69,6 +77,7 @@ def test_align_buffer_size():
 
 
 def test_metal_context_properties():
+    logger.info("running test_metal_context_properties")
     ctx = _require_context()
 
     name = ctx.device_name()
@@ -81,6 +90,7 @@ def test_metal_context_properties():
 
 
 def test_buffer_pool_reuse():
+    logger.info("running test_buffer_pool_reuse")
     ctx = _require_context()
     pool = ctx.buffer_pool
 
@@ -107,6 +117,7 @@ def test_buffer_pool_reuse():
 
 
 def test_create_buffer_from_bytes_roundtrip():
+    logger.info("running test_create_buffer_from_bytes_roundtrip")
     ctx = _require_context()
 
     payload = b"metal-marlin-cpp-ext"
@@ -124,6 +135,7 @@ def test_create_buffer_from_bytes_roundtrip():
 
 
 def test_create_buffer_from_ptr():
+    logger.info("running test_create_buffer_from_ptr")
     ctx = _require_context()
 
     payload = b"direct-pointer"
@@ -140,6 +152,7 @@ def test_create_buffer_from_ptr():
 
 
 def test_expert_buffer_pool():
+    logger.info("running test_expert_buffer_pool")
     if not hasattr(cpp_ext, "ExpertBufferPool"):
         pytest.skip("ExpertBufferPool not available")
 
@@ -173,6 +186,7 @@ class TestExpertManagerCpp:
     
     def test_expert_manager_available(self):
         """C++ expert manager should be available."""
+        logger.info("running test_expert_manager_available")
         from metal_marlin._compat import HAS_CPP_EXT
         from metal_marlin.expert_manager_cpp import is_available
         
@@ -181,6 +195,7 @@ class TestExpertManagerCpp:
     
     def test_expert_manager_import(self):
         """ExpertManagerCpp should be importable from main module."""
+        logger.info("running test_expert_manager_import")
         from metal_marlin import ExpertManagerCpp, expert_manager_available
         
         # If C++ extension is available, ExpertManagerCpp should be defined
@@ -189,6 +204,7 @@ class TestExpertManagerCpp:
     
     def test_expert_manager_creation(self):
         """ExpertManagerCpp should be creatable."""
+        logger.info("running test_expert_manager_creation")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -202,6 +218,7 @@ class TestExpertManagerCpp:
     
     def test_expert_manager_invalid_num_experts(self):
         """ExpertManagerCpp should reject invalid num_experts."""
+        logger.info("running test_expert_manager_invalid_num_experts")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -215,6 +232,7 @@ class TestExpertManagerCpp:
     
     def test_group_tokens_basic(self):
         """Token grouping should work correctly."""
+        logger.info("running test_group_tokens_basic")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -237,6 +255,7 @@ class TestExpertManagerCpp:
     
     def test_group_tokens_2d(self):
         """Token grouping from 2D array should work."""
+        logger.info("running test_group_tokens_2d")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -255,6 +274,7 @@ class TestExpertManagerCpp:
     
     def test_compute_expert_loads(self):
         """Expert load computation should be accurate."""
+        logger.info("running test_compute_expert_loads")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -276,6 +296,7 @@ class TestExpertManagerCpp:
     
     def test_load_imbalance_perfect(self):
         """Perfectly balanced load should have imbalance close to 0."""
+        logger.info("running test_load_imbalance_perfect")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -295,6 +316,7 @@ class TestExpertManagerCpp:
     
     def test_load_imbalance_imbalanced(self):
         """Imbalanced load should have high imbalance."""
+        logger.info("running test_load_imbalance_imbalanced")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -318,6 +340,7 @@ class TestExpertManagerCpp:
     
     def test_active_expert_count(self):
         """Active expert counting should work."""
+        logger.info("running test_active_expert_count")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -337,6 +360,7 @@ class TestExpertManagerCpp:
     
     def test_expert_batch_size(self):
         """Per-expert batch size should be correct."""
+        logger.info("running test_expert_batch_size")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -354,6 +378,7 @@ class TestExpertManagerCpp:
     
     def test_get_token_group(self):
         """Token group retrieval should work."""
+        logger.info("running test_get_token_group")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -376,6 +401,7 @@ class TestExpertManagerCpp:
         
         This test ensures the C++ implementation is being called, not a Python fallback.
         """
+        logger.info("running test_cpp_path_used_in_hot_path")
         from metal_marlin.expert_manager_cpp import ExpertManagerCpp, is_available
         
         if not is_available():
@@ -402,6 +428,7 @@ class TestExpertManagerCpp:
 
 def test_mmfp4_gemm_binding():
     """Test the direct mmfp4_gemm binding with a dummy kernel."""
+    logger.info("running test_mmfp4_gemm_binding")
     ctx = _require_context()
 
     # Define a dummy kernel that matches the signature expected by mmfp4_gemm
@@ -464,6 +491,7 @@ def test_mmfp4_gemm_binding():
 
 def test_batch_dispatch_mmfp4_gemm():
     """Test batch dispatch of mmfp4_gemm."""
+    logger.info("running test_batch_dispatch_mmfp4_gemm")
     ctx = _require_context()
     if not hasattr(cpp_ext, "BatchDispatch"):
         pytest.skip("BatchDispatch not available")
@@ -542,6 +570,7 @@ class TestServingContextCpp:
     
     def test_serving_context_available(self):
         """ServingContext should be available when C++ extension is built."""
+        logger.info("running test_serving_context_available")
         if not _CPP_EXT_AVAILABLE:
             pytest.skip("C++ extension not available")
         
@@ -554,6 +583,7 @@ class TestServingContextCpp:
     
     def test_serving_context_creation(self):
         """ServingContext should be creatable from MetalContext."""
+        logger.info("running test_serving_context_creation")
         if not _CPP_EXT_AVAILABLE:
             pytest.skip("C++ extension not available")
         
@@ -569,11 +599,13 @@ class TestServingContextCpp:
     
     def test_serving_cpp_module_import(self):
         """serving_cpp module should be importable."""
+        logger.info("running test_serving_cpp_module_import")
         from metal_marlin import serving_cpp
         assert hasattr(serving_cpp, 'ServingCppDispatcher')
     
     def test_serving_cpp_dispatcher_creation(self):
         """ServingCppDispatcher should be creatable."""
+        logger.info("running test_serving_cpp_dispatcher_creation")
         from metal_marlin.serving_cpp import ServingCppDispatcher
         
         dispatcher = ServingCppDispatcher()
@@ -582,6 +614,7 @@ class TestServingContextCpp:
     
     def test_serving_cpp_metrics(self):
         """ServingCppDispatcher should provide metrics."""
+        logger.info("running test_serving_cpp_metrics")
         from metal_marlin.serving_cpp import ServingCppDispatcher
         
         dispatcher = ServingCppDispatcher()
@@ -593,6 +626,7 @@ class TestServingContextCpp:
     
     def test_serving_cpp_reset_metrics(self):
         """ServingCppDispatcher should allow resetting metrics."""
+        logger.info("running test_serving_cpp_reset_metrics")
         from metal_marlin.serving_cpp import ServingCppDispatcher
         
         dispatcher = ServingCppDispatcher()
@@ -604,6 +638,7 @@ class TestServingContextCpp:
     
     def test_serving_engine_has_cpp_path(self, tmp_path):
         """ServingEngine should have C++ serving path wired."""
+        logger.info("running test_serving_engine_has_cpp_path")
         pytest.importorskip("pydantic")
         pytest.importorskip("scipy")
         from metal_marlin.serving.engine import EngineConfig
@@ -619,6 +654,7 @@ class TestServingContextCpp:
     
     def test_cpp_path_used_in_hot_path(self):
         """Verify C++ path is available for serving hot path."""
+        logger.info("running test_cpp_path_used_in_hot_path")
         if not _CPP_EXT_AVAILABLE:
             pytest.skip("C++ extension not available")
         

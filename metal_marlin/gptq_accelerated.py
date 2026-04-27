@@ -44,6 +44,7 @@ from __future__ import annotations
 import gc
 import json
 import socket
+import logging
 import struct
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -58,6 +59,9 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     import zmq
 
+
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Backend Selection
@@ -77,6 +81,7 @@ class Backend(Enum):
 def detect_best_backend() -> Backend:
     """Detect the best available backend for the current system."""
     # Check for CUDA first (fastest)
+    logger.debug("detect_best_backend called")
     try:
         import torch
 
@@ -146,6 +151,7 @@ class GPTQBackend(Protocol):
         normalize: bool = True,
     ) -> NDArray[np.float32]:
         """Compute Hessian H = 2 * X.T @ X from activations."""
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         ...
 
     def cholesky_inverse(
@@ -154,6 +160,7 @@ class GPTQBackend(Protocol):
         damp: float = 0.01,
     ) -> NDArray[np.float32]:
         """Compute inverse Hessian via Cholesky decomposition."""
+        logger.debug("cholesky_inverse called with H=%s, damp=%s", H, damp)
         ...
 
     def quantize_columns(
@@ -165,11 +172,13 @@ class GPTQBackend(Protocol):
         actorder: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float16], NDArray[np.int32]]:
         """Quantize weight columns with error propagation."""
+        logger.info("quantize_columns called with W=%s, H_inv=%s, grid=%s, group_size=%s", W, H_inv, grid, group_size)
         ...
 
     @property
     def name(self) -> str:
         """Backend name for logging."""
+        logger.debug("name called")
         ...
 
 
@@ -183,6 +192,7 @@ class NumPyBackend:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return "numpy"
 
     def compute_hessian(
@@ -191,6 +201,7 @@ class NumPyBackend:
         normalize: bool = True,
     ) -> NDArray[np.float32]:
         """Compute Hessian using NumPy matmul."""
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         X = np.asarray(activations, dtype=np.float64)
         if X.ndim == 3:
             # [batch, seq, hidden] -> [batch * seq, hidden]
@@ -210,6 +221,7 @@ class NumPyBackend:
         damp: float = 0.01,
     ) -> NDArray[np.float32]:
         """Compute H^{-1} via Cholesky decomposition."""
+        logger.debug("cholesky_inverse called with H=%s, damp=%s", H, damp)
         H = np.asarray(H, dtype=np.float64)
         n = H.shape[0]
 
@@ -236,6 +248,7 @@ class NumPyBackend:
         actorder: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float16], NDArray[np.int32]]:
         """Column-wise quantization with GPTQ error compensation."""
+        logger.info("quantize_columns called with W=%s, H_inv=%s, grid=%s, group_size=%s", W, H_inv, grid, group_size)
         W = np.asarray(W, dtype=np.float64).copy()
         H_inv = np.asarray(H_inv, dtype=np.float64)
         out_features, in_features = W.shape
@@ -306,6 +319,7 @@ class MPSBackend:
     """
 
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         import torch
 
         if not torch.backends.mps.is_available():
@@ -316,6 +330,7 @@ class MPSBackend:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return "mps"
 
     def compute_hessian(
@@ -324,6 +339,7 @@ class MPSBackend:
         normalize: bool = True,
     ) -> NDArray[np.float32]:
         """Compute Hessian using MPS-accelerated matmul."""
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         torch = self._torch
 
         X = np.asarray(activations, dtype=np.float32)
@@ -360,6 +376,7 @@ class MPSBackend:
         Note: MPS Cholesky has limited precision, so we use FP64 on CPU
         for the decomposition but FP32 for the matrix operations.
         """
+        logger.debug("cholesky_inverse called with H=%s, damp=%s", H, damp)
         torch = self._torch
 
         H = np.asarray(H, dtype=np.float64)
@@ -403,6 +420,7 @@ class MPSBackend:
         The inner loop is still sequential (inherent to GPTQ), but
         error propagation uses MPS for faster vector operations.
         """
+        logger.info("quantize_columns called with W=%s, H_inv=%s, grid=%s, group_size=%s", W, H_inv, grid, group_size)
         torch = self._torch
 
         W = np.asarray(W, dtype=np.float32).copy()
@@ -487,6 +505,7 @@ class CUDABackend:
     """
 
     def __init__(self, device_id: int = 0):
+        logger.debug("initializing %s with device_id=%s", type(self).__name__, device_id)
         import torch
 
         if not torch.cuda.is_available():
@@ -498,6 +517,7 @@ class CUDABackend:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return f"cuda:{self._device_id}"
 
     def compute_hessian(
@@ -506,6 +526,7 @@ class CUDABackend:
         normalize: bool = True,
     ) -> NDArray[np.float32]:
         """Compute Hessian using CUDA-accelerated matmul."""
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         torch = self._torch
 
         X = np.asarray(activations, dtype=np.float32)
@@ -546,6 +567,7 @@ class CUDABackend:
         damp: float = 0.01,
     ) -> NDArray[np.float32]:
         """Compute H^{-1} via Cholesky on CUDA with cuSOLVER."""
+        logger.debug("cholesky_inverse called with H=%s, damp=%s", H, damp)
         torch = self._torch
 
         H = np.asarray(H, dtype=np.float32)
@@ -594,6 +616,7 @@ class CUDABackend:
         actorder: bool = True,
     ) -> tuple[NDArray[np.float32], NDArray[np.float16], NDArray[np.int32]]:
         """CUDA-accelerated column quantization."""
+        logger.info("quantize_columns called with W=%s, H_inv=%s, grid=%s, group_size=%s", W, H_inv, grid, group_size)
         torch = self._torch
 
         W = np.asarray(W, dtype=np.float32).copy()
@@ -702,6 +725,7 @@ class ZMQGPTQProtocol:
     @staticmethod
     def configure_socket(sock: zmq.Socket) -> None:
         """Configure ZeroMQ socket with reliable connection settings."""
+        logger.info("configure_socket starting")
         import zmq
 
         # TCP keepalive for reliable connection detection over Wi-Fi/WAN
@@ -723,6 +747,7 @@ class ZMQGPTQProtocol:
         Returns:
             [header_json, data_bytes]
         """
+        logger.info("pack_array called with arr=%s", arr)
         header = json.dumps(
             {"shape": list(arr.shape), "dtype": str(arr.dtype)},
             separators=(",", ":"),
@@ -732,6 +757,7 @@ class ZMQGPTQProtocol:
     @staticmethod
     def unpack_array(header: bytes, data: bytes) -> np.ndarray:
         """Unpack numpy array from ZeroMQ frames."""
+        logger.info("unpack_array called with header=%s, data=%s", header, data)
         meta = json.loads(header)
         arr = np.frombuffer(data, dtype=meta["dtype"]).reshape(meta["shape"])
         return arr.copy()
@@ -747,6 +773,7 @@ class ZMQGPTQProtocol:
         Returns:
             Multipart message: [msg_type, header_json, array1_header, array1_data, ...]
         """
+        logger.debug("create_request called with msg_type=%s, config=%s, arrays=%s", msg_type, config, arrays)
         frames = [msg_type, json.dumps(config, separators=(",", ":")).encode()]
 
         if arrays:
@@ -762,6 +789,7 @@ class ZMQGPTQProtocol:
         Returns:
             (msg_type, config, arrays)
         """
+        logger.debug("parse_request called with frames=%s", frames)
         msg_type = frames[0]
         config = json.loads(frames[1])
 
@@ -786,6 +814,7 @@ class ZMQGPTQProtocol:
         Returns:
             Multipart message: [msg_type, header_json, array1_header, array1_data, ...]
         """
+        logger.debug("create_result called with success=%s, metadata=%s, arrays=%s", success, metadata, arrays)
         msg_type = ZMQGPTQProtocol.MSG_RESULT if success else ZMQGPTQProtocol.MSG_ERROR
 
         result_meta = {"success": success, **metadata}
@@ -807,6 +836,7 @@ class ZMQGPTQProtocol:
         Returns:
             (success, metadata, arrays)
         """
+        logger.debug("parse_result called with frames=%s", frames)
         msg_type = frames[0]
         success = msg_type == ZMQGPTQProtocol.MSG_RESULT
         metadata = json.loads(frames[1])
@@ -836,6 +866,7 @@ class RemoteGPTQProtocol:
     @staticmethod
     def pack_array(arr: np.ndarray) -> bytes:
         """Pack numpy array to binary format."""
+        logger.info("pack_array called with arr=%s", arr)
         header = json.dumps(
             {"shape": list(arr.shape), "dtype": str(arr.dtype)}, separators=(",", ":")
         ).encode()
@@ -845,6 +876,7 @@ class RemoteGPTQProtocol:
     @staticmethod
     def unpack_array(data: bytes) -> tuple[np.ndarray, int]:
         """Unpack numpy array from binary format."""
+        logger.info("unpack_array called with data=%s", data)
         offset = 0
         (header_len,) = struct.unpack_from("!I", data, offset)
         offset += 4
@@ -864,12 +896,14 @@ class RemoteGPTQProtocol:
     @staticmethod
     def send_message(sock: socket.socket, msg_type: int, payload: bytes) -> None:
         """Send a message over socket."""
+        logger.debug("send_message called with sock=%s, msg_type=%s, payload=%s", sock, msg_type, payload)
         header = struct.pack("!II", msg_type, len(payload))
         sock.sendall(header + payload)
 
     @staticmethod
     def recv_message(sock: socket.socket) -> tuple[int, bytes]:
         """Receive a message from socket."""
+        logger.debug("recv_message called with sock=%s", sock)
         header = sock.recv(8)
         if len(header) < 8:
             raise ConnectionError("Connection closed")
@@ -909,6 +943,7 @@ class RemoteGPTQClient:
             identity: Optional client identity for routing
         """
         # Normalize address to tcp:// format
+        logger.debug("initializing %s with address=%s, timeout=%s, identity=%s", type(self).__name__, address, timeout, identity)
         if not address.startswith("tcp://"):
             if ":" in address:
                 host, port = address.rsplit(":", 1)
@@ -927,6 +962,7 @@ class RemoteGPTQClient:
 
     def connect(self) -> None:
         """Establish connection to server using ZeroMQ DEALER socket."""
+        logger.debug("connect called")
         import zmq
 
         self._context = zmq.Context()
@@ -946,6 +982,7 @@ class RemoteGPTQClient:
 
     def close(self) -> None:
         """Close connection."""
+        logger.debug("close called")
         if self._socket:
             self._socket.close()
             self._socket = None
@@ -963,14 +1000,17 @@ class RemoteGPTQClient:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return f"remote_cuda:{self._address}"
 
     @property
     def is_connected(self) -> bool:
+        logger.debug("is_connected called")
         return self._connected
 
     def _send_recv(self, frames: list[bytes]) -> list[bytes]:
         """Send request and receive response."""
+        logger.debug("_send_recv called with frames=%s", frames)
         import zmq
 
         if self._socket is None:
@@ -989,6 +1029,7 @@ class RemoteGPTQClient:
 
     def send_heartbeat(self) -> bool:
         """Send heartbeat to check connection."""
+        logger.debug("send_heartbeat called")
         try:
             frames = ZMQGPTQProtocol.create_request(
                 ZMQGPTQProtocol.MSG_HEARTBEAT,
@@ -1006,6 +1047,7 @@ class RemoteGPTQClient:
         normalize: bool = True,
     ) -> NDArray[np.float32]:
         """Compute Hessian on remote server."""
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         frames = ZMQGPTQProtocol.create_request(
             ZMQGPTQProtocol.MSG_COMPUTE_HESSIAN,
             {"normalize": normalize},
@@ -1030,6 +1072,7 @@ class RemoteGPTQClient:
         damp: float = 0.01,
     ) -> GPTQLayerResult:
         """Full GPTQ quantization on remote server."""
+        logger.info("quantize_layer called with weights=%s, activations=%s, bits=%s, group_size=%s", weights, activations, bits, group_size)
         config = {
             "bits": bits,
             "group_size": group_size,
@@ -1133,6 +1176,7 @@ class GPTQAccelerated:
         config: GPTQConfig | None = None,
         grid: NDArray[np.float32] | None = None,
     ):
+        logger.debug("initializing %s with backend=%s, config=%s, grid=%s", type(self).__name__, backend, config, grid)
         self._backend = backend
         self._config = config or GPTQConfig()
         self._grid = grid if grid is not None else FP4_GRID
@@ -1157,6 +1201,7 @@ class GPTQAccelerated:
         Returns:
             GPTQAccelerated instance
         """
+        logger.debug("create called with backend=%s, config=%s, remote_address=%s", backend, config, remote_address)
         if isinstance(backend, str):
             backend = Backend[backend.upper()]
 
@@ -1182,6 +1227,7 @@ class GPTQAccelerated:
     @property
     def backend_name(self) -> str:
         """Name of the active backend."""
+        logger.debug("backend_name called")
         return self._backend.name
 
     def accumulate_hessian(
@@ -1198,6 +1244,7 @@ class GPTQAccelerated:
             layer_name: Name of the layer
             activations: Input activations [batch, seq, hidden] or [tokens, hidden]
         """
+        logger.debug("accumulate_hessian called with layer_name=%s, activations=%s", layer_name, activations)
         X = np.asarray(activations, dtype=np.float64)
         if X.ndim == 3:
             X = X.reshape(-1, X.shape[-1])
@@ -1227,6 +1274,7 @@ class GPTQAccelerated:
         Returns:
             Normalized Hessian matrix or None
         """
+        logger.debug("get_hessian called with layer_name=%s, apply_damping=%s", layer_name, apply_damping)
         if layer_name not in self._hessians:
             return None
 
@@ -1241,6 +1289,7 @@ class GPTQAccelerated:
 
     def clear_hessians(self) -> None:
         """Clear accumulated Hessians to free memory."""
+        logger.debug("clear_hessians called")
         self._hessians.clear()
         gc.collect()
 
@@ -1261,6 +1310,7 @@ class GPTQAccelerated:
         Returns:
             GPTQLayerResult with quantized weights and metadata
         """
+        logger.info("quantize_layer called with layer_name=%s, weights=%s, activations=%s", layer_name, weights, activations)
         W = np.asarray(weights, dtype=np.float32)
         out_features, in_features = W.shape
 
@@ -1319,6 +1369,7 @@ def _quantize_layer_worker(
     Returns:
         (layer_name, GPTQLayerResult)
     """
+    logger.info("_quantize_layer_worker called with args=%s", args)
     layer_name, weights, hessian, grid, group_size, actorder, damp, backend_name = args
 
     # Create backend in worker process
@@ -1396,6 +1447,7 @@ def quantize_layers_parallel(
     Returns:
         ParallelQuantizationResult with all layer results
     """
+    logger.info("quantize_layers_parallel called with layers=%s, hessians=%s, config=%s, backend=%s", layers, hessians, config, backend)
     config = config or GPTQConfig()
 
     if backend == Backend.AUTO:
@@ -1524,6 +1576,7 @@ class RemoteGPTQServer:
             port: Port to listen on
             device_id: CUDA device ID to use
         """
+        logger.debug("initializing %s with port=%s, device_id=%s", type(self).__name__, port, device_id)
         self._port = port
         self._device_id = device_id
         self._backend: CUDABackend | None = None
@@ -1532,6 +1585,7 @@ class RemoteGPTQServer:
 
     def run(self) -> None:
         """Start ZeroMQ ROUTER server and handle requests."""
+        logger.info("run starting")
         import signal
 
         import zmq
@@ -1557,6 +1611,7 @@ class RemoteGPTQServer:
 
         # Signal handler for clean shutdown
         def handle_signal(signum, frame):
+            logger.debug("handle_signal called with signum=%s, frame=%s", signum, frame)
             print("\nShutdown requested...")
             self._shutdown = True
 
@@ -1605,6 +1660,7 @@ class RemoteGPTQServer:
 
     def _handle_request(self, frames: list[bytes]) -> list[bytes]:
         """Handle a single request and return response frames."""
+        logger.debug("_handle_request called with frames=%s", frames)
         msg_type, config, arrays = ZMQGPTQProtocol.parse_request(frames)
 
         if msg_type == ZMQGPTQProtocol.MSG_HEARTBEAT:
@@ -1624,6 +1680,7 @@ class RemoteGPTQServer:
 
     def _handle_heartbeat(self, config: dict) -> list[bytes]:
         """Handle heartbeat request."""
+        logger.debug("_handle_heartbeat called with config=%s", config)
         return ZMQGPTQProtocol.create_result(
             success=True,
             metadata={
@@ -1634,6 +1691,7 @@ class RemoteGPTQServer:
 
     def _handle_compute_hessian(self, config: dict, arrays: list[np.ndarray]) -> list[bytes]:
         """Handle COMPUTE_HESSIAN request."""
+        logger.debug("_handle_compute_hessian called with config=%s, arrays=%s", config, arrays)
         if not arrays:
             return ZMQGPTQProtocol.create_result(
                 success=False, metadata={}, error="No activations provided"
@@ -1657,6 +1715,7 @@ class RemoteGPTQServer:
 
     def _handle_cholesky_inverse(self, config: dict, arrays: list[np.ndarray]) -> list[bytes]:
         """Handle CHOLESKY_INVERSE request."""
+        logger.debug("_handle_cholesky_inverse called with config=%s, arrays=%s", config, arrays)
         if not arrays:
             return ZMQGPTQProtocol.create_result(
                 success=False, metadata={}, error="No Hessian provided"
@@ -1680,6 +1739,7 @@ class RemoteGPTQServer:
 
     def _handle_quantize_full(self, config: dict, arrays: list[np.ndarray]) -> list[bytes]:
         """Handle QUANTIZE_FULL request."""
+        logger.info("_handle_quantize_full called with config=%s, arrays=%s", config, arrays)
         if len(arrays) < 2:
             return ZMQGPTQProtocol.create_result(
                 success=False,
@@ -1750,6 +1810,7 @@ def main():
         # On Mac coordinator:
         uv run python -m metal_marlin.gptq_accelerated benchmark
     """
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

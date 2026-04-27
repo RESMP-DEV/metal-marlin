@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Sequence
+import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -43,6 +44,9 @@ from .metal_dispatch import (
     require_mps,
 )
 from .moe_dispatch import MoEDispatchInfo, group_tokens_by_expert
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -106,6 +110,7 @@ class AsyncExpertDispatcher:
         Args:
             lib: MetalKernelLibrary instance for accessing Metal device and pipelines.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._command_buffers: list[Any] = []
         self._encoders: list[Any] = []
@@ -121,6 +126,7 @@ class AsyncExpertDispatcher:
         Returns:
             MTLComputePipelineState for the kernel.
         """
+        logger.debug("_get_pipeline called with kernel_name=%s", kernel_name)
         if kernel_name not in self._pipelines:
             self._pipelines[kernel_name] = self._lib.get_pipeline(kernel_name)
         return self._pipelines[kernel_name]
@@ -133,6 +139,7 @@ class AsyncExpertDispatcher:
 
         Must call commit_all() followed by wait_all() to execute.
         """
+        logger.debug("begin_expert_command called")
         if self._committed:
             raise RuntimeError(
                 "Commands already committed. Create a new AsyncExpertDispatcher or "
@@ -163,6 +170,7 @@ class AsyncExpertDispatcher:
         Raises:
             RuntimeError: If no command buffer is currently being encoded.
         """
+        logger.debug("dispatch_expert called with kernel_name=%s, grid=%s, threadgroup=%s", kernel_name, grid, threadgroup)
         if not self._encoders:
             raise RuntimeError(
                 "No active command buffer. Call begin_expert_command() first."
@@ -189,6 +197,7 @@ class AsyncExpertDispatcher:
         Once committed, no more dispatches can be added. Reset with reset() or
         create a new AsyncExpertDispatcher instance.
         """
+        logger.debug("commit_all called")
         if self._committed:
             raise RuntimeError("Commands already committed.")
 
@@ -203,6 +212,7 @@ class AsyncExpertDispatcher:
 
         Must be called after commit_all().
         """
+        logger.debug("wait_all called")
         if not self._committed:
             raise RuntimeError(
                 "Cannot wait: commands not committed. Call commit_all() first."
@@ -216,6 +226,7 @@ class AsyncExpertDispatcher:
 
         Clears all internal state, allowing the same dispatcher to be reused.
         """
+        logger.debug("reset called")
         self._command_buffers.clear()
         self._encoders.clear()
         self._pipelines.clear()
@@ -256,6 +267,7 @@ def dispatch_experts_parallel(
         ]
         dispatch_experts_parallel(lib, dispatches)
     """
+    logger.debug("dispatch_experts_parallel called with lib=%s, dispatches=%s", lib, dispatches)
     dispatcher = AsyncExpertDispatcher(lib)
 
     for kernel_name, grid, threadgroup, buffers in dispatches:
@@ -294,6 +306,7 @@ def group_tokens_by_expert_sparse(
         - expert_offsets: [num_experts + 1] int64 cumulative counts
         - inverse_indices: [batch] int64 indices (identity for sparse case)
     """
+    logger.debug("group_tokens_by_expert_sparse called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     require_mps()
 
     # Ensure expert_ids is [batch] shape and contiguous
@@ -341,6 +354,7 @@ def group_tokens_by_expert_metal(
         - expert_offsets: [num_experts + 1] int64 cumulative counts
         - inverse_indices: [batch * top_k] int64 indices to restore original order
     """
+    logger.debug("group_tokens_by_expert_metal called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     require_metal()
     require_mps()
 
@@ -472,6 +486,7 @@ def group_tokens_by_expert_full_sparse(
     Returns:
         MoEDispatchInfo with all indexing tensors for dispatch and scatter.
     """
+    logger.debug("group_tokens_by_expert_full_sparse called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     batch_size = expert_ids.shape[0] if expert_ids.dim() == 1 else expert_ids.shape[0]
 
     sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert_sparse(
@@ -512,6 +527,7 @@ def group_tokens_by_expert_full_metal(
     Returns:
         MoEDispatchInfo with all indexing tensors for dispatch and scatter.
     """
+    logger.debug("group_tokens_by_expert_full_metal called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     batch_size, top_k = expert_ids.shape
     sorted_indices, expert_offsets, inverse_indices = group_tokens_by_expert_metal(
         expert_ids, num_experts
@@ -555,6 +571,7 @@ def gather_for_experts_metal(
     Returns:
         [total_assignments, hidden_dim] activations in expert-sorted order.
     """
+    logger.debug("gather_for_experts_metal called with activations=%s, dispatch_info=%s", activations, dispatch_info)
     require_mps()
 
     # For now, use PyTorch gather (Metal kernel can be added later)
@@ -581,6 +598,7 @@ def scatter_expert_outputs_metal(
     Returns:
         [batch, out_dim] combined outputs with original token order.
     """
+    logger.debug("scatter_expert_outputs_metal called with expert_outputs=%s, expert_probs=%s, dispatch_info=%s", expert_outputs, expert_probs, dispatch_info)
     require_mps()
 
     batch_size = dispatch_info.num_tokens
@@ -625,6 +643,7 @@ def scatter_expert_outputs_sparse(
     Returns:
         [batch, out_dim] combined outputs with original token order.
     """
+    logger.debug("scatter_expert_outputs_sparse called with expert_outputs=%s, expert_probs=%s, dispatch_info=%s", expert_outputs, expert_probs, dispatch_info)
     require_mps()
 
     batch_size = dispatch_info.num_tokens
@@ -677,6 +696,7 @@ def detect_sparse_expert_tokens(
         >>> detect_sparse_expert_tokens(expert_probs, threshold=0.99)
         tensor([True, False, True])
     """
+    logger.debug("detect_sparse_expert_tokens called with expert_probs=%s, threshold=%s", expert_probs, threshold)
     require_mps()
 
     # Get max probability per token
@@ -719,6 +739,7 @@ def create_sparse_expert_dispatch(
         >>> sparse_dispatch, dense_dispatch, sparse_idx, dense_idx = \
         ...     create_sparse_expert_dispatch(expert_ids, expert_probs, sparse_mask)
     """
+    logger.debug("create_sparse_expert_dispatch called with expert_ids=%s, expert_probs=%s, sparse_mask=%s", expert_ids, expert_probs, sparse_mask)
     require_mps()
 
     batch_size, top_k = expert_ids.shape
@@ -818,6 +839,7 @@ def _compute_expert_offsets_sparse(
     Returns:
         [num_experts + 1] int64 cumulative counts (offsets).
     """
+    logger.debug("_compute_expert_offsets_sparse called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     device = expert_ids.device
 
     # Count occurrences of each expert
@@ -845,6 +867,7 @@ def gather_for_sparse_experts(
     Returns:
         [num_sparse, hidden_dim] activations for sparse tokens.
     """
+    logger.debug("gather_for_sparse_experts called with activations=%s, sparse_indices=%s", activations, sparse_indices)
     require_mps()
     return activations[sparse_indices]
 
@@ -866,6 +889,7 @@ def scatter_sparse_expert_outputs(
     Returns:
         [batch, out_dim] updated output tensor.
     """
+    logger.debug("scatter_sparse_expert_outputs called with sparse_outputs=%s, sparse_probs=%s, output=%s", sparse_outputs, sparse_probs, output)
     require_mps()
 
     # Weight by probability and scatter
@@ -911,6 +935,7 @@ def moe_dispatch_metal(
     Returns:
         [batch, out_dim] combined outputs.
     """
+    logger.debug("moe_dispatch_metal called with activations=%s, expert_ids=%s, expert_probs=%s", activations, expert_ids, expert_probs)
     require_metal()
     require_mps()
 

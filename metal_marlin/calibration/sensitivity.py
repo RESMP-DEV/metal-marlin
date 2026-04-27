@@ -43,11 +43,15 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -119,6 +123,7 @@ TRACE_CRITICAL_MULTIPLIER = 10.0  # 10x mean trace = critical layer
 
 def _is_router_layer(name: str) -> bool:
     """Detect if layer is an MoE router (always FP16)."""
+    logger.debug("_is_router_layer called with name=%s", name)
     name_lower = name.lower()
     router_patterns = [
         "router",
@@ -132,6 +137,7 @@ def _is_router_layer(name: str) -> bool:
 
 def _is_embedding_layer(name: str) -> bool:
     """Detect embedding layers (always FP16/BF16)."""
+    logger.debug("_is_embedding_layer called with name=%s", name)
     name_lower = name.lower()
     embed_patterns = ["embed", "wte", "word_embedding"]
     return any(p in name_lower for p in embed_patterns)
@@ -139,6 +145,7 @@ def _is_embedding_layer(name: str) -> bool:
 
 def _is_norm_layer(name: str) -> bool:
     """Detect normalization layers (always FP16/BF16)."""
+    logger.debug("_is_norm_layer called with name=%s", name)
     name_lower = name.lower()
     norm_patterns = ["norm", "layernorm", "rmsnorm", "ln_"]
     return any(p in name_lower for p in norm_patterns)
@@ -146,6 +153,7 @@ def _is_norm_layer(name: str) -> bool:
 
 def _is_attention_layer(name: str) -> bool:
     """Detect attention projection layers (sensitive to position)."""
+    logger.debug("_is_attention_layer called with name=%s", name)
     name_lower = name.lower()
     attn_patterns = ["q_proj", "k_proj", "v_proj", "o_proj", "qkv", "c_attn"]
     return any(p in name_lower for p in attn_patterns)
@@ -167,6 +175,7 @@ def _compute_hessian_stats(
     Returns:
         Tuple of (trace, condition_number). Returns (0, 1) if hessian is None.
     """
+    logger.debug("_compute_hessian_stats called with hessian=%s", hessian)
     if hessian is None:
         return 0.0, 1.0
 
@@ -203,6 +212,7 @@ def _compute_weight_stats(
     Returns:
         Tuple of (variance, outlier_ratio, extra_metrics).
     """
+    logger.debug("_compute_weight_stats called with weight=%s", weight)
     w = np.asarray(weight, dtype=np.float64).ravel()
 
     # Basic statistics
@@ -234,6 +244,7 @@ def _compute_weight_stats(
 
 def _compute_kurtosis(x: NDArray[np.float64], mean: float, std: float) -> float:
     """Compute excess kurtosis (normal distribution = 0)."""
+    logger.debug("_compute_kurtosis called with x=%s, mean=%s, std=%s", x, mean, std)
     if std < 1e-10:
         return 0.0
     centered = x - mean
@@ -271,6 +282,7 @@ def recommend_quantization(
         Tuple of (bits, format) e.g., (4, "fp4") or (16, "bf16").
     """
     # Rule 1: Critical layer types always stay high precision
+    logger.info("recommend_quantization called with name=%s, hessian_trace=%s, hessian_condition=%s, weight_variance=%s", name, hessian_trace, hessian_condition, weight_variance)
     if _is_router_layer(name):
         return 16, "bf16"  # Router is sacred for MoE
 
@@ -344,6 +356,7 @@ def analyze_layer_sensitivity(
         >>> print(f"Use {sens.recommended_bits}-bit {sens.recommended_format}")
     """
     # Compute Hessian statistics
+    logger.debug("analyze_layer_sensitivity called with weight=%s, hessian=%s, activations_sample=%s", weight, hessian, activations_sample)
     hessian_trace, hessian_condition = _compute_hessian_stats(hessian)
 
     # Compute weight statistics
@@ -393,6 +406,7 @@ def analyze_layer_sensitivity(
 
 def _get_memory_budget(target_pct: float = 0.80) -> int:
     """Get memory budget in bytes based on available system memory."""
+    logger.debug("_get_memory_budget called with target_pct=%s", target_pct)
     import psutil
 
     mem = psutil.virtual_memory()
@@ -432,6 +446,7 @@ def _compute_hessians_layerwise(
     Returns:
         Dict mapping layer names to Hessian matrices.
     """
+    logger.debug("_compute_hessians_layerwise called with model_path=%s, calibration_data=%s, batch_size=%s", model_path, calibration_data, batch_size)
     import gc
 
     from .hooks import CalibrationHooks
@@ -516,6 +531,7 @@ def _compute_hessians_layerwise(
         hooks = CalibrationHooks(damping=0.01)
 
         def layer_filter(name: str, module: Any) -> bool:
+            logger.debug("layer_filter called with name=%s, module=%s", name, module)
             return name in group_names
 
         num_hooked = hooks.register_linear_hooks(model, layer_filter=layer_filter)
@@ -591,6 +607,7 @@ def _compute_hessians_with_model(
 
     Uses layer-wise processing to avoid OOM on unified memory systems.
     """
+    logger.debug("_compute_hessians_with_model called with model_path=%s, calibration_data=%s, batch_size=%s", model_path, calibration_data, batch_size)
     return _compute_hessians_layerwise(
         model_path=model_path,
         calibration_data=calibration_data,
@@ -640,6 +657,7 @@ def compute_model_sensitivity_profile(
         ...     if sens.recommended_bits < 8:
         ...         print(f"{name}: {sens.recommended_format}")
     """
+    logger.debug("compute_model_sensitivity_profile called with model_path=%s, calibration_data=%s, layers_to_analyze=%s", model_path, calibration_data, layers_to_analyze)
     from safetensors import safe_open
 
     model_path = Path(model_path)
@@ -666,6 +684,7 @@ def compute_model_sensitivity_profile(
         st_file: Path,
     ) -> dict[str, tuple[NDArray[np.floating[Any]], float, float, dict[str, float]]]:
         """Load and process a single safetensors shard."""
+        logger.info("_load_shard called with st_file=%s", st_file)
         shard_stats: dict[
             str, tuple[NDArray[np.floating[Any]], float, float, dict[str, float]]
         ] = {}
@@ -873,6 +892,7 @@ def sensitivity_to_config(
     Returns:
         Dict mapping layer names to quantization config dicts.
     """
+    logger.debug("sensitivity_to_config called with profile=%s", profile)
     config = {}
 
     for name, sens in profile.items():
@@ -914,6 +934,7 @@ def save_sensitivity_profile(
         profile: Output from compute_model_sensitivity_profile.
         path: Output file path.
     """
+    logger.info("save_sensitivity_profile called with profile=%s, path=%s", profile, path)
     import json
 
     data = {
@@ -942,6 +963,7 @@ def load_sensitivity_profile(path: str | Path) -> dict[str, LayerSensitivity]:
     Returns:
         Dict mapping layer names to LayerSensitivity objects.
     """
+    logger.info("load_sensitivity_profile called with path=%s", path)
     import json
 
     with open(path) as f:

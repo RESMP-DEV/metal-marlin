@@ -1,11 +1,16 @@
+import logging
 
 import pytest
 
 from metal_marlin.paged.allocator import MultimodalBlockAllocator, TokenModality
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMultimodalBlockAllocator:
     def test_allocate_basic(self):
+        logger.info("running test_allocate_basic")
         allocator = MultimodalBlockAllocator(num_blocks=10)
         idx = allocator.allocate()
         assert idx == 0
@@ -13,6 +18,7 @@ class TestMultimodalBlockAllocator:
         assert allocator.num_allocated == 1
 
     def test_allocate_image_blocks_contiguous(self):
+        logger.info("running test_allocate_image_blocks_contiguous")
         allocator = MultimodalBlockAllocator(num_blocks=10, block_size=16)
         # Allocate 32 tokens -> 2 blocks
         indices = allocator.allocate_image_blocks(num_tokens=32, image_hash="hash1")
@@ -21,6 +27,7 @@ class TestMultimodalBlockAllocator:
         assert allocator.num_free == 8
 
     def test_fragmentation_behavior(self):
+        logger.info("running test_fragmentation_behavior")
         allocator = MultimodalBlockAllocator(num_blocks=10, block_size=16)
         
         # Create fragmentation: allocate 0, 1, 2, 3
@@ -44,6 +51,7 @@ class TestMultimodalBlockAllocator:
     def test_allocate_contiguous_implementation(self):
         # This test is for the NEW functionality we are about to add.
         # It might fail or error before implementation.
+        logger.info("running test_allocate_contiguous_implementation")
         allocator = MultimodalBlockAllocator(num_blocks=10, block_size=16)
         
         if not hasattr(allocator, "allocate_contiguous"):

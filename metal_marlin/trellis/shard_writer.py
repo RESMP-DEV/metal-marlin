@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 from safetensors.numpy import save_file as save_numpy_file
 
+
+
+logger = logging.getLogger(__name__)
 
 class ShardWriter:
     """Writes quantized tensors to sharded safetensors files."""
@@ -17,6 +21,7 @@ class ShardWriter:
         output_path: Path,
         max_shard_size_gb: float = 4.0,
     ):
+        logger.debug("initializing %s with output_path=%s, max_shard_size_gb=%s", type(self).__name__, output_path, max_shard_size_gb)
         self.output_path = Path(output_path)
         self.max_shard_size = int(max_shard_size_gb * 1024 * 1024 * 1024)
         self.current_shard: dict[str, np.ndarray] = {}
@@ -36,6 +41,7 @@ class ShardWriter:
         mse: float,
     ) -> None:
         """Add a quantized tensor to the current shard."""
+        logger.debug("add_tensor called with name=%s, indices=%s, scales=%s", name, indices, scales)
         safe_key = name.replace(".", "__")
 
         indices_size = indices.nbytes
@@ -64,6 +70,7 @@ class ShardWriter:
 
     def _flush_shard(self) -> None:
         """Write current shard to disk."""
+        logger.debug("_flush_shard called")
         if not self.current_shard:
             return
 
@@ -76,6 +83,7 @@ class ShardWriter:
 
     def finalize(self) -> None:
         """Flush remaining tensors and save metadata index."""
+        logger.debug("finalize called")
         self._flush_shard()
 
         index_path = self.output_path / "trellis_index.json"

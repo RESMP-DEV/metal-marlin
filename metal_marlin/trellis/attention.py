@@ -50,6 +50,7 @@ _attention_count = 0
 
 
 def get_attention_stats():
+    logger.debug("get_attention_stats called")
     global _attention_total_ms, _attention_count
     if _attention_count == 0:
         return 0.0
@@ -57,6 +58,7 @@ def get_attention_stats():
 
 
 def reset_attention_stats():
+    logger.debug("reset_attention_stats called")
     global _attention_total_ms, _attention_count
     _attention_total_ms = 0.0
     _attention_count = 0
@@ -75,6 +77,7 @@ def _log_trellis_attention_backend(*, use_fused_decode: bool) -> None:
     The message is emitted via both the module logger and ``print(stderr)`` so
     it is visible even when logging is not configured.
     """
+    logger.debug("_log_trellis_attention_backend called")
     global _trellis_attention_backend_logged
 
     if _trellis_attention_backend_logged:
@@ -132,15 +135,18 @@ class TrellisMLAConfig:
     @property
     def qk_head_dim(self) -> int:
         """Total Q/K head dimension (nope + rope)."""
+        logger.debug("qk_head_dim called")
         return self.qk_nope_head_dim + self.qk_rope_head_dim
 
     # Legacy compatibility
     @property
     def head_dim(self) -> int:
+        logger.debug("head_dim called")
         return self.qk_head_dim
 
     @property
     def kv_head_dim(self) -> int:
+        logger.debug("kv_head_dim called")
         return self.qk_nope_head_dim + self.v_head_dim
 
 
@@ -168,6 +174,7 @@ class TrellisMLAttention(nn.Module):
         kv_a_layernorm: nn.Module | None = None,
         use_fused_decode: bool = True,
     ):
+        logger.debug("initializing %s with config=%s, q_a_proj=%s, q_b_proj=%s, kv_a_proj=%s, kv_b_proj=%s", type(self).__name__, config, q_a_proj, q_b_proj, kv_a_proj, kv_b_proj)
         super().__init__()
         self.config = config
         self.use_fused_decode = use_fused_decode
@@ -235,6 +242,7 @@ class TrellisMLAttention(nn.Module):
         Uses fused Metal kernel to compute q_a_proj and kv_a_proj simultaneously.
         """
         # Get lib from q_a_proj (assumed set)
+        logger.debug("_fused_qkv_forward called with x=%s", x)
         lib = self.q_a_proj._get_lib()
 
         # We use Q=q_a, K=kv_a, V=None
@@ -284,6 +292,7 @@ class TrellisMLAttention(nn.Module):
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, _ = hidden_states.shape
 
         # Optim for batch=1 decode: fuse q_a and kv_a projections
@@ -633,6 +642,7 @@ def create_mla_projections(
     Returns:
         Dictionary with 'q_proj', 'kv_a_proj', 'kv_b_proj', 'o_proj' keys
     """
+    logger.debug("create_mla_projections called with config=%s, bits=%s, bias=%s", config, bits, bias)
     projections = {}
 
     # Optional query compression (low-rank: q_a_proj + q_b_proj)

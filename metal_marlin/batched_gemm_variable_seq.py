@@ -41,6 +41,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -51,6 +52,9 @@ from .metal_dispatch import (
     dispatch_kernel,
     mps_tensor_to_metal_buffer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -120,6 +124,7 @@ def dispatch_batched_gemm_variable_seq(
         >>>     group_size=64
         >>> )
     """
+    logger.debug("dispatch_batched_gemm_variable_seq called with lib=%s, A=%s, B=%s", lib, A, B)
     require_mps()
     require_metal()
 
@@ -289,6 +294,7 @@ def dispatch_grouped_attention_variable_seq(
         >>>     head_dim=128, batch_count=3
         >>> )
     """
+    logger.debug("dispatch_grouped_attention_variable_seq called with lib=%s, Q=%s, K=%s", lib, Q, K)
     require_mps()
     require_metal()
 

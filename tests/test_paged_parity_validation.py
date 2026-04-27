@@ -5,6 +5,7 @@ tolerances to handle FP16 precision differences.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -18,11 +19,15 @@ from metal_marlin.paged.parity_validation import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestParityConfig:
     """Test parity configuration."""
     
     def test_default_config(self):
         """Test default configuration."""
+        logger.info("running test_default_config")
         config = ParityConfig()
         assert config.fp16_atol == 5e-3
         assert config.fp16_rtol == 5e-2
@@ -31,6 +36,7 @@ class TestParityConfig:
     
     def test_fp16_tolerances(self):
         """Test FP16 tolerance selection."""
+        logger.info("running test_fp16_tolerances")
         config = ParityConfig()
         atol, rtol = config.get_tolerances(np.float16)
         assert atol == 5e-3
@@ -38,6 +44,7 @@ class TestParityConfig:
     
     def test_fp32_tolerances(self):
         """Test FP32 tolerance selection."""
+        logger.info("running test_fp32_tolerances")
         config = ParityConfig()
         atol, rtol = config.get_tolerances(np.float32)
         assert atol == 1e-5
@@ -45,6 +52,7 @@ class TestParityConfig:
     
     def test_custom_tolerances(self):
         """Test custom tolerance overrides."""
+        logger.info("running test_custom_tolerances")
         config = ParityConfig(atol=1e-4, rtol=1e-3)
         atol, rtol = config.get_tolerances(np.float16)
         assert atol == 1e-4
@@ -56,6 +64,7 @@ class TestValidateParity:
     
     def test_identical_arrays_pass(self):
         """Test identical arrays pass validation."""
+        logger.info("running test_identical_arrays_pass")
         arr = np.random.randn(2, 4, 64).astype(np.float32)
         result = validate_parity(arr, arr)
         
@@ -65,6 +74,7 @@ class TestValidateParity:
     
     def test_arrays_within_tolerance_pass(self):
         """Test arrays within tolerance pass."""
+        logger.info("running test_arrays_within_tolerance_pass")
         arr1 = np.ones((2, 4, 64), dtype=np.float32)
         arr2 = arr1 + 1e-6
         
@@ -75,6 +85,7 @@ class TestValidateParity:
     
     def test_arrays_outside_tolerance_fail(self):
         """Test arrays outside tolerance fail."""
+        logger.info("running test_arrays_outside_tolerance_fail")
         arr1 = np.ones((2, 4, 64), dtype=np.float32)
         arr2 = arr1 + 1.0
         
@@ -85,6 +96,7 @@ class TestValidateParity:
     
     def test_nan_detection(self):
         """Test NaN detection."""
+        logger.info("running test_nan_detection")
         arr1 = np.ones((2, 4, 64), dtype=np.float32)
         arr2 = arr1.copy()
         arr2[0, 0, 0] = np.nan
@@ -96,6 +108,7 @@ class TestValidateParity:
     
     def test_inf_detection(self):
         """Test Inf detection."""
+        logger.info("running test_inf_detection")
         arr1 = np.ones((2, 4, 64), dtype=np.float32)
         arr2 = arr1.copy()
         arr2[0, 0, 0] = np.inf
@@ -108,6 +121,7 @@ class TestValidateParity:
     def test_fp16_precision_tolerance(self):
         """Test FP16 arrays with realistic precision differences."""
         # Simulate FP16 precision difference (~0.002)
+        logger.info("running test_fp16_precision_tolerance")
         arr1 = np.random.randn(2, 4, 64).astype(np.float16)
         arr2 = arr1 + np.random.randn(2, 4, 64).astype(np.float16) * 0.001
         
@@ -123,6 +137,7 @@ class TestRunPagedV1ParityTest:
     
     def test_fp16_single_sequence(self):
         """Test FP16 single sequence parity."""
+        logger.info("running test_fp16_single_sequence")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=4,
@@ -137,6 +152,7 @@ class TestRunPagedV1ParityTest:
     
     def test_fp16_multi_sequence(self):
         """Test FP16 multi-sequence parity."""
+        logger.info("running test_fp16_multi_sequence")
         result = run_paged_v1_parity_test(
             num_seqs=2,
             num_heads=4,
@@ -151,6 +167,7 @@ class TestRunPagedV1ParityTest:
     
     def test_fp32_single_sequence(self):
         """Test FP32 single sequence parity."""
+        logger.info("running test_fp32_single_sequence")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=4,
@@ -165,6 +182,7 @@ class TestRunPagedV1ParityTest:
     
     def test_fp32_multi_sequence(self):
         """Test FP32 multi-sequence parity."""
+        logger.info("running test_fp32_multi_sequence")
         result = run_paged_v1_parity_test(
             num_seqs=4,
             num_heads=8,
@@ -179,6 +197,7 @@ class TestRunPagedV1ParityTest:
     
     def test_different_head_dims(self):
         """Test different head dimensions."""
+        logger.info("running test_different_head_dims")
         for head_dim in [32, 64, 96, 128]:
             result = run_paged_v1_parity_test(
                 num_seqs=1,
@@ -194,6 +213,7 @@ class TestRunPagedV1ParityTest:
     
     def test_different_seq_lengths(self):
         """Test different sequence lengths."""
+        logger.info("running test_different_seq_lengths")
         for seq_len in [1, 8, 16, 32, 64]:
             result = run_paged_v1_parity_test(
                 num_seqs=1,
@@ -209,6 +229,7 @@ class TestRunPagedV1ParityTest:
     
     def test_different_block_sizes(self):
         """Test different block sizes."""
+        logger.info("running test_different_block_sizes")
         for block_size in [8, 16, 32]:
             result = run_paged_v1_parity_test(
                 num_seqs=1,
@@ -229,6 +250,7 @@ class TestRunComprehensiveParitySuite:
     
     def test_default_suite_runs(self):
         """Test that default suite runs without errors."""
+        logger.info("running test_default_suite_runs")
         results = run_comprehensive_parity_suite()
         
         assert "total" in results
@@ -238,6 +260,7 @@ class TestRunComprehensiveParitySuite:
     
     def test_custom_configs(self):
         """Test with custom configurations."""
+        logger.info("running test_custom_configs")
         configs = [
             {"num_seqs": 1, "num_heads": 4, "num_kv_heads": 4, "dtype": np.float32, "name": "test1"},
             {"num_seqs": 2, "num_heads": 8, "num_kv_heads": 8, "dtype": np.float32, "name": "test2"},
@@ -252,6 +275,7 @@ class TestRunComprehensiveParitySuite:
     
     def test_suite_result_structure(self):
         """Test that suite results have correct structure."""
+        logger.info("running test_suite_result_structure")
         configs = [
             {"num_seqs": 1, "num_heads": 4, "num_kv_heads": 4, "dtype": np.float32, "name": "test1"},
         ]
@@ -271,6 +295,7 @@ class TestEdgeCases:
     
     def test_single_token_decode(self):
         """Test single token decode (seq_len=1)."""
+        logger.info("running test_single_token_decode")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=4,
@@ -285,6 +310,7 @@ class TestEdgeCases:
     
     def test_single_head(self):
         """Test with single head."""
+        logger.info("running test_single_head")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=1,
@@ -299,6 +325,7 @@ class TestEdgeCases:
     
     def test_small_head_dim(self):
         """Test with small head dimension."""
+        logger.info("running test_small_head_dim")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=4,
@@ -313,6 +340,7 @@ class TestEdgeCases:
     
     def test_large_head_dim(self):
         """Test with large head dimension."""
+        logger.info("running test_large_head_dim")
         result = run_paged_v1_parity_test(
             num_seqs=1,
             num_heads=4,
@@ -332,6 +360,7 @@ class TestEdgeCases:
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
 def test_paged_v1_parity_parametrized(num_seqs, num_heads, head_dim, dtype):
     """Parametrized parity test covering multiple configurations."""
+    logger.info("running test_paged_v1_parity_parametrized")
     result = run_paged_v1_parity_test(
         num_seqs=num_seqs,
         num_heads=num_heads,

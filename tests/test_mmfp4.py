@@ -9,6 +9,7 @@ These tests cover:
 """
 
 from __future__ import annotations
+import logging
 
 import gc
 
@@ -21,12 +22,16 @@ from metal_marlin.layers import MarlinLinear
 from metal_marlin.quantize import pack_fp4_weights as pack_fp4_weights_cpu
 from metal_marlin.quantize import unpack_fp4_weights
 
+
+logger = logging.getLogger(__name__)
+
 HAS_MPS = torch.backends.mps.is_available()
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
 
 
 def _fp4_e2m1_table(device: torch.device) -> torch.Tensor:
     """Return the FP4 E2M1 lookup table used by MMFP4 paths."""
+    logger.debug("_fp4_e2m1_table called with device=%s", device)
     return torch.tensor(
         [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
         device=device,
@@ -40,6 +45,7 @@ def _reference_dequant_mmfp4(
     group_size: int,
 ) -> torch.Tensor:
     """Reference MMFP4 dequantization for packed [K/8, N] weights."""
+    logger.info("_reference_dequant_mmfp4 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     k_packed, n = packed.shape
     k = k_packed * 8
     table = _fp4_e2m1_table(packed.device)
@@ -56,6 +62,7 @@ def _reference_dequant_mmfp4(
 @pytest.fixture(scope="module")
 def loaded_mmfp4_model():
     """Load a deterministic FP16 model and its MMFP4 packed representation."""
+    logger.info("loaded_mmfp4_model called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
 
@@ -97,6 +104,7 @@ def loaded_mmfp4_model():
 @pytest.fixture(scope="module")
 def mmfp4_kernel_case():
     """Create reusable MMFP4 kernel inputs."""
+    logger.debug("mmfp4_kernel_case called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
 
@@ -128,6 +136,7 @@ def mmfp4_kernel_case():
 @requires_mps
 def test_mmfp4_dequantization_correctness(mmfp4_kernel_case):
     """MMFP4 dequantization matches reference implementation."""
+    logger.info("running test_mmfp4_dequantization_correctness")
     packed = mmfp4_kernel_case["packed"]
     scales = mmfp4_kernel_case["scales"]
     k = mmfp4_kernel_case["k"]
@@ -143,6 +152,7 @@ def test_mmfp4_dequantization_correctness(mmfp4_kernel_case):
 @requires_mps
 def test_mmfp4_gemm_correctness_vs_fp16_matmul(mmfp4_kernel_case):
     """MMFP4 GEMM output matches FP16 matmul against reference dequantized weights."""
+    logger.info("running test_mmfp4_gemm_correctness_vs_fp16_matmul")
     activations = mmfp4_kernel_case["activations"]
     packed = mmfp4_kernel_case["packed"]
     scales = mmfp4_kernel_case["scales"]
@@ -161,6 +171,7 @@ def test_mmfp4_gemm_correctness_vs_fp16_matmul(mmfp4_kernel_case):
 @requires_mps
 def test_mmfp4linear_forward_backward_pass(loaded_mmfp4_model):
     """MMFP4 linear layer runs forward and backward with finite gradients."""
+    logger.info("running test_mmfp4linear_forward_backward_pass")
     layer = loaded_mmfp4_model["mmfp4_linear"]
     device = loaded_mmfp4_model["device"]
     in_features = loaded_mmfp4_model["in_features"]
@@ -181,6 +192,7 @@ def test_mmfp4linear_forward_backward_pass(loaded_mmfp4_model):
 
 def test_mmfp4_edge_case_non_aligned_sizes_roundtrip():
     """MMFP4 CPU pack/unpack handles non-aligned K and N via padding metadata."""
+    logger.info("running test_mmfp4_edge_case_non_aligned_sizes_roundtrip")
     torch.manual_seed(7)
 
     k = 130  # not divisible by 8 or group_size
@@ -212,6 +224,7 @@ def test_mmfp4_edge_case_non_aligned_sizes_roundtrip():
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 def test_mmfp4_edge_case_group_sizes(group_size: int):
     """MMFP4 GEMM remains numerically stable across supported group sizes."""
+    logger.info("running test_mmfp4_edge_case_group_sizes")
     torch.manual_seed(100 + group_size)
     device = torch.device("mps")
 
@@ -235,6 +248,7 @@ def test_mmfp4_edge_case_group_sizes(group_size: int):
 @requires_mps
 def test_mmfp4_memory_leak_check(mmfp4_kernel_case):
     """Repeated MMFP4 GEMM calls should not show unbounded memory growth."""
+    logger.info("running test_mmfp4_memory_leak_check")
     device = mmfp4_kernel_case["device"]
     packed = mmfp4_kernel_case["packed"]
     scales = mmfp4_kernel_case["scales"]

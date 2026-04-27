@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from ._compat import HAS_TORCH, require_torch
@@ -9,6 +10,9 @@ from ._compat import HAS_TORCH, require_torch
 if TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 def pad_to_multiple(
     tensor: torch.Tensor,
@@ -20,6 +24,7 @@ def pad_to_multiple(
     Returns:
         (padded_tensor, pad_size)
     """
+    logger.debug("pad_to_multiple called with tensor=%s, dim=%s, multiple=%s", tensor, dim, multiple)
     if not HAS_TORCH:
         require_torch("padding tensors")
 
@@ -46,6 +51,7 @@ def pad_to_multiple(
 
 def unpad(tensor: torch.Tensor, dim: int, pad_size: int) -> torch.Tensor:
     """Remove padding added by pad_to_multiple."""
+    logger.debug("unpad called with tensor=%s, dim=%s, pad_size=%s", tensor, dim, pad_size)
     if pad_size == 0:
         return tensor
     dim_norm = dim % tensor.dim()

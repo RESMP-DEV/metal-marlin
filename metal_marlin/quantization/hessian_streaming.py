@@ -16,6 +16,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,9 @@ import torch
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 class StreamingHessianCollector:
     """Collect per-layer Hessians during streaming forward pass.
@@ -40,6 +44,7 @@ class StreamingHessianCollector:
             hidden_dim: Dimension of hidden features (Hessian matrix size).
             dtype: Numpy dtype for accumulation (default: float64 for precision).
         """
+        logger.debug("initializing %s with hidden_dim=%s, dtype=%s", type(self).__name__, hidden_dim, dtype)
         self.hidden_dim = hidden_dim
         self.dtype = dtype
         self._H = np.zeros((hidden_dim, hidden_dim), dtype=dtype)
@@ -54,6 +59,7 @@ class StreamingHessianCollector:
             activations: Input activations tensor. Can be 2D [batch, hidden_dim]
                 or 3D [batch, seq_len, hidden_dim].
         """
+        logger.debug("accumulate called with activations=%s", activations)
         X = activations.float().cpu().numpy()
         if X.ndim == 3:
             X = X.reshape(-1, X.shape[-1])
@@ -73,6 +79,7 @@ class StreamingHessianCollector:
         Raises:
             ValueError: If no activations have been accumulated.
         """
+        logger.debug("finalize called with sigma_reg=%s", sigma_reg)
         if self._count == 0:
             raise ValueError("No activations accumulated")
 
@@ -126,6 +133,7 @@ def collect_all_hessians_streaming(
         # hessian_paths = {"model.layers.0.q_proj": Path("hessians/q_proj.npy"), ...}
     """
     # Create output directory
+    logger.debug("collect_all_hessians_streaming called with model_path=%s, calibration=%s, tokenizer=%s", model_path, calibration, tokenizer)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 

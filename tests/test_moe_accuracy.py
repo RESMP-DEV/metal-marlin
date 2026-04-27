@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -42,6 +43,9 @@ from metal_marlin.inference_metal import MetalQuantizedLinear  # noqa: E402
 from metal_marlin.layer_replacement import replace_linear_layers  # noqa: E402
 from metal_marlin.quantize import unpack_fp4_weights  # noqa: E402
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = [pytest.mark.slow, pytest.mark.requires_mps]
 
 MODEL_ID = "zai-org/GLM-4.7-Flash"
@@ -58,6 +62,7 @@ class LayerMSE:
 
 
 def _get_layers(model: Any) -> list[Any]:
+    logger.debug("_get_layers called with model=%s", model)
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return list(model.model.layers)
     if hasattr(model, "transformer") and hasattr(model.transformer, "layers"):
@@ -66,6 +71,7 @@ def _get_layers(model: Any) -> list[Any]:
 
 
 def _make_input_ids(tokenizer: Any, prompt: str, length: int, device: str) -> Any:
+    logger.debug("_make_input_ids called with tokenizer=%s, prompt=%s, length=%s", tokenizer, prompt, length)
     tokens = tokenizer.encode(prompt)
     if not tokens:
         raise ValueError("Tokenizer produced empty token list.")
@@ -84,12 +90,15 @@ def _forward_with_hooks(
     sample_tokens: int = 64,
     output_router_logits: bool = False,
 ) -> tuple[dict[int, torch.Tensor], torch.Tensor, Any]:
+    logger.debug("_forward_with_hooks called with model=%s, input_ids=%s", model, input_ids)
     layers = _get_layers(model)
     captured: dict[int, torch.Tensor] = {}
     hooks = []
 
     def _hook(idx: int):
+        logger.debug("_hook called with idx=%s", idx)
         def _inner(_module: Any, _inputs: Any, output: Any) -> None:
+            logger.debug("_inner called with _module=%s, _inputs=%s, output=%s", _module, _inputs, output)
             hidden = output[0] if isinstance(output, tuple) else output
             if not torch.is_tensor(hidden):
                 return
@@ -123,6 +132,7 @@ def _forward_with_hooks(
 def _compute_layer_mse(
     ref_states: dict[int, torch.Tensor], quant_states: dict[int, torch.Tensor]
 ) -> LayerMSE:
+    logger.debug("_compute_layer_mse called with ref_states=%s, quant_states=%s", ref_states, quant_states)
     per_layer: dict[int, float] = {}
     for idx, ref in ref_states.items():
         quant = quant_states.get(idx)
@@ -139,6 +149,7 @@ def _compute_layer_mse(
 
 
 def _routing_summary(outputs: Any) -> dict[str, float] | None:
+    logger.debug("_routing_summary called with outputs=%s", outputs)
     router_logits = getattr(outputs, "router_logits", None)
     if router_logits is None:
         return None
@@ -165,6 +176,7 @@ def _routing_summary(outputs: Any) -> dict[str, float] | None:
 
 
 def _logits_fn(model: Any, device: str):
+    logger.debug("_logits_fn called with model=%s, device=%s", model, device)
     def _fn(input_ids_np: np.ndarray) -> np.ndarray:
         input_ids = torch.from_numpy(input_ids_np).to(device)
         with torch.no_grad():
@@ -180,6 +192,7 @@ def _logits_fn(model: Any, device: str):
 
 
 def _unpack_quant_weight(layer: MetalQuantizedLinear) -> np.ndarray:
+    logger.info("_unpack_quant_weight called with layer=%s", layer)
     meta = {
         "orig_K": layer.in_features,
         "orig_N": layer.out_features,
@@ -198,6 +211,7 @@ def _unpack_quant_weight(layer: MetalQuantizedLinear) -> np.ndarray:
 
 
 def _compute_per_expert_error(ref_model: Any, quant_model: Any) -> dict[int, float]:
+    logger.debug("_compute_per_expert_error called with ref_model=%s, quant_model=%s", ref_model, quant_model)
     ref_linears = {
         name: module
         for name, module in ref_model.named_modules()
@@ -227,11 +241,13 @@ def _compute_per_expert_error(ref_model: Any, quant_model: Any) -> dict[int, flo
 
 @pytest.fixture(scope="session")
 def glm47_tokenizer():
+    logger.debug("glm47_tokenizer called")
     return AutoTokenizer.from_pretrained(MODEL_ID)
 
 
 @pytest.fixture(scope="session")
 def glm47_fp16_model():
+    logger.debug("glm47_fp16_model called")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16,
@@ -244,6 +260,7 @@ def glm47_fp16_model():
 
 @pytest.fixture(scope="session")
 def glm47_fp4_model():
+    logger.debug("glm47_fp4_model called")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype=torch.float16,
@@ -258,6 +275,7 @@ def glm47_fp4_model():
 @pytest.mark.smoke
 @pytest.mark.parametrize("seq_len", [1])
 def test_single_token_mse(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer, seq_len: int) -> None:
+    logger.info("running test_single_token_mse")
     input_ids = _make_input_ids(glm47_tokenizer, PROMPT, seq_len, "mps")
 
     ref_states, ref_logits, _ = _forward_with_hooks(
@@ -277,6 +295,7 @@ def test_single_token_mse(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer, se
 def test_short_sequence_mse(
     glm47_fp16_model, glm47_fp4_model, glm47_tokenizer, seq_len: int
 ) -> None:
+    logger.info("running test_short_sequence_mse")
     input_ids = _make_input_ids(glm47_tokenizer, PROMPT, seq_len, "mps")
 
     ref_states, ref_logits, _ = _forward_with_hooks(glm47_fp16_model, input_ids, sample_tokens=64)
@@ -295,6 +314,7 @@ def test_short_sequence_mse(
 def test_long_sequence_mse(
     glm47_fp16_model, glm47_fp4_model, glm47_tokenizer, seq_len: int
 ) -> None:
+    logger.info("running test_long_sequence_mse")
     input_ids = _make_input_ids(glm47_tokenizer, PROMPT, seq_len, "mps")
 
     ref_states, ref_logits, _ = _forward_with_hooks(glm47_fp16_model, input_ids, sample_tokens=32)
@@ -310,6 +330,7 @@ def test_long_sequence_mse(
 
 @pytest.mark.expensive
 def test_mixed_routing_patterns(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer) -> None:
+    logger.info("running test_mixed_routing_patterns")
     concentrated_ids = _make_input_ids(glm47_tokenizer, "the ", 128, "mps")
     diverse_ids = _make_input_ids(
         glm47_tokenizer,
@@ -345,6 +366,7 @@ def test_mixed_routing_patterns(glm47_fp16_model, glm47_fp4_model, glm47_tokeniz
 
 @pytest.mark.expensive
 def test_per_expert_weight_error(glm47_fp16_model, glm47_fp4_model) -> None:
+    logger.info("running test_per_expert_weight_error")
     errors = _compute_per_expert_error(glm47_fp16_model, glm47_fp4_model)
     assert errors, "No per-expert weights found to compute quantization error."
     assert all(np.isfinite(val) for val in errors.values())
@@ -352,6 +374,7 @@ def test_per_expert_weight_error(glm47_fp16_model, glm47_fp4_model) -> None:
 
 @pytest.mark.expensive
 def test_perplexity_increase(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer) -> None:
+    logger.info("running test_perplexity_increase")
     texts = load_wikitext2(max_samples=8)
 
     ref_ppl = compute_perplexity_from_logits(
@@ -381,6 +404,7 @@ def test_perplexity_increase(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer)
 
 @pytest.mark.expensive
 def test_golden_output_regression(glm47_fp16_model, glm47_fp4_model, glm47_tokenizer) -> None:
+    logger.info("running test_golden_output_regression")
     update_golden = os.environ.get("UPDATE_GLM47_MOE_GOLDEN") == "1"
 
     input_ids = _make_input_ids(glm47_tokenizer, PROMPT, 16, "mps")

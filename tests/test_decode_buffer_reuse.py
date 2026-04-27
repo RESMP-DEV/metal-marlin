@@ -1,8 +1,12 @@
 """Tests for decode hot path buffer reuse."""
+import logging
 
 import pytest
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 class TestDecodeBufferReuse:
@@ -10,6 +14,7 @@ class TestDecodeBufferReuse:
 
     @pytest.fixture
     def moe_layer(self):
+        logger.debug("moe_layer called")
         from metal_marlin.trellis.testing import create_mock_moe_mlp
         return create_mock_moe_mlp(
             hidden_dim=256,
@@ -22,6 +27,7 @@ class TestDecodeBufferReuse:
 
     def test_buffer_pool_reused_across_calls(self, moe_layer):
         """Test that buffer pool is reused across multiple forward calls."""
+        logger.info("running test_buffer_pool_reused_across_calls")
         x = torch.randn(1, 256, dtype=torch.float16, device="mps")
 
         # First forward - creates buffer pool
@@ -40,6 +46,7 @@ class TestDecodeBufferReuse:
 
     def test_weight_buffers_not_recreated(self, moe_layer):
         """Test that weight buffers are not recreated on each forward."""
+        logger.info("running test_weight_buffers_not_recreated")
         x = torch.randn(1, 256, dtype=torch.float16, device="mps")
 
         # Get initial buffers (created in __init__ for eager mode)

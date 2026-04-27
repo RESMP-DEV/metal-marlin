@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import platform
 import struct
 import subprocess
@@ -33,6 +34,9 @@ from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SystemMemoryInfo:
@@ -49,6 +53,7 @@ class SystemMemoryInfo:
     @property
     def usage_percent(self) -> float:
         """Memory usage as a percentage."""
+        logger.debug("usage_percent called")
         if self.total_ram_gb == 0:
             return 0.0
         return (self.used_ram_gb / self.total_ram_gb) * 100
@@ -60,6 +65,7 @@ class SystemMemoryInfo:
         On macOS, accounts for Metal unified memory.
         On Linux, uses available memory directly.
         """
+        logger.debug("available_with_pressure called")
         if self.metal_available_gb is not None:
             # Unified memory: use minimum of system available and Metal available
             return min(self.available_ram_gb, self.metal_available_gb)
@@ -76,6 +82,7 @@ def get_system_memory() -> SystemMemoryInfo:
         On macOS, also queries Metal unified memory availability.
         Falls back to psutil if available, otherwise uses OS-specific methods.
     """
+    logger.debug("get_system_memory called")
     system = platform.system()
 
     if system == "Darwin":
@@ -90,6 +97,7 @@ def get_system_memory() -> SystemMemoryInfo:
 def _get_macos_memory() -> SystemMemoryInfo:
     """Get memory info on macOS using vm_stat and sysctl."""
     # Get page size and vm_stat
+    logger.debug("_get_macos_memory called")
     try:
         page_size = int(subprocess.check_output(["sysctl", "-n", "hw.pagesize"]).strip())
     except (subprocess.CalledProcessError, ValueError):
@@ -177,6 +185,7 @@ def _get_macos_memory() -> SystemMemoryInfo:
 
 def _get_linux_memory() -> SystemMemoryInfo:
     """Get memory info on Linux from /proc/meminfo."""
+    logger.debug("_get_linux_memory called")
     meminfo: dict[str, int] = {}
 
     try:
@@ -218,6 +227,7 @@ def _get_linux_memory() -> SystemMemoryInfo:
 
 def _get_psutil_memory() -> SystemMemoryInfo:
     """Fallback memory info using psutil."""
+    logger.debug("_get_psutil_memory called")
     try:
         import psutil
 
@@ -244,6 +254,7 @@ def _get_psutil_memory() -> SystemMemoryInfo:
 
 def _is_apple_silicon() -> bool:
     """Check if running on Apple Silicon."""
+    logger.debug("_is_apple_silicon called")
     if platform.system() != "Darwin":
         return False
     try:
@@ -267,6 +278,7 @@ class TensorMetadata:
     @property
     def numel(self) -> int:
         """Total number of elements."""
+        logger.debug("numel called")
         result = 1
         for dim in self.shape:
             result *= dim
@@ -275,6 +287,7 @@ class TensorMetadata:
     @property
     def size_gb(self) -> float:
         """Size in gigabytes."""
+        logger.debug("size_gb called")
         return self.size_bytes / (1024**3)
 
 
@@ -289,6 +302,7 @@ def _parse_safetensors_metadata(file_path: Path) -> list[TensorMetadata]:
     Returns:
         List of TensorMetadata for all tensors in the file.
     """
+    logger.debug("_parse_safetensors_metadata called with file_path=%s", file_path)
     tensors: list[TensorMetadata] = []
 
     with open(file_path, "rb") as f:
@@ -392,6 +406,7 @@ class AdaptivePrefetcher:
         prefetch_factor: int = 1,
         filter_fn: Any | None = None,
     ):
+        logger.debug("initializing %s with st_files=%s, target_memory_gb=%s, prefetch_factor=%s, filter_fn=%s", type(self).__name__, st_files, target_memory_gb, prefetch_factor, filter_fn)
         self.st_files = [Path(f) for f in st_files]
         self.prefetch_factor = max(1, prefetch_factor)
         self.filter_fn = filter_fn
@@ -429,10 +444,12 @@ class AdaptivePrefetcher:
     @property
     def total_size_gb(self) -> float:
         """Total size of all tensors in GB."""
+        logger.debug("total_size_gb called")
         return sum(t.size_bytes for t in self._all_tensors) / (1024**3)
 
     def _load_tensor(self, metadata: TensorMetadata) -> tuple[str, np.ndarray]:
         """Load a single tensor from disk (with bfloat16 handling)."""
+        logger.info("_load_tensor called with metadata=%s", metadata)
         from safetensors import safe_open
 
         try:
@@ -454,6 +471,7 @@ class AdaptivePrefetcher:
 
     def _compute_batch(self, start_idx: int) -> list[TensorMetadata]:
         """Compute which tensors fit in the next batch."""
+        logger.debug("_compute_batch called with start_idx=%s", start_idx)
         batch: list[TensorMetadata] = []
         batch_bytes = 0
 
@@ -478,6 +496,7 @@ class AdaptivePrefetcher:
         Returns:
             List of (name, tensor) tuples.
         """
+        logger.debug("prefetch_batch called with batch_size=%s", batch_size)
         if batch_size is not None:
             # Load exactly batch_size tensors
             end_idx = min(self._current_idx + batch_size, len(self._all_tensors))
@@ -504,6 +523,7 @@ class AdaptivePrefetcher:
 
     def _prefetch_worker(self) -> None:
         """Background worker for prefetching."""
+        logger.debug("_prefetch_worker called")
         while not self._stop_event.is_set():
             # Wait for signal to prefetch
             self._prefetch_event.wait(timeout=0.1)
@@ -602,12 +622,14 @@ class AdaptivePrefetcher:
 
     def reset(self) -> None:
         """Reset iterator to beginning."""
+        logger.debug("reset called")
         self._current_idx = 0
         with self._buffer_lock:
             self._prefetch_buffer.clear()
 
     def estimate_batches(self) -> int:
         """Estimate number of batches needed to process all tensors."""
+        logger.debug("estimate_batches called")
         idx = 0
         count = 0
         while idx < len(self._all_tensors):

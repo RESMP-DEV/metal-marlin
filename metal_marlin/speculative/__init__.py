@@ -1,4 +1,5 @@
 """Speculative decoding: draft-then-verify for faster autoregressive inference."""
+import logging
 
 from .draft import DraftModel, DraftOutput, NGramDraft, SmallModelDraft
 from .eagle import EagleHead, TreeDraftOutput
@@ -19,6 +20,9 @@ from .verify import (
     verify_eagle_tree,
     verify_speculative,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AcceptanceResult",

@@ -5,10 +5,14 @@ for efficient CUDA/Metal kernel lookup.
 """
 
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TrellisCodebook:
@@ -40,6 +44,7 @@ class TrellisCodebook:
             Array of quantization levels for the codebook.
             Grid is uniform symmetric centered at 0, scaled by codebook_scale.
         """
+        logger.debug("get_grid called")
         n_levels = 2 ** self.bits
         # Uniform symmetric grid centered at 0
         grid = np.linspace(
@@ -61,6 +66,7 @@ class TrellisCodebook:
         Returns:
             Tuple of (quantized index, dequantized value)
         """
+        logger.info("quantize_value called with val=%s, scale=%s", val, scale)
         grid = self.get_grid()
         normalized = val / scale
 
@@ -76,4 +82,5 @@ class TrellisCodebook:
         Returns:
             Number of levels (2^bits)
         """
+        logger.debug("get_n_levels called")
         return 2 ** self.bits

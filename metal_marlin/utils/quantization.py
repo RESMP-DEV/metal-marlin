@@ -1,8 +1,12 @@
 """Common quantization utilities for KV caches."""
 
 from __future__ import annotations
+import logging
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 FP8_E4M3_MAX = 448.0
 INT8_MAX = 127.0
@@ -15,6 +19,7 @@ def quantize_fp8(
     scale_dtype: torch.dtype = torch.float16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize tensor to FP8 E4M3 format (simulated with uint8)."""
+    logger.info("quantize_fp8 called with tensor=%s, scale_method=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_method, scale_dtype)
     if scale_method == "channel":
         # Per-channel (last dim) scaling
         abs_max = tensor.abs().amax(dim=-1, keepdim=True)
@@ -38,6 +43,7 @@ def dequantize_fp8(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """Dequantize simulated FP8 tensor to float."""
+    logger.info("dequantize_fp8 called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     signed = quantized.to(torch.float32) - 128.0
     return (signed / 127.0 * FP8_E4M3_MAX * scale.to(torch.float32)).to(output_dtype)
 
@@ -48,6 +54,7 @@ def quantize_int8(
     scale_dtype: torch.dtype = torch.float16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize tensor to INT8 format with symmetric quantization."""
+    logger.info("quantize_int8 called with tensor=%s, scale_method=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_method, scale_dtype)
     if scale_method == "channel":
         abs_max = tensor.abs().amax(dim=-1, keepdim=True)
     else:
@@ -66,6 +73,7 @@ def dequantize_int8(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """Dequantize INT8 tensor to float."""
+    logger.info("dequantize_int8 called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     return (quantized.to(torch.float32) * scale.to(torch.float32)).to(output_dtype)
 
 
@@ -74,6 +82,7 @@ def quantize_fp4(
     scale_dtype: torch.dtype = torch.float16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize tensor to FP4 packed format."""
+    logger.info("quantize_fp4 called with tensor=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_dtype)
     abs_max = tensor.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
     scale = abs_max / FP4_MAX
     scaled = (tensor / scale).clamp(-FP4_MAX, FP4_MAX)
@@ -102,6 +111,7 @@ def dequantize_fp4(
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """Dequantize FP4 packed tensor to float."""
+    logger.info("dequantize_fp4 called with packed=%s, scale=%s, output_dtype=%s", packed, scale, output_dtype)
     batch, heads, seq, packed_dim = packed.shape
     dim = packed_dim * 8
     

@@ -1,5 +1,6 @@
 
 import asyncio
+import logging
 import sys
 import unittest
 from pathlib import Path
@@ -20,21 +21,28 @@ from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class MockModel:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.device = "cpu"
         self.config = MagicMock()
         self.config.hidden_size = 128
         self.config.vocab_size = 1000
         
     def to(self, device):
+        logger.debug("to called with device=%s", device)
         return self
     
     def eval(self):
+        logger.debug("eval called")
         return self
         
     def generate(self, input_ids, **kwargs):
         # Simulate generation by putting tokens into the streamer
+        logger.debug("generate called with input_ids=%s", input_ids)
         streamer = kwargs.get("streamer")
         if streamer:
             # Simulate generating 5 tokens
@@ -49,15 +57,18 @@ class MockModel:
 
 class MockTokenizer:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.vocab_size = 1000
         self.pad_token_id = 0
         self.eos_token_id = 1
         self.eos_token = "</s>"
     
     def decode(self, token_ids, **kwargs):
+        logger.debug("decode called with token_ids=%s", token_ids)
         return "".join([f"t{t}" for t in token_ids])
         
     def encode(self, text, **kwargs):
+        logger.debug("encode called with text=%s", text)
         return [1, 2, 3] # dummy
         
     def __call__(self, text, return_tensors="pt"):
@@ -65,12 +76,14 @@ class MockTokenizer:
 
 class TestStreamingGenerate(unittest.TestCase):
     def test_streaming_generate(self):
+        logger.info("running test_streaming_generate")
         model = MockModel()
         tokenizer = MockTokenizer()
         pipeline = MMFP4Pipeline(model, tokenizer, enable_persistent_cache=False)
         
         # We need to run the async method in an event loop
         async def run_test():
+            logger.info("running run_test")
             input_ids = torch.tensor([[1]])
             attention_mask = torch.tensor([[1]])
             

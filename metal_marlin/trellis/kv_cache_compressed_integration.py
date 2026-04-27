@@ -42,6 +42,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,6 +72,7 @@ def get_optimized_kv_from_cache(
     Returns:
         Compressed KV tensor [batch, seq_len, kv_lora_rank + qk_rope_head_dim]
     """
+    logger.debug("get_optimized_kv_from_cache called with kv_cache=%s, layer_idx=%s, batch_indices=%s", kv_cache, layer_idx, batch_indices)
     return kv_cache.get_compressed_kv(layer_idx, batch_indices)
 
 
@@ -97,6 +99,7 @@ def decompress_kv_optimized(
         k: Decompressed keys [batch, seq_len, num_kv_heads, qk_nope_head_dim]
         v: Decompressed values [batch, seq_len, num_kv_heads, v_head_dim]
     """
+    logger.debug("decompress_kv_optimized called with kv_cache=%s, layer_idx=%s, kv_b_proj_weight=%s", kv_cache, layer_idx, kv_b_proj_weight)
     return kv_cache.decompress_kv(
         layer_idx,
         kv_b_proj_weight,
@@ -120,6 +123,7 @@ def prefetch_with_optimization(
         layer_idx: Layer index to prefetch
         block_indices: Optional list of specific block indices to prefetch
     """
+    logger.debug("prefetch_with_optimization called with kv_cache=%s, layer_idx=%s, block_indices=%s", kv_cache, layer_idx, block_indices)
     kv_cache.prefetch_layer_async(layer_idx, block_indices)
 
 
@@ -145,6 +149,7 @@ def update_with_prefetch_and_cache(
     Returns:
         Updated compressed KV sequence
     """
+    logger.debug("update_with_prefetch_and_cache called with kv_cache=%s, layer_idx=%s, compressed_kv=%s", kv_cache, layer_idx, compressed_kv)
     result = kv_cache.update(layer_idx, compressed_kv)
 
     if trigger_prefetch and layer_idx + 1 < kv_cache.num_layers:
@@ -168,6 +173,7 @@ def is_optimized_cache(kv_cache) -> bool:
     Returns:
         True if kv_cache has optimized decompression methods
     """
+    logger.debug("is_optimized_cache called with kv_cache=%s", kv_cache)
     return (
         hasattr(kv_cache, "decompress_kv")
         and callable(kv_cache.decompress_kv)
@@ -187,6 +193,7 @@ def get_cache_optimization_stats(kv_cache) -> dict:
     Returns:
         Dictionary with optimization statistics
     """
+    logger.debug("get_cache_optimization_stats called with kv_cache=%s", kv_cache)
     if not is_optimized_cache(kv_cache):
         return {}
 
@@ -233,6 +240,7 @@ def decompress_kv_batch(
         k: Decompressed keys
         v: Decompressed values
     """
+    logger.debug("decompress_kv_batch called with kv_cache=%s, layer_idx=%s, kv_b_proj_weight=%s", kv_cache, layer_idx, kv_b_proj_weight)
     return decompress_kv_optimized(
         kv_cache,
         layer_idx,
@@ -283,6 +291,7 @@ def create_compressed_kv_cache(
             quantize_mode="int8",
         )
     """
+    logger.debug("create_compressed_kv_cache called with config=%s, max_batch_size=%s, max_seq_len=%s", config, max_batch_size, max_seq_len)
     from .kv_cache_compressed import CompressedKVCacheMLA
 
     return CompressedKVCacheMLA(
@@ -310,6 +319,7 @@ def reset_cache_for_batch(
         kv_cache: CompressedKVCacheMLA instance
         batch_idx: Batch index to reset
     """
+    logger.debug("reset_cache_for_batch called with kv_cache=%s, batch_idx=%s", kv_cache, batch_idx)
     kv_cache.reset_batch(batch_idx)
 
 
@@ -321,6 +331,7 @@ def reset_cache_all(kv_cache: CompressedKVCacheMLA) -> None:
     Args:
         kv_cache: CompressedKVCacheMLA instance
     """
+    logger.debug("reset_cache_all called with kv_cache=%s", kv_cache)
     kv_cache.reset_all()
 
 
@@ -342,6 +353,7 @@ def get_cached_block(
     Returns:
         Cached block data if available, None otherwise
     """
+    logger.debug("get_cached_block called with kv_cache=%s, layer_idx=%s, block_idx=%s", kv_cache, layer_idx, block_idx)
     return kv_cache.get_cached_block(layer_idx, block_idx)
 
 
@@ -351,6 +363,7 @@ def print_cache_stats(kv_cache: CompressedKVCacheMLA) -> None:
     Args:
         kv_cache: CompressedKVCacheMLA instance
     """
+    logger.debug("print_cache_stats called with kv_cache=%s", kv_cache)
     block_stats = kv_cache.get_block_sparse_stats()
     perf_stats = kv_cache.get_performance_stats()
 
@@ -422,6 +435,9 @@ def estimate_memory_savings(
 
     Example:
         from metal_marlin.trellis.config import TrellisModelConfig
+
+logger = logging.getLogger(__name__)
+
         config = TrellisModelConfig.from_pretrained("THUDM/glm-4-9b-chat")
         stats = estimate_memory_savings(
             config,
@@ -432,6 +448,7 @@ def estimate_memory_savings(
         )
         print(f"Memory savings: {stats['savings_ratio']:.2f}x")
     """
+    logger.debug("estimate_memory_savings called with config=%s, max_seq_len=%s, num_layers=%s", config, max_seq_len, num_layers)
     bytes_per_element = torch.tensor(0, dtype=dtype).element_size()
 
     # Standard KV cache memory

@@ -107,6 +107,7 @@ def _compiled_router_forward(
         - indices: Selected expert indices [batch, top_k]
         - weights: Normalized routing weights [batch, top_k]
     """
+    logger.info("_compiled_router_forward starting")
     logits = router(x)
     weights, indices = torch.topk(
         F.softmax(logits, dim=-1, dtype=torch.float16),
@@ -145,6 +146,7 @@ def get_buffer_timing_stats() -> dict[str, Any]:
         - cached_call_avg_ms: Average cached-call time
         - speedup: Ratio of first_call_avg to cached_call_avg
     """
+    logger.debug("get_buffer_timing_stats called")
     stats = dict(_buffer_timing_stats)
     if stats["first_call_ms"]:
         stats["first_call_avg_ms"] = sum(
@@ -172,6 +174,7 @@ def get_buffer_timing_stats() -> dict[str, Any]:
 
 def reset_buffer_timing_stats() -> None:
     """Reset buffer timing statistics."""
+    logger.debug("reset_buffer_timing_stats called")
     global _buffer_timing_stats
     _buffer_timing_stats = {
         "first_call_ms": [],
@@ -205,6 +208,7 @@ class PromptCacheEntry:
         Returns:
             True if expired, False otherwise.
         """
+        logger.debug("is_expired called with max_age_seconds=%s", max_age_seconds)
         return time.monotonic() - self.timestamp > max_age_seconds
 
 
@@ -237,6 +241,7 @@ def hash_prompt_tokens(input_ids: torch.Tensor) -> str:
     Returns:
         SHA256 hash as hex string.
     """
+    logger.debug("hash_prompt_tokens called with input_ids=%s", input_ids)
     tokens_bytes = input_ids.cpu().numpy().tobytes()
     return hashlib.sha256(tokens_bytes).hexdigest()
 
@@ -247,6 +252,7 @@ def get_prompt_cache_stats() -> dict[str, Any]:
     Returns:
         Dict with cache hits, misses, hit rate, and other stats.
     """
+    logger.debug("get_prompt_cache_stats called")
     total = _prompt_cache_stats["hits"] + _prompt_cache_stats["misses"]
     hit_rate = _prompt_cache_stats["hits"] / total if total > 0 else 0.0
 
@@ -262,6 +268,7 @@ def get_prompt_cache_stats() -> dict[str, Any]:
 
 def reset_prompt_cache_stats() -> None:
     """Reset prompt cache statistics."""
+    logger.debug("reset_prompt_cache_stats called")
     global _prompt_cache_stats
     _prompt_cache_stats = {
         "hits": 0,
@@ -273,6 +280,7 @@ def reset_prompt_cache_stats() -> None:
 
 def clear_prompt_cache() -> None:
     """Clear all cached prompts."""
+    logger.debug("clear_prompt_cache called")
     global _prompt_cache
     _prompt_cache.clear()
     reset_prompt_cache_stats()
@@ -289,6 +297,7 @@ def lookup_prompt_cache(
     Returns:
         Cached entry if found, None otherwise.
     """
+    logger.debug("lookup_prompt_cache called with input_ids=%s", input_ids)
     global _prompt_cache_stats
 
     prompt_hash = hash_prompt_tokens(input_ids)
@@ -319,6 +328,7 @@ def store_prompt_cache(input_ids: torch.Tensor, kv_cache: TrellisKVCache) -> Pro
     Returns:
         The created cache entry.
     """
+    logger.debug("store_prompt_cache called with input_ids=%s, kv_cache=%s", input_ids, kv_cache)
     global _prompt_cache
 
     prompt_hash = hash_prompt_tokens(input_ids)
@@ -346,6 +356,7 @@ def store_prompt_cache(input_ids: torch.Tensor, kv_cache: TrellisKVCache) -> Pro
 
 def evict_expired_prompt_cache_entries() -> None:
     """Remove expired entries from the prompt cache."""
+    logger.debug("evict_expired_prompt_cache_entries called")
     global _prompt_cache, _prompt_cache_stats
 
     expired_keys = [k for k, v in _prompt_cache.items(
@@ -393,6 +404,7 @@ class TokenEmbeddingCache:
         Args:
             token_id: Token ID to record.
         """
+        logger.debug("record_token called with token_id=%s", token_id)
         if 0 <= token_id < self.vocab_size:
             self._token_counts_tensor[token_id] += 1
 
@@ -405,6 +417,7 @@ class TokenEmbeddingCache:
         Args:
             embedding_layer: The nn.Embedding layer to cache from.
         """
+        logger.info("build_cache starting")
         if self._cache_built:
             return
 
@@ -441,6 +454,7 @@ class TokenEmbeddingCache:
         Returns:
             Embeddings [batch, seq_len, hidden_dim].
         """
+        logger.debug("get_embeddings called with input_ids=%s, embedding_layer=%s", input_ids, embedding_layer)
         if not self._cache_built or self._cached_embeddings is None:
             return embedding_layer(input_ids)
 
@@ -476,6 +490,7 @@ class TokenEmbeddingCache:
             - total_tokens: Total unique tokens seen
             - cache_hit_rate: (cache_size / total_tokens) if tokens seen
         """
+        logger.debug("get_cache_stats called")
         total_unique = (self._token_counts_tensor > 0).sum().item()
         cache_size = self._cache_mask.sum().item()
         hit_rate = cache_size / total_unique if total_unique > 0 else 0.0
@@ -511,6 +526,7 @@ class OutputBufferPool:
         Returns:
             Tuple of (PyTorch tensor, Metal buffer) for output.
         """
+        logger.debug("get_output_buffer called with batch_size=%s, dtype=%s", batch_size, dtype)
         key = batch_size
         if key not in self._buffers:
             tensor = torch.zeros(batch_size, self.hidden_dim,
@@ -527,15 +543,18 @@ class OutputBufferPool:
             batch_sizes: List of batch sizes to pre-allocate.
             dtype: Data type for the buffers.
         """
+        logger.debug("preallocate called with batch_sizes=%s, dtype=%s", batch_sizes, dtype)
         for bs in batch_sizes:
             self.get_output_buffer(bs, dtype)
 
     def clear(self) -> None:
         """Clear all cached buffers."""
+        logger.debug("clear called")
         self._buffers.clear()
 
     def memory_usage_bytes(self) -> int:
         """Get total memory usage of cached buffers in bytes."""
+        logger.debug("memory_usage_bytes called")
         total = 0
         for tensor, _ in self._buffers.values():
             total += tensor.numel() * tensor.element_size()
@@ -562,6 +581,7 @@ class WorkspaceBufferPool:
             intermediate_dim: Intermediate dimension size (typically 4x hidden).
             device: Device to allocate buffers on.
         """
+        logger.debug("initializing %s with hidden_dim=%s, intermediate_dim=%s, device=%s", type(self).__name__, hidden_dim, intermediate_dim, device)
         self.hidden_dim = hidden_dim
         self.intermediate_dim = intermediate_dim
         self.device = device
@@ -586,6 +606,7 @@ class WorkspaceBufferPool:
         Returns:
             Output buffer tensor [batch_size, hidden_dim] in fp16.
         """
+        logger.debug("get_output_buffer called with batch_size=%s", batch_size)
         if batch_size == 1:
             return self.output_buffer
         # Grow if needed
@@ -605,6 +626,7 @@ class WorkspaceBufferPool:
         Returns:
             Accumulator buffer tensor [batch_size, hidden_dim] in fp32.
         """
+        logger.debug("get_accum_buffer called with batch_size=%s", batch_size)
         if batch_size == 1:
             return self.accum_buffer
         # Grow if needed
@@ -625,6 +647,7 @@ class WorkspaceBufferPool:
         Returns:
             Intermediate buffer tensor [batch_size, intermediate_dim] in fp16.
         """
+        logger.debug("get_intermediate_buffer called with batch_size=%s", batch_size)
         if batch_size == 1:
             return self.intermediate
         # Grow if needed
@@ -645,6 +668,7 @@ class WorkspaceBufferPool:
         Returns:
             Tuple of (output_buffer, accum_buffer, intermediate_buffer).
         """
+        logger.debug("get_all_buffers called with batch_size=%s", batch_size)
         return (
             self.get_output_buffer(batch_size),
             self.get_accum_buffer(batch_size),
@@ -653,6 +677,7 @@ class WorkspaceBufferPool:
 
     def clear(self) -> None:
         """Clear all buffers, freeing memory."""
+        logger.debug("clear called")
         self.output_buffer = torch.empty(
             1, self.hidden_dim, dtype=torch.float16, device=self.device)
         self.accum_buffer = torch.empty(
@@ -663,6 +688,7 @@ class WorkspaceBufferPool:
 
     def memory_usage_bytes(self) -> int:
         """Get total memory usage of buffers in bytes."""
+        logger.debug("memory_usage_bytes called")
         return (
             self.output_buffer.numel() * self.output_buffer.element_size()
             + self.accum_buffer.numel() * self.accum_buffer.element_size()
@@ -711,6 +737,7 @@ class TrellisMoEMLP(nn.Module):
             use_mixed_bpw_optimizations: Enable mixed-precision dispatch optimizations.
             enable_kernel_autotune: Enable one-time kernel auto-tuning on first forward.
         """
+        logger.debug("initializing %s with router=%s, experts=%s, shared_expert=%s, num_experts_per_tok=%s, eager_buffers=%s", type(self).__name__, router, experts, shared_expert, num_experts_per_tok, eager_buffers)
         super().__init__()
         self._eager_buffers = eager_buffers
         self.router = router
@@ -836,6 +863,7 @@ class TrellisMoEMLP(nn.Module):
         This method is guarded to run only once. Subsequent calls are no-ops.
         """
         # Guard: ensure this runs only once (at load time, not during inference)
+        logger.debug("_prepare_expert_weights called")
         if getattr(self, "_weights_prepared", False):
             return
         self._weights_prepared = True
@@ -942,6 +970,7 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             True if experts have varying bit widths, False if uniform.
         """
+        logger.debug("_check_mixed_precision called")
         if not self.experts:
             return False
 
@@ -980,6 +1009,7 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             Dict mapping (gate_bits, up_bits, down_bits) -> list of expert indices.
         """
+        logger.info("_build_bit_groups starting")
         groups: dict[tuple[int, int, int], list[int]] = {}
         for i, expert in enumerate(self.experts):
             bit_tuple = (
@@ -1012,6 +1042,7 @@ class TrellisMoEMLP(nn.Module):
         Buffer creation is deferred to _ensure_bit_group_buffers() on first use.
         This saves ~16GB of duplicate weight storage.
         """
+        logger.info("_build_bit_group_cache starting")
         if not self.experts:
             self._bit_group_cache = {}
             return
@@ -1058,6 +1089,7 @@ class TrellisMoEMLP(nn.Module):
             Stacked tensor [num_experts, tiles_k, tiles_n, max_packed_bytes].
         """
         # Find max packed bytes across all experts
+        logger.debug("_stack_mixed_precision_weights called with weights=%s", weights)
         max_packed = max(w.shape[-1] for w in weights)
 
         # Check if all weights already have same size (common case)
@@ -1096,8 +1128,10 @@ class TrellisMoEMLP(nn.Module):
         """
 
         # Helper to ensure tensor is on CPU without round-trip through MPS
+        logger.debug("_prepare_expert_weights_cpu called")
         def _ensure_cpu(tensor: torch.Tensor) -> torch.Tensor:
             """Get tensor on CPU, avoiding device transfer if already there."""
+            logger.debug("_ensure_cpu called with tensor=%s", tensor)
             if tensor.device.type == "cpu":
                 return tensor
             # If on MPS/cuda, we need to move to CPU (but this should be rare
@@ -1174,12 +1208,14 @@ class TrellisMoEMLP(nn.Module):
 
     def _get_lib(self) -> MetalKernelLibrary:
         """Get or create Metal kernel library."""
+        logger.debug("_get_lib called")
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
     def _get_async_cmd_manager(self) -> AsyncCommandBufferManager:
         """Get or create async command buffer manager for layer."""
+        logger.debug("_get_async_cmd_manager called")
         if self._async_cmd_manager is None:
             from .async_dispatch import AsyncCommandBufferManager
             self._async_cmd_manager = AsyncCommandBufferManager(
@@ -1188,6 +1224,7 @@ class TrellisMoEMLP(nn.Module):
 
     def _check_fast_moe_available(self) -> bool:
         """Check if fast MoE kernel is available."""
+        logger.debug("_check_fast_moe_available called")
         try:
             lib = self._get_lib()
             # Try to get pipeline - will raise if not available
@@ -1210,6 +1247,7 @@ class TrellisMoEMLP(nn.Module):
         per dispatch during decode. Only dynamic inputs (activations, expert_ids,
         expert_probs) need new buffers per call.
         """
+        logger.debug("_get_cached_buffers called")
         if self._cached_weight_buffers is not None:
             return self._cached_weight_buffers
 
@@ -1259,6 +1297,7 @@ class TrellisMoEMLP(nn.Module):
         Pre-allocates output tensors for batch sizes 1, 2, 4, 8, 16 to avoid
         repeated allocation during autoregressive decode.
         """
+        logger.debug("_get_output_buffer_pool called")
         if self._output_buffer_pool is None:
             lib = self._get_lib()
             self._output_buffer_pool = OutputBufferPool(
@@ -1276,6 +1315,7 @@ class TrellisMoEMLP(nn.Module):
         Pre-allocates activation, expert_ids, expert_probs, and output buffers
         for common batch sizes to avoid repeated buffer creation during decode.
         """
+        logger.debug("_get_buffer_pool called")
         if self._buffer_pool is None:
             lib = self._get_lib()
             self._buffer_pool = MoEBufferPool(
@@ -1293,6 +1333,7 @@ class TrellisMoEMLP(nn.Module):
         Pre-allocates output, accumulator, and intermediate buffers
         to eliminate per-forward allocations.
         """
+        logger.debug("_get_workspace_buffer_pool called")
         if self._workspace_buffer_pool is None:
             device = str(next(self.router.parameters()).device)
             self._workspace_buffer_pool = WorkspaceBufferPool(
@@ -1308,6 +1349,7 @@ class TrellisMoEMLP(nn.Module):
         Call this after modifying model weights (e.g., after quantization
         or fine-tuning) to ensure buffers are recreated on next forward pass.
         """
+        logger.debug("invalidate_buffer_cache called")
         self._cached_weight_buffers = None
         if self._output_buffer_pool is not None:
             self._output_buffer_pool.clear()
@@ -1333,6 +1375,7 @@ class TrellisMoEMLP(nn.Module):
         Args:
             dispatcher: BatchedDispatcher to use, or None to use immediate execution.
         """
+        logger.debug("set_batched_dispatcher called with dispatcher=%s", dispatcher)
         self._batched_dispatcher = dispatcher
         self._pending_output = None
 
@@ -1342,6 +1385,7 @@ class TrellisMoEMLP(nn.Module):
         This should be called after the batched dispatcher has committed.
         Returns None if no dispatch was queued.
         """
+        logger.debug("get_pending_output called")
         return self._pending_output
 
     def _create_buffers_eagerly(self) -> None:
@@ -1356,6 +1400,7 @@ class TrellisMoEMLP(nn.Module):
 
         Called during __init__ when eager_buffers=True.
         """
+        logger.debug("_create_buffers_eagerly called")
         import gc
 
         from .moe_dispatch import create_cached_weight_buffers_from_cpu
@@ -1452,6 +1497,7 @@ class TrellisMoEMLP(nn.Module):
 
         Called during _create_buffers_eagerly() when mixed precision is detected.
         """
+        logger.debug("_create_bit_group_buffers called")
         from .moe_dispatch import create_cached_weight_buffers_from_cpu
 
         lib = self._get_lib()
@@ -1525,31 +1571,37 @@ class TrellisMoEMLP(nn.Module):
 
     def _check_routing_cache(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Check if cached routing decision can be reused for this input."""
+        logger.debug("_check_routing_cache called with x=%s", x)
         return self.expert_selection_cache.check(x)
 
     def _update_routing_cache(
         self, x: torch.Tensor, selected_experts: torch.Tensor, routing_weights: torch.Tensor
     ) -> None:
         """Update the routing cache with new routing decision."""
+        logger.debug("_update_routing_cache called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         self.expert_selection_cache.update(
             x, selected_experts, routing_weights)
 
     def get_routing_cache_stats(self) -> dict[str, int | float]:
         """Get routing cache hit/miss statistics."""
+        logger.debug("get_routing_cache_stats called")
         return self.expert_selection_cache.get_stats()
 
     def reset_routing_cache_stats(self) -> None:
         """Reset routing cache statistics."""
+        logger.debug("reset_routing_cache_stats called")
         self.expert_selection_cache.hits = 0
         self.expert_selection_cache.misses = 0
 
     def clear_routing_cache(self) -> None:
         """Clear the routing cache (e.g., at start of new generation)."""
+        logger.debug("clear_routing_cache called")
         self.expert_selection_cache.clear()
         self._cached_routing = None
 
     def get_expert_selection_stats(self) -> dict[str, Any]:
         """Get expert selection statistics and hot/cold expert information."""
+        logger.debug("get_expert_selection_stats called")
         num_experts = len(self.experts)
         cold_experts = set(range(num_experts)) - self._hot_experts
         return {
@@ -1563,6 +1615,7 @@ class TrellisMoEMLP(nn.Module):
 
     def reset_expert_stats(self) -> None:
         """Reset expert selection frequency statistics."""
+        logger.debug("reset_expert_stats called")
         self._expert_selection_counts = [0] * len(self.experts)
         self._forward_call_count = 0
         self._hot_experts = set(range(len(self.experts)))
@@ -1578,6 +1631,7 @@ class TrellisMoEMLP(nn.Module):
                       Default is 0.5 (top 50% are hot).
                       Lower values reduce memory but may increase latency.
         """
+        logger.debug("set_hot_expert_threshold called with threshold=%s", threshold)
         if not 0.0 < threshold <= 1.0:
             raise ValueError(f"threshold must be in (0, 1], got {threshold}")
         self._hot_expert_threshold = threshold
@@ -1596,6 +1650,7 @@ class TrellisMoEMLP(nn.Module):
             - total_experts_bytes: Total if all experts were hot
             - savings_bytes: Memory saved by cold expert sharing
         """
+        logger.debug("get_memory_usage_estimate called")
         num_experts = len(self.experts)
         num_hot = len(self._hot_experts)
         num_cold_loaded = len(self._cold_expert_buffer_pool)
@@ -1644,6 +1699,7 @@ class TrellisMoEMLP(nn.Module):
         Args:
             selected_experts: Selected expert indices [batch, top_k].
         """
+        logger.debug("_update_expert_frequencies called with selected_experts=%s", selected_experts)
         if self.expert_memory_pool is not None:
             # Use ExpertMemoryPool for hot/cold management on large models.
             self.expert_memory_pool.record_selection(selected_experts)
@@ -1669,6 +1725,7 @@ class TrellisMoEMLP(nn.Module):
         Note: ExpertMemoryPool automatically recomputes hot/cold experts
         via record_selection(), so this method primarily serves to sync legacy state.
         """
+        logger.debug("_recompute_hot_experts called")
         num_experts = len(self.experts)
         if num_experts == 0:
             return
@@ -1715,6 +1772,7 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             CachedWeightBuffers for the cold expert, or None if loading fails.
         """
+        logger.debug("_get_cold_expert_buffers called with expert_id=%s", expert_id)
         if expert_id in self._cold_expert_buffer_pool:
             return self._cold_expert_buffer_pool[expert_id]
 
@@ -1755,6 +1813,7 @@ class TrellisMoEMLP(nn.Module):
 
     def get_weight_tensors(self) -> dict[str, torch.Tensor] | None:
         """Get weight tensors for async transfer (if not using eager buffers)."""
+        logger.debug("get_weight_tensors called")
         if self._cached_weight_buffers is not None or self._eager_buffers:
             return None
 
@@ -1817,6 +1876,7 @@ class TrellisMoEMLP(nn.Module):
             Output tensor [batch, hidden_dim] in fp16.
         """
         # First try to use the MixedBPWMoEDispatcher if available
+        logger.debug("_dispatch_mixed_precision called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         if self.mixed_bpw_dispatcher is not None:
             try:
                 return self.mixed_bpw_dispatcher.dispatch(
@@ -1930,6 +1990,7 @@ class TrellisMoEMLP(nn.Module):
 
     def _get_tuning_cache_key(self) -> dict[str, Any]:
         """Build a stable cache key for kernel auto-tuning results."""
+        logger.debug("_get_tuning_cache_key called")
         bits_key: int | list[int]
         if self._is_mixed_precision:
             # Use a canonical mixed-bpw signature so equivalent models share cache.
@@ -1952,6 +2013,7 @@ class TrellisMoEMLP(nn.Module):
 
     def _get_tuning_cache_path(self) -> Path:
         """Get disk cache path for this layer's kernel auto-tuning results."""
+        logger.debug("_get_tuning_cache_path called")
         cache_key = self._get_tuning_cache_key()
         key_json = json.dumps(cache_key, sort_keys=True, separators=(",", ":"))
         model_hash = hashlib.sha256(key_json.encode("utf-8")).hexdigest()
@@ -1964,6 +2026,7 @@ class TrellisMoEMLP(nn.Module):
 
     def _load_cached_tuning(self) -> dict[str, Any] | None:
         """Load kernel auto-tuning configuration from disk cache."""
+        logger.info("_load_cached_tuning called")
         cache_path = self._get_tuning_cache_path()
         if not cache_path.exists():
             return None
@@ -1996,6 +2059,7 @@ class TrellisMoEMLP(nn.Module):
 
     def _save_tuning_cache(self) -> None:
         """Save kernel auto-tuning configuration to disk cache."""
+        logger.info("_save_tuning_cache called")
         if not self._kernel_config or "optimal" not in self._kernel_config:
             return
 
@@ -2021,6 +2085,7 @@ class TrellisMoEMLP(nn.Module):
         Measures performance of different kernel configurations and selects
         the optimal settings for subsequent forward passes.
         """
+        logger.debug("_auto_tune_kernel called with x=%s", x)
         if self._kernel_auto_tuned or not self.enable_kernel_autotune:
             return
 
@@ -2147,10 +2212,12 @@ class TrellisMoEMLP(nn.Module):
 
     def _auto_tune_kernels(self, x: torch.Tensor) -> None:
         """Alias for _auto_tune_kernel."""
+        logger.debug("_auto_tune_kernels called with x=%s", x)
         self._auto_tune_kernel(x)
 
     def _get_optimal_use_fp32_acc(self) -> bool:
         """Get optimal accumulator precision from auto-tuning results."""
+        logger.debug("_get_optimal_use_fp32_acc called")
         if self._kernel_config and "optimal" in self._kernel_config:
             return self._kernel_config["optimal"].get("use_fp32_acc", self.hidden_dim >= 1024)
         return self.hidden_dim >= 1024
@@ -2180,6 +2247,7 @@ class TrellisMoEMLP(nn.Module):
         feeds into the next layer's attention, so we cannot defer MoE
         computation.
         """
+        logger.debug("forward_fast called with x=%s, workspace=%s, workspace_offset=%s", x, workspace, workspace_offset)
         batch_size = x.shape[0] if x.dim(
         ) == 2 else x.numel() // self.hidden_dim
 
@@ -2560,6 +2628,7 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             Output tensor [..., hidden_size].
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         return self.forward_fast(
             x,
             workspace=workspace,
@@ -2577,6 +2646,7 @@ class TrellisMoEMLP(nn.Module):
         workspace_offset: int = 0,
     ) -> torch.Tensor:
         """Fallback for mixed-precision using per-expert dispatch."""
+        logger.debug("_forward_grouped_fallback called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         from .moe_dispatch import dispatch_moe_trellis_swiglu
 
         lib = self._get_lib()
@@ -2629,6 +2699,7 @@ class TrellisMoEMLP(nn.Module):
         heterogeneous bit configurations prevent safe slicing, falls back
         to per-expert dispatch for that group.
         """
+        logger.debug("_ensure_bit_group_buffers called")
         if self._cached_weight_buffers is None:
             # Global buffers not available yet, will retry on next forward
             return
@@ -2734,6 +2805,7 @@ class TrellisMoEMLP(nn.Module):
         workspace_offset: int = 0,
     ) -> torch.Tensor:
         # Guard: fall back if cache not available
+        logger.debug("_forward_grouped called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         if not hasattr(self, '_bit_group_cache') or self._bit_group_cache is None:
             return self._forward_grouped_fallback(
                 x, selected_experts, routing_weights, workspace, workspace_offset
@@ -2861,6 +2933,7 @@ class TrellisMoEMLP(nn.Module):
         Returns:
             TrellisMoEMLP module initialized with layer weights.
         """
+        logger.info("from_loader called with loader=%s, config=%s, layer_idx=%s", loader, config, layer_idx)
         layer_weights = loader.load_layer(layer_idx)
         prefix = f"model.layers.{layer_idx}.mlp"
 
@@ -2942,6 +3015,7 @@ class TrellisMoEMLP(nn.Module):
             - mean_abs_error: Mean absolute reconstruction error
             - snr_db: Signal-to-noise ratio in dB
         """
+        logger.info("quantize_router_to_int8 called")
         from .router_int8 import Int8RouterLinear, measure_quantization_error
 
         # Skip if already quantized
@@ -2976,6 +3050,7 @@ class TrellisMoEMLP(nn.Module):
             - scales_bytes: Size of scale tensor in bytes (if int8)
             - total_bytes: Total memory usage
         """
+        logger.debug("get_router_memory_usage called")
         if self._use_int8_router:
             # type: ignore[attr-defined, assignment]
             weights_int8: torch.Tensor = self.router.weights_int8
@@ -3030,6 +3105,7 @@ class TrellisDecoderLayer(nn.Module):
             layer_idx: Layer index (0-indexed).
             device: Device to place modules on.
         """
+        logger.debug("initializing %s with config=%s, layer_idx=%s, device=%s", type(self).__name__, config, layer_idx, device)
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -3053,6 +3129,7 @@ class TrellisDecoderLayer(nn.Module):
 
     def get_weight_tensors(self) -> dict[str, torch.Tensor] | None:
         """Get weight tensors from MoE MLP if available."""
+        logger.debug("get_weight_tensors called")
         if isinstance(self.mlp, TrellisMoEMLP):
             return self.mlp.get_weight_tensors()
         return None
@@ -3087,6 +3164,7 @@ class TrellisDecoderLayer(nn.Module):
         Returns:
             Output tensor [..., seq_len, hidden_size].
         """
+        logger.debug("_layer_forward_impl called with hidden_states=%s, attention_mask=%s, position_ids=%s", hidden_states, attention_mask, position_ids)
         layer_dtype = hidden_states.dtype
 
         # Pre-attention normalization
@@ -3138,6 +3216,7 @@ class TrellisDecoderLayer(nn.Module):
         return hidden_states
 
     def _layer_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logger.debug("_layer_forward called with hidden_states=%s", hidden_states)
         if self._checkpoint_context is None:
             raise RuntimeError(
                 "Checkpoint context is missing for TrellisDecoderLayer")
@@ -3170,6 +3249,7 @@ class TrellisDecoderLayer(nn.Module):
         _batch_ctx: LayerBatchContext | None = None,
     ) -> torch.Tensor:
         """Forward pass through the decoder layer."""
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if self.gradient_checkpointing and self.training:
             self._checkpoint_context = {
                 "attention_mask": attention_mask,
@@ -3229,6 +3309,7 @@ class TrellisDecoderLayer(nn.Module):
         Returns:
             TrellisDecoderLayer module initialized with layer weights.
         """
+        logger.info("from_loader called with loader=%s, config=%s, layer_idx=%s", loader, config, layer_idx)
         layer = cls(config, layer_idx, device)
 
         # Load layer weights
@@ -3368,6 +3449,7 @@ class ActivationPingPongBuffer:
             device: Device to allocate buffers on.
             dtype: Data type for activations (default: fp16).
         """
+        logger.debug("initializing %s with hidden_dim=%s, device=%s, dtype=%s", type(self).__name__, hidden_dim, device, dtype)
         self.hidden_dim = hidden_dim
         self.device = device
         self.dtype = dtype
@@ -3379,6 +3461,7 @@ class ActivationPingPongBuffer:
 
     def set_workspace(self, workspace: torch.Tensor, offset_a: int, offset_b: int) -> None:
         """Set workspace buffer and offsets for ping-pong buffers."""
+        logger.debug("set_workspace called with workspace=%s, offset_a=%s, offset_b=%s", workspace, offset_a, offset_b)
         self._workspace = workspace
         self._offsets = (offset_a, offset_b)
 
@@ -3386,6 +3469,7 @@ class ActivationPingPongBuffer:
         self, offset_bytes: int, batch_size: int, seq_len: int
     ) -> torch.Tensor:
         """Get a buffer from the workspace."""
+        logger.debug("_get_buffer_from_workspace called with offset_bytes=%s, batch_size=%s, seq_len=%s", offset_bytes, batch_size, seq_len)
         if self._workspace is None:
             raise ValueError("Workspace not set")
 
@@ -3409,6 +3493,7 @@ class ActivationPingPongBuffer:
         Returns:
             Input activation tensor [batch_size, seq_len, hidden_dim].
         """
+        logger.debug("get_input_buffer called with batch_size=%s, seq_len=%s", batch_size, seq_len)
         if self._workspace is not None:
             offset = self._offsets[0] if self._current_idx == 0 else self._offsets[1]
             return self._get_buffer_from_workspace(offset, batch_size, seq_len)
@@ -3439,6 +3524,7 @@ class ActivationPingPongBuffer:
         Returns:
             Output activation tensor [batch_size, seq_len, hidden_dim].
         """
+        logger.debug("get_output_buffer called with batch_size=%s, seq_len=%s", batch_size, seq_len)
         if self._workspace is not None:
             offset = self._offsets[1] if self._current_idx == 0 else self._offsets[0]
             self._current_idx = 1 - self._current_idx
@@ -3467,10 +3553,12 @@ class ActivationPingPongBuffer:
 
         Use this to reset or control buffer swapping.
         """
+        logger.debug("swap called")
         self._current_idx = 1 - self._current_idx
 
     def clear(self) -> None:
         """Clear all buffers, freeing memory."""
+        logger.debug("clear called")
         self._buffer_a = None
         self._buffer_b = None
         self._current_idx = 0
@@ -3480,6 +3568,7 @@ class TrellisModel(nn.Module):
     """Complete trellis-quantized model for inference."""
 
     def __init__(self, config: TrellisModelConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         super().__init__()
         self.config = config
 
@@ -3506,11 +3595,13 @@ class TrellisModel(nn.Module):
 
     def enable_gradient_checkpointing(self) -> None:
         """Enable activation checkpointing to reduce memory."""
+        logger.debug("enable_gradient_checkpointing called")
         for layer in self.layers:
             layer.gradient_checkpointing = True
 
     def _prefetch_layer_weights(self, layer_idx: int) -> None:
         """Prefetch next layer's weight buffers."""
+        logger.debug("_prefetch_layer_weights called with layer_idx=%s", layer_idx)
         if layer_idx >= len(self.layers):
             return
         next_mlp = self.layers[layer_idx].mlp
@@ -3541,6 +3632,7 @@ class TrellisModel(nn.Module):
         Returns:
             Hidden states tensor [batch, seq_len, hidden_size].
         """
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         hidden_states = self.embed_tokens(input_ids)
         batch_size, seq_len = input_ids.shape
 
@@ -3686,6 +3778,7 @@ class TrellisModel(nn.Module):
         Returns:
             Embeddings [batch, seq_len, hidden_size].
         """
+        logger.debug("_get_cached_embeddings called with input_ids=%s", input_ids)
         flat_ids = input_ids.flatten()
         num_tokens = flat_ids.numel()
         self._total_tokens_seen += num_tokens
@@ -3699,6 +3792,7 @@ class TrellisModel(nn.Module):
         return self._embedding_cache.get_embeddings(input_ids, self.embed_tokens)
 
     def _make_causal_mask(self, seq_len: int, device) -> torch.Tensor:
+        logger.debug("_make_causal_mask called with seq_len=%s, device=%s", seq_len, device)
         mask = torch.triu(torch.ones(
             seq_len, seq_len, device=device), diagonal=1)
         return mask.masked_fill(mask == 1, float("-inf"))
@@ -3714,6 +3808,7 @@ class TrellisModel(nn.Module):
             The BatchedDispatcher if any MoE layers exist, None otherwise.
         """
         # Find the first MoE layer to get the Metal library
+        logger.info("setup_batched_dispatch starting")
         lib = None
         for layer in self.layers:
             if isinstance(layer.mlp, TrellisMoEMLP):
@@ -3740,6 +3835,7 @@ class TrellisModel(nn.Module):
 
         After this call, all output tensors from MoE layers contain valid results.
         """
+        logger.debug("flush_batched_dispatch called")
         for layer in self.layers:
             if hasattr(layer.mlp, "_batched_dispatcher") and layer.mlp._batched_dispatcher:
                 layer.mlp._batched_dispatcher.commit_and_wait()
@@ -3751,6 +3847,7 @@ class TrellisModel(nn.Module):
 
         Restores immediate execution mode for MoE kernels.
         """
+        logger.debug("clear_batched_dispatch called")
         for layer in self.layers:
             if hasattr(layer.mlp, "set_batched_dispatcher"):
                 layer.mlp.set_batched_dispatcher(None)
@@ -3775,6 +3872,7 @@ class TrellisModel(nn.Module):
             defer_buffer_creation: If True (default), defer Metal buffer creation
                 until first forward pass. This speeds up loading significantly.
         """
+        logger.debug("from_pretrained called with model_path=%s, device=%s, load_in_layers=%s", model_path, device, load_in_layers)
         load_start = time.perf_counter()
 
         config = TrellisModelConfig.from_pretrained(model_path)
@@ -3789,6 +3887,7 @@ class TrellisModel(nn.Module):
         current_step = 0
 
         def report_progress(msg: str) -> None:
+            logger.debug("report_progress called with msg=%s", msg)
             nonlocal current_step
             current_step += 1
             if progress_callback:
@@ -3842,6 +3941,7 @@ class TrellisModel(nn.Module):
         Uses memory-mapped loading to avoid loading weights into RAM upfront.
         The OS pages in weight data on demand during the forward pass.
         """
+        logger.info("_load_base_weights called with model_path=%s", model_path)
         from pathlib import Path
 
         from ..mmap_loader import MmapSafetensorsLoader

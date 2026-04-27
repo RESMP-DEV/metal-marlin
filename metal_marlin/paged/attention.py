@@ -38,12 +38,16 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.special import softmax
 
+
+
+logger = logging.getLogger(__name__)
 
 def paged_attention_v1(
     query: NDArray[Any],  # [num_seqs, num_heads, head_dim]
@@ -70,6 +74,7 @@ def paged_attention_v1(
     Returns:
         Attention output [num_seqs, num_heads, head_dim] as float16.
     """
+    logger.debug("paged_attention_v1 called with query=%s, k_cache=%s, v_cache=%s", query, k_cache, v_cache)
     num_seqs, num_heads, head_dim = query.shape
     block_size = k_cache.shape[1]
 
@@ -140,6 +145,7 @@ def paged_attention(
     Returns:
         Attention output [num_seqs, num_heads, seq_len, head_dim].
     """
+    logger.debug("paged_attention called with query=%s, block_pool=%s, block_tables=%s", query, block_pool, block_tables)
     num_seqs = query.shape[0]
     num_heads = query.shape[1]
     seq_len = query.shape[2]
@@ -246,6 +252,7 @@ def write_kv_to_blocks(
     Returns:
         Updated block_pool array.
     """
+    logger.info("write_kv_to_blocks called with block_pool=%s, block_tables=%s, keys=%s", block_pool, block_tables, keys)
     num_seqs = keys.shape[0]
     num_tokens = keys.shape[1]
 

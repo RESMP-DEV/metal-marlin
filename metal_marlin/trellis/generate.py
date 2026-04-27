@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 from .._compat import require_torch, torch
@@ -32,6 +33,9 @@ from ..kv_cache import CacheConfig, KVCache, TrellisKVCache
 if TYPE_CHECKING:
     import torch as torch_typing
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class GenerationConfig:

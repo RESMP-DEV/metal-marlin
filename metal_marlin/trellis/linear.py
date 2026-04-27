@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,9 @@ from .dispatch import (
 if TYPE_CHECKING:
     from .loader import TrellisWeight
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MixedBPWLayout:
@@ -67,11 +71,13 @@ class MixedBPWLayout:
 
     def get_groups_for_bitwidth(self, bits: int) -> list[int]:
         """Get the group indices that use a specific bit-width."""
+        logger.debug("get_groups_for_bitwidth called with bits=%s", bits)
         return self.bit_to_groups.get(bits, [])
 
     @property
     def num_groups(self) -> int:
         """Total number of weight groups."""
+        logger.debug("num_groups called")
         return len(self.group_bits)
 
     def get_bitwidth_distribution(self) -> dict[int, int]:
@@ -80,6 +86,7 @@ class MixedBPWLayout:
         Returns:
             Dictionary mapping bit-width to group count.
         """
+        logger.debug("get_bitwidth_distribution called")
         return {bits: len(groups) for bits, groups in self.bit_to_groups.items()}
 
     def get_bitwidth_coverage(self) -> dict[int, float]:
@@ -88,6 +95,7 @@ class MixedBPWLayout:
         Returns:
             Dictionary mapping bit-width to coverage fraction.
         """
+        logger.debug("get_bitwidth_coverage called")
         total = self.num_groups
         if total == 0:
             return {}
@@ -114,6 +122,7 @@ class TrellisLinear(nn.Module):
         device: torch.device | str | None = None,
     ) -> None:
         """Initialize TrellisLinear."""
+        logger.debug("initializing %s with in_features=%s, out_features=%s, bits=%s, bias=%s, device=%s", type(self).__name__, in_features, out_features, bits, bias, device)
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -173,6 +182,7 @@ class TrellisLinear(nn.Module):
         bits_per_group: torch.Tensor,
     ) -> tuple[MixedBPWLayout, torch.Tensor, torch.Tensor]:
         """Build optimized memory layout for mixed bit-width weight storage."""
+        logger.info("_pack_same_bitwidth_groups_contiguously called with packed_indices_by_bits=%s, scales_by_bits=%s, bits_per_group=%s", packed_indices_by_bits, scales_by_bits, bits_per_group)
         unique_bits = sorted(packed_indices_by_bits.keys())
 
         sorted_group_indices = torch.argsort(bits_per_group, stable=True)
@@ -242,6 +252,7 @@ class TrellisLinear(nn.Module):
         device: torch.device | str | None = None,
     ) -> TrellisLinear:
         """Create TrellisLinear from mixed bit-width tensors."""
+        logger.debug("from_mixed_bpw_tensors called with in_features=%s, out_features=%s, bits_per_group=%s", in_features, out_features, bits_per_group)
         if device is None:
             device = "mps" if HAS_MPS else "cpu"
 
@@ -286,6 +297,7 @@ class TrellisLinear(nn.Module):
         Optimized to batch process groups by bit-width, minimizing kernel launch overhead.
         Uses single kernel launch per bit-width instead of per-group launches.
         """
+        logger.debug("forward_mixed_bpw called with x=%s", x)
         if not self._is_mixed_bpw or self._mixed_bpw_layout is None:
             raise RuntimeError(
                 "Layer is not configured for mixed bit-width forward pass.")
@@ -425,6 +437,7 @@ class TrellisLinear(nn.Module):
         return output.view(*batch_shape, self.out_features)
 
     def set_lib(self, lib: MetalKernelLibrary) -> None:
+        logger.debug("set_lib called with lib=%s", lib)
         self._lib = lib
 
     @classmethod
@@ -435,6 +448,7 @@ class TrellisLinear(nn.Module):
         device: torch.device | str | None = None,
     ) -> TrellisLinear:
         """Create TrellisLinear from a loaded TrellisWeight."""
+        logger.debug("from_trellis_weight called with weight=%s, bias=%s, device=%s", weight, bias, device)
         if device is None:
             device = "mps" if HAS_MPS else "cpu"
 
@@ -486,12 +500,14 @@ class TrellisLinear(nn.Module):
         return module
 
     def _get_lib(self) -> MetalKernelLibrary:
+        logger.debug("_get_lib called")
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
 
     def dequantize(self) -> torch.Tensor:
         """Dequantize weights to FP16."""
+        logger.info("dequantize called")
         K, N = self.out_features, self.in_features
         n_groups = self.scales.shape[0]
         group_size = (self.in_features + n_groups - 1) // n_groups
@@ -511,6 +527,7 @@ class TrellisLinear(nn.Module):
 
     def _dequantize_cpu_packed(self, K: int, N: int, group_size: int) -> torch.Tensor:
         """CPU fallback for dequantizing packed trellis weights."""
+        logger.info("_dequantize_cpu_packed called with K=%s, N=%s, group_size=%s", K, N, group_size)
         packed_indices = self.packed_indices.cpu().numpy()
         scales = self.scales.cpu().float().numpy()
         grid = self.grid.cpu().float().numpy()
@@ -542,6 +559,7 @@ class TrellisLinear(nn.Module):
 
     def _unpack_tile_indices(self, packed_tile: np.ndarray, bits: int, n_levels: int) -> np.ndarray:
         """Unpack packed bytes into codebook indices."""
+        logger.info("_unpack_tile_indices called with packed_tile=%s, bits=%s, n_levels=%s", packed_tile, bits, n_levels)
         n_elements = 256
         indices = np.zeros(n_elements, dtype=np.uint8)
         if bits == 4:
@@ -577,6 +595,7 @@ class TrellisLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with on-the-fly decompression."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         if self._is_mixed_bpw:
             return self.forward_mixed_bpw(x)
 
@@ -611,11 +630,13 @@ class TrellisLinear(nn.Module):
 
     def _forward_cpu_fallback(self, x_flat: torch.Tensor, group_size: int) -> torch.Tensor:
         """CPU fallback for forward pass."""
+        logger.debug("_forward_cpu_fallback called with x_flat=%s, group_size=%s", x_flat, group_size)
         weights = self.dequantize().to(x_flat.device)
         return x_flat @ weights.t()
 
     def extra_repr(self) -> str:
         """String representation for printing."""
+        logger.debug("extra_repr called")
         return (f"in_features={self.in_features}, out_features={self.out_features}, "
                 f"bits={self.bits if not self._is_mixed_bpw else 'mixed'}, bias={self.bias is not None}")
 
@@ -638,6 +659,7 @@ class TrellisModelWrapper(nn.Module):
             model: Base model architecture (unquantized).
             model_dir: Directory containing quantized model weights.
         """
+        logger.debug("initializing %s with model=%s, model_dir=%s", type(self).__name__, model, model_dir)
         super().__init__()
         self.model = model
         self.model_dir = Path(model_dir)
@@ -647,6 +669,7 @@ class TrellisModelWrapper(nn.Module):
 
     def _get_loader(self):
         """Get or create TrellisModelLoader."""
+        logger.info("_get_loader called")
         if self._loader is None:
             from .loader import TrellisModelLoader
 
@@ -659,6 +682,7 @@ class TrellisModelWrapper(nn.Module):
         Returns:
             Number of layers replaced.
         """
+        logger.debug("replace_linear_layers called")
         loader = self._get_loader()
         count = 0
 
@@ -694,6 +718,7 @@ class TrellisModelWrapper(nn.Module):
     @staticmethod
     def _split_name(name: str) -> tuple[str, str]:
         """Split module name into parent and child parts."""
+        logger.debug("_split_name called with name=%s", name)
         parts = name.rsplit(".", 1)
         if len(parts) == 1:
             return "", parts[0]
@@ -701,4 +726,5 @@ class TrellisModelWrapper(nn.Module):
 
     def forward(self, *args, **kwargs):
         """Forward pass through wrapped model."""
+        logger.debug("forward called")
         return self.model(*args, **kwargs)

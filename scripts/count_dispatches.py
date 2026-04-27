@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Count kernel dispatches per forward pass."""
 
+import logging
 import time
 
 import torch
@@ -16,11 +17,13 @@ orig_mps = md.mps_tensor_to_metal_buffer
 
 
 def counting_dispatch(*args, **kwargs):
+    logger.debug("counting_dispatch called")
     call_count["dispatch"] += 1
     return orig_dispatch(*args, **kwargs)
 
 
 def counting_mps(*args, **kwargs):
+    logger.debug("counting_mps called")
     call_count["mps_tensor"] += 1
     return orig_mps(*args, **kwargs)
 
@@ -38,7 +41,11 @@ moe_d.mps_tensor_to_metal_buffer = counting_mps
 from metal_marlin.trellis.model import TrellisForCausalLM
 
 
+
+logger = logging.getLogger(__name__)
+
 def main():
+    logger.info("main starting")
     print("Loading model...")
     model = TrellisForCausalLM.from_pretrained("models/GLM-4.7-Flash-Trellis-3bpw", device="mps")
 

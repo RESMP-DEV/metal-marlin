@@ -6,6 +6,7 @@ standard TrellisMLAttention.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -17,11 +18,15 @@ from metal_marlin.kv_cache import TrellisKVCache
 from metal_marlin.paged.mla_paged_adapter import MLAPagedAdapter
 from metal_marlin.trellis.attention import TrellisMLAConfig, TrellisMLAttention
 
+
+logger = logging.getLogger(__name__)
+
 # Skip if MPS is not available
 pytestmark = pytest.mark.skipif(not HAS_MPS, reason="Requires PyTorch MPS")
 
 class MockTrellisLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=False):
+        logger.debug("initializing %s with in_features=%s, out_features=%s, bias=%s", type(self).__name__, in_features, out_features, bias)
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -32,11 +37,13 @@ class MockTrellisLinear(nn.Module):
             self.bias = None
             
     def forward(self, x):
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         return nn.functional.linear(x, self.weight, self.bias)
 
 @pytest.fixture
 def mla_setup():
     """Setup a small MLA attention layer and cache."""
+    logger.info("mla_setup starting")
     batch_size = 1
     num_heads = 4
     qk_nope_dim = 32
@@ -88,6 +95,7 @@ def mla_setup():
     return attn_layer, kv_cache, config
 
 def test_adapter_initialization(mla_setup):
+    logger.info("running test_adapter_initialization")
     attn_layer, kv_cache, _ = mla_setup
     adapter = MLAPagedAdapter(kv_cache, attn_layer)
     assert adapter.kv_cache == kv_cache
@@ -95,6 +103,7 @@ def test_adapter_initialization(mla_setup):
     assert adapter.head_dim == 64 + 16 # kv_lora_rank + qk_rope_dim
 
 def test_paged_attention_accuracy(mla_setup):
+    logger.info("running test_paged_attention_accuracy")
     attn_layer, kv_cache, config = mla_setup
     adapter = MLAPagedAdapter(kv_cache, attn_layer)
     
@@ -147,6 +156,7 @@ def test_paged_attention_accuracy(mla_setup):
 
 @pytest.mark.parametrize("quant_mode", ["fp8", "fp4", "int4"])
 def test_paged_attention_quantized(mla_setup, quant_mode):
+    logger.info("running test_paged_attention_quantized")
     attn_layer, _, config = mla_setup
     
     # Create quantized cache

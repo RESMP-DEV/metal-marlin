@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 
 import torch
 from torch import Tensor
@@ -44,6 +45,7 @@ def _get_sampler(vocab_size: int) -> MetalSampler:
     
     The sampler is cached and reused to avoid repeated initialization.
     """
+    logger.debug("_get_sampler called with vocab_size=%s", vocab_size)
     global _sampler
     if _sampler is None or _sampler.vocab_size != vocab_size:
         _sampler = MetalSampler(vocab_size=vocab_size)
@@ -115,6 +117,7 @@ def verify_speculative(
     Returns:
         VerifyResult with accepted tokens, acceptance counts, and next token.
     """
+    logger.debug("verify_speculative called with draft_tokens=%s, draft_probs=%s, target_logits=%s", draft_tokens, draft_probs, target_logits)
     batch_size, num_spec = draft_tokens.shape
     device = draft_tokens.device
 
@@ -195,6 +198,9 @@ def verify_eagle_tree(
 
     Eagle v3 generates drafts as a tree structure where multiple paths branch
     from common prefixes. This allows speculating on multiple possible
+
+logger = logging.getLogger(__name__)
+
     continuations and accepting whichever path the target model agrees with.
 
     The tree is represented by:
@@ -230,6 +236,7 @@ def verify_eagle_tree(
             accepted_mask: [batch, tree_size] which tree nodes were accepted.
             num_accepted: Total accepted tokens (scalar, max across batch).
     """
+    logger.debug("verify_eagle_tree called with target_model=%s, draft_tokens=%s, draft_probs=%s", target_model, draft_tokens, draft_probs)
     batch_size, tree_size = draft_tokens.shape
     device = draft_tokens.device
 
@@ -327,6 +334,7 @@ def _run_target_on_tree(
 
     # Call target model with draft tokens
     # The model should return [batch, tree_size, vocab] logits
+    logger.debug("_run_target_on_tree called with target_model=%s, draft_tokens=%s, kv_cache=%s", target_model, draft_tokens, kv_cache)
     target_logits = target_model(draft_tokens, kv_cache)
 
     # Handle case where model returns logits for seq_len+tree_size
@@ -356,6 +364,7 @@ def _compute_node_acceptance(
     Returns:
         [batch, tree_size] boolean tensor where True means node accepted.
     """
+    logger.debug("_compute_node_acceptance called with draft_tokens=%s, draft_probs=%s, target_probs=%s", draft_tokens, draft_probs, target_probs)
     batch_size, tree_size = draft_tokens.shape
 
     # Gather probabilities for the specific draft token at each position
@@ -397,6 +406,7 @@ def _propagate_tree_acceptance(
         [batch, tree_size] boolean tensor where True means node and all
         ancestors were accepted.
     """
+    logger.debug("_propagate_tree_acceptance called with node_accepted=%s, tree_parents=%s, device=%s", node_accepted, tree_parents, device)
     batch_size, tree_size = node_accepted.shape
     tree_accepted = node_accepted.clone()
 
@@ -455,6 +465,7 @@ def _find_longest_accepted_path(
             paths: [batch, max_depth] token IDs along longest accepted path.
             lengths: [batch] length of accepted path per batch element.
     """
+    logger.debug("_find_longest_accepted_path called with tree_accepted=%s, tree_parents=%s, draft_tokens=%s", tree_accepted, tree_parents, draft_tokens)
     batch_size, tree_size = tree_accepted.shape
 
     # Compute depth of each node
@@ -540,6 +551,7 @@ def _sample_tree_next_token(
     Returns:
         [batch] next token IDs.
     """
+    logger.debug("_sample_tree_next_token called with tree_accepted=%s, tree_parents=%s, draft_probs=%s", tree_accepted, tree_parents, draft_probs)
     batch_size, tree_size = tree_accepted.shape
     next_tokens = torch.zeros(batch_size, dtype=torch.long, device=device)
 
@@ -655,6 +667,7 @@ def _greedy_probs(logits: Tensor) -> Tensor:
     Returns:
         [batch, seq, vocab] with 1.0 at argmax positions, 0 elsewhere.
     """
+    logger.debug("_greedy_probs called with logits=%s", logits)
     argmax_ids = logits.argmax(dim=-1)  # [batch, seq]
 
     # Build one-hot via scatter
@@ -681,6 +694,7 @@ def _sample_next_token(
     For rejected sequences: sample from the residual distribution
     norm(max(0, p_target - p_draft)) at the rejection position.
     """
+    logger.debug("_sample_next_token called with all_accepted=%s, rejection_pos=%s, num_spec=%s", all_accepted, rejection_pos, num_spec)
     next_token = torch.zeros(batch_size, dtype=torch.long, device=device)
 
     # Bonus token for fully-accepted sequences
@@ -729,6 +743,7 @@ def _sample_residual_batched(
     """
     # Gather target and draft probs at each element's rejection position.
     # rejection_pos is [batch], we need probs at those specific seq positions.
+    logger.debug("_sample_residual_batched called with rejected_mask=%s, rejection_pos=%s, target_probs=%s", rejected_mask, rejection_pos, target_probs)
     for b in range(batch_size):
         if not rejected_mask[b].item():
             continue
@@ -773,6 +788,7 @@ def _sample(logits: Tensor, temperature: float, top_p: float, device: torch.devi
     Returns:
         [batch] sampled token indices.
     """
+    logger.debug("_sample called with logits=%s, temperature=%s, top_p=%s", logits, temperature, top_p)
     if logits.ndim == 1:
         logits = logits.unsqueeze(0)
 
@@ -807,6 +823,7 @@ def _apply_top_p(probs: Tensor, p: float) -> Tensor:
         [batch, vocab] filtered and renormalized probabilities.
     """
     # Sort descending by probability
+    logger.debug("_apply_top_p called with probs=%s, p=%s", probs, p)
     sorted_probs, sorted_indices = probs.sort(dim=-1, descending=True)
 
     # Cumulative sum in sorted order

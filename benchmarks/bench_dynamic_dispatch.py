@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Benchmark dynamic C++ vs Python MoE dispatch."""
+import logging
 import time
 from pathlib import Path
 
 import torch
 from metal_marlin.trellis.model import TrellisForCausalLM
 from transformers import AutoTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 # Model path relative to this script
 MODEL_PATH = Path(__file__).parent.parent / "models" / "GLM-4.7-Flash-Marlin-MMFP4"

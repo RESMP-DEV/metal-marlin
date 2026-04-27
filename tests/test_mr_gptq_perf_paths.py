@@ -7,6 +7,7 @@ without requiring model downloads or heavy calibration runs.
 from __future__ import annotations
 
 import inspect
+import logging
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -18,17 +19,23 @@ import metal_marlin.gptq_accelerated as gptq_accelerated
 from metal_marlin.mr_gptq import HessianCollector, gptq_quantize_layer
 
 
+
+logger = logging.getLogger(__name__)
+
 class _TinyLinearModel(nn.Module):
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         super().__init__()
         self.proj = nn.Linear(4, 3, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         return self.proj(x)
 
 
 def test_hessian_hook_avoids_per_hook_numpy_conversion(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hook path should keep tensor-native accumulation after first conversion."""
+    logger.info("running test_hessian_hook_avoids_per_hook_numpy_conversion")
     collector = HessianCollector(accumulator_dtype="float32")
     model = _TinyLinearModel()
     collector.register_hooks(model)
@@ -61,6 +68,7 @@ def test_hessian_hook_avoids_per_hook_numpy_conversion(monkeypatch: pytest.Monke
 
 def test_gptq_quantize_layer_runs_vectorized_propagation_path() -> None:
     """GPTQ path should include and exercise vectorized in-group propagation."""
+    logger.info("running test_gptq_quantize_layer_runs_vectorized_propagation_path")
     source = inspect.getsource(gptq_quantize_layer)
     assert "W[:, i + 1 : g_end] -= err[:, None] * h_ratio[None, :]" in source
 
@@ -114,6 +122,7 @@ def test_accelerated_auto_selects_available_backend(
     backend_ctor_name: str,
 ) -> None:
     """AUTO backend should dispatch to the backend marked available."""
+    logger.info("running test_accelerated_auto_selects_available_backend")
     sentinel_backend = object()
 
     monkeypatch.setattr(

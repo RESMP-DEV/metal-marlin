@@ -11,6 +11,7 @@ Tests cover:
 - Pool metrics tracking
 - Pool clearing and reset
 """
+import logging
 
 import pytest
 
@@ -23,6 +24,9 @@ from metal_marlin.kv_cache import (
     get_pool_stats,
     reset_pool_metrics,
 )
+
+
+logger = logging.getLogger(__name__)
 
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 requires_mps = pytest.mark.skipif(
@@ -41,12 +45,14 @@ class TestPoolUtilities:
 
     def test_clear_pool(self):
         """Test that clear_pool resets the pool."""
+        logger.info("running test_clear_pool")
         clear_pool()
         stats = get_pool_stats()
         assert stats["pooled_tensors"] == 0
 
     def test_reset_pool_metrics(self):
         """Test that reset_pool_metrics clears counters."""
+        logger.info("running test_reset_pool_metrics")
         reset_pool_metrics()
         stats = get_pool_stats()
         assert stats["hits"] == 0
@@ -56,6 +62,7 @@ class TestPoolUtilities:
 
     def test_get_pool_stats_structure(self):
         """Test that get_pool_stats returns expected keys."""
+        logger.info("running test_get_pool_stats_structure")
         clear_pool()
         reset_pool_metrics()
         stats = get_pool_stats()
@@ -77,11 +84,13 @@ class TestKVCacheTorchPooling:
 
     def setup_method(self):
         """Reset pool before each test."""
+        logger.info("setup_method starting")
         clear_pool()
         reset_pool_metrics()
 
     def test_cache_creation_allocates_buffers(self):
         """Test that cache creation allocates new buffers (pool miss)."""
+        logger.info("running test_cache_creation_allocates_buffers")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -106,6 +115,7 @@ class TestKVCacheTorchPooling:
         and immediately reallocates from the pool. This should result in
         pool hits for the reallocation.
         """
+        logger.info("running test_reset_uses_pool_for_reallocation")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -134,6 +144,7 @@ class TestKVCacheTorchPooling:
         After reset, the cache should still be fully functional with
         new tensors allocated from the pool.
         """
+        logger.info("running test_reset_maintains_pool_efficiency")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -170,6 +181,7 @@ class TestKVCacheTorchPooling:
 
     def test_quantized_cache_pooling(self):
         """Test that quantized caches also use pooling."""
+        logger.info("running test_quantized_cache_pooling")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -201,11 +213,13 @@ class TestMLAKVCachePooling:
 
     def setup_method(self):
         """Reset pool before each test."""
+        logger.info("setup_method starting")
         clear_pool()
         reset_pool_metrics()
 
     def test_mla_cache_creation_uses_pool(self):
         """Test that MLAKVCache creation uses the pool."""
+        logger.info("running test_mla_cache_creation_uses_pool")
         cache = MLAKVCache(
             num_layers=2,
             batch_size=1,
@@ -222,6 +236,7 @@ class TestMLAKVCachePooling:
 
     def test_mla_reset_uses_pool(self):
         """Test that MLAKVCache reset uses pool for reallocation."""
+        logger.info("running test_mla_reset_uses_pool")
         cache = MLAKVCache(
             num_layers=2,
             batch_size=1,
@@ -242,6 +257,7 @@ class TestMLAKVCachePooling:
 
     def test_mla_reset_maintains_usability(self):
         """Test that MLAKVCache remains usable after reset."""
+        logger.info("running test_mla_reset_maintains_usability")
         cache = MLAKVCache(
             num_layers=2,
             batch_size=1,
@@ -271,6 +287,7 @@ class TestMLAKVCachePooling:
 
     def test_mla_quantized_pooling(self):
         """Test MLAKVCache pooling with quantization."""
+        logger.info("running test_mla_quantized_pooling")
         cache = MLAKVCache(
             num_layers=2,
             batch_size=1,
@@ -300,12 +317,14 @@ class TestPoolMetrics:
 
     def setup_method(self):
         """Reset pool before each test."""
+        logger.info("setup_method starting")
         clear_pool()
         reset_pool_metrics()
 
     @pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
     def test_hit_rate_during_reset(self):
         """Test that hit rate reflects pool usage during reset."""
+        logger.info("running test_hit_rate_during_reset")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -330,6 +349,7 @@ class TestPoolMetrics:
 
     def test_empty_pool_stats(self):
         """Test stats when pool is empty."""
+        logger.info("running test_empty_pool_stats")
         clear_pool()
         reset_pool_metrics()
         
@@ -352,11 +372,13 @@ class TestPoolingIntegration:
 
     def setup_method(self):
         """Reset pool before each test."""
+        logger.info("setup_method starting")
         clear_pool()
         reset_pool_metrics()
 
     def test_multiple_reset_cycles(self):
         """Test multiple reset cycles maintain pool efficiency."""
+        logger.info("running test_multiple_reset_cycles")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -378,6 +400,7 @@ class TestPoolingIntegration:
 
     def test_cache_remains_usable_after_reset(self):
         """Test that cache can be used after reset."""
+        logger.info("running test_cache_remains_usable_after_reset")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -408,6 +431,7 @@ class TestPoolingIntegration:
 
     def test_mixed_quantization_modes(self):
         """Test that different quantization modes don't interfere."""
+        logger.info("running test_mixed_quantization_modes")
         config_fp16 = CacheConfigTorch(
             num_layers=1,
             num_heads=4,

@@ -1,4 +1,5 @@
 """Test Metal shared memory (zero-copy) buffers and staging buffers."""
+import logging
 
 import pytest
 import torch
@@ -20,11 +21,15 @@ try:
 except Exception:
     HAS_METAL = False
 
+
+logger = logging.getLogger(__name__)
+
 HAS_MPS = torch.backends.mps.is_available()
 
 
 def _get_buffer_from_result(result):
     """Helper to get Metal buffer from result (handle or direct buffer)."""
+    logger.debug("_get_buffer_from_result called with result=%s", result)
     if isinstance(result, StagingTransferHandle):
         result.wait()
         return result.destination_buffer
@@ -34,6 +39,7 @@ def _get_buffer_from_result(result):
 @pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 def test_shared_buffer_from_bytes():
     """Test that buffers are created from CPU bytes."""
+    logger.info("running test_shared_buffer_from_bytes")
     lib = MetalKernelLibrary()
 
     # Test various buffer sizes
@@ -51,6 +57,7 @@ def test_shared_buffer_from_bytes():
 @pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 def test_shared_buffer_from_cpu_tensor():
     """Test that shared buffers are created from CPU tensors."""
+    logger.info("running test_shared_buffer_from_cpu_tensor")
     lib = MetalKernelLibrary()
 
     # Create CPU tensor
@@ -68,6 +75,7 @@ def test_shared_buffer_from_cpu_tensor():
 @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 def test_shared_buffer_from_mps_tensor():
     """Test that shared buffers are created from MPS tensors."""
+    logger.info("running test_shared_buffer_from_mps_tensor")
     lib = MetalKernelLibrary()
 
     # Create MPS tensor
@@ -84,6 +92,7 @@ def test_shared_buffer_from_mps_tensor():
 @pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 def test_storage_mode_shared():
     """Verify that buffers use StorageModeShared."""
+    logger.info("running test_storage_mode_shared")
     lib = MetalKernelLibrary()
     data = bytes(512 * 1024)  # 512KB
     buf = _private_buffer_from_bytes(lib, lib.device, data)
@@ -99,6 +108,7 @@ def test_storage_mode_shared():
 @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 def test_mps_buffer_storage_mode():
     """Verify MPS tensor buffers use StorageModeShared."""
+    logger.info("running test_mps_buffer_storage_mode")
     lib = MetalKernelLibrary()
     mps_tensor = torch.randn(1024, 1024, dtype=torch.float16, device="mps")
     buf = mps_tensor_to_metal_buffer(mps_tensor, lib.device)
@@ -113,6 +123,7 @@ def test_mps_buffer_storage_mode():
 @pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 def test_zero_copy_content_access():
     """Verify CPU can access shared buffer contents directly."""
+    logger.info("running test_zero_copy_content_access")
     lib = MetalKernelLibrary()
 
     # Create buffer with known data

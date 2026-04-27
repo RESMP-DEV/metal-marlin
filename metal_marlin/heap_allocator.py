@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,9 @@ if TYPE_CHECKING:
 if HAS_PYOBJC_METAL:
     import Metal
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class HeapAllocation:
@@ -64,11 +68,13 @@ class HeapAllocatorMetrics:
     @property
     def reuse_rate(self) -> float:
         """Ratio of allocations that reused freed buffers."""
+        logger.debug("reuse_rate called")
         if self.allocations == 0:
             return 0.0
         return self.reuse_count / self.allocations
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "allocations": self.allocations,
             "deallocations": self.deallocations,
@@ -131,6 +137,7 @@ class MetalHeapAllocator:
             heap_size: Total heap size in bytes (default 256MB)
             storage_mode: MTLResourceStorageMode for buffers
         """
+        logger.debug("initializing %s with device=%s, heap_size=%s", type(self).__name__, device, heap_size)
         if not HAS_PYOBJC_METAL:
             raise RuntimeError("PyObjC Metal is required for MetalHeapAllocator")
 
@@ -161,16 +168,19 @@ class MetalHeapAllocator:
     @property
     def heap(self) -> Any:
         """Get the underlying MTLHeap."""
+        logger.debug("heap called")
         return self._heap
 
     @property
     def heap_size(self) -> int:
         """Total heap size in bytes."""
+        logger.debug("heap_size called")
         return self._heap_size
 
     @property
     def allocated_bytes(self) -> int:
         """Currently allocated bytes."""
+        logger.debug("allocated_bytes called")
         return self._metrics.current_allocated
 
     @property
@@ -178,15 +188,18 @@ class MetalHeapAllocator:
         """Available bytes in heap (estimated)."""
         # MTLHeap doesn't expose available size directly in Python bindings easily
         # We rely on max_available_size if we could, but here we estimate
+        logger.debug("available_bytes called")
         return self._heap_size - self._metrics.current_allocated
 
     @property
     def metrics(self) -> HeapAllocatorMetrics:
         """Get allocator metrics."""
+        logger.debug("metrics called")
         return self._metrics
 
     def _align_size(self, size: int) -> int:
         """Align size to appropriate boundary."""
+        logger.debug("_align_size called with size=%s", size)
         if size >= self.LARGE_BUFFER_THRESHOLD:
             return (
                 (size + self.PAGE_SIZE_BYTES - 1) // self.PAGE_SIZE_BYTES
@@ -205,6 +218,7 @@ class MetalHeapAllocator:
         Raises:
             RuntimeError: If allocation exceeds heap capacity
         """
+        logger.debug("alloc called with size=%s", size)
         if not HAS_PYOBJC_METAL:
             raise RuntimeError("PyObjC Metal is required")
 
@@ -292,6 +306,7 @@ class MetalHeapAllocator:
         Returns:
             MTLBuffer allocated from heap
         """
+        logger.debug("alloc_buffer called with size=%s", size)
         buffer, _ = self.alloc(size)
         return buffer
 
@@ -304,6 +319,7 @@ class MetalHeapAllocator:
         Returns:
             Byte offset within the heap, or None if buffer not tracked
         """
+        logger.debug("get_offset called with buffer=%s", buffer)
         alloc = self._allocations.get(id(buffer))
         if alloc:
             return alloc.heap_offset
@@ -315,6 +331,7 @@ class MetalHeapAllocator:
         Args:
             buffer: MTLBuffer to release
         """
+        logger.debug("release called with buffer=%s", buffer)
         buf_id = id(buffer)
         alloc = self._allocations.pop(buf_id, None)
         if alloc is None:
@@ -333,6 +350,7 @@ class MetalHeapAllocator:
         Returns:
             Number of buffers released
         """
+        logger.debug("_compact_pool called")
         released = 0
         for pool_list in self._pool.values():
             for alloc in pool_list:
@@ -346,6 +364,7 @@ class MetalHeapAllocator:
         Returns:
             Number of buffers removed from pool
         """
+        logger.debug("clear_pool called")
         count = self._compact_pool()
         return count
 
@@ -354,6 +373,7 @@ class MetalHeapAllocator:
 
         This invalidates all previously allocated buffers.
         """
+        logger.debug("reset called")
         self._allocations.clear()
         self._pool.clear()
         self._metrics = HeapAllocatorMetrics()
@@ -364,6 +384,7 @@ class MetalHeapAllocator:
         Returns:
             Dictionary with allocator statistics
         """
+        logger.debug("stats called")
         pool_count = sum(len(pool) for pool in self._pool.values())
         size_distribution = {size: len(pool) for size, pool in self._pool.items() if pool}
 
@@ -408,6 +429,7 @@ class HeapBufferPool:
             heap_size: Total heap size in bytes
             storage_mode: MTLResourceStorageMode
         """
+        logger.debug("initializing %s with device=%s, heap_size=%s", type(self).__name__, device, heap_size)
         self._allocator = MetalHeapAllocator(device, heap_size, storage_mode=storage_mode)
 
     def get(self, size: int) -> Any:
@@ -419,6 +441,7 @@ class HeapBufferPool:
         Returns:
             MTLBuffer
         """
+        logger.debug("get called with size=%s", size)
         return self._allocator.alloc_buffer(size)
 
     def release(self, buffer: Any) -> None:
@@ -427,17 +450,21 @@ class HeapBufferPool:
         Args:
             buffer: MTLBuffer to release
         """
+        logger.debug("release called with buffer=%s", buffer)
         self._allocator.release(buffer)
 
     @property
     def allocator(self) -> MetalHeapAllocator:
         """Get the underlying heap allocator."""
+        logger.debug("allocator called")
         return self._allocator
 
     def stats(self) -> dict[str, Any]:
         """Get pool statistics."""
+        logger.debug("stats called")
         return self._allocator.stats()
 
     def clear_pool(self) -> int:
         """Clear pooled buffers."""
+        logger.debug("clear_pool called")
         return self._allocator.clear_pool()

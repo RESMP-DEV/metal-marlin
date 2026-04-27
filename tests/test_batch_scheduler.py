@@ -6,6 +6,7 @@ Tests the BatchScheduler implementation in scheduler.py for:
 - Priority insertion
 - Queue capacity management
 """
+import logging
 
 import pytest
 
@@ -19,9 +20,13 @@ from metal_marlin.serving.scheduler import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def config():
     """Default scheduler configuration."""
+    logger.debug("config called")
     return SchedulerConfig(
         max_num_seqs=8,
         max_num_batched_tokens=512,
@@ -33,17 +38,20 @@ def config():
 @pytest.fixture
 def allocator():
     """Block allocator with sufficient capacity."""
+    logger.debug("allocator called")
     return BlockAllocator(num_blocks=128)
 
 
 @pytest.fixture
 def scheduler(config, allocator):
     """BatchScheduler instance for testing."""
+    logger.debug("scheduler called with config=%s, allocator=%s", config, allocator)
     return BatchScheduler(config, allocator, max_queue_size=10)
 
 
 def make_request(request_id: str, num_tokens: int = 4) -> GenerationRequest:
     """Helper to create a test request."""
+    logger.debug("make_request called with request_id=%s, num_tokens=%s", request_id, num_tokens)
     return GenerationRequest(
         request_id=request_id,
         prompt_tokens=list(range(num_tokens)),
@@ -56,6 +64,7 @@ class TestBatchSchedulerDynamicInsertion:
 
     def test_single_request_insertion(self, scheduler):
         """Test adding a single request dynamically."""
+        logger.info("running test_single_request_insertion")
         req = make_request("req-1")
         scheduler.add_request(req)
 
@@ -65,6 +74,7 @@ class TestBatchSchedulerDynamicInsertion:
 
     def test_multiple_single_insertions(self, scheduler):
         """Test adding multiple requests one at a time."""
+        logger.info("running test_multiple_single_insertions")
         for i in range(5):
             req = make_request(f"req-{i}")
             scheduler.add_request(req)
@@ -74,6 +84,7 @@ class TestBatchSchedulerDynamicInsertion:
 
     def test_batch_insertion_enqueue(self, scheduler):
         """Test batch insertion with ENQUEUE policy."""
+        logger.info("running test_batch_insertion_enqueue")
         batch = [make_request(f"req-{i}") for i in range(3)]
         inserted = scheduler.insert_batch(batch, InsertionPolicy.ENQUEUE)
 
@@ -85,6 +96,7 @@ class TestBatchSchedulerDynamicInsertion:
     def test_batch_insertion_merge(self, scheduler):
         """Test batch insertion with MERGE policy (front insertion)."""
         # Add some background requests
+        logger.info("running test_batch_insertion_merge")
         for i in range(3):
             scheduler.add_request(make_request(f"bg-{i}"))
 
@@ -98,6 +110,7 @@ class TestBatchSchedulerDynamicInsertion:
     def test_batch_insertion_drop_if_full(self, scheduler):
         """Test batch insertion with DROP_IF_FULL policy."""
         # Fill the queue to near capacity (max_queue_size = 10)
+        logger.info("running test_batch_insertion_drop_if_full")
         for i in range(9):
             scheduler.add_request(make_request(f"req-{i}"))
 
@@ -112,6 +125,7 @@ class TestBatchSchedulerDynamicInsertion:
     def test_add_request_front(self, scheduler):
         """Test priority insertion at front of queue."""
         # Add background requests
+        logger.info("running test_add_request_front")
         scheduler.add_request(make_request("bg-1"))
         scheduler.add_request(make_request("bg-2"))
 
@@ -124,6 +138,7 @@ class TestBatchSchedulerDynamicInsertion:
 
     def test_insert_batch_front(self, scheduler):
         """Test batch priority insertion."""
+        logger.info("running test_insert_batch_front")
         scheduler.add_request(make_request("bg-1"))
 
         batch = [make_request(f"priority-{i}") for i in range(2)]
@@ -139,6 +154,7 @@ class TestQueueCapacityManagement:
     def test_queue_full_single_insertion(self, scheduler):
         """Test that add_request raises error when queue is full."""
         # Fill queue to capacity (max_queue_size = 10)
+        logger.info("running test_queue_full_single_insertion")
         for i in range(10):
             scheduler.add_request(make_request(f"req-{i}"))
 
@@ -148,6 +164,7 @@ class TestQueueCapacityManagement:
 
     def test_queue_utilization(self, scheduler):
         """Test queue utilization metric."""
+        logger.info("running test_queue_utilization")
         assert scheduler.queue_utilization == 0.0
 
         # Add 5 requests (50% capacity)
@@ -164,6 +181,7 @@ class TestQueueCapacityManagement:
 
     def test_clear_waiting(self, scheduler):
         """Test clearing waiting queue."""
+        logger.info("running test_clear_waiting")
         for i in range(5):
             scheduler.add_request(make_request(f"req-{i}"))
 
@@ -179,6 +197,7 @@ class TestInsertionStatistics:
 
     def test_stats_single_insertions(self, scheduler):
         """Test stats for single request insertions."""
+        logger.info("running test_stats_single_insertions")
         for i in range(3):
             scheduler.add_request(make_request(f"req-{i}"))
 
@@ -189,6 +208,7 @@ class TestInsertionStatistics:
 
     def test_stats_batch_insertions(self, scheduler):
         """Test stats for batch insertions."""
+        logger.info("running test_stats_batch_insertions")
         batch1 = [make_request(f"b1-{i}") for i in range(3)]
         batch2 = [make_request(f"b2-{i}") for i in range(2)]
 
@@ -202,6 +222,7 @@ class TestInsertionStatistics:
     def test_stats_with_drops(self, scheduler):
         """Test stats tracking dropped requests."""
         # Fill queue
+        logger.info("running test_stats_with_drops")
         for i in range(10):
             scheduler.add_request(make_request(f"req-{i}"))
 
@@ -215,6 +236,7 @@ class TestInsertionStatistics:
 
     def test_reset_stats(self, scheduler):
         """Test resetting insertion statistics."""
+        logger.info("running test_reset_stats")
         scheduler.add_request(make_request("req-1"))
         scheduler.insert_batch([make_request("req-2")])
 
@@ -232,6 +254,7 @@ class TestSchedulingWithDynamicInsertion:
     def test_schedule_after_dynamic_insertion(self, scheduler):
         """Test scheduling after dynamic insertions."""
         # Add requests dynamically
+        logger.info("running test_schedule_after_dynamic_insertion")
         for i in range(3):
             scheduler.add_request(make_request(f"req-{i}", num_tokens=16))
 
@@ -245,6 +268,7 @@ class TestSchedulingWithDynamicInsertion:
     def test_schedule_mixed_insertion_methods(self, scheduler):
         """Test scheduling with mixed insertion methods."""
         # Add via different methods
+        logger.info("running test_schedule_mixed_insertion_methods")
         scheduler.add_request(make_request("single-1", num_tokens=8))
 
         batch = [make_request(f"batch-{i}", num_tokens=8) for i in range(2)]

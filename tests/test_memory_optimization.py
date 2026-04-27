@@ -1,6 +1,7 @@
 """Tests for memory optimization features."""
 
 import gc
+import logging
 import os
 import resource
 
@@ -9,14 +10,19 @@ import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def get_rss_mb() -> float:
     """Get current RSS in MB."""
+    logger.debug("get_rss_mb called")
     return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
 
 
 def get_maxrss_mb() -> float:
     """Get current process max RSS (Resident Set Size) in MB."""
     # resource.getrusage returns maxrss in bytes on Linux, KB on macOS
+    logger.debug("get_maxrss_mb called")
     import platform
 
     usage = resource.getrusage(resource.RUSAGE_SELF)
@@ -34,6 +40,7 @@ class TestTrellisMoEMLPEagerBuffers:
     @pytest.fixture
     def mock_moe_layer(self):
         """Create a small mock MoE layer for testing."""
+        logger.debug("mock_moe_layer called")
         from metal_marlin.trellis.testing import create_mock_moe_mlp
 
         return create_mock_moe_mlp(
@@ -49,6 +56,7 @@ class TestTrellisMoEMLPEagerBuffers:
     def test_eager_buffers_creates_metal_buffers(self, mock_moe_layer):
         """Test that eager buffer creation populates Metal buffers in __init__."""
         # With eager_buffers=True (default), buffers are created during __init__
+        logger.info("running test_eager_buffers_creates_metal_buffers")
         assert mock_moe_layer._cached_weight_buffers is not None
 
         # Verify it's the correct type with expected fields
@@ -70,6 +78,7 @@ class TestTrellisMoEMLPEagerBuffers:
         This saves ~2x memory during model loading.
         """
         # Eager mode should NOT create stacked tensors
+        logger.info("running test_eager_buffers_frees_stacked_tensors")
         assert not hasattr(mock_moe_layer, "gate_weights_stacked"), \
             "Stacked tensors should not exist in eager mode"
         assert not hasattr(mock_moe_layer, "up_weights_stacked"), \
@@ -82,6 +91,7 @@ class TestTrellisMoEMLPEagerBuffers:
     @pytest.fixture
     def lazy_moe_layer(self):
         """Create MoE layer with lazy buffer creation (deprecated path)."""
+        logger.debug("lazy_moe_layer called")
         import warnings
 
         from metal_marlin.trellis.testing import create_mock_moe_mlp
@@ -106,6 +116,7 @@ class TestTrellisMoEMLPEagerBuffers:
         This is the deprecated path but should still work for compatibility.
         """
         # Lazy mode should create stacked tensors
+        logger.info("running test_lazy_buffers_creates_stacked_tensors")
         assert hasattr(lazy_moe_layer, "gate_weights_stacked")
         assert lazy_moe_layer.gate_weights_stacked is not None
 
@@ -123,6 +134,7 @@ class TestMemoryBaseline:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_cpu_to_metal_buffer_no_mps_copy(self):
         """Test that CPU→Metal doesn't create MPS copy."""
+        logger.info("running test_cpu_to_metal_buffer_no_mps_copy")
         import Metal
 
         from metal_marlin.metal_dispatch import mps_tensor_to_metal_buffer
@@ -163,6 +175,7 @@ class TestRealModelMemory:
 
     def test_model_load_memory_bounded(self):
         """Test that model loading stays within memory bounds."""
+        logger.info("running test_model_load_memory_bounded")
         from metal_marlin.trellis.model import TrellisForCausalLM
 
         gc.collect()

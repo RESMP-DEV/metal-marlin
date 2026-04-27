@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from unittest.mock import MagicMock
 
 import torch
@@ -6,8 +7,12 @@ import torch
 from metal_marlin.continuous_batching import ContinuousBatchingEngine
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_batching_logic():
     # Mock Engine
+    logger.info("running test_batching_logic")
     mock_engine = MagicMock()
     mock_engine.device = "cpu"
     mock_engine.tokenizer.pad_token_id = 0
@@ -21,6 +26,7 @@ def test_batching_logic():
     # Capture inputs to verify padding
     captured_inputs = []
     def model_forward(input_ids, attention_mask=None):
+        logger.debug("model_forward called with input_ids=%s, attention_mask=%s", input_ids, attention_mask)
         captured_inputs.append((input_ids.clone(), attention_mask.clone()))
         # Return logits [batch, seq, vocab=100]
         return torch.randn(input_ids.shape[0], input_ids.shape[1], 100)
@@ -32,6 +38,7 @@ def test_batching_logic():
     cb = ContinuousBatchingEngine(mock_engine, max_batch_size=5)
 
     async def run_test():
+        logger.info("running run_test")
         await cb.start()
 
         # Req 1: len 1
@@ -101,6 +108,7 @@ def test_batching_logic():
         # Retrying logic not easily possible here, but in deterministic env this usually works.
 
 def test_results_routing():
+    logger.info("running test_results_routing")
     mock_engine = MagicMock()
     mock_engine.device = "cpu"
     mock_engine.tokenizer.pad_token_id = 0
@@ -108,11 +116,13 @@ def test_results_routing():
     mock_engine.tokenizer.encode.return_value = torch.tensor([[1]])
     # Decode returns unique strings based on input
     def decode_mock(ids):
+        logger.debug("decode_mock called with ids=%s", ids)
         return f"decoded_{ids.sum().item()}"
     mock_engine.tokenizer.decode.side_effect = decode_mock
 
     # Mock model dynamic return
     def model_side_effect(input_ids, attention_mask=None):
+        logger.debug("model_side_effect called with input_ids=%s, attention_mask=%s", input_ids, attention_mask)
         return torch.randn(input_ids.shape[0], input_ids.shape[1], 10)
     mock_engine.model.side_effect = model_side_effect
 
@@ -121,6 +131,7 @@ def test_results_routing():
     cb = ContinuousBatchingEngine(mock_engine)
 
     async def run():
+        logger.info("run starting")
         await cb.start()
         # Input 1 -> [1]
         # Input 2 -> [10]

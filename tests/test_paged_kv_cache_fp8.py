@@ -1,4 +1,5 @@
 """Tests for PagedKVCache FP8 quantization."""
+import logging
 
 import numpy as np
 import pytest
@@ -6,13 +7,18 @@ import pytest
 from metal_marlin.paged_kv_cache import PagedKVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestPagedKVCacheFP8:
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=42)
 
     def test_fp8_quantize_dequantize(self, rng: np.random.Generator) -> None:
         """Test FP8 quantization and dequantization in PagedKVCache."""
+        logger.info("running test_fp8_quantize_dequantize")
         num_blocks = 16
         num_kv_heads = 4
         head_dim = 64
@@ -66,6 +72,7 @@ class TestPagedKVCacheFP8:
 
     def test_fp16_passthrough(self, rng: np.random.Generator) -> None:
         """Test FP16 passthrough (no quantization)."""
+        logger.info("running test_fp16_passthrough")
         cache = PagedKVCache(
             num_blocks=4,
             num_kv_heads=2,

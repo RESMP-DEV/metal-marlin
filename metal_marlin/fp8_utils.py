@@ -37,6 +37,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -45,6 +46,9 @@ from ._compat import require_torch, torch
 
 if TYPE_CHECKING:
     import torch as torch_typing
+
+
+logger = logging.getLogger(__name__)
 
 # FP8 E4M3 format constants
 # Max representable value: 2^7 * (1 + 7/8) = 128 * 1.875 = 240
@@ -76,6 +80,7 @@ def _compute_fp8_e4m3_codebook() -> np.ndarray:
     Returns:
         Array of 256 float32 values for codes 0-255.
     """
+    logger.debug("_compute_fp8_e4m3_codebook called")
     values = np.zeros(256, dtype=np.float32)
 
     for code in range(256):
@@ -120,6 +125,7 @@ def _get_torch_codebook(device: str = "cpu") -> torch_typing.Tensor:
     Returns:
         Tensor of shape [256] with FP8 E4M3 values.
     """
+    logger.debug("_get_torch_codebook called with device=%s", device)
     global _FP8_E4M3_CODEBOOK_TORCH
 
     require_torch()
@@ -143,6 +149,7 @@ def _float_to_fp8_e4m3_scalar(val: float) -> int:
     Returns:
         uint8 code (0-255) for the FP8 E4M3 representation.
     """
+    logger.debug("_float_to_fp8_e4m3_scalar called with val=%s", val)
     if np.isnan(val):
         return 0x7F  # Positive NaN
 
@@ -222,6 +229,7 @@ def quantize_to_fp8_e4m3(
         >>> k_scales.shape  # One scale per head_dim position
         torch.Size([1, 8, 1024, 1])
     """
+    logger.info("quantize_to_fp8_e4m3 called with tensor=%s, scale_method=%s, group_size=%s", getattr(tensor, "shape", tensor), scale_method, group_size)
     require_torch()
     assert torch is not None
 
@@ -314,6 +322,7 @@ def _quantize_tensor_to_fp8(
     Returns:
         uint8 tensor with FP8 codes.
     """
+    logger.info("_quantize_tensor_to_fp8 called with scaled=%s, codebook=%s", scaled, codebook)
     require_torch()
     assert torch is not None
 
@@ -372,6 +381,7 @@ def dequantize_fp8_e4m3(
         >>> k_restored.dtype
         torch.float16
     """
+    logger.info("dequantize_fp8_e4m3 called with fp8_tensor=%s, scales=%s, output_dtype=%s", getattr(fp8_tensor, "shape", fp8_tensor), scales, output_dtype)
     require_torch()
     assert torch is not None
 
@@ -429,6 +439,7 @@ def _compute_fp8_e5m2_codebook() -> np.ndarray:
     Returns:
         Array of 256 float32 values for codes 0-255.
     """
+    logger.debug("_compute_fp8_e5m2_codebook called")
     values = np.zeros(256, dtype=np.float32)
 
     for code in range(256):
@@ -477,6 +488,7 @@ def _get_torch_codebook_e5m2(device: str = "cpu") -> torch_typing.Tensor:
     Returns:
         Tensor of shape [256] with FP8 E5M2 values.
     """
+    logger.debug("_get_torch_codebook_e5m2 called with device=%s", device)
     global _FP8_E5M2_CODEBOOK_TORCH
 
     require_torch()
@@ -535,6 +547,7 @@ def quantize_to_fp8_e5m2(
         >>> k_scales.shape  # One scale per head_dim position
         torch.Size([1, 8, 1024, 1])
     """
+    logger.info("quantize_to_fp8_e5m2 called with tensor=%s, scale_method=%s, group_size=%s", getattr(tensor, "shape", tensor), scale_method, group_size)
     require_torch()
     assert torch is not None
 
@@ -625,6 +638,7 @@ def _quantize_tensor_to_fp8_e5m2(
     Returns:
         uint8 tensor with FP8 E5M2 codes.
     """
+    logger.info("_quantize_tensor_to_fp8_e5m2 called with scaled=%s, codebook=%s", scaled, codebook)
     require_torch()
     assert torch is not None
 
@@ -683,6 +697,7 @@ def dequantize_fp8_e5m2(
         >>> k_restored.dtype
         torch.float16
     """
+    logger.info("dequantize_fp8_e5m2 called with fp8_tensor=%s, scales=%s, output_dtype=%s", getattr(fp8_tensor, "shape", fp8_tensor), scales, output_dtype)
     require_torch()
     assert torch is not None
 
@@ -750,6 +765,7 @@ def quantize_kv_cache_fp8_e5m2(
         >>> v = torch.randn(1, 8, 1024, 128, dtype=torch.float16, device="mps")
         >>> (k_q, k_s), (v_q, v_s) = quantize_kv_cache_fp8_e5m2(k, v)
     """
+    logger.info("quantize_kv_cache_fp8_e5m2 called with k=%s, v=%s, scale_method=%s, group_size=%s", k, v, scale_method, group_size)
     k_fp8, k_scales = quantize_to_fp8_e5m2(k, scale_method, group_size)
     v_fp8, v_scales = quantize_to_fp8_e5m2(v, scale_method, group_size)
     return (k_fp8, k_scales), (v_fp8, v_scales)
@@ -780,6 +796,7 @@ def dequantize_kv_cache_fp8_e5m2(
         >>> (k_q, k_s), (v_q, v_s) = quantize_kv_cache_fp8_e5m2(k, v)
         >>> k_restored, v_restored = dequantize_kv_cache_fp8_e5m2(k_q, k_s, v_q, v_s)
     """
+    logger.info("dequantize_kv_cache_fp8_e5m2 called with k_fp8=%s, k_scales=%s, v_fp8=%s, v_scales=%s", k_fp8, k_scales, v_fp8, v_scales)
     k = dequantize_fp8_e5m2(k_fp8, k_scales, output_dtype)
     v = dequantize_fp8_e5m2(v_fp8, v_scales, output_dtype)
     return k, v
@@ -806,6 +823,7 @@ def compute_quantization_error_e5m2(
             - rmse: Root mean squared error
             - snr_db: Signal-to-noise ratio in dB
     """
+    logger.info("compute_quantization_error_e5m2 called with original=%s, scale_method=%s, group_size=%s", original, scale_method, group_size)
     require_torch()
     assert torch is not None
 
@@ -859,6 +877,7 @@ def quantize_kv_cache_fp8(
         >>> v = torch.randn(1, 8, 1024, 128, dtype=torch.float16, device="mps")
         >>> (k_q, k_s), (v_q, v_s) = quantize_kv_cache_fp8(k, v)
     """
+    logger.info("quantize_kv_cache_fp8 called with k=%s, v=%s, scale_method=%s, group_size=%s", k, v, scale_method, group_size)
     k_fp8, k_scales = quantize_to_fp8_e4m3(k, scale_method, group_size)
     v_fp8, v_scales = quantize_to_fp8_e4m3(v, scale_method, group_size)
     return (k_fp8, k_scales), (v_fp8, v_scales)
@@ -889,6 +908,7 @@ def dequantize_kv_cache_fp8(
         >>> (k_q, k_s), (v_q, v_s) = quantize_kv_cache_fp8(k, v)
         >>> k_restored, v_restored = dequantize_kv_cache_fp8(k_q, k_s, v_q, v_s)
     """
+    logger.info("dequantize_kv_cache_fp8 called with k_fp8=%s, k_scales=%s, v_fp8=%s, v_scales=%s", k_fp8, k_scales, v_fp8, v_scales)
     k = dequantize_fp8_e4m3(k_fp8, k_scales, output_dtype)
     v = dequantize_fp8_e4m3(v_fp8, v_scales, output_dtype)
     return k, v
@@ -915,6 +935,7 @@ def compute_quantization_error(
             - rmse: Root mean squared error
             - snr_db: Signal-to-noise ratio in dB
     """
+    logger.info("compute_quantization_error called with original=%s, scale_method=%s, group_size=%s", original, scale_method, group_size)
     require_torch()
     assert torch is not None
 

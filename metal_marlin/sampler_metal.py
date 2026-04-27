@@ -36,6 +36,7 @@ Requirements:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
@@ -59,6 +60,9 @@ except ImportError:
     HAS_METAL = False
     Metal = None  # type: ignore[assignment]
 
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Metal shader source for sampling operations
@@ -689,6 +693,7 @@ class MetalSampler:
         Raises:
             RuntimeError: If Metal is not available.
         """
+        logger.debug("initializing %s with vocab_size=%s, device=%s", type(self).__name__, vocab_size, device)
         if not HAS_METAL:
             raise RuntimeError(
                 "Metal sampler requires PyObjC. Install with:\n  pip install pyobjc-framework-Metal"
@@ -719,6 +724,7 @@ class MetalSampler:
 
     def _compile_shaders(self) -> None:
         """Compile Metal shader source."""
+        logger.info("_compile_shaders starting")
         options = Metal.MTLCompileOptions.new()
         options.setFastMathEnabled_(True)
         options.setLanguageVersion_(Metal.MTLLanguageVersion3_0)
@@ -762,6 +768,7 @@ class MetalSampler:
     def _init_buffers(self) -> None:
         """Pre-allocate Metal buffers for intermediate results."""
         # Scalar buffers
+        logger.debug("_init_buffers called")
         self._scalar_buf = self._device.newBufferWithLength_options_(
             4, Metal.MTLResourceStorageModeShared
         )
@@ -791,6 +798,7 @@ class MetalSampler:
 
     def _create_buffer_from_numpy(self, arr: np.ndarray) -> Any:
         """Create Metal buffer from numpy array."""
+        logger.debug("_create_buffer_from_numpy called with arr=%s", arr)
         buf = self._device.newBufferWithBytes_length_options_(
             arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
         )
@@ -801,11 +809,13 @@ class MetalSampler:
 
         Note: This creates a copy. For zero-copy, use MPS tensor directly.
         """
+        logger.debug("_create_buffer_from_tensor called with tensor=%s", tensor)
         arr = tensor.cpu().numpy()
         return self._create_buffer_from_numpy(arr)
 
     def _mps_tensor_to_buffer(self, tensor: torch.Tensor) -> Any:
         """Get Metal buffer from MPS tensor (shared memory)."""
+        logger.debug("_mps_tensor_to_buffer called with tensor=%s", tensor)
         if not tensor.is_mps:
             raise ValueError("Tensor must be on MPS device")
 
@@ -831,6 +841,7 @@ class MetalSampler:
         wait: bool = True,
     ) -> None:
         """Dispatch a Metal kernel."""
+        logger.debug("_dispatch_kernel called with name=%s, grid=%s, threadgroup=%s", name, grid, threadgroup)
         pipeline = self._pipelines.get(name)
         if pipeline is None:
             raise KeyError(f"Pipeline '{name}' not found")
@@ -856,6 +867,7 @@ class MetalSampler:
     def _greedy_sample(self, logits: torch.Tensor) -> torch.Tensor:
         """Greedy (argmax) sampling."""
         # Use Metal kernel for large vocab, PyTorch for small
+        logger.debug("_greedy_sample called with logits=%s", logits)
         if self.vocab_size > 10000:
             return self._greedy_sample_metal(logits)
         else:
@@ -863,6 +875,7 @@ class MetalSampler:
 
     def _greedy_sample_metal(self, logits: torch.Tensor) -> torch.Tensor:
         """Greedy sampling using Metal kernel."""
+        logger.debug("_greedy_sample_metal called with logits=%s", logits)
         batch_size = logits.shape[0] if logits.ndim > 1 else 1
         logits_flat = logits.reshape(-1) if batch_size == 1 else logits
 
@@ -911,6 +924,7 @@ class MetalSampler:
 
     def _apply_temperature(self, logits: torch.Tensor, temperature: float) -> torch.Tensor:
         """Apply temperature scaling."""
+        logger.debug("_apply_temperature called with logits=%s, temperature=%s", logits, temperature)
         if temperature == 1.0:
             return logits
         return logits / temperature
@@ -922,6 +936,7 @@ class MetalSampler:
         penalty: float,
     ) -> torch.Tensor:
         """Apply repetition penalty to previously generated tokens."""
+        logger.debug("_apply_repetition_penalty called with logits=%s, generated_ids=%s, penalty=%s", logits, generated_ids, penalty)
         if penalty == 1.0 or not generated_ids:
             return logits
 
@@ -966,6 +981,7 @@ class MetalSampler:
     def _softmax(self, logits: torch.Tensor) -> torch.Tensor:
         """Compute softmax probabilities."""
         # For moderate vocab sizes, use fused kernel
+        logger.debug("_softmax called with logits=%s", logits)
         if self.vocab_size <= self.FUSED_SOFTMAX_THRESHOLD:
             return self._softmax_fused(logits)
         else:
@@ -973,6 +989,7 @@ class MetalSampler:
 
     def _softmax_fused(self, logits: torch.Tensor) -> torch.Tensor:
         """Fused softmax for moderate vocabulary sizes."""
+        logger.debug("_softmax_fused called with logits=%s", logits)
         logits_f32 = logits.float().contiguous()
         if not logits_f32.is_mps:
             logits_f32 = logits_f32.to("mps")
@@ -995,6 +1012,7 @@ class MetalSampler:
         """Multi-pass softmax for large vocabularies."""
         # Fall back to PyTorch for simplicity
         # A proper implementation would use the multi-pass Metal kernels
+        logger.debug("_softmax_multipass called with logits=%s", logits)
         return torch.softmax(logits.float(), dim=-1)
 
     def _topk_sample(
@@ -1004,6 +1022,7 @@ class MetalSampler:
         temperature: float,
     ) -> torch.Tensor:
         """Top-k sampling."""
+        logger.debug("_topk_sample called with logits=%s, k=%s, temperature=%s", logits, k, temperature)
         k = min(k, self.MAX_TOP_K, self.vocab_size)
 
         # Apply temperature
@@ -1063,6 +1082,7 @@ class MetalSampler:
     ) -> torch.Tensor:
         """Top-p (nucleus) sampling."""
         # Apply temperature
+        logger.debug("_topp_sample called with logits=%s, p=%s, temperature=%s", logits, p, temperature)
         logits = self._apply_temperature(logits, temperature)
 
         # Compute probabilities
@@ -1117,6 +1137,7 @@ class MetalSampler:
             Sampled token IDs [batch] or [1]
         """
         # Ensure logits are on MPS
+        logger.debug("sample called with logits=%s, temperature=%s, top_k=%s", logits, temperature, top_k)
         if not logits.is_mps:
             logits = logits.to("mps")
 
@@ -1152,6 +1173,7 @@ class MetalSampler:
         Returns:
             Token IDs with highest logits
         """
+        logger.debug("greedy called with logits=%s", logits)
         return self._greedy_sample(logits)
 
     def sample_topk(
@@ -1170,6 +1192,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample_topk called with logits=%s, k=%s, temperature=%s", logits, k, temperature)
         return self._topk_sample(logits, k, temperature)
 
     def sample_topp(
@@ -1188,6 +1211,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample_topp called with logits=%s, p=%s, temperature=%s", logits, p, temperature)
         return self._topp_sample(logits, p, temperature)
 
 
@@ -1222,6 +1246,7 @@ def sample_tokens(
     Returns:
         Sampled token IDs
     """
+    logger.debug("sample_tokens called with logits=%s, vocab_size=%s, temperature=%s", logits, vocab_size, temperature)
     if vocab_size is None:
         vocab_size = logits.shape[-1]
 

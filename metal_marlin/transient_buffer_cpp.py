@@ -7,6 +7,7 @@ implementation for zero-overhead transient buffer management.
 from __future__ import annotations
 
 import ctypes
+import logging
 from typing import Any
 
 try:
@@ -19,6 +20,9 @@ except ImportError:
     StorageMode = None
     MetalDevice = None
 
+
+logger = logging.getLogger(__name__)
+
 # Global instance cache for device-specific buffers
 _transient_ring_cpp: Any = None
 _transient_ring_device_id: int | None = None
@@ -26,6 +30,7 @@ _transient_ring_device_id: int | None = None
 
 def _get_default_device() -> Any:
     """Get default Metal device."""
+    logger.debug("_get_default_device called")
     if MetalDevice is None:
         return None
     return MetalDevice.default_device()
@@ -42,6 +47,7 @@ def _extract_capsule_ptr(capsule: Any, name: bytes = b"mtldevice") -> int:
         Pointer address as integer
     """
     # Use ctypes to access capsule contents
+    logger.debug("_extract_capsule_ptr called with capsule=%s, name=%s", capsule, name)
     ctypes.pythonapi.PyCapsule_GetPointer.restype = ctypes.c_void_p
     ctypes.pythonapi.PyCapsule_GetPointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
     ptr = ctypes.pythonapi.PyCapsule_GetPointer(capsule, name)
@@ -74,6 +80,7 @@ class TransientBufferCPP:
             device: MTLDevice, MetalDevice, or None for default device
             capacity: Buffer capacity in bytes (default 100MB)
         """
+        logger.debug("initializing %s with device=%s, capacity=%s", type(self).__name__, device, capacity)
         if not HAS_CPP_EXT:
             raise RuntimeError(
                 "C++ extension not available. "
@@ -115,11 +122,13 @@ class TransientBufferCPP:
     def _init_python_buffer(self, device: Any, capacity: int) -> None:
         """Initialize Python fallback buffer."""
         # Use the existing Python TransientRingBuffer from _buffer_pool
+        logger.debug("_init_python_buffer called with device=%s, capacity=%s", device, capacity)
         from metal_marlin._buffer_pool import TransientRingBuffer
         self._buffer = TransientRingBuffer(device, capacity)
     
     def reset(self) -> None:
         """Reset ring buffer offset to zero (O(1) operation)."""
+        logger.debug("reset called")
         self._buffer.reset()
     
     def allocate(self, size: int) -> tuple[Any, int]:
@@ -131,6 +140,7 @@ class TransientBufferCPP:
         Returns:
             Tuple of (MTLBuffer, byte_offset)
         """
+        logger.debug("allocate called with size=%s", size)
         result = self._buffer.allocate(size)
         if result is None:
             raise RuntimeError(f"Transient buffer allocation failed for {size} bytes")
@@ -145,6 +155,7 @@ class TransientBufferCPP:
         Returns:
             Tuple of (raw_ptr, byte_offset)
         """
+        logger.debug("allocate_bytes called with size=%s", size)
         result = self._buffer.allocate_bytes(size)
         if result is None:
             raise RuntimeError(f"Transient buffer allocation failed for {size} bytes")
@@ -153,6 +164,7 @@ class TransientBufferCPP:
     @property
     def capacity(self) -> int:
         """Total buffer capacity."""
+        logger.debug("capacity called")
         if self._use_cpp:
             return self._buffer.capacity()
         return self._buffer._capacity
@@ -160,25 +172,30 @@ class TransientBufferCPP:
     @property
     def used(self) -> int:
         """Currently used bytes."""
+        logger.debug("used called")
         return self._buffer.used()
     
     @property
     def available(self) -> int:
         """Available bytes for allocation."""
+        logger.debug("available called")
         return self._buffer.available()
     
     @property
     def utilization(self) -> float:
         """Current utilization ratio (0.0 to 1.0)."""
+        logger.debug("utilization called")
         return self._buffer.utilization()
     
     @property
     def is_cpp_backend(self) -> bool:
         """Whether using C++ backend (True) or Python fallback (False)."""
+        logger.debug("is_cpp_backend called")
         return self._use_cpp
     
     def stats(self) -> dict[str, Any]:
         """Get buffer statistics."""
+        logger.debug("stats called")
         return {
             "capacity": self.capacity,
             "used": self.used,
@@ -200,6 +217,7 @@ class TransientBufferCPP:
         Returns:
             TransientBufferCPP instance
         """
+        logger.debug("get_for_device called with device=%s, capacity=%s", device, capacity)
         global _transient_ring_cpp, _transient_ring_device_id
         
         if device is None:
@@ -215,6 +233,7 @@ class TransientBufferCPP:
     @classmethod
     def reset_global(cls) -> None:
         """Reset the global transient buffer instance."""
+        logger.debug("reset_global called")
         global _transient_ring_cpp
         if _transient_ring_cpp is not None:
             _transient_ring_cpp.reset()
@@ -222,6 +241,7 @@ class TransientBufferCPP:
     @classmethod
     def is_available(cls) -> bool:
         """Check if C++ transient buffer is available."""
+        logger.debug("is_available called")
         return HAS_CPP_EXT
 
 
@@ -235,16 +255,19 @@ def get_transient_buffer_cpp(device: Any = None, capacity: int = 100 * 1024 * 10
     Returns:
         TransientBufferCPP instance
     """
+    logger.debug("get_transient_buffer_cpp called with device=%s, capacity=%s", device, capacity)
     return TransientBufferCPP.get_for_device(device, capacity)
 
 
 def reset_transient_buffer_cpp() -> None:
     """Reset global C++ transient buffer."""
+    logger.debug("reset_transient_buffer_cpp called")
     TransientBufferCPP.reset_global()
 
 
 def transient_buffer_cpp_stats() -> dict[str, Any] | None:
     """Get statistics for C++ transient buffer."""
+    logger.debug("transient_buffer_cpp_stats called")
     global _transient_ring_cpp
     if _transient_ring_cpp is not None:
         return _transient_ring_cpp.stats()

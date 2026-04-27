@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +8,9 @@ import torch
 
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline, PersistentKVCache
 
+
+
+logger = logging.getLogger(__name__)
 
 # Mock classes
 @dataclass
@@ -21,12 +25,14 @@ class MockConfig:
 
 class MockModel(torch.nn.Module):
     def __init__(self, device="cpu"):
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         super().__init__()
         self.device = torch.device(device)
         self.config = MockConfig()
         self.dtype = torch.float16
         
     def forward(self, input_ids, past_key_values=None, use_cache=False, **kwargs):
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         batch_size, seq_len = input_ids.shape
         vocab_size = self.config.vocab_size
         
@@ -53,6 +59,7 @@ class MockModel(torch.nn.Module):
     def generate(self, input_ids, past_key_values=None, **kwargs):
         # Simplified generate for testing pipeline logic
         # Just return input + 1 random token
+        logger.debug("generate called with input_ids=%s, past_key_values=%s", input_ids, past_key_values)
         batch_size, seq_len = input_ids.shape
         
         # Determine total length (prefix + current input)
@@ -97,10 +104,12 @@ class MockModel(torch.nn.Module):
         return outputs
         
     def eval(self):
+        logger.debug("eval called")
         return self
 
 class MockTokenizer:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.vocab_size = 100
         self.eos_token_id = 99
         self.pad_token_id = 99
@@ -118,9 +127,11 @@ class MockTokenizer:
         return {"input_ids": torch.tensor([tokens]), "attention_mask": torch.ones(1, len(tokens))}
         
     def decode(self, token_ids, skip_special_tokens=True):
+        logger.debug("decode called with token_ids=%s, skip_special_tokens=%s", token_ids, skip_special_tokens)
         return "mock output"
 
 def test_persistent_kv_cache_logic():
+    logger.info("running test_persistent_kv_cache_logic")
     if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         pytest.skip("Requires GPU")
         
@@ -131,6 +142,7 @@ def test_persistent_kv_cache_logic():
     # Ensure input_ids in tokenizer are on correct device
     original_call = tokenizer.__call__
     def device_aware_call(*args, **kwargs):
+        logger.debug("device_aware_call called")
         res = original_call(*args, **kwargs)
         res["input_ids"] = res["input_ids"].to(device)
         res["attention_mask"] = res["attention_mask"].to(device)

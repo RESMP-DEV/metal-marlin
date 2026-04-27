@@ -70,6 +70,7 @@ def _resolve_includes(source: str, src_dir: Path) -> str:
     Returns:
         Source code with includes inlined
     """
+    logger.debug("_resolve_includes called with source=%s, src_dir=%s", source, src_dir)
     import re
 
     # Only match local includes with double quotes, not system includes with angle brackets
@@ -77,10 +78,12 @@ def _resolve_includes(source: str, src_dir: Path) -> str:
     processed: set[str] = set()
 
     def resolve(src: str, depth: int = 0) -> str:
+        logger.debug("resolve called with src=%s, depth=%s", src, depth)
         if depth > 10:
             raise RuntimeError("Include depth exceeded")
 
         def replacer(match: re.Match[str]) -> str:
+            logger.debug("replacer called with match=%s", match)
             filename = match.group(1)
             if filename in processed:
                 return ""
@@ -107,6 +110,7 @@ def _preprocess_shader(source: str) -> str:
     Returns:
         Preprocessed source code
     """
+    logger.debug("_preprocess_shader called with source=%s", source)
     return _resolve_includes(source, _SHADER_DIR)
 
 
@@ -122,6 +126,7 @@ class GPTQMetal:
         Raises:
             RuntimeError: If Metal or PyTorch MPS is not available.
         """
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         if not HAS_METAL:
             raise RuntimeError(
                 "GPTQMetal requires PyObjC Metal. Install with:\n"
@@ -165,6 +170,7 @@ class GPTQMetal:
 
     def _metal_max_buffer_length(self) -> int:
         """Best-effort query for maximum Metal buffer size."""
+        logger.debug("_metal_max_buffer_length called")
         if self._device is None:
             return _DEFAULT_MAX_BUFFER_BYTES
         max_len_attr = getattr(self._device, "maxBufferLength", None)
@@ -180,6 +186,7 @@ class GPTQMetal:
 
     def _allocate_shared_buffer(self, size: int, *, name: str) -> Any:
         """Allocate a shared Metal buffer with size validation."""
+        logger.debug("_allocate_shared_buffer called with size=%s", size)
         if self._device is None:
             raise RuntimeError(f"Metal device unavailable while allocating {name}")
         if size <= 0:
@@ -207,6 +214,7 @@ class GPTQMetal:
         name: str,
     ) -> None:
         """Copy payload bytes into a shared Metal buffer."""
+        logger.info("_write_bytes_to_shared_buffer called with buffer=%s, payload=%s", buffer, payload)
         if buffer is None:
             raise RuntimeError(f"Cannot write {name}: destination buffer is None")
 
@@ -236,6 +244,7 @@ class GPTQMetal:
 
     def _get_uint32_constant_buffer(self, value: int) -> Any:
         """Get a cached Metal buffer containing a single uint32 constant."""
+        logger.debug("_get_uint32_constant_buffer called with value=%s", value)
         if value in self._uint32_constant_buffer_cache:
             return self._uint32_constant_buffer_cache[value]
         if not (0 <= value <= _UINT32_MAX):
@@ -252,12 +261,14 @@ class GPTQMetal:
 
     @staticmethod
     def _should_force_torch_matmul() -> bool:
+        logger.debug("_should_force_torch_matmul called")
         return os.environ.get(_FORCE_TORCH_MATMUL_ENV, "0").strip() == "1"
 
     @staticmethod
     def _torch_hessian_matmul(X: torch.Tensor, normalize: bool) -> torch.Tensor:
         """Safe fallback path that keeps output on MPS with expected contract."""
         # Use float32 for accumulation to ensure numerical stability and MPS compatibility
+        logger.debug("_torch_hessian_matmul called with X=%s, normalize=%s", X, normalize)
         X_fp32 = X.to(device="mps", dtype=torch.float32)
         H = (2.0 * (X_fp32.T @ X_fp32)).to(device="mps", dtype=torch.float32).contiguous()
         if normalize:
@@ -278,6 +289,7 @@ class GPTQMetal:
 
         Returns False (fallback) on any suspicious condition to avoid crashes.
         """
+        logger.debug("_is_hessian_kernel_eligible called with X=%s, n_samples=%s, in_features=%s", X, n_samples, in_features)
         try:
             # Force torch matmul via environment variable override
             if GPTQMetal._should_force_torch_matmul():
@@ -417,6 +429,7 @@ class GPTQMetal:
 
     @staticmethod
     def _torch_dtype_to_numpy_dtype(dtype: torch.dtype) -> np.dtype:
+        logger.debug("_torch_dtype_to_numpy_dtype called with dtype=%s", dtype)
         mapping: dict[torch.dtype, np.dtype] = {
             torch.float16: np.float16,
             torch.float32: np.float32,
@@ -447,6 +460,7 @@ class GPTQMetal:
             Tuple of (tensor, buffer, lifetime_holders). The holders list ensures
             intermediate CPU tensors stay alive during Metal dispatch.
         """
+        logger.debug("_bridge_mps_tensor_copy called with tensor=%s", tensor)
         if tensor is None:
             raise RuntimeError(f"{name} is None")
         if not hasattr(tensor, "is_mps"):
@@ -502,6 +516,7 @@ class GPTQMetal:
     def _copy_shared_buffer_bytes_to_host(buffer: Any, size: int, *, name: str) -> bytes:
         """Copy bytes out of a shared Metal buffer into host-owned memory."""
         # Note: This returns a copy (bytes object). For large buffers, direct numpy read is preferred.
+        logger.debug("_copy_shared_buffer_bytes_to_host called with buffer=%s, size=%s", buffer, size)
         if size <= 0:
             raise RuntimeError(f"{name}: Requested copy size must be positive, got {size}")
         try:
@@ -529,6 +544,7 @@ class GPTQMetal:
         Raises:
             RuntimeError: If buffer is incompatible
         """
+        logger.debug("_validate_buffer_before_copy called with buffer=%s, tensor=%s", buffer, tensor)
         if buffer is None:
             raise RuntimeError(f"{name}: Metal buffer is None")
         
@@ -561,6 +577,7 @@ class GPTQMetal:
         Raises:
             RuntimeError: If copy fails
         """
+        logger.debug("_copy_metal_buffer_to_mps_tensor called with buffer=%s, tensor=%s", buffer, tensor)
         if tensor is None:
             raise RuntimeError(f"{name}: Target tensor is None")
         
@@ -589,6 +606,7 @@ class GPTQMetal:
 
     def _validate_command_buffer(self, command_buffer: Any, *, kernel_name: str) -> None:
         """Raise if the command buffer did not complete successfully."""
+        logger.debug("_validate_command_buffer called with command_buffer=%s", command_buffer)
         if command_buffer is None:
             raise RuntimeError(f"Command buffer is None for {kernel_name}")
 
@@ -619,6 +637,7 @@ class GPTQMetal:
         Raises:
             RuntimeError: If output contract is violated
         """
+        logger.debug("_validate_hessian_output_contract called with H=%s", H)
         expected_shape = (in_features, in_features)
         if tuple(H.shape) != expected_shape:
             raise RuntimeError(
@@ -656,6 +675,7 @@ class GPTQMetal:
         Returns:
             True if Metal output appears correct, False otherwise
         """
+        logger.debug("_validate_hessian_numerical_correctness called with H_metal=%s, X=%s, n_samples=%s", H_metal, X, n_samples)
         try:
             # Check 1: Symmetry (Hessian should be symmetric)
             # Allow some numerical tolerance for FP16
@@ -704,6 +724,7 @@ class GPTQMetal:
 
     def _get_pipeline(self, source: str, function_name: str):
         """Compile and cache a compute pipeline."""
+        logger.debug("_get_pipeline called with source=%s, function_name=%s", source, function_name)
         if function_name in self._pipelines:
             return self._pipelines[function_name]
 
@@ -726,6 +747,7 @@ class GPTQMetal:
     @staticmethod
     def _pipeline_max_threads(pipeline: Any) -> int | None:
         """Best-effort query for pipeline max threads per threadgroup."""
+        logger.debug("_pipeline_max_threads called with pipeline=%s", pipeline)
         max_threads_attr = getattr(pipeline, "maxTotalThreadsPerThreadgroup", None)
         try:
             if callable(max_threads_attr):
@@ -748,6 +770,7 @@ class GPTQMetal:
         pipeline: Any,
     ) -> None:
         """Validate dispatch geometry before touching encoder state."""
+        logger.debug("_validate_dispatch_config called")
         if grid_x <= 0 or grid_y <= 0:
             raise RuntimeError(f"{kernel_name}: invalid dispatch grid ({grid_x}, {grid_y})")
         if grid_x > _UINT32_MAX or grid_y > _UINT32_MAX:
@@ -763,6 +786,7 @@ class GPTQMetal:
 
     def _new_command_encoder(self, *, kernel_name: str) -> tuple[Any, Any]:
         """Create a command buffer and compute encoder with validation."""
+        logger.debug("_new_command_encoder called")
         if self._command_queue is None:
             raise RuntimeError(f"{kernel_name}: Metal command queue is unavailable")
         command_buffer = self._command_queue.commandBuffer()
@@ -776,6 +800,7 @@ class GPTQMetal:
     @staticmethod
     def _end_encoding(encoder: Any, *, kernel_name: str) -> None:
         """End Metal command encoding if encoder was created."""
+        logger.debug("_end_encoding called with encoder=%s", encoder)
         if encoder is None:
             return
         try:
@@ -790,6 +815,7 @@ class GPTQMetal:
         in_features: int,
     ) -> torch.Tensor:
         """Dispatch hessian_compute kernel with guarded execution."""
+        logger.debug("_dispatch_hessian_compute called with X=%s, n_samples=%s, in_features=%s", X, n_samples, in_features)
         tile_dim = _HESSIAN_TILE_DIM
         tg_threads = _HESSIAN_THREADS_PER_TG
         lifetime_holders: list[Any] = []
@@ -886,6 +912,7 @@ class GPTQMetal:
         n_samples: int,
     ) -> None:
         """Dispatch hessian_normalize kernel with guarded execution."""
+        logger.debug("_dispatch_hessian_normalize called with H=%s, in_features=%s, n_samples=%s", H, in_features, n_samples)
         tile_dim = _HESSIAN_TILE_DIM
         tg_threads = _HESSIAN_THREADS_PER_TG
         lifetime_holders: list[Any] = []
@@ -957,6 +984,7 @@ class GPTQMetal:
         
         Also performs numerical validation to detect incorrect Metal output.
         """
+        logger.debug("_guarded_metal_hessian_dispatch called with X=%s, n_samples=%s, in_features=%s", X, n_samples, in_features)
         try:
             H = self._dispatch_hessian_compute(X, n_samples, in_features)
             if normalize:
@@ -993,6 +1021,7 @@ class GPTQMetal:
         Includes extensive safety checks and robust fallback to torch.matmul.
         Preserves environment variable override METAL_MARLIN_GPTQ_FORCE_TORCH_MATMUL=1.
         """
+        logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
         if isinstance(activations, np.ndarray):
             X = torch.from_numpy(activations)
         else:
@@ -1037,6 +1066,7 @@ class GPTQMetal:
         regularization: float = 1e-6,
     ) -> torch.Tensor:
         """Compute Cholesky decomposition H = L @ L^T."""
+        logger.debug("cholesky_decompose called with H=%s, regularization=%s", H, regularization)
         H_reg = H + regularization * torch.eye(H.shape[0], device=H.device, dtype=H.dtype)
         return torch.linalg.cholesky(H_reg)
 
@@ -1049,6 +1079,7 @@ class GPTQMetal:
         percdamp: float = 0.01,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Quantize a weight matrix using GPTQ algorithm."""
+        logger.info("quantize_weight_gptq called with weight=%s, H=%s, bits=%s, blocksize=%s", getattr(weight, "shape", weight), H, bits, blocksize)
         from .gptq import GPTQQuantizer
 
         _, in_features = weight.shape
@@ -1082,10 +1113,12 @@ class GPTQMetal:
 
 # Convenience functions
 def compute_hessian_metal(activations: torch.Tensor | NDArray, normalize: bool = True) -> torch.Tensor:
+    logger.debug("compute_hessian_metal called with activations=%s, normalize=%s", activations, normalize)
     return GPTQMetal().compute_hessian(activations, normalize)
 
 
 def cholesky_decompose(H: torch.Tensor | NDArray, regularization: float = 1e-6) -> NDArray[np.float64]:
+    logger.debug("cholesky_decompose called with H=%s, regularization=%s", H, regularization)
     gptq = GPTQMetal()
     if isinstance(H, np.ndarray):
         H = torch.from_numpy(H.astype(np.float32)).to("mps")

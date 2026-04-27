@@ -1,4 +1,5 @@
 
+import logging
 import unittest
 
 from contrib.metal_marlin.metal_marlin.paged.allocator import (
@@ -7,9 +8,13 @@ from contrib.metal_marlin.metal_marlin.paged.allocator import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMultimodalBlockAllocatorOptimization(unittest.TestCase):
     def test_fragmentation_and_contiguous_allocation(self):
         # Initialize with 100 blocks
+        logger.info("running test_fragmentation_and_contiguous_allocation")
         allocator = MultimodalBlockAllocator(num_blocks=100)
         
         # Allocate some scattered blocks to create fragmentation
@@ -61,6 +66,7 @@ class TestMultimodalBlockAllocatorOptimization(unittest.TestCase):
         # allocator._COMPACT_THRESHOLD
         
     def test_unused_compaction_logic(self):
+        logger.info("running test_unused_compaction_logic")
         allocator = MultimodalBlockAllocator(num_blocks=10)
         # Check if _rebuild_free_runs exists but is not used
         self.assertTrue(hasattr(allocator, '_free_runs'))

@@ -15,6 +15,7 @@ Slow tests requiring real models are marked with @pytest.mark.slow.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -63,6 +64,9 @@ from metal_marlin.quantize_fp4 import (
     unpack_fp4,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # Multi-domain calibration v3 gist URL
 CALIBRATION_V3_URL = (
     "https://gist.githubusercontent.com/bartowski1182/eb213dccb3571f863da82e99418f81e8/"
@@ -78,6 +82,7 @@ CALIBRATION_V3_URL = (
 @pytest.fixture
 def small_weight_matrix():
     """Create small synthetic weight matrix for fast tests."""
+    logger.debug("small_weight_matrix called")
     np.random.seed(42)
     return np.random.randn(128, 256).astype(np.float32)
 
@@ -85,6 +90,7 @@ def small_weight_matrix():
 @pytest.fixture
 def calibration_activations():
     """Create synthetic calibration activations."""
+    logger.debug("calibration_activations called")
     np.random.seed(123)
     # Simulate 100 tokens x 256 features
     return [np.random.randn(20, 256).astype(np.float32) * 1.5 for _ in range(5)]
@@ -93,6 +99,7 @@ def calibration_activations():
 @pytest.fixture
 def synthetic_model_weights():
     """Create synthetic model-like weights with realistic naming."""
+    logger.debug("synthetic_model_weights called")
     np.random.seed(456)
     weights = {
         "model.layers.0.self_attn.q_proj.weight": np.random.randn(256, 256).astype(np.float32),
@@ -118,6 +125,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_basic_computation(self):
         """Verify H = X^T @ X is computed correctly."""
+        logger.info("running test_hessian_basic_computation")
         np.random.seed(42)
         X = np.random.randn(100, 64).astype(np.float32)
 
@@ -135,6 +143,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_incremental_matches_batch(self):
         """Incremental Hessian accumulation should match batch computation."""
+        logger.info("running test_hessian_incremental_matches_batch")
         np.random.seed(123)
 
         # Create multiple batches
@@ -158,6 +167,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_from_activations_shapes(self, calibration_activations):
         """Verify HessianInfo from activations has correct shapes."""
+        logger.info("running test_hessian_from_activations_shapes")
         hessian_info = collect_hessian_from_activations(calibration_activations, damp_ratio=0.01)
 
         assert hessian_info.hessian.shape == (256, 256)
@@ -166,6 +176,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_damping_increases_diagonal(self, calibration_activations):
         """Damping should increase diagonal elements for numerical stability."""
+        logger.info("running test_hessian_damping_increases_diagonal")
         info_no_damp = collect_hessian_from_activations(calibration_activations, damp_ratio=0.0)
         info_with_damp = collect_hessian_from_activations(calibration_activations, damp_ratio=0.05)
 
@@ -174,6 +185,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_with_outlier_activations(self):
         """Hessian should handle extreme activations without NaN/Inf."""
+        logger.info("running test_hessian_with_outlier_activations")
         np.random.seed(789)
 
         # Normal activations with extreme outliers
@@ -189,6 +201,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_reproducibility(self):
         """Same input should produce identical Hessian."""
+        logger.info("running test_hessian_reproducibility")
         np.random.seed(42)
         X1 = np.random.randn(100, 64).astype(np.float32)
 
@@ -202,6 +215,7 @@ class TestHessianCollectorAccuracy:
 
     def test_hessian_sample_count_tracking(self, calibration_activations):
         """Verify sample counts are tracked correctly."""
+        logger.info("running test_hessian_sample_count_tracking")
         total_samples = sum(act.shape[0] for act in calibration_activations)
         info = collect_hessian_from_activations(calibration_activations)
 
@@ -218,6 +232,7 @@ class TestCalibrationDatasetLoader:
 
     def test_dataset_container_basics(self):
         """Test CalibrationDataset basic operations."""
+        logger.info("running test_dataset_container_basics")
         samples = ["sample 1", "sample 2 is longer", "sample 3"]
         dataset = CalibrationDataset(
             samples=samples,
@@ -232,6 +247,7 @@ class TestCalibrationDatasetLoader:
 
     def test_dataset_filter(self):
         """Test filtering calibration samples."""
+        logger.info("running test_dataset_filter")
         samples = [
             "short",
             "this is a longer sample with code: def foo(): pass",
@@ -250,6 +266,7 @@ class TestCalibrationDatasetLoader:
     def test_local_json_loading(self, tmp_path: Path):
         """Test loading calibration data from local JSON file."""
         # JSON list of strings (needs sufficient length per sample)
+        logger.info("running test_local_json_loading")
         data = [
             "Sample 1: code snippet with enough content to pass length filter of 50 chars",
             "Sample 2: chat format text that is also long enough to be included here",
@@ -264,6 +281,7 @@ class TestCalibrationDatasetLoader:
 
     def test_local_jsonl_loading(self, tmp_path: Path):
         """Test loading from JSONL format."""
+        logger.info("running test_local_jsonl_loading")
         lines = [
             '{"text": "Sample 1 with enough characters to pass the length filter check"}',
             '{"text": "Sample 2 also needs to be sufficiently long for inclusion in dataset"}',
@@ -277,6 +295,7 @@ class TestCalibrationDatasetLoader:
 
     def test_local_txt_loading(self, tmp_path: Path):
         """Test loading from plain text format."""
+        logger.info("running test_local_txt_loading")
         txt_content = """This is the first sample paragraph with enough length to pass filtering.
 
 This is the second sample paragraph, also with sufficient length for inclusion.
@@ -291,6 +310,7 @@ Third sample paragraph here with more text to ensure it passes the minimum lengt
 
     def test_max_samples_limit(self):
         """Test that max_samples limits returned data."""
+        logger.info("running test_max_samples_limit")
         all_samples = [f"Sample {i}: content here with enough text" for i in range(100)]
         dataset = CalibrationDataset(samples=all_samples, name="test", version="v1")
 
@@ -301,6 +321,7 @@ Third sample paragraph here with more text to ensure it passes the minimum lengt
     @pytest.mark.slow
     def test_calibration_v3_download(self):
         """Test downloading calibration v3 data."""
+        logger.info("running test_calibration_v3_download")
         import urllib.request
 
         try:
@@ -323,6 +344,7 @@ Third sample paragraph here with more text to ensure it passes the minimum lengt
     def test_calibration_data_format_parsing(self):
         """Test parsing different calibration data formats."""
         # Nested JSON with 'samples' key
+        logger.info("running test_calibration_data_format_parsing")
         nested_data = {"samples": ["text1 with content", "text2 with content"]}
         samples = CalibrationDataset._parse_json_data(nested_data)
         assert "text1 with content" in samples
@@ -345,6 +367,7 @@ class TestSensitivityReproducibility:
 
     def test_gptq_deterministic(self, small_weight_matrix):
         """GPTQ quantization should be deterministic given same input."""
+        logger.info("running test_gptq_deterministic")
         np.random.seed(42)
         X = np.random.randn(100, 256).astype(np.float32)
         H = compute_hessian(X)
@@ -357,6 +380,7 @@ class TestSensitivityReproducibility:
 
     def test_rtn_deterministic(self, small_weight_matrix):
         """RTN quantization should be deterministic."""
+        logger.info("running test_rtn_deterministic")
         result1 = quantize_rtn(small_weight_matrix, bits=4, group_size=128)
         result2 = quantize_rtn(small_weight_matrix, bits=4, group_size=128)
 
@@ -365,6 +389,7 @@ class TestSensitivityReproducibility:
 
     def test_hadamard_rotation_invertible(self, small_weight_matrix):
         """Hadamard rotation should be perfectly invertible."""
+        logger.info("running test_hadamard_rotation_invertible")
         rotated, meta = apply_hadamard_rotation(small_weight_matrix, block_size=64)
         recovered = inverse_hadamard_rotation(rotated, meta)
 
@@ -375,6 +400,7 @@ class TestSensitivityReproducibility:
     def test_hadamard_disperses_outliers(self, small_weight_matrix):
         """Hadamard rotation should reduce max/mean ratio (disperse outliers)."""
         # Add synthetic outlier
+        logger.info("running test_hadamard_disperses_outliers")
         W = small_weight_matrix.copy()
         W[0, 0] = 100.0  # Large outlier
 
@@ -387,6 +413,7 @@ class TestSensitivityReproducibility:
 
     def test_actorder_improves_quality(self, small_weight_matrix):
         """Activation ordering should improve or match baseline quality."""
+        logger.info("running test_actorder_improves_quality")
         np.random.seed(42)
         X = np.random.randn(100, 256).astype(np.float32)
         H = compute_hessian(X)
@@ -410,6 +437,7 @@ class TestSensitivityReproducibility:
 
     def test_gptq_vs_rtn_comparison(self, small_weight_matrix):
         """GPTQ and RTN should both produce valid quantized outputs."""
+        logger.info("running test_gptq_vs_rtn_comparison")
         np.random.seed(42)
         X = np.random.randn(100, 256).astype(np.float32)
         H = compute_hessian(X)
@@ -427,6 +455,7 @@ class TestSensitivityReproducibility:
 
     def test_scale_computation_reproducibility(self, small_weight_matrix):
         """Scale computation should be reproducible."""
+        logger.info("running test_scale_computation_reproducibility")
         packed1, scales1 = quantize_fp4(small_weight_matrix, group_size=128)
         packed2, scales2 = quantize_fp4(small_weight_matrix, group_size=128)
 
@@ -444,6 +473,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_fp4_pack_unpack_roundtrip(self, small_weight_matrix):
         """FP4 pack/unpack should preserve values within quantization error."""
+        logger.info("running test_fp4_pack_unpack_roundtrip")
         packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
         unpacked = unpack_fp4(packed, scales, group_size=128)
 
@@ -458,6 +488,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_int4_symmetric_pack_unpack(self, small_weight_matrix):
         """INT4 symmetric quantization pack/unpack."""
+        logger.info("running test_int4_symmetric_pack_unpack")
         packed, scales, zeros = quantize_int4(small_weight_matrix, group_size=128, symmetric=True)
 
         assert zeros is None  # Symmetric has no zero points
@@ -471,6 +502,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_int4_asymmetric_pack_unpack(self, small_weight_matrix):
         """INT4 asymmetric quantization pack/unpack."""
+        logger.info("running test_int4_asymmetric_pack_unpack")
         packed, scales, zeros = quantize_int4(small_weight_matrix, group_size=128, symmetric=False)
 
         assert zeros is not None
@@ -479,6 +511,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_int8_per_channel_quantization(self, small_weight_matrix):
         """INT8 per-channel quantization."""
+        logger.info("running test_int8_per_channel_quantization")
         result = quantize_int8(small_weight_matrix, symmetric=True)
 
         assert result["data"].dtype == np.int8
@@ -488,6 +521,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_fp4_grid_values(self):
         """Verify FP4 E2M1 grid has correct values."""
+        logger.info("running test_fp4_grid_values")
         expected = np.array(
             [
                 0.0,
@@ -512,17 +546,20 @@ class TestMixedPrecisionPackUnpack:
 
     def test_int4_grid_values(self):
         """Verify INT4 symmetric grid has correct values."""
+        logger.info("running test_int4_grid_values")
         expected = np.arange(-8, 8, dtype=np.float32)
         np.testing.assert_array_equal(INT4_GRID, expected)
 
     def test_nf4_grid_normalized(self):
         """NF4 grid should be normalized to [-1, 1]."""
+        logger.info("running test_nf4_grid_normalized")
         assert NF4_GRID.min() == -1.0
         assert NF4_GRID.max() == 1.0
         assert len(NF4_GRID) == 16
 
     def test_quantize_to_grid_nearest(self):
         """quantize_to_grid should find nearest grid point."""
+        logger.info("running test_quantize_to_grid_nearest")
         values = np.array([0.1, 0.4, 0.6, 1.2, 5.5])
         grid = FP4_E2M1_GRID
 
@@ -538,6 +575,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_mixed_precision_layer_config(self, synthetic_model_weights):
         """Test layer classification and config assignment."""
+        logger.info("running test_mixed_precision_layer_config")
         config = MixedPrecisionConfig.default_moe()
 
         for name, tensor in synthetic_model_weights.items():
@@ -565,6 +603,7 @@ class TestMixedPrecisionPackUnpack:
 
     def test_should_quantize_dimension_check(self):
         """should_quantize should reject incompatible dimensions."""
+        logger.info("running test_should_quantize_dimension_check")
         config = MixedPrecisionConfig.default_dense()
 
         # 1D tensor - should not quantize
@@ -588,6 +627,7 @@ class TestFP8FormatCorrectness:
 
     def test_fp8_quantization_basic(self, small_weight_matrix):
         """Basic FP8 quantization should produce valid output."""
+        logger.info("running test_fp8_quantization_basic")
         result = quantize_fp8(small_weight_matrix, group_size=128)
 
         assert result["data"].dtype == np.int8
@@ -597,6 +637,7 @@ class TestFP8FormatCorrectness:
 
     def test_fp8_value_range(self, small_weight_matrix):
         """FP8 quantized values should be in valid range."""
+        logger.info("running test_fp8_value_range")
         result = quantize_fp8(small_weight_matrix, group_size=128)
 
         # INT8 mapped from [-448, 448] to [-127, 127]
@@ -605,11 +646,13 @@ class TestFP8FormatCorrectness:
 
     def test_fp8_scales_positive(self, small_weight_matrix):
         """FP8 scales should all be positive."""
+        logger.info("running test_fp8_scales_positive")
         result = quantize_fp8(small_weight_matrix, group_size=128)
         assert np.all(result["scales"] > 0)
 
     def test_fp8_handles_zeros(self):
         """FP8 should handle zero-filled tensors."""
+        logger.info("running test_fp8_handles_zeros")
         zeros = np.zeros((128, 256), dtype=np.float32)
         result = quantize_fp8(zeros, group_size=128)
 
@@ -618,6 +661,7 @@ class TestFP8FormatCorrectness:
 
     def test_fp8_preserves_sign(self, small_weight_matrix):
         """FP8 quantization should preserve value signs."""
+        logger.info("running test_fp8_preserves_sign")
         result = quantize_fp8(small_weight_matrix, group_size=128)
 
         # Dequantize and check signs match
@@ -642,6 +686,7 @@ class TestFP8FormatCorrectness:
 
     def test_fp8_group_size_validation(self, small_weight_matrix):
         """FP8 should handle different group sizes."""
+        logger.info("running test_fp8_group_size_validation")
         for group_size in [32, 64, 128, 256]:
             result = quantize_fp8(small_weight_matrix, group_size=group_size)
             expected_groups = 256 // group_size
@@ -658,6 +703,7 @@ class TestEndToEndQuantizeInference:
 
     def test_fp4_quantize_and_matmul(self, small_weight_matrix):
         """Quantized FP4 weights should work in matrix multiplication."""
+        logger.info("running test_fp4_quantize_and_matmul")
         packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
 
         # Dequantize
@@ -680,6 +726,7 @@ class TestEndToEndQuantizeInference:
 
     def test_gptq_quantize_and_matmul(self, small_weight_matrix):
         """GPTQ quantized weights should work in matrix multiplication."""
+        logger.info("running test_gptq_quantize_and_matmul")
         np.random.seed(42)
         X_cal = np.random.randn(100, 256).astype(np.float32)
         H = compute_hessian(X_cal)
@@ -697,6 +744,7 @@ class TestEndToEndQuantizeInference:
 
     def test_mr_gptq_layer_quantization(self, small_weight_matrix):
         """MR-GPTQ quantizer should produce valid packed output."""
+        logger.info("running test_mr_gptq_layer_quantization")
         quantizer = MRGPTQQuantizer(
             bits=4,
             format="fp4",
@@ -720,6 +768,7 @@ class TestEndToEndQuantizeInference:
 
     def test_mr_gptq_with_hadamard_rotation(self, small_weight_matrix):
         """MR-GPTQ with Hadamard should improve quality."""
+        logger.info("running test_mr_gptq_with_hadamard_rotation")
         np.random.seed(42)
 
         # Add outlier
@@ -738,6 +787,7 @@ class TestEndToEndQuantizeInference:
 
     def test_quantization_error_metrics(self, small_weight_matrix):
         """Quantization error metrics should be computed correctly."""
+        logger.info("running test_quantization_error_metrics")
         packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
         error = compute_quantization_error(small_weight_matrix, packed, scales, 128)
 
@@ -754,6 +804,7 @@ class TestEndToEndQuantizeInference:
     def test_full_layer_quantize_dequant_chain(self, small_weight_matrix):
         """Full chain: original -> quantize -> pack -> unpack -> dequant -> compare."""
         # Quantize
+        logger.info("running test_full_layer_quantize_dequant_chain")
         packed, scales = quantize_fp4(small_weight_matrix, group_size=128)
 
         # Verify packed format
@@ -776,6 +827,7 @@ class TestEndToEndQuantizeInference:
     @pytest.mark.smoke
     def test_basic_pipeline_smoke(self):
         """Smoke test for basic quantization pipeline."""
+        logger.info("running test_basic_pipeline_smoke")
         np.random.seed(42)
         W = np.random.randn(64, 128).astype(np.float32)
 
@@ -798,6 +850,7 @@ class TestEdgeCases:
 
     def test_single_group_quantization(self):
         """Quantization with single group (group_size = in_features)."""
+        logger.info("running test_single_group_quantization")
         np.random.seed(42)
         W = np.random.randn(64, 128).astype(np.float32)
 
@@ -806,6 +859,7 @@ class TestEdgeCases:
 
     def test_many_groups_quantization(self):
         """Quantization with many small groups."""
+        logger.info("running test_many_groups_quantization")
         np.random.seed(42)
         W = np.random.randn(64, 256).astype(np.float32)
 
@@ -814,6 +868,7 @@ class TestEdgeCases:
 
     def test_zero_weight_handling(self):
         """Quantization should handle zero weights."""
+        logger.info("running test_zero_weight_handling")
         W = np.zeros((64, 128), dtype=np.float32)
 
         packed, scales = quantize_fp4(W, group_size=128)
@@ -824,6 +879,7 @@ class TestEdgeCases:
 
     def test_extreme_values_handling(self):
         """Quantization should handle extreme weight values."""
+        logger.info("running test_extreme_values_handling")
         np.random.seed(42)
         W = np.random.randn(64, 128).astype(np.float32) * 1000
 
@@ -838,6 +894,7 @@ class TestEdgeCases:
 
     def test_hadamard_size_validation(self):
         """Hadamard matrix should reject non-power-of-2 sizes."""
+        logger.info("running test_hadamard_size_validation")
         with pytest.raises(ValueError):
             hadamard_matrix(3)
 
@@ -849,6 +906,7 @@ class TestEdgeCases:
 
     def test_gptq_dimension_mismatch_error(self):
         """GPTQ should error on dimension mismatch."""
+        logger.info("running test_gptq_dimension_mismatch_error")
         W = np.random.randn(64, 128).astype(np.float32)
         H_wrong = np.random.randn(64, 64).astype(np.float32)  # Wrong size
 
@@ -859,6 +917,7 @@ class TestEdgeCases:
 
     def test_quantize_tensor_dispatch(self):
         """quantize_tensor should dispatch correctly to different formats."""
+        logger.info("running test_quantize_tensor_dispatch")
         np.random.seed(42)
         W = np.random.randn(64, 128).astype(np.float32)
 
@@ -894,6 +953,7 @@ class TestCalibrationIntegration:
 
     def test_ranges_to_scales_fp4(self):
         """Test converting activation ranges to FP4 scales."""
+        logger.info("running test_ranges_to_scales_fp4")
         ranges = {
             "layer1": (-3.0, 3.0),
             "layer2": (-6.0, 6.0),
@@ -907,6 +967,7 @@ class TestCalibrationIntegration:
 
     def test_ranges_to_scales_int4(self):
         """Test converting activation ranges to INT4 scales."""
+        logger.info("running test_ranges_to_scales_int4")
         ranges = {
             "layer1": (-7.0, 7.0),
         }
@@ -919,6 +980,7 @@ class TestCalibrationIntegration:
     def test_calibration_with_fp4_quantization(self, small_weight_matrix, tmp_path: Path):
         """Test calibration-aware FP4 quantization."""
         # Create mock activation ranges
+        logger.info("running test_calibration_with_fp4_quantization")
         activation_ranges = {
             "input_range": (-2.0, 2.0),
             "percentile": 99.5,
@@ -958,6 +1020,7 @@ class TestSlowRealModels:
 
     def test_calibration_v3_full_download_and_parse(self):
         """Download and parse full calibration v3 dataset."""
+        logger.info("running test_calibration_v3_full_download_and_parse")
         import urllib.request
 
         try:
@@ -976,6 +1039,7 @@ class TestSlowRealModels:
 
     def test_large_weight_quantization(self):
         """Test quantization on larger weight matrices."""
+        logger.info("running test_large_weight_quantization")
         np.random.seed(42)
         W = np.random.randn(4096, 4096).astype(np.float32)
 
@@ -986,6 +1050,7 @@ class TestSlowRealModels:
 
     def test_full_gptq_large_layer(self):
         """GPTQ on larger layer with full Hessian computation."""
+        logger.info("running test_full_gptq_large_layer")
         np.random.seed(42)
         W = np.random.randn(1024, 1024).astype(np.float32)
         X = np.random.randn(512, 1024).astype(np.float32)

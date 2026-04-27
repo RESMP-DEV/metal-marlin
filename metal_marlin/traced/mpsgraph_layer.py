@@ -1,4 +1,5 @@
 """MPSGraph traced decoder layer for fused execution."""
+import logging
 
 
 import torch
@@ -9,6 +10,9 @@ try:
 except ImportError:
     HAS_MPSGRAPH = False
 
+
+
+logger = logging.getLogger(__name__)
 
 class TracedDecoderLayer:
     """MPSGraph traced decoder layer.
@@ -28,6 +32,7 @@ class TracedDecoderLayer:
         seq_len: int = 1,
         hidden_size: int = 2048,
     ):
+        logger.debug("initializing %s with layer=%s, batch_size=%s, seq_len=%s, hidden_size=%s", type(self).__name__, layer, batch_size, seq_len, hidden_size)
         if not HAS_MPSGRAPH:
             raise RuntimeError("MPSGraph not available")
         
@@ -42,6 +47,7 @@ class TracedDecoderLayer:
     
     def _build_graph(self):
         """Build MPSGraph for the decoder layer."""
+        logger.info("_build_graph starting")
         self._graph = MPSGraph.MPSGraph()
         
         # Input placeholder
@@ -59,6 +65,7 @@ class TracedDecoderLayer:
     
     def compile(self):
         """Compile the graph to executable."""
+        logger.info("compile starting")
         if self._compiled:
             return
         

@@ -12,8 +12,12 @@ Strategy:
 from __future__ import annotations
 
 import collections
+import logging
 from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 class ExpertWeightStreamer:
     """
@@ -31,6 +35,7 @@ class ExpertWeightStreamer:
             num_experts: Total number of experts in the model.
             gpu_cache_size: Maximum number of experts to keep GPU-resident.
         """
+        logger.debug("initializing %s with num_experts=%s, gpu_cache_size=%s", type(self).__name__, num_experts, gpu_cache_size)
         self.num_experts = num_experts
         self.gpu_cache_size = gpu_cache_size
 
@@ -50,6 +55,7 @@ class ExpertWeightStreamer:
         On M4 Max this primarily ensures Metal marks the pages resident
         before the compute encoder begins, avoiding mid-kernel page faults.
         """
+        logger.debug("prefetch_experts called with expert_indices=%s", expert_indices)
         for expert_idx in expert_indices:
             if 0 <= expert_idx < self.num_experts and expert_idx not in self.gpu_cache:
                 self._load_to_gpu(expert_idx)
@@ -61,6 +67,7 @@ class ExpertWeightStreamer:
         Returns a dict representing the expert's state/metadata.
         Weights themselves would be attached by the caller (e.g., Metal buffers).
         """
+        logger.debug("get_expert_weights called with expert_idx=%s", expert_idx)
         if not (0 <= expert_idx < self.num_experts):
             raise ValueError(
                 f"expert_idx {expert_idx} out of range [0, {self.num_experts})"
@@ -85,6 +92,7 @@ class ExpertWeightStreamer:
 
         Uses a frequency-aware LRU approach to preserve genuinely hot experts.
         """
+        logger.debug("evict_cold called")
         while len(self.gpu_cache) > self.gpu_cache_size:
             # Build list of oldest items
             oldest = list(self.gpu_cache.keys())
@@ -105,6 +113,7 @@ class ExpertWeightStreamer:
 
         Useful for callers that want to trigger background prefetching.
         """
+        logger.debug("predicted_experts called with top_k=%s", top_k)
         if not self._history:
             return []
 
@@ -130,6 +139,7 @@ class ExpertWeightStreamer:
           - useResource / makeResident on the backing MTLBuffer
           - setPurgeableState(.nonVolatile) to hint residency
         """
+        logger.info("_load_to_gpu called with expert_idx=%s", expert_idx)
         self.gpu_cache[expert_idx] = {
             "expert_idx": expert_idx,
             "status": "resident",

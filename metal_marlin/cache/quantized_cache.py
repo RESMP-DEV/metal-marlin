@@ -6,10 +6,14 @@ It is designed for decode-time workloads where KV bandwidth dominates latency.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class QuantizedKVCache:
     """KV cache with FP4/INT8 quantization.
@@ -33,6 +37,7 @@ class QuantizedKVCache:
         scale_group_size: int = 128,
         device: str | torch.device | None = None,
     ):
+        logger.debug("initializing %s with max_seq_len=%s, num_layers=%s, num_heads=%s, head_dim=%s, dtype=%s", type(self).__name__, max_seq_len, num_layers, num_heads, head_dim, dtype)
         if quant_dtype not in {"fp4", "int8"}:
             raise ValueError(f"quant_dtype must be 'fp4' or 'int8', got {quant_dtype!r}")
         if max_seq_len <= 0:
@@ -84,6 +89,7 @@ class QuantizedKVCache:
         position: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add new K/V and return full dequantized cache range for this layer."""
+        logger.debug("update called with layer_idx=%s, new_k=%s, new_v=%s", layer_idx, new_k, new_v)
         if not (0 <= layer_idx < self.num_layers):
             raise IndexError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")
         if not (0 <= position < self.max_seq_len):
@@ -121,6 +127,7 @@ class QuantizedKVCache:
         Returns:
             Attention output with shape ``[heads, head_dim]``.
         """
+        logger.debug("attention called with layer_idx=%s, query=%s, start=%s", layer_idx, query, start)
         from ..kernels import quantized_kv_attention_decode
 
         if end is None:
@@ -151,6 +158,7 @@ class QuantizedKVCache:
 
     def _quantize(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP4/INT8 with per-group scales."""
+        logger.info("_quantize called with tensor=%s", tensor)
         scales = self._compute_group_scales(tensor)
         expanded_scales = self._expand_scales(scales)
 
@@ -167,6 +175,7 @@ class QuantizedKVCache:
 
     def _dequantize_range(self, start: int, end: int, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Dequantize a range of the cache for one layer."""
+        logger.info("_dequantize_range called with start=%s, end=%s, layer_idx=%s", start, end, layer_idx)
         if not (0 <= layer_idx < self.num_layers):
             raise IndexError(f"layer_idx {layer_idx} out of range [0, {self.num_layers})")
         if not (0 <= start <= end <= self.max_seq_len):
@@ -185,15 +194,18 @@ class QuantizedKVCache:
 
     def reset(self) -> None:
         """Reset logical sequence length for a new request."""
+        logger.debug("reset called")
         self.current_len = 0
 
     def fp16_memory_bytes(self, seq_len: int | None = None) -> int:
         """Estimated FP16 cache footprint for K+V at ``seq_len``."""
+        logger.debug("fp16_memory_bytes called with seq_len=%s", seq_len)
         use_len = self.current_len if seq_len is None else seq_len
         return use_len * self.num_layers * 2 * self.num_heads * self.head_dim * 2
 
     def quantized_memory_bytes(self, seq_len: int | None = None) -> int:
         """Quantized cache footprint for K+V + scales at ``seq_len``."""
+        logger.info("quantized_memory_bytes called with seq_len=%s", seq_len)
         use_len = self.current_len if seq_len is None else seq_len
         data_bytes = use_len * self.num_layers * 2 * self.num_heads * self.packed_head_dim
         scale_bytes = use_len * self.num_layers * 2 * self.num_heads * self.num_scale_groups * 2
@@ -201,12 +213,14 @@ class QuantizedKVCache:
 
     def compression_ratio(self, seq_len: int | None = None) -> float:
         """FP16 bytes / quantized bytes."""
+        logger.debug("compression_ratio called with seq_len=%s", seq_len)
         q_bytes = self.quantized_memory_bytes(seq_len)
         if q_bytes == 0:
             return 1.0
         return self.fp16_memory_bytes(seq_len) / q_bytes
 
     def _normalize_token(self, tensor: torch.Tensor, name: str) -> torch.Tensor:
+        logger.debug("_normalize_token called with tensor=%s, name=%s", tensor, name)
         if tensor.ndim == 3:
             if tensor.shape[0] != 1:
                 raise ValueError(
@@ -224,6 +238,7 @@ class QuantizedKVCache:
         return tensor.to(device=self.device, dtype=self.dtype)
 
     def _compute_group_scales(self, tensor: torch.Tensor) -> torch.Tensor:
+        logger.debug("_compute_group_scales called with tensor=%s", tensor)
         max_q = 7.0 if self.quant_dtype == "fp4" else 127.0
         padded_dim = self.num_scale_groups * self.scale_group_size
 
@@ -235,6 +250,7 @@ class QuantizedKVCache:
         return (abs_max / max_q).to(torch.float16)
 
     def _expand_scales(self, scales: torch.Tensor) -> torch.Tensor:
+        logger.debug("_expand_scales called with scales=%s", scales)
         expanded = (
             scales.to(torch.float32)
             .unsqueeze(-1)
@@ -244,6 +260,7 @@ class QuantizedKVCache:
         return expanded[:, : self.head_dim]
 
     def _dequantize_tensor(self, quant: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        logger.info("_dequantize_tensor called with quant=%s, scales=%s", quant, scales)
         seq_len = quant.shape[0]
         expanded_scales = (
             scales.to(torch.float32)
@@ -274,6 +291,7 @@ class QuantizedKVCache:
         start: int,
         end: int,
     ) -> torch.Tensor:
+        logger.debug("_attention_fallback called with layer_idx=%s, query=%s, start=%s", layer_idx, query, start)
         k_cache, v_cache = self._dequantize_range(start, end, layer_idx)
         # [seq, heads, dim] -> [heads, seq, dim]
         k = k_cache.to(torch.float32).permute(1, 0, 2)

@@ -23,12 +23,16 @@ Usage:
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 import struct
 from pathlib import Path
 
 import numpy as np
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 # Paths to Metal shaders
 _SHADER_V2_PATH = Path(__file__).parent.parent / "src" / "flash_attention_v2.metal"
@@ -42,6 +46,7 @@ _NUM_SIMDGROUPS = 4
 
 def _check_metal_available() -> bool:
     """Check if Metal API is available via PyObjC."""
+    logger.debug("_check_metal_available called")
     try:
         import Metal  # noqa: F401
 
@@ -52,6 +57,7 @@ def _check_metal_available() -> bool:
 
 def _check_torch_available() -> bool:
     """Check if PyTorch is available for reference computation."""
+    logger.debug("_check_torch_available called")
     try:
         import torch  # noqa: F401
 
@@ -86,6 +92,7 @@ def ref_scaled_dot_product_attention(
     Returns:
         Output tensor [batch, heads_q, seq_q, head_dim]
     """
+    logger.debug("ref_scaled_dot_product_attention called with Q=%s, K=%s, V=%s", Q, K, V)
     batch, heads_q, seq_q, head_dim = Q.shape
     _, heads_kv, seq_k, _ = K.shape
 
@@ -137,6 +144,7 @@ def ref_torch_attention(
     is_causal: bool = False,
 ) -> np.ndarray:
     """PyTorch reference implementation for higher precision verification."""
+    logger.debug("ref_torch_attention called with Q=%s, K=%s, V=%s", Q, K, V)
     import torch
     import torch.nn.functional as F
 
@@ -181,6 +189,7 @@ class MetalCompilationError(Exception):
 
 def _read_metal_buffer(buf, nbytes: int) -> bytes:
     """Read bytes from a Metal buffer."""
+    logger.debug("_read_metal_buffer called with buf=%s, nbytes=%s", buf, nbytes)
     contents = buf.contents()
     if isinstance(contents, int):
         arr = (ctypes.c_char * nbytes).from_address(contents)
@@ -196,6 +205,7 @@ def _read_metal_buffer(buf, nbytes: int) -> bytes:
 
 def _compile_shader(shader_path: Path):
     """Compile a Metal shader and return (device, library)."""
+    logger.info("_compile_shader starting")
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -223,6 +233,7 @@ def _compile_shader(shader_path: Path):
 
 def _create_pipeline(device, library, kernel_name: str):
     """Create a compute pipeline, raising ThreadgroupMemoryExceeded if it fails."""
+    logger.debug("_create_pipeline called with device=%s, library=%s, kernel_name=%s", device, library, kernel_name)
     func = library.newFunctionWithName_(kernel_name)
     if func is None:
         raise ValueError(f"Kernel {kernel_name} not found")
@@ -242,6 +253,7 @@ def _create_pipeline(device, library, kernel_name: str):
 
 def _create_buffer(device, data: np.ndarray):
     """Create a Metal buffer from a numpy array."""
+    logger.debug("_create_buffer called with device=%s, data=%s", device, data)
     import Metal
 
     return device.newBufferWithBytes_length_options_(
@@ -251,6 +263,7 @@ def _create_buffer(device, data: np.ndarray):
 
 def _create_constant_buffer(device, value, dtype=np.uint32):
     """Create a small constant buffer for kernel parameters."""
+    logger.debug("_create_constant_buffer called with device=%s, value=%s, dtype=%s", device, value, dtype)
     import Metal
 
     data = np.array([value], dtype=dtype)
@@ -276,6 +289,7 @@ def _pack_attention_params(
     is_causal: int,
 ) -> bytes:
     """Pack AttentionParams struct for v2 kernels."""
+    logger.info("_pack_attention_params called with batch=%s, heads_q=%s, heads_kv=%s, seq_q=%s", batch, heads_q, heads_kv, seq_q)
     return struct.pack(
         "IIIIIIfII", batch, heads_q, heads_kv, seq_q, seq_k, head_dim, scale, gqa_ratio, is_causal
     )
@@ -289,6 +303,7 @@ def run_flash_attention_v2(
     is_causal: bool = False,
 ) -> np.ndarray:
     """Run flash_attention_v2 or flash_attention_v2_causal kernel."""
+    logger.debug("run_flash_attention_v2 called with Q=%s, K=%s, V=%s", Q, K, V)
     import Metal
 
     batch, heads_q, seq_q, head_dim = Q.shape
@@ -352,6 +367,7 @@ def run_flash_attention_v2_decode(
     scale: float,
 ) -> np.ndarray:
     """Run flash_attention_v2_decode kernel (seq_q=1)."""
+    logger.debug("run_flash_attention_v2_decode called with Q=%s, K=%s, V=%s", Q, K, V)
     import Metal
 
     batch, heads_q, seq_q, head_dim = Q.shape
@@ -374,12 +390,14 @@ def run_flash_attention_v2_decode(
     buf_O = device.newBufferWithLength_options_(output_size, Metal.MTLResourceStorageModeShared)
 
     def _make_uint32_buffer(val: int):
+        logger.debug("_make_uint32_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
         )
 
     def _make_float_buffer(val: float):
+        logger.debug("_make_float_buffer called with val=%s", val)
         data = np.array([val], dtype=np.float32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -433,6 +451,7 @@ def run_flash_attention_v2_gqa(
     is_causal: bool = False,
 ) -> np.ndarray:
     """Run flash_attention_v2_gqa kernel."""
+    logger.debug("run_flash_attention_v2_gqa called with Q=%s, K=%s, V=%s", Q, K, V)
     import Metal
 
     batch, heads_q, seq_q, head_dim = Q.shape
@@ -496,6 +515,7 @@ def run_flash_attention_v2_mqa(
     is_causal: bool = False,
 ) -> np.ndarray:
     """Run flash_attention_v2_mqa kernel (single KV head)."""
+    logger.debug("run_flash_attention_v2_mqa called with Q=%s, K=%s, V=%s", Q, K, V)
     import Metal
 
     batch, heads_q, seq_q, head_dim = Q.shape
@@ -559,6 +579,7 @@ def run_flash_attention_v2_mqa(
 @pytest.fixture
 def rng():
     """Reproducible random number generator."""
+    logger.debug("rng called")
     return np.random.default_rng(42)
 
 
@@ -572,6 +593,7 @@ def generate_qkv(
     head_dim: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate random Q, K, V tensors."""
+    logger.debug("generate_qkv called with rng=%s, batch=%s, heads_q=%s", rng, batch, heads_q)
     Q = rng.standard_normal((batch, heads_q, seq_q, head_dim)).astype(np.float16)
     K = rng.standard_normal((batch, heads_kv, seq_k, head_dim)).astype(np.float16)
     V = rng.standard_normal((batch, heads_kv, seq_k, head_dim)).astype(np.float16)
@@ -597,6 +619,7 @@ class TestReferenceImplementation:
     )
     def test_reference_non_causal(self, rng, batch, heads, seq_q, seq_k, head_dim):
         """Test NumPy reference against manual computation."""
+        logger.info("running test_reference_non_causal")
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq_q, seq_k, head_dim)
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -618,6 +641,7 @@ class TestReferenceImplementation:
     )
     def test_reference_causal(self, rng, batch, heads, seq, head_dim):
         """Test causal masking in NumPy reference."""
+        logger.info("running test_reference_causal")
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq, seq, head_dim)
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -637,6 +661,7 @@ class TestReferenceImplementation:
     )
     def test_reference_gqa(self, rng, heads_q, heads_kv):
         """Test GQA head expansion in NumPy reference."""
+        logger.info("running test_reference_gqa")
         Q, K, V = generate_qkv(rng, 1, heads_q, heads_kv, 64, 64, 64)
         scale = 1.0 / math.sqrt(64)
 
@@ -657,6 +682,7 @@ class TestReferenceImplementation:
     )
     def test_numpy_vs_pytorch_reference(self, rng, batch, heads, seq_q, seq_k, head_dim, is_causal):
         """Verify NumPy reference matches PyTorch."""
+        logger.info("running test_numpy_vs_pytorch_reference")
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq_q, seq_k, head_dim)
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -689,6 +715,7 @@ class TestPyTorchReference:
     )
     def test_pytorch_reference_non_causal(self, rng, batch, heads, seq, head_dim):
         """Verify our NumPy reference matches PyTorch SDPA."""
+        logger.info("running test_pytorch_reference_non_causal")
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq, seq, head_dim)
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -711,6 +738,7 @@ class TestPyTorchReference:
     )
     def test_pytorch_reference_causal(self, rng, batch, heads, seq, head_dim):
         """Verify causal masking matches PyTorch."""
+        logger.info("running test_pytorch_reference_causal")
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq, seq, head_dim)
         scale = 1.0 / math.sqrt(head_dim)
 
@@ -735,6 +763,7 @@ class TestEdgeCases:
 
     def test_single_token_prefill(self, rng):
         """Test single token prefill (seq_q=1)."""
+        logger.info("running test_single_token_prefill")
         Q, K, V = generate_qkv(rng, 1, 8, 8, 1, 128, 64)
         scale = 1.0 / math.sqrt(64)
 
@@ -746,6 +775,7 @@ class TestEdgeCases:
     def test_seq_not_divisible_by_tile(self, rng):
         """Test sequences not divisible by tile size."""
         # 73 is not divisible by TILE_Q=16 or TILE_KV=64
+        logger.info("running test_seq_not_divisible_by_tile")
         Q, K, V = generate_qkv(rng, 1, 8, 8, 73, 73, 64)
         scale = 1.0 / math.sqrt(64)
 
@@ -756,6 +786,7 @@ class TestEdgeCases:
 
     def test_long_context(self, rng):
         """Test longer context lengths."""
+        logger.info("running test_long_context")
         Q, K, V = generate_qkv(rng, 1, 4, 4, 32, 2048, 64)
         scale = 1.0 / math.sqrt(64)
 
@@ -775,6 +806,7 @@ class TestEdgeCases:
     )
     def test_gqa_ratios(self, rng, heads_q, heads_kv):
         """Test various GQA ratios."""
+        logger.info("running test_gqa_ratios")
         Q, K, V = generate_qkv(rng, 1, heads_q, heads_kv, 64, 64, 64)
         scale = 1.0 / math.sqrt(64)
 
@@ -786,6 +818,7 @@ class TestEdgeCases:
     def test_causal_correct_masking(self, rng):
         """Verify causal mask is applied correctly."""
         # Use small sizes for easier verification
+        logger.info("running test_causal_correct_masking")
         batch, heads, seq, head_dim = 1, 1, 4, 8
         Q, K, V = generate_qkv(rng, batch, heads, heads, seq, seq, head_dim)
         scale = 1.0 / math.sqrt(head_dim)

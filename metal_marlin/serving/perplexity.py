@@ -8,6 +8,7 @@ PPL = exp(cross_entropy_loss) = exp(-1/N * sum(log P(x_i | x_{<i})))
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -16,6 +17,9 @@ import torch.nn.functional as F
 if TYPE_CHECKING:
     from ..inference.pipeline_v2 import TransformersMarlinPipeline
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PerplexityResult:
@@ -50,6 +54,7 @@ def compute_perplexity(
         PerplexityResult with overall and optional chunk-level perplexities
     """
     # Tokenize
+    logger.debug("compute_perplexity called with pipeline=%s, text=%s, chunk_size=%s", pipeline, text, chunk_size)
     inputs = pipeline.tokenizer(text, return_tensors="pt", truncation=False)
     input_ids = inputs["input_ids"].to(pipeline.device)
     attention_mask = inputs.get("attention_mask", None)
@@ -127,6 +132,7 @@ def compute_perplexity_from_ids(
     Returns:
         Perplexity as a float
     """
+    logger.debug("compute_perplexity_from_ids called with model=%s, input_ids=%s, attention_mask=%s", model, input_ids, attention_mask)
     outputs = model(
         input_ids,
         attention_mask=attention_mask,
@@ -157,17 +163,20 @@ class PerplexityTracker:
     """
 
     def __init__(self, window_size: int = 100):
+        logger.debug("initializing %s with window_size=%s", type(self).__name__, window_size)
         self.window_size = window_size
         self._ppls: list[tuple[float, int, str]] = []  # (ppl, tokens, source)
 
     def add(self, ppl: float, tokens: int, source: str = "unknown"):
         """Add a perplexity observation."""
+        logger.debug("add called with ppl=%s, tokens=%s, source=%s", ppl, tokens, source)
         self._ppls.append((ppl, tokens, source))
         if len(self._ppls) > self.window_size:
             self._ppls = self._ppls[-self.window_size:]
 
     def get_stats(self) -> dict[str, Any]:
         """Get aggregated perplexity statistics."""
+        logger.debug("get_stats called")
         if not self._ppls:
             return {
                 "mean_perplexity": None,
@@ -201,6 +210,7 @@ class PerplexityTracker:
 
     def to_prometheus(self) -> str:
         """Export metrics in Prometheus format."""
+        logger.debug("to_prometheus called")
         stats = self.get_stats()
         lines = []
 

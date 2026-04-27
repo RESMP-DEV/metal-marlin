@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -36,14 +37,19 @@ except ImportError as e:
     raise SystemExit(f"PyTorch required: {e}")
 
 
+
+logger = logging.getLogger(__name__)
+
 def load_analysis(analysis_path: str) -> dict:
     """Load layer importance analysis from JSON."""
+    logger.info("load_analysis called with analysis_path=%s", analysis_path)
     with open(analysis_path) as f:
         return json.load(f)
 
 
 def get_prunable_layers(analysis: dict, threshold_pct: float | None = None) -> list[int]:
     """Extract prunable layers from analysis."""
+    logger.debug("get_prunable_layers called with analysis=%s, threshold_pct=%s", analysis, threshold_pct)
     if threshold_pct is None:
         threshold_pct = analysis.get("threshold_pct", 0.5)
 
@@ -58,6 +64,7 @@ def get_prunable_layers(analysis: dict, threshold_pct: float | None = None) -> l
 
 def apply_pruning(args: argparse.Namespace) -> int:
     """Create pruned model configuration."""
+    logger.debug("apply_pruning called with args=%s", args)
     from metal_marlin.trellis import TrellisModelConfig
 
     print(f"Loading analysis from: {args.analysis}")
@@ -128,6 +135,7 @@ def apply_pruning(args: argparse.Namespace) -> int:
 
 def benchmark_pruning(args: argparse.Namespace) -> int:
     """Benchmark original vs pruned model."""
+    logger.info("benchmark_pruning starting with args=%s", args)
     import numpy as np
 
     from metal_marlin.eval import load_wikitext2
@@ -179,6 +187,7 @@ def benchmark_pruning(args: argparse.Namespace) -> int:
     def benchmark_inference(skip_layers: list[int] | None = None) -> tuple[float, float]:
         """Benchmark inference speed and perplexity."""
         # Update config's skip_layers
+        logger.info("benchmark_inference starting with skip_layers=%s", skip_layers)
         model.model.config.skip_layers = skip_layers
 
         total_tokens = 0
@@ -257,6 +266,7 @@ def benchmark_pruning(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Apply layer pruning based on importance analysis")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

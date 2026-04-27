@@ -9,6 +9,7 @@ Tests cover:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -29,8 +30,12 @@ from metal_marlin.vision.projector import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_torch_device() -> str:
     """Get the best available PyTorch device."""
+    logger.debug("_get_torch_device called")
     if torch is None:
         return "cpu"
     if torch.backends.mps.is_available():
@@ -50,6 +55,7 @@ class TestVisionProjectorConfig:
 
     def test_default_config(self) -> None:
         """Test default configuration values."""
+        logger.info("running test_default_config")
         config = VisionProjectorConfig()
 
         assert config.projector_type == ProjectorType.LLAVA_MLP
@@ -62,6 +68,7 @@ class TestVisionProjectorConfig:
 
     def test_custom_config(self) -> None:
         """Test custom configuration."""
+        logger.info("running test_custom_config")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.PERCEIVER,
             vision_hidden_size=1408,
@@ -80,11 +87,13 @@ class TestVisionProjectorConfig:
 
     def test_intermediate_size_default(self) -> None:
         """Test intermediate_size defaults to 4x vision_hidden_size."""
+        logger.info("running test_intermediate_size_default")
         config = VisionProjectorConfig(vision_hidden_size=512)
         assert config.intermediate_size == 2048
 
     def test_from_llava_config(self) -> None:
         """Test parsing LLaVA-style HuggingFace config."""
+        logger.info("running test_from_llava_config")
         hf_config = {
             "model_type": "llava",
             "vision_config": {"hidden_size": 1024},
@@ -100,6 +109,7 @@ class TestVisionProjectorConfig:
 
     def test_from_qwen2vl_config(self) -> None:
         """Test parsing Qwen2-VL config."""
+        logger.info("running test_from_qwen2vl_config")
         hf_config = {
             "model_type": "qwen2_vl",
             "vision_config": {"hidden_size": 1280},
@@ -120,6 +130,7 @@ class TestVisionProjectorConfig:
 
     def test_from_internvl_config(self) -> None:
         """Test parsing InternVL config."""
+        logger.info("running test_from_internvl_config")
         hf_config = {
             "model_type": "internvl",
             "visual_hidden_size": 1408,
@@ -146,11 +157,13 @@ class TestProjectorTypeDetection:
 
     def test_detect_llava(self) -> None:
         """Test detection of LLaVA projector."""
+        logger.info("running test_detect_llava")
         config = {"model_type": "llava"}
         assert detect_projector_type(config) == ProjectorType.LLAVA_MLP
 
     def test_detect_qwen2vl(self) -> None:
         """Test detection of Qwen2-VL Perceiver."""
+        logger.info("running test_detect_qwen2vl")
         config = {"model_type": "qwen2_vl"}
         assert detect_projector_type(config) == ProjectorType.PERCEIVER
 
@@ -159,11 +172,13 @@ class TestProjectorTypeDetection:
 
     def test_detect_internvl(self) -> None:
         """Test detection of InternVL QLLaMA projector."""
+        logger.info("running test_detect_internvl")
         config = {"model_type": "internvl"}
         assert detect_projector_type(config) == ProjectorType.QLLAMA
 
     def test_detect_explicit_type(self) -> None:
         """Test explicit projector_type in config."""
+        logger.info("running test_detect_explicit_type")
         config = {"projector_type": "linear"}
         assert detect_projector_type(config) == ProjectorType.LINEAR
 
@@ -172,6 +187,7 @@ class TestProjectorTypeDetection:
 
     def test_detect_default(self) -> None:
         """Test default fallback to LLaVA MLP."""
+        logger.info("running test_detect_default")
         config = {"model_type": "unknown_model"}
         assert detect_projector_type(config) == ProjectorType.LLAVA_MLP
 
@@ -186,6 +202,7 @@ class TestLLaVAProjector:
 
     @pytest.fixture
     def config(self) -> VisionProjectorConfig:
+        logger.debug("config called")
         return VisionProjectorConfig(
             projector_type=ProjectorType.LLAVA_MLP,
             vision_hidden_size=1024,
@@ -195,6 +212,7 @@ class TestLLaVAProjector:
 
     def test_init(self, config: VisionProjectorConfig) -> None:
         """Test projector initialization."""
+        logger.info("running test_init")
         projector = LLaVAProjector(config)
 
         assert projector.vision_hidden_size == 1024
@@ -203,6 +221,7 @@ class TestLLaVAProjector:
 
     def test_forward_numpy(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with numpy input."""
+        logger.info("running test_forward_numpy")
         projector = LLaVAProjector(config)
 
         # Single image: [batch, num_patches, vision_hidden]
@@ -214,6 +233,7 @@ class TestLLaVAProjector:
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
     def test_forward_torch(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with PyTorch input."""
+        logger.info("running test_forward_torch")
         assert torch is not None
         projector = LLaVAProjector(config)
 
@@ -225,6 +245,7 @@ class TestLLaVAProjector:
 
     def test_forward_batched(self, config: VisionProjectorConfig) -> None:
         """Test batched forward pass."""
+        logger.info("running test_forward_batched")
         projector = LLaVAProjector(config)
 
         # Batch of 4 images
@@ -235,6 +256,7 @@ class TestLLaVAProjector:
 
     def test_forward_variable_patches(self, config: VisionProjectorConfig) -> None:
         """Test with variable number of patches."""
+        logger.info("running test_forward_variable_patches")
         projector = LLaVAProjector(config)
 
         for num_patches in [256, 576, 1024]:
@@ -253,6 +275,7 @@ class TestQwen2VLProjector:
 
     @pytest.fixture
     def config(self) -> VisionProjectorConfig:
+        logger.debug("config called")
         return VisionProjectorConfig(
             projector_type=ProjectorType.PERCEIVER,
             vision_hidden_size=1280,
@@ -264,6 +287,7 @@ class TestQwen2VLProjector:
 
     def test_init(self, config: VisionProjectorConfig) -> None:
         """Test projector initialization."""
+        logger.info("running test_init")
         projector = Qwen2VLProjector(config)
 
         assert projector.vision_hidden_size == 1280
@@ -274,6 +298,7 @@ class TestQwen2VLProjector:
 
     def test_forward_numpy(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with numpy (simplified fallback)."""
+        logger.info("running test_forward_numpy")
         projector = Qwen2VLProjector(config)
 
         # Variable length input gets resampled to fixed query tokens
@@ -286,6 +311,7 @@ class TestQwen2VLProjector:
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
     def test_forward_torch(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with PyTorch (full cross-attention)."""
+        logger.info("running test_forward_torch")
         assert torch is not None
         projector = Qwen2VLProjector(config)
 
@@ -297,6 +323,7 @@ class TestQwen2VLProjector:
 
     def test_forward_multi_image(self, config: VisionProjectorConfig) -> None:
         """Test with multiple images (concatenated patches)."""
+        logger.info("running test_forward_multi_image")
         projector = Qwen2VLProjector(config)
 
         # 3 images * 576 patches each = 1728 total patches
@@ -317,6 +344,7 @@ class TestInternVLProjector:
 
     @pytest.fixture
     def config(self) -> VisionProjectorConfig:
+        logger.debug("config called")
         return VisionProjectorConfig(
             projector_type=ProjectorType.QLLAMA,
             vision_hidden_size=1408,
@@ -329,6 +357,7 @@ class TestInternVLProjector:
 
     def test_init(self, config: VisionProjectorConfig) -> None:
         """Test projector initialization."""
+        logger.info("running test_init")
         projector = InternVLProjector(config)
 
         assert projector.vision_hidden_size == 1408
@@ -338,6 +367,7 @@ class TestInternVLProjector:
 
     def test_forward_numpy(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with numpy."""
+        logger.info("running test_forward_numpy")
         projector = InternVLProjector(config)
 
         x = np.random.randn(1, 576, 1408).astype(np.float32)
@@ -348,6 +378,7 @@ class TestInternVLProjector:
     @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not available")
     def test_forward_torch(self, config: VisionProjectorConfig) -> None:
         """Test forward pass with PyTorch."""
+        logger.info("running test_forward_torch")
         assert torch is not None
         projector = InternVLProjector(config)
 
@@ -359,6 +390,7 @@ class TestInternVLProjector:
 
     def test_forward_high_resolution(self, config: VisionProjectorConfig) -> None:
         """Test with high-resolution image (more patches)."""
+        logger.info("running test_forward_high_resolution")
         projector = InternVLProjector(config)
 
         # High-res: 32x32 = 1024 patches
@@ -379,6 +411,7 @@ class TestLinearProjector:
 
     def test_forward(self) -> None:
         """Test linear projection."""
+        logger.info("running test_forward")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.LINEAR,
             vision_hidden_size=768,
@@ -397,6 +430,7 @@ class TestIdentityProjector:
 
     def test_matching_dims(self) -> None:
         """Test identity with matching dimensions."""
+        logger.info("running test_matching_dims")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.IDENTITY,
             vision_hidden_size=4096,
@@ -411,6 +445,7 @@ class TestIdentityProjector:
 
     def test_mismatched_dims_raises(self) -> None:
         """Test identity raises error for mismatched dimensions."""
+        logger.info("running test_mismatched_dims_raises")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.IDENTITY,
             vision_hidden_size=1024,
@@ -431,6 +466,7 @@ class TestVisionProjectorFactory:
 
     def test_from_config_llava(self) -> None:
         """Test factory creates LLaVA projector."""
+        logger.info("running test_from_config_llava")
         config = VisionProjectorConfig(projector_type=ProjectorType.LLAVA_MLP)
         projector = VisionProjector.from_config(config)
 
@@ -438,6 +474,7 @@ class TestVisionProjectorFactory:
 
     def test_from_config_perceiver(self) -> None:
         """Test factory creates Perceiver projector."""
+        logger.info("running test_from_config_perceiver")
         config = VisionProjectorConfig(projector_type=ProjectorType.PERCEIVER)
         projector = VisionProjector.from_config(config)
 
@@ -445,6 +482,7 @@ class TestVisionProjectorFactory:
 
     def test_from_config_qllama(self) -> None:
         """Test factory creates QLLaMA projector."""
+        logger.info("running test_from_config_qllama")
         config = VisionProjectorConfig(projector_type=ProjectorType.QLLAMA)
         projector = VisionProjector.from_config(config)
 
@@ -452,6 +490,7 @@ class TestVisionProjectorFactory:
 
     def test_from_hf_config(self) -> None:
         """Test factory from HuggingFace config."""
+        logger.info("running test_from_hf_config")
         hf_config = {
             "model_type": "llava",
             "vision_config": {"hidden_size": 1024},
@@ -472,6 +511,7 @@ class TestMultiImageInput:
 
     def test_interleaved_images(self) -> None:
         """Test projector with interleaved image tokens."""
+        logger.info("running test_interleaved_images")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.LLAVA_MLP,
             vision_hidden_size=1024,
@@ -492,6 +532,7 @@ class TestMultiImageInput:
 
     def test_video_frames(self) -> None:
         """Test projector with video frame sequence."""
+        logger.info("running test_video_frames")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.PERCEIVER,
             vision_hidden_size=1280,
@@ -523,6 +564,7 @@ class TestEdgeCases:
 
     def test_single_patch(self) -> None:
         """Test with single patch input."""
+        logger.info("running test_single_patch")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.LLAVA_MLP,
             vision_hidden_size=1024,
@@ -537,6 +579,7 @@ class TestEdgeCases:
 
     def test_large_batch(self) -> None:
         """Test with large batch size."""
+        logger.info("running test_large_batch")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.LLAVA_MLP,
             vision_hidden_size=512,
@@ -551,6 +594,7 @@ class TestEdgeCases:
 
     def test_2d_input(self) -> None:
         """Test with 2D input (no batch dimension)."""
+        logger.info("running test_2d_input")
         config = VisionProjectorConfig(
             projector_type=ProjectorType.LLAVA_MLP,
             vision_hidden_size=1024,
@@ -565,6 +609,7 @@ class TestEdgeCases:
 
     def test_different_activations(self) -> None:
         """Test with different activation functions."""
+        logger.info("running test_different_activations")
         for activation in ["gelu", "silu", "relu"]:
             config = VisionProjectorConfig(
                 projector_type=ProjectorType.LLAVA_MLP,

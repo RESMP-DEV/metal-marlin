@@ -6,12 +6,16 @@ using Metal-optimized kernels for Apple Silicon.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
 
 from ..metal_dispatch import HAS_METAL, HAS_MPS, dispatch_gemm_fp4, get_default_library
 
+
+
+logger = logging.getLogger(__name__)
 
 class GemmFp4:
     """FP4 quantized GEMM operation using Metal Marlin kernels.
@@ -26,6 +30,7 @@ class GemmFp4:
         Args:
             library: Optional MetalKernelLibrary instance. If None, uses default.
         """
+        logger.debug("initializing %s with library=%s", type(self).__name__, library)
         if not HAS_METAL or not HAS_MPS:
             raise ImportError(
                 "FP4 GEMM requires Metal and MPS support. "
@@ -53,6 +58,7 @@ class GemmFp4:
             Output tensor with shape (..., out_features)
         """
         # Ensure input is on MPS device
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         if not x.is_mps:
             x = x.to("mps")
         if not packed_weight.is_mps:

@@ -25,12 +25,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -50,16 +54,19 @@ class TileConfig:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return f"{self.tile_m}x{self.tile_n}x{self.tile_k}_sg{self.simdgroups}"
 
     @property
     def threads_per_tg(self) -> int:
+        logger.debug("threads_per_tg called")
         return self.simdgroups * 32
 
     @property
     def shared_memory_bytes(self) -> int:
         """Estimate threadgroup memory usage."""
         # A buffer: NUM_BUFFERS * TILE_M * TILE_K * 2 bytes (half)
+        logger.debug("shared_memory_bytes called")
         a_mem = self.num_buffers * self.tile_m * self.tile_k * 2
         # B staging: SIMDGROUPS * 8 * 8 * 2 bytes per simdgroup
         b_mem = self.simdgroups * 8 * 8 * 2
@@ -68,16 +75,19 @@ class TileConfig:
     @property
     def output_elements(self) -> int:
         """Elements computed per threadgroup."""
+        logger.debug("output_elements called")
         return self.tile_m * self.tile_n
 
     @property
     def elements_per_thread(self) -> int:
         """Output elements per thread."""
+        logger.debug("elements_per_thread called")
         return self.output_elements // self.threads_per_tg
 
     def fits_m3_max(self) -> bool:
         """Check if config fits M3 Max constraints."""
         # Max 1024 threads per threadgroup
+        logger.debug("fits_m3_max called")
         if self.threads_per_tg > 1024:
             return False
         # Conservative shared memory limit for good occupancy
@@ -142,6 +152,7 @@ def estimate_bandwidth(M: int, N: int, K: int, elapsed_s: float, group_size: int
     """Estimate memory bandwidth in GB/s."""
     # Read: A (M*K*2 bytes) + B_packed (K/8*N*4 bytes for FP4) + scales
     # Write: C (M*N*2 bytes)
+    logger.debug("estimate_bandwidth called with M=%s, N=%s, K=%s", M, N, K)
     bytes_read = (
         M * K * 2 +           # A (half)
         (K // 8) * N * 4 +    # B_packed (uint32, FP4)
@@ -154,6 +165,7 @@ def estimate_bandwidth(M: int, N: int, K: int, elapsed_s: float, group_size: int
 def modify_kernel_source(source: str, config: TileConfig) -> str:
     """Modify kernel source with new tile constants."""
     # Replace tile dimension constants
+    logger.debug("modify_kernel_source called with source=%s, config=%s", source, config)
     replacements = [
         (r'constant constexpr uint TILE_M = \d+;',
          f'constant constexpr uint TILE_M = {config.tile_m};'),
@@ -182,6 +194,7 @@ class TileConfigBenchmarker:
     """Benchmarks GEMM kernels with different tile configurations."""
 
     def __init__(self, warmup_iters: int = 5, bench_iters: int = 20, group_size: int = 32):
+        logger.debug("initializing %s with warmup_iters=%s, bench_iters=%s, group_size=%s", type(self).__name__, warmup_iters, bench_iters, group_size)
         self.warmup_iters = warmup_iters
         self.bench_iters = bench_iters
         self.group_size = group_size
@@ -214,6 +227,7 @@ class TileConfigBenchmarker:
 
     def compile_kernel(self, config: TileConfig) -> Any:
         """Compile kernel with specific tile configuration."""
+        logger.info("compile_kernel starting")
         cache_key = config.name
         if cache_key in self._pipeline_cache:
             return self._pipeline_cache[cache_key]
@@ -249,6 +263,7 @@ class TileConfigBenchmarker:
     ) -> BenchmarkResult:
         """Benchmark a single tile configuration."""
         # Check constraints
+        logger.info("benchmark_config starting with config=%s, M=%s, N=%s, K=%s", config, M, N, K)
         if not config.fits_m3_max():
             return BenchmarkResult(
                 config=config, M=M, N=N, K=K,
@@ -294,6 +309,7 @@ class TileConfigBenchmarker:
 
             # Get Metal buffers
             def get_buffer(tensor: torch.Tensor) -> Any:
+                logger.debug("get_buffer called with tensor=%s", tensor)
                 import objc
                 # Use storage data pointer
                 ptr = tensor.data_ptr()
@@ -333,6 +349,7 @@ class TileConfigBenchmarker:
             grid_y = (M + config.tile_m - 1) // config.tile_m
 
             def run_kernel() -> None:
+                logger.debug("run_kernel called")
                 cmd_buf = self.command_queue.commandBuffer()
                 encoder = cmd_buf.computeCommandEncoder()
                 encoder.setComputePipelineState_(pipeline)
@@ -401,6 +418,7 @@ class TileConfigBenchmarker:
 
 def print_config_summary() -> None:
     """Print summary of tile configurations to test."""
+    logger.debug("print_config_summary called")
     print("\n" + "=" * 90)
     print("TILE CONFIGURATIONS TO BENCHMARK")
     print("=" * 90)
@@ -428,6 +446,7 @@ def benchmark_problem_size(
     verbose: bool = True,
 ) -> list[BenchmarkResult]:
     """Benchmark all configs for a single problem size."""
+    logger.info("benchmark_problem_size starting with benchmarker=%s, M=%s, N=%s, K=%s", benchmarker, M, N, K)
     results = []
 
     if verbose:
@@ -477,6 +496,7 @@ def benchmark_problem_size(
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Benchmark tile sizes for M3 Max cache optimization",
         formatter_class=argparse.RawDescriptionHelpFormatter,

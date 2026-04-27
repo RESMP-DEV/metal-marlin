@@ -5,6 +5,7 @@ for long-running servers, including weighted scoring, fragmentation
 awareness, and adaptive policies.
 """
 
+import logging
 import time
 
 import numpy as np
@@ -20,11 +21,15 @@ from metal_marlin.paged.cache_manager_optimized import (
 from metal_marlin.paged.kv_block import KVBlockConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestOptimizedKVCacheEviction:
     """Test optimized eviction policies for long-running servers."""
 
     def test_weighted_score_calculation(self):
         """Test that weighted scores consider recency, frequency, and size."""
+        logger.info("running test_weighted_score_calculation")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -65,6 +70,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_fragmentation_aware_eviction(self):
         """Test that eviction considers fragmentation impact."""
+        logger.info("running test_fragmentation_aware_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -115,6 +121,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_adaptive_policy_switching(self):
         """Test that adaptive policy switches based on workload patterns."""
+        logger.info("running test_adaptive_policy_switching")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.ADAPTIVE,
@@ -147,6 +154,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_ttl_based_eviction(self):
         """Test TTL-based eviction for time-sensitive sequences."""
+        logger.info("running test_ttl_based_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -178,6 +186,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_priority_based_eviction(self):
         """Test that high-priority sequences are protected."""
+        logger.info("running test_priority_based_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -214,6 +223,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_batch_eviction(self):
         """Test batch eviction for efficiency."""
+        logger.info("running test_batch_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -254,6 +264,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_eviction_stats_tracking(self):
         """Test that eviction statistics are accurately tracked."""
+        logger.info("running test_eviction_stats_tracking")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.LRU,
@@ -287,6 +298,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_memory_pressure_eviction(self):
         """Test proactive eviction under memory pressure."""
+        logger.info("running test_memory_pressure_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.WEIGHTED,
@@ -317,6 +329,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_concurrent_access_safety(self):
         """Test thread safety of eviction operations."""
+        logger.info("running test_concurrent_access_safety")
         import threading
 
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
@@ -332,6 +345,7 @@ class TestOptimizedKVCacheEviction:
         errors = []
 
         def worker(thread_id: int) -> None:
+            logger.debug("worker called with thread_id=%s", thread_id)
             try:
                 for i in range(10):
                     seq_id = thread_id * 100 + i
@@ -364,6 +378,7 @@ class TestOptimizedKVCacheEviction:
 
     def test_lru_compatibility(self):
         """Test that optimized cache maintains LRU behavior as baseline."""
+        logger.info("running test_lru_compatibility")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.LRU,
@@ -414,6 +429,7 @@ class TestEvictionConfig:
 
     def test_default_config(self):
         """Test default eviction configuration."""
+        logger.info("running test_default_config")
         config = EvictionConfig()
         assert config.policy == EvictionPolicy.WEIGHTED
         assert config.recency_weight == 1.0
@@ -422,6 +438,7 @@ class TestEvictionConfig:
 
     def test_config_validation(self):
         """Test that invalid config values are rejected."""
+        logger.info("running test_config_validation")
         with pytest.raises(ValueError):
             EvictionConfig(recency_weight=-1.0)
 
@@ -434,6 +451,7 @@ class TestWeightedScore:
 
     def test_score_calculation(self):
         """Test weighted score calculation."""
+        logger.info("running test_score_calculation")
         score = WeightedScore.calculate(
             recency=1.0,
             frequency=5.0,
@@ -452,6 +470,7 @@ class TestWeightedScore:
 
     def test_score_normalization(self):
         """Test score normalization for fair comparison."""
+        logger.info("running test_score_normalization")
         scores = [10.0, 20.0, 30.0]
         normalized = WeightedScore.normalize_scores(scores)
         assert len(normalized) == len(scores)

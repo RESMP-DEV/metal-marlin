@@ -1,4 +1,5 @@
 
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -33,15 +34,20 @@ except ImportError:
         _speculative_generate,
     )
 
+
+logger = logging.getLogger(__name__)
+
 # Mock verify_kernel to return 1 accepted token
 def mock_verify_kernel(*args, **kwargs):
     # Returns: num_accepted, accepted_mask, next_token
     # Simulate accepting 1 token. Next token ID 100.
+    logger.debug("mock_verify_kernel called")
     return (torch.tensor([1]), torch.tensor([True]), torch.tensor([100]))
 
 # Mock classes
 class MockConfig:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.hidden_size = 32
         self.num_hidden_layers = 2
         self.num_attention_heads = 4
@@ -52,6 +58,7 @@ class MockConfig:
 
 class MockModel(torch.nn.Module):
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         super().__init__()
         self.config = MockConfig()
         self.device = torch.device("cpu")
@@ -59,6 +66,7 @@ class MockModel(torch.nn.Module):
         self.forward_calls = []
         
     def forward(self, input_ids, past_key_values=None, use_cache=True, output_hidden_states=False, return_dict=True):
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         self.forward_calls.append({
             "input_ids": input_ids,
             "past_key_values": past_key_values,
@@ -103,16 +111,20 @@ class MockModel(torch.nn.Module):
     
     def generate(self, input_ids, **kwargs):
         # Mock generate not used in speculative path (except if draft model missing)
+        logger.debug("generate called with input_ids=%s", input_ids)
         return torch.cat([input_ids, torch.tensor([[1, 2]])], dim=1)
         
     def eval(self):
+        logger.debug("eval called")
         return self
         
     def to(self, device):
+        logger.debug("to called with device=%s", device)
         return self
 
 class MockTokenizer:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self.vocab_size = 100
         self.pad_token_id = 0
         self.eos_token_id = 1
@@ -127,10 +139,12 @@ class MockTokenizer:
         return {"input_ids": torch.tensor([ids]), "attention_mask": torch.ones(1, len(ids))}
     
     def decode(self, ids, skip_special_tokens=True):
+        logger.debug("decode called with ids=%s, skip_special_tokens=%s", ids, skip_special_tokens)
         return "mock output"
 
 def test_speculative_persistent_cache_integration():
     # Patch verify_kernel
+    logger.info("running test_speculative_persistent_cache_integration")
     with patch('metal_marlin.inference.mmfp4_pipeline.verify_kernel', side_effect=mock_verify_kernel):
         model = MockModel()
         tokenizer = MockTokenizer()

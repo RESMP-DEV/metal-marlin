@@ -2,10 +2,14 @@
 
 Target: _toks_tests
 """
+import logging
 import pytest
 import torch
 
 from .fixtures.synthetic_mixed_moe import benchmark_forward, create_synthetic_model
+
+
+logger = logging.getLogger(__name__)
 
 # Thresholds for synthetic model on MPS
 # Note: Synthetic model uses FakeTrellisLinear (F.linear) so it should be fast.
@@ -21,10 +25,12 @@ class TestToksRegression:
     @pytest.fixture(scope="class")
     def model(self):
         """Create model once for the class."""
+        logger.debug("model called")
         return create_synthetic_model(device="mps")
 
     def test_synthetic_decode_throughput(self, model):
         """Test decode throughput (batch=1, seq_len=1)."""
+        logger.info("running test_synthetic_decode_throughput")
         result = benchmark_forward(
             model,
             batch_size=1,
@@ -44,6 +50,7 @@ class TestToksRegression:
 
     def test_synthetic_prefill_throughput(self, model):
         """Test prefill throughput (batch=1, seq_len=128)."""
+        logger.info("running test_synthetic_prefill_throughput")
         result = benchmark_forward(
             model,
             batch_size=1,

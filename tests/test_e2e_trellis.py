@@ -1,9 +1,13 @@
 """End-to-end tests for trellis inference pipeline."""
 
+import logging
 from pathlib import Path
 
 import pytest
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 MODEL_PATH = "models/GLM-4.7-Flash-EXL3-3bpw"
 
@@ -11,6 +15,7 @@ MODEL_PATH = "models/GLM-4.7-Flash-EXL3-3bpw"
 @pytest.fixture(scope="module")
 def model_available():
     """Check if test model is available."""
+    logger.debug("model_available called")
     if not Path(MODEL_PATH).exists():
         pytest.skip(f"Model not found: {MODEL_PATH}")
     return True
@@ -21,6 +26,7 @@ class TestTrellisE2E:
 
     def test_load_single_layer(self, model_available):
         """Test loading a single layer."""
+        logger.info("running test_load_single_layer")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         loader = TrellisModelLoader(MODEL_PATH)
@@ -31,6 +37,7 @@ class TestTrellisE2E:
 
     def test_trellis_linear_forward(self, model_available):
         """Test TrellisLinear forward pass."""
+        logger.info("running test_trellis_linear_forward")
         from metal_marlin.trellis.linear import TrellisLinear
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -50,6 +57,7 @@ class TestTrellisE2E:
 
     def test_dense_mlp_forward(self, model_available):
         """Test dense MLP (layer 0) forward."""
+        logger.info("running test_dense_mlp_forward")
         from metal_marlin.trellis.layer import TrellisDenseMLP
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -65,6 +73,7 @@ class TestTrellisE2E:
     @pytest.mark.slow
     def test_moe_layer_forward(self, model_available):
         """Test MoE layer (layer 2+) forward."""
+        logger.info("running test_moe_layer_forward")
         from metal_marlin.trellis.loader import TrellisModelLoader
         from metal_marlin.trellis.moe import TrellisMoEConfig, TrellisMoELayer
 
@@ -88,6 +97,7 @@ class TestTrellisE2E:
     @pytest.mark.slow
     def test_attention_forward(self, model_available):
         """Test attention forward."""
+        logger.info("running test_attention_forward")
         from metal_marlin.trellis.attention import TrellisMLAttention
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -107,6 +117,7 @@ class TestTrellisE2EGeneration:
 
     def test_full_layer_stack(self, model_available):
         """Test forward through multiple layers."""
+        logger.info("running test_full_layer_stack")
         from metal_marlin.trellis.config import TrellisModelConfig
         from metal_marlin.trellis.layer import TrellisDecoderLayer
         from metal_marlin.trellis.loader import TrellisModelLoader

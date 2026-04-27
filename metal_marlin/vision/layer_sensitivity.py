@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,9 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 class VisionLayerType(str, Enum):
     """Types of layers in vision encoders."""
@@ -96,6 +100,7 @@ class VisionLayerInfo:
         Returns:
             VisionLayerInfo with detected type and dimensions.
         """
+        logger.debug("from_weight called with name=%s, weight=%s", name, weight)
         layer_type = cls._classify_layer(name)
         shape = weight.shape
 
@@ -120,6 +125,7 @@ class VisionLayerInfo:
     @staticmethod
     def _classify_layer(name: str) -> VisionLayerType:
         """Classify layer type from name."""
+        logger.debug("_classify_layer called with name=%s", name)
         name_lower = name.lower()
 
         # Position embeddings
@@ -167,6 +173,7 @@ class VisionLayerInfo:
     @staticmethod
     def _extract_layer_idx(name: str) -> int:
         """Extract layer index from name like 'layers.5.mlp'."""
+        logger.debug("_extract_layer_idx called with name=%s", name)
         import re
 
         match = re.search(r"layers?\.(\d+)", name.lower())
@@ -210,10 +217,12 @@ class VisionLayerSensitivity:
 
     @property
     def name(self) -> str:
+        logger.debug("name called")
         return self.layer_info.name
 
     @property
     def layer_type(self) -> VisionLayerType:
+        logger.debug("layer_type called")
         return self.layer_info.layer_type
 
 
@@ -241,14 +250,17 @@ class SensitivityReport:
 
     @property
     def num_layers(self) -> int:
+        logger.debug("num_layers called")
         return len(self.layers)
 
     def get_by_type(self, layer_type: VisionLayerType) -> list[VisionLayerSensitivity]:
         """Get all layers of a specific type."""
+        logger.debug("get_by_type called with layer_type=%s", layer_type)
         return [layer for layer in self.layers if layer.layer_type == layer_type]
 
     def get_precision_summary(self) -> dict[str, int]:
         """Get count of layers by recommended precision."""
+        logger.debug("get_precision_summary called")
         summary: dict[str, int] = {}
         for layer in self.layers:
             prec = layer.recommended_precision
@@ -257,6 +269,7 @@ class SensitivityReport:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+        logger.debug("to_dict called")
         return {
             "total_params": self.total_params,
             "quantizable_params": self.quantizable_params,
@@ -305,6 +318,7 @@ def analyze_vision_layer_sensitivity(
     Returns:
         SensitivityReport with per-layer analysis.
     """
+    logger.debug("analyze_vision_layer_sensitivity called with weights=%s, activations=%s, hessians=%s", weights, activations, hessians)
     layers: list[VisionLayerSensitivity] = []
     total_params = 0
     quantizable_params = 0
@@ -442,6 +456,7 @@ def analyze_vision_layer_sensitivity(
 
 def _simulate_fp4_error(weight: NDArray[np.floating], group_size: int = 128) -> float:
     """Simulate FP4 quantization error."""
+    logger.debug("_simulate_fp4_error called with weight=%s, group_size=%s", weight, group_size)
     w = weight.flatten().astype(np.float32)
 
     # FP4 E2M1 codebook (positive values, symmetric)
@@ -474,6 +489,7 @@ def _simulate_fp4_error(weight: NDArray[np.floating], group_size: int = 128) -> 
 
 def _simulate_fp8_error(weight: NDArray[np.floating]) -> float:
     """Simulate FP8 E4M3 quantization error."""
+    logger.debug("_simulate_fp8_error called with weight=%s", weight)
     w = weight.flatten().astype(np.float32)
 
     # FP8 E4M3 range: ±448 with 3 mantissa bits
@@ -492,6 +508,7 @@ def _simulate_fp8_error(weight: NDArray[np.floating]) -> float:
 
 def _simulate_int4_error(weight: NDArray[np.floating], group_size: int = 128) -> float:
     """Simulate INT4 symmetric quantization error."""
+    logger.debug("_simulate_int4_error called with weight=%s, group_size=%s", weight, group_size)
     w = weight.flatten().astype(np.float32)
 
     if len(w) < group_size:
@@ -518,6 +535,7 @@ def _simulate_int4_error(weight: NDArray[np.floating], group_size: int = 128) ->
 
 def _adjust_sensitivity_by_type(score: float, layer_type: VisionLayerType) -> float:
     """Adjust sensitivity score based on layer type."""
+    logger.debug("_adjust_sensitivity_by_type called with score=%s, layer_type=%s", score, layer_type)
     multipliers = {
         VisionLayerType.PATCH_EMBED: 2.0,  # Critical
         VisionLayerType.POSITION_EMBED: 2.0,  # Critical
@@ -537,6 +555,7 @@ def _adjust_sensitivity_by_type(score: float, layer_type: VisionLayerType) -> fl
 
 def _precision_to_bits(precision: str) -> int:
     """Convert precision string to bits."""
+    logger.debug("_precision_to_bits called with precision=%s", precision)
     return {
         "bf16": 16,
         "fp16": 16,
@@ -551,6 +570,7 @@ def _precision_to_bits(precision: str) -> int:
 
 def _estimate_quantized_memory(layers: list[VisionLayerSensitivity]) -> float:
     """Estimate memory usage with recommended quantization."""
+    logger.info("_estimate_quantized_memory called with layers=%s", layers)
     total_bytes = 0
 
     for layer in layers:
@@ -573,6 +593,7 @@ def _estimate_quantized_memory(layers: list[VisionLayerSensitivity]) -> float:
 
 def save_sensitivity_report(report: SensitivityReport, path: str | Path) -> None:
     """Save sensitivity report to JSON file."""
+    logger.info("save_sensitivity_report called with report=%s, path=%s", report, path)
     import json
 
     path = Path(path)
@@ -587,6 +608,7 @@ def load_sensitivity_report(path: str | Path) -> dict[str, Any]:
 
     Returns raw dict since VisionLayerInfo needs weight tensors.
     """
+    logger.info("load_sensitivity_report called with path=%s", path)
     import json
 
     with open(path) as f:

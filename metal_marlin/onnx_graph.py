@@ -13,9 +13,13 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ONNXOp:
@@ -74,6 +78,7 @@ def parse_onnx_graph(onnx_path: str | Path) -> list[ONNXOp]:
         ImportError: If onnx package is not installed.
         ValueError: If the file is not a valid ONNX model.
     """
+    logger.debug("parse_onnx_graph called with onnx_path=%s", onnx_path)
     try:
         import onnx
     except ImportError as e:
@@ -119,6 +124,7 @@ def parse_onnx_graph_full(onnx_path: str | Path) -> ONNXGraphInfo:
     Returns:
         ONNXGraphInfo with ops and metadata.
     """
+    logger.debug("parse_onnx_graph_full called with onnx_path=%s", onnx_path)
     try:
         import onnx
     except ImportError as e:
@@ -167,6 +173,7 @@ def parse_onnx_graph_full(onnx_path: str | Path) -> ONNXGraphInfo:
 
 def _parse_attributes(node) -> dict[str, Any]:
     """Parse ONNX node attributes to Python types."""
+    logger.debug("_parse_attributes called with node=%s", node)
     try:
         import onnx
     except ImportError:
@@ -220,6 +227,7 @@ def detect_architecture(ops: list[ONNXOp]) -> str:
         Architecture name: "llama", "gpt", "mistral", "moe", "bert", "t5",
         or "unknown".
     """
+    logger.debug("detect_architecture called with ops=%s", ops)
     op_types = [op.op_type for op in ops]
     op_type_set = set(op_types)
     op_counts = _count_op_types(ops)
@@ -256,6 +264,7 @@ def detect_architecture(ops: list[ONNXOp]) -> str:
 
 def _count_op_types(ops: list[ONNXOp]) -> dict[str, int]:
     """Count occurrences of each op type."""
+    logger.debug("_count_op_types called with ops=%s", ops)
     counts: dict[str, int] = {}
     for op in ops:
         counts[op.op_type] = counts.get(op.op_type, 0) + 1
@@ -271,6 +280,7 @@ def _has_moe_pattern(ops: list[ONNXOp], op_type_set: set[str]) -> bool:
     - Scatter/Gather or conditional dispatch patterns
     """
     # Look for TopK which is used for expert selection
+    logger.debug("_has_moe_pattern called with ops=%s, op_type_set=%s", ops, op_type_set)
     has_topk = "TopK" in op_type_set
 
     # Look for patterns suggesting router + experts
@@ -314,6 +324,7 @@ def _has_encoder_decoder_pattern(ops: list[ONNXOp]) -> bool:
     # and K/V come from encoder (different sources)
 
     # Check for relative position bias patterns
+    logger.debug("_has_encoder_decoder_pattern called with ops=%s", ops)
     has_relative_position = any(
         "relative" in op.name.lower() or "position_bias" in op.name.lower() for op in ops
     )
@@ -342,6 +353,7 @@ def _has_bert_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[
     - No causal masking (bidirectional attention)
     - Often have [CLS] token handling
     """
+    logger.debug("_has_bert_pattern called with ops=%s, op_type_set=%s, op_counts=%s", ops, op_type_set, op_counts)
     has_layernorm = "LayerNormalization" in op_type_set
     has_gelu = "Gelu" in op_type_set
 
@@ -380,6 +392,7 @@ def _has_llama_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict
     - Gated MLP (gate * up then down projection)
     """
     # Check for SiLU which is characteristic of Llama
+    logger.debug("_has_llama_pattern called with ops=%s, op_type_set=%s, op_counts=%s", ops, op_type_set, op_counts)
     has_silu = "Silu" in op_type_set
 
     # Check for Mul + Sigmoid pattern (manual SiLU implementation)
@@ -423,6 +436,7 @@ def _has_sliding_window_pattern(ops: list[ONNXOp]) -> bool:
     attends to a fixed window of previous tokens.
     """
     # Look for sliding window hints in names
+    logger.debug("_has_sliding_window_pattern called with ops=%s", ops)
     for op in ops:
         name_lower = op.name.lower()
         if "sliding" in name_lower or "window" in name_lower:
@@ -449,6 +463,7 @@ def _has_gpt_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[s
     - Absolute position embeddings (not RoPE)
     - Causal attention masking
     """
+    logger.debug("_has_gpt_pattern called with ops=%s, op_type_set=%s, op_counts=%s", ops, op_type_set, op_counts)
     has_layernorm = "LayerNormalization" in op_type_set
     has_gelu = "Gelu" in op_type_set
 
@@ -480,6 +495,7 @@ def _has_gpt_pattern(ops: list[ONNXOp], op_type_set: set[str], op_counts: dict[s
 def _has_basic_transformer_pattern(op_type_set: set[str], op_counts: dict[str, int]) -> bool:
     """Detect basic transformer structure without specific architecture."""
     # Core transformer ops
+    logger.debug("_has_basic_transformer_pattern called with op_type_set=%s, op_counts=%s", op_type_set, op_counts)
     has_matmul = "MatMul" in op_type_set or "Gemm" in op_type_set
     has_softmax = "Softmax" in op_type_set
     "LayerNormalization" in op_type_set or any("norm" in op.lower() for op in op_type_set)
@@ -503,6 +519,7 @@ def get_layer_count(ops: list[ONNXOp]) -> int:
     Counts repeated structural patterns to estimate layer count.
     """
     # Count softmax operations as proxy for attention layers
+    logger.debug("get_layer_count called with ops=%s", ops)
     softmax_count = sum(1 for op in ops if op.op_type == "Softmax")
 
     # Each transformer layer typically has one Softmax in attention
@@ -514,6 +531,7 @@ def get_attention_heads(ops: list[ONNXOp]) -> int | None:
 
     Returns None if unable to determine.
     """
+    logger.debug("get_attention_heads called with ops=%s", ops)
     for op in ops:
         if op.op_type == "Reshape":
             # Look for reshape that splits hidden_dim into heads
@@ -533,6 +551,7 @@ def summarize_graph(ops: list[ONNXOp]) -> dict[str, Any]:
         - architecture: Detected architecture
         - total_ops: Total number of operations
     """
+    logger.debug("summarize_graph called with ops=%s", ops)
     op_counts = _count_op_types(ops)
     return {
         "op_counts": op_counts,

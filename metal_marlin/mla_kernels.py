@@ -35,6 +35,7 @@ Note:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -46,6 +47,9 @@ HAS_METAL_DISPATCH: bool = HAS_MPS and HAS_PYOBJC_METAL
 
 if TYPE_CHECKING:
     import torch
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants matching mla_proj.metal
@@ -72,6 +76,7 @@ _metal_lib: Any = None
 
 def _get_metal_library() -> Any:
     """Get or create the Metal kernel library."""
+    logger.debug("_get_metal_library called")
     global _metal_lib
     if _metal_lib is None:
         from .metal_dispatch import get_default_library
@@ -82,6 +87,7 @@ def _get_metal_library() -> Any:
 
 def _require_mps() -> None:
     """Raise if MPS is not available."""
+    logger.debug("_require_mps called")
     if not HAS_MPS:
         raise RuntimeError(
             "MLA kernel dispatch requires PyTorch with MPS backend.\n"
@@ -108,6 +114,7 @@ def _dequant_fp4_numpy(
     group_size: int,
 ) -> np.ndarray:
     """CPU fallback: dequantize packed FP4 weights to float32."""
+    logger.info("_dequant_fp4_numpy called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     packed_k = K // FP4_PER_UINT
 
     # Extract nibble indices from packed uint32 words
@@ -135,6 +142,7 @@ def _mla_proj_numpy(
     group_size: int,
 ) -> np.ndarray:
     """CPU fallback: MLA projection via numpy."""
+    logger.debug("_mla_proj_numpy called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
     orig_shape = A.shape
     K = orig_shape[-1]
     M = int(np.prod(orig_shape[:-1]))
@@ -159,6 +167,7 @@ def _mla_decode_numpy(
     group_size: int,
 ) -> np.ndarray:
     """CPU fallback: MLA decode GEMV via numpy."""
+    logger.debug("_mla_decode_numpy called with x=%s, W_packed=%s, scales=%s", x, W_packed, scales)
     x_flat = x.reshape(-1).astype(np.float32)
     K = x_flat.shape[0]
     N = W_packed.shape[1]
@@ -189,6 +198,7 @@ def _dispatch_mla_proj(
     group_size: int,
 ) -> torch.Tensor:
     """Dispatch MLA projection kernel via Metal."""
+    logger.debug("_dispatch_mla_proj called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
     import Metal
 
     from .metal_dispatch import (
@@ -251,6 +261,7 @@ def _dispatch_mla_decode(
     group_size: int,
 ) -> torch.Tensor:
     """Dispatch MLA decode GEMV kernel via Metal."""
+    logger.debug("_dispatch_mla_decode called with x=%s, W_packed=%s, scales=%s", x, W_packed, scales)
     import Metal
 
     from .metal_dispatch import (
@@ -311,6 +322,7 @@ def _dispatch_mla_fused(
     group_size_b: int,
 ) -> torch.Tensor:
     """Dispatch fused kv_a + kv_b projection kernel via Metal."""
+    logger.debug("_dispatch_mla_fused called with hidden=%s, W_a_packed=%s, scales_a=%s", hidden, W_a_packed, scales_a)
     import Metal
 
     from .metal_dispatch import (
@@ -412,6 +424,7 @@ def mla_proj_fp4(
     Returns:
         Output [*, N].
     """
+    logger.debug("mla_proj_fp4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(A, torch.Tensor):
@@ -475,6 +488,7 @@ def mla_decode_proj_fp4(
     Returns:
         Output [N] or [1, N].
     """
+    logger.debug("mla_decode_proj_fp4 called with x=%s, W_packed=%s, scales=%s", x, W_packed, scales)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(x, torch.Tensor):
@@ -545,6 +559,7 @@ def mla_fused_kv_proj_fp4(
         Uses the fused Metal kernel when available (mla_fused_kv_proj_fp4 in mla_proj.metal).
         Falls back to two sequential projections when fused kernel is unavailable.
     """
+    logger.debug("mla_fused_kv_proj_fp4 called with hidden=%s, W_a_packed=%s, scales_a=%s", hidden, W_a_packed, scales_a)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(hidden, torch.Tensor):
@@ -648,6 +663,7 @@ def mla_proj_with_rope_fp4(
         the mla_proj_with_rope_fp4 Metal kernel should be used directly.
     """
     # Compute projection
+    logger.debug("mla_proj_with_rope_fp4 called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
     output = mla_proj_fp4(A, B_packed, scales, group_size, dtype)
 
     if HAS_METAL_DISPATCH and torch is not None:
@@ -739,6 +755,7 @@ def mla_decode_batched_fp4(
         Output [batch, N].
     """
     # For small batches, use mla_proj_fp4 which handles arbitrary leading dims
+    logger.debug("mla_decode_batched_fp4 called with x=%s, W_packed=%s, scales=%s", x, W_packed, scales)
     return mla_proj_fp4(x, W_packed, scales, group_size, dtype)
 
 
@@ -763,6 +780,7 @@ def pack_fp4_weights_mla(
     Returns:
         (packed_weights, scales) for use with mla_proj_fp4.
     """
+    logger.info("pack_fp4_weights_mla called with weight=%s, group_size=%s", weight, group_size)
     if HAS_TORCH and torch is not None:
         # Use PyTorch-based packing from kernels module
         try:
@@ -836,6 +854,7 @@ class MLALinear:
             group_size: Quantization group size.
             dtype: Output dtype. If None, uses default.
         """
+        logger.debug("initializing %s with in_features=%s, out_features=%s, group_size=%s, dtype=%s", type(self).__name__, in_features, out_features, group_size, dtype)
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
@@ -846,11 +865,13 @@ class MLALinear:
 
     def load_quantized(self, weight_packed: Any, scales: Any) -> None:
         """Load pre-quantized weights."""
+        logger.info("load_quantized called with weight_packed=%s, scales=%s", weight_packed, scales)
         self.weight_packed = weight_packed
         self.scales = scales
 
     def quantize_weights(self, weight: Any) -> None:
         """Quantize and store FP16/FP32 weights."""
+        logger.info("quantize_weights called with weight=%s", weight)
         self.weight_packed, self.scales = pack_fp4_weights_mla(weight, self.group_size)
 
     def __call__(self, x: Any) -> Any:
@@ -918,6 +939,7 @@ class MLAAttentionProjections:
             group_size: Quantization group size.
             dtype: Compute dtype.
         """
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, num_kv_heads=%s, head_dim=%s, q_lora_rank=%s", type(self).__name__, hidden_size, num_heads, num_kv_heads, head_dim, q_lora_rank)
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -955,6 +977,7 @@ class MLAAttentionProjections:
                 rope_latent: [batch, seq, rope_head_dim] - for RoPE (if rope_head_dim > 0)
         """
         # Down-project to latent space
+        logger.debug("project_kv called with hidden_states=%s", hidden_states)
         kv_a_out = self.kv_a_proj(hidden_states)  # [batch, seq, kv_lora_rank + rope_head_dim]
 
         if self.rope_head_dim > 0:
@@ -980,6 +1003,7 @@ class MLAAttentionProjections:
         Returns:
             kv: [batch, seq, num_kv_heads * head_dim * 2]
         """
+        logger.debug("decompress_kv called with kv_latent=%s", kv_latent)
         return self.kv_b_proj(kv_latent)
 
     def project_q(self, hidden_states: Any) -> Any:
@@ -992,6 +1016,7 @@ class MLAAttentionProjections:
         Returns:
             q: [batch, seq, num_heads * head_dim]
         """
+        logger.debug("project_q called with hidden_states=%s", hidden_states)
         if self.q_lora_rank is not None and self.q_a_proj is not None and self.q_b_proj is not None:
             q_latent = self.q_a_proj(hidden_states)
             return self.q_b_proj(q_latent)

@@ -42,6 +42,7 @@ Reference:
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -52,6 +53,9 @@ from ._compat import HAS_TORCH, torch
 
 if TYPE_CHECKING:
     import torch as torch_typing
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # GGUF value type codes (from gguf.md spec)
@@ -445,6 +449,7 @@ def dequant_q4_0(data: np.ndarray, n_elements: int) -> np.ndarray:
     Dequant: value = (quant - 8) * scale
     The 4-bit values are unsigned [0, 15], centered at 8.
     """
+    logger.info("dequant_q4_0 called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_0]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -479,6 +484,7 @@ def dequant_q4_1(data: np.ndarray, n_elements: int) -> np.ndarray:
 
     Dequant: value = quant * scale + min
     """
+    logger.info("dequant_q4_1 called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_1]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -515,6 +521,7 @@ def dequant_q5_0(data: np.ndarray, n_elements: int) -> np.ndarray:
     Each element is 5 bits: 4 low bits from nibble + 1 high bit from bitfield.
     Dequant: value = (quant5 - 16) * scale
     """
+    logger.info("dequant_q5_0 called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_0]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -555,6 +562,7 @@ def dequant_q5_1(data: np.ndarray, n_elements: int) -> np.ndarray:
 
     Each element is 5 bits. Dequant: value = quant5 * scale + min
     """
+    logger.info("dequant_q5_1 called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_1]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -593,6 +601,7 @@ def dequant_q8_0(data: np.ndarray, n_elements: int) -> np.ndarray:
 
     Dequant: value = quant * scale
     """
+    logger.info("dequant_q8_0 called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q8_0]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -625,6 +634,7 @@ def dequant_q2_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     Each super-block has 16 sub-blocks of 16 elements.
     Dequant: value = d * scale * q - dmin * min
     """
+    logger.info("dequant_q2_k called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q2_K]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -681,6 +691,7 @@ def dequant_q3_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     Quants are 3-bit: 2 bits from qs + 1 bit from hmask.
     Dequant: value = d * scale * (q - 4) where q is 3-bit [0-7]
     """
+    logger.info("dequant_q3_k called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q3_K]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -781,6 +792,7 @@ def dequant_q4_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     Each super-block has 8 sub-blocks of 32 elements.
     Dequant: value = d * scale * q - dmin * min
     """
+    logger.info("dequant_q4_k called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q4_K]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -856,6 +868,7 @@ def dequant_q5_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     Each element is 5 bits: 4 from qs + 1 from qh.
     Dequant: value = d * scale * q - dmin * min
     """
+    logger.info("dequant_q5_k called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q5_K]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -935,6 +948,7 @@ def dequant_q6_k(data: np.ndarray, n_elements: int) -> np.ndarray:
     Each element is 6 bits: 4 from ql + 2 from qh.
     Dequant: value = d * scale * (q - 32)
     """
+    logger.info("dequant_q6_k called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_Q6_K]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -1019,6 +1033,7 @@ def dequant_iq4_nl(data: np.ndarray, n_elements: int) -> np.ndarray:
 
     Uses a fixed non-linear codebook instead of linear [0,15].
     """
+    logger.info("dequant_iq4_nl called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ4_NL]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -1052,6 +1067,7 @@ def _iq2_xxs_grid() -> np.ndarray:
     """
     # For IQ2_XXS, each 2-bit code maps to values in the range approx [-1.0, 1.0]
     # The actual codebook is importance-weighted, but we use an approximation
+    logger.debug("_iq2_xxs_grid called")
     grid = np.zeros((512, 8), dtype=np.float32)
     for i in range(512):
         for j in range(8):
@@ -1072,6 +1088,7 @@ def dequant_iq2_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
     Uses importance-weighted grid codebook for 2-bit quantization.
     Achieves ~2.0625 bpw (bits per weight).
     """
+    logger.info("dequant_iq2_xxs called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ2_XXS]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -1123,6 +1140,7 @@ def dequant_iq3_xxs(data: np.ndarray, n_elements: int) -> np.ndarray:
     Uses importance-weighted grid codebook for 3-bit quantization.
     Achieves ~3.0625 bpw.
     """
+    logger.info("dequant_iq3_xxs called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ3_XXS]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -1181,6 +1199,7 @@ def dequant_iq4_xs(data: np.ndarray, n_elements: int) -> np.ndarray:
     Uses IQ4_NL codebook with per-sub-block 6-bit scales.
     Achieves ~4.25 bpw.
     """
+    logger.info("dequant_iq4_xs called with data=%s, n_elements=%s", data, n_elements)
     block_size, block_bytes = GGML_BLOCK_PARAMS[GGML_TYPE_IQ4_XS]
     n_blocks = n_elements // block_size
     raw = data[: n_blocks * block_bytes].reshape(n_blocks, block_bytes)
@@ -1276,6 +1295,7 @@ def dequantize_tensor(
     Raises:
         ValueError: If qtype is not a supported quantization type.
     """
+    logger.info("dequantize_tensor called with data=%s, qtype=%s, n_elements=%s", data, qtype, n_elements)
     if qtype not in _DEQUANT_FNS:
         raise ValueError(
             f"Unsupported GGML quantization type: {qtype}. "
@@ -1309,6 +1329,7 @@ def _quantize_to_marlin_fp4(
         packed: [K_padded, N_padded // 8] uint32 packed weights.
         scales: [K_padded // group_size, N_padded] FP16 per-group scales.
     """
+    logger.info("_quantize_to_marlin_fp4 called with weights_fp32=%s, group_size=%s", getattr(weights_fp32, "shape", weights_fp32), group_size)
     K, N = weights_fp32.shape
 
     # Pad K to multiple of group_size
@@ -1373,6 +1394,7 @@ class GGUFMetadata:
             version: GGUF file format version (2 or 3).
             tensor_count: Number of tensors in the GGUF file.
         """
+        logger.debug("initializing %s with metadata=%s, version=%s, tensor_count=%s", type(self).__name__, metadata, version, tensor_count)
         self._metadata = metadata
         self._version = version
         self._tensor_count = tensor_count
@@ -1380,31 +1402,37 @@ class GGUFMetadata:
     @property
     def version(self) -> int:
         """GGUF file format version (2 or 3)."""
+        logger.debug("version called")
         return self._version
 
     @property
     def tensor_count(self) -> int:
         """Number of tensors in the GGUF file."""
+        logger.debug("tensor_count called")
         return self._tensor_count
 
     @property
     def kv_count(self) -> int:
         """Number of key-value metadata pairs."""
+        logger.debug("kv_count called")
         return len(self._metadata)
 
     @property
     def architecture(self) -> str | None:
         """Model architecture identifier (e.g., 'llama', 'gemma', 'qwen2')."""
+        logger.debug("architecture called")
         return self._metadata.get(GGUF_META_ARCHITECTURE)
 
     @property
     def file_type(self) -> int | None:
         """Quantization file type (0=F32, 1=F16, 2+=various quants)."""
+        logger.debug("file_type called")
         return self._metadata.get(GGUF_META_FILE_TYPE)
 
     @property
     def file_type_name(self) -> str | None:
         """Human-readable file type name."""
+        logger.debug("file_type_name called")
         ft = self.file_type
         if ft is None:
             return None
@@ -1447,52 +1475,62 @@ class GGUFMetadata:
     @property
     def model_name(self) -> str | None:
         """Human-readable model name."""
+        logger.debug("model_name called")
         return self._metadata.get(GGUF_META_NAME)
 
     @property
     def quantization_version(self) -> int | None:
         """GGUF quantization format version."""
+        logger.info("quantization_version called")
         return self._metadata.get(GGUF_META_QUANTIZATION_VERSION)
 
     @property
     def vocab_size(self) -> int | None:
         """Vocabulary size (number of tokens)."""
+        logger.debug("vocab_size called")
         return self._metadata.get(GGUF_META_VOCAB_SIZE)
 
     @property
     def context_length(self) -> int | None:
         """Maximum context window length."""
+        logger.debug("context_length called")
         return self._metadata.get(GGUF_META_CONTEXT_LENGTH)
 
     @property
     def hidden_size(self) -> int | None:
         """Embedding dimension (hidden size / d_model)."""
+        logger.debug("hidden_size called")
         return self._metadata.get(GGUF_META_EMBEDDING_LENGTH)
 
     @property
     def num_layers(self) -> int | None:
         """Number of transformer layers (block_count)."""
+        logger.debug("num_layers called")
         return self._metadata.get(GGUF_META_BLOCK_COUNT)
 
     @property
     def intermediate_size(self) -> int | None:
         """Feed-forward network hidden size."""
+        logger.debug("intermediate_size called")
         return self._metadata.get(GGUF_META_FEED_FORWARD_LENGTH)
 
     @property
     def num_attention_heads(self) -> int | None:
         """Number of attention heads."""
+        logger.debug("num_attention_heads called")
         return self._metadata.get(GGUF_META_ATTENTION_HEAD_COUNT)
 
     @property
     def num_key_value_heads(self) -> int | None:
         """Number of key/value heads (for GQA/MQA)."""
+        logger.debug("num_key_value_heads called")
         return self._metadata.get(GGUF_META_ATTENTION_HEAD_COUNT_KV)
 
     @property
     def rope_dim(self) -> int | None:
         """RoPE (rotary position embedding) dimension."""
         # Try architecture-specific first, then general
+        logger.debug("rope_dim called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.rope.dimension_count"
@@ -1504,6 +1542,7 @@ class GGUFMetadata:
     def rope_freq_base(self) -> float | None:
         """RoPE frequency base (usually 10000 or 1000000)."""
         # Try architecture-specific first, then general
+        logger.debug("rope_freq_base called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.rope.freq_base"
@@ -1515,6 +1554,7 @@ class GGUFMetadata:
     def rope_scaling_type(self) -> str | None:
         """RoPE scaling type ('linear', 'yarn', 'ntk', etc.)."""
         # Try architecture-specific first, then general
+        logger.debug("rope_scaling_type called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.rope.scaling.type"
@@ -1526,6 +1566,7 @@ class GGUFMetadata:
     def rope_scaling_factor(self) -> float | None:
         """RoPE scaling factor."""
         # Try architecture-specific first, then general
+        logger.debug("rope_scaling_factor called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.rope.scaling.factor"
@@ -1536,16 +1577,19 @@ class GGUFMetadata:
     @property
     def rope_scaling_original_context(self) -> int | None:
         """RoPE scaling original context length."""
+        logger.debug("rope_scaling_original_context called")
         return self._metadata.get(GGUF_META_ROPE_SCALING_ORIG_CTX)
 
     @property
     def rope_scaling_finetuned(self) -> bool | None:
         """Whether RoPE scaling was finetuned."""
+        logger.debug("rope_scaling_finetuned called")
         return self._metadata.get(GGUF_META_ROPE_SCALING_FINETUNED)
 
     @property
     def head_dim(self) -> int | None:
         """Attention head dimension (hidden_size / num_attention_heads)."""
+        logger.debug("head_dim called")
         if self.hidden_size is not None and self.num_attention_heads is not None:
             return self.hidden_size // self.num_attention_heads
         return None
@@ -1553,6 +1597,7 @@ class GGUFMetadata:
     @property
     def kv_head_dim(self) -> int | None:
         """Key/value head dimension."""
+        logger.debug("kv_head_dim called")
         if self.hidden_size is not None and self.num_key_value_heads is not None:
             return self.hidden_size // self.num_key_value_heads
         return None
@@ -1561,6 +1606,7 @@ class GGUFMetadata:
     def rms_norm_eps(self) -> float | None:
         """RMS normalization epsilon."""
         # Try architecture-specific first, then general
+        logger.debug("rms_norm_eps called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.attention.layer_norm_rms_epsilon"
@@ -1579,6 +1625,7 @@ class GGUFMetadata:
     @property
     def layer_norm_eps(self) -> float | None:
         """Layer normalization epsilon."""
+        logger.debug("layer_norm_eps called")
         for key in [GGUF_META_LAYERNORM_EPS, GGUF_META_ATTENTION_LAYERNORM_EPS]:
             if key in self._metadata:
                 return self._metadata[key]
@@ -1587,12 +1634,14 @@ class GGUFMetadata:
     @property
     def attention_clamp_kqv(self) -> float | None:
         """Attention clamp value for K, Q, V."""
+        logger.debug("attention_clamp_kqv called")
         return self._metadata.get(GGUF_META_ATTENTION_CLAMP_KQV)
 
     @property
     def sliding_window(self) -> int | None:
         """Sliding window attention size (for Mistral, Mixtral, etc.)."""
         # Try architecture-specific first
+        logger.debug("sliding_window called")
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.sliding_window"
@@ -1603,186 +1652,222 @@ class GGUFMetadata:
     @property
     def use_parallel_residual(self) -> bool | None:
         """Whether to use parallel residual connections (pre-Norm)."""
+        logger.debug("use_parallel_residual called")
         return self._metadata.get(GGUF_META_USE_PARALLEL_RESIDUAL)
 
     @property
     def tensor_data_layout(self) -> str | None:
         """Tensor data layout ('ggml', 'ggmf', 'ggjt', etc.)."""
+        logger.debug("tensor_data_layout called")
         return self._metadata.get(GGUF_META_TENSOR_DATA_LAYOUT)
 
     @property
     def max_alibi_bias(self) -> float | None:
         """Maximum ALiBi bias value."""
+        logger.debug("max_alibi_bias called")
         return self._metadata.get(GGUF_META_MAX_ALIBI_BIAS)
 
     @property
     def cls_bias(self) -> bool | None:
         """Whether classification head bias is used."""
+        logger.debug("cls_bias called")
         return self._metadata.get(GGUF_META_CLS_BIAS)
 
     @property
     def logit_scale(self) -> float | None:
         """Logit scale factor."""
+        logger.debug("logit_scale called")
         return self._metadata.get(GGUF_META_LOGIT_SCALE)
 
     @property
     def gqa(self) -> int | None:
         """Grouped query attention divisor."""
+        logger.debug("gqa called")
         return self._metadata.get(GGUF_META_GQA)
 
     # MoE-specific properties
     @property
     def num_experts(self) -> int | None:
         """Total number of experts (for MoE models)."""
+        logger.debug("num_experts called")
         return self._metadata.get(GGUF_META_EXPERT_COUNT)
 
     @property
     def num_shared_experts(self) -> int | None:
         """Number of shared experts (for Mixtral-style MoE)."""
+        logger.debug("num_shared_experts called")
         return self._metadata.get(GGUF_META_EXPERT_SHARED_COUNT)
 
     @property
     def num_active_experts(self) -> int | None:
         """Number of active experts per token (expert_used_count)."""
+        logger.debug("num_active_experts called")
         return self._metadata.get(GGUF_META_EXPERT_USED_COUNT)
 
     @property
     def moe_top_k(self) -> int | None:
         """Top-K routing for MoE (how many experts to activate)."""
+        logger.debug("moe_top_k called")
         return self._metadata.get(GGUF_META_MOE_TOP_K)
 
     @property
     def moe_weights(self) -> list[float] | None:
         """MoE expert weights."""
+        logger.debug("moe_weights called")
         return self._metadata.get(GGUF_META_MOE_WEIGHTS)
 
     @property
     def expert_norm_scale(self) -> float | None:
         """Expert normalization scale."""
+        logger.debug("expert_norm_scale called")
         return self._metadata.get(GGUF_META_EXPERT_NORM_SCALE)
 
     @property
     def expert_norm_epsilon(self) -> float | None:
         """Expert normalization epsilon."""
+        logger.debug("expert_norm_epsilon called")
         return self._metadata.get(GGUF_META_EXPERT_NORM_EPSILON)
 
     @property
     def alignment(self) -> int | None:
         """Byte alignment for tensor data."""
+        logger.debug("alignment called")
         return self._metadata.get(GGUF_META_ALIGNMENT)
 
     # Tokenizer properties
     @property
     def tokenizer_model(self) -> str | None:
         """Tokenizer model type ('llama', 'gpt2', 'bert', etc.)."""
+        logger.debug("tokenizer_model called")
         return self._metadata.get(GGUF_META_TOKENIZER_MODEL)
 
     @property
     def tokenizer_tokens(self) -> list[str] | None:
         """List of tokenizer vocabulary tokens."""
+        logger.debug("tokenizer_tokens called")
         return self._metadata.get(GGUF_META_TOKENIZER_LIST)
 
     @property
     def tokenizer_merges(self) -> list[str] | None:
         """Tokenizer BPE merge rules."""
+        logger.debug("tokenizer_merges called")
         return self._metadata.get(GGUF_META_TOKENIZER_MERGES)
 
     @property
     def bos_token_id(self) -> int | None:
         """Beginning-of-sequence token ID."""
+        logger.debug("bos_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_BOS_ID)
 
     @property
     def eos_token_id(self) -> int | None:
         """End-of-sequence token ID."""
+        logger.debug("eos_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_EOS_ID)
 
     @property
     def unk_token_id(self) -> int | None:
         """Unknown token ID."""
+        logger.debug("unk_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_UNK_ID)
 
     @property
     def sep_token_id(self) -> int | None:
         """Separator token ID."""
+        logger.debug("sep_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_SEP_ID)
 
     @property
     def pad_token_id(self) -> int | None:
         """Padding token ID."""
+        logger.debug("pad_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_PAD_ID)
 
     @property
     def hf_tokenizer_json(self) -> str | None:
         """HuggingFace tokenizer config (JSON string)."""
+        logger.debug("hf_tokenizer_json called")
         return self._metadata.get(GGUF_META_TOKENIZER_HF_JSON)
 
     @property
     def prefix_token_id(self) -> int | None:
         """Prefix token ID."""
+        logger.debug("prefix_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_PREFIX_ID)
 
     @property
     def suffix_token_id(self) -> int | None:
         """Suffix token ID."""
+        logger.debug("suffix_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_SUFFIX_ID)
 
     @property
     def middle_token_id(self) -> int | None:
         """Middle token ID (for fill-in-the-middle)."""
+        logger.debug("middle_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_MIDDLE_ID)
 
     @property
     def eot_token_id(self) -> int | None:
         """End-of-turn token ID."""
+        logger.debug("eot_token_id called")
         return self._metadata.get(GGUF_META_TOKENIZER_EOT_ID)
 
     @property
     def chat_template(self) -> str | None:
         """Chat template string."""
+        logger.debug("chat_template called")
         return self._metadata.get(GGUF_META_TOKENIZER_CHAT_TEMPLATE)
 
     # Extended RoPE properties
     @property
     def rope_scaling_beta_fast(self) -> int | None:
         """RoPE scaling beta_fast parameter (for YaRN)."""
+        logger.debug("rope_scaling_beta_fast called")
         return self._metadata.get(GGUF_META_ROPE_SCALING_BETA_FAST)
 
     @property
     def rope_scaling_beta_slow(self) -> int | None:
         """RoPE scaling beta_slow parameter (for YaRN)."""
+        logger.debug("rope_scaling_beta_slow called")
         return self._metadata.get(GGUF_META_ROPE_SCALING_BETA_SLOW)
 
     @property
     def rope_scaling_attn_factor(self) -> float | None:
         """RoPE scaling attention factor."""
+        logger.debug("rope_scaling_attn_factor called")
         return self._metadata.get(GGUF_META_ROPE_SCALING_ATTN_FACTOR)
 
     @property
     def attention_causal(self) -> bool | None:
         """Whether attention is causal."""
+        logger.debug("attention_causal called")
         val = self._metadata.get(GGUF_META_ATTENTION_CAUSAL)
         return bool(val) if val is not None else None
 
     @property
     def expert_gating_func(self) -> str | None:
         """Expert gating function (for MoE models)."""
+        logger.debug("expert_gating_func called")
         return self._metadata.get(GGUF_META_EXPERT_GATING_FUNC)
 
     @property
     def tokenizer_scores(self) -> list[float] | None:
         """Tokenizer scores/probabilities for each token."""
+        logger.debug("tokenizer_scores called")
         return self._metadata.get(GGUF_META_TOKENIZER_SCORES)
 
     @property
     def add_bos_token(self) -> bool | None:
         """Whether to add BOS token."""
+        logger.debug("add_bos_token called")
         val = self._metadata.get(GGUF_META_TOKENIZER_ADD_BOS)
         return bool(val) if val is not None else None
 
     @property
     def add_eos_token(self) -> bool | None:
         """Whether to add EOS token."""
+        logger.debug("add_eos_token called")
         val = self._metadata.get(GGUF_META_TOKENIZER_ADD_EOS)
         return bool(val) if val is not None else None
 
@@ -1790,113 +1875,135 @@ class GGUFMetadata:
     @property
     def author(self) -> str | None:
         """Model author."""
+        logger.debug("author called")
         return self._metadata.get(GGUF_META_AUTHOR)
 
     @property
     def model_version(self) -> str | None:
         """Model version string (from general.version metadata)."""
+        logger.debug("model_version called")
         return self._metadata.get(GGUF_META_VERSION)
 
     @property
     def organization(self) -> str | None:
         """Model organization."""
+        logger.debug("organization called")
         return self._metadata.get(GGUF_META_ORGANIZATION)
 
     @property
     def finetune(self) -> str | None:
         """Finetune name/description."""
+        logger.debug("finetune called")
         return self._metadata.get(GGUF_META_FINETUNE)
 
     @property
     def basename(self) -> str | None:
         """Model base name."""
+        logger.debug("basename called")
         return self._metadata.get(GGUF_META_BASENAME)
 
     @property
     def description(self) -> str | None:
         """Model description."""
+        logger.debug("description called")
         return self._metadata.get(GGUF_META_DESCRIPTION)
 
     @property
     def quantized_by(self) -> str | None:
         """Who/what quantized the model."""
+        logger.info("quantized_by called")
         return self._metadata.get(GGUF_META_QUANTIZED_BY)
 
     @property
     def size_label(self) -> str | None:
         """Model size label (e.g., '7B', '13B')."""
+        logger.debug("size_label called")
         return self._metadata.get(GGUF_META_SIZE_LABEL)
 
     @property
     def license(self) -> str | None:
         """Model license identifier."""
+        logger.debug("license called")
         return self._metadata.get(GGUF_META_LICENSE) or self._metadata.get(GGUF_META_LICENSE_NAME)
 
     @property
     def license_link(self) -> str | None:
         """Link to license text."""
+        logger.debug("license_link called")
         return self._metadata.get(GGUF_META_LICENSE_LINK)
 
     @property
     def url(self) -> str | None:
         """Model URL."""
+        logger.debug("url called")
         return self._metadata.get(GGUF_META_URL)
 
     @property
     def tags(self) -> list[str] | None:
         """Model tags."""
+        logger.debug("tags called")
         return self._metadata.get(GGUF_META_TAGS)
 
     @property
     def languages(self) -> list[str] | None:
         """Model languages."""
+        logger.debug("languages called")
         return self._metadata.get(GGUF_META_LANGUAGES)
 
     @property
     def dataset(self) -> str | None:
         """Training dataset information."""
+        logger.debug("dataset called")
         return self._metadata.get(GGUF_META_DATASET)
 
     # SSM (Mamba) properties
     @property
     def ssm_conv_kernel(self) -> int | None:
         """SSM convolution kernel size."""
+        logger.debug("ssm_conv_kernel called")
         return self._metadata.get(GGUF_META_SSM_CONV_KERNEL)
 
     @property
     def ssm_inner_size(self) -> int | None:
         """SSM inner dimension size."""
+        logger.debug("ssm_inner_size called")
         return self._metadata.get(GGUF_META_SSM_INNER_SIZE)
 
     @property
     def ssm_state_size(self) -> int | None:
         """SSM state size."""
+        logger.debug("ssm_state_size called")
         return self._metadata.get(GGUF_META_SSM_STATE_SIZE)
 
     @property
     def ssm_time_step_rank(self) -> int | None:
         """SSM time step rank."""
+        logger.debug("ssm_time_step_rank called")
         return self._metadata.get(GGUF_META_SSM_TIME_STEP_RANK)
 
     # Split/sharding properties
     @property
     def split_no(self) -> int | None:
         """Split number for sharded models."""
+        logger.debug("split_no called")
         return self._metadata.get(GGUF_META_SPLIT_NO)
 
     @property
     def split_count(self) -> int | None:
         """Total number of splits."""
+        logger.debug("split_count called")
         return self._metadata.get(GGUF_META_SPLIT_COUNT)
 
     @property
     def split_tensors_count(self) -> int | None:
         """Number of tensors in this split."""
+        logger.debug("split_tensors_count called")
         return self._metadata.get(GGUF_META_SPLIT_TENSORS_COUNT)
 
     @property
     def split_tensors_all_count(self) -> int | None:
         """Total number of tensors across all splits."""
+        logger.debug("split_tensors_all_count called")
         return self._metadata.get(GGUF_META_SPLIT_TENSORS_ALL_COUNT)
 
     # Utility methods
@@ -1910,6 +2017,7 @@ class GGUFMetadata:
         Returns:
             The metadata value or None if not found.
         """
+        logger.debug("get_arch_key called with key_suffix=%s", key_suffix)
         arch = self.architecture
         if arch:
             arch_key = f"{arch}.{key_suffix}"
@@ -1926,6 +2034,7 @@ class GGUFMetadata:
         Returns:
             True if the model's architecture matches any of the given names.
         """
+        logger.debug("is_architecture called")
         model_arch = self.architecture
         if model_arch is None:
             return False
@@ -1945,14 +2054,17 @@ class GGUFMetadata:
         Returns:
             The metadata value or default.
         """
+        logger.debug("get called with key=%s, default=%s", key, default)
         return self._metadata.get(key, default)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the underlying raw metadata dict."""
+        logger.debug("to_dict called")
         return self._metadata.copy()
 
     def summary(self) -> str:
         """Return a human-readable summary of key model configuration."""
+        logger.debug("summary called")
         lines = [
             "GGUF Model Configuration",
             "=" * 40,
@@ -2065,6 +2177,7 @@ class GGUFMetadata:
         Returns:
             Dictionary with model configuration fields.
         """
+        logger.debug("extract_config called")
         config: dict[str, Any] = {}
 
         # GGUF format metadata
@@ -2245,6 +2358,7 @@ class TensorInfo:
     __slots__ = ("name", "shape", "qtype", "offset")
 
     def __init__(self, name: str, shape: tuple[int, ...], qtype: int, offset: int):
+        logger.debug("initializing %s with name=%s, shape=%s, qtype=%s, offset=%s", type(self).__name__, name, shape, qtype, offset)
         self.name = name
         self.shape = shape
         self.qtype = qtype
@@ -2252,6 +2366,7 @@ class TensorInfo:
 
     @property
     def n_elements(self) -> int:
+        logger.debug("n_elements called")
         result = 1
         for d in self.shape:
             result *= d
@@ -2260,6 +2375,7 @@ class TensorInfo:
     @property
     def data_size(self) -> int:
         """Byte size of this tensor's data in the file."""
+        logger.debug("data_size called")
         n = self.n_elements
         if self.qtype == GGML_TYPE_F32:
             return n * 4
@@ -2291,6 +2407,7 @@ class GGUFReader:
     MAGIC = b"GGUF"
 
     def __init__(self, path: str | Path):
+        logger.debug("initializing %s with path=%s", type(self).__name__, path)
         self.path = Path(path)
         self.metadata: dict[str, Any] = {}
         self.tensor_infos: dict[str, TensorInfo] = {}
@@ -2313,6 +2430,7 @@ class GGUFReader:
         Returns:
             GGUFMetadata instance wrapping the parsed metadata.
         """
+        logger.debug("gguf_metadata called")
         if self._gguf_metadata is None:
             self._gguf_metadata = GGUFMetadata(
                 self.metadata,
@@ -2323,6 +2441,7 @@ class GGUFReader:
 
     def _parse_header(self) -> None:
         """Parse GGUF file header, metadata, and tensor index."""
+        logger.debug("_parse_header called")
         with open(self.path, "rb") as f:
             # Magic number
             magic = f.read(4)
@@ -2364,6 +2483,7 @@ class GGUFReader:
 
     def _read_string(self, f) -> str:
         """Read a GGUF string: uint64 length + UTF-8 bytes."""
+        logger.debug("_read_string called with f=%s", f)
         if self._version >= 3:
             length = struct.unpack("<Q", f.read(8))[0]
         else:
@@ -2372,11 +2492,13 @@ class GGUFReader:
 
     def _read_value(self, f) -> Any:
         """Read a typed GGUF value."""
+        logger.debug("_read_value called with f=%s", f)
         vtype = struct.unpack("<I", f.read(4))[0]
         return self._read_typed_value(f, vtype)
 
     def _read_typed_value(self, f, vtype: int) -> Any:
         """Read a value given its GGUF type code."""
+        logger.debug("_read_typed_value called with f=%s, vtype=%s", f, vtype)
         if vtype == GGUF_TYPE_UINT8:
             return struct.unpack("<B", f.read(1))[0]
         if vtype == GGUF_TYPE_INT8:
@@ -2412,6 +2534,7 @@ class GGUFReader:
 
     def _read_tensor_info(self, f) -> TensorInfo:
         """Read a tensor info entry from the GGUF header."""
+        logger.debug("_read_tensor_info called with f=%s", f)
         name = self._read_string(f)
         n_dims = struct.unpack("<I", f.read(4))[0]
 
@@ -2428,6 +2551,7 @@ class GGUFReader:
 
     def _read_tensor_data(self, info: TensorInfo) -> np.ndarray:
         """Read raw tensor bytes from the data section."""
+        logger.debug("_read_tensor_data called with info=%s", info)
         abs_offset = self._data_offset + info.offset
         size = info.data_size
         with open(self.path, "rb") as f:
@@ -2451,6 +2575,7 @@ class GGUFReader:
             KeyError: If tensor name not found.
             ValueError: If tensor type is unsupported.
         """
+        logger.debug("get_tensor_fp32 called with name=%s", name)
         if name not in self.tensor_infos:
             raise KeyError(
                 f"Tensor '{name}' not found. Available: {list(self.tensor_infos.keys())[:10]}..."
@@ -2513,6 +2638,7 @@ class GGUFReader:
         Raises:
             ValueError: If tensor is not 2D (not a weight matrix).
         """
+        logger.debug("get_tensor_marlin_np called with name=%s, group_size=%s", name, group_size)
         fp32 = self.get_tensor_fp32(name)
 
         if fp32.ndim != 2:
@@ -2548,6 +2674,7 @@ class GGUFReader:
             ValueError: If tensor is not 2D (not a weight matrix).
             ImportError: If PyTorch is not installed.
         """
+        logger.debug("get_tensor_marlin called with name=%s, group_size=%s", name, group_size)
         if not HAS_TORCH or torch is None:
             raise ImportError(
                 "get_tensor_marlin() requires PyTorch. "
@@ -2567,6 +2694,7 @@ class GGUFReader:
         Returns:
             numpy float16 array.
         """
+        logger.debug("get_tensor_fp16 called with name=%s", name)
         fp32 = self.get_tensor_fp32(name)
         return fp32.astype(np.float16)
 
@@ -2584,6 +2712,7 @@ class GGUFReader:
         Raises:
             ImportError: If PyTorch is not installed.
         """
+        logger.debug("get_tensor_fp16_torch called with name=%s", name)
         if not HAS_TORCH or torch is None:
             raise ImportError(
                 "get_tensor_fp16_torch() requires PyTorch. "
@@ -2598,6 +2727,7 @@ class GGUFReader:
         Returns:
             List of dicts with keys: name, shape, qtype, n_elements, data_size.
         """
+        logger.debug("list_tensors called")
         result = []
         for name, info in self.tensor_infos.items():
             result.append(
@@ -2614,10 +2744,12 @@ class GGUFReader:
 
     def tensor_names(self) -> list[str]:
         """Return all tensor names in file order."""
+        logger.debug("tensor_names called")
         return list(self.tensor_infos.keys())
 
     def is_quantized(self, name: str) -> bool:
         """Check if a tensor uses block quantization (vs dense F16/F32)."""
+        logger.info("is_quantized called with name=%s", name)
         if name not in self.tensor_infos:
             raise KeyError(f"Tensor '{name}' not found")
         return self.tensor_infos[name].qtype in BLOCK_QUANT_TYPES
@@ -2630,11 +2762,13 @@ class GGUFReader:
 
 def _align_offset(offset: int, alignment: int) -> int:
     """Round up offset to the next alignment boundary."""
+    logger.debug("_align_offset called with offset=%s, alignment=%s", offset, alignment)
     return ((offset + alignment - 1) // alignment) * alignment
 
 
 def _qtype_name(qtype: int) -> str:
     """Human-readable name for a GGML type code."""
+    logger.debug("_qtype_name called with qtype=%s", qtype)
     names = {
         GGML_TYPE_F32: "F32",
         GGML_TYPE_F16: "F16",
@@ -2694,6 +2828,7 @@ def load_gguf_model_np(
           - (packed_weights, scales) tuple for 2D quantized weight matrices
           - numpy array (FP16) for other tensors
     """
+    logger.info("load_gguf_model_np called with path=%s, group_size=%s, skip_patterns=%s", path, group_size, skip_patterns)
     if skip_patterns is None:
         skip_patterns = []
 
@@ -2740,6 +2875,7 @@ def load_gguf_model(
     Raises:
         ImportError: If PyTorch is not installed.
     """
+    logger.info("load_gguf_model called with path=%s, group_size=%s, skip_patterns=%s", path, group_size, skip_patterns)
     if not HAS_TORCH or torch is None:
         raise ImportError(
             "load_gguf_model() requires PyTorch. "

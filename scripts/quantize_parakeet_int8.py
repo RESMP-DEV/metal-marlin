@@ -31,6 +31,7 @@ def quantize_tensor_to_int8(
     Returns:
         Tuple of (quantized_int8_tensor, scale_tensor)
     """
+    logger.info("quantize_tensor_to_int8 called with tensor=%s, per_channel=%s", getattr(tensor, "shape", tensor), per_channel)
     if per_channel and tensor.dim() >= 2:
         # Per-channel quantization along the last dimension (output channels)
         scale = tensor.abs().max(dim=-1, keepdim=True)[0] / 127.0
@@ -56,6 +57,7 @@ def quantize_to_int8(state_dict: dict, per_channel: bool = True) -> dict:
     Returns:
         Quantized state dictionary
     """
+    logger.info("quantize_to_int8 called with state_dict=%s, per_channel=%s", state_dict, per_channel)
     quantized_state_dict = {}
 
     for key, tensor in state_dict.items():
@@ -94,6 +96,7 @@ def quantize_to_int8(state_dict: dict, per_channel: bool = True) -> dict:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Quantize Parakeet TDT-0.6B to INT8 for ANE compatibility"
     )

@@ -1,13 +1,18 @@
 """Tests for buffer pool efficiency metrics."""
+import logging
 
 import pytest
 
+
+
+logger = logging.getLogger(__name__)
 
 class TestBufferPoolMetrics:
     """Tests for BufferPoolMetrics class."""
 
     def test_metrics_initialization(self):
         """Test that metrics initialize with correct defaults."""
+        logger.info("running test_metrics_initialization")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -22,6 +27,7 @@ class TestBufferPoolMetrics:
 
     def test_hit_rate_calculation(self):
         """Test hit rate calculation."""
+        logger.info("running test_hit_rate_calculation")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -40,6 +46,7 @@ class TestBufferPoolMetrics:
 
     def test_smoothed_hit_rate(self):
         """Test exponentially smoothed hit rate."""
+        logger.info("running test_smoothed_hit_rate")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -58,6 +65,7 @@ class TestBufferPoolMetrics:
 
     def test_buffer_lifetime_tracking(self):
         """Test buffer lifetime tracking."""
+        logger.info("running test_buffer_lifetime_tracking")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -74,6 +82,7 @@ class TestBufferPoolMetrics:
 
     def test_pool_efficiency_score(self):
         """Test pool efficiency score calculation."""
+        logger.info("running test_pool_efficiency_score")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -91,6 +100,7 @@ class TestBufferPoolMetrics:
 
     def test_tuning_recommendations_low_hit_rate(self):
         """Test tuning recommendations for low hit rate."""
+        logger.info("running test_tuning_recommendations_low_hit_rate")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -104,6 +114,7 @@ class TestBufferPoolMetrics:
 
     def test_tuning_recommendations_high_fragmentation(self):
         """Test tuning recommendations for high fragmentation."""
+        logger.info("running test_tuning_recommendations_high_fragmentation")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -117,6 +128,7 @@ class TestBufferPoolMetrics:
 
     def test_to_dict(self):
         """Test metrics serialization to dict."""
+        logger.info("running test_to_dict")
         from metal_marlin._buffer_pool import BufferPoolMetrics
 
         metrics = BufferPoolMetrics()
@@ -144,6 +156,7 @@ class TestMetalBufferPoolMetrics:
     def test_metrics_property(self):
         """Test that metrics property returns current metrics."""
         # Skip if Metal not available
+        logger.info("running test_metrics_property")
         pytest.importorskip("Metal")
 
         import Metal as Metal
@@ -162,6 +175,7 @@ class TestMetalBufferPoolMetrics:
     def test_stats_includes_metrics(self):
         """Test that stats() includes new metrics."""
         # Skip if Metal not available
+        logger.info("running test_stats_includes_metrics")
         pytest.importorskip("Metal")
 
         import Metal as Metal

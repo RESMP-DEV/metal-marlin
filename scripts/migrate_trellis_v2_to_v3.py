@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import shutil
 import sys
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ import torch
 from safetensors.torch import save_file
 from tqdm import tqdm
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TensorInfo:
@@ -60,6 +64,7 @@ class ShardWriter:
         shard_size_bytes: int = 5 * 1024 * 1024 * 1024,  # 5GB default
         prefix: str = "model",
     ):
+        logger.debug("initializing %s with output_dir=%s, shard_size_bytes=%s, prefix=%s", type(self).__name__, output_dir, shard_size_bytes, prefix)
         self.output_dir = Path(output_dir)
         self.shard_size_bytes = shard_size_bytes
         self.prefix = prefix
@@ -74,10 +79,12 @@ class ShardWriter:
 
     def _get_shard_filename(self, shard_num: int, total_shards: int) -> str:
         """Generate shard filename following HF conventions."""
+        logger.debug("_get_shard_filename called with shard_num=%s, total_shards=%s", shard_num, total_shards)
         return f"{self.prefix}-{shard_num:05d}-of-{total_shards:05d}.safetensors"
 
     def _write_current_shard(self) -> None:
         """Write the current shard to disk."""
+        logger.info("_write_current_shard called")
         if not self._current_shard:
             return
 
@@ -109,6 +116,7 @@ class ShardWriter:
             bits: Optional bits info for metadata
             mse: Optional MSE for metadata
         """
+        logger.debug("add_tensor called with name=%s, tensor=%s, bits=%s", name, tensor, bits)
         tensor_size = tensor.numel() * tensor.element_size()
 
         # Check if we need to start a new shard
@@ -138,6 +146,7 @@ class ShardWriter:
     def finalize(self) -> None:
         """Finalize all shards and write the index file."""
         # Write the last shard
+        logger.debug("finalize called")
         if self._current_shard:
             self._write_current_shard()
 
@@ -182,6 +191,7 @@ def load_v2_layer(
     Returns:
         Tuple of (tensor_infos, tensor_data)
     """
+    logger.info("load_v2_layer called with layer_dir=%s", layer_dir)
     from safetensors.torch import load_file
 
     # Load index.json
@@ -249,6 +259,7 @@ def migrate_model(
         shard_size_gb: Target size per shard in GB
         verify: Whether to verify the migration
     """
+    logger.debug("migrate_model called with input_dir=%s, output_dir=%s, shard_size_gb=%s", input_dir, output_dir, shard_size_gb)
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
 
@@ -349,6 +360,7 @@ def verify_migration(
         output_dir: Path to v3 model
         v2_shapes: Dictionary of tensor names to shapes from v2
     """
+    logger.debug("verify_migration called with output_dir=%s, v2_shapes=%s", output_dir, v2_shapes)
     from safetensors import safe_open
 
     # Load the index
@@ -417,6 +429,7 @@ def verify_migration(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Migrate Trellis v2 models to v3 format"
     )

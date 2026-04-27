@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 
 import importlib
 from types import SimpleNamespace
@@ -11,11 +12,15 @@ from metal_marlin.inference.mmfp4_pipeline import (
 )
 from metal_marlin.kv_cache import MLAKVCache
 
+
+logger = logging.getLogger(__name__)
+
 KV_CACHE_MODULE = importlib.import_module("metal_marlin.kv_cache")
 
 
 class _DummyAttention:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.use_paged_attention = False
         self.use_fused_decode = False
         self.prefer_glm4_fused_kernel = False
@@ -23,11 +28,13 @@ class _DummyAttention:
 
 class _DummyLayer:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.self_attn = _DummyAttention()
 
 
 class _DummyModel:
     def __init__(self, device: str = "cpu", num_layers: int = 2) -> None:
+        logger.debug("initializing %s with device=%s, num_layers=%s", type(self).__name__, device, num_layers)
         self.device = device
         self.config = SimpleNamespace()
         self.model = SimpleNamespace(
@@ -35,6 +42,7 @@ class _DummyModel:
         )
 
     def eval(self) -> _DummyModel:
+        logger.debug("eval called")
         return self
 
 
@@ -44,6 +52,7 @@ class _DummyTokenizer:
 
 
 def _build_pipeline(device: str = "cpu") -> MMFP4Pipeline:
+    logger.info("_build_pipeline starting")
     model = _DummyModel(device=device)
     tokenizer = _DummyTokenizer()
     return MMFP4Pipeline(model, tokenizer, use_paged_attention=False)
@@ -52,8 +61,10 @@ def _build_pipeline(device: str = "cpu") -> MMFP4Pipeline:
 def test_mla_glm4_kernel_preference_uses_runtime_library_fallback(
     monkeypatch,
 ) -> None:
+    logger.info("running test_mla_glm4_kernel_preference_uses_runtime_library_fallback")
     class _RuntimeLibrary:
         def get_function(self, function_name: str) -> object:
+            logger.debug("get_function called with function_name=%s", function_name)
             if function_name != "mla_fused_attention_decode_glm4":
                 raise KeyError(function_name)
             return object()
@@ -76,8 +87,10 @@ def test_mla_glm4_kernel_preference_uses_runtime_library_fallback(
 def test_mla_glm4_kernel_preference_falls_back_when_unavailable(
     monkeypatch,
 ) -> None:
+    logger.info("running test_mla_glm4_kernel_preference_falls_back_when_unavailable")
     class _NoKernelLibrary:
         def get_function(self, function_name: str) -> object:
+            logger.debug("get_function called with function_name=%s", function_name)
             raise KeyError(function_name)
 
     monkeypatch.setattr("metal_marlin.metal_dispatch.get_kernel", lambda _: None)
@@ -96,6 +109,7 @@ def test_mla_glm4_kernel_preference_falls_back_when_unavailable(
 
 
 def test_mla_kv_cache_defaults_to_int8_for_non_paged_pipeline(monkeypatch) -> None:
+    logger.info("running test_mla_kv_cache_defaults_to_int8_for_non_paged_pipeline")
     monkeypatch.setattr(KV_CACHE_MODULE, "require_mps", lambda *_args, **_kwargs: None)
 
     pipeline = _build_pipeline(device="cpu")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 import torch.nn as nn
@@ -12,6 +13,9 @@ from .trellis.model import (
     TrellisModelConfig,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class EarlyExitOutput(CausalLMOutput):
@@ -26,6 +30,7 @@ class EarlyExitModel(TrellisForCausalLM):
     """
 
     def __init__(self, config: TrellisModelConfig, exit_threshold: float = 0.9):
+        logger.debug("initializing %s with config=%s, exit_threshold=%s", type(self).__name__, config, exit_threshold)
         super().__init__(config)
         self.exit_threshold = exit_threshold
 
@@ -55,6 +60,7 @@ class EarlyExitModel(TrellisForCausalLM):
         Iterates through layers and checks classifier confidence after each layer.
         If confidence > threshold, exits early and returns logits.
         """
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         hidden_states = self.model.embed_tokens(input_ids)
         batch_size, seq_len = input_ids.shape
         device = hidden_states.device

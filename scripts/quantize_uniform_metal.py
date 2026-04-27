@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -49,6 +50,9 @@ import numpy as np
 import torch
 from safetensors import safe_open
 from safetensors.numpy import save_file as save_numpy_file
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -104,6 +108,7 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
     Returns:
         Packed uint8 array with header byte containing bits value
     """
+    logger.info("pack_indices_vectorized called with indices=%s, bits=%s", indices, bits)
     if bits < 2 or bits > 8:
         raise ValueError(f"bits must be in range [2, 8], got {bits}")
 
@@ -248,12 +253,14 @@ def pack_indices_vectorized(indices: np.ndarray, bits: int) -> np.ndarray:
 
 def mps_sync() -> None:
     """Synchronize MPS."""
+    logger.debug("mps_sync called")
     torch.mps.synchronize()
 
 
 def mps_memory_gb() -> tuple[float, float]:
     """Return (allocated_gb, reserved_gb) MPS memory."""
     # MPS doesn't have direct memory reporting, estimate from tensors
+    logger.debug("mps_memory_gb called")
     allocated = torch.mps.current_allocated_memory() / 1e9 if hasattr(torch.mps, 'current_allocated_memory') else 0
     return allocated, 0
 
@@ -268,6 +275,7 @@ def hadamard_matrix_mps(n: int, device: torch.device) -> torch.Tensor:
 
     Uses Sylvester construction: H_2n = [[H_n, H_n], [H_n, -H_n]].
     """
+    logger.debug("hadamard_matrix_mps called with n=%s, device=%s", n, device)
     if n == 1:
         return torch.ones(1, 1, device=device, dtype=torch.float32)
 
@@ -293,6 +301,7 @@ def blockwise_hadamard_mps(
     Returns:
         Transformed tensor
     """
+    logger.debug("blockwise_hadamard_mps called with X=%s, block_size=%s, axis=%s", X, block_size, axis)
     H = hadamard_matrix_mps(block_size, X.device)
 
     if axis == 0:
@@ -328,17 +337,20 @@ class TrellisCodebook:
     """Standalone Trellis codebook for quantization."""
 
     def __init__(self, bits: int):
+        logger.debug("initializing %s with bits=%s", type(self).__name__, bits)
         self.bits = bits
         self.dim = 2**bits
         self.grid = self._init_grid()
 
     def _init_grid(self) -> np.ndarray:
         """Initialize quantization grid."""
+        logger.debug("_init_grid called")
         n = 2**self.bits
         grid = np.linspace(-1, 1, n, dtype=np.float32)
         return grid
 
     def get_grid(self) -> np.ndarray:
+        logger.debug("get_grid called")
         return self.grid
 
     def quantize(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -347,6 +359,7 @@ class TrellisCodebook:
         Returns:
             (indices, dequantized_values)
         """
+        logger.info("quantize called with X=%s", X)
         flat = X.flatten()
 
         # Find nearest codebook entries
@@ -374,6 +387,7 @@ def ldl_decompose(H: np.ndarray, reg: float = 0.025) -> tuple[np.ndarray, np.nda
     Returns:
         (L, D) where H = L @ D @ L.T
     """
+    logger.debug("ldl_decompose called with H=%s, reg=%s", H, reg)
     n = H.shape[0]
 
     # Add regularization
@@ -413,6 +427,7 @@ def viterbi_quantize_tile(
     Returns:
         (indices, scales, Su, Sv) - quantized representation
     """
+    logger.info("viterbi_quantize_tile called with W_tile=%s, L=%s, codebook=%s", W_tile, L, codebook)
     tile_size = W_tile.shape[0]
 
     # Simple quantization (full Viterbi is complex, use greedy for now)
@@ -454,6 +469,7 @@ def quantize_tiles_mps_batched(
     Returns:
         (indices_list, scales_list, su_list, sv_list) for each tile
     """
+    logger.info("quantize_tiles_mps_batched called with W=%s, codebook=%s, tile_size=%s", W, codebook, tile_size)
     out_features, in_features = W.shape
     device = W.device
 
@@ -518,6 +534,7 @@ class BitAllocator:
         min_bits: int = 4,  # Forced to 4
         max_bits: int = 4,  # Forced to 4
     ):
+        logger.debug("initializing %s with min_bits=%s, max_bits=%s", type(self).__name__, min_bits, max_bits)
         self.min_bits = 4  # UNIFORM: always 4
         self.max_bits = 4  # UNIFORM: always 4
         print("Using UNIFORM 4-bit quantization for all tensors")
@@ -539,6 +556,7 @@ class BitAllocator:
             (bits, sensitivity) - bits is ALWAYS 4
         """
         # UNIFORM 4-BIT: Always return 4
+        logger.debug("compute_bits called with weight=%s, name=%s, is_expert=%s", weight, name, is_expert)
         return 4, 1.0
 
 
@@ -561,6 +579,7 @@ class QuantizedTensor:
 
     def save(self, key: str, tensor_dict: dict) -> None:
         """Save to tensor dict."""
+        logger.info("save called with key=%s, tensor_dict=%s", key, tensor_dict)
         tensor_dict[f"{key}.packed"] = self.packed_indices
         tensor_dict[f"{key}.scales"] = self.scales
         tensor_dict[f"{key}.su"] = self.su
@@ -582,6 +601,7 @@ class MPSQuantizer:
         min_bits: int = 4,
         max_bits: int = 4,
     ):
+        logger.debug("initializing %s with min_bits=%s, max_bits=%s", type(self).__name__, min_bits, max_bits)
         self.min_bits = 4  # UNIFORM
         self.max_bits = 4  # UNIFORM
         self.device = MPS_DEVICE
@@ -609,6 +629,7 @@ class MPSQuantizer:
         Returns:
             QuantizedTensor or None if quantization failed
         """
+        logger.info("quantize_tensor called with weight=%s, name=%s, is_expert=%s", weight, name, is_expert)
         try:
             # Move to MPS
             if weight.device.type != "mps":
@@ -667,6 +688,7 @@ class MPSQuantizer:
         Returns:
             List of (name, quantized_tensor) tuples
         """
+        logger.info("quantize_batch_gpu called with weights=%s, is_expert_layer=%s", weights, is_expert_layer)
         results = []
         for name, weight in weights:
             qtensor = self.quantize_tensor(weight, name, is_expert_layer)
@@ -687,6 +709,7 @@ class MPSQuantizer:
         Returns:
             Dict of tensor_name -> numpy arrays for saving
         """
+        logger.info("quantize_prepared_layer called with layer_weights=%s, layer_idx=%s", layer_weights, layer_idx)
         output = {}
         is_expert_layer = "experts" in str(layer_weights.keys())
 
@@ -715,6 +738,7 @@ class MPSQuantizer:
         Returns:
             Statistics dict
         """
+        logger.info("quantize_model called with model_path=%s, output_path=%s, max_layers=%s", model_path, output_path, max_layers)
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -803,6 +827,7 @@ class MPSQuantizer:
         self, weight_map: dict[str, str]
     ) -> dict[int, list[str]]:
         """Group tensor names by layer index."""
+        logger.debug("_group_tensors_by_layer called with weight_map=%s", weight_map)
         layers = {}
         for name in weight_map.keys():
             # Parse layer index from name like "model.layers.0.mlp.gate_proj.weight"
@@ -826,6 +851,7 @@ class MPSQuantizer:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Uniform 4-bit Trellis quantization for GLM-4.7-Flash"
     )

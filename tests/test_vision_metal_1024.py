@@ -11,6 +11,7 @@ All tests are skipped if MPS is not available.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -33,9 +34,13 @@ except ImportError:
     HAS_VISION_METAL = False
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def vision_metal():
     """Fixture providing a VisionMetal instance."""
+    logger.debug("vision_metal called")
     if not HAS_VISION_METAL:
         pytest.skip("VisionMetal not available")
     return VisionMetal()
@@ -48,6 +53,7 @@ def vision_metal():
 
 def test_resize_bilinear_tiled_1024(vision_metal):
     """Test tile-based resize for 1024x1024 images."""
+    logger.info("running test_resize_bilinear_tiled_1024")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -69,6 +75,7 @@ def test_resize_bilinear_tiled_1024(vision_metal):
 
 def test_resize_bilinear_tiled_2048(vision_metal):
     """Test tile-based resize for very large 2048x2048 images."""
+    logger.info("running test_resize_bilinear_tiled_2048")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -90,6 +97,7 @@ def test_resize_bilinear_tiled_2048(vision_metal):
 
 def test_resize_bilinear_tiled_vs_standard(vision_metal):
     """Verify tiled resize produces similar results to standard resize."""
+    logger.info("running test_resize_bilinear_tiled_vs_standard")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -120,6 +128,7 @@ def test_resize_bilinear_tiled_vs_standard(vision_metal):
 
 def test_preprocess_large_image_fused_with_crop(vision_metal):
     """Test fused pipeline with center crop."""
+    logger.info("running test_preprocess_large_image_fused_with_crop")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -147,6 +156,7 @@ def test_preprocess_large_image_fused_with_crop(vision_metal):
 
 def test_preprocess_large_image_fused_no_crop(vision_metal):
     """Test fused pipeline without center crop (resize only)."""
+    logger.info("running test_preprocess_large_image_fused_no_crop")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -174,6 +184,7 @@ def test_preprocess_large_image_fused_no_crop(vision_metal):
 
 def test_preprocess_large_image_fused_vs_separate(vision_metal):
     """Verify fused pipeline matches separate operations."""
+    logger.info("running test_preprocess_large_image_fused_vs_separate")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -218,6 +229,7 @@ def test_preprocess_large_image_fused_vs_separate(vision_metal):
 
 def test_resize_bicubic_8x8_basic(vision_metal):
     """Test Lanczos-style 8x8 bicubic resize."""
+    logger.info("running test_resize_bicubic_8x8_basic")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -237,6 +249,7 @@ def test_resize_bicubic_8x8_basic(vision_metal):
 
 def test_resize_bicubic_8x8_vs_standard(vision_metal):
     """Compare 8x8 bicubic to standard bicubic."""
+    logger.info("running test_resize_bicubic_8x8_vs_standard")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -273,6 +286,7 @@ def test_resize_bicubic_8x8_vs_standard(vision_metal):
 
 def test_resize_aspect_ratio_preserve_wide(vision_metal):
     """Test aspect ratio preserve for wide images (16:9)."""
+    logger.info("running test_resize_aspect_ratio_preserve_wide")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -299,6 +313,7 @@ def test_resize_aspect_ratio_preserve_wide(vision_metal):
 
 def test_resize_aspect_ratio_preserve_tall(vision_metal):
     """Test aspect ratio preserve for tall images (9:16)."""
+    logger.info("running test_resize_aspect_ratio_preserve_tall")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -324,6 +339,7 @@ def test_resize_aspect_ratio_preserve_tall(vision_metal):
 
 def test_resize_aspect_ratio_preserve_already_square(vision_metal):
     """Test aspect ratio preserve for already square images."""
+    logger.info("running test_resize_aspect_ratio_preserve_already_square")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -354,6 +370,7 @@ def test_resize_aspect_ratio_preserve_already_square(vision_metal):
 
 def test_resize_bilinear_tiled_nchw(vision_metal):
     """Test tiled resize with NCHW layout."""
+    logger.info("running test_resize_bilinear_tiled_nchw")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -373,6 +390,7 @@ def test_resize_bilinear_tiled_nchw(vision_metal):
 
 def test_preprocess_large_image_fused_nchw(vision_metal):
     """Test fused pipeline with NCHW layout."""
+    logger.info("running test_preprocess_large_image_fused_nchw")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -404,6 +422,7 @@ def test_preprocess_large_image_fused_nchw(vision_metal):
 @pytest.mark.parametrize("batch_size", [1, 2, 4])
 def test_resize_bilinear_tiled_batch(vision_metal, batch_size):
     """Test tiled resize with batched images."""
+    logger.info("running test_resize_bilinear_tiled_batch")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -424,6 +443,7 @@ def test_resize_bilinear_tiled_batch(vision_metal, batch_size):
 @pytest.mark.parametrize("batch_size", [1, 2])
 def test_preprocess_large_image_fused_batch(vision_metal, batch_size):
     """Test fused pipeline with batched images."""
+    logger.info("running test_preprocess_large_image_fused_batch")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 

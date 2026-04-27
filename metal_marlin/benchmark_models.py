@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -33,6 +34,9 @@ from typing import Any
 import numpy as np
 
 from ._compat import HAS_TORCH, torch
+
+
+logger = logging.getLogger(__name__)
 
 # Published FP16 perplexity values from model cards / papers
 # Source: HuggingFace model cards, original papers, community benchmarks
@@ -117,6 +121,7 @@ class BenchmarkResult:
 
     def kl_quality_rating(self) -> str:
         """Return quality rating based on KL divergence."""
+        logger.debug("kl_quality_rating called")
         if self.kl_mean < 0.01:
             return "excellent"
         elif self.kl_mean < 0.05:
@@ -128,11 +133,13 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to JSON-serializable dict."""
+        logger.debug("to_dict called")
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BenchmarkResult:
         """Reconstruct from dict."""
+        logger.debug("from_dict called with d=%s", d)
         return cls(**d)
 
 
@@ -143,6 +150,7 @@ def detect_model_type(config: Any) -> str:
     Returns: "dense", "moe", or "moe-mtp"
     """
     # Check various MoE config field names used by different models
+    logger.debug("detect_model_type called with config=%s", config)
     num_experts = (
         getattr(config, "num_experts", None)
         or getattr(config, "n_routed_experts", None)  # GLM-4.7-Flash style
@@ -171,6 +179,7 @@ def compute_params(config: Any, model_type: str) -> tuple[int, int]:
 
     For MoE models, active params are: attention + shared expert + top-k routed experts.
     """
+    logger.debug("compute_params called with config=%s, model_type=%s", config, model_type)
     hidden = config.hidden_size
     intermediate = config.intermediate_size
     num_layers = config.num_hidden_layers
@@ -254,6 +263,7 @@ def get_precision_config(model_type: str, preset: str) -> tuple[str, Any]:
 
     Returns: (config_name, MixedPrecisionConfig)
     """
+    logger.debug("get_precision_config called with model_type=%s, preset=%s", model_type, preset)
     from .mixed_precision import MixedPrecisionConfig
 
     if preset == "uniform":
@@ -281,6 +291,7 @@ def load_calibration_data(calibration: str) -> list[str]:
     - "bartowski-v3": Bartowski's calibration set (800+ samples)
     - "c4": C4 validation subset (up to 10k samples)
     """
+    logger.info("load_calibration_data called with calibration=%s", calibration)
     if calibration in {"llama.cpp-imatrix", "wikitext-2-train", "wiki.train.raw"}:
         calibration = "wikitext-2"
 
@@ -339,6 +350,7 @@ def load_eval_data(
     Returns:
         List of text samples for evaluation
     """
+    logger.info("load_eval_data called with dataset=%s, num_samples=%s", dataset, num_samples)
     if dataset.startswith("bartowski"):
         try:
             from datasets import load_dataset
@@ -388,6 +400,7 @@ def load_calibration_stream(dataset: str):
     Yields:
         Text samples one at a time
     """
+    logger.info("load_calibration_stream called with dataset=%s", dataset)
     if dataset.startswith("bartowski"):
         try:
             from datasets import load_dataset
@@ -473,6 +486,7 @@ def benchmark_model(
     Returns:
         BenchmarkResult with all metrics
     """
+    logger.info("benchmark_model starting with model_id=%s, preset=%s, calibration=%s, samples=%s", model_id, preset, calibration, samples)
     import tempfile
 
     from .hf_loader import download_model, load_model_config
@@ -668,6 +682,7 @@ def benchmark_model(
 
 def _get_torch_device() -> str:
     """Get the best available torch device."""
+    logger.debug("_get_torch_device called")
     if not HAS_TORCH or torch is None:
         return "cpu"
     if torch.cuda.is_available():
@@ -679,6 +694,7 @@ def _get_torch_device() -> str:
 
 def _synchronize_device(device: str) -> None:
     """Synchronize the device to ensure operations are complete."""
+    logger.debug("_synchronize_device called with device=%s", device)
     if not HAS_TORCH or torch is None:
         return
     if device == "cuda" and torch.cuda.is_available():
@@ -689,6 +705,7 @@ def _synchronize_device(device: str) -> None:
 
 def _clear_device_cache(device: str) -> None:
     """Clear device memory cache."""
+    logger.debug("_clear_device_cache called with device=%s", device)
     if not HAS_TORCH or torch is None:
         return
     if device == "cuda" and torch.cuda.is_available():
@@ -724,6 +741,7 @@ def _compute_kl_divergence(
     Returns:
         (kl_mean, kl_max, kl_std)
     """
+    logger.debug("_compute_kl_divergence called with original_path=%s, quantized_path=%s, texts=%s", original_path, quantized_path, texts)
     from .eval import compute_kl_divergence_np, load_tokenizer
 
     if not HAS_TORCH or torch is None:
@@ -850,6 +868,7 @@ def _download_gguf_model(
     Returns:
         (gguf_path, size_gb): Path to downloaded GGUF file and size in GB
     """
+    logger.info("_download_gguf_model called with model_id=%s, quant_type=%s, verbose=%s", model_id, quant_type, verbose)
     import subprocess
 
     # Get GGUF repo from mapping
@@ -952,6 +971,7 @@ def _run_llama_cpp_perplexity(
     Returns:
         Perplexity value or None if llama.cpp not available
     """
+    logger.debug("_run_llama_cpp_perplexity called with gguf_path=%s, max_length=%s, verbose=%s", gguf_path, max_length, verbose)
     import shutil
     import subprocess
 
@@ -1073,6 +1093,7 @@ def _benchmark_gguf(
         (perplexity, throughput_tok_s, memory_gb)
     """
     # Try llama.cpp CLI first for accurate perplexity
+    logger.info("_benchmark_gguf starting with gguf_path=%s, texts=%s, max_length=%s, verbose=%s", gguf_path, texts, max_length, verbose)
     ppl = _run_llama_cpp_perplexity(gguf_path, max_length, verbose)
     use_cli_ppl = ppl is not None
 
@@ -1164,6 +1185,7 @@ def _benchmark_marlin(
         (perplexity, throughput_tok_s, memory_gb)
     """
 
+    logger.info("_benchmark_marlin starting with model_path=%s, texts=%s, max_length=%s, verbose=%s", model_path, texts, max_length, verbose)
     try:
         if not HAS_TORCH or torch is None:
             raise ImportError("PyTorch not available")
@@ -1245,12 +1267,14 @@ def benchmark_models_parallel(
     Returns:
         List of BenchmarkResult for each model
     """
+    logger.info("benchmark_models_parallel starting with model_ids=%s, output_json=%s, max_workers=%s", model_ids, output_json, max_workers)
     results: list[BenchmarkResult] = []
     output_path = Path(output_json)
 
     verbose = kwargs.pop("verbose", True)
 
     def _run_single(model_id: str) -> BenchmarkResult:
+        logger.debug("_run_single called with model_id=%s", model_id)
         print(f"\n{'=' * 60}")
         print(f"Benchmarking: {model_id}")
         print("=" * 60)
@@ -1280,6 +1304,7 @@ def benchmark_models_parallel(
 
 def print_results_table(results: list[BenchmarkResult]) -> None:
     """Print results as a formatted table comparing Marlin FP4 vs GGUF."""
+    logger.debug("print_results_table called with results=%s", results)
     if not results:
         print("No results to display")
         return
@@ -1340,6 +1365,7 @@ def print_results_table(results: list[BenchmarkResult]) -> None:
 
 
 def main():
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

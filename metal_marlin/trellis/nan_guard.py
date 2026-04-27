@@ -63,6 +63,7 @@ class NaNStatistics:
             input_tensor: Optional input tensor that triggered NaN.
             recovered: Whether the NaN was recovered via fallback.
         """
+        logger.debug("record_nan called with layer_idx=%s, input_tensor=%s, recovered=%s", layer_idx, input_tensor, recovered)
         self.last_nan_timestamp = time.time()
 
         if layer_idx is not None:
@@ -97,6 +98,7 @@ class NaNStatistics:
         Returns:
             Dictionary with NaN statistics summary.
         """
+        logger.debug("get_summary called")
         return {
             "total_recoveries": self.total_nan_recoveries,
             "total_failures": self.total_nan_failures,
@@ -112,6 +114,7 @@ class NaNStatistics:
 
     def clear(self) -> None:
         """Clear all statistics."""
+        logger.debug("clear called")
         self.nan_count_by_layer.clear()
         self.nan_triggering_inputs.clear()
         self.total_nan_recoveries = 0
@@ -125,6 +128,7 @@ _global_stats = NaNStatistics()
 
 def get_nan_statistics() -> NaNStatistics:
     """Get the global NaN statistics instance."""
+    logger.debug("get_nan_statistics called")
     return _global_stats
 
 
@@ -138,6 +142,7 @@ def nan_check(tensor: torch.Tensor, name: str = "tensor") -> bool:
     Returns:
         True if tensor contains NaN, False otherwise.
     """
+    logger.debug("nan_check called with tensor=%s, name=%s", tensor, name)
     has_nan = bool(tensor.isnan().any().item())
     if has_nan:
         logger.warning(f"NaN detected in {name}")
@@ -180,6 +185,7 @@ class NaNGuard:
             enabled: Whether to enable NaN checking.
             stats: Statistics instance to use (default: global stats).
         """
+        logger.debug("initializing %s with fallback=%s, layer_idx=%s, enabled=%s, stats=%s", type(self).__name__, fallback, layer_idx, enabled, stats)
         self.fallback = fallback
         self.layer_idx = layer_idx
         self.enabled = enabled
@@ -195,6 +201,7 @@ class NaNGuard:
         Args:
             x: Input tensor to store.
         """
+        logger.debug("set_input called with x=%s", x)
         self._input = x
 
     def check(self, output: torch.Tensor) -> torch.Tensor:
@@ -209,6 +216,7 @@ class NaNGuard:
         Raises:
             RuntimeError: If NaN detected and no fallback provided.
         """
+        logger.debug("check called with output=%s", output)
         if not self.enabled:
             return output
 
@@ -264,6 +272,7 @@ class NaNGuard:
     @property
     def nan_detected(self) -> bool:
         """Whether NaN was detected during this guard's scope."""
+        logger.debug("nan_detected called")
         return self._nan_detected
 
 
@@ -294,6 +303,7 @@ def nan_guarded(
     Yields:
         NaNGuard instance.
     """
+    logger.debug("nan_guarded called with x=%s, fallback=%s, layer_idx=%s", x, fallback, layer_idx)
     guard = NaNGuard(fallback=fallback, layer_idx=layer_idx, enabled=enabled)
     guard.set_input(x)
     yield guard

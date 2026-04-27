@@ -44,6 +44,7 @@ class MixedBPWMoEDispatcher:
     _warned_no_batch = False
 
     def __init__(self, layer: TrellisMoEMLP):
+        logger.debug("initializing %s with layer=%s", type(self).__name__, layer)
         self.layer = layer
         self._bit_group_buffers: dict[
             tuple[int, int, int], tuple[CachedWeightBuffers, list[int]]
@@ -58,6 +59,7 @@ class MixedBPWMoEDispatcher:
 
     def ensure_buffers(self) -> None:
         """Ensure per-bit-group buffers are created."""
+        logger.debug("ensure_buffers called")
         if self._bit_group_buffers is not None:
             return
 
@@ -86,6 +88,7 @@ class MixedBPWMoEDispatcher:
         When omitted, this method creates a local batch and commits before
         returning for backward compatibility.
         """
+        logger.debug("dispatch called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         batch_size = x.shape[0]
         device = x.device
         if lib is None:
@@ -295,6 +298,7 @@ class MixedBPWMoEDispatcher:
                 _group_output_fp32: torch.Tensor = group_output_fp32,
                 _keep_alive: tuple[Any, ...] = keep_alive,
             ) -> None:
+                logger.debug("_accumulate_group called")
                 output.index_add_(0, _scatter_indices,
                                   _group_output_fp32.half())
 
@@ -335,6 +339,7 @@ class ExpertSelectionCache:
     """Cache expert selections for similar hidden states."""
 
     def __init__(self, max_entries: int = 16, similarity_threshold: float = 0.95):
+        logger.debug("initializing %s with max_entries=%s, similarity_threshold=%s", type(self).__name__, max_entries, similarity_threshold)
         self._cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self._hidden_hashes: dict[int, torch.Tensor] = {}
         self.max_entries = max_entries
@@ -344,26 +349,32 @@ class ExpertSelectionCache:
 
     @property
     def hits(self) -> int:
+        logger.debug("hits called")
         return self._hits
 
     @hits.setter
     def hits(self, value: int) -> None:
+        logger.debug("hits called with value=%s", value)
         self._hits = value
 
     @property
     def misses(self) -> int:
+        logger.debug("misses called")
         return self._misses
 
     @misses.setter
     def misses(self, value: int) -> None:
+        logger.debug("misses called with value=%s", value)
         self._misses = value
 
     def _compute_hash(self, hidden: torch.Tensor) -> int:
         # Use downsampled hidden state as key.
+        logger.debug("_compute_hash called with hidden=%s", hidden)
         downsampled = hidden.detach()[..., ::64].float().cpu().numpy()
         return hash(downsampled.tobytes())
 
     def lookup(self, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
+        logger.debug("lookup called with hidden=%s", hidden)
         h = self._compute_hash(hidden)
         if h in self._cache:
             cached_hidden = self._hidden_hashes[h]
@@ -381,6 +392,7 @@ class ExpertSelectionCache:
     def store(
         self, hidden: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor
     ) -> None:
+        logger.debug("store called with hidden=%s, experts=%s, weights=%s", hidden, experts, weights)
         if len(self._cache) >= self.max_entries:
             # Evict oldest entry.
             oldest = next(iter(self._cache))
@@ -392,18 +404,22 @@ class ExpertSelectionCache:
 
     # Backward-compatible aliases for existing call sites.
     def check(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor] | None:
+        logger.debug("check called with x=%s", x)
         return self.lookup(x)
 
     def update(
         self, x: torch.Tensor, selected_experts: torch.Tensor, routing_weights: torch.Tensor
     ) -> None:
+        logger.debug("update called with x=%s, selected_experts=%s, routing_weights=%s", x, selected_experts, routing_weights)
         self.store(x, selected_experts, routing_weights)
 
     def clear(self) -> None:
+        logger.debug("clear called")
         self._cache.clear()
         self._hidden_hashes.clear()
 
     def get_stats(self) -> dict[str, Any]:
+        logger.debug("get_stats called")
         total = self._hits + self._misses
         return {
             "hits": self._hits,
@@ -420,6 +436,7 @@ class ExpertMemoryPool:
     """
 
     def __init__(self, experts: Any, hot_threshold: float = 0.5):
+        logger.debug("initializing %s with experts=%s, hot_threshold=%s", type(self).__name__, experts, hot_threshold)
         self.experts = experts  # nn.ModuleList
         self.hot_threshold = hot_threshold
         self.hot_experts: set[int] = set(range(len(experts)))
@@ -430,6 +447,7 @@ class ExpertMemoryPool:
 
     def record_selection(self, selected_experts: torch.Tensor) -> None:
         """Record expert usage."""
+        logger.debug("record_selection called with selected_experts=%s", selected_experts)
         flat = selected_experts.flatten().tolist()
         for eid in flat:
             self.selection_counts[eid] += 1
@@ -439,6 +457,7 @@ class ExpertMemoryPool:
             self._recompute_hot_experts()
 
     def _recompute_hot_experts(self) -> None:
+        logger.debug("_recompute_hot_experts called")
         num_experts = len(self.experts)
         if num_experts == 0:
             return
@@ -458,6 +477,7 @@ class ExpertMemoryPool:
 
     def get_cold_expert_buffers(self, expert_id: int, lib: MetalKernelLibrary) -> CachedWeightBuffers | None:
         """Load cold expert buffers on demand."""
+        logger.debug("get_cold_expert_buffers called with expert_id=%s, lib=%s", expert_id, lib)
         if expert_id in self.cold_buffer_pool:
             return self.cold_buffer_pool[expert_id]
 
@@ -493,6 +513,7 @@ class ExpertMemoryPool:
             return None
 
     def reset_stats(self) -> None:
+        logger.debug("reset_stats called")
         self.selection_counts = [0] * len(self.experts)
         self.call_count = 0
         self.hot_experts = set(range(len(self.experts)))

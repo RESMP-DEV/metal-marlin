@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,9 @@ from metal_marlin._quantized_weights import _apply_moe_expert_weights, _apply_qu
 from metal_marlin.layer_replacement import replace_glm4_moe_experts, replace_linear_layers
 from metal_marlin.layers.mtp_head import GLMMTPHead
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
+
+logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------------------
 # Qwen hybrid / DeltaNet-family config helpers
@@ -39,6 +43,7 @@ def get_effective_text_config(config: Any) -> Any:
         The config object that carries ``vocab_size`` / ``hidden_size`` / etc.
         For multimodal models this is ``config.text_config``; otherwise ``config``.
     """
+    logger.debug("get_effective_text_config called with config=%s", config)
     if hasattr(config, "text_config"):
         text_cfg = getattr(config, "text_config", None)
         if text_cfg is not None and hasattr(text_cfg, "vocab_size"):
@@ -60,6 +65,7 @@ def get_layer_types(config: Any) -> list[str] | None:
         when present, otherwise ``None``.
     """
     # Direct attribute first (flat configs: Qwen3Config, Qwen3NextConfig, VLText configs)
+    logger.debug("get_layer_types called with config=%s", config)
     if hasattr(config, "layer_types"):
         val = getattr(config, "layer_types")
         if isinstance(val, list):
@@ -92,6 +98,7 @@ def get_full_attention_interval(config: Any) -> int | None:
         The interval as an integer if present, otherwise ``None``.
     """
     # Check top-level first, then multimodal text sub-config
+    logger.debug("get_full_attention_interval called with config=%s", config)
     candidates = [config]
     text_cfg = get_effective_text_config(config)
     if text_cfg is not config:
@@ -150,6 +157,7 @@ def get_deltanet_metadata(config: Any) -> dict[str, Any] | None:
     # Resolve the config object that actually carries DeltaNet fields.
     # For multimodal wrappers the fields live in text_config; for flat
     # configs they live at top level.
+    logger.debug("get_deltanet_metadata called with config=%s", config)
     source_cfg = config
     model_type = getattr(config, "model_type", "") or ""
     if model_type not in _QWEN3_NEXT_MODEL_TYPES:
@@ -197,6 +205,7 @@ def is_qwen_hybrid_deltanet(config: Any) -> bool:
     Returns:
         ``True`` if the config describes a DeltaNet-family hybrid model.
     """
+    logger.debug("is_qwen_hybrid_deltanet called with config=%s", config)
     layer_types = get_layer_types(config)
     if layer_types is None:
         return False
@@ -218,6 +227,7 @@ def _load_mtp_head_from_checkpoint(
     GLM 4.7 Flash stores auxiliary next-token predictor weights under:
     `model.layers.<num_hidden_layers>.shared_head.head.weight`.
     """
+    logger.info("_load_mtp_head_from_checkpoint called with model=%s, config=%s, loader=%s", model, config, loader)
     num_tokens_hint = (
         getattr(config, "num_nextn_predict_layers", None)
         or getattr(config, "num_mtp_heads", None)
@@ -312,6 +322,7 @@ def load_prequantized_mmfp4_model(
     Returns:
         Tuple of (model, tokenizer)
     """
+    logger.info("load_prequantized_mmfp4_model called with model_path=%s, device=%s, bits=%s", model_path, device, bits)
     print(f"Loading MMFP4 model from {model_path}...")
     quantized_path = Path(model_path)
 

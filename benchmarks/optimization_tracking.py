@@ -3,9 +3,13 @@
 import json
 from collections.abc import Callable
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 def run_benchmark(model: Any) -> dict[str, float]:
     """Run benchmark on a model and return throughput metrics.
@@ -13,6 +17,7 @@ def run_benchmark(model: Any) -> dict[str, float]:
     This is a placeholder that should be replaced with actual benchmark logic.
     """
     # Placeholder: in real implementation, run actual benchmark
+    logger.info("run_benchmark starting with model=%s", model)
     raise NotImplementedError("Benchmark logic must be provided")
 
 
@@ -41,6 +46,7 @@ class OptimizationTracker:
             baseline_path: Path to JSON file containing baseline metrics.
             output_path: Optional path to save results (defaults to results.json).
         """
+        logger.debug("initializing %s with baseline_path=%s, output_path=%s", type(self).__name__, baseline_path, output_path)
         baseline_file = Path(baseline_path)
         if not baseline_file.exists():
             raise FileNotFoundError(f"Baseline file not found: {baseline_path}")
@@ -75,6 +81,7 @@ class OptimizationTracker:
         Returns:
             Improvement multiplier over baseline (e.g., 1.5 = 50% faster).
         """
+        logger.info("benchmark_phase starting with phase_name=%s, model=%s, benchmark_fn=%s", phase_name, model, benchmark_fn)
         bench_fn = benchmark_fn or run_benchmark
         result = bench_fn(model)
         
@@ -98,6 +105,7 @@ class OptimizationTracker:
     
     def _save_results(self) -> None:
         """Save all results to output file."""
+        logger.info("_save_results called")
         data = {
             "baseline": self.baseline,
             "phases": self.results,
@@ -114,6 +122,7 @@ class OptimizationTracker:
         Returns:
             Dict with baseline, best phase, total improvement, etc.
         """
+        logger.debug("get_summary called")
         if not self.results:
             return {
                 "baseline_throughput": self.baseline["throughput"]["decode_tok_s"],
@@ -137,6 +146,7 @@ class OptimizationTracker:
     
     def print_summary(self) -> None:
         """Print formatted summary to console."""
+        logger.debug("print_summary called")
         summary = self.get_summary()
         
         print("=" * 50)

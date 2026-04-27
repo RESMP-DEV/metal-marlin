@@ -41,6 +41,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import platform
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 # Detect ARM64 architecture for NEON availability
 _ARCH = platform.machine().lower()
@@ -97,6 +101,7 @@ _FP8_E4M3_CODEBOOK: NDArray[np.float32] | None = None
 
 def _get_fp8_e4m3_codebook() -> NDArray[np.float32]:
     """Get or compute the FP8 E4M3 codebook."""
+    logger.debug("_get_fp8_e4m3_codebook called")
     global _FP8_E4M3_CODEBOOK
     if _FP8_E4M3_CODEBOOK is None:
         values = np.zeros(256, dtype=np.float32)
@@ -124,6 +129,7 @@ _FP8_E5M2_CODEBOOK: NDArray[np.float32] | None = None
 
 def _get_fp8_e5m2_codebook() -> NDArray[np.float32]:
     """Get or compute the FP8 E5M2 codebook."""
+    logger.debug("_get_fp8_e5m2_codebook called")
     global _FP8_E5M2_CODEBOOK
     if _FP8_E5M2_CODEBOOK is None:
         values = np.zeros(256, dtype=np.float32)
@@ -171,6 +177,7 @@ def _unpack_nibbles_k8_vectorized(
     Returns:
         uint8 array [K, N] with nibble values 0-15
     """
+    logger.info("_unpack_nibbles_k8_vectorized called with packed=%s, K=%s, N=%s", packed, K, N)
     k_blocks = K // 8
     indices = np.empty((K, N), dtype=np.uint8)
 
@@ -201,6 +208,7 @@ def _unpack_nibbles_n8_vectorized(
     Returns:
         uint8 array [K, N] with nibble values 0-15
     """
+    logger.info("_unpack_nibbles_n8_vectorized called with packed=%s, K=%s, N=%s", packed, K, N)
     n_blocks = N // 8
     indices = np.empty((K, N), dtype=np.uint8)
 
@@ -229,6 +237,7 @@ def _unpack_bytes_vectorized(
     Returns:
         uint8 array [K, N] with byte codes 0-255
     """
+    logger.info("_unpack_bytes_vectorized called with packed=%s, K=%s, N=%s", packed, K, N)
     n_blocks = N // 4
     codes = np.empty((K, N), dtype=np.uint8)
 
@@ -277,6 +286,7 @@ def dequant_fp4_neon(
         float32 array [K, N] with dequantized weights
     """
     # Validate dimensions
+    logger.info("dequant_fp4_neon called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     k_blocks = K // 8
     assert packed.shape == (k_blocks, N), f"packed shape {packed.shape} != ({k_blocks}, {N})"
 
@@ -317,6 +327,7 @@ def dequant_fp4_scalar(
 
     Used for correctness validation and non-ARM platforms.
     """
+    logger.info("dequant_fp4_scalar called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     output = np.zeros((K, N), dtype=np.float32)
     k_blocks = K // 8
 
@@ -345,6 +356,7 @@ def dequant_fp4_auto(
     group_size: int,
 ) -> NDArray[np.float32]:
     """Auto-dispatch FP4 dequantization to NEON or scalar."""
+    logger.info("dequant_fp4_auto called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     if HAS_NEON:
         return dequant_fp4_neon(packed, scales, K, N, group_size)
     return dequant_fp4_scalar(packed, scales, K, N, group_size)
@@ -381,6 +393,7 @@ def dequant_int4_neon(
     Returns:
         float32 array [K, N] with dequantized weights
     """
+    logger.info("dequant_int4_neon called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -425,6 +438,7 @@ def dequant_int4_asym_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_int4_asym_neon called with packed=%s, scales=%s, zeros=%s, K=%s", packed, scales, zeros, K)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -471,6 +485,7 @@ def dequant_nf4_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_nf4_neon called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -517,6 +532,7 @@ def dequant_fp8_e4m3_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_fp8_e4m3_neon called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -558,6 +574,7 @@ def dequant_fp8_e5m2_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_fp8_e5m2_neon called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -606,6 +623,7 @@ def dequant_int8_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_int8_neon called with data=%s, scales=%s, K=%s, N=%s", data, scales, K, N)
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
 
@@ -638,6 +656,7 @@ def dequant_int8_per_channel_neon(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_int8_per_channel_neon called with data=%s, scales=%s, output=%s", data, scales, output)
     K, N = data.shape
     if output is None:
         output = np.empty((K, N), dtype=np.float32)
@@ -677,6 +696,7 @@ def dequant_q4_0_neon(
     Returns:
         float32 array with n_elements values
     """
+    logger.info("dequant_q4_0_neon called with data=%s, n_elements=%s, output=%s", data, n_elements, output)
     BLOCK_SIZE = 32
     BLOCK_BYTES = 18
     n_blocks = n_elements // BLOCK_SIZE
@@ -733,6 +753,7 @@ def dequant_q4_1_neon(
     Returns:
         float32 array with n_elements values
     """
+    logger.info("dequant_q4_1_neon called with data=%s, n_elements=%s, output=%s", data, n_elements, output)
     BLOCK_SIZE = 32
     BLOCK_BYTES = 20
     n_blocks = n_elements // BLOCK_SIZE
@@ -785,6 +806,7 @@ def dequant_q8_0_neon(
     Returns:
         float32 array with n_elements values
     """
+    logger.info("dequant_q8_0_neon called with data=%s, n_elements=%s, output=%s", data, n_elements, output)
     BLOCK_SIZE = 32
     BLOCK_BYTES = 34
     n_blocks = n_elements // BLOCK_SIZE
@@ -835,6 +857,7 @@ def dequant_fp4_chunked(
     Returns:
         float32 array [K, N]
     """
+    logger.info("dequant_fp4_chunked called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     output = np.empty((K, N), dtype=np.float32)
 
     for k_start in range(0, K, chunk_size):
@@ -891,6 +914,7 @@ def get_optimal_dequant_fn(
     Returns:
         Dequantization function for the specified type
     """
+    logger.info("get_optimal_dequant_fn called with quant_type=%s, prefer_neon=%s", quant_type, prefer_neon)
     use_neon = HAS_NEON and prefer_neon
 
     dispatch_table = {
@@ -938,6 +962,7 @@ def benchmark_dequant(
     Returns:
         Dict with timing results
     """
+    logger.info("benchmark_dequant starting with quant_type=%s, K=%s, N=%s, group_size=%s", quant_type, K, N, group_size)
     import time
 
     # Generate test data

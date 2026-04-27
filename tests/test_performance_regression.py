@@ -29,6 +29,7 @@ Usage:
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 
 if TYPE_CHECKING:
     import torch as torch_types
+
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Configuration
@@ -90,6 +94,7 @@ class AccuracyBaseline:
 
 def _mps_memory_gb() -> float:
     """Get current MPS memory usage in GB."""
+    logger.debug("_mps_memory_gb called")
     if not HAS_TORCH or torch is None or not HAS_MPS:
         return 0.0
 
@@ -107,12 +112,14 @@ def _mps_memory_gb() -> float:
 
 def _sync_gpu() -> None:
     """Synchronize GPU operations."""
+    logger.debug("_sync_gpu called")
     if HAS_TORCH and torch is not None and HAS_MPS:
         torch.mps.synchronize()
 
 
 def _clear_memory() -> None:
     """Clear GPU memory and run garbage collection."""
+    logger.debug("_clear_memory called")
     gc.collect()
     if HAS_TORCH and torch is not None and HAS_MPS:
         torch.mps.synchronize()
@@ -124,6 +131,7 @@ class LatencyTimer:
     """Context manager for measuring operation latency."""
 
     def __init__(self, sync_gpu: bool = True) -> None:
+        logger.debug("initializing %s with sync_gpu=%s", type(self).__name__, sync_gpu)
         self.sync_gpu = sync_gpu
         self.start_time: float = 0.0
         self.end_time: float = 0.0
@@ -141,6 +149,7 @@ class LatencyTimer:
 
     @property
     def elapsed_ms(self) -> float:
+        logger.debug("elapsed_ms called")
         return (self.end_time - self.start_time) * 1000
 
 
@@ -148,6 +157,7 @@ class MemoryTracker:
     """Context manager for tracking peak memory usage."""
 
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.baseline_gb: float = 0.0
         self.peak_gb: float = 0.0
 
@@ -164,11 +174,13 @@ class MemoryTracker:
 
     def sample(self) -> None:
         """Sample current memory usage and update peak if higher."""
+        logger.debug("sample called")
         current = _mps_memory_gb()
         self.peak_gb = max(self.peak_gb, current)
 
     @property
     def used_gb(self) -> float:
+        logger.debug("used_gb called")
         return max(0.0, self.peak_gb - self.baseline_gb)
 
 
@@ -184,6 +196,7 @@ def synthetic_decode_workload() -> dict[str, Any]:
     This simulates the computational pattern of decode without actual model.
     """
     # Simulate 30B model dimensions
+    logger.info("synthetic_decode_workload called")
     hidden_size = 8192
     num_layers = 48
     intermediate_size = 22016
@@ -203,6 +216,7 @@ def synthetic_decode_workload() -> dict[str, Any]:
 def synthetic_memory_workload() -> dict[str, Any]:
     """Create synthetic memory workload for memory testing."""
     # Simulate allocations similar to model inference
+    logger.info("synthetic_memory_workload called")
     return {
         "weight_gb": 1.5,  # Quantized weights
         "kv_cache_gb": 0.5,  # KV cache at 2k context
@@ -214,6 +228,7 @@ def synthetic_memory_workload() -> dict[str, Any]:
 @pytest.fixture
 def synthetic_accuracy_baseline() -> AccuracyBaseline:
     """Baseline accuracy values for comparison."""
+    logger.debug("synthetic_accuracy_baseline called")
     return AccuracyBaseline(perplexity=7.5, tolerance_pct=ACCURACY_THRESHOLD_PCT)
 
 
@@ -229,6 +244,7 @@ class TestDecodeLatencyCI:
     def test_latency_measurement_infrastructure(self) -> None:
         """Verify the latency measurement infrastructure works correctly."""
         # Measure a known operation
+        logger.info("running test_latency_measurement_infrastructure")
         with LatencyTimer(sync_gpu=False) as timer:
             time.sleep(0.01)  # 10ms sleep
 
@@ -240,6 +256,7 @@ class TestDecodeLatencyCI:
     @pytest.mark.smoke
     def test_latency_threshold_validation(self, synthetic_decode_workload: dict) -> None:
         """Validate that synthetic decode would pass the latency threshold."""
+        logger.info("running test_latency_threshold_validation")
         cfg = synthetic_decode_workload
 
         # Calculate expected total decode time
@@ -273,6 +290,7 @@ class TestDecodeLatencyCI:
         - Plenty of headroom for kernel overhead
         """
         # 30B model: 48 layers, target 7s total
+        logger.info("running test_single_token_latency_budget")
         layers_30b = 48
         budget_per_layer_ms = (DECODE_LATENCY_THRESHOLD_MS / layers_30b)
 
@@ -292,6 +310,7 @@ class TestMemoryUsageCI:
     @pytest.mark.smoke
     def test_memory_measurement_infrastructure(self) -> None:
         """Verify memory measurement infrastructure works."""
+        logger.info("running test_memory_measurement_infrastructure")
         with MemoryTracker() as tracker:
             # Allocate and immediately free (memory should be minimal)
             _ = [0] * 1000
@@ -303,6 +322,7 @@ class TestMemoryUsageCI:
     @pytest.mark.smoke
     def test_memory_threshold_validation(self, synthetic_memory_workload: dict) -> None:
         """Validate that synthetic workload would pass memory threshold."""
+        logger.info("running test_memory_threshold_validation")
         cfg = synthetic_memory_workload
 
         total_gb = cfg["weight_gb"] + cfg["kv_cache_gb"] + cfg["activation_gb"]
@@ -338,6 +358,7 @@ class TestMemoryUsageCI:
         - Activations: ~0.3GB
         - Overhead: ~0.3GB
         """
+        logger.info("running test_memory_budget_breakdown")
         threshold_gb = MEMORY_THRESHOLD_GB
 
         # Minimum viable budget for each component
@@ -371,6 +392,7 @@ class TestAccuracyCI:
         self, synthetic_accuracy_baseline: AccuracyBaseline
     ) -> None:
         """Validate accuracy threshold logic."""
+        logger.info("running test_accuracy_threshold_validation")
         baseline = synthetic_accuracy_baseline
 
         # Simulate a measurement within tolerance
@@ -400,6 +422,7 @@ class TestAccuracyCI:
         self, synthetic_accuracy_baseline: AccuracyBaseline
     ) -> None:
         """Verify that accuracy regressions are properly detected."""
+        logger.info("running test_accuracy_regression_detection")
         baseline = synthetic_accuracy_baseline
 
         # Simulate a regression (2x the tolerance)
@@ -432,6 +455,7 @@ class TestDecodeLatencyFull:
 
     def test_single_token_decode_latency(self) -> None:
         """Measure actual single-token decode latency."""
+        logger.info("running test_single_token_decode_latency")
         from metal_marlin.kernels import marlin_gemm_fp4, pack_fp4_weights
 
         assert torch is not None
@@ -502,6 +526,7 @@ class TestMemoryUsageFull:
 
     def test_peak_memory_during_inference(self) -> None:
         """Measure actual peak memory during inference workload."""
+        logger.info("running test_peak_memory_during_inference")
         from metal_marlin.kernels import marlin_gemm_fp4, pack_fp4_weights
 
         assert torch is not None
@@ -557,6 +582,7 @@ class TestAccuracyFull:
 
     def test_quantization_accuracy(self) -> None:
         """Verify quantized GEMM accuracy against FP16 reference."""
+        logger.info("running test_quantization_accuracy")
         from metal_marlin.kernels import marlin_gemm_fp4, pack_fp4_weights
 
         assert torch is not None
@@ -639,6 +665,7 @@ class TestRegressionReport:
     @pytest.mark.smoke
     def test_generate_summary(self) -> None:
         """Print summary of all thresholds and their values."""
+        logger.info("running test_generate_summary")
         print("\n" + "=" * 70)
         print("PERFORMANCE REGRESSION TEST CONFIGURATION")
         print("=" * 70)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,9 @@ try:
 except Exception:  # pragma: no cover - optional dependency guard
     torch = None
 
+
+
+logger = logging.getLogger(__name__)
 
 HAS_MPS = bool(
     torch is not None
@@ -28,6 +32,7 @@ pytestmark = pytest.mark.skipif(torch is None, reason="PyTorch required")
 
 def _import_runtime_deps():
     """Import runtime-heavy modules lazily to keep collection robust."""
+    logger.debug("_import_runtime_deps called")
     try:
         from metal_marlin.gptq_metal import GPTQMetal
         from metal_marlin.kv_cache import TrellisKVCache
@@ -49,6 +54,7 @@ def _import_runtime_deps():
 @pytest.fixture(scope="module")
 def synthetic_checkpoint():
     """Use the checked-in synthetic Trellis fixture for regression coverage."""
+    logger.debug("synthetic_checkpoint called")
     _, _, _, _, get_checked_in_synthetic_trellis_fixture_path = _import_runtime_deps()
     fixture_path = get_checked_in_synthetic_trellis_fixture_path()
     if not fixture_path.exists():
@@ -72,6 +78,7 @@ def synthetic_checkpoint():
 @pytest.mark.smoke
 def test_synthetic_trellis_hessian_smoke(synthetic_checkpoint) -> None:
     """Smoke path: fixture build/load, prefill+decode, and Hessian compute."""
+    logger.info("running test_synthetic_trellis_hessian_smoke")
     TrellisForCausalLM, TrellisModel, TrellisKVCache, GPTQMetal, _ = _import_runtime_deps()
 
     torch.manual_seed(2026)

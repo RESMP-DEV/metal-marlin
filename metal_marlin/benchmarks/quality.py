@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 from dataclasses import asdict, dataclass
+import logging
 from typing import Any
 
 import numpy as np
@@ -13,6 +14,9 @@ from ..eval import compute_perplexity_from_logits, evaluate_kl_divergence, load_
 from ..inference_metal import MetalQuantizedLinear
 from ..quantize import unpack_fp4_weights
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class QualityMetrics:
@@ -31,6 +35,7 @@ class QualityMetrics:
     max_length: int
 
     def to_json(self) -> dict[str, Any]:
+        logger.debug("to_json called")
         return asdict(self)
 
 
@@ -45,6 +50,7 @@ def compare_models(
     verbose: bool = True,
 ) -> QualityMetrics:
     """Compare reference and quantized models using perplexity, KL, and RMSE."""
+    logger.debug("compare_models called with ref_model=%s, quant_model=%s, tokenizer=%s", ref_model, quant_model, tokenizer)
     if not HAS_TORCH or torch is None:
         raise RuntimeError("PyTorch is required for quality comparison.")
 
@@ -111,6 +117,7 @@ def compare_models(
 
 
 def _get_model_device(model: Any) -> str:
+    logger.debug("_get_model_device called with model=%s", model)
     if not HAS_TORCH or torch is None:
         return "cpu"
     try:
@@ -120,6 +127,7 @@ def _get_model_device(model: Any) -> str:
 
 
 def _logits_fn(model: Any, device: str):
+    logger.debug("_logits_fn called with model=%s, device=%s", model, device)
     def _fn(input_ids_np: np.ndarray) -> np.ndarray:
         if not HAS_TORCH or torch is None:
             raise RuntimeError("PyTorch is required for logits evaluation.")
@@ -137,6 +145,7 @@ def _logits_fn(model: Any, device: str):
 
 
 def _compute_layer_rmse(ref_model: Any, quant_model: Any) -> tuple[float, list[dict[str, float]]]:
+    logger.debug("_compute_layer_rmse called with ref_model=%s, quant_model=%s", ref_model, quant_model)
     if not HAS_TORCH or torch is None:
         return 0.0, []
 

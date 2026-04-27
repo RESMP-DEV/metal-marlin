@@ -30,9 +30,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import Literal
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 # FP8 E4M3 format constants
 # E4M3: 4 exponent bits, 3 mantissa bits
@@ -78,12 +82,14 @@ class CacheStats:
     def fp16_memory_bytes(self) -> int:
         """Memory if using FP16 storage."""
         # 2 (K+V) * layers * kv_heads * seq_len * head_dim * 2 bytes
+        logger.debug("fp16_memory_bytes called")
         return 2 * self.layers * self.kv_heads * self.current_seq_len * self.head_dim * 2
 
     @property
     def quantized_memory_bytes(self) -> int:
         """Memory with current quantized storage."""
         # Base: 1 byte per element (FP8/INT8)
+        logger.info("quantized_memory_bytes called")
         base = 2 * self.layers * self.kv_heads * self.current_seq_len * self.head_dim
 
         # Scale overhead depends on strategy
@@ -102,6 +108,7 @@ class CacheStats:
     @property
     def compression_ratio(self) -> float:
         """Compression ratio vs FP16."""
+        logger.debug("compression_ratio called")
         if self.current_seq_len == 0:
             return 1.0
         return self.fp16_memory_bytes / self.quantized_memory_bytes
@@ -109,6 +116,7 @@ class CacheStats:
     @property
     def memory_saved_mb(self) -> float:
         """Memory saved in MB."""
+        logger.info("memory_saved_mb called")
         return (self.fp16_memory_bytes - self.quantized_memory_bytes) / (1024 * 1024)
 
 
@@ -131,6 +139,7 @@ def compress_kv(
         - v_quantized: uint8 tensor with quantized values
         - v_scales: FP16 scales for dequantization
     """
+    logger.debug("compress_kv called with k=%s, v=%s, scaling=%s", k, v, scaling)
     if k is None or v is None:
         raise ValueError("Both k and v must be provided")
 
@@ -168,6 +177,7 @@ def decompress_kv(
     Returns:
         (k_deq, v_deq): Dequantized tensors in output_dtype
     """
+    logger.debug("decompress_kv called with k_q=%s, k_scales=%s, v_q=%s", k_q, k_scales, v_q)
     if scaling == ScalingStrategy.ASYMMETRIC:
         # FP8 for keys, INT8 for values
         k = _dequantize_fp8_e4m3(k_q, k_scales, output_dtype=output_dtype)
@@ -198,6 +208,7 @@ def _quantize_fp8_e4m3(
         (quantized, scales): uint8 quantized values and FP16 scales
     """
     # Compute absolute max for scaling
+    logger.info("_quantize_fp8_e4m3 called with tensor=%s, per_head=%s", getattr(tensor, "shape", tensor), per_head)
     if per_head:
         # Scale per [batch, head, position]
         abs_max = np.max(np.abs(tensor), axis=-1, keepdims=True)
@@ -240,6 +251,7 @@ def _dequantize_fp8_e4m3(
     """
     # Convert back from uint8 to signed scaled values
     # [0, 255] -> [-448, 448]
+    logger.info("_dequantize_fp8_e4m3 called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     signed = (quantized.astype(np.float32) - 128.0) / 127.0 * FP8_E4M3_MAX
     dequantized = signed * scale.astype(np.float32)
 
@@ -263,6 +275,7 @@ def _quantize_int8_symmetric(
         (quantized, scales): uint8 quantized values (offset by 128) and FP16 scales
     """
     # Compute absolute max for scaling
+    logger.info("_quantize_int8_symmetric called with tensor=%s, per_head=%s", getattr(tensor, "shape", tensor), per_head)
     if per_head:
         abs_max = np.max(np.abs(tensor), axis=-1, keepdims=True)
     else:
@@ -299,6 +312,7 @@ def _dequantize_int8_symmetric(
         Dequantized tensor in output_dtype
     """
     # Convert back from uint8 to signed
+    logger.info("_dequantize_int8_symmetric called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     signed = quantized.astype(np.float32) - 128.0
     dequantized = signed * scale.astype(np.float32)
 
@@ -345,6 +359,7 @@ class QuantizedKVCache:
             scaling: Quantization scaling strategy
             compute_dtype: Dtype for attention computation output (fp16 or bf16)
         """
+        logger.debug("initializing %s with num_layers=%s, num_kv_heads=%s, head_dim=%s, max_seq_len=%s, batch_size=%s", type(self).__name__, num_layers, num_kv_heads, head_dim, max_seq_len, batch_size)
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -393,6 +408,7 @@ class QuantizedKVCache:
             k_new: New keys [batch, num_kv_heads, new_seq_len, head_dim]
             v_new: New values [batch, num_kv_heads, new_seq_len, head_dim]
         """
+        logger.debug("compress_and_store called with layer_idx=%s, k_new=%s, v_new=%s", layer_idx, k_new, v_new)
         new_seq_len = k_new.shape[2]
         end_pos = self.seq_len + new_seq_len
 
@@ -420,6 +436,7 @@ class QuantizedKVCache:
         Returns:
             (k, v): Dequantized tensors in compute_dtype
         """
+        logger.debug("get_kv_for_attention called with layer_idx=%s", layer_idx)
         if self.seq_len == 0:
             return (
                 np.zeros(
@@ -463,6 +480,7 @@ class QuantizedKVCache:
         Returns:
             (k_full, v_full): Full dequantized KV cache including new tokens
         """
+        logger.debug("update called with layer_idx=%s, k_new=%s, v_new=%s", layer_idx, k_new, v_new)
         new_seq_len = k_new.shape[2]
         end_pos = self.seq_len + new_seq_len
 
@@ -490,14 +508,17 @@ class QuantizedKVCache:
 
         Call this AFTER updating all layers for the current token(s).
         """
+        logger.debug("advance called with num_tokens=%s", num_tokens)
         self.seq_len += num_tokens
 
     def reset(self) -> None:
         """Clear cache for new sequence."""
+        logger.debug("reset called")
         self.seq_len = 0
 
     def get_stats(self) -> CacheStats:
         """Get cache statistics."""
+        logger.debug("get_stats called")
         return CacheStats(
             layers=self.num_layers,
             kv_heads=self.num_kv_heads,
@@ -509,8 +530,10 @@ class QuantizedKVCache:
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         return self.get_stats().quantized_memory_bytes / (1024 * 1024)
 
     def memory_saved_mb(self) -> float:
         """Return memory saved vs FP16 in MB."""
+        logger.info("memory_saved_mb called")
         return self.get_stats().memory_saved_mb

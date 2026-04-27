@@ -3,12 +3,16 @@
 Implements the Hadamard rotation scheme from ExllamaV3 for improved
 quantization quality through channel decorrelation.
 """
+import logging
 
 import numpy as np
 from numpy.typing import NDArray
 
 from metal_marlin.hadamard import hadamard_matrix
 
+
+
+logger = logging.getLogger(__name__)
 
 def preprocess_hessian_exl3(
     H: NDArray[np.float64],
@@ -47,6 +51,7 @@ def preprocess_hessian_exl3(
         >>> Had.shape
         (128, 128)
     """
+    logger.debug("preprocess_hessian_exl3 called with H=%s, had_k=%s", H, had_k)
     k = H.shape[0]
 
     # Random sign flips - adds randomness to break symmetry
@@ -98,6 +103,7 @@ def blockwise_hadamard(
         >>> Y.shape
         (256, 256)
     """
+    logger.debug("blockwise_hadamard called with X=%s, block_size=%s, axis=%s", X, block_size, axis)
     if axis not in (0, 1):
         raise ValueError(f"axis must be 0 or 1, got {axis}")
 
@@ -181,6 +187,7 @@ def rotate_weights_exl3(
     Returns:
         W_rotated: Rotated weights ready for trellis quantization
     """
+    logger.debug("rotate_weights_exl3 called with W=%s, su=%s, sv=%s", W, su, sv)
     W = W.astype(np.float64)
 
     # Step 1: Apply sign flips for input channels (su)
@@ -231,6 +238,7 @@ def unrotate_weights_exl3(
     Returns:
         W_unrotated: Reconstructed weights in original space
     """
+    logger.debug("unrotate_weights_exl3 called with W_q=%s, su=%s, sv=%s", W_q, su, sv)
     W = W_q.astype(np.float64)
 
     # Step 1: Apply Hadamard along out_features (axis=0) - inverse of sv rotation

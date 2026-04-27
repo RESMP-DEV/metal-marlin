@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -37,6 +38,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerResult:
@@ -68,6 +72,7 @@ class MetalLayerwiseQuantizer:
         group_size: int = 128,
         sigma_reg: float = 0.01,
     ):
+        logger.debug("initializing %s with model_id=%s, bits=%s, group_size=%s, sigma_reg=%s", type(self).__name__, model_id, bits, group_size, sigma_reg)
         self.model_id = model_id
         self.bits = bits
         self.group_size = group_size
@@ -93,6 +98,7 @@ class MetalLayerwiseQuantizer:
 
     def initialize(self) -> None:
         """Download model metadata and build layer index."""
+        logger.debug("initialize called")
         from huggingface_hub import snapshot_download
 
         print(f"\nInitializing model: {self.model_id}")
@@ -142,6 +148,7 @@ class MetalLayerwiseQuantizer:
 
         NOTE: We generate on-demand per layer to save memory.
         """
+        logger.debug("get_calibration_activations called with num_samples=%s, max_seq_len=%s", num_samples, max_seq_len)
         print("\nCalibration config:")
         print(f"  Samples: {num_samples}, Max seq: {max_seq_len}")
         print("  Will generate activations on-demand per layer")
@@ -167,6 +174,7 @@ class MetalLayerwiseQuantizer:
         max_seq_len: int = 512,
     ) -> torch.Tensor:
         """Generate activations for a single layer on-demand."""
+        logger.debug("_generate_layer_activations called with layer_idx=%s, hidden_size=%s, num_samples=%s", layer_idx, hidden_size, num_samples)
         total_tokens = num_samples * max_seq_len
 
         # Variance pattern: increases then decreases through layers
@@ -187,6 +195,7 @@ class MetalLayerwiseQuantizer:
         Uses dispatch_hessian_compute which calls the fixed hessian.metal kernel
         with simdgroup matrix operations.
         """
+        logger.debug("compute_hessian_metal called with activations=%s", activations)
         H = dispatch_hessian_compute(
             self.metal_lib,
             activations,
@@ -203,6 +212,7 @@ class MetalLayerwiseQuantizer:
 
         Returns dict of {tensor_name: numpy_array}.
         """
+        logger.info("load_layer_weights called with layer_idx=%s, sublayer_pattern=%s", layer_idx, sublayer_pattern)
         weights = {}
         prefix = f"model.layers.{layer_idx}."
 
@@ -229,6 +239,7 @@ class MetalLayerwiseQuantizer:
         3. Run EXL3 quantization
         4. Compute sensitivity/quality metrics
         """
+        logger.info("quantize_layer called with layer_idx=%s, activations=%s", layer_idx, activations)
         results = []
         prefix = f"model.layers.{layer_idx}."
 
@@ -347,6 +358,7 @@ class MetalLayerwiseQuantizer:
         H: np.ndarray,
     ) -> tuple[float, int]:
         """Compute layer sensitivity and recommend bit width."""
+        logger.debug("_compute_sensitivity called with weight=%s, H=%s", weight, H)
         w_abs = np.abs(weight)
         p99 = np.percentile(w_abs, 99)
         p50 = np.percentile(w_abs, 50)
@@ -392,6 +404,7 @@ class MetalLayerwiseQuantizer:
         calibration_samples: int = 64,
     ) -> list[LayerResult]:
         """Quantize entire model layer-by-layer."""
+        logger.info("quantize_model called with max_layers=%s, calibration_samples=%s", max_layers, calibration_samples)
         self.initialize()
 
         # Get calibration config (no memory allocated yet)
@@ -444,6 +457,7 @@ class MetalLayerwiseQuantizer:
 
     def _print_summary(self, results: list[LayerResult], total_time: float) -> None:
         """Print quantization summary."""
+        logger.debug("_print_summary called with results=%s, total_time=%s", results, total_time)
         successful = [r for r in results if r.success]
         failed = [r for r in results if not r.success]
 
@@ -519,6 +533,7 @@ def compute_perplexity_wikitext(
     as a quality check. For true quantized perplexity, we'd need to implement
     forward pass with quantized weights.
     """
+    logger.debug("compute_perplexity_wikitext called with tokenizer=%s, model_path=%s, max_samples=%s", tokenizer, model_path, max_samples)
     try:
         import math
 
@@ -570,6 +585,7 @@ def benchmark_throughput(
 
     Measures tokens/second for the Hessian computation kernel.
     """
+    logger.info("benchmark_throughput starting with metal_lib=%s, hidden_size=%s, context_lengths=%s", metal_lib, hidden_size, context_lengths)
     print("\nBenchmarking throughput at various context lengths...")
 
     results = {}
@@ -608,6 +624,7 @@ def benchmark_throughput(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Layer-by-layer EXL3 quantization with Metal Hessian"
     )

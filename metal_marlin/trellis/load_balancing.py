@@ -30,9 +30,13 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LoadBalancingConfig:
@@ -93,6 +97,7 @@ class ExpertLoadTracker:
 
     def reset(self) -> None:
         """Reset accumulated statistics for a new training step."""
+        logger.debug("reset called")
         self._token_counts = torch.zeros(
             self.num_experts, dtype=torch.float32, device=self.device
         )
@@ -116,6 +121,7 @@ class ExpertLoadTracker:
             router_logits: Optional [batch_size, num_experts] raw router logits.
         """
         # Ensure tensors are initialized (should always be true after __post_init__)
+        logger.debug("update called with selected_experts=%s, routing_weights=%s, router_logits=%s", selected_experts, routing_weights, router_logits)
         assert self._token_counts is not None
         assert self._prob_sums is not None
         assert self._logit_sq_sums is not None
@@ -154,6 +160,7 @@ class ExpertLoadTracker:
             - expert_utilization_cv: Coefficient of variation of expert loads
             - max_load_ratio: Ratio of most-loaded to average load
         """
+        logger.debug("compute_loss called with config=%s", config)
         if self._total_tokens == 0:
             zero = torch.tensor(0.0, device=self.device, requires_grad=True)
             return zero, {
@@ -203,18 +210,21 @@ class ExpertLoadTracker:
 
     def get_expert_loads(self) -> torch.Tensor:
         """Get current expert load distribution as fractions summing to 1."""
+        logger.info("get_expert_loads called")
         if self._total_tokens == 0:
             return torch.ones(self.num_experts, device=self.device) / self.num_experts
         return self._token_counts / self._token_counts.sum().clamp(min=1)
 
     def get_hot_experts(self, threshold: float = 1.5) -> list[int]:
         """Get experts with load > threshold * average."""
+        logger.debug("get_hot_experts called with threshold=%s", threshold)
         loads = self.get_expert_loads()
         avg_load = 1.0 / self.num_experts
         return (loads > threshold * avg_load).nonzero(as_tuple=True)[0].tolist()
 
     def get_cold_experts(self, threshold: float = 0.5) -> list[int]:
         """Get experts with load < threshold * average."""
+        logger.debug("get_cold_experts called with threshold=%s", threshold)
         loads = self.get_expert_loads()
         avg_load = 1.0 / self.num_experts
         mask = (loads < threshold * avg_load) & (loads > 0)
@@ -222,6 +232,7 @@ class ExpertLoadTracker:
 
     def get_dead_experts(self) -> list[int]:
         """Get experts that received no tokens."""
+        logger.debug("get_dead_experts called")
         if self._total_tokens == 0:
             return []
         return (self._token_counts == 0).nonzero(as_tuple=True)[0].tolist()
@@ -251,6 +262,7 @@ def compute_load_balance_loss_inline(
     Returns:
         Tuple of (loss tensor, metrics dict).
     """
+    logger.info("compute_load_balance_loss_inline called with selected_experts=%s, routing_weights=%s, router_logits=%s", selected_experts, routing_weights, router_logits)
     device = selected_experts.device
     batch_size = selected_experts.shape[0]
 

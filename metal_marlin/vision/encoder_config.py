@@ -24,9 +24,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 class VisionArchitecture(str, Enum):
     """Supported vision encoder architectures."""
@@ -179,6 +183,7 @@ class VisionEncoderConfig:
     @property
     def num_patches(self) -> int:
         """Number of patches per image (excluding CLS token)."""
+        logger.debug("num_patches called")
         if isinstance(self.image_size, tuple):
             h, w = self.image_size
         else:
@@ -188,16 +193,19 @@ class VisionEncoderConfig:
     @property
     def sequence_length(self) -> int:
         """Sequence length including CLS token if present."""
+        logger.debug("sequence_length called")
         return self.num_patches + (1 if self.cls_token else 0)
 
     @property
     def patch_embedding_dim(self) -> int:
         """Dimension of patch embedding projection."""
+        logger.debug("patch_embedding_dim called")
         return self.num_channels * self.patch_size * self.patch_size
 
     @classmethod
     def clip_vit_l_14(cls) -> VisionEncoderConfig:
         """Configuration for OpenAI CLIP ViT-L/14 (used in LLaVA-1.5)."""
+        logger.debug("clip_vit_l_14 called")
         return cls(
             architecture=VisionArchitecture.CLIP_VIT_L_14,
             model_name="CLIP ViT-L/14",
@@ -226,6 +234,7 @@ class VisionEncoderConfig:
     @classmethod
     def clip_vit_l_14_336(cls) -> VisionEncoderConfig:
         """Configuration for CLIP ViT-L/14 with 336px input (LLaVA-1.5)."""
+        logger.debug("clip_vit_l_14_336 called")
         config = cls.clip_vit_l_14()
         config.architecture = VisionArchitecture.CLIP_VIT_L_14_336
         config.model_name = "CLIP ViT-L/14@336px"
@@ -235,6 +244,7 @@ class VisionEncoderConfig:
     @classmethod
     def siglip_so400m(cls) -> VisionEncoderConfig:
         """Configuration for SigLIP SO400M (used in LLaVA-1.6, LLaVA-NeXT)."""
+        logger.debug("siglip_so400m called")
         return cls(
             architecture=VisionArchitecture.SIGLIP_SO400M,
             model_name="SigLIP SO400M",
@@ -263,6 +273,7 @@ class VisionEncoderConfig:
         - Spatial merge for variable resolution support
         - 14x14 patches with dynamic resolution
         """
+        logger.debug("qwen2_vl called")
         return cls(
             architecture=VisionArchitecture.QWEN2_VL_VIT,
             model_name="Qwen2-VL ViT",
@@ -311,6 +322,7 @@ class VisionEncoderConfig:
         - 6144 hidden dimension
         - Large MLP expansion (4x)
         """
+        logger.debug("intern_vit_6b called")
         return cls(
             architecture=VisionArchitecture.INTERN_VIT_6B,
             model_name="InternViT-6B",
@@ -351,6 +363,7 @@ class VisionEncoderConfig:
     @classmethod
     def intern_vit_300m(cls) -> VisionEncoderConfig:
         """Configuration for InternViT-300M (smaller InternVL variant)."""
+        logger.debug("intern_vit_300m called")
         return cls(
             architecture=VisionArchitecture.INTERN_VIT_300M,
             model_name="InternViT-300M",
@@ -379,6 +392,7 @@ class VisionEncoderConfig:
         - Efficient attention patterns
         - Lightweight cross-attention
         """
+        logger.debug("pixtral called")
         return cls(
             architecture=VisionArchitecture.PIXTRAL_VIT,
             model_name="Pixtral ViT",
@@ -428,6 +442,7 @@ class VisionEncoderConfig:
         Returns:
             VisionEncoderConfig for the detected architecture.
         """
+        logger.debug("from_hf_config called with config_path=%s, config_dict=%s", config_path, config_dict)
         import json
 
         if config_dict is None:
@@ -483,6 +498,7 @@ class VisionEncoderConfig:
         Returns:
             (precision, group_size) tuple.
         """
+        logger.debug("get_layer_precision called with layer_name=%s", layer_name)
         name_lower = layer_name.lower()
 
         # Patch embeddings - always high precision
@@ -524,6 +540,7 @@ class VisionEncoderConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+        logger.debug("to_dict called")
         return {
             "architecture": self.architecture.value,
             "model_name": self.model_name,
@@ -568,6 +585,7 @@ def detect_vision_architecture(model_path: str | Path) -> VisionArchitecture:
     Returns:
         Detected VisionArchitecture enum value.
     """
+    logger.debug("detect_vision_architecture called with model_path=%s", model_path)
     import json
 
     model_path = Path(model_path)

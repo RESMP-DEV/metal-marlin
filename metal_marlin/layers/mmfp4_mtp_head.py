@@ -5,6 +5,7 @@ enabling speculative decoding without a separate draft model.
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 import torch.nn as nn
@@ -18,9 +19,13 @@ try:
 except ImportError:
     HAS_METAL = False
 
+
+logger = logging.getLogger(__name__)
+
 _metal_lib = None
 
 def _get_metal_lib():
+    logger.debug("_get_metal_lib called")
     global _metal_lib
     if _metal_lib is None and HAS_METAL:
         try:
@@ -70,6 +75,7 @@ class MMFP4MTPHead(nn.Module):
         adaptive_depth: bool = True,
         adaptive_depth_config: AdaptiveDepthConfig | None = None,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_predictions=%s, group_size=%s, share_weights_with=%s", type(self).__name__, hidden_size, vocab_size, num_predictions, group_size, share_weights_with)
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
@@ -120,6 +126,7 @@ class MMFP4MTPHead(nn.Module):
     @property
     def adaptive_depth_enabled(self) -> bool:
         """Whether adaptive speculation depth is enabled."""
+        logger.debug("adaptive_depth_enabled called")
         return self._adaptive_depth_enabled
     
     @property
@@ -128,6 +135,7 @@ class MMFP4MTPHead(nn.Module):
         
         Returns the adaptive depth if enabled, otherwise returns num_predictions.
         """
+        logger.debug("current_speculation_depth called")
         if self._adaptive_depth_enabled and self._adaptive_controller is not None:
             return self._adaptive_controller.current_depth
         return self.num_predictions
@@ -138,6 +146,7 @@ class MMFP4MTPHead(nn.Module):
         Returns:
             Dict with adaptive depth statistics, or empty dict if not enabled.
         """
+        logger.debug("get_adaptive_stats called")
         if not self._adaptive_depth_enabled or self._adaptive_controller is None:
             return {}
         
@@ -165,6 +174,7 @@ class MMFP4MTPHead(nn.Module):
         Returns:
             New speculation depth
         """
+        logger.debug("update_adaptive_depth called with num_accepted=%s, num_proposed=%s", num_accepted, num_proposed)
         if not self._adaptive_depth_enabled or self._adaptive_controller is None:
             return self.num_predictions
         
@@ -172,6 +182,7 @@ class MMFP4MTPHead(nn.Module):
     
     def reset_adaptive_depth(self) -> None:
         """Reset adaptive depth controller for a new sequence."""
+        logger.debug("reset_adaptive_depth called")
         if self._adaptive_controller is not None:
             self._adaptive_controller.reset()
     
@@ -199,6 +210,7 @@ class MMFP4MTPHead(nn.Module):
         Returns:
             MMFP4MTPHead with shared weights from target model
         """
+        logger.debug("from_target_model called with target_model=%s, num_predictions=%s, group_size=%s", target_model, num_predictions, group_size)
         config = getattr(target_model, "config", None)
         if config is not None:
             hidden_size = getattr(config, "hidden_size", 4096)
@@ -238,6 +250,7 @@ class MMFP4MTPHead(nn.Module):
     def _extract_lm_head(target_model: nn.Module) -> nn.Linear | None:
         """Extract the LM head from a target model if available."""
         # Common attribute names for LM heads
+        logger.debug("_extract_lm_head called with target_model=%s", target_model)
         lm_head_names = ["lm_head", "output", "embed_out", "head", "decoder"]
         
         for name in lm_head_names:
@@ -268,6 +281,7 @@ class MMFP4MTPHead(nn.Module):
         or initializes with the source layer's distribution.
         """
         # Create new linear layer
+        logger.debug("_adapt_linear called with source=%s, intermediate_size=%s, vocab_size=%s", source, intermediate_size, vocab_size)
         new_layer = nn.Linear(intermediate_size, vocab_size, bias=source.bias is not None)
         
         # Initialize with proper scaling
@@ -279,6 +293,7 @@ class MMFP4MTPHead(nn.Module):
     
     def get_shared_params(self) -> list[nn.Parameter]:
         """Get list of parameters that are shared with the target model."""
+        logger.debug("get_shared_params called")
         shared = []
         if self._weight_sharing_enabled:
             shared.append(self.input_proj.weight)
@@ -292,6 +307,7 @@ class MMFP4MTPHead(nn.Module):
         Returns:
             Dict with 'total_params', 'shared_params', 'unique_params', 'savings_bytes'
         """
+        logger.debug("get_memory_savings called")
         total_params = sum(p.numel() for p in self.parameters())
         shared_params = sum(p.numel() for p in self.get_shared_params())
         unique_params = total_params - shared_params
@@ -324,6 +340,7 @@ class MMFP4MTPHead(nn.Module):
             logits: [batch, num_predictions, vocab]
         """
         # Take last position for decode
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         h = hidden_states[:, -1:, :]  # [batch, 1, hidden]
         
         # Shared transformation with fused SiLU + Norm
@@ -360,6 +377,7 @@ class MMFP4MTPHead(nn.Module):
         single-kernel execution for all prediction heads.
         """
         # Collect weights from all output heads
+        logger.info("_rebuild_fused_weights starting")
         weights = []
         biases = []
         
@@ -379,6 +397,7 @@ class MMFP4MTPHead(nn.Module):
     
     def _clear_fused_weights(self) -> None:
         """Clear fused weights cache (call when weights are modified)."""
+        logger.debug("_clear_fused_weights called")
         self._fused_weight = None
         self._fused_bias = None
     
@@ -401,6 +420,7 @@ class MMFP4MTPHead(nn.Module):
             tokens: [batch, num_predictions] predicted token IDs
             probs: [batch, num_predictions, vocab] probability distributions
         """
+        logger.debug("speculate called with hidden_states=%s, temperature=%s", hidden_states, temperature)
         with torch.inference_mode():
             logits = self.forward(hidden_states)  # [batch, num_predictions, vocab]
             
@@ -434,6 +454,7 @@ class MMFP4MTPHead(nn.Module):
             tokens: [batch, num_tokens] 
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate_fast_path called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         if num_tokens is None:
             num_tokens = self.num_predictions
             
@@ -478,6 +499,7 @@ def verify_kernel(
         accepted_mask: [batch, num_predictions] Boolean mask of accepted tokens
         next_token: [batch] The token sampled after the last accepted token
     """
+    logger.debug("verify_kernel called with draft_tokens=%s, target_logits=%s, draft_probs=%s", draft_tokens, target_logits, draft_probs)
     batch_size, num_predictions = draft_tokens.shape
     device = draft_tokens.device
     vocab_size = target_logits.shape[-1]

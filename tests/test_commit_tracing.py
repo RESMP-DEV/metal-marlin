@@ -34,6 +34,7 @@ class _BatchTraceCaptureHandler(logging.Handler):
     """Capture existing batch trace logger output."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        logger.debug("emit called with record=%s", record)
         _BATCH_LOG_EVENTS.append(self.format(record))
 
 
@@ -41,10 +42,12 @@ class _CommandBufferProxy:
     """Fallback wrapper when monkey-patching the command buffer instance fails."""
 
     def __init__(self, inner: Any, source: str) -> None:
+        logger.debug("initializing %s with inner=%s, source=%s", type(self).__name__, inner, source)
         self._inner = inner
         self._source = source
 
     def commit(self, *args: Any, **kwargs: Any) -> Any:
+        logger.debug("commit called")
         _record_commit(self._source)
         return self._inner.commit(*args, **kwargs)
 
@@ -53,6 +56,7 @@ class _CommandBufferProxy:
 
 
 def _record_commit(source: str) -> None:
+    logger.debug("_record_commit called with source=%s", source)
     stack_lines = traceback.format_stack(limit=64)
     stack_text = "".join(stack_lines[:-2]) if len(stack_lines) >= 2 else "".join(stack_lines)
     _COMMIT_EVENTS.append(
@@ -67,6 +71,7 @@ def _record_commit(source: str) -> None:
 
 
 def _patch_method(owner: Any, method_name: str, source_name: str) -> bool:
+    logger.debug("_patch_method called with owner=%s, method_name=%s, source_name=%s", owner, method_name, source_name)
     method = getattr(owner, method_name, None)
     if not callable(method):
         return False
@@ -74,6 +79,7 @@ def _patch_method(owner: Any, method_name: str, source_name: str) -> bool:
         return True
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
+        logger.debug("wrapped called")
         _record_commit(source_name)
         return method(*args, **kwargs)
 
@@ -87,6 +93,7 @@ def _patch_method(owner: Any, method_name: str, source_name: str) -> bool:
 
 
 def _patch_function(module: Any, function_name: str, source_name: str) -> bool:
+    logger.debug("_patch_function called with module=%s, function_name=%s, source_name=%s", module, function_name, source_name)
     fn = getattr(module, function_name, None)
     if not callable(fn):
         return False
@@ -94,6 +101,7 @@ def _patch_function(module: Any, function_name: str, source_name: str) -> bool:
         return True
 
     def wrapped(*args: Any, **kwargs: Any) -> Any:
+        logger.debug("wrapped called")
         _record_commit(source_name)
         return fn(*args, **kwargs)
 
@@ -107,6 +115,7 @@ def _patch_function(module: Any, function_name: str, source_name: str) -> bool:
 
 
 def _instrument_command_buffer(command_buffer: Any) -> Any:
+    logger.debug("_instrument_command_buffer called with command_buffer=%s", command_buffer)
     if command_buffer is None:
         return None
 
@@ -118,6 +127,7 @@ def _instrument_command_buffer(command_buffer: Any) -> Any:
         return command_buffer
 
     def traced_commit(*args: Any, **kwargs: Any) -> Any:
+        logger.debug("traced_commit called")
         _record_commit("MTLCommandBuffer.commit")
         return original_commit(*args, **kwargs)
 
@@ -130,6 +140,7 @@ def _instrument_command_buffer(command_buffer: Any) -> Any:
 
 
 def _patch_pyobjc_command_queue() -> bool:
+    logger.debug("_patch_pyobjc_command_queue called")
     try:
         import Metal
     except Exception as exc:  # pragma: no cover - platform dependent
@@ -155,6 +166,7 @@ def _patch_pyobjc_command_queue() -> bool:
         return True
 
     def wrapped_command_buffer(self: Any, *args: Any, **kwargs: Any) -> Any:
+        logger.debug("wrapped_command_buffer called")
         command_buffer = command_buffer_method(self, *args, **kwargs)
         return _instrument_command_buffer(command_buffer)
 
@@ -170,6 +182,7 @@ def _patch_pyobjc_command_queue() -> bool:
 
 
 def _patch_cpp_extension() -> None:
+    logger.debug("_patch_cpp_extension called")
     try:
         from metal_marlin._compat import _metal_dispatch_ext
     except Exception as exc:
@@ -205,6 +218,7 @@ def _patch_cpp_extension() -> None:
 
 
 def _patch_python_commit_surfaces() -> None:
+    logger.debug("_patch_python_commit_surfaces called")
     try:
         from metal_marlin import metal_dispatch
         from metal_marlin.trellis import async_dispatch
@@ -237,6 +251,7 @@ def _patch_python_commit_surfaces() -> None:
 
 
 def _install_commit_tracing() -> None:
+    logger.debug("_install_commit_tracing called")
     handler = _BatchTraceCaptureHandler()
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
@@ -248,6 +263,7 @@ def _install_commit_tracing() -> None:
 
 
 def _write_trace_report(model_path: Path, failure: str | None) -> None:
+    logger.info("_write_trace_report called with model_path=%s, failure=%s", model_path, failure)
     lines: list[str] = []
     lines.append("Command Buffer Commit Trace Report")
     lines.append(f"Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -289,6 +305,7 @@ def _write_trace_report(model_path: Path, failure: str | None) -> None:
 
 
 def _run_single_forward_pass() -> None:
+    logger.debug("_run_single_forward_pass called")
     if not torch.backends.mps.is_available():
         raise RuntimeError("MPS is required to trace Metal command buffer commits.")
 
@@ -307,6 +324,7 @@ def _run_single_forward_pass() -> None:
 
 
 def main() -> int:
+    logger.info("main starting")
     model_path = _THIS_DIR / "fixtures" / "synthetic_trellis_smoke"
     failure: str | None = None
 

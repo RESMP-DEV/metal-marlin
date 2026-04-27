@@ -14,11 +14,15 @@ For M4 with simdgroup, 16 aligns well with 32-wide SIMD.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class KVBlockConfig:
@@ -32,12 +36,14 @@ class KVBlockConfig:
     @property
     def memory_bytes(self) -> int:
         """Memory footprint of one block in bytes."""
+        logger.debug("memory_bytes called")
         elem_size = self.dtype.itemsize
         return 2 * self.block_size * self.num_heads * self.head_dim * elem_size
 
     @property
     def shape(self) -> tuple[int, int, int, int]:
         """Storage shape: [2, block_size, num_heads, head_dim]."""
+        logger.debug("shape called")
         return (2, self.block_size, self.num_heads, self.head_dim)
 
 
@@ -55,6 +61,7 @@ class KVBlock:
     __slots__ = ("config", "_data", "_token_count", "_ref_count")
 
     def __init__(self, config: KVBlockConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or KVBlockConfig()
         self._data: NDArray[Any] | None = None
         self._token_count: int = 0
@@ -62,30 +69,36 @@ class KVBlock:
 
     def allocate(self) -> None:
         """Allocate block memory."""
+        logger.debug("allocate called")
         self._data = np.zeros(self.config.shape, dtype=self.config.dtype)
         self._token_count = 0
 
     @property
     def data(self) -> NDArray[Any] | None:
         """The underlying storage array."""
+        logger.debug("data called")
         return self._data
 
     @property
     def token_count(self) -> int:
         """Number of tokens currently stored."""
+        logger.debug("token_count called")
         return self._token_count
 
     @property
     def ref_count(self) -> int:
         """Reference count for copy-on-write."""
+        logger.debug("ref_count called")
         return self._ref_count
 
     def acquire(self) -> None:
         """Increment reference count."""
+        logger.debug("acquire called")
         self._ref_count += 1
 
     def release(self) -> int:
         """Decrement reference count. Returns new count."""
+        logger.debug("release called")
         self._ref_count = max(0, self._ref_count - 1)
         return self._ref_count
 
@@ -102,6 +115,7 @@ class KVBlock:
         Raises:
             RuntimeError: If block is full or not allocated.
         """
+        logger.debug("append_kv called with k=%s, v=%s", k, v)
         if self._data is None:
             raise RuntimeError("Block not allocated")
         if self._token_count >= self.config.block_size:
@@ -128,6 +142,7 @@ class KVBlock:
         Raises:
             RuntimeError: If block is full/unallocated or batch exceeds capacity.
         """
+        logger.debug("append_kv_batch called with keys=%s, values=%s", keys, values)
         if self._data is None:
             raise RuntimeError("Block not allocated")
 
@@ -154,6 +169,7 @@ class KVBlock:
         Raises:
             RuntimeError: If block is not allocated.
         """
+        logger.debug("get_kv called")
         if self._data is None:
             raise RuntimeError("Block not allocated")
         return self._data[0, : self._token_count], self._data[1, : self._token_count]
@@ -161,25 +177,30 @@ class KVBlock:
     @property
     def is_full(self) -> bool:
         """Whether the block has no remaining slots."""
+        logger.debug("is_full called")
         return self._token_count >= self.config.block_size
 
     @property
     def is_empty(self) -> bool:
         """Whether the block has no tokens stored."""
+        logger.debug("is_empty called")
         return self._token_count == 0
 
     @property
     def remaining(self) -> int:
         """Number of empty slots."""
+        logger.debug("remaining called")
         return self.config.block_size - self._token_count
 
     @property
     def memory_bytes(self) -> int:
         """Memory footprint of this block in bytes."""
+        logger.debug("memory_bytes called")
         return self.config.memory_bytes
 
     def reset(self) -> None:
         """Clear block contents without deallocating."""
+        logger.debug("reset called")
         if self._data is not None:
             self._data.fill(0)
         self._token_count = 0
@@ -187,6 +208,7 @@ class KVBlock:
 
     def copy(self) -> KVBlock:
         """Create an independent copy of this block (for CoW)."""
+        logger.debug("copy called")
         new_block = KVBlock(config=self.config)
         if self._data is not None:
             new_block._data = self._data.copy()

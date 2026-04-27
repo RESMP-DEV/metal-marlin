@@ -3,6 +3,7 @@
 Tests verify that the fused dequantization+GEMM kernels work correctly
 for both decode (small M) and prefill (large M) scenarios.
 """
+import logging
 
 import numpy as np
 import pytest
@@ -12,8 +13,12 @@ import torch.nn as nn
 from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
 
 
+
+logger = logging.getLogger(__name__)
+
 def require_metal():
     """Skip test if Metal/MPS is not available."""
+    logger.debug("require_metal called")
     if not (HAS_MPS and HAS_METAL):
         pytest.skip("Metal/MPS not available - skipping trellis tests")
 
@@ -31,6 +36,7 @@ class TestTrellisLinearFusedGEMM:
     @pytest.fixture
     def trellis_linear_layer(self):
         """Create a TrellisLinear layer for testing."""
+        logger.debug("trellis_linear_layer called")
         from metal_marlin.trellis.linear import TrellisLinear
 
         out_features = 256
@@ -76,6 +82,7 @@ class TestTrellisLinearFusedGEMM:
         - Output shape is correct
         - Output is deterministic
         """
+        logger.info("running test_fused_forward_decode")
         require_metal()
 
         M = 1
@@ -108,6 +115,7 @@ class TestTrellisLinearFusedGEMM:
         - Output shape is correct
         - Output is finite and deterministic
         """
+        logger.info("running test_fused_forward_prefill")
         M = 128
         in_features = trellis_linear_layer.in_features
         out_features = trellis_linear_layer.out_features
@@ -136,6 +144,7 @@ class TestTrellisLinearFusedGEMM:
         - Fused GEMM produces same result as dequantize then matmul
         - Both decode and prefill paths are tested
         """
+        logger.info("running test_fused_vs_dequant_correctness")
         from metal_marlin.trellis.dispatch import dispatch_trellis_dequant_packed
 
         in_features = trellis_linear_layer.in_features
@@ -197,6 +206,7 @@ class TestTrellisLinearFusedGEMM:
         - Memory stays bounded when running forward pass
         - No spike to full FP16 weight matrix size
         """
+        logger.info("running test_memory_no_materialization")
         if not torch.backends.mps.is_available():
             pytest.skip("MPS not available")
 
@@ -245,6 +255,7 @@ class TestTrellisLinearFusedGEMM:
 
         Verifies fused kernels handle batch dimension correctly.
         """
+        logger.info("running test_batched_3d_input")
         batch_size = 4
         seq_len = 32
         in_features = trellis_linear_layer.in_features
@@ -269,6 +280,7 @@ class TestTrellisLinearFusedGEMM:
         Verifies both decode (M<=16) and prefill (M>16) paths work.
         Prefill tests are skipped due to kernel bugs.
         """
+        logger.info("running test_different_batch_sizes")
         in_features = trellis_linear_layer.in_features
         out_features = trellis_linear_layer.out_features
 
@@ -290,6 +302,7 @@ class TestTrellisLinearFusedGEMM:
 
         Verifies bias is correctly added to output.
         """
+        logger.info("running test_bias_handling")
         from metal_marlin.trellis.linear import TrellisLinear
 
         # Create layer with bias

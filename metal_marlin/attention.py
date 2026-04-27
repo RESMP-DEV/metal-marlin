@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -31,6 +32,9 @@ import torch.nn.functional as F
 from .kv_cache import KVCache
 from .layers import MarlinLinear
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class BlockSparseMask:
@@ -94,6 +98,7 @@ class BlockSparseMask:
         Returns:
             BlockSparseMask configured for sliding window attention
         """
+        logger.debug("create_sliding_window called with seq_len=%s, window_size=%s, block_size=%s", seq_len, window_size, block_size)
         if device is None:
             device = _get_device()
 
@@ -160,6 +165,7 @@ class BlockSparseMask:
         Returns:
             BlockSparseMask configured for BigBird attention
         """
+        logger.debug("create_bigbird called with seq_len=%s, num_random_blocks=%s, num_global_blocks=%s", seq_len, num_random_blocks, num_global_blocks)
         if device is None:
             device = _get_device()
 
@@ -254,6 +260,7 @@ class BlockSparseMask:
         Returns:
             BlockSparseMask configured for Longformer attention
         """
+        logger.debug("create_longformer called with seq_len=%s, window_size=%s, num_global_tokens=%s", seq_len, window_size, num_global_tokens)
         if device is None:
             device = _get_device()
 
@@ -313,6 +320,7 @@ class BlockSparseMask:
         Returns:
             BlockSparseMask representing the same mask pattern
         """
+        logger.debug("from_dense_mask called with dense_mask=%s, block_q=%s, block_k=%s", dense_mask, block_q, block_k)
         seq_q, seq_k = dense_mask.shape
         device = dense_mask.device
 
@@ -360,6 +368,7 @@ if TYPE_CHECKING:
 
 def _get_device() -> torch.device:
     """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    logger.debug("_get_device called")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -369,6 +378,7 @@ class RoPE(nn.Module):
     """Rotary Position Embedding."""
 
     def __init__(self, dims: int, traditional: bool = False, base: float = 10000.0):
+        logger.debug("initializing %s with dims=%s, traditional=%s, base=%s", type(self).__name__, dims, traditional, base)
         super().__init__()
         self.dims = dims
         self.traditional = traditional
@@ -388,6 +398,7 @@ class RoPE(nn.Module):
         Returns:
             Tensor with RoPE applied
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         shape = x.shape
         seq_len = shape[2]
         head_dim = shape[3]
@@ -459,6 +470,7 @@ class MarlinAttention(nn.Module):
         max_position_embeddings: int = 4096,
         bias: bool = False,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, num_kv_heads=%s, head_dim=%s, quant_type=%s", type(self).__name__, hidden_size, num_heads, num_kv_heads, head_dim, quant_type)
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -520,6 +532,7 @@ class MarlinAttention(nn.Module):
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, _ = hidden_states.shape
 
         # Compute Q, K, V projections using Marlin kernels
@@ -631,6 +644,7 @@ def scaled_dot_product_attention_metal(
     Returns:
         Attention output [batch, num_heads, seq_len, head_dim]
     """
+    logger.debug("scaled_dot_product_attention_metal called with q=%s, k=%s, v=%s", q, k, v)
     if scale is None:
         scale = q.shape[-1] ** -0.5
 
@@ -684,6 +698,7 @@ def flash_attention_metal(
     Returns:
         Attention output [batch, num_heads, seq_len, head_dim]
     """
+    logger.debug("flash_attention_metal called with q=%s, k=%s, v=%s", q, k, v)
     if scale is None:
         scale = q.shape[-1] ** -0.5
 
@@ -734,6 +749,7 @@ def sliding_window_attention_metal(
         Attention output [batch, num_heads, seq_len, head_dim]
     """
     # Import here to avoid circular dependency
+    logger.debug("sliding_window_attention_metal called with q=%s, k=%s, v=%s", q, k, v)
     from .sliding_window_attention import sliding_window_attention
 
     if scale is None:
@@ -781,6 +797,7 @@ def create_causal_bitmask(
         Each uint64 contains 64 mask bits: bit k = 0 (unmasked) if k <= q_pos
         Returns None for single-token decode
     """
+    logger.debug("create_causal_bitmask called with seq_len=%s, kv_seq_len=%s, device=%s", seq_len, kv_seq_len, device)
     kv_seq_len = kv_seq_len or seq_len
 
     # Single token decode - no masking needed
@@ -858,6 +875,7 @@ def create_causal_mask(
     Returns:
         Causal mask with -inf for masked positions, or None for single-token decode
     """
+    logger.debug("create_causal_mask called with seq_len=%s, kv_seq_len=%s, device=%s", seq_len, kv_seq_len, device)
     kv_seq_len = kv_seq_len or seq_len
 
     # Single token decode - no masking needed
@@ -919,6 +937,7 @@ def block_sparse_attention_metal(
         This function dispatches to the attention_block_sparse_fused_qkv Metal kernel
         which provides optimized memory access patterns for sparse attention.
     """
+    logger.debug("block_sparse_attention_metal called with q=%s, k=%s, v=%s", q, k, v)
     from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 
     if not HAS_TORCH or torch is None:
@@ -996,6 +1015,7 @@ def block_sparse_attention_metal(
 
     # Helper to create Metal buffers from tensors
     def _tensor_to_buffer(tensor: torch.Tensor) -> Any:
+        logger.debug("_tensor_to_buffer called with tensor=%s", tensor)
         storage = tensor.untyped_storage()
         ptr = storage.data_ptr()
         size = storage.nbytes()
@@ -1021,12 +1041,14 @@ def block_sparse_attention_metal(
         )
 
     def _make_uint32_buffer(val: int):
+        logger.debug("_make_uint32_buffer called with val=%s", val)
         data = np.array([val], dtype=np.uint32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
         )
 
     def _make_float_buffer(val: float):
+        logger.debug("_make_float_buffer called with val=%s", val)
         data = np.array([val], dtype=np.float32)
         return device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -1132,6 +1154,7 @@ def create_sliding_window_mask(
     Returns:
         Mask with -inf for masked positions, or None for single-token decode
     """
+    logger.debug("create_sliding_window_mask called with seq_len=%s, window_size=%s, kv_seq_len=%s", seq_len, window_size, kv_seq_len)
     kv_seq_len = kv_seq_len or seq_len
 
     # Single token decode - no masking needed

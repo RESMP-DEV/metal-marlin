@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,6 +41,9 @@ from ..mixed_precision import Precision
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 # Metadata key prefix for safetensors header
 # Using __metal_marlin__ namespace to avoid collisions
@@ -74,11 +78,13 @@ class MixedFormatHeader:
 
     def to_json(self) -> str:
         """Serialize header to JSON string for safetensors metadata."""
+        logger.debug("to_json called")
         return json.dumps(asdict(self), separators=(",", ":"))
 
     @classmethod
     def from_json(cls, json_str: str) -> MixedFormatHeader:
         """Deserialize header from JSON string."""
+        logger.debug("from_json called with json_str=%s", json_str)
         data = json.loads(json_str)
         return cls(**data)
 
@@ -92,6 +98,7 @@ class MixedFormatHeader:
             Format string or None if layer not found.
         """
         # Strip common suffixes to get base name
+        logger.debug("get_format called with layer_name=%s", layer_name)
         base_name = layer_name
         for suffix in (".packed", ".scales", ".zeros", ".weight", ".bias"):
             if base_name.endswith(suffix):
@@ -107,6 +114,7 @@ class MixedFormatHeader:
 
     def get_group_size(self, layer_name: str) -> int | None:
         """Get group size for a layer."""
+        logger.debug("get_group_size called with layer_name=%s", layer_name)
         base_name = layer_name
         for suffix in (".packed", ".scales", ".zeros", ".weight", ".bias"):
             if base_name.endswith(suffix):
@@ -121,6 +129,7 @@ class MixedFormatHeader:
 
     def summary(self) -> str:
         """Return human-readable summary."""
+        logger.debug("summary called")
         lines = [
             f"Mixed Format Model (v{self.version})",
             f"  Total params: {self.total_params / 1e9:.2f}B",
@@ -143,6 +152,7 @@ class MixedFormatHeader:
 
 def _precision_to_format_str(precision: Precision) -> str:
     """Convert Precision enum to format string for header."""
+    logger.debug("_precision_to_format_str called with precision=%s", precision)
     mapping = {
         Precision.FP16: "fp16",
         Precision.BF16: "bf16",
@@ -160,6 +170,7 @@ def _precision_to_format_str(precision: Precision) -> str:
 
 def _format_str_to_precision(fmt: str) -> Precision:
     """Convert format string to Precision enum."""
+    logger.debug("_format_str_to_precision called with fmt=%s", fmt)
     mapping = {
         "fp16": Precision.FP16,
         "bf16": Precision.BF16,
@@ -177,6 +188,7 @@ def _format_str_to_precision(fmt: str) -> Precision:
 
 def _bits_for_precision(precision: Precision) -> int:
     """Return bits per element for a precision level."""
+    logger.debug("_bits_for_precision called with precision=%s", precision)
     bits = {
         Precision.FP16: 16,
         Precision.BF16: 16,
@@ -210,6 +222,7 @@ def _pack_single_layer(
         Dictionary of tensors to save (may include .packed, .scales, etc.)
     """
     # Import quantization functions lazily to avoid circular imports
+    logger.info("_pack_single_layer called with name=%s, weight=%s, precision=%s, group_size=%s", name, weight, precision, group_size)
     from ..mixed_precision import LayerQuantConfig, quantize_tensor
 
     if precision in (Precision.FP16, Precision.BF16):
@@ -284,6 +297,7 @@ def pack_mixed_format_model(
         >>> precision_map = {"layer1": (Precision.FP4_E2M1, 128)}
         >>> header = pack_mixed_format_model(weights, precision_map, Path("out.safetensors"))
     """
+    logger.info("pack_mixed_format_model called with weights=%s, precision_map=%s, output_path=%s", weights, precision_map, output_path)
     try:
         from safetensors.numpy import save_file
     except ImportError as e:
@@ -377,6 +391,7 @@ def load_mixed_format_model(
         ...     fmt = header.get_format(name)
         ...     print(f"{name}: {fmt}")
     """
+    logger.info("load_mixed_format_model called with model_path=%s", model_path)
     try:
         from safetensors import safe_open
     except ImportError as e:
@@ -435,6 +450,7 @@ def get_layer_precision(
     Returns:
         Tuple of (Precision enum, group_size). Group size is 0 for fp16/bf16.
     """
+    logger.debug("get_layer_precision called with header=%s, layer_name=%s", header, layer_name)
     format_str = header.get_format(layer_name)
     if format_str is None:
         return Precision.FP16, 0
@@ -460,6 +476,7 @@ def merge_mixed_format_models(
     Returns:
         Combined MixedFormatHeader.
     """
+    logger.debug("merge_mixed_format_models called with model_paths=%s, output_path=%s", model_paths, output_path)
     try:
         from safetensors.numpy import save_file
     except ImportError as e:

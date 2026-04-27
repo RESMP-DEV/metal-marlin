@@ -18,6 +18,7 @@ Performance: ~5x faster than PyTorch for batch=1, 128 experts, k=8
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -33,6 +34,9 @@ from ..metal_dispatch import (
 if TYPE_CHECKING or HAS_METAL:
     import Metal
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SoftmaxTopKBuffers:
@@ -73,6 +77,7 @@ class SoftmaxTopKDispatcher:
             top_k: Number of experts to select per token (e.g., 8).
             max_batch: Maximum batch size for prefill.
         """
+        logger.debug("initializing %s with lib=%s, num_experts=%s, top_k=%s, max_batch=%s", type(self).__name__, lib, num_experts, top_k, max_batch)
         self._lib = lib
         self._device = lib.device
         self._num_experts = num_experts
@@ -97,6 +102,7 @@ class SoftmaxTopKDispatcher:
 
     def _preallocate(self, batch_size: int) -> None:
         """Pre-allocate buffers for given batch size."""
+        logger.debug("_preallocate called with batch_size=%s", batch_size)
         if batch_size in self._buffers:
             return
 
@@ -131,6 +137,7 @@ class SoftmaxTopKDispatcher:
 
     def _get_buffers(self, batch_size: int) -> SoftmaxTopKBuffers:
         """Get or create buffers for given batch size."""
+        logger.debug("_get_buffers called with batch_size=%s", batch_size)
         if batch_size not in self._buffers:
             self._preallocate(batch_size)
         return self._buffers[batch_size]
@@ -148,6 +155,7 @@ class SoftmaxTopKDispatcher:
             routing_weights: Normalized weights [1, top_k] float16
         """
         # Handle input shape
+        logger.debug("dispatch_decode called with router_logits=%s", router_logits)
         if router_logits.dim() == 1:
             router_logits = router_logits.unsqueeze(0)
 
@@ -200,6 +208,7 @@ class SoftmaxTopKDispatcher:
             selected_experts: Expert indices [batch, top_k] int64
             routing_weights: Normalized weights [batch, top_k] float16
         """
+        logger.debug("dispatch_prefill called with router_logits=%s", router_logits)
         batch_size = router_logits.shape[0]
 
         # Get or create buffers
@@ -241,6 +250,7 @@ class SoftmaxTopKDispatcher:
             selected_experts: Expert indices [batch, top_k] int64
             routing_weights: Normalized weights [batch, top_k] float16
         """
+        logger.debug("dispatch called with router_logits=%s", router_logits)
         batch_size = router_logits.shape[0] if router_logits.dim() > 1 else 1
         if batch_size == 1:
             return self.dispatch_decode(router_logits)
@@ -268,6 +278,7 @@ def get_softmax_topk_dispatcher(
     Returns:
         SoftmaxTopKDispatcher instance.
     """
+    logger.debug("get_softmax_topk_dispatcher called with lib=%s, num_experts=%s, top_k=%s", lib, num_experts, top_k)
     global _dispatcher
 
     if _dispatcher is None or _dispatcher._num_experts != num_experts or _dispatcher._top_k != top_k:
@@ -300,5 +311,6 @@ def softmax_topk_fused(
         selected_experts: Expert indices [batch, top_k] int64
         routing_weights: Normalized weights [batch, top_k] float16
     """
+    logger.debug("softmax_topk_fused called with lib=%s, router_logits=%s, num_experts=%s", lib, router_logits, num_experts)
     dispatcher = get_softmax_topk_dispatcher(lib, num_experts, top_k)
     return dispatcher.dispatch(router_logits)

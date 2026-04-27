@@ -32,6 +32,7 @@ Reference:
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,9 @@ from typing import Any
 import numpy as np
 
 from .gguf_loader import DEQUANT_SUPPORTED_TYPES, dequantize_tensor
+
+
+logger = logging.getLogger(__name__)
 
 # --- MXFP4 Constants ---
 
@@ -71,6 +75,7 @@ def e8m0_to_fp32(e: np.ndarray) -> np.ndarray:
     E8M0 is a pure exponent format: value = 2^(e - 127).
     Special case: e=0 maps to 2^(-126) (smallest normal).
     """
+    logger.debug("e8m0_to_fp32 called with e=%s", e)
     result = np.where(
         e == 0,
         np.float32(2.0**-126),
@@ -85,6 +90,7 @@ def dequant_mxfp4_block(raw: np.ndarray) -> np.ndarray:
     Layout: [e8m0_byte, qs[0], qs[1], ..., qs[15]]
     Each qs byte contains two 4-bit E2M1 values: low nibble first, high nibble second.
     """
+    logger.info("dequant_mxfp4_block called with raw=%s", raw)
     e_byte = raw[0]
     scale = e8m0_to_fp32(np.array([e_byte], dtype=np.uint8))[0]
     qs = raw[1:17]  # 16 bytes = 32 nibbles
@@ -115,6 +121,7 @@ def dequant_mxfp4(data: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
     Returns:
         FP16 array of the specified shape.
     """
+    logger.info("dequant_mxfp4 called with data=%s, shape=%s", data, shape)
     n_elements = int(np.prod(shape))
     n_blocks = n_elements // MXFP4_BLOCK_SIZE
     assert n_blocks * MXFP4_BLOCK_SIZE == n_elements, (
@@ -168,6 +175,7 @@ def quantize_fp4(
     Returns:
         [K, N] array of uint8 indices (0-15) into KVALUES_MXFP4.
     """
+    logger.info("quantize_fp4 called with weights=%s, scales=%s, group_size=%s", weights, scales, group_size)
     K, N = weights.shape
     n_groups = K // group_size
 
@@ -208,6 +216,7 @@ def compute_scales_marlin(
     Returns:
         [K // group_size, N] FP16 scales.
     """
+    logger.debug("compute_scales_marlin called with weights=%s, group_size=%s", weights, group_size)
     K, N = weights.shape
     n_groups = K // group_size
     weights_grouped = weights.reshape(n_groups, group_size, N).astype(np.float32)
@@ -232,6 +241,7 @@ def pack_nibbles(indices: np.ndarray) -> np.ndarray:
     Returns:
         [K // 2, N] uint8 array of packed nibble pairs.
     """
+    logger.info("pack_nibbles called with indices=%s", indices)
     K, N = indices.shape
     assert K % 2 == 0, f"K={K} must be even for nibble packing"
     lo = indices[0::2, :]  # even rows
@@ -264,6 +274,7 @@ def reorder_for_simdgroup(packed: np.ndarray, N: int) -> np.ndarray:
     Returns:
         Reordered array with same shape.
     """
+    logger.debug("reorder_for_simdgroup called with packed=%s, N=%s", packed, N)
     packed.shape[0]
 
     # Number of 8-column tiles
@@ -323,6 +334,7 @@ def pack_weights_marlin(
         packed_weights: [K // 8, N] uint32 array (8 FP4 values per word).
         scales: [K // group_size, N] FP16 per-group scales.
     """
+    logger.info("pack_weights_marlin called with weights_fp16=%s, group_size=%s", weights_fp16, group_size)
     weights = weights_fp16.astype(np.float32)
     K, N = weights.shape
 
@@ -378,6 +390,7 @@ def dequant_marlin(
         [K, N] FP16 array.
     """
     # Unpack uint32 -> 4 bytes
+    logger.info("dequant_marlin called with packed_weights=%s, scales=%s, K=%s, N=%s", packed_weights, scales, K, N)
     K // 8
     byte0 = (packed_weights & 0xFF).astype(np.uint8)
     byte1 = ((packed_weights >> 8) & 0xFF).astype(np.uint8)
@@ -427,6 +440,7 @@ def is_quantizable_tensor(name: str) -> bool:
     typically kept in full precision for accuracy.
     """
     # Keep these in original precision
+    logger.info("is_quantizable_tensor called with name=%s", name)
     skip_patterns = [
         "embed",
         "token_embd",
@@ -444,12 +458,14 @@ def is_quantizable_tensor(name: str) -> bool:
 
 def is_importance_matrix_tensor(name: str) -> bool:
     """Best-effort detection for imatrix/importance tensors."""
+    logger.debug("is_importance_matrix_tensor called with name=%s", name)
     name_lower = name.lower()
     return "imatrix" in name_lower or "importance" in name_lower
 
 
 def ggml_type_name(type_val: int) -> str:
     """Human-readable GGML type name for stats/metadata."""
+    logger.debug("ggml_type_name called with type_val=%s", type_val)
     names = {
         0: "F32",
         1: "F16",
@@ -481,6 +497,7 @@ def extract_model_config(reader: Any) -> dict[str, Any]:
     Reads architecture, hidden size, layers, heads, etc. from the GGUF
     key-value metadata store.
     """
+    logger.debug("extract_model_config called with reader=%s", reader)
     config: dict[str, Any] = {}
 
     # Map of GGUF metadata keys to config keys
@@ -556,6 +573,7 @@ def convert_gguf_to_marlin(
     Returns:
         Dictionary with conversion statistics.
     """
+    logger.info("convert_gguf_to_marlin called with gguf_path=%s, output_path=%s, group_size=%s, validate=%s", gguf_path, output_path, group_size, validate)
     try:
         from gguf import GGUFReader
     except ImportError as e:
@@ -858,6 +876,7 @@ def convert_gguf_to_marlin(
 
 def main() -> None:
     """CLI entry point for GGUF to Marlin conversion."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

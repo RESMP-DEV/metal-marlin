@@ -14,11 +14,15 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from xml.dom import minidom
+
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).parent.parent
 SRC_DIR = ROOT / "src"
@@ -29,6 +33,7 @@ METAL_MARLIN_DIR = ROOT / "metal_marlin"
 
 def grep_count(pattern: str, path: str = ".", include: str = "*.py") -> tuple[int, list[str]]:
     """Count files matching grep pattern. Returns (count, file_list)."""
+    logger.debug("grep_count called with pattern=%s, path=%s, include=%s", pattern, path, include)
     try:
         result = subprocess.run(
             ["grep", "-rl", pattern, f"--include={include}", path],
@@ -45,6 +50,7 @@ def grep_count(pattern: str, path: str = ".", include: str = "*.py") -> tuple[in
 
 def check_command_exists(cmd: str) -> bool:
     """Check if a command/binary exists."""
+    logger.debug("check_command_exists called with cmd=%s", cmd)
     try:
         subprocess.run(["which", cmd], capture_output=True, check=True)
         return True
@@ -54,6 +60,7 @@ def check_command_exists(cmd: str) -> bool:
 
 def get_pyproject_deps() -> list[str]:
     """Extract dependencies from pyproject.toml."""
+    logger.debug("get_pyproject_deps called")
     pyproject = ROOT / "pyproject.toml"
     if not pyproject.exists():
         return []
@@ -76,6 +83,7 @@ def get_pyproject_deps() -> list[str]:
 
 def compile_shader(metal_file: Path) -> dict:
     """Try to compile a Metal shader using xcrun."""
+    logger.info("compile_shader starting")
     try:
         result = subprocess.run(
             ["xcrun", "-sdk", "macosx", "metal", "-c", str(metal_file), "-o", "/dev/null"],
@@ -98,6 +106,7 @@ def compile_shader(metal_file: Path) -> dict:
 
 def collect_facts() -> ET.Element:
     """Collect all facts into an XML structure."""
+    logger.debug("collect_facts called")
     root = ET.Element("status_facts")
     root.set("timestamp", datetime.now().isoformat())
     root.set("project", "metal_marlin")
@@ -160,6 +169,7 @@ def collect_facts() -> ET.Element:
     counts_elem = ET.SubElement(root, "file_counts")
 
     def add_count(name: str, pattern: str, path: Path):
+        logger.debug("add_count called with name=%s, pattern=%s, path=%s", name, pattern, path)
         elem = ET.SubElement(counts_elem, "count")
         elem.set("name", name)
         if path.exists():
@@ -230,6 +240,7 @@ def collect_facts() -> ET.Element:
 
 
 def main():
+    logger.info("main starting")
     facts = collect_facts()
 
     # Pretty print XML

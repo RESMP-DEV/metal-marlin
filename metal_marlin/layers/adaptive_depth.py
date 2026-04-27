@@ -12,7 +12,11 @@ depth is computed based on the theoretical speedup formula for speculative decod
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -66,6 +70,7 @@ class AdaptiveDepthStats:
     @property
     def overall_acceptance_rate(self) -> float:
         """Overall acceptance rate across all steps."""
+        logger.debug("overall_acceptance_rate called")
         if self.total_proposed == 0:
             return 0.0
         return self.total_accepted / self.total_proposed
@@ -76,6 +81,7 @@ class AdaptiveDepthStats:
         
         Higher is better. A score of 1.0 means all proposed tokens are accepted.
         """
+        logger.debug("efficiency_score called")
         if self.total_proposed == 0:
             return 0.0
         return self.total_accepted / self.total_proposed
@@ -114,6 +120,7 @@ class AdaptiveSpeculationController:
     """
     
     def __init__(self, config: AdaptiveDepthConfig | None = None):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or AdaptiveDepthConfig()
         self._current_depth = self.config.initial_depth
         self._ema_acceptance = 0.5  # Start with neutral estimate
@@ -123,12 +130,14 @@ class AdaptiveSpeculationController:
     @property
     def current_depth(self) -> int:
         """Current speculation depth."""
+        logger.debug("current_depth called")
         return self._current_depth
     
     @property
     def stats(self) -> AdaptiveDepthStats:
         """Current statistics."""
         # Update stats with current values
+        logger.debug("stats called")
         self._stats.current_depth = self._current_depth
         self._stats.ema_acceptance = self._ema_acceptance
         return self._stats
@@ -143,6 +152,7 @@ class AdaptiveSpeculationController:
         Returns:
             New speculation depth
         """
+        logger.debug("update called with num_accepted=%s, num_proposed=%s", num_accepted, num_proposed)
         if num_proposed == 0:
             return self._current_depth
         
@@ -211,6 +221,7 @@ class AdaptiveSpeculationController:
         Returns:
             Optimal speculation depth
         """
+        logger.debug("_compute_optimal_depth called")
         ema = self._ema_acceptance
         
         # Clamp to reasonable range for computation
@@ -270,6 +281,7 @@ class AdaptiveSpeculationController:
         Returns:
             Estimated speedup factor (1.0 = no speedup)
         """
+        logger.debug("get_speedup_estimate called")
         alpha = max(0.01, self._ema_acceptance)  # Avoid division by zero
         k = self._current_depth
         
@@ -289,6 +301,7 @@ class AdaptiveSpeculationController:
     
     def reset(self) -> None:
         """Reset controller state for a new sequence."""
+        logger.debug("reset called")
         self._current_depth = self.config.initial_depth
         self._ema_acceptance = 0.5
         self._acceptance_history.clear()
@@ -300,6 +313,7 @@ class AdaptiveSpeculationController:
         Returns:
             True if depth should be increased
         """
+        logger.debug("should_increase_depth called")
         return (
             self._ema_acceptance > self.config.target_acceptance + 0.1
             and self._current_depth < self.config.max_depth
@@ -311,6 +325,7 @@ class AdaptiveSpeculationController:
         Returns:
             True if depth should be decreased
         """
+        logger.debug("should_decrease_depth called")
         return (
             self._ema_acceptance < self.config.target_acceptance - 0.2
             and self._current_depth > self.config.min_depth

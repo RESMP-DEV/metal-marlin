@@ -16,6 +16,7 @@ from __future__ import annotations
 import heapq
 import io
 import mmap
+import logging
 import platform
 import threading
 import time
@@ -85,14 +86,17 @@ class MMAPWeightStats:
     
     @property
     def hit_rate(self) -> float:
+        logger.debug("hit_rate called")
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
     
     @property
     def prefetch_efficiency(self) -> float:
+        logger.debug("prefetch_efficiency called")
         return self.prefetch_hits / self.prefetch_requests if self.prefetch_requests > 0 else 0.0
     
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "total_mappings": self.total_mappings,
             "active_mappings": self.active_mappings,
@@ -135,6 +139,7 @@ class MMAPWeightManager:
             config: MMAP weight configuration
             device: Target device for loaded weights
         """
+        logger.debug("initializing %s with loader=%s, config=%s, device=%s, buffer_recycler=%s", type(self).__name__, loader, config, device, buffer_recycler)
         self._loader = loader
         self.config = config or MMAPWeightConfig()
         self._device = device
@@ -171,6 +176,7 @@ class MMAPWeightManager:
         
     def _get_mmap(self, shard_path: Path) -> mmap.mmap:
         """Get or create memory map for a shard file."""
+        logger.debug("_get_mmap called with shard_path=%s", shard_path)
         with self._mmap_lock:
             if shard_path in self._mmap_cache:
                 return self._mmap_cache[shard_path]
@@ -197,6 +203,7 @@ class MMAPWeightManager:
     
     def _evict_oldest_mapping(self) -> None:
         """Evict least recently used file mapping."""
+        logger.debug("_evict_oldest_mapping called")
         if not self._mmap_cache:
             return
         
@@ -226,6 +233,7 @@ class MMAPWeightManager:
         Returns:
             Loaded tensor on target device
         """
+        logger.info("load_weight called with tensor_name=%s, dtype=%s, shape=%s", tensor_name, dtype, shape)
         import torch
         
         # Check cache first
@@ -328,6 +336,7 @@ class MMAPWeightManager:
     
     def _get_cached_weight(self, tensor_name: str) -> Any | None:
         """Get weight from cache if available."""
+        logger.debug("_get_cached_weight called with tensor_name=%s", tensor_name)
         with self._mmap_lock:
             if tensor_name in self._weight_cache:
                 tensor, _ = self._weight_cache[tensor_name]
@@ -344,6 +353,7 @@ class MMAPWeightManager:
     
     def _cache_weight(self, tensor_name: str, tensor: Any) -> None:
         """Cache a loaded weight with LRU eviction."""
+        logger.debug("_cache_weight called with tensor_name=%s, tensor=%s", tensor_name, tensor)
         size_bytes = tensor.numel() * tensor.element_size()
         
         with self._mmap_lock:
@@ -362,6 +372,7 @@ class MMAPWeightManager:
     
     def _evict_lru_weight(self) -> None:
         """Evict least recently used weight from cache."""
+        logger.debug("_evict_lru_weight called")
         if not self._weight_cache:
             return
         
@@ -381,6 +392,7 @@ class MMAPWeightManager:
         Returns:
             List of futures for prefetch operations
         """
+        logger.debug("prefetch_weights called with tensor_names=%s", tensor_names)
         if not self.config.enable_background_prefetch:
             return []
         
@@ -399,6 +411,7 @@ class MMAPWeightManager:
     
     def _prefetch_task(self, tensor_name: str) -> None:
         """Background task to prefetch a weight."""
+        logger.debug("_prefetch_task called with tensor_name=%s", tensor_name)
         try:
             self.load_weight(tensor_name)
             with self._stats_lock:
@@ -418,6 +431,7 @@ class MMAPWeightManager:
         Returns:
             Dictionary of weight tensors
         """
+        logger.info("load_layer_weights called with layer_idx=%s", layer_idx)
         weights = {}
         tensor_names = self._loader._layer_to_tensors.get(layer_idx, [])
         
@@ -434,6 +448,7 @@ class MMAPWeightManager:
     
     def get_stats(self) -> dict[str, Any]:
         """Get memory-mapped weight statistics."""
+        logger.debug("get_stats called")
         with self._stats_lock:
             stats = self._stats.to_dict()
         
@@ -450,6 +465,7 @@ class MMAPWeightManager:
     
     def clear_cache(self) -> None:
         """Clear weight cache (keeps file mappings)."""
+        logger.debug("clear_cache called")
         with self._mmap_lock:
             self._weight_cache.clear()
             self._current_cache_bytes = 0
@@ -463,6 +479,7 @@ class MMAPWeightManager:
         Returns:
             Recycled bytearray or None if not available
         """
+        logger.debug("get_recycled_buffer called with size_bytes=%s", size_bytes)
         return self._buffer_recycler.get_buffer(size_bytes)
     
     def return_buffer(self, buffer: bytearray) -> None:
@@ -471,10 +488,12 @@ class MMAPWeightManager:
         Args:
             buffer: Buffer to recycle
         """
+        logger.debug("return_buffer called with buffer=%s", buffer)
         self._buffer_recycler.return_buffer(buffer)
     
     def close(self) -> None:
         """Close all file mappings and release resources."""
+        logger.debug("close called")
         self.clear_cache()
         
         with self._mmap_lock:
@@ -507,6 +526,9 @@ if TYPE_CHECKING:
     import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class CompactionStats:
     """Statistics for memory compaction operations."""
@@ -519,6 +541,7 @@ class CompactionStats:
     avg_compaction_time_ms: float = 0.0
     
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "total_compactions": self.total_compactions,
             "total_bytes_moved_gb": self.total_bytes_moved / (1024**3),
@@ -569,6 +592,7 @@ class MemoryCompactor:
     """
     
     def __init__(self, config: CompactionConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or CompactionConfig()
         self._stats = CompactionStats()
         self._lock = threading.RLock()
@@ -590,6 +614,7 @@ class MemoryCompactor:
         Returns:
             True if compaction should be performed
         """
+        logger.debug("should_compact called with fragmentation_ratio=%s, memory_usage_bytes=%s, max_memory_bytes=%s", fragmentation_ratio, memory_usage_bytes, max_memory_bytes)
         if not self.config.enable_auto_compaction:
             return False
             
@@ -624,6 +649,7 @@ class MemoryCompactor:
         Returns:
             Fragmentation ratio (0.0 = no fragmentation, 1.0 = fully fragmented)
         """
+        logger.debug("calculate_fragmentation called with allocated_blocks=%s, total_memory=%s", allocated_blocks, total_memory)
         if not allocated_blocks or total_memory == 0:
             return 0.0
         
@@ -666,6 +692,7 @@ class MemoryCompactor:
         Returns:
             Tuple of (bytes_moved, bytes_freed)
         """
+        logger.debug("compact_expert_cache called with expert_cache=%s", expert_cache)
         if not self.config.compact_expert_cache or not expert_cache:
             return 0, 0
         
@@ -722,6 +749,7 @@ class MemoryCompactor:
         Returns:
             Tuple of (bytes_moved, bytes_freed)
         """
+        logger.debug("compact_layer_buffers called with layers=%s, layer_stream_order=%s", layers, layer_stream_order)
         if not self.config.compact_layer_buffers:
             return 0, 0
         
@@ -769,6 +797,7 @@ class MemoryCompactor:
         Returns:
             Tuple of (bytes_moved, bytes_freed)
         """
+        logger.debug("compact_buffer_pool called with buffer_pool=%s", buffer_pool)
         if not self.config.compact_buffer_pool:
             return 0, 0
         
@@ -808,6 +837,7 @@ class MemoryCompactor:
         Returns:
             Compaction results dictionary
         """
+        logger.debug("perform_compaction called with memory_manager=%s, expert_cache=%s, layers=%s", memory_manager, expert_cache, layers)
         start_time = time.time()
         total_bytes_moved = 0
         total_bytes_freed = 0
@@ -873,11 +903,13 @@ class MemoryCompactor:
     
     def get_stats(self) -> dict[str, Any]:
         """Get compaction statistics."""
+        logger.debug("get_stats called")
         with self._lock:
             return self._stats.to_dict()
     
     def reset_stats(self) -> None:
         """Reset compaction statistics."""
+        logger.debug("reset_stats called")
         with self._lock:
             self._stats = CompactionStats()
 
@@ -916,6 +948,7 @@ class StreamBuffer:
         Returns byte buffers to the recycler if one was configured,
         otherwise allows normal garbage collection.
         """
+        logger.debug("release called")
         if self._recycled_buffer is not None and self._recycler is not None:
             self._recycler.return_buffer(self._recycled_buffer)
             self._recycled_buffer = None
@@ -932,6 +965,7 @@ class StreamBuffer:
         
     def pin(self) -> None:
         """Pin the tensor memory if available."""
+        logger.debug("pin called")
         if self.tensor is not None and hasattr(self.tensor, 'pin_memory') and not self.tensor.is_pinned():
             try:
                 # Note: pin_memory() copies the tensor to pinned memory
@@ -960,6 +994,7 @@ class StreamBuffer:
         Returns:
             StreamBuffer configured for recycling
         """
+        logger.debug("with_recycler called with name=%s, size_bytes=%s, device=%s", name, size_bytes, device)
         return cls(
             name=name,
             size_bytes=size_bytes,
@@ -1000,6 +1035,7 @@ class ZeroCopyConfig:
     
     def is_zero_copy_available(self) -> bool:
         """Check if zero-copy is available on this system."""
+        logger.debug("is_zero_copy_available called")
         import platform
         if platform.system() == "Darwin" and platform.machine() in ("arm64", "arm64e"):
             return True  # Apple Silicon unified memory
@@ -1078,6 +1114,7 @@ class ZeroCopyTransferManager:
     """
     
     def __init__(self, config: ZeroCopyConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         require_torch("ZeroCopyTransferManager")
         
         self.config = config or ZeroCopyConfig()
@@ -1097,6 +1134,7 @@ class ZeroCopyTransferManager:
     
     def _detect_unified_memory(self) -> bool:
         """Detect if running on unified memory architecture."""
+        logger.debug("_detect_unified_memory called")
         import platform
         return (
             platform.system() == "Darwin" and
@@ -1119,6 +1157,7 @@ class ZeroCopyTransferManager:
         Returns:
             Pinned tensor ready for zero-copy transfer
         """
+        logger.debug("allocate_pinned_buffer called with shape=%s, dtype=%s, device=%s", shape, dtype, device)
         import torch
         
         if not self.config.pin_memory:
@@ -1160,6 +1199,7 @@ class ZeroCopyTransferManager:
     
     def return_pinned_buffer(self, tensor: torch.Tensor) -> None:
         """Return a pinned buffer to the pool for reuse."""
+        logger.debug("return_pinned_buffer called with tensor=%s", tensor)
         if not self.config.pin_memory or not tensor.is_pinned():
             return
         
@@ -1197,6 +1237,7 @@ class ZeroCopyTransferManager:
             Tensor on target device
         """
         
+        logger.debug("zero_copy_transfer called with tensor=%s, target_device=%s, non_blocking=%s", tensor, target_device, non_blocking)
         if non_blocking is None:
             non_blocking = self.config.use_non_blocking
         
@@ -1236,6 +1277,7 @@ class ZeroCopyTransferManager:
         Returns:
             Tensor optimized for zero-copy access
         """
+        logger.debug("create_zero_copy_view called with tensor=%s", tensor)
         if not self._unified_memory or not self.config.use_unified_memory:
             return tensor
         
@@ -1276,6 +1318,7 @@ class ZeroCopyTransferManager:
         Returns:
             Tensor on target device
         """
+        logger.debug("stream_from_mmap called with mmap_buffer=%s, offset=%s, size_bytes=%s", mmap_buffer, offset, size_bytes)
         import torch
         
         # Read from mmap
@@ -1334,6 +1377,7 @@ class ZeroCopyTransferManager:
     
     def synchronize(self) -> None:
         """Synchronize all pending async transfers."""
+        logger.debug("synchronize called")
         import torch
         
         # Synchronize MPS
@@ -1347,6 +1391,7 @@ class ZeroCopyTransferManager:
     
     def get_stats(self) -> dict[str, Any]:
         """Get zero-copy transfer statistics."""
+        logger.debug("get_stats called")
         with self._lock:
             pinned_pool_size = sum(
                 len(pool) for pool in self._pinned_pool.values()
@@ -1362,6 +1407,7 @@ class ZeroCopyTransferManager:
     
     def cleanup(self) -> None:
         """Clean up pinned memory pool."""
+        logger.debug("cleanup called")
         with self._lock:
             self._pinned_pool.clear()
             self._pinned_pool_size = 0
@@ -1378,6 +1424,7 @@ class BandwidthOptimizer:
     """
     
     def __init__(self, config: BandwidthOptimizerConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         require_torch("BandwidthOptimizer")
         
         self.config = config or BandwidthOptimizerConfig()
@@ -1401,6 +1448,7 @@ class BandwidthOptimizer:
     
     def _auto_detect_bandwidth(self) -> None:
         """Auto-detect system bandwidth capabilities."""
+        logger.debug("_auto_detect_bandwidth called")
         import torch
         
         # Detect platform-specific bandwidth characteristics
@@ -1436,6 +1484,7 @@ class BandwidthOptimizer:
         Returns:
             Optimal chunk size in bytes
         """
+        logger.debug("get_optimal_chunk_size called with transfer_type=%s", transfer_type)
         if transfer_type == "cpu_to_gpu":
             return int(self.config.cpu_to_gpu_chunk_mb * 1024 * 1024)
         elif transfer_type == "disk_to_cpu":
@@ -1452,6 +1501,7 @@ class BandwidthOptimizer:
         source: str,
     ) -> None:
         """Profile a transfer for adaptive optimization."""
+        logger.debug("profile_transfer called with size_bytes=%s, duration_seconds=%s, source=%s", size_bytes, duration_seconds, source)
         if not self.config.enable_bandwidth_profiling:
             return
             
@@ -1475,6 +1525,7 @@ class BandwidthOptimizer:
     
     def _adapt_chunk_sizes(self) -> None:
         """Adapt chunk sizes based on profiling data."""
+        logger.debug("_adapt_chunk_sizes called")
         if not self._metrics:
             return
             
@@ -1507,6 +1558,7 @@ class BandwidthOptimizer:
         Returns:
             Pooled tensor or None if not available
         """
+        logger.debug("get_pooled_buffer called with size_bytes=%s, device=%s", size_bytes, device)
         if not self.config.enable_memory_pooling:
             return None
             
@@ -1524,6 +1576,7 @@ class BandwidthOptimizer:
     
     def return_pooled_buffer(self, tensor: torch.Tensor) -> None:
         """Return a buffer to the memory pool for reuse."""
+        logger.debug("return_pooled_buffer called with tensor=%s", tensor)
         if not self.config.enable_memory_pooling:
             return
             
@@ -1556,6 +1609,7 @@ class BandwidthOptimizer:
         """
         
         # Check for pooled buffer
+        logger.debug("create_optimized_transfer called with data=%s, target_device=%s, non_blocking=%s", data, target_device, non_blocking)
         size_bytes = data.numel() * data.element_size()
         pooled = self.get_pooled_buffer(size_bytes, target_device)
         
@@ -1580,10 +1634,12 @@ class BandwidthOptimizer:
     
     def _is_unified_memory(self) -> bool:
         """Check if running on unified memory architecture."""
+        logger.debug("_is_unified_memory called")
         return platform.system() == "Darwin" and platform.machine() in ("arm64", "arm64e")
     
     def get_bandwidth_stats(self) -> dict[str, Any]:
         """Get bandwidth optimization statistics."""
+        logger.debug("get_bandwidth_stats called")
         with self._lock:
             if not self._metrics:
                 return {
@@ -1607,11 +1663,13 @@ class BandwidthOptimizer:
     
     def clear_metrics(self) -> None:
         """Clear profiling metrics."""
+        logger.debug("clear_metrics called")
         with self._lock:
             self._metrics.clear()
     
     def cleanup(self) -> None:
         """Clean up memory pools and resources."""
+        logger.debug("cleanup called")
         with self._pool_lock:
             self._memory_pools.clear()
         self.clear_metrics()
@@ -1638,6 +1696,7 @@ class MemoryStats:
     unified_memory_enabled: bool
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "max_memory_gb": self.max_memory_gb,
             "gpu_used_gb": self.gpu_used_gb,
@@ -1684,6 +1743,7 @@ class GhostEntry:
     
     def should_readmit(self, current_time: float, current_access_count: int) -> bool:
         """Determine if this expert should be immediately readmitted to cache."""
+        logger.debug("should_readmit called with current_time=%s, current_access_count=%s", current_time, current_access_count)
         time_since_eviction = current_time - self.evicted_at
         # Quick re-access indicates high value - readmit immediately
         return time_since_eviction < 5.0  # 5 second window
@@ -1697,12 +1757,14 @@ class AccessPattern:
     
     def add_access(self, layer_idx: int, expert_idx: int) -> None:
         """Record an expert access."""
+        logger.debug("add_access called with layer_idx=%s, expert_idx=%s", layer_idx, expert_idx)
         self.recent_accesses.append((layer_idx, expert_idx))
         if len(self.recent_accesses) > self.pattern_window:
             self.recent_accesses.pop(0)
     
     def predict_next(self) -> list[tuple[int, int]]:
         """Predict which experts will be accessed next based on patterns."""
+        logger.debug("predict_next called")
         if len(self.recent_accesses) < 2:
             return []
         
@@ -1748,6 +1810,7 @@ class CachedExpert:
     
     def update_access(self) -> None:
         """Update access statistics on cache hit with optimized decay."""
+        logger.debug("update_access called")
         now = time.time()
         time_delta = now - self.last_access_time
         
@@ -1781,6 +1844,7 @@ class CachedExpert:
         Optimized: Uses score caching for O(1) repeated lookups within 100ms window.
         """
         # Optimized: Return cached score if still valid (within 100ms)
+        logger.debug("compute_score called with policy=%s, current_time=%s, hot_expert_boost=%s", policy, current_time, hot_expert_boost)
         if (self._cached_score is not None and
             current_time - self._score_timestamp < 0.1):
             return self._cached_score
@@ -1832,6 +1896,7 @@ class CachedExpert:
         Optimized: Uses reuse distance statistics to predict future access patterns.
         Higher return value = more likely to be accessed soon.
         """
+        logger.debug("estimate_future_access called with horizon_ms=%s", horizon_ms)
         if self.access_count == 0 or self.avg_reuse_distance_ms == 0:
             return 0.5  # Unknown - default to moderate probability
         
@@ -1851,6 +1916,7 @@ class CachedExpert:
         Considers: frequency, load time cost, and access predictability.
         """
         # Base value from access frequency
+        logger.debug("get_value_score called")
         freq_value = self.access_frequency
         
         # Load time value (amortized cost)
@@ -1924,6 +1990,7 @@ class OptimizedExpertCache:
     """
     
     def __init__(self, config: ExpertCacheConfig) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self._cache: dict[tuple[int, int], CachedExpert] = {}
         # Min-heap: (score, sequence, key) - sequence ensures stable ordering
@@ -1944,6 +2011,7 @@ class OptimizedExpertCache:
     
     def get(self, key: tuple[int, int], default: Any = None) -> CachedExpert | Any:
         """Get expert from cache. Optimized: O(1) lookup."""
+        logger.debug("get called with key=%s, default=%s", key, default)
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
@@ -1960,6 +2028,7 @@ class OptimizedExpertCache:
     
     def put(self, key: tuple[int, int], expert: CachedExpert) -> None:
         """Add expert to cache. Optimized: O(log n) insertion."""
+        logger.debug("put called with key=%s, expert=%s", key, expert)
         with self._lock:
             # Check if already exists (update case)
             if key in self._cache:
@@ -2000,15 +2069,19 @@ class OptimizedExpertCache:
         return iter(self._cache)
 
     def items(self):
+        logger.debug("items called")
         return self._cache.items()
 
     def values(self):
+        logger.debug("values called")
         return self._cache.values()
 
     def keys(self):
+        logger.debug("keys called")
         return self._cache.keys()
 
     def pop(self, key: tuple[int, int], default: Any = ...):
+        logger.debug("pop called with key=%s, default=%s", key, default)
         with self._lock:
             if key in self._cache:
                 val = self._cache.pop(key)
@@ -2018,12 +2091,14 @@ class OptimizedExpertCache:
             raise KeyError(key)
 
     def update(self, other: dict[tuple[int, int], CachedExpert]) -> None:
+        logger.debug("update called with other=%s", other)
         with self._lock:
             for k, v in other.items():
                 self.put(k, v)
     
     def evict_if_needed(self, required_bytes: int, current_memory: int) -> list[tuple[tuple[int, int], CachedExpert]]:
         """Evict experts to make room. Optimized: O(k log n) for k evictions."""
+        logger.debug("evict_if_needed called with required_bytes=%s, current_memory=%s", required_bytes, current_memory)
         evicted: list[tuple[tuple[int, int], CachedExpert]] = []
         max_memory = self.config.max_memory_bytes
         
@@ -2047,6 +2122,7 @@ class OptimizedExpertCache:
     
     def _evict_one(self) -> tuple[tuple[int, int], CachedExpert] | None:
         """Evict single expert using heap. O(log n)."""
+        logger.debug("_evict_one called")
         current_time = time.time()
         
         # Find valid entry from heap (lazy deletion)
@@ -2080,6 +2156,7 @@ class OptimizedExpertCache:
     
     def get_stats(self) -> dict[str, Any]:
         """Get cache statistics."""
+        logger.debug("get_stats called")
         with self._lock:
             total_accesses = self._hits + self._misses
             hit_rate = self._hits / total_accesses if total_accesses > 0 else 0.0
@@ -2099,6 +2176,7 @@ class OptimizedExpertCache:
     def should_admit(self, key: tuple[int, int], load_time_ms: float,
                      ghost_hit: bool = False) -> bool:
         """Smart admission control with value-based decision."""
+        logger.debug("should_admit called with key=%s, load_time_ms=%s, ghost_hit=%s", key, load_time_ms, ghost_hit)
         if ghost_hit:
             self._ghost_hits += 1
             return True
@@ -2128,6 +2206,7 @@ class OptimizedExpertCache:
     
     def detect_workload(self) -> str:
         """Detect access pattern for adaptive optimization."""
+        logger.info("detect_workload called")
         with self._lock:
             if len(self._access_times) < 5:
                 return "unknown"
@@ -2159,6 +2238,7 @@ class OptimizedExpertCache:
     
     def clear(self) -> list[CachedExpert]:
         """Clear all entries and return evicted experts."""
+        logger.debug("clear called")
         with self._lock:
             evicted = list(self._cache.values())
             self._cache.clear()
@@ -2172,10 +2252,12 @@ class OptimizedExpertCache:
         return len(self._cache)
     
     def values(self):
+        logger.debug("values called")
         return self._cache.values()
     
     def get_eviction_candidate(self) -> tuple[int, int] | None:
         """Peek at next eviction candidate without removing."""
+        logger.debug("get_eviction_candidate called")
         with self._lock:
             current_time = time.time()
             
@@ -2206,6 +2288,7 @@ class WeightStreamer:
         config: WeightStreamConfig | None = None,
         device: str = "mps",
     ) -> None:
+        logger.debug("initializing %s with model_path=%s, config=%s, device=%s", type(self).__name__, model_path, config, device)
         require_torch("WeightStreamer")
         import torch
         
@@ -2258,6 +2341,7 @@ class WeightStreamer:
             Tensor loaded to target device
         """
         
+        logger.debug("stream_weight called with weight_name=%s, shard_path=%s, offset=%s", weight_name, shard_path, offset)
         with self._lock:
             # Check cache first
             if weight_name in self._stream_buffer:
@@ -2288,6 +2372,7 @@ class WeightStreamer:
         shape: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Load tensor using memory-mapped I/O with zero-copy optimization."""
+        logger.info("_mmap_load called with shard_path=%s, offset=%s, size_bytes=%s, dtype=%s", shard_path, offset, size_bytes, dtype)
         import torch
         
         # Optimize: Allocate tensor first (pinned if requested)
@@ -2365,6 +2450,7 @@ class WeightStreamer:
             weight_names: List of weight names to prefetch
             shard_info: Dict mapping weight names to (shard_path, offset, size) tuples
         """
+        logger.debug("prefetch_weights called with weight_names=%s, shard_info=%s", weight_names, shard_info)
         if not self.config.enable_prefetch:
             return
             
@@ -2395,6 +2481,7 @@ class WeightStreamer:
     ) -> None:
         """Preload weight into stream buffer (background task)."""
         
+        logger.info("_preload_weight called with weight_name=%s, shard_path=%s, offset=%s, size_bytes=%s", weight_name, shard_path, offset, size_bytes)
         try:
             with self._lock:
                 if weight_name in self._stream_buffer:
@@ -2413,6 +2500,7 @@ class WeightStreamer:
     def _cache_weight(self, weight_name: str, tensor: torch.Tensor) -> None:
         """Cache a loaded weight with heap-based LRU eviction."""
         
+        logger.debug("_cache_weight called with weight_name=%s, tensor=%s", weight_name, tensor)
         with self._lock:
             size_bytes = tensor.numel() * tensor.element_size()
             
@@ -2445,6 +2533,7 @@ class WeightStreamer:
     
     def _evict_lru(self) -> None:
         """Evict least recently used weight from cache."""
+        logger.debug("_evict_lru called")
         if not self._stream_buffer:
             return
             
@@ -2460,6 +2549,7 @@ class WeightStreamer:
         Uses the min-heap to efficiently find and evict the least recently
         used weight buffer when memory pressure is high.
         """
+        logger.debug("_heap_lru_evict called")
         with self._lock:
             while self._heap_lru:
                 # Get oldest entry from heap
@@ -2475,6 +2565,7 @@ class WeightStreamer:
     
     def _update_access(self, weight_name: str) -> None:
         """Update access tracking for eviction policy."""
+        logger.debug("_update_access called with weight_name=%s", weight_name)
         self._stream_buffer.move_to_end(weight_name)
         self._access_count[weight_name] = self._access_count.get(weight_name, 0) + 1
     
@@ -2485,6 +2576,7 @@ class WeightStreamer:
         shape: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Convert buffer back to tensor (placeholder for actual reconstruction)."""
+        logger.debug("_buffer_to_tensor called with buffer=%s, dtype=%s, shape=%s", buffer, dtype, shape)
         if buffer.tensor is not None:
             return buffer.tensor
             
@@ -2498,6 +2590,7 @@ class WeightStreamer:
         Returns:
             True if weight was found and evicted
         """
+        logger.debug("evict_weight called with weight_name=%s", weight_name)
         with self._lock:
             if weight_name not in self._stream_buffer:
                 return False
@@ -2510,6 +2603,7 @@ class WeightStreamer:
     
     def clear_cache(self) -> None:
         """Clear all cached weights."""
+        logger.debug("clear_cache called")
         with self._lock:
             for buffer in self._stream_buffer.values():
                 buffer.release()
@@ -2524,6 +2618,7 @@ class WeightStreamer:
     
     def get_stream_stats(self) -> dict[str, Any]:
         """Get streaming statistics."""
+        logger.debug("get_stream_stats called")
         with self._lock:
             return {
                 "cached_weights": len(self._stream_buffer),
@@ -2535,6 +2630,7 @@ class WeightStreamer:
     
     def _calculate_hit_rate(self) -> float:
         """Calculate cache hit rate."""
+        logger.debug("_calculate_hit_rate called")
         if not self._access_count:
             return 0.0
         hits = sum(1 for count in self._access_count.values() if count > 1)
@@ -2542,6 +2638,7 @@ class WeightStreamer:
     
     def shutdown(self) -> None:
         """Shutdown the streamer and release resources."""
+        logger.debug("shutdown called")
         self.clear_cache()
         self._executor.shutdown(wait=True)
 
@@ -2578,6 +2675,7 @@ class MMFP4MemoryManager:
         zero_copy_config: ZeroCopyConfig | None = None,
         enable_zero_copy: bool = True,
     ) -> None:
+        logger.debug("initializing %s with model_path=%s, max_memory_gb=%s", type(self).__name__, model_path, max_memory_gb)
         require_torch("MMFP4MemoryManager")
         import torch
 
@@ -2708,10 +2806,12 @@ class MMFP4MemoryManager:
         }
 
     def _has_unified_memory(self) -> bool:
+        logger.debug("_has_unified_memory called")
         return platform.system() == "Darwin" and platform.machine() in ("arm64", "arm64e")
 
     def _initialize_metadata(self) -> None:
         # Default sizes if loader is not available
+        logger.debug("_initialize_metadata called")
         avg_layer_size = int(0.5 * 1024**3) # 500MB
         
         for idx in range(self._num_layers):
@@ -2726,6 +2826,7 @@ class MMFP4MemoryManager:
     
     def _init_weight_prefetcher(self) -> None:
         """Initialize weight prefetcher for optimized loading."""
+        logger.debug("_init_weight_prefetcher called")
         if not self._enable_weight_prefetch or self._loader is None:
             return
         
@@ -2755,6 +2856,7 @@ class MMFP4MemoryManager:
         Returns:
             WeightPrefetcher if enabled, None otherwise
         """
+        logger.debug("get_weight_prefetcher called")
         return self._weight_prefetcher
     
     def prefetch_weights(self, tensor_names: list[str]) -> None:
@@ -2763,6 +2865,7 @@ class MMFP4MemoryManager:
         Args:
             tensor_names: List of tensor names to prefetch
         """
+        logger.debug("prefetch_weights called with tensor_names=%s", tensor_names)
         if self._weight_prefetcher is not None:
             self._weight_prefetcher.prefetch(tensor_names)
     
@@ -2772,17 +2875,20 @@ class MMFP4MemoryManager:
         Args:
             layer_idx: Layer index to prefetch
         """
+        logger.debug("prefetch_layer_weights called with layer_idx=%s", layer_idx)
         if self._weight_prefetcher is not None:
             self._weight_prefetcher.prefetch_layer(layer_idx)
     
     def get_prefetch_stats(self) -> dict[str, Any]:
         """Get weight prefetching statistics."""
+        logger.debug("get_prefetch_stats called")
         if self._weight_prefetcher is not None:
             return self._weight_prefetcher.get_stats()
         return {"enabled": False}
     
     def clear_prefetch_cache(self) -> None:
         """Clear the weight prefetch cache."""
+        logger.debug("clear_prefetch_cache called")
         if self._weight_prefetcher is not None:
             self._weight_prefetcher.clear_cache()
 
@@ -2793,6 +2899,7 @@ class MMFP4MemoryManager:
         Only affects weights currently in CPU memory.
         """
         # Pin layer weights using per-layer locks for better concurrency
+        logger.debug("pin_weights called")
         for idx, meta in self._layers.items():
             with self._per_layer_locks[idx]:
                 if meta.is_loaded and meta.weights:
@@ -2843,6 +2950,7 @@ class MMFP4MemoryManager:
         """
         
         # Fast path: already on target device - return as-is (no copy)
+        logger.debug("_zero_copy called with tensor=%s", tensor)
         if str(tensor.device) == str(self._device):
             return tensor
         
@@ -2893,6 +3001,7 @@ class MMFP4MemoryManager:
         Returns:
             Pinned/unified memory buffer ready for zero-copy transfer
         """
+        logger.debug("allocate_zero_copy_buffer called with shape=%s, dtype=%s", shape, dtype)
         import torch
         
         if dtype is None:
@@ -2915,15 +3024,18 @@ class MMFP4MemoryManager:
         Returns:
             Tensor optimized for zero-copy access
         """
+        logger.debug("create_zero_copy_view called with tensor=%s", tensor)
         if self._zero_copy_manager is not None:
             return self._zero_copy_manager.create_zero_copy_view(tensor)
         return tensor
 
     def load_layer_async(self, layer_idx: int) -> Future[dict]:
         """Asynchronously load a layer into GPU memory."""
+        logger.info("load_layer_async called with layer_idx=%s", layer_idx)
         return self._executor.submit(self._load_layer_impl, layer_idx)
 
     def _load_layer_impl(self, layer_idx: int) -> dict:
+        logger.info("_load_layer_impl called with layer_idx=%s", layer_idx)
         import torch
         
         if layer_idx not in self._per_layer_locks:
@@ -2976,6 +3088,7 @@ class MMFP4MemoryManager:
             return {"layer_idx": layer_idx, "weights": weights, "status": "loaded"}
 
     def _prefetch_next(self, current_idx: int) -> None:
+        logger.debug("_prefetch_next called with current_idx=%s", current_idx)
         for i in range(1, self._prefetch_window + 1):
             next_idx = current_idx + i
             if next_idx < self._num_layers and next_idx not in self._prefetch_futures:
@@ -2983,11 +3096,13 @@ class MMFP4MemoryManager:
 
     def _get_expert_from_cache(self, key: tuple[int, int]) -> CachedExpert | None:
         """Get expert from cache with minimal lock holding."""
+        logger.debug("_get_expert_from_cache called with key=%s", key)
         with self._lock:
             return self._expert_weight_cache.get(key)
     
     def _update_expert_access_metadata(self, key: tuple[int, int], cached: CachedExpert) -> None:
         """Update expert access metadata under lock."""
+        logger.debug("_update_expert_access_metadata called with key=%s, cached=%s", key, cached)
         with self._lock:
             cached.update_access()
             if key in self._experts:
@@ -3013,6 +3128,7 @@ class MMFP4MemoryManager:
         - Minimizes global lock holding to only metadata updates
         - Double-checked locking pattern for cache hits
         """
+        logger.debug("get_expert_weights called with layer_idx=%s, expert_idx=%s", layer_idx, expert_idx)
         key = (layer_idx, expert_idx)
         config = self._expert_cache_config
         
@@ -3132,6 +3248,7 @@ class MMFP4MemoryManager:
         
         Optimized with batch eviction to reduce lock contention.
         """
+        logger.debug("_evict_experts_if_needed called with required_bytes=%s", required_bytes)
         config = self._expert_cache_config
         
         # Use OptimizedExpertCache's efficient heap-based eviction
@@ -3160,11 +3277,13 @@ class MMFP4MemoryManager:
         """
         # Delegate to OptimizedExpertCache's efficient heap-based candidate selection
         # This provides O(1) peek vs O(n) for manual scanning
+        logger.debug("_select_eviction_candidate called with current_time=%s", current_time)
         return self._expert_weight_cache.get_eviction_candidate()
     
     def _add_ghost_entry(self, key: tuple[int, int], evicted: CachedExpert,
                          current_time: float) -> None:
         """Add a ghost entry for ARC-style admission control."""
+        logger.debug("_add_ghost_entry called with key=%s, evicted=%s, current_time=%s", key, evicted, current_time)
         config = self._expert_cache_config
         
         ghost = GhostEntry(
@@ -3187,6 +3306,7 @@ class MMFP4MemoryManager:
         Uses OptimizedExpertCache's heap-based O(log n) eviction and maintains 
         ghost entries for ARC-style admission control.
         """
+        logger.debug("_evict_one_expert called with current_time=%s", current_time)
         config = self._expert_cache_config
         
         # Use OptimizedExpertCache's efficient heap-based eviction
@@ -3223,6 +3343,7 @@ class MMFP4MemoryManager:
         Prefetches experts in the same layer (next index) and potentially
         the same expert in the next layer for MoE routing patterns.
         """
+        logger.debug("_prefetch_adjacent_experts called with layer_idx=%s, expert_idx=%s", layer_idx, expert_idx)
         config = self._expert_cache_config
         if not config.enable_prefetch:
             return
@@ -3258,6 +3379,7 @@ class MMFP4MemoryManager:
         Uses access pattern history to predict which experts will be needed
         next and prefetches them in advance to reduce latency.
         """
+        logger.debug("_prefetch_predicted_experts called")
         config = self._expert_cache_config
         if not config.enable_predictive_prefetch:
             return
@@ -3294,6 +3416,7 @@ class MMFP4MemoryManager:
         - Uses per-layer lock for loading
         - Minimizes global lock to only cache metadata updates
         """
+        logger.debug("_prefetch_expert_task called with layer_idx=%s, expert_idx=%s", layer_idx, expert_idx)
         key = (layer_idx, expert_idx)
         
         with self._lock:
@@ -3333,6 +3456,7 @@ class MMFP4MemoryManager:
 
     def _load_expert_impl(self, layer_idx: int, expert_idx: int) -> dict[str, Any]:
         """Load expert weights from disk or storage."""
+        logger.info("_load_expert_impl called with layer_idx=%s, expert_idx=%s", layer_idx, expert_idx)
         import torch
         # Simulated or real load
         if self._loader and hasattr(self._loader, "load_expert"):
@@ -3355,6 +3479,7 @@ class MMFP4MemoryManager:
         even if not currently active (based on frequency and size).
         Leverages OptimizedExpertCache's heap for efficient candidate selection.
         """
+        logger.debug("evict_inactive_experts called with active_experts=%s", active_experts)
         with self._lock:
             if self._num_experts_per_layer == 0:
                 return
@@ -3412,6 +3537,7 @@ class MMFP4MemoryManager:
 
     def compress_kv_cache(self, layer_idx: int, head_idx: int, kv: torch.Tensor) -> torch.Tensor:
         """Compress KV cache using MLA's 8x compression strategy."""
+        logger.debug("compress_kv_cache called with layer_idx=%s, head_idx=%s, kv=%s", layer_idx, head_idx, kv)
         if self._kv_compression_ratio <= 1:
             return kv
         
@@ -3425,6 +3551,7 @@ class MMFP4MemoryManager:
 
     def checkpoint_activation(self, layer_idx: int, activation: torch.Tensor) -> None:
         """Store activation for recomputation during prefill."""
+        logger.debug("checkpoint_activation called with layer_idx=%s, activation=%s", layer_idx, activation)
         if not self._activation_checkpointing:
             return
         self._activations[layer_idx] = activation.detach()
@@ -3443,6 +3570,7 @@ class MMFP4MemoryManager:
         Returns:
             Tensor buffer ready for use
         """
+        logger.debug("get_buffer called with size_bytes=%s, dtype=%s", size_bytes, dtype)
         return self._buffer_pool.acquire(size_bytes, self._device, dtype)
 
     def release_buffer(self, buffer: torch.Tensor, skip_pool: bool = False) -> None:
@@ -3452,6 +3580,7 @@ class MMFP4MemoryManager:
             buffer: Buffer to return to pool
             skip_pool: If True, don't pool and let GC collect (for large buffers)
         """
+        logger.debug("release_buffer called with buffer=%s, skip_pool=%s", buffer, skip_pool)
         self._buffer_pool.release(buffer, skip_pool)
 
     def get_buffer_pool_stats(self) -> dict:
@@ -3461,10 +3590,12 @@ class MMFP4MemoryManager:
             Dict with pool metrics including hit rate, utilization,
             tier breakdowns, and eviction counts.
         """
+        logger.debug("get_buffer_pool_stats called")
         return self._buffer_pool.get_stats()
 
     def get_memory_stats(self) -> dict:
         """Return current memory usage breakdown."""
+        logger.debug("get_memory_stats called")
         return MemoryStats(
             max_memory_gb=self._max_memory_bytes / 1024**3,
             gpu_used_gb=self._gpu_memory_used / 1024**3,
@@ -3478,12 +3609,14 @@ class MMFP4MemoryManager:
 
     def get_bandwidth_stats(self) -> dict[str, Any]:
         """Get bandwidth optimization statistics."""
+        logger.debug("get_bandwidth_stats called")
         if self._bandwidth_optimizer:
             return self._bandwidth_optimizer.get_bandwidth_stats()
         return {"bandwidth_opt_enabled": False}
 
     def _optimized_transfer(self, tensor: torch.Tensor, target_device: str) -> torch.Tensor:
         """Transfer tensor with bandwidth optimization."""
+        logger.debug("_optimized_transfer called with tensor=%s, target_device=%s", tensor, target_device)
         if self._bandwidth_optimizer:
             return self._bandwidth_optimizer.create_optimized_transfer(tensor, target_device)
         return tensor.to(target_device)
@@ -3506,6 +3639,7 @@ class MMFP4MemoryManager:
         Returns:
             Dictionary of weight tensors for the layer
         """
+        logger.debug("stream_layer_from_disk called with layer_idx=%s", layer_idx)
         import torch
         
         if layer_idx not in self._per_layer_locks:
@@ -3546,6 +3680,7 @@ class MMFP4MemoryManager:
     
     def _stream_layer_weights(self, layer_idx: int) -> dict[str, torch.Tensor]:
         """Internal method to stream layer weights using shard metadata."""
+        logger.debug("_stream_layer_weights called with layer_idx=%s", layer_idx)
         import torch
         
         weights = {}
@@ -3616,6 +3751,7 @@ class MMFP4MemoryManager:
         Returns:
             True if layer was found and unloaded
         """
+        logger.info("unload_streamed_layer called with layer_idx=%s", layer_idx)
         if layer_idx not in self._per_layer_locks:
             return False
 
@@ -3656,6 +3792,7 @@ class MMFP4MemoryManager:
         Analyzes current memory usage and adjusts streaming cache size,
         prefetch window, and eviction policy for optimal performance.
         """
+        logger.debug("optimize_streaming_for_inference called")
         with self._lock:
             if not self._weight_streamer:
                 return
@@ -3682,6 +3819,7 @@ class MMFP4MemoryManager:
     
     def get_streaming_stats(self) -> dict[str, Any]:
         """Get weight streaming statistics."""
+        logger.debug("get_streaming_stats called")
         stats = {
             "streaming_enabled": self._enable_weight_streaming,
             "streamed_layers": len(self._streamed_layers),
@@ -3719,6 +3857,7 @@ class MMFP4MemoryManager:
                 - cache_hit_rate: Weight streamer cache hit rate
                 - streaming_time_ms: Total time for streaming operation
         """
+        logger.debug("_weight_streaming called with layer_indices=%s", layer_indices)
         start_time = time.time()
         loaded_layers: list[int] = []
         failed_layers: list[int] = []
@@ -3808,6 +3947,7 @@ class MMFP4MemoryManager:
         Returns:
             Amount of memory freed in bytes
         """
+        logger.debug("_evict_for_memory called with required_bytes=%s", required_bytes)
         freed_bytes = 0
         target_free = required_bytes * 1.1  # 10% buffer
         
@@ -3841,6 +3981,7 @@ class MMFP4MemoryManager:
         Returns:
             Dict with actions taken and memory freed
         """
+        logger.debug("_memory_pressure called with pressure_level=%s", pressure_level)
         import torch
         
         actions_taken: list[str] = []
@@ -4043,6 +4184,7 @@ class MMFP4MemoryManager:
         Returns:
             Dictionary with compaction results
         """
+        logger.debug("compact_memory called with force=%s", force)
         if not force:
             # Check if we should compact based on fragmentation
             fragmentation = self.calculate_fragmentation()
@@ -4075,6 +4217,7 @@ class MMFP4MemoryManager:
         Returns:
             Fragmentation ratio (0.0 = no fragmentation, 1.0 = fully fragmented)
         """
+        logger.debug("calculate_fragmentation called")
         allocated_blocks: list[tuple[int, int]] = []
         current_offset = 0
         
@@ -4102,6 +4245,7 @@ class MMFP4MemoryManager:
     
     def get_compaction_stats(self) -> dict[str, Any]:
         """Get memory compaction statistics."""
+        logger.debug("get_compaction_stats called")
         stats = self._memory_compactor.get_stats()
         stats["current_fragmentation"] = self.calculate_fragmentation()
         stats["auto_compaction_enabled"] = self._compaction_config.enable_auto_compaction
@@ -4113,11 +4257,13 @@ class MMFP4MemoryManager:
         Args:
             config: New compaction configuration
         """
+        logger.info("configure_compaction starting")
         self._compaction_config = config
         self._memory_compactor.config = config
     
     def get_zero_copy_stats(self) -> dict[str, Any]:
         """Get zero-copy transfer statistics."""
+        logger.debug("get_zero_copy_stats called")
         if self._zero_copy_manager:
             stats = self._zero_copy_manager.get_stats()
             stats["zero_copy_enabled"] = self._enable_zero_copy
@@ -4130,6 +4276,7 @@ class MMFP4MemoryManager:
     
     def synchronize_zero_copy(self) -> None:
         """Synchronize all pending zero-copy transfers."""
+        logger.debug("synchronize_zero_copy called")
         if self._zero_copy_manager:
             self._zero_copy_manager.synchronize()
         else:
@@ -4141,6 +4288,7 @@ class MMFP4MemoryManager:
                 torch.cuda.synchronize()
     
     def cleanup(self) -> None:
+        logger.debug("cleanup called")
         if self._weight_streamer:
             self._weight_streamer.shutdown()
             self._weight_streamer = None

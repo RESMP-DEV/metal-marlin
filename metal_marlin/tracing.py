@@ -5,11 +5,15 @@ Output chrome://tracing JSON format.
 """
 
 import json
+import logging
 import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 _ENABLED = os.getenv("MM_TRACE") == "1"
 _EVENTS: list[dict[str, Any]] = []
@@ -18,6 +22,7 @@ _START_TIME = time.perf_counter()
 
 def _timestamp_us() -> int:
     """Get timestamp in microseconds since tracing started."""
+    logger.debug("_timestamp_us called")
     return int((time.perf_counter() - _START_TIME) * 1_000_000)
 
 
@@ -39,6 +44,7 @@ def record_event(
         dur: Duration in microseconds (for 'X' phase)
         args: Additional metadata
     """
+    logger.debug("record_event called with name=%s, cat=%s, ph=%s", name, cat, ph)
     if not _ENABLED:
         return
 
@@ -68,6 +74,7 @@ def trace_scope(name: str, cat: str = "cpu", **args: Any):
         with trace_scope("matmul", cat="kernel", M=4096, N=4096):
             kernel.launch()
     """
+    logger.debug("trace_scope called with name=%s, cat=%s", name, cat)
     if not _ENABLED:
         yield
         return
@@ -86,6 +93,7 @@ def trace_kernel(name: str, **args: Any):
     Example:
         trace_kernel("marlin_kernel", M=4096, N=4096, K=4096)
     """
+    logger.debug("trace_kernel called with name=%s", name)
     record_event(name, "kernel", "i", args=args or None)
 
 
@@ -95,6 +103,7 @@ def trace_instant(name: str, cat: str = "cpu", **args: Any):
     Example:
         trace_instant("checkpoint", cat="memory", bytes=1024)
     """
+    logger.debug("trace_instant called with name=%s, cat=%s", name, cat)
     record_event(name, cat, "i", args=args or None)
 
 
@@ -104,6 +113,7 @@ def write_trace(output_path: str | None = None) -> None:
     Args:
         output_path: Output file path (default: trace_<timestamp>.json)
     """
+    logger.info("write_trace called with output_path=%s", output_path)
     if not _ENABLED or not _EVENTS:
         return
 
@@ -130,6 +140,7 @@ def write_trace(output_path: str | None = None) -> None:
 
 def clear_trace() -> None:
     """Clear all recorded events."""
+    logger.debug("clear_trace called")
     global _EVENTS, _START_TIME
     _EVENTS.clear()
     _START_TIME = time.perf_counter()
@@ -137,4 +148,5 @@ def clear_trace() -> None:
 
 def is_enabled() -> bool:
     """Check if tracing is enabled."""
+    logger.debug("is_enabled called")
     return _ENABLED

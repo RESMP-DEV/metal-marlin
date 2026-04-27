@@ -3,6 +3,7 @@
 This namespace intentionally exports only the active MoE routing and grouping
 surface. Retired experiments live in Git history rather than runtime shims.
 """
+import logging
 
 from metal_marlin.moe.gpu_grouping import (
     GPUExpertGrouping,
@@ -25,6 +26,9 @@ from metal_marlin.moe_dispatch import (
     group_tokens_by_expert_gpu,
     scatter_expert_outputs,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "FusedMoEDispatcher",

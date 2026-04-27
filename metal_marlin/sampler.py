@@ -31,6 +31,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -48,6 +49,9 @@ from .metal_dispatch import (
 if TYPE_CHECKING:
     import torch as torch_typing
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SamplingConfig:
@@ -85,6 +89,7 @@ class MetalSampler:
             lib: Optional MetalKernelLibrary. If None, uses the default library.
             seed: Random seed for sampling. If None, uses current time.
         """
+        logger.debug("initializing %s with vocab_size=%s, lib=%s, seed=%s", type(self).__name__, vocab_size, lib, seed)
         require_metal()
         require_mps()
 
@@ -100,6 +105,7 @@ class MetalSampler:
 
     def _get_seed(self) -> int:
         """Get and increment the random seed."""
+        logger.debug("_get_seed called")
         seed = self._seed
         self._seed = (self._seed + 1) % (2**63)
         return seed
@@ -113,6 +119,7 @@ class MetalSampler:
         Returns:
             Token ID with maximum logit value
         """
+        logger.debug("argmax called with logits=%s", logits)
         require_mps()
 
         # Ensure correct shape
@@ -176,6 +183,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample_categorical called with logits=%s, temperature=%s", logits, temperature)
         require_mps()
 
         # Ensure correct shape
@@ -242,6 +250,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample_top_k called with logits=%s, k=%s, temperature=%s", logits, k, temperature)
         require_mps()
 
         if logits.dim() == 1:
@@ -305,6 +314,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample_top_p called with logits=%s, p=%s, temperature=%s", logits, p, temperature)
         require_mps()
 
         if logits.dim() == 1:
@@ -376,6 +386,7 @@ class MetalSampler:
         Returns:
             Modified logits tensor (same object, modified in-place)
         """
+        logger.debug("apply_repetition_penalty called with logits=%s, generated_ids=%s, penalty=%s", logits, generated_ids, penalty)
         if penalty == 1.0 or not generated_ids:
             return logits
 
@@ -459,6 +470,7 @@ class MetalSampler:
         Returns:
             Sampled token ID
         """
+        logger.debug("sample called with logits=%s, temperature=%s, top_p=%s", logits, temperature, top_p)
         require_mps()
 
         # Make a copy to avoid modifying the original
@@ -503,6 +515,7 @@ def sample_next_token(
     Returns:
         Sampled token ID
     """
+    logger.debug("sample_next_token called with logits=%s, config=%s, generated_ids=%s", logits, config, generated_ids)
     if config is None:
         config = SamplingConfig()
 

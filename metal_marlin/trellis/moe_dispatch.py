@@ -80,11 +80,13 @@ _mixed_bpw_last_fallback: dict[str, Any] | None = None
 
 def get_mixed_bpw_grouping_fallback_counters() -> dict[str, int]:
     """Return mixed-BPW token-grouping fallback counters."""
+    logger.debug("get_mixed_bpw_grouping_fallback_counters called")
     return _mixed_bpw_grouping_counters.copy()
 
 
 def get_mixed_bpw_grouping_fallback_diagnostics() -> dict[str, Any]:
     """Return counters plus the last reason-coded CPU fallback event."""
+    logger.debug("get_mixed_bpw_grouping_fallback_diagnostics called")
     diagnostics: dict[str, Any] = {"counters": get_mixed_bpw_grouping_fallback_counters()}
     if _mixed_bpw_last_fallback is not None:
         diagnostics["last_fallback"] = _mixed_bpw_last_fallback.copy()
@@ -93,6 +95,7 @@ def get_mixed_bpw_grouping_fallback_diagnostics() -> dict[str, Any]:
 
 def reset_mixed_bpw_grouping_fallback_counters() -> None:
     """Reset mixed-BPW token-grouping fallback counters and last event."""
+    logger.debug("reset_mixed_bpw_grouping_fallback_counters called")
     global _mixed_bpw_grouping_counters
     global _mixed_bpw_last_fallback
     _mixed_bpw_grouping_counters = _MIXED_BPW_GROUPING_BASE_COUNTERS.copy()
@@ -100,6 +103,7 @@ def reset_mixed_bpw_grouping_fallback_counters() -> None:
 
 
 def _bump_mixed_bpw_grouping_counter(key: str, amount: int = 1) -> None:
+    logger.debug("_bump_mixed_bpw_grouping_counter called with key=%s, amount=%s", key, amount)
     _mixed_bpw_grouping_counters[key] = _mixed_bpw_grouping_counters.get(key, 0) + amount
 
 
@@ -112,6 +116,7 @@ def _record_mixed_bpw_grouping_fallback(
     num_experts: int,
 ) -> None:
     """Record reason-coded diagnostics when grouping falls back from GPU to CPU."""
+    logger.debug("_record_mixed_bpw_grouping_fallback called")
     global _mixed_bpw_last_fallback
     _bump_mixed_bpw_grouping_counter("grouping_cpu_fallback_total")
     _bump_mixed_bpw_grouping_counter(f"grouping_cpu_fallback_reason_{reason_code}")
@@ -139,6 +144,7 @@ def _group_tokens_mixed_bpw_primary_gpu(
     num_experts: int,
 ):
     """Use GPU token grouping when available, otherwise CPU fallback with diagnostics."""
+    logger.debug("_group_tokens_mixed_bpw_primary_gpu called")
     batch_size, top_k = expert_ids.shape
     _bump_mixed_bpw_grouping_counter("grouping_calls_total")
 
@@ -220,6 +226,7 @@ def prepare_fairway_grouped_inputs(
         - expert_offsets: [num_experts + 1] int32 cumulative expert offsets.
         - sorted_probs: [batch * top_k] float16 probabilities aligned to sorted_token_ids.
     """
+    logger.debug("prepare_fairway_grouped_inputs called")
     if expert_ids.dim() != 2 or expert_probs.dim() != 2:
         raise ValueError(
             "expert_ids and expert_probs must be rank-2 tensors with shape [batch, top_k]"
@@ -268,6 +275,7 @@ def _normalize_bit_group_entry(
     entry: tuple[Any, Any],
 ) -> tuple[list[int], Any]:
     """Normalize both supported tuple layouts to (expert_list, cached_buffers)."""
+    logger.debug("_normalize_bit_group_entry called")
     first, second = entry
     expert_list: list[int]
     cached_buffers: Any
@@ -288,6 +296,7 @@ def _normalize_bit_group_entry(
 
 def _normalize_moe_bits(bits: int | tuple[int, int, int]) -> tuple[int, int, int]:
     """Normalize uniform/per-projection bits to (gate_bits, up_bits, down_bits)."""
+    logger.debug("_normalize_moe_bits called with bits=%s", bits)
     if isinstance(bits, tuple):
         return bits
     return bits, bits, bits
@@ -304,6 +313,7 @@ def _get_or_create_moe_params_buffer(
     bits: int | tuple[int, int, int],
 ) -> Any:
     """Get/create cached params buffer keyed by device, bits, and dispatch shape."""
+    logger.debug("_get_or_create_moe_params_buffer called")
     gate_bits, up_bits, down_bits = _normalize_moe_bits(bits)
     shape_sig = (batch_size, hidden_dim, intermediate_dim, num_experts, top_k)
     cache_key = (id(device), (gate_bits, up_bits, down_bits), shape_sig)
@@ -352,15 +362,18 @@ class ExpertOutputRing:
     """
 
     def __init__(self, num_buffers: int = 3, shape: tuple = (), dtype=torch.float16, device: str = "mps"):
+        logger.debug("initializing %s with num_buffers=%s, shape=%s, dtype=%s, device=%s", type(self).__name__, num_buffers, shape, dtype, device)
         self._buffers = [torch.empty(shape, dtype=dtype, device=device) for _ in range(num_buffers)]
         self._index = 0
 
     def next(self) -> torch.Tensor:
+        logger.debug("next called")
         buf = self._buffers[self._index]
         self._index = (self._index + 1) % len(self._buffers)
         return buf
 
     def reset(self):
+        logger.debug("reset called")
         self._index = 0
 
 
@@ -412,6 +425,7 @@ class BatchedDispatcher:
         Args:
             lib: MetalKernelLibrary with compiled MoE kernels.
         """
+        logger.debug("initializing %s with lib=%s", type(self).__name__, lib)
         self._lib = lib
         self._queue: list[QueuedDispatch] = []
         self._committed = False
@@ -419,6 +433,7 @@ class BatchedDispatcher:
     @property
     def pending_count(self) -> int:
         """Number of dispatches queued but not yet committed."""
+        logger.debug("pending_count called")
         return len(self._queue)
 
     def queue_moe_dispatch(
@@ -457,6 +472,7 @@ class BatchedDispatcher:
         Returns:
             Output tensor (fp16) - valid only after commit_and_wait()
         """
+        logger.debug("queue_moe_dispatch called")
         device = self._lib.device
         batch_size = activations.shape[0]
 
@@ -548,6 +564,7 @@ class BatchedDispatcher:
         After this call completes, all output tensors returned by
         queue_moe_dispatch() contain valid results.
         """
+        logger.debug("commit_and_wait called")
         if not self._queue:
             return
 
@@ -583,6 +600,7 @@ class BatchedDispatcher:
 
     def clear(self) -> None:
         """Discard all queued dispatches without executing."""
+        logger.debug("clear called")
         self._queue.clear()
         self._committed = False
 
@@ -629,10 +647,12 @@ def create_cached_weight_buffers(
 
     Uses batched buffer creation to reduce Metal API overhead.
     """
+    logger.debug("create_cached_weight_buffers called with device=%s, gate_weights=%s, gate_scales=%s", device, gate_weights, gate_scales)
     require_mps()
     from ..metal_dispatch import mps_tensors_to_metal_buffers
 
     def ensure_half(t: torch.Tensor) -> torch.Tensor:
+        logger.debug("ensure_half called with t=%s", t)
         if t.dtype == torch.float16:
             return t.contiguous()
         return t.half().contiguous()
@@ -694,9 +714,11 @@ def create_cached_weight_buffers_from_cpu(
 
     Uses batched buffer creation to reduce Metal API overhead.
     """
+    logger.debug("create_cached_weight_buffers_from_cpu called with device=%s, gate_weights=%s, gate_scales=%s", device, gate_weights, gate_scales)
     from ..metal_dispatch import cpu_tensors_to_metal_buffers
 
     def ensure_half_cpu(t: torch.Tensor) -> torch.Tensor:
+        logger.debug("ensure_half_cpu called with t=%s", t)
         if t.is_mps or t.is_cuda:
             raise ValueError(f"Tensor must be on CPU, got device={t.device}")
         if t.dtype == torch.float16:
@@ -839,6 +861,7 @@ class MoEBufferPool:
             memory_pressure_threshold: Seconds of inactivity before releasing buffers.
             enable_coalescing: Whether to enable buffer coalescing for small allocations.
         """
+        logger.debug("initializing %s with device=%s, hidden_dim=%s, max_batch=%s, top_k_values=%s, enable_metrics=%s", type(self).__name__, device, hidden_dim, max_batch, top_k_values, enable_metrics)
         self.device = device
         self.hidden_dim = hidden_dim
         self.max_batch = max_batch
@@ -896,6 +919,7 @@ class MoEBufferPool:
             Power-of-2 bucket size that can accommodate the allocation.
             Returns the exact size if larger than max bucket.
         """
+        logger.debug("_get_bucket_size called with size=%s", size)
         for bucket in self.BUCKET_SIZES:
             if size <= bucket:
                 return bucket
@@ -911,6 +935,7 @@ class MoEBufferPool:
         Returns:
             True if coalescing should be used for this size.
         """
+        logger.debug("_should_coalesce called with size=%s", size)
         return self.enable_coalescing and size <= self.COALESCE_THRESHOLD
 
     def _allocate_coalesced(
@@ -925,6 +950,7 @@ class MoEBufferPool:
         Returns:
             Tuple of (tensor_view, metal_buffer, offset) or None if allocation fails.
         """
+        logger.debug("_allocate_coalesced called with size=%s, dtype=%s", size, dtype)
         bucket_size = self._get_bucket_size(size)
 
         if bucket_size not in self._coalesced_buffers:
@@ -968,6 +994,7 @@ class MoEBufferPool:
             offset: Offset in the coalesced buffer.
             size: Size of the allocation.
         """
+        logger.debug("_free_coalesced called with offset=%s, size=%s", offset, size)
         for bucket_size, allocations in self._coalesced_allocations.items():
             for i, (alloc_offset, alloc_size) in enumerate(allocations):
                 if alloc_offset == offset and alloc_size == size:
@@ -989,6 +1016,7 @@ class MoEBufferPool:
         Returns:
             Number of buffers released.
         """
+        logger.debug("on_memory_pressure called")
         current_time = time.monotonic()
         released = 0
 
@@ -1062,6 +1090,7 @@ class MoEBufferPool:
         Args:
             callback: Function to call when memory pressure is detected.
         """
+        logger.debug("set_memory_pressure_callback called with callback=%s", callback)
         self._memory_pressure_callback = callback
 
     def _update_access_time(self, key: str) -> None:
@@ -1070,6 +1099,7 @@ class MoEBufferPool:
         Args:
             key: Buffer identifier string.
         """
+        logger.debug("_update_access_time called with key=%s", key)
         current_time = time.monotonic()
         self._last_used[key] = current_time
         self._access_count[key] = self._access_count.get(key, 0) + 1
@@ -1077,6 +1107,7 @@ class MoEBufferPool:
 
     def _preallocate_all(self) -> None:
         """Preallocate buffers for all standard batch sizes and top_k values."""
+        logger.debug("_preallocate_all called")
         batch_sizes = [
             b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
 
@@ -1094,6 +1125,7 @@ class MoEBufferPool:
 
     def _preallocate_activation(self, batch_size: int) -> None:
         """Preallocate activation buffer for given batch size."""
+        logger.debug("_preallocate_activation called with batch_size=%s", batch_size)
         if batch_size in self._activation_buffers:
             return
         act_tensor = torch.zeros(
@@ -1103,6 +1135,7 @@ class MoEBufferPool:
 
     def _preallocate_output(self, batch_size: int) -> None:
         """Preallocate fp32 and fp16 output buffers for given batch size."""
+        logger.debug("_preallocate_output called with batch_size=%s", batch_size)
         if batch_size in self._output_buffers:
             return
         out_tensor = torch.zeros(
@@ -1118,6 +1151,7 @@ class MoEBufferPool:
 
     def _preallocate_expert_ids(self, batch_size: int, top_k: int) -> None:
         """Preallocate expert_ids buffer for given batch size and top_k."""
+        logger.debug("_preallocate_expert_ids called with batch_size=%s, top_k=%s", batch_size, top_k)
         key = (batch_size, top_k)
         if key in self._expert_ids_buffers:
             return
@@ -1128,6 +1162,7 @@ class MoEBufferPool:
 
     def _preallocate_expert_probs(self, batch_size: int, top_k: int) -> None:
         """Preallocate expert_probs buffer for given batch size and top_k."""
+        logger.debug("_preallocate_expert_probs called with batch_size=%s, top_k=%s", batch_size, top_k)
         key = (batch_size, top_k)
         if key in self._expert_probs_buffers:
             return
@@ -1137,6 +1172,7 @@ class MoEBufferPool:
         self._expert_probs_buffers[key] = (tensor, buf)
 
     def get_activation_buffer(self, batch_size: int, activations: torch.Tensor) -> Any:
+        logger.debug("get_activation_buffer called with batch_size=%s, activations=%s", batch_size, activations)
         key_str = f"act_{batch_size}"
         self._update_access_time(key_str)
 
@@ -1151,6 +1187,7 @@ class MoEBufferPool:
         return mps_tensor_to_metal_buffer(activations.contiguous(), self.device)
 
     def get_expert_ids_buffer(self, batch_size: int, top_k: int, expert_ids: torch.Tensor) -> Any:
+        logger.debug("get_expert_ids_buffer called with batch_size=%s, top_k=%s, expert_ids=%s", batch_size, top_k, expert_ids)
         key = (batch_size, top_k)
         key_str = f"ids_{key}"
         self._update_access_time(key_str)
@@ -1167,6 +1204,7 @@ class MoEBufferPool:
     def get_expert_probs_buffer(
         self, batch_size: int, top_k: int, expert_probs: torch.Tensor
     ) -> Any:
+        logger.debug("get_expert_probs_buffer called with batch_size=%s, top_k=%s, expert_probs=%s", batch_size, top_k, expert_probs)
         key = (batch_size, top_k)
         key_str = f"probs_{key}"
         self._update_access_time(key_str)
@@ -1185,6 +1223,7 @@ class MoEBufferPool:
         return buf
 
     def get_output_buffer(self, batch_size: int) -> tuple[torch.Tensor, Any]:
+        logger.debug("get_output_buffer called with batch_size=%s", batch_size)
         key_str = f"out_{batch_size}"
         self._update_access_time(key_str)
 
@@ -1203,6 +1242,7 @@ class MoEBufferPool:
         For batch=1 decode, this avoids allocating a new tensor on every call.
         The caller should copy fp32 output into this buffer via .copy_().
         """
+        logger.debug("get_output_fp16 called with batch_size=%s", batch_size)
         if batch_size in self._output_fp16_buffers:
             return self._output_fp16_buffers[batch_size]
         # Fallback: allocate (should not happen for common batch sizes)
@@ -1217,6 +1257,7 @@ class MoEBufferPool:
             top_k: The top_k value to preallocate buffers for.
             batch_sizes: Optional list of batch sizes. Defaults to standard sizes.
         """
+        logger.debug("preallocate_top_k called with top_k=%s, batch_sizes=%s", top_k, batch_sizes)
         if batch_sizes is None:
             batch_sizes = [
                 b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
@@ -1241,6 +1282,7 @@ class MoEBufferPool:
             bits: Either uniform bits (int) or per-projection (gate, up, down) tuple.
         """
         # Handle per-projection bits
+        logger.debug("get_params_buffer called with batch_size=%s, hidden_dim=%s, intermediate_dim=%s", batch_size, hidden_dim, intermediate_dim)
         if isinstance(bits, tuple):
             gate_bits, up_bits, down_bits = bits
         else:
@@ -1274,6 +1316,7 @@ class MoEBufferPool:
 
     def clear(self) -> None:
         """Clear all buffers and reset the pool state."""
+        logger.debug("clear called")
         self._activation_buffers.clear()
         self._expert_ids_buffers.clear()
         self._expert_probs_buffers.clear()
@@ -1306,6 +1349,7 @@ def select_moe_kernel(
     Returns:
         Tuple of (kernel_name, tile_n)
     """
+    logger.debug("select_moe_kernel called with batch_size=%s, use_fp32_acc=%s, gate_bits=%s", batch_size, use_fp32_acc, gate_bits)
     return get_kernel_for_batch_size(
         batch_size=batch_size,
         use_fp32_acc=use_fp32_acc,
@@ -1317,6 +1361,7 @@ def select_moe_kernel(
 
 def _get_moe_tile_n_for_kernel(kernel_name: str) -> int:
     """Infer tile_n from kernel name for benchmark-only kernel overrides."""
+    logger.debug("_get_moe_tile_n_for_kernel called with kernel_name=%s", kernel_name)
     if "large_batch" in kernel_name:
         return 128
     return 64
@@ -1354,6 +1399,7 @@ def get_moe_kernel(
         - Better instruction scheduling
         - Reduced register pressure
     """
+    logger.debug("get_moe_kernel called with batch_size=%s, use_fp32_acc=%s, gate_bits=%s", batch_size, use_fp32_acc, gate_bits)
     return select_moe_kernel(batch_size, use_fp32_acc, gate_bits, up_bits, down_bits)
 
 
@@ -1399,6 +1445,7 @@ def dispatch_moe_trellis_swiglu_batched(
     Returns:
         Output tensor [batch, hidden_dim] fp16
     """
+    logger.debug("dispatch_moe_trellis_swiglu_batched called with lib=%s, activations=%s, gate_weights=%s", lib, activations, gate_weights)
     device = lib.device
     batch_size = activations.shape[0]
 
@@ -1660,6 +1707,7 @@ def dispatch_moe_trellis_swiglu(
     call waitUntilCompleted() at a layer boundary after batching dispatches.
     """
     # Validation (required for correctness tests)
+    logger.debug("dispatch_moe_trellis_swiglu called with lib=%s, activations=%s, gate_weights=%s", lib, activations, gate_weights)
     if activations.dim() != 2:
         raise MoEDispatchValidationError(
             f"activations must be rank-2 [batch, hidden_dim], got shape={tuple(activations.shape)}"
@@ -1929,6 +1977,7 @@ class RouterBufferPool:
             top_k: Number of experts selected per token.
             max_batch: Maximum batch size to support.
         """
+        logger.debug("initializing %s with device=%s, hidden_dim=%s, num_experts=%s, top_k=%s, max_batch=%s", type(self).__name__, device, hidden_dim, num_experts, top_k, max_batch)
         self.device = device
         self.hidden_dim = hidden_dim
         self.num_experts = num_experts
@@ -1944,6 +1993,7 @@ class RouterBufferPool:
         self._preallocate_all()
 
     def _preallocate_all(self) -> None:
+        logger.debug("_preallocate_all called")
         batch_sizes = [
             b for b in self.STANDARD_BATCH_SIZES if b <= self.max_batch]
         for batch_size in batch_sizes:
@@ -1952,6 +2002,7 @@ class RouterBufferPool:
             self._preallocate_expert_probs(batch_size)
 
     def _preallocate_hidden(self, batch_size: int) -> None:
+        logger.debug("_preallocate_hidden called with batch_size=%s", batch_size)
         if batch_size in self._hidden_buffers:
             return
         tensor = torch.zeros(batch_size, self.hidden_dim,
@@ -1960,6 +2011,7 @@ class RouterBufferPool:
         self._hidden_buffers[batch_size] = (tensor, buf)
 
     def _preallocate_expert_ids(self, batch_size: int) -> None:
+        logger.debug("_preallocate_expert_ids called with batch_size=%s", batch_size)
         if batch_size in self._expert_ids_buffers:
             return
         tensor = torch.zeros(batch_size, self.top_k,
@@ -1968,6 +2020,7 @@ class RouterBufferPool:
         self._expert_ids_buffers[batch_size] = (tensor, buf)
 
     def _preallocate_expert_probs(self, batch_size: int) -> None:
+        logger.debug("_preallocate_expert_probs called with batch_size=%s", batch_size)
         if batch_size in self._expert_probs_buffers:
             return
         tensor = torch.zeros(batch_size, self.top_k,
@@ -1977,6 +2030,7 @@ class RouterBufferPool:
 
     def get_hidden_buffer(self, batch_size: int, hidden: torch.Tensor) -> Any:
         """Get or create hidden state buffer, copying data in."""
+        logger.debug("get_hidden_buffer called with batch_size=%s, hidden=%s", batch_size, hidden)
         if batch_size in self._hidden_buffers:
             tensor, buf = self._hidden_buffers[batch_size]
             tensor.copy_(hidden)
@@ -1985,6 +2039,7 @@ class RouterBufferPool:
 
     def get_expert_ids_output(self, batch_size: int) -> tuple[torch.Tensor, Any]:
         """Get output buffer for expert IDs."""
+        logger.debug("get_expert_ids_output called with batch_size=%s", batch_size)
         if batch_size in self._expert_ids_buffers:
             tensor, buf = self._expert_ids_buffers[batch_size]
             return tensor, buf
@@ -1995,6 +2050,7 @@ class RouterBufferPool:
 
     def get_expert_probs_output(self, batch_size: int) -> tuple[torch.Tensor, Any]:
         """Get output buffer for expert probabilities."""
+        logger.debug("get_expert_probs_output called with batch_size=%s", batch_size)
         if batch_size in self._expert_probs_buffers:
             tensor, buf = self._expert_probs_buffers[batch_size]
             return tensor, buf
@@ -2007,6 +2063,7 @@ class RouterBufferPool:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> Any:
         """Get or create params buffer."""
+        logger.debug("get_params_buffer called with batch_size=%s, hidden_dim=%s, num_experts=%s", batch_size, hidden_dim, num_experts)
         key = (batch_size, hidden_dim, num_experts, top_k)
         if key not in self._params_buffers:
             params_data = np.array(
@@ -2017,6 +2074,7 @@ class RouterBufferPool:
         return self._params_buffers[key]
 
     def clear(self) -> None:
+        logger.debug("clear called")
         self._hidden_buffers.clear()
         self._expert_ids_buffers.clear()
         self._expert_probs_buffers.clear()
@@ -2037,6 +2095,7 @@ def create_cached_router_buffers(device: Any, router_weights: torch.Tensor) -> C
     Returns:
         CachedRouterBuffers with Metal buffer.
     """
+    logger.debug("create_cached_router_buffers called with device=%s, router_weights=%s", device, router_weights)
     require_mps()
 
     # Router weights from nn.Linear are [out_features, in_features] = [num_experts, hidden_dim]
@@ -2090,6 +2149,7 @@ def dispatch_moe_router_fused(
         Tuple of (expert_ids [batch, top_k] uint32, expert_probs [batch, top_k] fp16).
         Probabilities are renormalized to sum to 1.
     """
+    logger.debug("dispatch_moe_router_fused called with lib=%s, hidden=%s, router_weights=%s", lib, hidden, router_weights)
     device = lib.device
     batch_size = hidden.shape[0]
     hidden_dim = hidden.shape[1]
@@ -2266,6 +2326,7 @@ def dispatch_moe_fused_router_sorted(
         sorted_indices: [batch * top_k] uint32 tensor grouped by expert.
         expert_offsets: [num_experts + 1] uint32 tensor of cumulative counts.
     """
+    logger.debug("dispatch_moe_fused_router_sorted called with lib=%s, hidden=%s, router_weights=%s", lib, hidden, router_weights)
     require_mps()
     device = lib.device
     batch_size = hidden.shape[0]
@@ -2377,6 +2438,7 @@ def dispatch_moe_trellis_swiglu_grouped_fairway(
     Returns:
         Output [batch, hidden_dim] in fp16 with weighted accumulation.
     """
+    logger.debug("dispatch_moe_trellis_swiglu_grouped_fairway called")
     del use_fp32_acc  # grouped kernel has no fp32acc variant
 
     batch_size = activations.shape[0]
@@ -2545,6 +2607,7 @@ def dispatch_moe_per_bit_tuple(
     Returns:
         Output tensor [batch, hidden_dim] in fp16.
     """
+    logger.debug("dispatch_moe_per_bit_tuple called with lib=%s, activations=%s, expert_ids=%s", lib, activations, expert_ids)
     batch_size = activations.shape[0]
 
     # Create or reuse output accumulator in fp32
@@ -2564,6 +2627,7 @@ def dispatch_moe_per_bit_tuple(
         cached_buffers: CachedWeightBuffers,
     ) -> torch.Tensor:
         """Legacy per-tuple dispatch used as compatibility fallback."""
+        logger.debug("_dispatch_legacy_per_tuple called")
         return dispatch_moe_trellis_swiglu(
             lib,
             activations=group_activations,

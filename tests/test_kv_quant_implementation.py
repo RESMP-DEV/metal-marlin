@@ -12,11 +12,15 @@ Supports quantization modes:
 """
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
 
 from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
+
+
+logger = logging.getLogger(__name__)
 
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 requires_mps = pytest.mark.skipif(
@@ -31,6 +35,7 @@ class TestKVQuantImplementation:
 
     def test_mmfp4_mla_accepts_kv_quant_param(self):
         """Test that MMFP4MLA accepts kv_quant parameter."""
+        logger.info("running test_mmfp4_mla_accepts_kv_quant_param")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         # Test all supported quantization modes
@@ -60,6 +65,7 @@ class TestKVQuantImplementation:
 
     def test_quantize_kv_cache_fp4(self):
         """Test FP4 quantization of KV cache."""
+        logger.info("running test_quantize_kv_cache_fp4")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -90,6 +96,7 @@ class TestKVQuantImplementation:
 
     def test_quantize_kv_cache_fp8(self):
         """Test FP8 quantization of KV cache."""
+        logger.info("running test_quantize_kv_cache_fp8")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -120,6 +127,7 @@ class TestKVQuantImplementation:
 
     def test_quantize_kv_cache_int8(self):
         """Test INT8 quantization of KV cache."""
+        logger.info("running test_quantize_kv_cache_int8")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -150,6 +158,7 @@ class TestKVQuantImplementation:
 
     def test_quantize_kv_cache_none(self):
         """Test that 'none' quantization returns original cache with unit scales."""
+        logger.info("running test_quantize_kv_cache_none")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -178,6 +187,7 @@ class TestKVQuantImplementation:
 
     def test_mla_attention_params_with_kv_quant(self):
         """Test MLAAttentionParams includes KV quant params."""
+        logger.info("running test_mla_attention_params_with_kv_quant")
         from metal_marlin.mla_fused import MLAAttentionParams
         
         params = MLAAttentionParams(
@@ -224,6 +234,7 @@ class TestKVQuantImplementation:
 
     def test_kv_quant_params_in_struct_all_modes(self):
         """Test that all KV quant modes are correctly mapped in struct."""
+        logger.info("running test_kv_quant_params_in_struct_all_modes")
         from metal_marlin.mla_fused import MLAAttentionParams
         
         mode_map = {
@@ -271,6 +282,7 @@ class TestKVQuantImplementation:
 
     def test_sliding_window_with_kv_quant(self):
         """Test sliding window attention works with KV quant."""
+        logger.info("running test_sliding_window_with_kv_quant")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -298,6 +310,7 @@ class TestKVQuantShaderSupport:
     def test_shader_quantization_modes_defined(self):
         """Test that shader quantization mode constants are defined."""
         # Read the shader file to verify quantization support
+        logger.info("running test_shader_quantization_modes_defined")
         import os
         
         shader_path = os.path.join(
@@ -321,6 +334,7 @@ class TestKVQuantShaderSupport:
 
     def test_mla_write_kv_cache_quantized_kernel_exists(self):
         """Test that the quantized KV cache write kernel exists."""
+        logger.info("running test_mla_write_kv_cache_quantized_kernel_exists")
         import os
         
         shader_path = os.path.join(
@@ -342,6 +356,7 @@ class TestKVQuantMemorySavings:
 
     def test_fp4_memory_savings(self):
         """Test FP4 provides 4x memory savings."""
+        logger.info("running test_fp4_memory_savings")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(
@@ -370,6 +385,7 @@ class TestKVQuantMemorySavings:
 
     def test_fp8_memory_savings(self):
         """Test FP8 provides 2x memory savings."""
+        logger.info("running test_fp8_memory_savings")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         layer = MMFP4MLA(

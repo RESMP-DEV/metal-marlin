@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,9 @@ except ImportError:
     plt = None  # type: ignore[assignment]
     HAS_MATPLOTLIB = False
 
+
+
+logger = logging.getLogger(__name__)
 
 # Default paths relative to package root
 _ROOT = Path(__file__).parent.parent  # metal_marlin/
@@ -95,6 +99,7 @@ def aggregate_results(results_dir: str | Path) -> pd.DataFrame:
         DataFrame with columns for all benchmark metrics.
         Returns empty DataFrame if pandas not available or no results found.
     """
+    logger.debug("aggregate_results called with results_dir=%s", results_dir)
     if not HAS_PANDAS:
         raise ImportError("pandas required for aggregate_results. Install with: pip install pandas")
 
@@ -150,6 +155,7 @@ def aggregate_results(results_dir: str | Path) -> pd.DataFrame:
 
 def _parse_benchmark_json(data: dict[str, Any], filename: str) -> list[dict[str, Any]]:
     """Parse benchmark JSON into list of entry dicts."""
+    logger.info("_parse_benchmark_json starting with data=%s, filename=%s", data, filename)
     entries: list[dict[str, Any]] = []
 
     # Extract timestamp and hardware from config section if present
@@ -185,6 +191,7 @@ def _extract_entry(
     r: dict[str, Any], timestamp: str, hardware: str, filename: str
 ) -> dict[str, Any] | None:
     """Extract a single benchmark entry from result dict."""
+    logger.debug("_extract_entry called with r=%s, timestamp=%s, hardware=%s", r, timestamp, hardware)
     if not r:
         return None
 
@@ -236,6 +243,7 @@ def _extract_ppl_entry(
     data: dict[str, Any], timestamp: str, hardware: str, filename: str
 ) -> dict[str, Any] | None:
     """Extract perplexity-focused benchmark entry."""
+    logger.debug("_extract_ppl_entry called with data=%s, timestamp=%s, hardware=%s", data, timestamp, hardware)
     model = data.get("model", data.get("model_path", _extract_model_name(filename)))
     ppl = data.get("perplexity", data.get("ppl", 0.0))
     ppl_base = data.get("baseline_ppl", data.get("fp16_ppl", 0.0))
@@ -267,6 +275,7 @@ def _extract_ppl_entry(
 def _extract_model_name(label: str) -> str:
     """Extract model name from label string."""
     # Common patterns: "Llama-2-7B-FP4", "mistral-7b-fp4-g128"
+    logger.debug("_extract_model_name called with label=%s", label)
     label = label.lower()
     for model in [
         "llama-2-7b",
@@ -286,6 +295,7 @@ def _extract_model_name(label: str) -> str:
 
 def _extract_config(label: str, r: dict[str, Any]) -> str:
     """Extract config identifier (e.g., fp4-g128) from label or result."""
+    logger.debug("_extract_config called with label=%s, r=%s", label, r)
     if "config" in r:
         return str(r["config"])
 
@@ -323,6 +333,7 @@ def _extract_config(label: str, r: dict[str, Any]) -> str:
 
 def _extract_quant_type(config: str, r: dict[str, Any]) -> str:
     """Extract quantization type from config string or result."""
+    logger.info("_extract_quant_type called with config=%s, r=%s", config, r)
     if "quant_type" in r:
         return str(r["quant_type"])
 
@@ -340,6 +351,7 @@ def _extract_quant_type(config: str, r: dict[str, Any]) -> str:
 
 def _extract_group_size(config: str) -> int:
     """Extract group size from config string."""
+    logger.debug("_extract_group_size called with config=%s", config)
     import re
 
     match = re.search(r"g(\d+)", config.lower())
@@ -350,6 +362,7 @@ def _extract_group_size(config: str) -> int:
 
 def _extract_calibration(filename: str, r: dict[str, Any]) -> str:
     """Extract calibration dataset from filename or result."""
+    logger.debug("_extract_calibration called with filename=%s, r=%s", filename, r)
     if "calibration" in r:
         return str(r["calibration"])
 
@@ -377,6 +390,7 @@ def generate_markdown_report(df: pd.DataFrame) -> str:
     Returns:
         Markdown string for RESULTS.md
     """
+    logger.debug("generate_markdown_report called with df=%s", df)
     if not HAS_PANDAS:
         raise ImportError("pandas required for generate_markdown_report")
 
@@ -429,6 +443,7 @@ def generate_markdown_report(df: pd.DataFrame) -> str:
 
 def _generate_summary_table(df: pd.DataFrame) -> list[str]:
     """Generate summary table with best config per model."""
+    logger.debug("_generate_summary_table called with df=%s", df)
     lines: list[str] = []
 
     # Group by model, find best config (lowest PPL delta with good compression)
@@ -466,6 +481,7 @@ def _generate_summary_table(df: pd.DataFrame) -> list[str]:
 
 def _generate_model_breakdown(df: pd.DataFrame) -> list[str]:
     """Generate detailed per-model tables."""
+    logger.debug("_generate_model_breakdown called with df=%s", df)
     lines: list[str] = []
 
     models = df["model"].unique()
@@ -502,6 +518,7 @@ def _generate_model_breakdown(df: pd.DataFrame) -> list[str]:
 
 def _generate_precision_comparison(df: pd.DataFrame) -> list[str]:
     """Compare uniform vs mixed-precision configs."""
+    logger.debug("_generate_precision_comparison called with df=%s", df)
     lines: list[str] = []
 
     # Filter to uniform and mixed configs
@@ -547,6 +564,7 @@ def _generate_precision_comparison(df: pd.DataFrame) -> list[str]:
 
 def _generate_calibration_comparison(df: pd.DataFrame) -> list[str]:
     """Compare WikiText-2 vs Bartowski v3 calibration."""
+    logger.debug("_generate_calibration_comparison called with df=%s", df)
     lines: list[str] = []
 
     wiki = df[df["calibration"].str.contains("wikitext", case=False, na=False)]
@@ -598,6 +616,7 @@ def plot_ppl_vs_compression(df: pd.DataFrame, output: str | Path) -> None:
         df: DataFrame from aggregate_results()
         output: Path for output PNG file
     """
+    logger.debug("plot_ppl_vs_compression called with df=%s, output=%s", df, output)
     if not HAS_MATPLOTLIB:
         raise ImportError(
             "matplotlib required for plot_ppl_vs_compression. Install with: pip install matplotlib"
@@ -684,6 +703,7 @@ def plot_throughput_comparison(df: pd.DataFrame, output: str | Path) -> None:
         df: DataFrame from aggregate_results()
         output: Path for output PNG file
     """
+    logger.debug("plot_throughput_comparison called with df=%s, output=%s", df, output)
     if not HAS_MATPLOTLIB:
         raise ImportError(
             "matplotlib required for plot_throughput_comparison. Install with: pip install matplotlib"
@@ -764,6 +784,7 @@ def generate_results_file(results_dir: str | Path, output_dir: str | Path | None
     Returns:
         Path to generated RESULTS.md
     """
+    logger.debug("generate_results_file called with results_dir=%s, output_dir=%s", results_dir, output_dir)
     results_dir = Path(results_dir)
     if output_dir is None:
         output_dir = results_dir.parent if results_dir.name == "results" else results_dir
@@ -824,6 +845,7 @@ def generate_results_file(results_dir: str | Path, output_dir: str | Path | None
 
 
 def main():
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Benchmark result aggregation and reporting")

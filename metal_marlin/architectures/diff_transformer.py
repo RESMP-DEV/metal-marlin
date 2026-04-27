@@ -37,6 +37,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -51,8 +52,12 @@ if TYPE_CHECKING:
     from ..kv_cache import KVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_device() -> torch.device:
     """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    logger.debug("_get_device called")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -141,6 +146,7 @@ def parse_diff_transformer_config(config_dict: dict[str, Any]) -> DifferentialAt
         }
     """
     # Core dimensions (standard transformer fields)
+    logger.debug("parse_diff_transformer_config called with config_dict=%s", config_dict)
     hidden_size = config_dict.get("hidden_size", config_dict.get("d_model", 4096))
     num_heads = config_dict.get("num_attention_heads", config_dict.get("n_head", 32))
     num_kv_heads = config_dict.get(
@@ -211,6 +217,7 @@ class DifferentialAttention(nn.Module):
         sublayer_norm: bool = False,
         use_fused_kernel: bool = True,
     ):
+        logger.debug("initializing %s with num_heads=%s, head_dim=%s, lambda_init=%s, lambda_learnable=%s, lambda_per_head=%s", type(self).__name__, num_heads, head_dim, lambda_init, lambda_learnable, lambda_per_head)
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -245,6 +252,7 @@ class DifferentialAttention(nn.Module):
 
     def get_lambda(self) -> torch.Tensor:
         """Get current lambda value(s)."""
+        logger.debug("get_lambda called")
         if self.lambda_learnable and self.lambda_log is not None:
             lambda_val: torch.Tensor = torch.exp(self.lambda_log)
             return lambda_val
@@ -273,6 +281,7 @@ class DifferentialAttention(nn.Module):
         Returns:
             Differential attention output [batch, num_heads, seq_q, head_dim]
         """
+        logger.debug("forward: input shape=%s dtype=%s", q1.shape if hasattr(q1, "shape") else type(q1).__name__, q1.dtype if hasattr(q1, "dtype") else "N/A")
         batch_size, num_heads, seq_q, head_dim = q1.shape
         num_kv_heads = k1.shape[1]
         device = q1.device
@@ -394,6 +403,7 @@ class DifferentialMarlinAttention(nn.Module):
         bias: bool = False,
         use_fused_kernel: bool = True,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, num_kv_heads=%s, head_dim=%s, lambda_init=%s", type(self).__name__, hidden_size, num_heads, num_kv_heads, head_dim, lambda_init)
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -414,6 +424,7 @@ class DifferentialMarlinAttention(nn.Module):
             # the layers after loading weights, or load pre-quantized checkpoints.
             # This matches the pattern where models are trained in FP16 and
             # quantized post-training.
+            logger.info("_build_proj starting")
             return nn.Linear(in_features, out_features, bias=bias)
 
         v_size = self.num_kv_heads * self.head_dim
@@ -482,6 +493,7 @@ class DifferentialMarlinAttention(nn.Module):
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, _ = hidden_states.shape
 
         # V projection (shared between both attention paths)
@@ -566,6 +578,7 @@ class DifferentialMarlinAttention(nn.Module):
         Returns:
             Configured DifferentialMarlinAttention layer.
         """
+        logger.debug("from_config called with config=%s, quant_type=%s, group_size=%s", config, quant_type, group_size)
         return cls(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -601,6 +614,7 @@ def create_causal_mask(
     Returns:
         Causal mask with -inf for masked positions, or None for single-token decode
     """
+    logger.debug("create_causal_mask called with seq_len=%s, kv_seq_len=%s, device=%s", seq_len, kv_seq_len, device)
     kv_seq_len = kv_seq_len or seq_len
 
     if seq_len == 1:

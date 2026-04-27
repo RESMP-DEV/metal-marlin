@@ -22,6 +22,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -34,6 +35,9 @@ if TYPE_CHECKING:
 
 from .hf_loader import ModelConfig
 
+
+
+logger = logging.getLogger(__name__)
 
 def extract_onnx_weights(
     onnx_path: str | Path,
@@ -65,6 +69,7 @@ def extract_onnx_weights(
         model.embed_tokens.weight: (32000, 4096) (from /model/embed_tokens/Gather)
         model.layers.0.self_attn.q_proj.weight: (4096, 4096) (from /model/layers.0/self_attn/q_proj/MatMul)
     """
+    logger.debug("extract_onnx_weights called with onnx_path=%s", onnx_path)
     try:
         import onnx
         from onnx import numpy_helper
@@ -146,6 +151,7 @@ def normalize_onnx_name(onnx_name: str, consumer_map: dict[str, list[str]] | Non
         >>> normalize_onnx_name("model.layers.0.mlp.gate_proj.weight")
         'model.layers.0.mlp.gate_proj.weight'
     """
+    logger.debug("normalize_onnx_name called with onnx_name=%s, consumer_map=%s", onnx_name, consumer_map)
     name = onnx_name
 
     # Strip leading slash
@@ -230,6 +236,7 @@ def get_onnx_config(onnx_path: str | Path) -> ModelConfig:
         >>> print(f"Layers: {config.num_hidden_layers}, Hidden: {config.hidden_size}")
         Layers: 32, Hidden: 4096
     """
+    logger.debug("get_onnx_config called with onnx_path=%s", onnx_path)
     try:
         import onnx
     except ImportError as e:
@@ -268,6 +275,7 @@ def _build_consumer_map(graph) -> dict[str, list[str]]:
     Returns:
         Dict mapping initializer name -> list of consumer op types
     """
+    logger.info("_build_consumer_map starting")
     consumer_map: dict[str, list[str]] = {}
 
     for node in graph.node:
@@ -292,6 +300,7 @@ def _extract_metadata_config(model) -> dict[str, Any]:
     Returns:
         Dict of extracted configuration parameters (may be empty)
     """
+    logger.debug("_extract_metadata_config called with model=%s", model)
     config: dict[str, Any] = {}
 
     # Check model metadata properties
@@ -334,6 +343,7 @@ def _infer_config_from_shapes(model, config: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Updated config dict with inferred values
     """
+    logger.debug("_infer_config_from_shapes called with model=%s, config=%s", model, config)
     from onnx import numpy_helper
 
     # Collect tensor shapes keyed by normalized name
@@ -447,6 +457,7 @@ def list_onnx_tensors(onnx_path: str | Path) -> list[dict[str, Any]]:
         >>> for info in list_onnx_tensors("model.onnx"):
         ...     print(f"{info['hf_name']}: {info['shape']}")
     """
+    logger.debug("list_onnx_tensors called with onnx_path=%s", onnx_path)
     try:
         import onnx
         from onnx import TensorProto

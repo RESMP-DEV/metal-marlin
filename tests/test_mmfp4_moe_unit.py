@@ -1,3 +1,4 @@
+import logging
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -10,10 +11,14 @@ from metal_marlin.layers import mmfp4_moe
 from metal_marlin.layers.mmfp4_moe import MMFP4Expert, MMFP4MoE
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMMFP4MoEUnit:
     @pytest.fixture
     def mock_dispatch(self):
         """Mock the dispatch module."""
+        logger.debug("mock_dispatch called")
         mock = MagicMock()
         # Patch the global variable in mmfp4_moe that caches the module
         with patch.object(mmfp4_moe, '_moe_dispatch_module', mock):
@@ -23,7 +28,9 @@ class TestMMFP4MoEUnit:
     def setup_router_mock(self):
         """Setup router mock before each test."""
         # Setup default fused router mock
+        logger.info("setup_router_mock starting")
         def mock_fused_router(hidden, gate, top_k, **kwargs):
+            logger.debug("mock_fused_router called with hidden=%s, gate=%s, top_k=%s", hidden, gate, top_k)
             batch_size = hidden.shape[0]
             return (
                 torch.ones(batch_size, top_k) * 0.5,  # topk_weights
@@ -37,6 +44,7 @@ class TestMMFP4MoEUnit:
     @pytest.fixture
     def moe_layer(self):
         """Create a small MoE layer for testing."""
+        logger.debug("moe_layer called")
         layer = MMFP4MoE(
             n_experts=4,
             n_experts_per_tok=2,
@@ -54,6 +62,7 @@ class TestMMFP4MoEUnit:
         1. Skip expensive sort/gather/scatter operations
         2. Use the fused decode kernel directly (via moe_dispatch)
         """
+        logger.info("running test_decode_path_uses_optimized_forward")
         x = torch.randn(1, 32)  # Single token triggers decode path
         
         # Configure the mock dispatch function to return a tensor of correct shape
@@ -93,6 +102,7 @@ class TestMMFP4MoEUnit:
         - gather_for_experts  
         - scatter_expert_outputs
         """
+        logger.info("running test_decode_path_skips_group_tokens")
         x = torch.randn(1, 32)
         
         # Configure mock return value
@@ -115,6 +125,7 @@ class TestMMFP4MoEUnit:
         _moe_decode_optimized single-token fast path.
         """
         # Use a shape that results in >1 tokens after reshape
+        logger.info("running test_batch_path_not_decode")
         x = torch.randn(2, 2, 32)  # 4 tokens total
         
         # Configure mocks for batch path
@@ -140,12 +151,14 @@ class TestMMFP4MoEUnit:
 
     def test_forward_decode_optimized_exists(self):
         """Verify _forward_decode_optimized method exists and is callable."""
+        logger.info("running test_forward_decode_optimized_exists")
         layer = MMFP4MoE(n_experts=4, n_experts_per_tok=2, hidden_size=32)
         assert hasattr(layer, '_forward_decode_optimized')
         assert callable(getattr(layer, '_forward_decode_optimized'))
 
     def test_decode_optimized_docstring(self):
         """Verify _forward_decode_optimized has proper documentation."""
+        logger.info("running test_decode_optimized_docstring")
         layer = MMFP4MoE(n_experts=4, n_experts_per_tok=2, hidden_size=32)
         docstring = layer._forward_decode_optimized.__doc__
         assert docstring is not None

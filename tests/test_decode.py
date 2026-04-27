@@ -13,6 +13,7 @@ Backend: PyTorch MPS (no MLX dependency)
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import TYPE_CHECKING
 
@@ -27,10 +28,14 @@ if TYPE_CHECKING:
     import torch as torch_types
 
 
+
+logger = logging.getLogger(__name__)
+
 # Check if Metal kernel dispatch is functional
 # The Metal buffer interop may fail on some configurations
 def _check_metal_dispatch_works() -> bool:
     """Check if Metal kernel dispatch is functional."""
+    logger.debug("_check_metal_dispatch_works called")
     if not HAS_TORCH or not HAS_MPS or torch is None:
         return False
     try:
@@ -54,6 +59,7 @@ _METAL_DISPATCH_WORKS: bool | None = None
 
 def metal_dispatch_works() -> bool:
     """Check if Metal kernel dispatch is functional (cached)."""
+    logger.debug("metal_dispatch_works called")
     global _METAL_DISPATCH_WORKS
     if _METAL_DISPATCH_WORKS is None:
         _METAL_DISPATCH_WORKS = _check_metal_dispatch_works()
@@ -72,6 +78,7 @@ class TestDecodeGEMV:
     @pytest.fixture
     def setup_weights(self) -> dict:
         """Create test weights for decode tests."""
+        logger.info("setup_weights starting")
         if not HAS_TORCH or torch is None:
             pytest.skip("PyTorch not available")
         if not HAS_MPS:
@@ -108,6 +115,7 @@ class TestDecodeGEMV:
     @requires_metal_dispatch
     def test_decode_gemv_fp4_correctness(self, setup_weights: dict) -> None:
         """Test decode_gemv_fp4 produces same results as full GEMM."""
+        logger.info("running test_decode_gemv_fp4_correctness")
         assert torch is not None
         cfg = setup_weights
         K, _N = cfg["K"], cfg["N"]
@@ -146,6 +154,7 @@ class TestDecodeGEMV:
     @requires_metal_dispatch
     def test_decode_gemv_fp4_1d_input(self, setup_weights: dict) -> None:
         """Test decode_gemv_fp4 with 1D input (common case)."""
+        logger.info("running test_decode_gemv_fp4_1d_input")
         assert torch is not None
         cfg = setup_weights
         K, N = cfg["K"], cfg["N"]
@@ -173,6 +182,7 @@ class TestDecodeGEMV:
     @requires_metal_dispatch
     def test_decode_gemv_fp4_wide_correctness(self, setup_weights: dict) -> None:
         """Test decode_gemv_fp4_wide produces same results as standard."""
+        logger.info("running test_decode_gemv_fp4_wide_correctness")
         assert torch is not None
         cfg = setup_weights
         K, _N = cfg["K"], cfg["N"]
@@ -208,6 +218,7 @@ class TestDecodeGEMV:
     @requires_metal_dispatch
     def test_decode_gemv_fp4_batched_correctness(self, setup_weights: dict) -> None:
         """Test decode_gemv_fp4_batched for M=2..8."""
+        logger.info("running test_decode_gemv_fp4_batched_correctness")
         assert torch is not None
         cfg = setup_weights
         K, _N = cfg["K"], cfg["N"]
@@ -243,6 +254,7 @@ class TestDecodeGEMV:
     @requires_metal_dispatch
     def test_decode_gemv_small_dimensions(self) -> None:
         """Test decode GEMV with small dimensions."""
+        logger.info("running test_decode_gemv_small_dimensions")
         assert torch is not None
 
         from metal_marlin.kernels import marlin_gemm_fp4, pack_fp4_weights
@@ -273,6 +285,7 @@ class TestDecodeGEMV:
     @pytest.mark.slow
     def test_decode_gemv_large_dimensions(self) -> None:
         """Test decode GEMV with large dimensions (30B-scale projections)."""
+        logger.info("running test_decode_gemv_large_dimensions")
         assert torch is not None
 
         from metal_marlin.kernels import marlin_gemm_fp4, pack_fp4_weights
@@ -304,6 +317,7 @@ class TestSelectDecodeKernel:
 
     def test_m1_small_n(self) -> None:
         """M=1, small N -> standard decode."""
+        logger.info("running test_m1_small_n")
         from metal_marlin.inference import select_decode_kernel
 
         kernel = select_decode_kernel(M=1, N=256, K=4096)
@@ -311,6 +325,7 @@ class TestSelectDecodeKernel:
 
     def test_m1_large_n(self) -> None:
         """M=1, large N -> wide decode."""
+        logger.info("running test_m1_large_n")
         from metal_marlin.inference import select_decode_kernel
 
         kernel = select_decode_kernel(M=1, N=4096, K=4096)
@@ -318,6 +333,7 @@ class TestSelectDecodeKernel:
 
     def test_m1_boundary_n(self) -> None:
         """M=1, N=512 boundary -> wide decode."""
+        logger.info("running test_m1_boundary_n")
         from metal_marlin.inference import select_decode_kernel
 
         kernel = select_decode_kernel(M=1, N=512, K=4096)
@@ -325,6 +341,7 @@ class TestSelectDecodeKernel:
 
     def test_small_batch(self) -> None:
         """M=2..8 -> batched decode."""
+        logger.info("running test_small_batch")
         from metal_marlin.inference import select_decode_kernel
 
         for m in [2, 4, 8]:
@@ -333,6 +350,7 @@ class TestSelectDecodeKernel:
 
     def test_large_batch(self) -> None:
         """M > 8 -> full GEMM."""
+        logger.info("running test_large_batch")
         from metal_marlin.inference import select_decode_kernel
 
         for m in [16, 32, 64]:
@@ -346,6 +364,7 @@ class TestQuantizedKVAttention:
     @pytest.fixture
     def setup_attention(self) -> dict:
         """Create test tensors for attention tests."""
+        logger.info("setup_attention starting")
         if not HAS_TORCH or torch is None:
             pytest.skip("PyTorch not available")
         if not HAS_MPS:
@@ -405,6 +424,7 @@ class TestQuantizedKVAttention:
     @requires_mps
     def test_quantized_kv_attention_shape(self, setup_attention: dict) -> None:
         """Test output shape of quantized KV attention."""
+        logger.info("running test_quantized_kv_attention_shape")
         assert torch is not None
         from metal_marlin.inference import quantized_kv_attention
 
@@ -433,6 +453,7 @@ class TestQuantizedKVAttention:
     @requires_mps
     def test_quantized_kv_attention_accuracy(self, setup_attention: dict) -> None:
         """Test quantized attention is close to FP reference."""
+        logger.info("running test_quantized_kv_attention_accuracy")
         assert torch is not None
         import torch.nn.functional as F
 
@@ -491,6 +512,7 @@ class TestDecodeState:
     @requires_mps
     def test_decode_state_creation(self) -> None:
         """Test DecodeState can be created with config and weights."""
+        logger.info("running test_decode_state_creation")
         assert torch is not None
         from metal_marlin.inference import DecodeConfig, DecodeState, LayerWeights
 
@@ -512,6 +534,7 @@ class TestDecodeState:
         intermediate_size = config.intermediate_size or 11008
 
         def make_weights() -> LayerWeights:
+            logger.debug("make_weights called")
             return LayerWeights(
                 q_proj_weight=torch.zeros(
                     (hidden_size // 8, num_heads * head_dim), dtype=torch.uint32, device="mps"
@@ -595,6 +618,7 @@ class TestDecodePerformance:
     @pytest.mark.slow
     def test_decode_vs_gemm_speedup(self) -> None:
         """Measure speedup of decode GEMV vs full GEMM."""
+        logger.info("running test_decode_vs_gemm_speedup")
         assert torch is not None
         import time
 
