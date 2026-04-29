@@ -1,5 +1,13 @@
 # Changelog
 
+This file tracks AlphaHENG-local changes, operator-facing behavior changes, and concise upstream summaries for `metal_marlin`.
+
+## Recording rules
+
+- Keep `Unreleased` current.
+- Record kernel behavior, dispatch behavior, benchmark interpretation changes, and validation updates.
+- Summarize the effect of syncs or research sweeps instead of copying commit logs.
+
 ## [Unreleased] - 2026-02-10
 
 ### Fixed
