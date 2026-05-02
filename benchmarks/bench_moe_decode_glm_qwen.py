@@ -32,6 +32,7 @@ if str(_ROOT) not in sys.path:
 
 from metal_marlin._compat import HAS_TORCH, torch  # noqa: E402
 from metal_marlin.trellis.lm import TrellisForCausalLM  # noqa: E402
+from metal_marlin.wandb_helper import wandb_tracker  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -370,6 +371,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: contrib/metal_marlin/benchmarks/results/moe_decode_glm_qwen_regression.json)"
         ),
     )
+    parser.add_argument("--wandb-project", help="Weights & Biases project name")
+    parser.add_argument("--wandb-name", help="Weights & Biases run name")
+    parser.add_argument("--wandb-tags", help="Comma-separated Weights & Biases tags")
     return parser
 
 
@@ -385,6 +389,25 @@ def main() -> int:
 
     presets = _parse_presets(args)
     device = _resolve_device(args.device)
+
+    # Initialize W&B tracking
+    wb_project = args.wandb_project or os.environ.get("WANDB_PROJECT") or os.environ.get("WB_PROJECT")
+    wb_name = args.wandb_name or os.environ.get("WANDB_NAME") or os.environ.get("WB_NAME")
+    wb_tags_raw = args.wandb_tags or os.environ.get("WANDB_TAGS") or os.environ.get("WB_TAGS")
+    wb_tags = [t.strip() for t in wb_tags_raw.split(",")] if wb_tags_raw else None
+
+    wb_config = {
+        "device_requested": args.device,
+        "device_used": device,
+        "prompt_len": args.prompt_len,
+        "decode_tokens": args.decode_tokens,
+        "warmup": args.warmup,
+        "runs": args.runs,
+        "seed": args.seed,
+        "torch_version": torch.__version__,
+        "selected_presets": presets,
+    }
+    wandb_tracker.init(project=wb_project, name=wb_name, config=wb_config, tags=wb_tags)
 
     overrides = _parse_model_path_mappings(args.model_path)
     if args.glm_model_path:
@@ -448,6 +471,31 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(f"\nSummary written to: {output}")
+
+    # Log to W&B
+    if wandb_tracker.enabled:
+        wandb_log_data = {}
+        for preset, res in results.items():
+            if res["status"] == "ok":
+                wandb_log_data[f"{preset}/decode_ms_per_token"] = res["decode_ms_per_token"]
+                wandb_log_data[f"{preset}/decode_tok_per_s"] = res["decode_tok_per_s"]
+                wandb_log_data[f"{preset}/model_load_s"] = res["model_load_s"]
+                wandb_log_data[f"{preset}/p50_ms"] = res["p50_ms"]
+                wandb_log_data[f"{preset}/p95_ms"] = res["p95_ms"]
+                wandb_log_data[f"{preset}/p99_ms"] = res["p99_ms"]
+                if res.get("fallback_diagnostics"):
+                    for diag_name, diag_val in res["fallback_diagnostics"].items():
+                        if isinstance(diag_val, dict):
+                            for k, v in diag_val.items():
+                                wandb_log_data[f"{preset}/fallback/{diag_name}/{k}"] = v
+                        else:
+                            wandb_log_data[f"{preset}/fallback/{diag_name}"] = diag_val
+                
+                # Also log model path info
+                wandb_tracker.run.config.update({f"{preset}_model_path": res["model_path"]})
+
+        wandb_tracker.log(wandb_log_data)
+        wandb_tracker.finish()
     return 0
 
 

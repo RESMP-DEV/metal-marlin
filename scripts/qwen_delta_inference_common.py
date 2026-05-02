@@ -532,6 +532,31 @@ def build_inference_argparser(
         default=config.min_decode_speed,
         help="Minimum acceptable decode speed in tok/s (hard gate).",
     )
+    # Optional W&B tracking (non-secret controls only)
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=os.getenv("WANDB_PROJECT", ""),
+        help="W&B project name. If set and API key is present, tracking is enabled.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=os.getenv("WANDB_RUN_NAME", ""),
+        help="W&B run name.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        default=os.getenv("WANDB_TAGS", ""),
+        help="Comma-separated W&B tags.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=os.getenv("WANDB_ENTITY", ""),
+        help="W&B entity (team/user) name.",
+    )
     return parser
 
 
@@ -620,6 +645,30 @@ def run_inference_main(
     # -- get architecture config for reports ------------------------------
     arch_config = get_arch_config(args.model_path, args.tokenizer)
 
+    # -- setup W&B tracking -----------------------------------------------
+    from metal_marlin.wandb_helper import wandb_tracker  # noqa: E402
+
+    if args.wandb_project:
+        tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
+        wandb_config = {
+            "model_name": arch_config.model_name,
+            "model_path": str(args.model_path),
+            "tokenizer": str(tokenizer_path),
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "device": args.device,
+            "min_decode_speed": args.min_decode_speed,
+        }
+        wandb_tracker.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name if args.wandb_run_name else None,
+            entity=args.wandb_entity if args.wandb_entity else None,
+            tags=tags,
+            config=wandb_config,
+        )
+
     # -- run inference benchmark ------------------------------------------
     metrics: InferenceMetrics = run_inference_benchmark(
         pipeline=pipeline,
@@ -637,7 +686,26 @@ def run_inference_main(
 
     # -- sanity gate ------------------------------------------------------
     min_speed = args.min_decode_speed
-    if not check_sanity_gate(metrics, min_speed):
+    gate_passed = check_sanity_gate(metrics, min_speed)
+
+    # -- W&B logging ------------------------------------------------------
+    wandb_tracker.log({
+        "model_name": arch_config.model_name,
+        "model_path": str(args.model_path),
+        "tokenizer": str(tokenizer_path),
+        "prompt_length": metrics.prompt_tokens,
+        "max_new_tokens": args.max_new_tokens,
+        "prefill_ms": metrics.prefill_time_ms,
+        "decode_tok_s": metrics.decode_speed,
+        "peak_memory_mb": metrics.peak_memory_mb,
+        "active_params": metrics.active_params,
+        "sanity_gate_passed": gate_passed,
+    })
+    wandb_tracker.finish()
+
+    if not gate_passed:
+        # Note: the error string was already printed by check_sanity_gate, but
+        # we repeat it to stderr for the calling scripts.
         print(
             f"ERROR: Decode speed {metrics.decode_speed:.2f} tok/s is below the "
             f"minimum threshold of {min_speed:.2f} tok/s on M4.",
