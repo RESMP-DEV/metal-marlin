@@ -1,4 +1,5 @@
 """Continuous batching serving infrastructure for Metal Marlin."""
+import logging
 
 from .continuous_batch import (
     BatchScheduler,
@@ -17,6 +18,9 @@ from .mmfp4_server import KVCacheSharing, _kv_sharing
 from .request import GenerationRequest, RequestStatus, SchedulerOutput
 from .runner import BatchedModelRunner, ModelConfig
 from .scheduler import FCFSScheduler, SchedulerConfig
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Core types

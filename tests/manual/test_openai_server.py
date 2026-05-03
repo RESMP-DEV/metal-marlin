@@ -12,17 +12,22 @@ Prerequisites:
 """
 
 import json
+import logging
 import sys
 import time
 from pathlib import Path
 
 import requests
 
+
+logger = logging.getLogger(__name__)
+
 BASE_URL = "http://127.0.0.1:8000"
 
 
 def test_health():
     """Test health endpoint."""
+    logger.info("running test_health")
     print("\n[1/7] Testing /health endpoint...")
     try:
         response = requests.get(f"{BASE_URL}/health", timeout=5)
@@ -36,6 +41,7 @@ def test_health():
 
 def test_list_models():
     """Test model listing endpoint."""
+    logger.info("running test_list_models")
     print("\n[2/7] Testing /v1/models endpoint...")
     try:
         response = requests.get(f"{BASE_URL}/v1/models", timeout=5)
@@ -55,6 +61,7 @@ def test_list_models():
 
 def test_chat_completion_basic():
     """Test basic chat completion."""
+    logger.info("running test_chat_completion_basic")
     print("\n[3/7] Testing basic chat completion...")
     try:
         payload = {
@@ -90,6 +97,7 @@ def test_chat_completion_basic():
 
 def test_chat_completion_streaming():
     """Test streaming chat completion."""
+    logger.info("running test_chat_completion_streaming")
     print("\n[4/7] Testing streaming chat completion...")
     try:
         payload = {
@@ -131,6 +139,7 @@ def test_chat_completion_streaming():
 
 def test_text_completion():
     """Test legacy text completion endpoint."""
+    logger.info("running test_text_completion")
     print("\n[5/7] Testing text completion...")
     try:
         payload = {
@@ -163,6 +172,7 @@ def test_text_completion():
 
 def test_concurrent_requests():
     """Test multiple concurrent requests."""
+    logger.info("running test_concurrent_requests")
     print("\n[6/7] Testing concurrent requests...")
     try:
         import concurrent.futures
@@ -176,6 +186,7 @@ def test_concurrent_requests():
         ]
 
         def make_request(prompt):
+            logger.debug("make_request called with prompt=%s", prompt)
             payload = {
                 "model": "glm-4.7-flash",
                 "messages": [{"role": "user", "content": prompt}],
@@ -211,6 +222,7 @@ def test_concurrent_requests():
 
 def test_metrics():
     """Test metrics endpoint."""
+    logger.info("running test_metrics")
     print("\n[7/7] Testing /metrics endpoint...")
     try:
         response = requests.get(f"{BASE_URL}/metrics", timeout=5)
@@ -231,6 +243,7 @@ def test_metrics():
 
 def main():
     """Run all tests."""
+    logger.info("main starting")
     print("="*60)
     print("GLM-4.7-Flash OpenAI Server Tests")
     print("="*60)

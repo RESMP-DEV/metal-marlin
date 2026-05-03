@@ -13,6 +13,7 @@ Tests cover:
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
@@ -40,16 +41,21 @@ if HAS_TORCH:
     )
 
 
+
+logger = logging.getLogger(__name__)
+
 @requires_torch
 class TestCompressedKVCacheMLABasic:
     """Test basic cache operations."""
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_init_defaults(self):
         """Test cache initialization with default parameters."""
+        logger.info("running test_init_defaults")
         config = TrellisModelConfig(
             num_hidden_layers=2,
             num_attention_heads=8,
@@ -76,6 +82,7 @@ class TestCompressedKVCacheMLABasic:
 
     def test_update_and_get_compressed_kv(self):
         """Test updating cache and retrieving compressed KV."""
+        logger.info("running test_update_and_get_compressed_kv")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=8,
@@ -109,6 +116,7 @@ class TestCompressedKVCacheMLABasic:
 
     def test_decompress_kv(self):
         """Test on-the-fly decompression of KV."""
+        logger.info("running test_decompress_kv")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -154,10 +162,12 @@ class TestCompressedKVCacheMLAOptimizations:
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_block_sparse_layout(self):
         """Test block-sparse layout for long sequences."""
+        logger.info("running test_block_sparse_layout")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -190,6 +200,7 @@ class TestCompressedKVCacheMLAOptimizations:
 
     def test_memory_pooling_efficiency(self):
         """Test that memory pooling reduces allocations."""
+        logger.info("running test_memory_pooling_efficiency")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -222,6 +233,7 @@ class TestCompressedKVCacheMLAOptimizations:
 
     def test_threadgroup_cache(self):
         """Test threadgroup cache for decompressed tiles."""
+        logger.info("running test_threadgroup_cache")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -261,6 +273,7 @@ class TestCompressedKVCacheMLAOptimizations:
 
     def test_prefetch_optimization(self):
         """Test async prefetching of next layer's blocks."""
+        logger.info("running test_prefetch_optimization")
         config = TrellisModelConfig(
             num_hidden_layers=2,
             num_attention_heads=4,
@@ -300,10 +313,12 @@ class TestCompressedKVCacheMLAQuantization:
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_fp8_quantization(self):
         """Test FP8 quantization of compressed KV."""
+        logger.info("running test_fp8_quantization")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -328,6 +343,7 @@ class TestCompressedKVCacheMLAQuantization:
 
     def test_fp4_quantization(self):
         """Test FP4 quantization of compressed KV."""
+        logger.info("running test_fp4_quantization")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -352,6 +368,7 @@ class TestCompressedKVCacheMLAQuantization:
 
     def test_memory_savings_with_quantization(self):
         """Test memory savings from quantization."""
+        logger.info("running test_memory_savings_with_quantization")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -406,10 +423,12 @@ class TestCompressedKVCacheMLAStatistics:
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_block_sparse_stats(self):
         """Test block-sparse statistics."""
+        logger.info("running test_block_sparse_stats")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -442,6 +461,7 @@ class TestCompressedKVCacheMLAStatistics:
 
     def test_performance_stats(self):
         """Test performance statistics tracking."""
+        logger.info("running test_performance_stats")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -486,10 +506,12 @@ class TestCompressedKVCacheMLAIntegration:
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_create_compressed_kv_cache(self):
         """Test factory function for cache creation."""
+        logger.info("running test_create_compressed_kv_cache")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -513,6 +535,7 @@ class TestCompressedKVCacheMLAIntegration:
 
     def test_create_compressed_kv_cache_uses_default_quantization(self):
         """Test factory inherits the module-level default quantization mode."""
+        logger.info("running test_create_compressed_kv_cache_uses_default_quantization")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -534,6 +557,7 @@ class TestCompressedKVCacheMLAIntegration:
 
     def test_update_with_prefetch_and_cache(self):
         """Test update wrapper with prefetch."""
+        logger.info("running test_update_with_prefetch_and_cache")
         config = TrellisModelConfig(
             num_hidden_layers=2,
             num_attention_heads=4,
@@ -566,6 +590,7 @@ class TestCompressedKVCacheMLAIntegration:
 
     def test_reset_cache(self):
         """Test cache reset functionality."""
+        logger.info("running test_reset_cache")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -599,6 +624,7 @@ class TestCompressedKVCacheMLAIntegration:
 
     def test_estimate_memory_savings(self):
         """Test memory savings estimation."""
+        logger.info("running test_estimate_memory_savings")
         config = TrellisModelConfig(
             num_hidden_layers=32,
             num_attention_heads=20,
@@ -626,6 +652,7 @@ class TestCompressedKVCacheMLAIntegration:
 
     def test_print_cache_stats(self):
         """Test cache statistics printing (no exception)."""
+        logger.info("running test_print_cache_stats")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -653,10 +680,12 @@ class TestCompressedKVCacheMLALongContext:
 
     @staticmethod
     def _device() -> torch.device:
+        logger.debug("_device called")
         return torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
 
     def test_long_context_efficient_paging(self):
         """Test efficient paging for long sequences."""
+        logger.info("running test_long_context_efficient_paging")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,
@@ -689,6 +718,7 @@ class TestCompressedKVCacheMLALongContext:
 
     def test_memory_usage_scaling(self):
         """Test that memory scales with block size, not sequence length."""
+        logger.info("running test_memory_usage_scaling")
         config = TrellisModelConfig(
             num_hidden_layers=1,
             num_attention_heads=4,

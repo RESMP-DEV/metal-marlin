@@ -1,6 +1,7 @@
 """Tests for fairway grouped-input preparation in Trellis MoE dispatch."""
 
 from __future__ import annotations
+import logging
 
 import torch
 
@@ -8,8 +9,12 @@ from metal_marlin import moe_dispatch as parent_moe_dispatch
 from metal_marlin.trellis import moe_dispatch as trellis_moe_dispatch
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_prepare_fairway_grouped_inputs_cpu_fallback_outputs() -> None:
     """CPU fallback should still produce grouped-kernel-ready tensors."""
+    logger.info("running test_prepare_fairway_grouped_inputs_cpu_fallback_outputs")
     trellis_moe_dispatch.reset_mixed_bpw_grouping_fallback_counters()
 
     expert_ids = torch.tensor(
@@ -70,6 +75,7 @@ def test_prepare_fairway_grouped_inputs_records_gpu_unavailable_reason(
     monkeypatch,
 ) -> None:
     """Missing GPU grouping entry-point should use the existing fallback reason code."""
+    logger.info("running test_prepare_fairway_grouped_inputs_records_gpu_unavailable_reason")
     trellis_moe_dispatch.reset_mixed_bpw_grouping_fallback_counters()
     monkeypatch.setattr(trellis_moe_dispatch, "group_tokens_by_expert_full_gpu", None)
 

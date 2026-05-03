@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import math
 import os
 import platform
@@ -38,6 +39,9 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 # ── Project root detection ───────────────────────────────────────────────────
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -52,6 +56,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 
 def _percentile(sorted_vals: list[float], pct: float) -> float:
     """Compute percentile from already-sorted list."""
+    logger.debug("_percentile called with sorted_vals=%s, pct=%s", sorted_vals, pct)
     if not sorted_vals:
         return 0.0
     idx = (len(sorted_vals) - 1) * pct
@@ -63,6 +68,7 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 
 def _git_info() -> dict[str, Any]:
     """Capture git repository state for reproducibility."""
+    logger.debug("_git_info called")
     info: dict[str, Any] = {
         "available": False,
         "commit": None,
@@ -93,6 +99,7 @@ def _git_info() -> dict[str, Any]:
 
 def _hardware_info() -> dict[str, Any]:
     """Capture hardware environment."""
+    logger.debug("_hardware_info called")
     info: dict[str, Any] = {
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -106,6 +113,7 @@ def _hardware_info() -> dict[str, Any]:
     if sys.platform == "darwin":
         try:
             def _sysctl(key: str) -> str:
+                logger.debug("_sysctl called with key=%s", key)
                 r = subprocess.run(
                     ["sysctl", "-n", key],
                     capture_output=True, text=True, timeout=5,
@@ -152,6 +160,7 @@ def _hardware_info() -> dict[str, Any]:
 
 def _software_versions() -> dict[str, Any]:
     """Capture versions of key dependencies."""
+    logger.debug("_software_versions called")
     versions: dict[str, Any] = {}
 
     for pkg_name in ("numpy", "scipy", "psutil", "pydantic", "safetensors", "tiktoken"):
@@ -195,6 +204,7 @@ def _compute_integrity_hash(data: dict[str, Any]) -> str:
     generation.  The hash covers the canonical JSON serialization of every
     key except 'integrity_hash' itself.
     """
+    logger.debug("_compute_integrity_hash called with data=%s", data)
     canonical = json.dumps(data, sort_keys=True, indent=None, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -207,6 +217,7 @@ def bench_numpy_matmul(
     iterations: int = 20,
 ) -> list[dict[str, Any]]:
     """Benchmark numpy matrix multiplication for baseline throughput."""
+    logger.info("bench_numpy_matmul starting with sizes=%s, warmup=%s, iterations=%s", sizes, warmup, iterations)
     import numpy as np
 
     results: list[dict[str, Any]] = []
@@ -258,6 +269,7 @@ def bench_torch_matmul(
     device: str = "cpu",
 ) -> list[dict[str, Any]]:
     """Benchmark torch matrix multiplication (CPU or MPS)."""
+    logger.info("bench_torch_matmul starting with sizes=%s, warmup=%s, iterations=%s, device=%s", sizes, warmup, iterations, device)
     try:
         import torch
     except ImportError:
@@ -322,6 +334,7 @@ def bench_memory_bandwidth(
     iterations: int = 15,
 ) -> dict[str, Any]:
     """Estimate sustained memory bandwidth via numpy array copy."""
+    logger.info("bench_memory_bandwidth starting with size_mb=%s, warmup=%s, iterations=%s", size_mb, warmup, iterations)
     import numpy as np
 
     n_elements = (size_mb * 1024 * 1024) // 4  # float32
@@ -366,6 +379,7 @@ def bench_vector_ops(
     iterations: int = 20,
 ) -> dict[str, Any]:
     """Benchmark basic vector operations (add, multiply, reduce) via numpy."""
+    logger.info("bench_vector_ops starting with size=%s, warmup=%s, iterations=%s", size, warmup, iterations)
     import numpy as np
 
     a = np.random.randn(size).astype(np.float32)
@@ -412,6 +426,7 @@ def bench_vector_ops(
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Reproducible metal_marlin benchmark suite",
     )

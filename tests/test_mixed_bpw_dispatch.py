@@ -1,4 +1,5 @@
 """Test mixed bit-width MoE dispatch with C++ integration."""
+import logging
 
 import numpy as np
 import pytest
@@ -12,7 +13,11 @@ from metal_marlin.trellis.mixed_bpw_dispatch import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def _has_metal() -> bool:
+    logger.debug("_has_metal called")
     try:
         from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
         return HAS_METAL and HAS_MPS
@@ -26,6 +31,7 @@ pytestmark = pytest.mark.skipif(not _has_metal(), reason="Metal not available")
 @pytest.fixture
 def mixed_bpw_config():
     """Create a test configuration for mixed bit-width MoE."""
+    logger.debug("mixed_bpw_config called")
     return MoEConfig(
         num_experts=4,
         num_experts_per_tok=2,
@@ -38,6 +44,7 @@ def mixed_bpw_config():
 @pytest.fixture
 def mixed_bpw_weights():
     """Create mock weights for mixed bit-width experts."""
+    logger.debug("mixed_bpw_weights called")
     num_experts = 4
     hidden_dim = 256
     intermediate_dim = 192
@@ -91,6 +98,7 @@ def mixed_bpw_weights():
 
 def test_mixed_bpw_dispatch_basic(mixed_bpw_config, mixed_bpw_weights):
     """Test basic mixed BPW dispatch executes without error."""
+    logger.info("running test_mixed_bpw_dispatch_basic")
     reset_mixed_bpw_stats()
 
     config = mixed_bpw_config
@@ -132,6 +140,7 @@ def test_mixed_bpw_dispatch_basic(mixed_bpw_config, mixed_bpw_weights):
 
 def test_mixed_bpw_dispatch_cpp_fallback(mixed_bpw_config, mixed_bpw_weights):
     """Test that C++ fallback is properly integrated."""
+    logger.info("running test_mixed_bpw_dispatch_cpp_fallback")
     reset_mixed_bpw_stats()
 
     config = mixed_bpw_config
@@ -199,6 +208,7 @@ def test_mixed_bpw_dispatch_cpp_fallback(mixed_bpw_config, mixed_bpw_weights):
 
 def test_mixed_bpw_config_cpp_integration(mixed_bpw_config):
     """Test that Python and C++ MoEConfig can interoperate."""
+    logger.info("running test_mixed_bpw_config_cpp_integration")
     from metal_marlin import _cpp_ext
 
     # Create Python config
@@ -231,6 +241,7 @@ def test_mixed_bpw_config_cpp_integration(mixed_bpw_config):
 
 def test_mixed_bpw_stats_tracking(mixed_bpw_config, mixed_bpw_weights):
     """Test that statistics are properly tracked."""
+    logger.info("running test_mixed_bpw_stats_tracking")
     reset_mixed_bpw_stats()
 
     config = mixed_bpw_config
@@ -268,6 +279,7 @@ def test_mixed_bpw_stats_tracking(mixed_bpw_config, mixed_bpw_weights):
 
 def test_mixed_bpw_bit_width_grouping(mixed_bpw_config, mixed_bpw_weights):
     """Test that experts are correctly grouped by bit-width."""
+    logger.info("running test_mixed_bpw_bit_width_grouping")
     from metal_marlin import _cpp_ext
 
     config = mixed_bpw_config

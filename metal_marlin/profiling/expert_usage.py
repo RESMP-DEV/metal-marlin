@@ -37,6 +37,7 @@ Integration with MoE dispatch:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections.abc import Iterator
@@ -47,6 +48,9 @@ from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ExpertDispatchRecord:
@@ -96,6 +100,7 @@ class ExpertStats:
     @property
     def avg_tokens_per_selection(self) -> float:
         """Average tokens per selection."""
+        logger.debug("avg_tokens_per_selection called")
         if self.total_selections == 0:
             return 0.0
         return self.total_tokens / self.total_selections
@@ -103,6 +108,7 @@ class ExpertStats:
     @property
     def avg_time_ms(self) -> float:
         """Average dispatch time in milliseconds."""
+        logger.debug("avg_time_ms called")
         if self.dispatch_count == 0:
             return 0.0
         return self.total_time_ms / self.dispatch_count
@@ -110,6 +116,7 @@ class ExpertStats:
     @property
     def bandwidth_gbs(self) -> float:
         """Average memory bandwidth in GB/s."""
+        logger.debug("bandwidth_gbs called")
         if self.total_time_ms == 0:
             return 0.0
         total_bytes = self.total_bytes_read + self.total_bytes_written
@@ -118,6 +125,7 @@ class ExpertStats:
     @property
     def p50_time_ms(self) -> float:
         """50th percentile dispatch time."""
+        logger.debug("p50_time_ms called")
         if not self.time_samples:
             return 0.0
         sorted_times = sorted(self.time_samples)
@@ -126,6 +134,7 @@ class ExpertStats:
     @property
     def p95_time_ms(self) -> float:
         """95th percentile dispatch time."""
+        logger.debug("p95_time_ms called")
         if not self.time_samples:
             return 0.0
         sorted_times = sorted(self.time_samples)
@@ -144,6 +153,7 @@ class LayerExpertStats:
 
     def get_or_create_expert(self, expert_id: int) -> ExpertStats:
         """Get or create stats for an expert."""
+        logger.debug("get_or_create_expert called with expert_id=%s", expert_id)
         if expert_id not in self.expert_stats:
             self.expert_stats[expert_id] = ExpertStats(expert_id=expert_id)
         return self.expert_stats[expert_id]
@@ -172,6 +182,7 @@ class ExpertUsageProfiler:
         enabled: bool = False,
         max_time_samples: int = 1000,
     ):
+        logger.debug("initializing %s with num_experts=%s, num_layers=%s, enabled=%s, max_time_samples=%s", type(self).__name__, num_experts, num_layers, enabled, max_time_samples)
         self.num_experts = num_experts
         self.num_layers = num_layers
         self._enabled = enabled
@@ -201,14 +212,17 @@ class ExpertUsageProfiler:
 
     def enable(self) -> None:
         """Enable profiling."""
+        logger.debug("enable called")
         self._enabled = True
 
     def disable(self) -> None:
         """Disable profiling."""
+        logger.debug("disable called")
         self._enabled = False
 
     def is_enabled(self) -> bool:
         """Check if profiling is enabled."""
+        logger.debug("is_enabled called")
         return self._enabled
 
     def set_model_config(
@@ -228,6 +242,7 @@ class ExpertUsageProfiler:
             intermediate_dim: FFN intermediate dimension
             bits: Weight quantization bits
         """
+        logger.debug("set_model_config called with num_experts=%s, num_layers=%s, hidden_dim=%s", num_experts, num_layers, hidden_dim)
         self.num_experts = num_experts
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
@@ -245,6 +260,7 @@ class ExpertUsageProfiler:
             Tuple of (bytes_read, bytes_written)
         """
         # Activations: [batch, hidden_dim] fp16
+        logger.debug("_estimate_bytes_for_dispatch called with batch_size=%s", batch_size)
         activation_bytes = batch_size * self.hidden_dim * 2
 
         # Expert weights (quantized):
@@ -282,6 +298,7 @@ class ExpertUsageProfiler:
             expert_ids: [batch, top_k] selected expert indices
             expert_probs: [batch, top_k] routing probabilities (optional)
         """
+        logger.debug("record_routing called with layer_idx=%s, expert_ids=%s, expert_probs=%s", layer_idx, expert_ids, expert_probs)
         if not self._enabled:
             return
 
@@ -325,6 +342,7 @@ class ExpertUsageProfiler:
             batch_size: Total tokens in batch
             dispatch_time_ms: Wall-clock dispatch time
         """
+        logger.debug("record_dispatch called with layer_idx=%s, expert_ids=%s, batch_size=%s", layer_idx, expert_ids, batch_size)
         if not self._enabled:
             return
 
@@ -401,6 +419,7 @@ class ExpertUsageProfiler:
 
         Actually, this just times and stores the elapsed. Use record_dispatch_timed instead.
         """
+        logger.debug("time_dispatch called with layer_idx=%s", layer_idx)
         if not self._enabled:
             yield
             return
@@ -424,6 +443,7 @@ class ExpertUsageProfiler:
 
         Must be called within or immediately after time_dispatch context.
         """
+        logger.debug("record_dispatch_timed called with layer_idx=%s, expert_ids=%s, batch_size=%s", layer_idx, expert_ids, batch_size)
         if not self._enabled or self._current_dispatch_start is None:
             return
 
@@ -434,6 +454,7 @@ class ExpertUsageProfiler:
 
     def _get_or_create_layer_stats(self, layer_idx: int) -> LayerExpertStats:
         """Get or create stats for a layer."""
+        logger.debug("_get_or_create_layer_stats called with layer_idx=%s", layer_idx)
         if layer_idx not in self._layer_stats:
             self._layer_stats[layer_idx] = LayerExpertStats(layer_idx=layer_idx)
         return self._layer_stats[layer_idx]
@@ -448,6 +469,7 @@ class ExpertUsageProfiler:
         Returns:
             ExpertStats or None if not found
         """
+        logger.debug("get_expert_stats called with expert_id=%s, layer_idx=%s", expert_id, layer_idx)
         with self._lock:
             if layer_idx is not None:
                 if layer_idx in self._layer_stats:
@@ -465,6 +487,7 @@ class ExpertUsageProfiler:
         Returns:
             List of expert IDs with load > threshold * average
         """
+        logger.debug("get_hot_experts called with threshold=%s, layer_idx=%s", threshold, layer_idx)
         with self._lock:
             if layer_idx is not None and layer_idx in self._layer_stats:
                 stats_dict = self._layer_stats[layer_idx].expert_stats
@@ -493,6 +516,7 @@ class ExpertUsageProfiler:
         Returns:
             List of expert IDs with load < threshold * average
         """
+        logger.debug("get_cold_experts called with threshold=%s, layer_idx=%s", threshold, layer_idx)
         with self._lock:
             if layer_idx is not None and layer_idx in self._layer_stats:
                 stats_dict = self._layer_stats[layer_idx].expert_stats
@@ -520,6 +544,7 @@ class ExpertUsageProfiler:
         Returns:
             List of expert IDs with zero selections
         """
+        logger.debug("get_dead_experts called with layer_idx=%s", layer_idx)
         with self._lock:
             if layer_idx is not None and layer_idx in self._layer_stats:
                 stats_dict = self._layer_stats[layer_idx].expert_stats
@@ -542,6 +567,7 @@ class ExpertUsageProfiler:
             - gini: Gini coefficient (0 = perfect equality)
             - max_min_ratio: Ratio of max to min load
         """
+        logger.info("get_load_imbalance called with layer_idx=%s", layer_idx)
         with self._lock:
             if layer_idx is not None and layer_idx in self._layer_stats:
                 stats_dict = self._layer_stats[layer_idx].expert_stats
@@ -576,6 +602,7 @@ class ExpertUsageProfiler:
         Returns:
             Dictionary with all profiling results.
         """
+        logger.debug("generate_report called")
         with self._lock:
             total_dispatches = sum(ls.total_dispatches for ls in self._layer_stats.values())
             total_time_ms = sum(ls.total_time_ms for ls in self._layer_stats.values())
@@ -635,6 +662,7 @@ class ExpertUsageProfiler:
 
     def print_summary(self) -> None:
         """Print human-readable summary to stdout."""
+        logger.debug("print_summary called")
         report = self.generate_report()
         summary = report["summary"]
         balance = report["load_balance"]
@@ -676,6 +704,7 @@ class ExpertUsageProfiler:
 
     def save_report(self, path: str | Path) -> None:
         """Save report to JSON file."""
+        logger.info("save_report called with path=%s", path)
         report = self.generate_report()
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -684,6 +713,7 @@ class ExpertUsageProfiler:
 
     def clear(self) -> None:
         """Clear all collected data."""
+        logger.debug("clear called")
         with self._lock:
             self._layer_stats.clear()
             self._global_expert_stats.clear()
@@ -696,11 +726,13 @@ _global_expert_profiler = ExpertUsageProfiler()
 
 def get_global_expert_profiler() -> ExpertUsageProfiler:
     """Get the global expert usage profiler instance."""
+    logger.debug("get_global_expert_profiler called")
     return _global_expert_profiler
 
 
 def reset_global_expert_profiler() -> None:
     """Reset the global profiler."""
+    logger.debug("reset_global_expert_profiler called")
     _global_expert_profiler.clear()
 
 

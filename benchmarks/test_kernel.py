@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Test dequant kernel performance."""
 
+import logging
 import sys
 import time
 from pathlib import Path
@@ -17,6 +18,9 @@ from metal_marlin.trellis.dispatch import dispatch_trellis_dequant_packed
 
 import os
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -24,6 +28,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     sys.exit(0)
 
 def main():
+    logger.info("main starting")
     bits = 3
     K, N = 2048, 5632
     tiles_k = K // 16

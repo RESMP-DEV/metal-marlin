@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -12,12 +13,16 @@ pytest.importorskip("transformers")
 
 from transformers import AutoConfig, AutoTokenizer  # noqa: E402
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.slow
 
 _DEFAULT_MODEL_ID = "Qwen/Qwen3-30B-A3B"
 
 
 def _require_qwen3_moe_class():
+    logger.debug("_require_qwen3_moe_class called")
     try:
         from transformers import Qwen3MoeForCausalLM  # type: ignore
     except Exception as exc:  # pragma: no cover - depends on transformers version
@@ -26,6 +31,7 @@ def _require_qwen3_moe_class():
 
 
 def _load_config(model_id: str):
+    logger.info("_load_config called with model_id=%s", model_id)
     try:
         return AutoConfig.from_pretrained(model_id)
     except Exception:
@@ -36,6 +42,7 @@ def _load_config(model_id: str):
 
 
 def _clone_config(config: Any, overrides: dict[str, Any]) -> Any:
+    logger.debug("_clone_config called with config=%s, overrides=%s", config, overrides)
     data = config.to_dict()
     for key, value in overrides.items():
         if key in data:
@@ -47,6 +54,7 @@ def _clone_config(config: Any, overrides: dict[str, Any]) -> Any:
 
 
 def _get_moe_blocks(model: Any) -> list[Any]:
+    logger.debug("_get_moe_blocks called with model=%s", model)
     blocks = [m for m in model.modules() if m.__class__.__name__ == "Qwen3MoeSparseMoeBlock"]
     if not blocks:
         pytest.skip("Qwen3MoeSparseMoeBlock not found in model")
@@ -54,6 +62,7 @@ def _get_moe_blocks(model: Any) -> list[Any]:
 
 
 def _find_router_linear(block: Any, num_experts: int):
+    logger.debug("_find_router_linear called with block=%s, num_experts=%s", block, num_experts)
     candidates: list[tuple[str, Any]] = []
     for name, module in block.named_modules():
         if isinstance(module, torch.nn.Linear) and module.out_features == num_experts:
@@ -65,6 +74,7 @@ def _find_router_linear(block: Any, num_experts: int):
 
 
 def _assert_no_shared_expert(block: Any) -> None:
+    logger.debug("_assert_no_shared_expert called with block=%s", block)
     for name in ("shared_expert", "shared_experts", "shared_expert_mlp", "shared_mlp"):
         if not hasattr(block, name):
             continue
@@ -77,10 +87,12 @@ def _assert_no_shared_expert(block: Any) -> None:
 
 
 def _expert_layer_filter(name: str, _module: Any) -> bool:
+    logger.debug("_expert_layer_filter called with name=%s, _module=%s", name, _module)
     return ".experts.0." in name or name.endswith((".gate", ".router", ".gate_proj"))
 
 
 def _select_device() -> str | None:
+    logger.debug("_select_device called")
     if torch.cuda.is_available():
         return "cuda"
     if torch.backends.mps.is_available():
@@ -90,6 +102,7 @@ def _select_device() -> str | None:
 
 @pytest.fixture(scope="session")
 def qwen3_moe_config():
+    logger.debug("qwen3_moe_config called")
     model_id = os.environ.get("QWEN3_MOE_MODEL", _DEFAULT_MODEL_ID)
     config = _load_config(model_id)
     assert config.model_type == "qwen3_moe"
@@ -102,6 +115,7 @@ def qwen3_moe_config():
 
 @pytest.fixture
 def qwen3_moe_tiny_config(qwen3_moe_config):
+    logger.debug("qwen3_moe_tiny_config called with qwen3_moe_config=%s", qwen3_moe_config)
     overrides = {
         "hidden_size": 128,
         "intermediate_size": 256,
@@ -121,6 +135,7 @@ def qwen3_moe_tiny_config(qwen3_moe_config):
 
 @pytest.fixture(scope="session")
 def qwen3_moe_pretrained():
+    logger.debug("qwen3_moe_pretrained called")
     model_id = os.environ.get("QWEN3_MOE_MODEL")
     if not model_id:
         pytest.skip("Set QWEN3_MOE_MODEL to a local path or HF repo to run pretrained tests.")
@@ -150,6 +165,7 @@ def qwen3_moe_pretrained():
 
 
 def test_qwen3_moe_model_loads(qwen3_moe_tiny_config):
+    logger.info("running test_qwen3_moe_model_loads")
     Qwen3MoeForCausalLM = _require_qwen3_moe_class()
     model = Qwen3MoeForCausalLM(qwen3_moe_tiny_config)
     assert model.config.model_type == "qwen3_moe"
@@ -157,6 +173,7 @@ def test_qwen3_moe_model_loads(qwen3_moe_tiny_config):
 
 
 def test_qwen3_moe_layer_replacement_preserves_experts(qwen3_moe_tiny_config):
+    logger.info("running test_qwen3_moe_layer_replacement_preserves_experts")
     pytest.importorskip("metal_marlin")
     from metal_marlin.quantize_model import quantize_model
 
@@ -182,6 +199,7 @@ def test_qwen3_moe_layer_replacement_preserves_experts(qwen3_moe_tiny_config):
 
 
 def test_qwen3_moe_routing_topk(qwen3_moe_tiny_config):
+    logger.info("running test_qwen3_moe_routing_topk")
     Qwen3MoeForCausalLM = _require_qwen3_moe_class()
     model = Qwen3MoeForCausalLM(qwen3_moe_tiny_config)
     block = _get_moe_blocks(model)[0]
@@ -201,11 +219,13 @@ def test_qwen3_moe_routing_topk(qwen3_moe_tiny_config):
 
 
 def test_qwen3_moe_pretrained_loads(qwen3_moe_pretrained):
+    logger.info("running test_qwen3_moe_pretrained_loads")
     model, _tokenizer = qwen3_moe_pretrained
     assert model.config.model_type == "qwen3_moe"
 
 
 def test_qwen3_moe_generation_quality(qwen3_moe_pretrained):
+    logger.info("running test_qwen3_moe_generation_quality")
     model, tokenizer = qwen3_moe_pretrained
     device = next(model.parameters()).device
 

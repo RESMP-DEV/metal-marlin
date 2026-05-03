@@ -21,9 +21,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum, auto
+import logging
 from typing import TYPE_CHECKING, Any
 
 from .._compat import HAS_TORCH, torch
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -56,11 +60,13 @@ class Device:
     @property
     def is_gpu(self) -> bool:
         """True if this is any type of GPU device."""
+        logger.debug("is_gpu called")
         return self.device_type in (DeviceType.CUDA, DeviceType.MPS)
 
     @property
     def is_cpu(self) -> bool:
         """True if this is a CPU device."""
+        logger.debug("is_cpu called")
         return self.device_type == DeviceType.CPU
 
     def __str__(self) -> str:
@@ -70,6 +76,7 @@ class Device:
     @classmethod
     def cpu(cls, device_id: int = 0) -> Device:
         """Create a CPU device."""
+        logger.debug("cpu called with device_id=%s", device_id)
         import platform
 
         return cls(
@@ -81,6 +88,7 @@ class Device:
     @classmethod
     def cuda(cls, device_id: int = 0) -> Device:
         """Create a CUDA device (NVIDIA GPU via PyTorch)."""
+        logger.debug("cuda called with device_id=%s", device_id)
         if not HAS_TORCH or torch is None:
             raise RuntimeError("PyTorch required for CUDA devices")
 
@@ -101,6 +109,7 @@ class Device:
     @classmethod
     def mps(cls, device_id: int = 0) -> Device:
         """Create an MPS device (Metal via PyTorch on macOS)."""
+        logger.debug("mps called with device_id=%s", device_id)
         if not HAS_TORCH or torch is None:
             raise RuntimeError("PyTorch required for MPS devices")
 
@@ -135,16 +144,19 @@ class DeviceMesh:
     @property
     def tensor_parallel_size(self) -> int:
         """Number of devices in tensor parallel dimension."""
+        logger.debug("tensor_parallel_size called")
         return len(self.devices[0]) if self.devices else 0
 
     @property
     def pipeline_parallel_size(self) -> int:
         """Number of devices in pipeline parallel dimension."""
+        logger.debug("pipeline_parallel_size called")
         return len(self.devices) if self.devices else 0
 
     @property
     def world_size(self) -> int:
         """Total number of devices in the mesh."""
+        logger.debug("world_size called")
         return self.tensor_parallel_size * self.pipeline_parallel_size
 
     def __len__(self) -> int:
@@ -165,6 +177,7 @@ class DeviceMesh:
         Returns:
             Device at the specified position
         """
+        logger.debug("get_device called with tp_rank=%s, pp_rank=%s", tp_rank, pp_rank)
         return self.devices[pp_rank][tp_rank]
 
     def get_tp_group(self, pp_rank: int = 0) -> list[Device]:
@@ -176,6 +189,7 @@ class DeviceMesh:
         Returns:
             List of devices that form a tensor parallel group
         """
+        logger.debug("get_tp_group called with pp_rank=%s", pp_rank)
         return list(self.devices[pp_rank])
 
     def get_pp_group(self, tp_rank: int = 0) -> list[Device]:
@@ -187,6 +201,7 @@ class DeviceMesh:
         Returns:
             List of devices that form a pipeline parallel group
         """
+        logger.debug("get_pp_group called with tp_rank=%s", tp_rank)
         return [row[tp_rank] for row in self.devices]
 
     @classmethod
@@ -206,6 +221,7 @@ class DeviceMesh:
         Returns:
             DeviceMesh with specified topology
         """
+        logger.debug("from_devices called with devices=%s, tensor_parallel_size=%s, pipeline_parallel_size=%s", devices, tensor_parallel_size, pipeline_parallel_size)
         n_devices = len(devices)
         if n_devices == 0:
             return cls(devices=[])
@@ -258,6 +274,7 @@ class DeviceMesh:
         Returns:
             DeviceMesh with n_devices CPU devices
         """
+        logger.debug("cpu_only called with n_devices=%s", n_devices)
         devices = [Device.cpu(i) for i in range(n_devices)]
         return cls.from_devices(devices)
 
@@ -272,6 +289,7 @@ class DeviceMesh:
         Returns:
             DeviceMesh with [CPU, MPS] tensor parallel topology
         """
+        logger.debug("cpu_mps_split called")
         devices = [Device.cpu(0), Device.mps(0)]
         return cls.from_devices(devices, tensor_parallel_size=2)
 
@@ -284,6 +302,7 @@ class DeviceMesh:
         Returns:
             DeviceMesh with one MPS device
         """
+        logger.debug("single_mps called")
         return cls.from_devices([Device.mps(0)])
 
     @classmethod
@@ -298,6 +317,7 @@ class DeviceMesh:
         Returns:
             DeviceMesh with all available devices
         """
+        logger.debug("detect_available called")
         devices: list[Device] = []
 
         # Try CUDA
@@ -336,6 +356,7 @@ def get_device_for_array(arr: Any) -> Device:
         Device where the array resides
     """
     # PyTorch tensors
+    logger.debug("get_device_for_array called with arr=%s", arr)
     if HAS_TORCH and torch is not None and isinstance(arr, torch.Tensor):
         device = arr.device
         if device.type == "cuda":
@@ -359,6 +380,7 @@ def move_to_device(arr: Any, device: Device) -> Any:
     Returns:
         Array on the target device
     """
+    logger.debug("move_to_device called with arr=%s, device=%s", arr, device)
     from .._compat import to_numpy
 
     current_device = get_device_for_array(arr)

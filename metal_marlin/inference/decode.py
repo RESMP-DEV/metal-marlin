@@ -26,6 +26,7 @@ Backend: PyTorch MPS + Metal dispatch (no MLX dependency)
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -34,6 +35,9 @@ import torch
 import torch.nn.functional as F
 
 from .._compat import HAS_TORCH
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -45,11 +49,13 @@ if TYPE_CHECKING:
 
 def _check_mps() -> bool:
     """Check if MPS backend is available."""
+    logger.debug("_check_mps called")
     return HAS_TORCH and torch.backends.mps.is_available()
 
 
 def require_mps(feature: str = "this operation") -> None:
     """Raise RuntimeError if MPS is not available."""
+    logger.debug("require_mps called with feature=%s", feature)
     if not _check_mps():
         raise RuntimeError(
             f"MPS backend is required for {feature}. "
@@ -173,10 +179,12 @@ class DecodePerfStats:
 
     @property
     def total_time_ms(self) -> float:
+        logger.debug("total_time_ms called")
         return sum(self.layer_times_ms) if self.layer_times_ms else 0.0
 
     @property
     def tokens_per_second(self) -> float:
+        logger.debug("tokens_per_second called")
         if self.total_time_ms > 0:
             return 1000.0 / self.total_time_ms
         return 0.0
@@ -199,6 +207,7 @@ class DecodeState:
         layer_weights: list[LayerWeights],
         device: str = "mps",
     ) -> None:
+        logger.debug("initializing %s with config=%s, layer_weights=%s, device=%s", type(self).__name__, config, layer_weights, device)
         require_mps("DecodeState")
 
         self.config = config
@@ -218,6 +227,7 @@ class DecodeState:
 
     def _init_persistent_buffers(self) -> None:
         """Initialize persistent buffers for decode."""
+        logger.debug("_init_persistent_buffers called")
         cfg = self.config
         assert cfg.head_dim is not None
         assert cfg.num_kv_heads is not None
@@ -239,14 +249,17 @@ class DecodeState:
 
     @property
     def qkv_buffer(self) -> torch.Tensor | None:
+        logger.debug("qkv_buffer called")
         return self._qkv_buffer
 
     @property
     def attn_out_buffer(self) -> torch.Tensor | None:
+        logger.debug("attn_out_buffer called")
         return self._attn_out_buffer
 
     @property
     def mlp_buffer(self) -> torch.Tensor | None:
+        logger.debug("mlp_buffer called")
         return self._mlp_buffer
 
 
@@ -503,6 +516,7 @@ def select_decode_kernel(M: int, N: int, K: int) -> str:
         Kernel name to use ("decode_gemv_fp4", "decode_gemv_fp4_wide",
         "decode_gemv_fp4_tiled", or "marlin_gemm_fp4" for larger M).
     """
+    logger.debug("select_decode_kernel called with M=%s, N=%s, K=%s", M, N, K)
     if M > 8:
         # Fall back to full GEMM for larger batches
         return "marlin_gemm_fp4"
@@ -549,6 +563,7 @@ def quantized_linear_torch(
     """
     # For now, use a simple dequantize-then-matmul approach
     # A proper implementation would use Metal kernels
+    logger.info("quantized_linear_torch called with x=%s, weight_packed=%s, scales=%s, group_size=%s", x, weight_packed, scales, group_size)
     K_packed, N = weight_packed.shape
     K = K_packed * 8
 
@@ -578,6 +593,7 @@ def _dequantize_fp4_torch(
     Returns:
         [K, N] fp16 tensor
     """
+    logger.info("_dequantize_fp4_torch called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     device = packed.device
     dtype = scales.dtype
 
@@ -650,6 +666,7 @@ def fused_qkv_projection(
         - K: [batch, num_kv_heads, 1, head_dim]
         - V: [batch, num_kv_heads, 1, head_dim]
     """
+    logger.debug("fused_qkv_projection called with hidden_states=%s, layer=%s, config=%s", hidden_states, layer, config)
     require_mps("fused_qkv_projection")
 
     batch_size = hidden_states.shape[0]
@@ -716,6 +733,7 @@ def quantized_kv_attention(
     Returns:
         Attention output [batch, num_heads, 1, head_dim].
     """
+    logger.info("quantized_kv_attention called with q=%s, k_cache=%s, v_cache=%s, k_scales=%s", q, k_cache, v_cache, k_scales)
     require_mps("quantized_kv_attention")
     if quant_dtype not in {"fp8", "int8", "fp4"}:
         raise ValueError(f"Unsupported quant_dtype: {quant_dtype}")
@@ -764,6 +782,7 @@ def quantized_kv_attention(
 
     def _expand_scales(scales: torch.Tensor, target_dim: int) -> torch.Tensor:
         # scales: [B, H, S, G]
+        logger.debug("_expand_scales called with scales=%s, target_dim=%s", scales, target_dim)
         if scales.shape[-1] == target_dim:
             return scales.to(torch.float32)
         expanded = (
@@ -775,6 +794,7 @@ def quantized_kv_attention(
         return expanded[..., :target_dim]
 
     def _dequantize_cache(cache: torch.Tensor, scales: torch.Tensor, mode: str) -> torch.Tensor:
+        logger.info("_dequantize_cache called with cache=%s, scales=%s, mode=%s", cache, scales, mode)
         if mode == "fp8":
             centered = cache.to(torch.float32) - 128.0
             return centered / 127.0 * _expand_scales(scales, cache.shape[-1]) * 448.0
@@ -826,6 +846,7 @@ def _apply_rope(
     rope_theta: float = 10000.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply Rotary Position Embedding to Q and K."""
+    logger.debug("_apply_rope called with q=%s, k=%s, position=%s", q, k, position)
     require_mps("_apply_rope")
 
     head_dim = q.shape[3]
@@ -863,6 +884,7 @@ def _apply_rope(
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """RMS normalization."""
+    logger.debug("_rms_norm called with x=%s, weight=%s, eps=%s", x, weight, eps)
     variance = torch.mean(x**2, dim=-1, keepdim=True)
     x_normed = x * torch.rsqrt(variance + eps)
     return weight * x_normed
@@ -879,6 +901,7 @@ def _mlp_forward(
     group_size: int,
 ) -> torch.Tensor:
     """SwiGLU MLP forward pass."""
+    logger.debug("_mlp_forward called with hidden_states=%s, gate_weight=%s, gate_scales=%s", hidden_states, gate_weight, gate_scales)
     require_mps("_mlp_forward")
 
     gate = quantized_linear_torch(hidden_states, gate_weight, gate_scales, group_size)
@@ -923,6 +946,7 @@ def persistent_decode_step(
         - new_k: New key to append to cache [batch, num_kv_heads, 1, head_dim]
         - new_v: New value to append to cache [batch, num_kv_heads, 1, head_dim]
     """
+    logger.debug("persistent_decode_step called with hidden_states=%s, state=%s, layer_idx=%s", hidden_states, state, layer_idx)
     require_mps("persistent_decode_step")
 
     config = state.config

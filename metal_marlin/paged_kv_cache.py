@@ -15,10 +15,14 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import logging
 from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 KVCacheDType = Literal["fp16", "fp8", "fp8_e5m2", "FP8-E5M2", "int8", "int4"]
 
@@ -61,6 +65,7 @@ class PagedKVCache:
         dtype: str = "fp16",
         block_size: int = BLOCK_SIZE,
     ) -> None:
+        logger.debug("initializing %s with num_blocks=%s, num_kv_heads=%s, head_dim=%s, dtype=%s, block_size=%s", type(self).__name__, num_blocks, num_kv_heads, head_dim, dtype, block_size)
         if num_blocks <= 0:
             raise ValueError(f"num_blocks must be > 0, got {num_blocks}")
         if num_kv_heads <= 0:
@@ -102,6 +107,7 @@ class PagedKVCache:
 
     @staticmethod
     def _normalize_dtype(dtype: str) -> KVCacheDType:
+        logger.debug("_normalize_dtype called with dtype=%s", dtype)
         key = dtype.strip().lower()
         aliases = {
             "float16": "fp16",
@@ -121,6 +127,7 @@ class PagedKVCache:
 
     def _resolve_layout(self) -> _StorageLayout:
         # Base dense shape: [num_blocks, block_size, num_kv_heads, head_dim]
+        logger.debug("_resolve_layout called")
         dense_shape = (
             self.num_blocks,
             self.block_size,
@@ -201,6 +208,7 @@ class PagedKVCache:
         Raises:
             RuntimeError: If insufficient free blocks are available.
         """
+        logger.debug("allocate_blocks called with num_tokens=%s, seq_id=%s", num_tokens, seq_id)
         if num_tokens < 0:
             raise ValueError(f"num_tokens must be >= 0, got {num_tokens}")
 
@@ -237,6 +245,7 @@ class PagedKVCache:
         The output has shape ``[num_seqs, max_blocks_per_seq]`` and dtype int32.
         Sequence rows are ordered by ascending ``seq_id``.
         """
+        logger.debug("get_block_tables called with pad_value=%s", pad_value)
         if not self._block_tables:
             return np.empty((0, 0), dtype=np.int32)
 
@@ -251,6 +260,7 @@ class PagedKVCache:
 
     def get_context_lens(self) -> NDArray[np.int32]:
         """Return context lengths aligned with ``get_block_tables()`` row order."""
+        logger.debug("get_context_lens called")
         if not self._context_lens:
             return np.empty((0,), dtype=np.int32)
         seq_ids = sorted(self._context_lens)
@@ -258,6 +268,7 @@ class PagedKVCache:
 
     def get_sequence_ids(self) -> NDArray[np.int32]:
         """Return sequence IDs aligned with ``get_block_tables()`` row order."""
+        logger.debug("get_sequence_ids called")
         if not self._block_tables:
             return np.empty((0,), dtype=np.int32)
         return np.asarray(sorted(self._block_tables), dtype=np.int32)
@@ -265,11 +276,13 @@ class PagedKVCache:
     @property
     def num_free_blocks(self) -> int:
         """Number of currently free physical blocks."""
+        logger.debug("num_free_blocks called")
         return len(self._free_blocks)
 
     @property
     def num_allocated_blocks(self) -> int:
         """Number of currently allocated physical blocks."""
+        logger.debug("num_allocated_blocks called")
         return self.num_blocks - len(self._free_blocks)
 
     def quantize_kv(
@@ -285,6 +298,7 @@ class PagedKVCache:
             v: Value tensor of shape ``[num_tokens, num_heads, head_dim]``.
             slot_mapping: Flat slot indices for each token.
         """
+        logger.info("quantize_kv called with k=%s, v=%s, slot_mapping=%s", k, v, slot_mapping)
         if k.shape != v.shape:
             raise ValueError(f"k and v shapes must match, got {k.shape} vs {v.shape}")
         if k.shape[0] != slot_mapping.shape[0]:
@@ -420,6 +434,7 @@ class PagedKVCache:
             Tuple of (k, v) tensors of shape ``[seq_len, num_heads, head_dim]``.
             For 'fp8' and 'int8' storage, values are dequantized to 'fp16'.
         """
+        logger.debug("get_kv called with seq_id=%s", seq_id)
         if seq_id not in self._block_tables:
             raise ValueError(f"Sequence {seq_id} not found")
 
@@ -460,6 +475,7 @@ class PagedKVCache:
         Returns:
             Tuple of (k, v) tensors of shape ``[num_tokens, num_heads, head_dim]``.
         """
+        logger.info("dequantize_kv called with slot_mapping=%s", slot_mapping)
         block_indices = slot_mapping // self.block_size
         block_offsets = slot_mapping % self.block_size
 

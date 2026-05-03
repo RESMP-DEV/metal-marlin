@@ -5,10 +5,14 @@ for Metal dequantization kernels.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 def unpack_gptq_zeros(qzeros: torch.Tensor, bits: int = 4) -> torch.Tensor:
     """Unpack 4-bit packed zeros to float16.
@@ -20,6 +24,7 @@ def unpack_gptq_zeros(qzeros: torch.Tensor, bits: int = 4) -> torch.Tensor:
     Returns:
         Unpacked zeros [n_groups, out_features] as float16
     """
+    logger.info("unpack_gptq_zeros called with qzeros=%s, bits=%s", qzeros, bits)
     qzeros = qzeros.cpu().numpy()
     n_groups, packed_cols = qzeros.shape
 
@@ -71,6 +76,7 @@ def load_gptq_weights(
     # 1. Unpack zeros
     # GPTQ stores zeros packed. We need them unpacked for the kernel
     # (or kernel unpacks them, but unpacking once here is easier for now).
+    logger.info("load_gptq_weights called with qweight=%s, qzeros=%s, scales=%s", qweight, qzeros, scales)
     if qzeros.dtype == torch.int32:
         zeros = unpack_gptq_zeros(qzeros, bits=bits)
     else:

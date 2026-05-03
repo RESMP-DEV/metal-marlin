@@ -4,6 +4,7 @@ Verify: Test streaming output with a simple prompt
 """
 
 from collections.abc import Iterator
+import logging
 
 import pytest
 
@@ -16,12 +17,16 @@ except ImportError:
     HAS_TRELLIS_GENERATE = False
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not HAS_TRELLIS_GENERATE, reason="trellis_generate not available")
 class TestGenerationConfig:
     """Test GenerationConfig dataclass."""
 
     def test_default_values(self):
         """Test GenerationConfig default values."""
+        logger.info("running test_default_values")
         config = GenerationConfig()
         assert config.max_new_tokens == 256
         assert config.temperature == 1.0
@@ -34,6 +39,7 @@ class TestGenerationConfig:
 
     def test_custom_values(self):
         """Test GenerationConfig accepts custom values."""
+        logger.info("running test_custom_values")
         config = GenerationConfig(
             max_new_tokens=100,
             temperature=0.7,
@@ -56,22 +62,27 @@ class TestTrellisGenerator:
 
     def test_class_exists(self):
         """Test TrellisGenerator class is importable."""
+        logger.info("running test_class_exists")
         assert TrellisGenerator is not None
 
     def test_has_stream_generate(self):
         """Test stream_generate method exists."""
+        logger.info("running test_has_stream_generate")
         assert hasattr(TrellisGenerator, "stream_generate")
 
     def test_has_stream_generate_tokens(self):
         """Test stream_generate_tokens method exists."""
+        logger.info("running test_has_stream_generate_tokens")
         assert hasattr(TrellisGenerator, "stream_generate_tokens")
 
     def test_has_generate(self):
         """Test generate method exists."""
+        logger.info("running test_has_generate")
         assert hasattr(TrellisGenerator, "generate")
 
     def test_stream_generate_is_iterator(self):
         """Test stream_generate returns an Iterator type hint."""
+        logger.info("running test_stream_generate_is_iterator")
         import inspect
 
         sig = inspect.signature(TrellisGenerator.stream_generate)
@@ -81,6 +92,7 @@ class TestTrellisGenerator:
 
     def test_stream_generate_tokens_is_iterator(self):
         """Test stream_generate_tokens returns an Iterator type hint."""
+        logger.info("running test_stream_generate_tokens_is_iterator")
         import inspect
 
         sig = inspect.signature(TrellisGenerator.stream_generate_tokens)
@@ -91,6 +103,7 @@ class TestTrellisGenerator:
 
 def test_module_exports():
     """Test module exports."""
+    logger.info("running test_module_exports")
     from metal_marlin.trellis import GenerationConfig, TrellisGenerator
     assert TrellisGenerator is not None
     assert GenerationConfig is not None

@@ -12,6 +12,7 @@ Key Dimensions (GLM-4.7-Flash):
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,9 @@ if HAS_PYOBJC_METAL:
 if TYPE_CHECKING:
     import torch
 
+
+logger = logging.getLogger(__name__)
+
 # Constants matching paged_attention.metal
 BLOCK_SIZE = 8
 THREADS_PER_TG = 128
@@ -37,6 +41,7 @@ _paged_kernel_lib: Any = None
 
 def _get_paged_kernel_library() -> Any:
     """Get or create the paged attention kernel library."""
+    logger.debug("_get_paged_kernel_library called")
     global _paged_kernel_lib
     if _paged_kernel_lib is None:
         from ..metal_dispatch import MetalKernelLibrary
@@ -75,6 +80,7 @@ def _get_paged_kernel_library() -> Any:
 
 def _mps_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     """Convert MPS tensor to Metal buffer."""
+    logger.debug("_mps_tensor_to_metal_buffer called with tensor=%s, device=%s", tensor, device)
     if not tensor.is_mps:
         tensor = tensor.to("mps")
     if not tensor.is_contiguous():
@@ -100,6 +106,7 @@ class MLAPagedAdapter:
             kv_cache: TrellisKVCache instance (contiguous or paged backend).
             attention_layer: TrellisMLAttention instance providing projections.
         """
+        logger.debug("initializing %s with kv_cache=%s, attention_layer=%s", type(self).__name__, kv_cache, attention_layer)
         self.kv_cache = kv_cache
         self.attn = attention_layer
         self.config = attention_layer.config
@@ -112,6 +119,7 @@ class MLAPagedAdapter:
 
     def _get_block_tables(self, batch_size: int) -> torch.Tensor:
         """Generate virtual block tables for contiguous TrellisKVCache."""
+        logger.debug("_get_block_tables called with batch_size=%s", batch_size)
         max_seq = self.kv_cache.max_seq_len
         num_blocks_per_seq = (max_seq + BLOCK_SIZE - 1) // BLOCK_SIZE
 
@@ -130,6 +138,7 @@ class MLAPagedAdapter:
         Returns:
             q_latent: [batch, num_heads, kv_lora_rank]
         """
+        logger.debug("_project_query called with q_nope=%s", q_nope)
         num_heads = self.attn.num_heads
         qk_nope_dim = self.attn.qk_nope_head_dim
         v_dim = self.attn.v_head_dim
@@ -163,6 +172,7 @@ class MLAPagedAdapter:
         Returns:
             attn_output: [batch, num_heads, v_head_dim]
         """
+        logger.debug("attention called with q_nope=%s, q_rope=%s, layer_idx=%s", q_nope, q_rope, layer_idx)
         batch_size, num_heads, _ = q_nope.shape
 
         # 1. Project Q to latent space
@@ -249,6 +259,7 @@ class MLAPagedAdapter:
         return attn_out.squeeze(2)
 
     def _dispatch_v1(self, Q, K, V, block_tables, context_lens, scale):
+        logger.debug("_dispatch_v1 called with Q=%s, K=%s, V=%s", Q, K, V)
         lib = _get_paged_kernel_library()
         device = lib.device
 
@@ -271,6 +282,7 @@ class MLAPagedAdapter:
 
         # Scalar arguments
         def make_u32(v):
+            logger.debug("make_u32 called with v=%s", v)
             return device.newBufferWithBytes_length_options_(
                 np.array([v], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
             )
@@ -298,6 +310,7 @@ class MLAPagedAdapter:
         return output
 
     def _dispatch_v1_fp8(self, Q, K, V, Ks, Vs, block_tables, context_lens, scale):
+        logger.debug("_dispatch_v1_fp8 called with Q=%s, K=%s, V=%s", Q, K, V)
         lib = _get_paged_kernel_library()
         device = lib.device
 
@@ -319,6 +332,7 @@ class MLAPagedAdapter:
         ]
 
         def make_u32(v):
+            logger.debug("make_u32 called with v=%s", v)
             return device.newBufferWithBytes_length_options_(
                 np.array([v], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
             )
@@ -346,6 +360,7 @@ class MLAPagedAdapter:
         return output
 
     def _dispatch_v1_fp4(self, Q, K, V, Ks, Vs, block_tables, context_lens, scale):
+        logger.debug("_dispatch_v1_fp4 called with Q=%s, K=%s, V=%s", Q, K, V)
         lib = _get_paged_kernel_library()
         device = lib.device
 
@@ -367,6 +382,7 @@ class MLAPagedAdapter:
         ]
 
         def make_u32(v):
+            logger.debug("make_u32 called with v=%s", v)
             return device.newBufferWithBytes_length_options_(
                 np.array([v], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
             )
@@ -394,6 +410,7 @@ class MLAPagedAdapter:
         return output
 
     def _dispatch_v1_int4(self, Q, K, V, Ks, Vs, block_tables, context_lens, scale):
+        logger.debug("_dispatch_v1_int4 called with Q=%s, K=%s, V=%s", Q, K, V)
         lib = _get_paged_kernel_library()
         device = lib.device
 
@@ -415,6 +432,7 @@ class MLAPagedAdapter:
         ]
 
         def make_u32(v):
+            logger.debug("make_u32 called with v=%s", v)
             return device.newBufferWithBytes_length_options_(
                 np.array([v], dtype=np.uint32).tobytes(), 4, Metal.MTLResourceStorageModeShared
             )

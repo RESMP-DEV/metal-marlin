@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging
 import torch
 import torch.nn as nn
 
@@ -37,6 +38,9 @@ with torch.no_grad():
 
 # Time 47 layers (simulate full model)
 import time
+
+
+logger = logging.getLogger(__name__)
 
 torch.mps.synchronize()
 t0 = time.time()

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -66,6 +67,9 @@ from .layer_sensitivity import SensitivityReport, VisionLayerType, analyze_visio
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class VisionCalibrationConfig:
@@ -99,6 +103,7 @@ def build_vision_calibration_dataset(
     Returns:
         VisionCalibrationDataset.
     """
+    logger.info("build_vision_calibration_dataset starting")
     source_lower = source.lower()
     if source_lower in {"coco", "coco_subset"}:
         return VisionCalibrationDataset.coco_subset(
@@ -119,12 +124,15 @@ class _ActivationCollector:
     """Collects limited activation samples for layer sensitivity analysis."""
 
     def __init__(self, max_samples: int = 4096) -> None:
+        logger.debug("initializing %s with max_samples=%s", type(self).__name__, max_samples)
         self.max_samples = max_samples
         self._buffers: dict[str, list[np.ndarray]] = {}
         self._counts: dict[str, int] = {}
 
     def make_hook(self, name: str) -> Callable:
+        logger.debug("make_hook called with name=%s", name)
         def hook(_module: Any, inputs: tuple[Any, ...], _output: Any) -> None:
+            logger.debug("hook called with _module=%s, inputs=%s, _output=%s", _module, inputs, _output)
             if not inputs:
                 return
             x = inputs[0]
@@ -146,6 +154,7 @@ class _ActivationCollector:
         return hook
 
     def get(self) -> dict[str, np.ndarray]:
+        logger.debug("get called")
         return {
             name: np.concatenate(chunks, axis=0) for name, chunks in self._buffers.items() if chunks
         }
@@ -177,6 +186,7 @@ def collect_vision_calibration_stats(
     Returns:
         (activations, hessians) dicts keyed by weight names.
     """
+    logger.debug("collect_vision_calibration_stats called with model=%s, calibration_data=%s, config=%s", model, calibration_data, config)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch required for calibration.")
 
@@ -226,6 +236,7 @@ def analyze_vision_encoder_sensitivity(
     fp8_threshold: float = 0.005,
 ) -> SensitivityReport:
     """Run sensitivity analysis for vision encoder layers."""
+    logger.debug("analyze_vision_encoder_sensitivity called with weights=%s, activations=%s, hessians=%s", weights, activations, hessians)
     return analyze_vision_layer_sensitivity(
         weights=weights,
         activations=activations,
@@ -241,6 +252,7 @@ def build_vision_precision_map(
     report: SensitivityReport | None = None,
 ) -> dict[str, tuple[Precision, int]]:
     """Build per-layer precision map for vision encoder weights."""
+    logger.info("build_vision_precision_map starting")
     precision_map: dict[str, tuple[Precision, int]] = {}
     report_map: dict[str, Any] = {}
 
@@ -286,6 +298,7 @@ def build_vlm_precision_map(
     Vision encoder weights use FP8/BF16 (from vision_precision_map),
     while the LLM defaults to FP4 (optionally preserving embeddings/norms).
     """
+    logger.info("build_vlm_precision_map starting")
     precision_map: dict[str, tuple[Precision, int]] = {}
     vision_precision_map = vision_precision_map or {}
 
@@ -316,10 +329,12 @@ def pack_vlm_mixed_format(
     output_path: str,
 ) -> Any:
     """Pack a mixed-format VLM using the provided precision map."""
+    logger.info("pack_vlm_mixed_format called with weights=%s, precision_map=%s, output_path=%s", weights, precision_map, output_path)
     return pack_mixed_format_model(weights, precision_map, output_path)
 
 
 def _precision_from_string(precision: str) -> Precision:
+    logger.debug("_precision_from_string called with precision=%s", precision)
     mapping = {
         "fp16": Precision.FP16,
         "bf16": Precision.BF16,
@@ -338,9 +353,11 @@ def _precision_from_string(precision: str) -> Precision:
 def _make_vision_layer_filter(
     config: VisionEncoderConfig,
 ) -> Callable[[str, Any], bool]:
+    logger.debug("_make_vision_layer_filter called with config=%s", config)
     prefix = config.layer_prefix
 
     def _filter(name: str, _module: Any) -> bool:
+        logger.debug("_filter called with name=%s, _module=%s", name, _module)
         if prefix and name.startswith(prefix):
             return True
         return "vision" in name.lower() or "visual" in name.lower()
@@ -353,6 +370,7 @@ def _register_activation_hooks(
     collector: _ActivationCollector,
     layer_filter: Callable[[str, Any], bool],
 ) -> list[Any]:
+    logger.debug("_register_activation_hooks called with model=%s, collector=%s, layer_filter=%s", model, collector, layer_filter)
     if not HAS_TORCH or torch is None:
         return []
 
@@ -370,6 +388,7 @@ def _register_activation_hooks(
 
 
 def _default_forward_fn(model: Any, batch: Any) -> Any:
+    logger.debug("_default_forward_fn called with model=%s, batch=%s", model, batch)
     candidates = [
         "forward_vision",
         "encode_images",
@@ -395,6 +414,7 @@ def _default_forward_fn(model: Any, batch: Any) -> Any:
 
 
 def _convert_batch_for_model(model: Any, batch: np.ndarray) -> Any:
+    logger.info("_convert_batch_for_model called with model=%s, batch=%s", model, batch)
     if torch is None:
         raise RuntimeError("PyTorch required for calibration.")
     device = _get_torch_device(model)
@@ -402,6 +422,7 @@ def _convert_batch_for_model(model: Any, batch: np.ndarray) -> Any:
 
 
 def _get_torch_device(model: Any) -> Any:
+    logger.debug("_get_torch_device called with model=%s", model)
     if not HAS_TORCH or torch is None:
         return None
     for param in model.parameters():
@@ -412,6 +433,7 @@ def _get_torch_device(model: Any) -> Any:
 def _map_stats_to_weight_names(
     stats: dict[str, NDArray[np.floating]],
 ) -> dict[str, NDArray[np.floating]]:
+    logger.debug("_map_stats_to_weight_names called with stats=%s", stats)
     mapped: dict[str, NDArray[np.floating]] = {}
     for name, value in stats.items():
         if name.endswith(".weight"):
@@ -422,12 +444,14 @@ def _map_stats_to_weight_names(
 
 
 def _is_vision_weight_name(name: str, config: VisionEncoderConfig) -> bool:
+    logger.debug("_is_vision_weight_name called with name=%s, config=%s", name, config)
     if config.layer_prefix and name.startswith(config.layer_prefix):
         return True
     return "vision" in name.lower() or "visual" in name.lower()
 
 
 def _is_llm_sensitive_weight(name: str) -> bool:
+    logger.debug("_is_llm_sensitive_weight called with name=%s", name)
     name_lower = name.lower()
     if "embed" in name_lower:
         return True

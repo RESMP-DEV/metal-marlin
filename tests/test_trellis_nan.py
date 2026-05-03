@@ -6,6 +6,7 @@ like q_b_proj (768 -> 5120) in GLM-4.7-Flash-Trellis-3bpw.
 Reference: dispatch_gemm_trellis_decode in metal_marlin/trellis/dispatch.py
 """
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -13,12 +14,16 @@ import torch
 
 from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
 
+
+logger = logging.getLogger(__name__)
+
 MODEL_PATH = Path(__file__).parents[1] / "models" / "GLM-4.7-Flash-Trellis-3bpw"
 pytestmark = pytest.mark.skipif(not MODEL_PATH.exists(), reason="Model not found")
 
 
 def require_metal():
     """Skip test if Metal/MPS is not available."""
+    logger.debug("require_metal called")
     if not (HAS_MPS and HAS_METAL):
         pytest.skip("Metal/MPS not available")
 
@@ -32,6 +37,7 @@ class TestTrellisNaN:
         This is the minimal reproduction case for the NaN bug.
         The kernel produces NaN for this specific expansion layer shape.
         """
+        logger.info("running test_q_b_proj_nan")
         require_metal()
 
         from metal_marlin.trellis.linear import TrellisLinear
@@ -80,6 +86,7 @@ class TestTrellisNaN:
         The decode kernel (gemm_trellis_packed_decode) is the primary
         path used during autoregressive generation.
         """
+        logger.info("running test_q_b_proj_decode_path")
         require_metal()
 
         from metal_marlin.trellis.linear import TrellisLinear
@@ -102,6 +109,7 @@ class TestTrellisNaN:
 
         This helps isolate whether the bug is specific to expansion layers.
         """
+        logger.info("running test_expansion_vs_contraction")
         require_metal()
 
         from metal_marlin.trellis.linear import TrellisLinear

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 _PAGED_ATTENTION_SHADER_PATH = (
     Path(__file__).resolve().parent.parent / "src" / "paged_attention.metal"
@@ -173,6 +177,7 @@ def build_attention_exports(
 ) -> dict[str, Callable[..., Any]]:
     """Build extracted attention exports using helpers provided by kernels.py."""
 
+    logger.info("build_attention_exports starting")
     def paged_attention_v1(
         q: torch.Tensor,
         k_cache: torch.Tensor,
@@ -182,6 +187,7 @@ def build_attention_exports(
         scale: float,
     ) -> torch.Tensor:
         """Dispatch paged attention v1 kernel."""
+        logger.debug("paged_attention_v1 called with q=%s, k_cache=%s, v_cache=%s", q, k_cache, v_cache)
         require_mps()
 
         batch, num_heads_q, seq_len, head_dim = q.shape
@@ -282,6 +288,7 @@ def build_attention_exports(
         scale: float | None = None,
     ) -> torch.Tensor:
         """Fused decode attention over FP4/INT8 KV cache."""
+        logger.info("quantized_kv_attention_decode called with query=%s, k_cache=%s, v_cache=%s, k_scales=%s", query, k_cache, v_cache, k_scales)
         require_mps()
 
         if quant_dtype not in {"fp4", "int8"}:
@@ -418,6 +425,7 @@ def build_attention_exports(
         scale: float,
     ) -> torch.Tensor:
         """Paged attention fallback over FP4-interleaved block cache."""
+        logger.debug("paged_attention_fp4 called with query=%s, key_cache=%s, value_cache=%s", query, key_cache, value_cache)
         del value_cache
 
         num_seqs, num_heads, seq_len, head_dim = query.shape
@@ -481,11 +489,13 @@ def build_attention_exports(
     ) -> torch.Tensor:
         """Flash Attention with FP4-quantized KV cache."""
 
+        logger.debug("flash_attention_kv_fp4 called with Q=%s, K_packed=%s, V_packed=%s", Q, K_packed, V_packed)
         def _dequantize_fp4_blockscaled(
             packed: torch.Tensor,
             scales: torch.Tensor,
             head_dim: int,
         ) -> torch.Tensor:
+            logger.info("_dequantize_fp4_blockscaled called with packed=%s, scales=%s, head_dim=%s", packed, scales, head_dim)
             packed_cpu = packed.detach().cpu()
             scales_cpu = scales.detach().cpu()
             if scales_cpu.dim() == 4 and scales_cpu.shape[-1] == 1:

@@ -37,6 +37,7 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ._compat import require_torch, torch
@@ -48,6 +49,9 @@ if TYPE_CHECKING:
     from .kv_cache import KVCache as KVCacheTorch
     from .metal_dispatch import MetalKernelLibrary
 
+
+
+logger = logging.getLogger(__name__)
 
 class RequestState(IntEnum):
     """Request lifecycle states."""
@@ -107,6 +111,7 @@ class PipelineScheduler:
             lib: MetalKernelLibrary for dispatching to GPU streams.
             max_batch_size: Maximum decode batch size per iteration.
         """
+        logger.debug("initializing %s with model=%s, lib=%s, max_batch_size=%s", type(self).__name__, model, lib, max_batch_size)
         require_torch()
 
         self.model = model
@@ -141,6 +146,7 @@ class PipelineScheduler:
         Returns:
             Request ID for tracking.
         """
+        logger.debug("add_request called with prompt_ids=%s, config=%s", prompt_ids, config)
         from .generate import GenerationConfig
 
         if config is None:
@@ -167,6 +173,7 @@ class PipelineScheduler:
         a separate stream.
         """
         # Create KV cache
+        logger.debug("_do_prefill called with request=%s", request)
         request.kv_cache = self.model.create_kv_cache()
 
         # Forward pass
@@ -185,6 +192,7 @@ class PipelineScheduler:
         Returns:
             Generated token ID, or None if finished.
         """
+        logger.debug("_do_decode_step called with request=%s", request)
         config = request.config
         logits = request.logits
 
@@ -239,6 +247,7 @@ class PipelineScheduler:
         Yields:
             Tuple of (request_id, token_id) for each generated token.
         """
+        logger.debug("generate called")
         while self.pending_prefill or self.active_decode or self.prefilling:
             # Phase 1: Start prefill for next pending request
             if self.prefilling is None and self.pending_prefill:
@@ -276,6 +285,7 @@ class PipelineScheduler:
             Dict mapping request_id to full output tensor [1, total_len].
         """
         # Drain the generator
+        logger.debug("generate_all called")
         for _ in self.generate():
             pass
 
@@ -306,6 +316,7 @@ class AsyncPipelineScheduler(PipelineScheduler):
         lib: MetalKernelLibrary,
         max_batch_size: int = 8,
     ):
+        logger.debug("initializing %s with model=%s, lib=%s, max_batch_size=%s", type(self).__name__, model, lib, max_batch_size)
         super().__init__(model, lib, max_batch_size)
 
         # Track async operations
@@ -325,6 +336,7 @@ class AsyncPipelineScheduler(PipelineScheduler):
         Yields:
             Tuple of (request_id, token_id) for each generated token.
         """
+        logger.debug("generate called")
         while self.pending_prefill or self.active_decode or self._prefill_pending:
             # Phase 1: Start async prefill if possible
             if self._prefill_pending is None and self.pending_prefill:
@@ -378,6 +390,7 @@ def generate_pipelined(
     Returns:
         Dict mapping request index to output tensor [1, total_len].
     """
+    logger.debug("generate_pipelined called with model=%s, requests=%s, lib=%s", model, requests, lib)
     require_torch()
 
     if lib is None:

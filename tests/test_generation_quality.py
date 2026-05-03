@@ -1,11 +1,16 @@
 """E2E generation test with memory cleanup."""
+import logging
 import gc
 
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_generation_not_gibberish():
+    logger.info("running test_generation_not_gibberish")
     from metal_marlin.model_utils import load_prequantized_mmfp4_model
     
     try:

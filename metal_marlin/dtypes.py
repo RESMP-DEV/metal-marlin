@@ -43,11 +43,15 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Literal
 
 import numpy as np
 
 from ._compat import HAS_TORCH, torch
+
+
+logger = logging.getLogger(__name__)
 
 # Type aliases for dtype string literals
 WeightDType = Literal["fp16", "bf16"]
@@ -86,6 +90,7 @@ class DTypeConfig:
     @property
     def torch_weights(self) -> Any | None:
         """Get PyTorch dtype for weights. Returns None if PyTorch unavailable."""
+        logger.debug("torch_weights called")
         if not HAS_TORCH:
             return None
         return _STR_TO_TORCH[self.weights]
@@ -93,6 +98,7 @@ class DTypeConfig:
     @property
     def torch_activations(self) -> Any | None:
         """Get PyTorch dtype for activations. Returns None if PyTorch unavailable."""
+        logger.debug("torch_activations called")
         if not HAS_TORCH:
             return None
         return _STR_TO_TORCH[self.activations]
@@ -100,6 +106,7 @@ class DTypeConfig:
     @property
     def torch_accumulation(self) -> Any | None:
         """Get PyTorch dtype for accumulation. Returns None if PyTorch unavailable."""
+        logger.debug("torch_accumulation called")
         if not HAS_TORCH:
             return None
         return _STR_TO_TORCH[self.accumulation]
@@ -107,6 +114,7 @@ class DTypeConfig:
     @property
     def torch_scales(self) -> Any | None:
         """Get PyTorch dtype for scales. Returns None if PyTorch unavailable."""
+        logger.debug("torch_scales called")
         if not HAS_TORCH:
             return None
         return _STR_TO_TORCH[self.scales]
@@ -114,6 +122,7 @@ class DTypeConfig:
     @property
     def torch_kv_cache(self) -> Any | None:
         """Get PyTorch dtype for KV cache. Returns None if PyTorch unavailable."""
+        logger.debug("torch_kv_cache called")
         if not HAS_TORCH:
             return None
         return _STR_TO_TORCH[self.kv_cache]
@@ -121,41 +130,49 @@ class DTypeConfig:
     @property
     def numpy_weights(self) -> np.dtype:
         """Get numpy dtype for weights."""
+        logger.debug("numpy_weights called")
         return _STR_TO_NUMPY[self.weights]
 
     @property
     def numpy_activations(self) -> np.dtype:
         """Get numpy dtype for activations."""
+        logger.debug("numpy_activations called")
         return _STR_TO_NUMPY[self.activations]
 
     @property
     def numpy_accumulation(self) -> np.dtype:
         """Get numpy dtype for accumulation."""
+        logger.debug("numpy_accumulation called")
         return _STR_TO_NUMPY[self.accumulation]
 
     @property
     def numpy_scales(self) -> np.dtype:
         """Get numpy dtype for scales."""
+        logger.debug("numpy_scales called")
         return _STR_TO_NUMPY[self.scales]
 
     @property
     def metal_weights(self) -> str:
         """Get Metal shader type name for weights."""
+        logger.debug("metal_weights called")
         return _STR_TO_METAL[self.weights]
 
     @property
     def metal_activations(self) -> str:
         """Get Metal shader type name for activations."""
+        logger.debug("metal_activations called")
         return _STR_TO_METAL[self.activations]
 
     @property
     def metal_accumulation(self) -> str:
         """Get Metal shader type name for accumulation."""
+        logger.debug("metal_accumulation called")
         return _STR_TO_METAL[self.accumulation]
 
     @property
     def metal_scales(self) -> str:
         """Get Metal shader type name for scales."""
+        logger.debug("metal_scales called")
         return _STR_TO_METAL[self.scales]
 
 
@@ -225,6 +242,7 @@ def get_torch_dtype(dtype_str: str) -> Any:
         ImportError: If PyTorch is not available
         ValueError: If dtype_str is not recognized
     """
+    logger.debug("get_torch_dtype called with dtype_str=%s", dtype_str)
     if not HAS_TORCH:
         raise ImportError("PyTorch is not available. Install with: pip install torch")
     if dtype_str not in _STR_TO_TORCH:
@@ -246,6 +264,7 @@ def get_numpy_dtype(dtype_str: str) -> np.dtype:
     Raises:
         ValueError: If dtype_str is not recognized
     """
+    logger.debug("get_numpy_dtype called with dtype_str=%s", dtype_str)
     if dtype_str not in _STR_TO_NUMPY:
         raise ValueError(
             f"Unknown dtype: {dtype_str!r}. Valid options: {list(_STR_TO_NUMPY.keys())}"
@@ -265,6 +284,7 @@ def get_metal_type(dtype_str: str) -> str:
     Raises:
         ValueError: If dtype_str is not recognized
     """
+    logger.debug("get_metal_type called with dtype_str=%s", dtype_str)
     if dtype_str not in _STR_TO_METAL:
         raise ValueError(
             f"Unknown dtype: {dtype_str!r}. Valid options: {list(_STR_TO_METAL.keys())}"
@@ -295,6 +315,7 @@ def numpy_dtype_for_torch(torch_dtype: Any) -> np.dtype:
         ...     numpy_dtype_for_torch(torch.bfloat16)  # numpy.float16 (numpy storage)
         ...     numpy_dtype_for_torch(torch.float32)  # numpy.float32
     """
+    logger.debug("numpy_dtype_for_torch called with torch_dtype=%s", torch_dtype)
     if not HAS_TORCH:
         raise ImportError("PyTorch is not available. Install with: pip install torch")
     if torch_dtype not in _TORCH_TO_NUMPY:
@@ -317,6 +338,7 @@ def torch_dtype_to_str(torch_dtype: Any) -> str:
         ImportError: If PyTorch is not available
         ValueError: If torch_dtype is not recognized
     """
+    logger.debug("torch_dtype_to_str called with torch_dtype=%s", torch_dtype)
     if not HAS_TORCH:
         raise ImportError("PyTorch is not available. Install with: pip install torch")
     if torch_dtype not in _TORCH_TO_STR:
@@ -343,6 +365,7 @@ def get_default_config() -> DTypeConfig:
     Returns:
         Default DTypeConfig instance
     """
+    logger.debug("get_default_config called")
     global _default_config
     if _default_config is None:
         _default_config = DTypeConfig()
@@ -355,12 +378,14 @@ def set_default_config(config: DTypeConfig) -> None:
     Args:
         config: New default configuration
     """
+    logger.debug("set_default_config called with config=%s", config)
     global _default_config
     _default_config = config
 
 
 def reset_default_config() -> None:
     """Reset the global default configuration to factory defaults."""
+    logger.debug("reset_default_config called")
     global _default_config
     _default_config = None
 
@@ -374,6 +399,7 @@ def fp16_config() -> DTypeConfig:
     - Maximum compatibility is needed
     - Memory is not a primary concern
     """
+    logger.debug("fp16_config called")
     return DTypeConfig(
         weights="fp16",
         activations="fp16",
@@ -391,6 +417,7 @@ def bf16_config() -> DTypeConfig:
     - Training or fine-tuning (better gradient flow)
     - Working with models that have large weight magnitudes
     """
+    logger.debug("bf16_config called")
     return DTypeConfig(
         weights="bf16",
         activations="bf16",
@@ -408,6 +435,7 @@ def memory_efficient_config() -> DTypeConfig:
     - Memory is constrained
     - Slight accuracy loss is acceptable
     """
+    logger.debug("memory_efficient_config called")
     return DTypeConfig(
         weights="fp16",
         activations="fp16",
@@ -429,6 +457,7 @@ def training_compatible_config() -> DTypeConfig:
     - Values have very large magnitudes that would clip in E4M3
     - Compatibility with NVIDIA/AMD FP8 training frameworks
     """
+    logger.debug("training_compatible_config called")
     return DTypeConfig(
         weights="bf16",
         activations="bf16",
@@ -446,6 +475,7 @@ def high_precision_config() -> DTypeConfig:
     - Memory is not a concern
     - Running evaluation or benchmarks
     """
+    logger.debug("high_precision_config called")
     return DTypeConfig(
         weights="bf16",
         activations="bf16",

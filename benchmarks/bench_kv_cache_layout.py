@@ -13,6 +13,7 @@ This benchmark measures both read and write performance to determine optimal lay
 """
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -23,6 +24,9 @@ import torch.nn.functional as F
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -47,6 +51,7 @@ class LayoutConfig:
 def create_cache_tensors(config: LayoutConfig, device: torch.device):
     """Create K and V cache tensors with specified layout."""
     # Full precision cache allocation
+    logger.debug("create_cache_tensors called with config=%s, device=%s", config, device)
     if config.layout == "LBHSD":
         # [num_layers, batch, num_kv_heads, max_seq_len, head_dim]
         shape = (
@@ -108,6 +113,7 @@ def write_to_cache_bhsd(
     new_seq_len: int,
 ):
     """Write to BHSD layout cache: [batch, heads, seq, dim]."""
+    logger.info("write_to_cache_bhsd called with k_cache=%s, v_cache=%s, k_new=%s", k_cache, v_cache, k_new)
     for layer_idx in range(len(k_cache)):
         k_cache[layer_idx].narrow(2, start_pos, new_seq_len).copy_(k_new)
         v_cache[layer_idx].narrow(2, start_pos, new_seq_len).copy_(v_new)
@@ -126,6 +132,7 @@ def write_to_cache_bshd(
     Input comes in BHSD format from attention computation, need to transpose.
     """
     # Transpose from [B, H, S, D] to [B, S, H, D]
+    logger.info("write_to_cache_bshd called with k_cache=%s, v_cache=%s, k_new=%s", k_cache, v_cache, k_new)
     k_transposed = k_new.permute(0, 2, 1, 3)
     v_transposed = v_new.permute(0, 2, 1, 3)
     for layer_idx in range(len(k_cache)):
@@ -142,6 +149,7 @@ def write_to_cache_lbhsd(
     new_seq_len: int,
 ):
     """Write to stacked LBHSD layout cache."""
+    logger.info("write_to_cache_lbhsd called with k_cache=%s, v_cache=%s, k_new=%s", k_cache, v_cache, k_new)
     num_layers = k_cache.shape[0]
     # Expand for all layers: [L, B, H, S, D]
     k_expanded = k_new.unsqueeze(0).expand(num_layers, -1, -1, -1, -1)
@@ -159,6 +167,7 @@ def write_to_cache_lbshd(
     new_seq_len: int,
 ):
     """Write to stacked LBSHD layout cache."""
+    logger.info("write_to_cache_lbshd called with k_cache=%s, v_cache=%s, k_new=%s", k_cache, v_cache, k_new)
     num_layers = k_cache.shape[0]
     # Transpose and expand: [B, H, S, D] -> [B, S, H, D] -> [L, B, S, H, D]
     k_transposed = k_new.permute(0, 2, 1, 3)
@@ -179,6 +188,7 @@ def read_from_cache_bhsd(
     Returns: [batch, num_kv_heads, seq_len, head_dim]
     """
     # Stack and slice
+    logger.debug("read_from_cache_bhsd called with k_cache=%s, v_cache=%s, seq_len=%s", k_cache, v_cache, seq_len)
     k_stacked = torch.stack([k_cache[i][:, :, :seq_len, :] for i in range(len(k_cache))])
     v_stacked = torch.stack([v_cache[i][:, :, :seq_len, :] for i in range(len(v_cache))])
     return k_stacked, v_stacked
@@ -194,6 +204,7 @@ def read_from_cache_bshd(
     Returns: [batch, num_kv_heads, seq_len, head_dim] (transposed back)
     """
     # Slice then transpose from [B, S, H, D] back to [B, H, S, D]
+    logger.debug("read_from_cache_bshd called with k_cache=%s, v_cache=%s, seq_len=%s", k_cache, v_cache, seq_len)
     k_stacked = torch.stack([
         k_cache[i][:, :seq_len, :, :].permute(0, 2, 1, 3)
         for i in range(len(k_cache))
@@ -211,6 +222,7 @@ def read_from_cache_lbhsd(
     seq_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Read from stacked LBHSD layout."""
+    logger.debug("read_from_cache_lbhsd called with k_cache=%s, v_cache=%s, seq_len=%s", k_cache, v_cache, seq_len)
     return k_cache[:, :, :, :seq_len, :], v_cache[:, :, :, :seq_len, :]
 
 
@@ -221,6 +233,7 @@ def read_from_cache_lbshd(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Read from stacked LBSHD layout."""
     # Slice to [L, B, seq_len, H, D] then transpose to [L, B, H, seq_len, D]
+    logger.debug("read_from_cache_lbshd called with k_cache=%s, v_cache=%s, seq_len=%s", k_cache, v_cache, seq_len)
     k_sliced = k_cache[:, :, :seq_len, :, :].permute(0, 1, 3, 2, 4)
     v_sliced = v_cache[:, :, :seq_len, :, :].permute(0, 1, 3, 2, 4)
     return k_sliced, v_sliced
@@ -233,6 +246,7 @@ def benchmark_cache_write(
     num_iterations: int = 100,
 ) -> dict:
     """Benchmark cache write performance (single token decode)."""
+    logger.info("benchmark_cache_write starting with config=%s, device=%s, num_warmup=%s, num_iterations=%s", config, device, num_warmup, num_iterations)
     k_cache, v_cache, is_stacked = create_cache_tensors(config, device)
 
     # Single token input (decode phase)
@@ -293,6 +307,7 @@ def benchmark_cache_read(
     num_iterations: int = 100,
 ) -> dict:
     """Benchmark cache read performance at given sequence length."""
+    logger.info("benchmark_cache_read starting with config=%s, device=%s, seq_len=%s, num_warmup=%s", config, device, seq_len, num_warmup)
     k_cache, v_cache, is_stacked = create_cache_tensors(config, device)
 
     # Pre-populate cache
@@ -378,6 +393,7 @@ def benchmark_attention_with_cache(
     num_iterations: int = 20,
 ) -> dict:
     """Benchmark end-to-end attention computation with cache reads."""
+    logger.info("benchmark_attention_with_cache starting with config=%s, device=%s, seq_len=%s, num_warmup=%s", config, device, seq_len, num_warmup)
     k_cache, v_cache, is_stacked = create_cache_tensors(config, device)
 
     # Pre-populate cache
@@ -424,6 +440,7 @@ def benchmark_attention_with_cache(
     scale = config.head_dim ** -0.5
 
     def attention_fn():
+        logger.debug("attention_fn called")
         k_full, v_full = read_fn()
         # k_full: [L, B, H, S, D] or [L, B, Hkv, S, D]
         # Need to process per-layer
@@ -481,6 +498,7 @@ def run_benchmark_suite(
     batch_size: int = 1,
 ) -> dict:
     """Run complete benchmark suite comparing all layouts."""
+    logger.info("run_benchmark_suite starting with num_layers=%s, num_heads=%s, num_kv_heads=%s, head_dim=%s", num_layers, num_heads, num_kv_heads, head_dim)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float16 if device.type == "cuda" else torch.float32
 
@@ -629,6 +647,7 @@ def run_benchmark_suite(
 def main():
     """Run the full benchmark suite."""
     # Small model config for quick testing
+    logger.info("main starting")
     results = run_benchmark_suite(
         num_layers=8,
         num_heads=8,

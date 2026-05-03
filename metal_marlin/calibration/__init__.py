@@ -44,6 +44,7 @@ Example (GQA/MQA attention):
     )
     hooks.register_attention_hooks(model, layer_prefix="model.layers")
 """
+import logging
 
 from .adaptive_quant import (
     AdaptiveQuantizer,
@@ -64,6 +65,9 @@ from .sensitivity import (
     save_sensitivity_profile,
     sensitivity_to_config,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Adaptive quantization

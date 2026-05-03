@@ -12,6 +12,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 
 import torch
@@ -22,6 +23,9 @@ from metal_marlin.fused_attention_mps import fused_attention
 import os
 import sys
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -29,11 +33,13 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     sys.exit(0)
 
 def _synchronize() -> None:
+    logger.debug("_synchronize called")
     if torch.backends.mps.is_available():
         torch.mps.synchronize()
 
 
 def _time_fn(fn, iters: int, warmup: int) -> float:
+    logger.debug("_time_fn called with fn=%s, iters=%s, warmup=%s", fn, iters, warmup)
     for _ in range(warmup):
         fn()
     _synchronize()
@@ -45,6 +51,7 @@ def _time_fn(fn, iters: int, warmup: int) -> float:
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Benchmark MLA attention kernels")
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--seq-len", type=int, default=1024)
@@ -70,9 +77,11 @@ def main() -> int:
     scale = 1.0 / (args.head_dim**0.5)
 
     def _run_fused() -> None:
+        logger.debug("_run_fused called")
         fused_attention(q, k, v, mask=None, scale=scale, causal=args.causal)
 
     def _run_torch() -> None:
+        logger.debug("_run_torch called")
         torch.nn.functional.scaled_dot_product_attention(
             q,
             k,

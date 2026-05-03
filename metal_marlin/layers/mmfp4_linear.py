@@ -46,6 +46,7 @@ if HAS_TORCH and torch is not None:
         Returns:
             Contiguous tensor
         """
+        logger.debug("_minimize_contiguous called with tensor=%s", tensor)
         return tensor if tensor.is_contiguous() else tensor.contiguous()
 
     def _optimized_scale_load(
@@ -69,6 +70,7 @@ if HAS_TORCH and torch is not None:
         Returns:
             Scales tensor with shape [n_groups, N] for kernel access
         """
+        logger.info("_optimized_scale_load called with scales=%s, group_size=%s, in_features=%s", scales, group_size, in_features)
         n_groups = (in_features + group_size - 1) // group_size
 
         # Determine current layout and normalize to [n_groups, N]
@@ -107,6 +109,7 @@ if HAS_TORCH and torch is not None:
         """
         # Delegating checks to PyTorch C++ implementation for maximum performance
         # .to() handles no-op cases (same device/dtype) efficiently
+        logger.info("_fused_dtype_convert called with tensor=%s, dtype=%s, device=%s, non_blocking=%s", getattr(tensor, "shape", tensor), dtype, device, non_blocking)
         return tensor.to(
             device=device,
             dtype=dtype,
@@ -135,6 +138,7 @@ if HAS_TORCH and torch is not None:
             - SiLU: Uses PyTorch's native silu (optimized in MPS)
             - When activation is None, returns tensor unchanged (zero overhead)
         """
+        logger.debug("_fused_activation called with tensor=%s, activation=%s", tensor, activation)
         if activation is None:
             return tensor
 
@@ -154,10 +158,12 @@ if HAS_TORCH and torch is not None:
                 f"Unsupported activation: {activation}. Use 'gelu', 'silu', or None")
 
     def _u32_hex_sample(words: torch.Tensor, limit: int = 8) -> list[str]:
+        logger.debug("_u32_hex_sample called with words=%s, limit=%s", words, limit)
         sample = words.reshape(-1)[:limit].to(torch.int64).tolist()
         return [f"0x{int(v) & 0xFFFFFFFF:08x}" for v in sample]
 
     def _as_u32_tensor(packed: torch.Tensor) -> torch.Tensor:
+        logger.debug("_as_u32_tensor called with packed=%s", packed)
         if packed.dtype == torch.uint32:
             return packed
         if packed.dtype in (torch.int32, torch.int64):
@@ -168,6 +174,7 @@ if HAS_TORCH and torch is not None:
 
     def _unpack_rowwise_nibbles(packed_weights: torch.Tensor) -> torch.Tensor:
         """Unpack [out, in//8] uint32 words into uint8 nibbles [out, in]."""
+        logger.info("_unpack_rowwise_nibbles called with packed_weights=%s", getattr(packed_weights, "shape", packed_weights))
         shifts = _SHIFT_4BIT.to(device=packed_weights.device).view(1, 1, 8)
         words = packed_weights.to(torch.int64).unsqueeze(-1)
         nibbles = torch.bitwise_and(
@@ -178,6 +185,7 @@ if HAS_TORCH and torch is not None:
         kernel_cache: torch.Tensor, out_features: int
     ) -> torch.Tensor:
         """Unpack kernel layout [in//8, out] words into nibble matrix [in, out]."""
+        logger.info("_unpack_kernel_layout_nibbles called with kernel_cache=%s, out_features=%s", kernel_cache, out_features)
         shifts = _SHIFT_4BIT.to(device=kernel_cache.device).view(1, 1, 8)
         words = kernel_cache.to(torch.int64).unsqueeze(-1)
         nibbles = torch.bitwise_and(
@@ -197,6 +205,7 @@ if HAS_TORCH and torch is not None:
         group_size: int,
     ) -> torch.Tensor:
         """Dequantize row-packed MMFP4 weights to [out_features, in_features] float16."""
+        logger.info("_dequantize_rowwise_mmfp4 called with packed_weights=%s, scales=%s, group_size=%s", getattr(packed_weights, "shape", packed_weights), scales, group_size)
         out_features, in_packed = packed_weights.shape
         in_features = in_packed * 8
 
@@ -237,6 +246,7 @@ if HAS_TORCH and torch is not None:
 
         Memory footprint reduced from 4 intermediate tensors to 1.
         """
+        logger.info("_fast_dequant called with packed_weights=%s, scales=%s, group_size=%s", getattr(packed_weights, "shape", packed_weights), scales, group_size)
         out_features, in_packed = packed_weights.shape
         in_features = in_packed * 8
         device = packed_weights.device
@@ -302,6 +312,7 @@ if HAS_TORCH and torch is not None:
 
     def _get_cached_e2m1_table(device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """Get cached E2M1 table for device, creating if necessary."""
+        logger.debug("_get_cached_e2m1_table called with device=%s, dtype=%s", device, dtype)
         cache_key = f"{device}:{dtype}"
         if cache_key not in _fast_dequant._E2M1_TABLE_CACHE:
             _fast_dequant._E2M1_TABLE_CACHE[cache_key] = _E2M1_TABLE.to(
@@ -313,6 +324,7 @@ if HAS_TORCH and torch is not None:
 
         Uses bit shift for power-of-2 group sizes, integer division otherwise.
         """
+        logger.debug("_get_cached_group_ids called with in_features=%s, group_size=%s, n_groups=%s", in_features, group_size, n_groups)
         cache_key = (in_features, group_size, str(device))
         if cache_key not in _fast_dequant._GROUP_ID_CACHE:
             # Power of 2: use bit shift (much faster than division)
@@ -357,6 +369,7 @@ if HAS_TORCH and torch is not None:
         Returns:
             Output tensor [B, N] float16
         """
+        logger.debug("_small_batch_opt called with x_2d=%s, packed_weights=%s, scales=%s", x_2d, packed_weights, scales)
         batch_size = x_2d.shape[0]
         out_features, in_packed = packed_weights.shape
         in_features = in_packed * 8
@@ -424,6 +437,7 @@ if HAS_TORCH and torch is not None:
 
         Verify: `cd contrib/metal_marlin && uv run pytest tests/test_mmfp4_gemm_accuracy.py -v`
         """
+        logger.info("_rowpacked_to_gpu_layout called with packed_weights=%s, target_device=%s", getattr(packed_weights, "shape", packed_weights), target_device)
         global _MMFP4_LAYOUT_DEBUG_ONCE
 
         # Determine target device (default to current device)
@@ -470,6 +484,7 @@ if HAS_TORCH and torch is not None:
         kernel_cache: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Attempt real MMFP4 kernel path; return (output, updated_kernel_cache)."""
+        logger.debug("_try_mmfp4_kernel_gemm called with x_2d=%s, packed_weights=%s, scales=%s", x_2d, packed_weights, scales)
         if not x_2d.is_mps:
             return (None, kernel_cache)
 
@@ -537,6 +552,7 @@ if HAS_TORCH and torch is not None:
         group_size: int,
     ) -> torch.Tensor:
         """MMFP4 GEMM for row-packed weights [out, in//8]."""
+        logger.debug("mmfp4_gemm called with x=%s, packed_weights=%s, scales=%s", x, packed_weights, scales)
         if x.dim() != 2:
             raise ValueError(
                 f"x must be rank-2 [M, K], got shape={tuple(x.shape)}")
@@ -650,6 +666,7 @@ if HAS_TORCH and torch is not None:
             group_size: int = 128,
             activation: str | None = None,
         ) -> None:
+            logger.debug("initializing %s with packed_weights=%s, scales=%s, bias=%s, group_size=%s, activation=%s", type(self).__name__, packed_weights, scales, bias, group_size, activation)
             super().__init__()
             if group_size <= 0:
                 raise ValueError(f"group_size must be > 0, got {group_size}")
@@ -726,6 +743,7 @@ if HAS_TORCH and torch is not None:
             cache invalidation on shape/dtype/device changes.
             """
             # Invalidate cache if properties changed
+            logger.debug("_get_cached_input_2d called with x=%s", x)
             if (self._input_cache is not None and
                 (self._input_cache.shape != x.shape or
                  self._input_cache.dtype != x.dtype or
@@ -758,6 +776,7 @@ if HAS_TORCH and torch is not None:
             when called multiple times (e.g., in inference loops).
             """
             # Check if we have a valid converted cache
+            logger.info("_get_cached_converted_input called with x_2d=%s, target_dtype=%s", x_2d, target_dtype)
             if (self._input_2d_cache is not None and
                 x_2d is self._input_2d_cache and
                 self._input_converted_cache is not None and
@@ -777,6 +796,7 @@ if HAS_TORCH and torch is not None:
             scales: torch.Tensor,
         ) -> torch.Tensor:
             """Ensure dequantized weight exists on the active device."""
+            logger.info("_ensure_dequant_weight called with packed=%s, scales=%s", packed, scales)
             if (
                 self._dequant_weight is None
                 or self._dequant_weight.device != packed.device
@@ -788,6 +808,7 @@ if HAS_TORCH and torch is not None:
 
         def forward(self, x: torch.Tensor, skip_kernel_try: bool = False) -> torch.Tensor:
             """x: [batch, seq, in_features] -> [batch, seq, out_features]."""
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             if x.shape[-1] != self.in_features:
                 raise ValueError(
                     f"Expected input last dim={self.in_features}, got {x.shape[-1]}"
@@ -942,6 +963,7 @@ if HAS_TORCH and torch is not None:
             tensors: Mapping[str, Any],
         ) -> MMFP4Linear:
             """Load from HF-style tensors dict with `.weight` and `.scales` keys."""
+            logger.debug("from_pretrained_weight called with name=%s, tensors=%s", name, tensors)
             weight_key: str | None = None
             scales_key: str | None = None
 
@@ -995,6 +1017,7 @@ else:
         scales: Any,
         group_size: int,
     ) -> Any:
+        logger.debug("mmfp4_gemm called with x=%s, packed_weights=%s, scales=%s", x, packed_weights, scales)
         raise RuntimeError("MMFP4Linear requires PyTorch")
 
     class MMFP4Linear:  # type: ignore[no-redef]
@@ -1007,13 +1030,16 @@ else:
             bias: Any = None,
             group_size: int = 128,
         ) -> None:
+            logger.debug("initializing %s with packed_weights=%s, scales=%s, bias=%s, group_size=%s", type(self).__name__, packed_weights, scales, bias, group_size)
             raise RuntimeError("MMFP4Linear requires PyTorch")
 
         def forward(self, x: Any) -> Any:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             raise RuntimeError("MMFP4Linear requires PyTorch")
 
         @classmethod
         def from_pretrained_weight(cls, name: str, tensors: Mapping[str, Any]) -> MMFP4Linear:
+            logger.debug("from_pretrained_weight called with name=%s, tensors=%s", name, tensors)
             raise RuntimeError("MMFP4Linear requires PyTorch")
 
 

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+import logging
 import struct
 import threading
 import time
@@ -103,16 +104,19 @@ class PrefixCacheConfig:
     def bytes_per_block(self) -> int:
         """Memory footprint of one block across all layers (K+V)."""
         # 2 for K+V, 2 bytes per element (fp16/bf16)
+        logger.debug("bytes_per_block called")
         return 2 * self.block_size * self.num_heads * self.head_dim * 2 * self.num_layers
 
     @property
     def max_gpu_bytes(self) -> int:
         """Maximum GPU memory for cached blocks."""
+        logger.debug("max_gpu_bytes called")
         return self.max_gpu_blocks * self.bytes_per_block
 
     @property
     def max_ram_bytes(self) -> int:
         """Maximum RAM for cached blocks."""
+        logger.debug("max_ram_bytes called")
         return self.max_ram_blocks * self.bytes_per_block
 
 
@@ -156,6 +160,7 @@ class CachedBlock:
 
     def touch(self) -> None:
         """Update access time and count."""
+        logger.debug("touch called")
         self.last_access = time.time()
         self.access_count += 1
 
@@ -176,11 +181,13 @@ class CacheMetrics:
     @property
     def hit_rate(self) -> float:
         """Cache hit rate."""
+        logger.debug("hit_rate called")
         total = self.hits + self.misses + self.partial_hits
         return self.hits / total if total > 0 else 0.0
 
     def reset(self) -> None:
         """Reset all metrics."""
+        logger.debug("reset called")
         self.hits = 0
         self.misses = 0
         self.partial_hits = 0
@@ -200,6 +207,9 @@ except ImportError:
     HAS_XXHASH = False
 
 
+
+logger = logging.getLogger(__name__)
+
 def hash_tokens(tokens: Sequence[int], algorithm: str = "xxhash") -> str:
     """Hash a sequence of tokens to a content-addressed identifier.
 
@@ -213,6 +223,7 @@ def hash_tokens(tokens: Sequence[int], algorithm: str = "xxhash") -> str:
         Hex digest string uniquely identifying this token sequence.
     """
     # Pack tokens as bytes for hashing
+    logger.debug("hash_tokens called with tokens=%s, algorithm=%s", tokens, algorithm)
     token_bytes = struct.pack(f">{len(tokens)}I", *tokens)
 
     if algorithm == "xxhash" and HAS_XXHASH:
@@ -240,6 +251,7 @@ def hash_prefix(tokens: Sequence[int], block_size: int, algorithm: str = "xxhash
         List of hashes, one per complete block. The hash of block N
         depends on blocks 0..N (chain hashing for uniqueness).
     """
+    logger.debug("hash_prefix called with tokens=%s, block_size=%s, algorithm=%s", tokens, block_size, algorithm)
     hashes = []
     num_blocks = len(tokens) // block_size
 
@@ -280,6 +292,7 @@ class PrefixCache:
     """
 
     def __init__(self, config: PrefixCacheConfig) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self._lock = threading.RLock()
 
@@ -308,6 +321,7 @@ class PrefixCache:
         Returns:
             PrefixMatch describing the longest matched prefix.
         """
+        logger.debug("match_prefix called with tokens=%s", tokens)
         if len(tokens) < self.config.block_size:
             # Too short for any complete block
             if self.config.enable_metrics:
@@ -382,6 +396,7 @@ class PrefixCache:
             List of KV data per block. Each block is a list of arrays
             (one per layer), shape [2, block_size, num_heads, head_dim].
         """
+        logger.debug("get_blocks called with block_hashes=%s, promote_to_gpu=%s", block_hashes, promote_to_gpu)
         result = []
 
         with self._lock:
@@ -424,6 +439,7 @@ class PrefixCache:
             List of block hashes for the stored blocks.
         """
         # Compute hashes for all blocks
+        logger.debug("store_prefix called with tokens=%s, kv_blocks=%s, start_block=%s", tokens, kv_blocks, start_block)
         all_hashes = hash_prefix(tokens, self.config.block_size, self.config.hash_algorithm)
 
         # Only store new blocks
@@ -473,6 +489,7 @@ class PrefixCache:
             Combined KV for the full sequence. Structure matches input:
             list of arrays per layer, shape [2, seq_len, num_heads, head_dim].
         """
+        logger.debug("extend_from_cache called with prefix_kv=%s, new_kv=%s, concat_fn=%s", prefix_kv, new_kv, concat_fn)
         if not prefix_kv:
             return new_kv
 
@@ -510,6 +527,7 @@ class PrefixCache:
         Call this when a sequence using these blocks is complete.
         Blocks with ref_count 0 become eligible for eviction.
         """
+        logger.debug("release_blocks called with block_hashes=%s", block_hashes)
         with self._lock:
             for block_hash in block_hashes:
                 block = self._get_block(block_hash)
@@ -518,6 +536,7 @@ class PrefixCache:
 
     def clear(self) -> None:
         """Clear all cached blocks."""
+        logger.debug("clear called")
         with self._lock:
             self._gpu_blocks.clear()
             self._ram_blocks.clear()
@@ -530,6 +549,7 @@ class PrefixCache:
 
     def memory_usage(self) -> dict[str, int]:
         """Get current memory usage per tier in bytes."""
+        logger.debug("memory_usage called")
         with self._lock:
             return {
                 "gpu": len(self._gpu_blocks) * self.config.bytes_per_block,
@@ -541,6 +561,7 @@ class PrefixCache:
 
     def _has_block(self, block_hash: str) -> bool:
         """Check if block exists in any tier."""
+        logger.debug("_has_block called with block_hash=%s", block_hash)
         return (
             block_hash in self._gpu_blocks
             or block_hash in self._ram_blocks
@@ -549,6 +570,7 @@ class PrefixCache:
 
     def _get_block(self, block_hash: str) -> CachedBlock | None:
         """Get block from any tier."""
+        logger.debug("_get_block called with block_hash=%s", block_hash)
         if block_hash in self._gpu_blocks:
             return self._gpu_blocks[block_hash]
         if block_hash in self._ram_blocks:
@@ -560,6 +582,7 @@ class PrefixCache:
     def _add_to_gpu(self, block: CachedBlock) -> None:
         """Add block to GPU tier, evicting if necessary."""
         # Evict if at capacity
+        logger.debug("_add_to_gpu called with block=%s", block)
         while len(self._gpu_blocks) >= self.config.max_gpu_blocks:
             self._evict_from_gpu()
 
@@ -568,6 +591,7 @@ class PrefixCache:
 
     def _evict_from_gpu(self) -> None:
         """Evict least recently used block from GPU to RAM."""
+        logger.debug("_evict_from_gpu called")
         if not self._gpu_blocks:
             return
 
@@ -597,6 +621,7 @@ class PrefixCache:
 
     def _evict_from_ram(self) -> None:
         """Evict least recently used block from RAM to disk."""
+        logger.debug("_evict_from_ram called")
         if not self._ram_blocks:
             return
 
@@ -626,6 +651,7 @@ class PrefixCache:
     def _promote_to_gpu(self, block: CachedBlock) -> None:
         """Promote block from RAM/disk to GPU tier."""
         # Remove from current tier
+        logger.debug("_promote_to_gpu called with block=%s", block)
         if block.block_hash in self._ram_blocks:
             del self._ram_blocks[block.block_hash]
         elif block.block_hash in self._disk_index:
@@ -636,6 +662,7 @@ class PrefixCache:
 
     def _save_to_disk(self, block: CachedBlock) -> None:
         """Save block data to disk."""
+        logger.info("_save_to_disk called with block=%s", block)
         if not self.config.disk_cache_path:
             return
 
@@ -651,6 +678,7 @@ class PrefixCache:
 
     def _load_from_disk(self, block: CachedBlock) -> None:
         """Load block data from disk."""
+        logger.info("_load_from_disk called with block=%s", block)
         if block.disk_path is None or not block.disk_path.exists():
             raise ValueError(f"Disk cache file not found for block {block.block_hash}")
 
@@ -682,11 +710,13 @@ class RadixPrefixCache(PrefixCache):
     """
 
     def __init__(self, config: PrefixCacheConfig) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         super().__init__(config)
         self._radix_root: dict[str, Any] = {}  # Token block hash -> subtree
 
     def match_prefix(self, tokens: Sequence[int]) -> PrefixMatch:
         """Find longest cached prefix using radix tree traversal."""
+        logger.debug("match_prefix called with tokens=%s", tokens)
         if len(tokens) < self.config.block_size:
             if self.config.enable_metrics:
                 self.metrics.misses += 1
@@ -750,6 +780,7 @@ class RadixPrefixCache(PrefixCache):
         start_block: int = 0,
     ) -> list[str]:
         """Store KV blocks and update radix tree."""
+        logger.debug("store_prefix called with tokens=%s, kv_blocks=%s, start_block=%s", tokens, kv_blocks, start_block)
         all_hashes = hash_prefix(tokens, self.config.block_size, self.config.hash_algorithm)
         hashes_to_store = all_hashes[start_block : start_block + len(kv_blocks)]
 
@@ -787,6 +818,7 @@ class RadixPrefixCache(PrefixCache):
 
     def clear(self) -> None:
         """Clear all cached blocks and radix tree."""
+        logger.debug("clear called")
         super().clear()
         with self._lock:
             self._radix_root.clear()

@@ -1,3 +1,4 @@
+import logging
 import pytest
 import torch
 
@@ -7,6 +8,9 @@ try:
 except ImportError:
     HAS_METAL = False
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 
 @pytest.mark.parametrize("shape", [
@@ -15,6 +19,7 @@ pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
     (4, 256, 7168),  # GLM-4 hidden
 ])
 def test_rmsnorm_matches_pytorch(shape):
+    logger.info("running test_rmsnorm_matches_pytorch")
     x = torch.randn(shape, device="mps", dtype=torch.float16)
     hidden = shape[-1]
     weight = torch.randn(hidden, device="mps", dtype=torch.float16)
@@ -30,6 +35,7 @@ def test_rmsnorm_matches_pytorch(shape):
     torch.testing.assert_close(metal_result, torch_result, rtol=1e-2, atol=1e-3)
 
 def test_layernorm_matches_pytorch():
+    logger.info("running test_layernorm_matches_pytorch")
     x = torch.randn(32, 4096, device="mps", dtype=torch.float16)
     weight = torch.randn(4096, device="mps", dtype=torch.float16)
     bias = torch.randn(4096, device="mps", dtype=torch.float16)

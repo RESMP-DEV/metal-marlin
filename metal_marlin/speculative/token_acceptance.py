@@ -15,10 +15,14 @@ verify.py to manage the flow of accepted tokens through the generation pipeline.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -68,6 +72,7 @@ class AcceptanceStats:
     @property
     def overall_acceptance_rate(self) -> float:
         """Fraction of all proposed tokens that were accepted."""
+        logger.debug("overall_acceptance_rate called")
         if self.total_proposed == 0:
             return 0.0
         return self.total_accepted / self.total_proposed
@@ -75,12 +80,14 @@ class AcceptanceStats:
     @property
     def average_acceptance_per_step(self) -> float:
         """Average number of tokens accepted per step."""
+        logger.debug("average_acceptance_per_step called")
         if self.step_count == 0:
             return 0.0
         return self.total_accepted / self.step_count
 
     def get_recent_acceptance_rate(self, window: int = 10) -> float:
         """Acceptance rate over the most recent steps."""
+        logger.debug("get_recent_acceptance_rate called with window=%s", window)
         if not self.acceptance_history:
             return 0.0
         recent = self.acceptance_history[-window:]
@@ -88,6 +95,7 @@ class AcceptanceStats:
 
     def reset(self) -> None:
         """Reset all statistics to zero."""
+        logger.debug("reset called")
         self.total_accepted = 0
         self.total_rejected = 0
         self.total_bonus_tokens = 0
@@ -129,6 +137,7 @@ class TokenAcceptanceTracker:
             track_history: Whether to track per-step acceptance history.
             max_history: Maximum number of steps to keep in history.
         """
+        logger.debug("initializing %s with track_history=%s, max_history=%s", type(self).__name__, track_history, max_history)
         self.track_history = track_history
         self.max_history = max_history
         self.stats = AcceptanceStats()
@@ -151,6 +160,7 @@ class TokenAcceptanceTracker:
         Returns:
             AcceptanceResult with full acceptance information.
         """
+        logger.debug("compute_acceptance called with draft_tokens=%s, num_accepted=%s, next_token=%s", draft_tokens, num_accepted, next_token)
         batch_size = draft_tokens.shape[0]
         device = draft_tokens.device
 
@@ -204,6 +214,7 @@ class TokenAcceptanceTracker:
         Returns:
             [batch, seq_len + num_accepted + (1 if include_next else 0)] output sequence.
         """
+        logger.debug("assemble_sequence called with input_ids=%s, acceptance=%s, include_next=%s", input_ids, acceptance, include_next)
         batch_size = input_ids.shape[0]
 
         # Start with input tokens
@@ -259,6 +270,7 @@ class TokenAcceptanceTracker:
             acceptance: AcceptanceResult from compute_acceptance.
             num_speculative: Number of speculative tokens proposed.
         """
+        logger.debug("update_stats called with acceptance=%s, num_speculative=%s", acceptance, num_speculative)
         batch_size = acceptance.num_accepted.shape[0]
 
         total_accepted = int(acceptance.num_accepted.sum().item())
@@ -292,6 +304,7 @@ to reflect the true sequence state. This method returns the tokens
         Returns:
             List of [1, num_tokens] tensors per batch element.
         """
+        logger.debug("get_draft_sync_tokens called with acceptance=%s", acceptance)
         sync_tokens: list[Tensor] = []
         batch_size = acceptance.num_accepted.shape[0]
 
@@ -331,6 +344,7 @@ to reflect the true sequence state. This method returns the tokens
         Returns:
             New speculation length.
         """
+        logger.debug("compute_adaptive_speculation_length called with current_length=%s, min_length=%s, max_length=%s", current_length, min_length, max_length)
         if not self.track_history or len(self.stats.acceptance_history) < 3:
             return current_length
 
@@ -373,6 +387,7 @@ to reflect the true sequence state. This method returns the tokens
         Returns:
             New speculation length.
         """
+        logger.debug("compute_speculation_length_step called with current_length=%s, min_length=%s, max_length=%s", current_length, min_length, max_length)
         if not self.track_history or len(self.stats.acceptance_history) < window:
             return current_length
 
@@ -387,10 +402,12 @@ to reflect the true sequence state. This method returns the tokens
 
     def reset(self) -> None:
         """Reset the tracker state."""
+        logger.debug("reset called")
         self.stats.reset()
 
     def get_stats(self) -> AcceptanceStats:
         """Get current acceptance statistics."""
+        logger.debug("get_stats called")
         return self.stats
 
 
@@ -412,6 +429,7 @@ def compute_acceptance_probabilities(
     Returns:
         [batch, num_spec] acceptance probabilities.
     """
+    logger.debug("compute_acceptance_probabilities called with draft_probs=%s, target_probs=%s, draft_tokens=%s", draft_probs, target_probs, draft_tokens)
     batch_size, num_spec, vocab = draft_probs.shape
     device = draft_probs.device
 
@@ -450,6 +468,7 @@ def estimate_optimal_speculation_length(
         Estimated optimal speculation length.
     """
     # Average across batch
+    logger.debug("estimate_optimal_speculation_length called with acceptance_probs=%s, draft_cost_ratio=%s, overhead=%s", acceptance_probs, draft_cost_ratio, overhead)
     avg_probs = acceptance_probs.float().mean(dim=0)  # [num_spec]
 
     # Compute expected tokens per step for different speculation lengths
@@ -487,6 +506,7 @@ def create_acceptance_report(tracker: TokenAcceptanceTracker) -> dict:
     Returns:
         Dictionary with acceptance metrics.
     """
+    logger.debug("create_acceptance_report called with tracker=%s", tracker)
     stats = tracker.stats
 
     report = {

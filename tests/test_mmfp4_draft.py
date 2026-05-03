@@ -1,6 +1,7 @@
 """Tests for MMFP4 draft model architecture for speculative decoding."""
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -12,8 +13,12 @@ from metal_marlin.speculative.mmfp4_draft import MMFP4DraftModel, MMFP4DraftMode
 from metal_marlin.speculative.mtp_draft import MTPDraft
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_default_dtype():
     """Get default dtype for tests."""
+    logger.debug("_get_default_dtype called")
     return torch.float32  # Use float32 for CPU tests
 
 
@@ -21,6 +26,7 @@ class MockTargetModel:
     """Mock target model for testing."""
     
     def __init__(self, vocab_size: int = 100, hidden_size: int = 256):
+        logger.debug("initializing %s with vocab_size=%s, hidden_size=%s", type(self).__name__, vocab_size, hidden_size)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.config = type("Config", (), {"hidden_size": hidden_size, "vocab_size": vocab_size})()
@@ -32,6 +38,7 @@ class MockTargetModel:
         return torch.randn(batch, seq, self.vocab_size)
     
     def create_kv_cache(self):
+        logger.debug("create_kv_cache called")
         from metal_marlin.kv_cache import CacheConfig, KVCache
         config = CacheConfig(
             num_layers=1,
@@ -43,6 +50,7 @@ class MockTargetModel:
         return KVCache(config, batch_size=1, device="cpu")
     
     def forward(self, input_ids, output_hidden_states=False, **kwargs):
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         batch, seq = input_ids.shape
         # Return hidden states if requested
         if output_hidden_states:
@@ -55,6 +63,7 @@ class MockTargetModel:
         return torch.randn(batch, seq, self.vocab_size)
     
     def parameters(self):
+        logger.debug("parameters called")
         return iter([torch.randn(1)])
 
 
@@ -63,6 +72,7 @@ class TestMMFP4MTPHead:
     
     def test_mtp_head_output_shape(self):
         """MTP head should predict N future tokens."""
+        logger.info("running test_mtp_head_output_shape")
         batch, seq, hidden, vocab = 2, 10, 256, 100
         num_predictions = 4
         dtype = _get_default_dtype()
@@ -81,6 +91,7 @@ class TestMMFP4MTPHead:
     
     def test_mtp_head_speculate(self):
         """MTP head speculate should return tokens and probs."""
+        logger.info("running test_mtp_head_speculate")
         batch, seq, hidden, vocab = 1, 5, 256, 100
         num_predictions = 4
         dtype = _get_default_dtype()
@@ -101,6 +112,7 @@ class TestMMFP4MTPHead:
     
     def test_verify_kernel(self):
         """Verify kernel should accept/reject draft tokens correctly."""
+        logger.info("running test_verify_kernel")
         batch, num_spec, vocab = 2, 4, 50
         
         draft_tokens = torch.randint(0, vocab, (batch, num_spec))
@@ -122,6 +134,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_creation(self):
         """Draft model should initialize correctly."""
+        logger.info("running test_draft_model_creation")
         draft = MMFP4DraftModel(
             hidden_size=256,
             vocab_size=100,
@@ -135,6 +148,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_from_target(self):
         """Draft model should create from target model."""
+        logger.info("running test_draft_model_from_target")
         target = MockTargetModel(vocab_size=100, hidden_size=256)
         draft = MMFP4DraftModel.from_target_model(target, num_predictions=4)
         
@@ -144,6 +158,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_speculate_from_hidden(self):
         """Draft model should generate tokens from hidden states."""
+        logger.info("running test_draft_model_speculate_from_hidden")
         batch, seq, hidden, vocab = 1, 5, 256, 100
         num_predictions = 4
         dtype = _get_default_dtype()
@@ -166,6 +181,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_speculate_with_cache(self):
         """Draft model should use cached hidden states."""
+        logger.info("running test_draft_model_speculate_with_cache")
         batch, seq, hidden, vocab = 1, 5, 256, 100
         dtype = _get_default_dtype()
         
@@ -189,6 +205,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_reset(self):
         """Draft model should reset cache correctly."""
+        logger.info("running test_draft_model_reset")
         draft = MMFP4DraftModel(
             hidden_size=256,
             vocab_size=100,
@@ -204,6 +221,7 @@ class TestMMFP4DraftModel:
     
     def test_draft_model_fallback(self):
         """Draft model should fallback when no hidden states."""
+        logger.info("running test_draft_model_fallback")
         batch, vocab = 2, 100
         dtype = _get_default_dtype()
         
@@ -227,6 +245,7 @@ class TestMTPDraft:
     
     def test_mtp_draft_creation(self):
         """MTPDraft should wrap MTP head."""
+        logger.info("running test_mtp_draft_creation")
         dtype = _get_default_dtype()
         head = MMFP4MTPHead(hidden_size=256, vocab_size=100, num_predictions=4).to(dtype=dtype)
         draft = MTPDraft(mtp_head=head)
@@ -236,6 +255,7 @@ class TestMTPDraft:
     
     def test_mtp_draft_speculate(self):
         """MTPDraft should generate speculative tokens."""
+        logger.info("running test_mtp_draft_speculate")
         dtype = _get_default_dtype()
         head = MMFP4MTPHead(hidden_size=256, vocab_size=100, num_predictions=4).to(dtype=dtype)
         draft = MTPDraft(mtp_head=head)
@@ -253,6 +273,7 @@ class TestMTPDraft:
     
     def test_mtp_draft_fallback(self):
         """MTPDraft should fallback without hidden states."""
+        logger.info("running test_mtp_draft_fallback")
         dtype = _get_default_dtype()
         head = MMFP4MTPHead(hidden_size=256, vocab_size=100, num_predictions=4).to(dtype=dtype)
         draft = MTPDraft(mtp_head=head)
@@ -270,6 +291,7 @@ class TestMMFP4SpeculativeIntegration:
     
     def test_mmfp4_draft_with_speculative_engine(self):
         """MMFP4 draft model should work with SpeculativeEngine."""
+        logger.info("running test_mmfp4_draft_with_speculative_engine")
         vocab_size = 100
         hidden_size = 256
         dtype = _get_default_dtype()
@@ -297,6 +319,7 @@ class TestMMFP4SpeculativeIntegration:
     
     def test_speedup_estimate(self):
         """Draft model should provide speedup estimates."""
+        logger.info("running test_speedup_estimate")
         draft = MMFP4DraftModel(
             hidden_size=256,
             vocab_size=100,

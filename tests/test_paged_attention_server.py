@@ -1,6 +1,7 @@
 """Tests for paged attention mode in the OpenAI server."""
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import socket
@@ -12,16 +13,21 @@ from pathlib import Path
 import pytest
 import requests
 
+
+logger = logging.getLogger(__name__)
+
 _PORT = 8125
 _BASE_URL = f"http://localhost:{_PORT}"
 _MODEL_NAME = "test-paged-model"
 
 
 def _project_root() -> Path:
+    logger.debug("_project_root called")
     return Path(__file__).resolve().parents[1]
 
 
 def _wait_for_health(timeout_s: float = 30.0) -> None:
+    logger.debug("_wait_for_health called with timeout_s=%s", timeout_s)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         try:
@@ -35,6 +41,7 @@ def _wait_for_health(timeout_s: float = 30.0) -> None:
 
 
 def _port_available(port: int) -> bool:
+    logger.debug("_port_available called with port=%s", port)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -47,6 +54,7 @@ def _port_available(port: int) -> bool:
 @pytest.fixture(scope="module")
 def paged_server():
     """Start server with paged attention enabled."""
+    logger.debug("paged_server called")
     if not _port_available(_PORT):
         pytest.skip(f"Port {_PORT} is already in use")
 
@@ -97,6 +105,7 @@ def paged_server():
 
 def test_health_with_batching(paged_server):
     """Health check works with batching enabled."""
+    logger.info("running test_health_with_batching")
     response = requests.get(f"{_BASE_URL}/health", timeout=5.0)
     assert response.status_code == 200
     assert response.json()["model_loaded"] is True
@@ -104,6 +113,7 @@ def test_health_with_batching(paged_server):
 
 def test_chat_completion_with_batching(paged_server):
     """Chat completion works with batching enabled."""
+    logger.info("running test_chat_completion_with_batching")
     response = requests.post(
         f"{_BASE_URL}/v1/chat/completions",
         json={

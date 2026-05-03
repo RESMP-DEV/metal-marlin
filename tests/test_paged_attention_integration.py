@@ -6,6 +6,7 @@ attention implementation for GLM-style models.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -15,8 +16,12 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 from metal_marlin.paged_kv_cache import PagedKVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_device() -> str:
     """Get the appropriate test device."""
+    logger.debug("_get_device called")
     if HAS_MPS:
         return "mps"
     return "cpu"
@@ -28,6 +33,7 @@ class TestPagedKVCacheBasics:
 
     def test_paged_kv_cache_creation(self):
         """Test basic PagedKVCache creation."""
+        logger.info("running test_paged_kv_cache_creation")
         cache = PagedKVCache(
             num_blocks=64,
             num_kv_heads=20,
@@ -43,6 +49,7 @@ class TestPagedKVCacheBasics:
         
     def test_paged_kv_cache_fp8_creation(self):
         """Test PagedKVCache creation with FP8 dtype."""
+        logger.info("running test_paged_kv_cache_fp8_creation")
         cache = PagedKVCache(
             num_blocks=32,
             num_kv_heads=8,
@@ -56,6 +63,7 @@ class TestPagedKVCacheBasics:
         
     def test_paged_kv_cache_invalid_block_size(self):
         """Test that invalid block size raises error."""
+        logger.info("running test_paged_kv_cache_invalid_block_size")
         with pytest.raises(ValueError, match="block_size"):
             PagedKVCache(
                 num_blocks=64,
@@ -67,6 +75,7 @@ class TestPagedKVCacheBasics:
             
     def test_paged_kv_cache_free_blocks(self):
         """Test free block tracking."""
+        logger.info("running test_paged_kv_cache_free_blocks")
         cache = PagedKVCache(
             num_blocks=64,
             num_kv_heads=20,
@@ -85,6 +94,7 @@ class TestPagedKVCacheBasics:
 
     def test_paged_kv_cache_allocation(self):
         """Test PagedKVCache block allocation."""
+        logger.info("running test_paged_kv_cache_allocation")
         cache = PagedKVCache(
             num_blocks=64,
             num_kv_heads=20,
@@ -111,6 +121,7 @@ class TestPagedKVCacheBasics:
 
     def test_paged_kv_cache_quantize_fp8(self):
         """Test FP8 quantization in PagedKVCache."""
+        logger.info("running test_paged_kv_cache_quantize_fp8")
         cache = PagedKVCache(
             num_blocks=16,
             num_kv_heads=8,
@@ -144,6 +155,7 @@ class TestPagedAttentionMMFP4Integration:
 
     def test_mmfp4_mla_creation_with_paged_attention(self):
         """Test MMFP4MLA layer creation with paged attention enabled."""
+        logger.info("running test_mmfp4_mla_creation_with_paged_attention")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         device = _get_device()
@@ -168,6 +180,7 @@ class TestPagedAttentionMMFP4Integration:
         
     def test_paged_adapter_lazy_initialization(self):
         """Test that paged attention adapter is created lazily."""
+        logger.info("running test_paged_adapter_lazy_initialization")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         
         device = _get_device()
@@ -195,6 +208,7 @@ class TestPagedAttentionMMFP4Integration:
         
     def test_mmfp4_paged_attention_adapter_forward(self):
         """Test MMFP4PagedAttention adapter forward pass."""
+        logger.info("running test_mmfp4_paged_attention_adapter_forward")
         from metal_marlin.layers.mmfp4_mla import MMFP4MLA
         from metal_marlin.paged.mmfp4_paged_adapter import MMFP4PagedAttention
         
@@ -253,6 +267,7 @@ def test_paged_attention_glm_style():
     
     Validates the exact configuration mentioned in the task with valid GQA.
     """
+    logger.info("running test_paged_attention_glm_style")
     from metal_marlin.layers.mmfp4_mla import MMFP4MLA
     
     device = _get_device()

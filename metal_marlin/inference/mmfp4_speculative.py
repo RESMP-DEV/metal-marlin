@@ -2,6 +2,7 @@
 """
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -12,8 +13,12 @@ else:
     GLMMTPHead = Any
 
 
+
+logger = logging.getLogger(__name__)
+
 def _sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """Sample a single token from logits for each batch element."""
+    logger.debug("_sample called with logits=%s, temperature=%s", logits, temperature)
     if logits.dim() == 3 and logits.shape[1] == 1:
         logits = logits[:, 0, :]
     if logits.dim() != 2:
@@ -32,6 +37,7 @@ def _split_draft_logits(
     num_draft: int,
 ) -> list[torch.Tensor]:
     """Normalize MTP outputs into per-step [batch, vocab] logits."""
+    logger.debug("_split_draft_logits called with draft_logits=%s, num_draft=%s", draft_logits, num_draft)
     if isinstance(draft_logits, torch.Tensor):
         if draft_logits.dim() == 3:
             steps = min(num_draft, draft_logits.shape[1])
@@ -69,6 +75,7 @@ def speculative_decode(
     Returns:
         (new_tokens, num_accepted) - generated tokens and acceptance count
     """
+    logger.debug("speculative_decode called with model=%s, mtp_head=%s, input_ids=%s", model, mtp_head, input_ids)
     if input_ids.dim() != 2:
         raise ValueError(f"Expected input_ids shape [batch, seq], got {tuple(input_ids.shape)}")
     if input_ids.shape[0] != 1:
@@ -126,12 +133,14 @@ class MMFP4SpeculativeDecoder:
     """Implements speculative decoding with a verification kernel."""
 
     def __init__(self, model):
+        logger.debug("initializing %s with model=%s", type(self).__name__, model)
         self.model = model
         self.verify_kernel = None # Placeholder for the Metal kernel
 
     def _load_kernels(self):
         """Load and compile the Metal verification kernel."""
         # TODO: Implement kernel loading
+        logger.info("_load_kernels called")
         pass
 
     def verify(
@@ -143,6 +152,7 @@ class MMFP4SpeculativeDecoder:
         """Verify draft tokens against target model logits."""
         
         # Python implementation from MMFP4Pipeline._draft_verify
+        logger.debug("verify called with draft_tokens=%s, target_logits=%s, temperature=%s", draft_tokens, target_logits, temperature)
         if torch.isnan(target_logits).any():
             return 0, False
 

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import statistics
 import sys
@@ -43,6 +44,9 @@ from metal_marlin.flash_attention_v2 import (  # noqa: E402
     flash_attention_v2,
     flash_attention_v2_decode,
 )
+
+
+logger = logging.getLogger(__name__)
 
 WARMUP_ITERS = 10
 BENCH_ITERS = 50
@@ -90,6 +94,7 @@ def _time_kernel(
         Tuple of (mean_time_ms, std_time_ms)
     """
     # Warmup
+    logger.debug("_time_kernel called with fn=%s, warmup=%s, iterations=%s", fn, warmup, iterations)
     for _ in range(warmup):
         _ = fn()
         mps_sync()
@@ -126,6 +131,7 @@ def benchmark_fa2_prefill(
     Returns:
         Tuple of (mean_time_ms, std_time_ms)
     """
+    logger.info("benchmark_fa2_prefill starting with batch=%s, num_heads=%s, seq_len=%s, head_dim=%s", batch, num_heads, seq_len, head_dim)
     q = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
     k = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
     v = torch.randn(batch, num_heads, seq_len, head_dim, dtype=torch.float16, device="mps")
@@ -134,6 +140,7 @@ def benchmark_fa2_prefill(
     scale = 1.0 / math.sqrt(head_dim)
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         return flash_attention_v2(q, k, v, scale=scale, causal=causal)
 
     return _time_kernel(fn, warmup=warmup, iterations=iterations)
@@ -159,6 +166,7 @@ def benchmark_fa2_decode(
         Tuple of (mean_time_ms, std_time_ms)
     """
     # Decode: seq_q=1, seq_k=context_len
+    logger.info("benchmark_fa2_decode starting with batch=%s, num_heads=%s, context_len=%s, head_dim=%s", batch, num_heads, context_len, head_dim)
     q = torch.randn(batch, num_heads, 1, head_dim, dtype=torch.float16, device="mps")
     k = torch.randn(batch, num_heads, context_len, head_dim, dtype=torch.float16, device="mps")
     v = torch.randn(batch, num_heads, context_len, head_dim, dtype=torch.float16, device="mps")
@@ -167,6 +175,7 @@ def benchmark_fa2_decode(
     scale = 1.0 / math.sqrt(head_dim)
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         return flash_attention_v2_decode(q, k, v, scale=scale)
 
     return _time_kernel(fn, warmup=warmup, iterations=iterations)
@@ -198,6 +207,7 @@ def benchmark_fa3_prefill(
     """
     # TODO: Implement FA3 Python binding when available
     # For now, return placeholder values
+    logger.info("benchmark_fa3_prefill starting with batch=%s, num_heads=%s, seq_len=%s, head_dim=%s", batch, num_heads, seq_len, head_dim)
     return 0.0, 0.0, "FA3 Python interface not yet implemented"
 
 
@@ -225,6 +235,7 @@ def benchmark_fa3_decode(
     """
     # TODO: Implement FA3 Python binding when available
     # For now, return placeholder values
+    logger.info("benchmark_fa3_decode starting with batch=%s, num_heads=%s, context_len=%s, head_dim=%s", batch, num_heads, context_len, head_dim)
     return 0.0, 0.0, "FA3 Python interface not yet implemented"
 
 
@@ -252,6 +263,7 @@ def calculate_attention_flops(
         Total FLOPs
     """
     # Q @ K^T: 2 * batch * heads * seq_q * seq_k * head_dim
+    logger.debug("calculate_attention_flops called with batch=%s, num_heads=%s, seq_q=%s", batch, num_heads, seq_q)
     qk_flops = 2 * batch * num_heads * seq_q * seq_k * head_dim
 
     # Softmax + attn @ V: 2 * batch * heads * seq_q * seq_k * head_dim
@@ -287,6 +299,7 @@ def calculate_memory_usage(
         Memory usage in MB
     """
     # Q: batch * num_heads * seq_q * head_dim * 2 bytes (FP16)
+    logger.debug("calculate_memory_usage called with batch=%s, num_heads=%s, seq_q=%s", batch, num_heads, seq_q)
     q_bytes = batch * num_heads * seq_q * head_dim * 2
 
     # K: batch * num_heads * seq_k * head_dim * 2 bytes
@@ -321,6 +334,7 @@ def run_prefill_benchmarks(
     Returns:
         List of BenchmarkResult objects
     """
+    logger.info("run_prefill_benchmarks starting with batch=%s, num_heads=%s, head_dim=%s, context_lengths=%s", batch, num_heads, head_dim, context_lengths)
     if context_lengths is None:
         context_lengths = [1024, 2048, 4096, 8192, 16384, 32768]
 
@@ -412,6 +426,7 @@ def run_decode_benchmarks(
     Returns:
         List of BenchmarkResult objects
     """
+    logger.info("run_decode_benchmarks starting with batch=%s, num_heads=%s, head_dim=%s, context_lengths=%s", batch, num_heads, head_dim, context_lengths)
     if context_lengths is None:
         context_lengths = [1024, 2048, 4096, 8192, 16384, 32768]
 
@@ -504,6 +519,7 @@ def run_gqa_benchmarks(
     Returns:
         List of BenchmarkResult objects
     """
+    logger.info("run_gqa_benchmarks starting with batch=%s, num_q_heads=%s, num_kv_heads=%s, head_dim=%s", batch, num_q_heads, num_kv_heads, head_dim)
     if context_lengths is None:
         context_lengths = [1024, 2048, 4096, 8192, 16384, 32768]
 
@@ -526,6 +542,7 @@ def run_gqa_benchmarks(
             scale = 1.0 / math.sqrt(head_dim)
 
             def fa2_fn() -> torch.Tensor:
+                logger.debug("fa2_fn called")
                 return flash_attention_v2_decode(q, k, v, scale=scale)
 
             fa2_mean, fa2_std = _time_kernel(fa2_fn, warmup=warmup, iterations=iterations)
@@ -591,6 +608,7 @@ def export_results(results: list[BenchmarkResult], output_path: str | Path) -> N
         results: List of BenchmarkResult objects
         output_path: Path to output JSON file
     """
+    logger.info("export_results called with results=%s, output_path=%s", results, output_path)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -613,6 +631,7 @@ def print_summary(results: list[BenchmarkResult]) -> None:
     Args:
         results: List of BenchmarkResult objects
     """
+    logger.debug("print_summary called with results=%s", results)
     print("\n" + "=" * 80)
     print("Benchmark Summary")
     print("=" * 80)
@@ -650,6 +669,7 @@ def main() -> int:
     Returns:
         Exit code (0 for success, 1 for failure)
     """
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Benchmark Flash Attention v3 vs v2 across context lengths 1K to 32K"
     )

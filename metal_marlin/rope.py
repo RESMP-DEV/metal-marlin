@@ -32,6 +32,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any
@@ -87,6 +88,7 @@ class YaRNConfig:
         Returns:
             YaRNConfig if rope_scaling is enabled, None otherwise.
         """
+        logger.debug("from_hf_config called with config=%s", config)
         rope_scaling = config.get("rope_scaling")
 
         # No rope_scaling - only modern configuration is supported
@@ -147,6 +149,7 @@ def get_yarn_mscale(scale_factor: float, mscale_all_dim: float = 0.0) -> float:
     Returns:
         Attention temperature multiplier (>= 1.0 for scale_factor >= 1.0).
     """
+    logger.debug("get_yarn_mscale called with scale_factor=%s, mscale_all_dim=%s", scale_factor, mscale_all_dim)
     if scale_factor <= 1.0:
         return 1.0
 
@@ -176,6 +179,7 @@ def _yarn_find_correction_dim(
     Returns:
         Dimension index (float) corresponding to the target rotations.
     """
+    logger.debug("_yarn_find_correction_dim called with num_rotations=%s, dim=%s, base=%s", num_rotations, dim, base)
     return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
         2 * math.log(base)
     )
@@ -204,6 +208,7 @@ def _yarn_find_correction_range(
     Returns:
         (low_idx, high_idx) tuple defining the interpolation range.
     """
+    logger.debug("_yarn_find_correction_range called with beta_fast=%s, beta_slow=%s, dim=%s", beta_fast, beta_slow, dim)
     low = math.floor(_yarn_find_correction_dim(beta_fast, dim, base, max_position_embeddings))
     high = math.ceil(_yarn_find_correction_dim(beta_slow, dim, base, max_position_embeddings))
     return max(low, 0), min(high, dim - 1)
@@ -230,6 +235,7 @@ def _yarn_linear_ramp_mask(
     Returns:
         Tensor of shape [dim // 2] with ramp values.
     """
+    logger.debug("_yarn_linear_ramp_mask called with low=%s, high=%s, dim=%s", low, high, dim)
     require_torch("YaRN RoPE")
     if dtype is None:
         dtype = torch.float32
@@ -272,6 +278,7 @@ def compute_yarn_inv_freq(
         >>> inv_freq = compute_yarn_inv_freq(128, 10000.0, config, device="mps")
         >>> # Shape: [64] - one inverse frequency per pair of dimensions
     """
+    logger.debug("compute_yarn_inv_freq called with dim=%s, base=%s, config=%s", dim, base, config)
     require_torch("YaRN RoPE")
 
     # Determine device
@@ -341,6 +348,7 @@ def compute_yarn_cos_sin_cache(
     Returns:
         (cos_cache, sin_cache) tensors of shape [max_seq_len, dim // 2].
     """
+    logger.debug("compute_yarn_cos_sin_cache called with dim=%s, max_seq_len=%s, base=%s", dim, max_seq_len, base)
     require_torch("YaRN RoPE cache")
 
     if dtype is None:
@@ -406,6 +414,7 @@ class YaRNRoPE:
             device: Target device.
             dtype: Cache dtype.
         """
+        logger.debug("initializing %s with dim=%s, max_seq_len=%s, base=%s, config=%s, device=%s", type(self).__name__, dim, max_seq_len, base, config, device)
         require_torch("YaRNRoPE")
 
         self.dim = dim
@@ -432,6 +441,7 @@ class YaRNRoPE:
 
     def _build_cache(self) -> None:
         """Build the cos/sin cache."""
+        logger.info("_build_cache starting")
         self.cos_cache, self.sin_cache = compute_yarn_cos_sin_cache(
             self.dim,
             self.max_seq_len,
@@ -456,6 +466,7 @@ class YaRNRoPE:
         Returns:
             Tensor with RoPE applied, same shape as input.
         """
+        logger.debug("apply called with x=%s, offset=%s", x, offset)
         require_torch("YaRNRoPE.apply")
 
         seq_len = x.shape[2]
@@ -490,6 +501,7 @@ class YaRNRoPE:
         Args:
             new_max_seq_len: New maximum sequence length.
         """
+        logger.debug("extend_cache called with new_max_seq_len=%s", new_max_seq_len)
         if new_max_seq_len <= self.max_seq_len:
             return
 
@@ -513,6 +525,7 @@ def create_rope_from_config(
     Returns:
         YaRNRoPE instance, or None if no scaling configured.
     """
+    logger.debug("create_rope_from_config called with config=%s, device=%s", config, device)
     yarn_config = YaRNConfig.from_hf_config(config)
     if yarn_config is None:
         return None
@@ -554,6 +567,9 @@ except ImportError:
     HAS_MPS = False
 
 
+
+logger = logging.getLogger(__name__)
+
 def dispatch_rope_yarn_forward(
     lib: Any,
     x: Any,
@@ -577,6 +593,7 @@ def dispatch_rope_yarn_forward(
     Returns:
         Output tensor with YaRN RoPE applied [batch, seq_len, num_heads, head_dim]
     """
+    logger.debug("dispatch_rope_yarn_forward called with lib=%s, x=%s, cos_cache=%s", lib, x, cos_cache)
     require_torch("dispatch_rope_yarn_forward")
 
     if not HAS_METAL_DISPATCH:
@@ -696,6 +713,7 @@ def dispatch_rope_yarn_latent(
     Returns:
         Output tensor with YaRN RoPE applied to positional portion
     """
+    logger.debug("dispatch_rope_yarn_latent called with lib=%s, x=%s, cos_cache=%s", lib, x, cos_cache)
     require_torch("dispatch_rope_yarn_latent")
 
     if not HAS_METAL_DISPATCH:
@@ -811,6 +829,7 @@ def dispatch_rope_yarn_qk_fused(
     Returns:
         Tuple of (q_rotated, k_rotated) tensors
     """
+    logger.debug("dispatch_rope_yarn_qk_fused called with lib=%s, q=%s, k=%s", lib, q, k)
     require_torch("dispatch_rope_yarn_qk_fused")
 
     if not HAS_METAL_DISPATCH:
@@ -922,6 +941,7 @@ class YaRNRoPEMetal(YaRNRoPE):
         dtype: Any = None,
         rope_ratio: float = 1.0,
     ):
+        logger.debug("initializing %s with dim=%s, max_seq_len=%s, base=%s, config=%s, device=%s", type(self).__name__, dim, max_seq_len, base, config, device)
         super().__init__(dim, max_seq_len, base, config, device, dtype)
 
         # Store rope_ratio for API compatibility with _RotaryEmbedding
@@ -948,6 +968,7 @@ class YaRNRoPEMetal(YaRNRoPE):
         Returns:
             Tensor with YaRN RoPE applied.
         """
+        logger.debug("apply called with x=%s, offset=%s", x, offset)
         require_torch("YaRNRoPEMetal.apply")
 
         # Check if we can use Metal
@@ -1012,6 +1033,7 @@ class YaRNRoPEMetal(YaRNRoPE):
         Returns:
             Tuple of (q_rotated, k_rotated).
         """
+        logger.debug("apply_qk_fused called with q=%s, k=%s, offset=%s", q, k, offset)
         require_torch("YaRNRoPEMetal.apply_qk_fused")
 
         # Compute attention scale
@@ -1072,6 +1094,7 @@ def dispatch_fused_rope_attention(
     Returns:
         Attention output tensor [batch, seq_q, num_heads, v_head_dim]
     """
+    logger.debug("dispatch_fused_rope_attention called with lib=%s, q_nope=%s, q_rope=%s", lib, q_nope, q_rope)
     require_torch("dispatch_fused_rope_attention")
     
     if not HAS_METAL_DISPATCH:
@@ -1255,6 +1278,7 @@ class YaRNRoPELatent(YaRNRoPE):
             dtype: Cache dtype.
         """
         # Use rope_dim for the parent class (this determines inv_freq/cache size)
+        logger.debug("initializing %s with rope_dim=%s, kv_lora_rank=%s, max_seq_len=%s, base=%s, config=%s", type(self).__name__, rope_dim, kv_lora_rank, max_seq_len, base, config)
         super().__init__(rope_dim, max_seq_len, base, config, device, dtype)
         self.kv_lora_rank = kv_lora_rank
         self.rope_dim = rope_dim
@@ -1280,6 +1304,7 @@ class YaRNRoPELatent(YaRNRoPE):
         Returns:
             Tensor with RoPE applied to positional portion only.
         """
+        logger.debug("apply called with x=%s, offset=%s", x, offset)
         require_torch("YaRNRoPELatent.apply")
 
         batch_size, seq_len, total_dim = x.shape

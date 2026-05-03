@@ -11,6 +11,7 @@ for in the remaining rows using the L factor from the LDL decomposition.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -24,6 +25,9 @@ from metal_marlin.quantization.viterbi_quant import (
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 def compute_group_scales(
     weight: NDArray[np.float32],
@@ -44,6 +48,7 @@ def compute_group_scales(
     Returns:
         scales: [n_groups, out_features] per-group scales
     """
+    logger.debug("compute_group_scales called with weight=%s, group_size=%s, codebook=%s", weight, group_size, codebook)
     out_feat, in_feat = weight.shape
     n_groups = (in_feat + group_size - 1) // group_size
 
@@ -83,6 +88,7 @@ def compute_tile_scales(
     Returns:
         tile_scales: [n_tiles] per-tile scales
     """
+    logger.debug("compute_tile_scales called with tiles=%s, codebook=%s", tiles, codebook)
     grid = codebook.get_grid()
     max_grid = float(np.max(np.abs(grid)))
     eps = 1e-8
@@ -108,6 +114,7 @@ def pack_indices(indices: NDArray[np.uint8]) -> NDArray[np.uint8]:
     Returns:
         packed: [tiles_k, tiles_n, 256] packed indices
     """
+    logger.info("pack_indices called with indices=%s", indices)
     n_tiles, tile_size = indices.shape
     assert tile_size == 256, f"Expected tile size 256, got {tile_size}"
 
@@ -134,6 +141,7 @@ def extract_tiles_from_rows(
     Returns:
         tiles: List of TrellisTile objects
     """
+    logger.debug("extract_tiles_from_rows called with rows=%s, col_offset=%s", rows, col_offset)
     out_feat, n_cols = rows.shape
     assert n_cols % 16 == 0, f"n_cols must be multiple of 16, got {n_cols}"
 
@@ -186,6 +194,7 @@ def ldlq_quantize_layer(
         scales: [n_groups, out_features] per-group scales
         weight_q: [out_features, in_features] dequantized weights
     """
+    logger.info("ldlq_quantize_layer called with weight=%s, L=%s, D=%s, codebook=%s", getattr(weight, "shape", weight), L, D, codebook)
     out_feat, in_feat = weight.shape
     tiles_k = in_feat // 16
     tiles_n = out_feat // 16

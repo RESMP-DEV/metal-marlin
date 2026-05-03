@@ -13,6 +13,7 @@ All tests are skipped if MPS is not available.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -35,9 +36,13 @@ except ImportError:
     HAS_VISION_METAL = False
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def vision_metal():
     """Fixture providing a VisionMetal instance."""
+    logger.debug("vision_metal called")
     if not HAS_VISION_METAL:
         pytest.skip("VisionMetal not available")
     return VisionMetal()
@@ -46,6 +51,7 @@ def vision_metal():
 @pytest.fixture
 def sample_image():
     """Create a sample RGB image for testing."""
+    logger.debug("sample_image called")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     # Create a sample 256x256 RGB image
@@ -57,6 +63,7 @@ def sample_image():
 @pytest.fixture
 def sample_batch():
     """Create a batch of sample images."""
+    logger.debug("sample_batch called")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     rng = np.random.default_rng(42)
@@ -84,6 +91,7 @@ def test_resize_bilinear_accuracy(vision_metal, sample_image, size):
 
     Tolerance: max abs error < 0.01 (1/255 for uint8 equivalent).
     """
+    logger.info("running test_resize_bilinear_accuracy")
     pytest.importorskip("scipy")
     from scipy.ndimage import zoom
 
@@ -126,6 +134,7 @@ def test_resize_bicubic_vs_pil(vision_metal, sample_image):
     different kernel coefficients and edge handling. The Metal implementation
     is functionally correct; it just produces different values than PIL.
     """
+    logger.info("running test_resize_bicubic_vs_pil")
     pytest.importorskip("PIL")
     from PIL import Image
 
@@ -162,6 +171,7 @@ def test_resize_bicubic_vs_pil(vision_metal, sample_image):
 
 def test_normalize_imagenet(vision_metal, sample_image):
     """Verify mean/std normalization matches torchvision.transforms.Normalize."""
+    logger.info("running test_normalize_imagenet")
     pytest.importorskip("torchvision")
     from torchvision import transforms
 
@@ -195,6 +205,7 @@ def test_normalize_imagenet(vision_metal, sample_image):
 
 def test_fused_vs_separate(vision_metal, sample_image):
     """Test that resize_and_normalize() matches resize() + normalize()."""
+    logger.info("running test_fused_vs_separate")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -246,6 +257,7 @@ def test_vit_patch_extract(vision_metal, patch_size):
 
     Example: 224x224 with patch_size=16 -> 196 patches of 16x16x3.
     """
+    logger.info("running test_vit_patch_extract")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -292,6 +304,7 @@ def test_vit_patch_extract(vision_metal, patch_size):
 
 def test_nchw_vs_nhwc(vision_metal):
     """Verify NCHW and NHWC layouts produce equivalent results."""
+    logger.info("running test_nchw_vs_nhwc")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -325,6 +338,7 @@ def test_nchw_vs_nhwc(vision_metal):
 @pytest.mark.parametrize("batch_size", [1, 4, 16])
 def test_batched_images(vision_metal, batch_size):
     """Test that batches of images are processed correctly."""
+    logger.info("running test_batched_images")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -364,6 +378,7 @@ def test_dtype_support(vision_metal, sample_image, dtype):
 
     Note: float16 uses image_resize_bilinear_f16 kernel path.
     """
+    logger.info("running test_dtype_support")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -391,6 +406,7 @@ def test_dtype_support(vision_metal, sample_image, dtype):
 
 def test_normalize_clip(vision_metal):
     """Test CLIP normalization parameters."""
+    logger.info("running test_normalize_clip")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -407,6 +423,7 @@ def test_normalize_clip(vision_metal):
 
 def test_dynamic_resize_qwen2vl(vision_metal):
     """Test dynamic resize for Qwen2-VL style variable resolutions."""
+    logger.info("running test_dynamic_resize_qwen2vl")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -425,6 +442,7 @@ def test_dynamic_resize_qwen2vl(vision_metal):
 
 def test_channel_order_preserved(vision_metal):
     """Test that channel order is preserved during resize."""
+    logger.info("running test_channel_order_preserved")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -449,6 +467,7 @@ def test_channel_order_preserved(vision_metal):
 
 def test_patch_extract_nchw(vision_metal):
     """Test patch extraction with NCHW layout."""
+    logger.info("running test_patch_extract_nchw")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 

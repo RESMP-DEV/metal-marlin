@@ -1,3 +1,4 @@
+import logging
 import time
 
 import torch
@@ -5,7 +6,11 @@ import torch
 from metal_marlin.kernels import HAS_METAL, HAS_MPS, marlin_gemm_fp4
 
 
+
+logger = logging.getLogger(__name__)
+
 def main() -> None:
+    logger.info("main starting")
     assert HAS_METAL and HAS_MPS, "Metal not available"
 
     # Test dimensions matching Qwen3-4B

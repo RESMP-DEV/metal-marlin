@@ -1,10 +1,15 @@
+import logging
 
 import torch
 
 from metal_marlin.layers.mmfp4_expert import MMFP4Expert
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_parity():
+    logger.info("running test_parity")
     if not torch.backends.mps.is_available():
         print("Skipping MPS test")
         return

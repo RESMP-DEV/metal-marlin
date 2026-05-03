@@ -1,4 +1,5 @@
 """Tests for AWQ (Activation-aware Weight Quantization)."""
+import logging
 
 import numpy as np
 
@@ -13,9 +14,13 @@ from metal_marlin.awq import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_compute_activation_stats():
     """Test activation statistics computation."""
     # Create dummy activations
+    logger.info("running test_compute_activation_stats")
     batch_size = 10
     seq_len = 128
     in_features = 512
@@ -42,6 +47,7 @@ def test_compute_activation_stats():
 
 def test_find_salient_weights():
     """Test salient weight identification."""
+    logger.info("running test_find_salient_weights")
     in_features = 512
     out_features = 256
 
@@ -67,6 +73,7 @@ def test_find_salient_weights():
 
 def test_compute_salient_scaling():
     """Test salient weight scaling computation."""
+    logger.info("running test_compute_salient_scaling")
     in_features = 512
     out_features = 256
     group_size = 128
@@ -85,6 +92,7 @@ def test_compute_salient_scaling():
 
 def test_pack_awq_weights():
     """Test AWQ weight packing."""
+    logger.info("running test_pack_awq_weights")
     in_features = 512
     out_features = 256
     group_size = 128
@@ -108,6 +116,7 @@ def test_pack_awq_weights():
 
 def test_awq_quantize_dequantize():
     """Test full AWQ quantization and dequantization pipeline."""
+    logger.info("running test_awq_quantize_dequantize")
     in_features = 512
     out_features = 256
     group_size = 128
@@ -156,6 +165,7 @@ def test_awq_quantize_dequantize():
 
 def test_awq_reconstruction_quality():
     """Test AWQ reconstruction quality on synthetic data."""
+    logger.info("running test_awq_reconstruction_quality")
     in_features = 1024
     out_features = 512
     group_size = 128
@@ -204,6 +214,7 @@ def test_awq_reconstruction_quality():
 
 def test_awq_edge_cases():
     """Test AWQ edge cases."""
+    logger.info("running test_awq_edge_cases")
     in_features = 512
     out_features = 256
 
@@ -228,6 +239,7 @@ def test_awq_edge_cases():
 
 def run_all_tests():
     """Run all AWQ tests."""
+    logger.info("running run_all_tests")
     print("\n" + "=" * 70)
     print("Running AWQ Tests")
     print("=" * 70 + "\n")

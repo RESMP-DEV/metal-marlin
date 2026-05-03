@@ -13,6 +13,7 @@ within acceptable numerical tolerance for equivalent inputs.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -36,8 +37,12 @@ except ImportError:
     HAS_KERNELS = False
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_device() -> str:
     """Get the appropriate test device."""
+    logger.debug("_get_device called")
     if HAS_MPS:
         return "mps"
     return "cpu"
@@ -74,6 +79,7 @@ class TestPagedLinearAttentionParity:
 
         Validates numerical equivalence for decode workloads (single Q token).
         """
+        logger.info("running test_paged_v1_matches_linear_attention")
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -190,6 +196,7 @@ class TestPagedLinearAttentionParity:
         - paged_attention_v1 (Metal): Metal kernel implementation
         - F.scaled_dot_product_attention: Standard linear attention
         """
+        logger.info("running test_metal_paged_v1_matches_linear_attention")
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -319,6 +326,7 @@ class TestPagedLinearAttentionParity:
         supports both prefill and decode, comparing against standard
         linear attention.
         """
+        logger.info("running test_paged_block_pool_matches_linear_attention")
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -419,6 +427,7 @@ def test_paged_v1_smoke(num_heads, head_dim, seq_len, num_kv_heads, block_size):
     Quick sanity check with single sequence to verify core correctness.
     Marked with @smoke for fast feedback in development.
     """
+    logger.info("running test_paged_v1_smoke")
     if num_heads % num_kv_heads != 0:
         pytest.skip("Invalid GQA configuration")
 
@@ -477,6 +486,7 @@ def test_paged_block_pool_smoke(num_heads, head_dim, seq_len, block_size):
 
     Quick validation of block pool API against linear attention.
     """
+    logger.info("running test_paged_block_pool_smoke")
     seed = 42
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -554,6 +564,7 @@ class TestPagedAttentionEdgeCases:
     @pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
     def test_single_token_decode(self):
         """Single token decode (seq_len=1) matches linear attention."""
+        logger.info("running test_single_token_decode")
         torch.manual_seed(123)
         np.random.seed(123)
 
@@ -611,6 +622,7 @@ class TestPagedAttentionEdgeCases:
     @pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
     def test_gqa_expansion_parity(self):
         """GQA expansion matches between paged and linear attention."""
+        logger.info("running test_gqa_expansion_parity")
         torch.manual_seed(456)
         np.random.seed(456)
 
@@ -677,6 +689,7 @@ class TestPagedAttentionEdgeCases:
     @pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
     def test_partial_block_usage(self):
         """Attention with partially filled last block matches linear."""
+        logger.info("running test_partial_block_usage")
         torch.manual_seed(789)
         np.random.seed(789)
 

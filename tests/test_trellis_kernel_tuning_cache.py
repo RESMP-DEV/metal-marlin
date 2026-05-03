@@ -29,6 +29,7 @@ def _make_mock_moe_layer(
     num_experts: int = 4,
     bits: int = 3,
 ) -> TrellisMoEMLP:
+    logger.debug("_make_mock_moe_layer called")
     return create_mock_moe_mlp(
         hidden_dim=hidden_dim,
         intermediate_dim=intermediate_dim,
@@ -43,6 +44,7 @@ def _make_mock_moe_layer(
 @requires_trellis
 def test_tuning_cache_key_includes_model_dimensions() -> None:
     """Cache path hash should vary with hidden/intermediate/experts/bits."""
+    logger.info("running test_tuning_cache_key_includes_model_dimensions")
     base = _make_mock_moe_layer(
         hidden_dim=32, intermediate_dim=64, num_experts=4, bits=3
     )
@@ -73,6 +75,7 @@ def test_second_load_uses_cached_tuning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Second layer load should skip auto-tuning when cache file exists."""
+    logger.info("running test_second_load_uses_cached_tuning")
     cache_path = tmp_path / "kernel_tuning_test.json"
     monkeypatch.setattr(
         TrellisMoEMLP, "_get_tuning_cache_path", lambda self: cache_path
@@ -103,6 +106,7 @@ def test_second_load_uses_cached_tuning(
 def test_optimal_use_fp32_acc_respects_cache() -> None:
     """_get_optimal_use_fp32_acc should prefer cached config over heuristic."""
     # Small hidden dim (<1024), default heuristic is False
+    logger.info("running test_optimal_use_fp32_acc_respects_cache")
     layer = _make_mock_moe_layer(hidden_dim=32)
     
     # By default (no cache), it should be False

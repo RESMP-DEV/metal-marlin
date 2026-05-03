@@ -9,6 +9,7 @@ Usage:
 """
 
 import argparse
+import logging
 import math
 import sys
 from pathlib import Path
@@ -18,6 +19,9 @@ from transformers import AutoTokenizer
 
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 from metal_marlin.trellis.config import GLM4_TOKENIZER_ID
+
+
+logger = logging.getLogger(__name__)
 
 # Add parent directory for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -32,6 +36,7 @@ def load_test_dataset(dataset_name: str = "wikitext") -> list[str]:
     Returns:
         List of text strings for perplexity calculation.
     """
+    logger.info("running load_test_dataset")
     if dataset_name == "wikitext":
         # WikiText-2 subset for quick testing
         test_texts = [
@@ -77,6 +82,7 @@ def calculate_perplexity(
     Returns:
         Average perplexity across all texts.
     """
+    logger.debug("calculate_perplexity called with pipeline=%s, texts=%s, max_length=%s", pipeline, texts, max_length)
     tokenizer = pipeline.tokenizer
     model = pipeline.model
     device = next(model.parameters()).device
@@ -141,6 +147,7 @@ def benchmark_generation_speed(
     Returns:
         Dictionary with TPS, latency_ms, and other metrics.
     """
+    logger.info("benchmark_generation_speed starting with pipeline=%s, prompt=%s, max_tokens=%s, num_runs=%s", pipeline, prompt, max_tokens, num_runs)
     import time
 
     tps_list = []
@@ -177,6 +184,7 @@ def benchmark_generation_speed(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Perplexity benchmark for GLM-4.7-Flash")
     parser.add_argument(

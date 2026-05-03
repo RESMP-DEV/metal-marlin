@@ -29,12 +29,16 @@ Example:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     ArrayLike = NDArray[np.integer] | NDArray[np.floating]
@@ -63,6 +67,7 @@ class OverflowInfo:
     @property
     def drop_rate(self) -> float:
         """Fraction of token-expert assignments that were dropped."""
+        logger.debug("drop_rate called")
         if self.total_assignments == 0:
             return 0.0
         return self.dropped_tokens / self.total_assignments
@@ -70,6 +75,7 @@ class OverflowInfo:
     @property
     def utilization(self) -> float:
         """Fraction of capacity that was used (excluding drops)."""
+        logger.debug("utilization called")
         if self.capacity_per_expert == 0:
             return 0.0
         # Total capacity across all experts that received assignments
@@ -109,6 +115,7 @@ class CapacityStats:
     @property
     def overall_drop_rate(self) -> float:
         """Overall fraction of assignments dropped."""
+        logger.debug("overall_drop_rate called")
         if self.total_assignments == 0:
             return 0.0
         return self.total_dropped / self.total_assignments
@@ -116,6 +123,7 @@ class CapacityStats:
     @property
     def overflow_rate(self) -> float:
         """Fraction of batches that had overflow."""
+        logger.debug("overflow_rate called")
         if self.total_batches == 0:
             return 0.0
         return self.batches_with_overflow / self.total_batches
@@ -129,6 +137,7 @@ class CapacityStats:
         Returns:
             List of (expert_id, overflow_count) tuples, sorted by count descending.
         """
+        logger.debug("top_overflow_experts called with k=%s", k)
         sorted_experts = sorted(self.expert_overflow_counts.items(), key=lambda x: -x[1])
         return sorted_experts[:k]
 
@@ -160,6 +169,7 @@ class CapacityAnalyzer:
         capacity_factor: float = 1.0,
         top_k: int = 2,
     ):
+        logger.debug("initializing %s with num_experts=%s, capacity_factor=%s, top_k=%s", type(self).__name__, num_experts, capacity_factor, top_k)
         self.num_experts = num_experts
         self.capacity_factor = capacity_factor
         self.top_k = top_k
@@ -175,6 +185,7 @@ class CapacityAnalyzer:
         Returns:
             Maximum tokens per expert.
         """
+        logger.debug("compute_capacity called with batch_size=%s", batch_size)
         return compute_expert_capacity(
             batch_size, self.num_experts, self.capacity_factor, self.top_k
         )
@@ -188,6 +199,7 @@ class CapacityAnalyzer:
         Returns:
             OverflowInfo with details about this batch's overflow.
         """
+        logger.debug("record_batch called with expert_ids=%s", expert_ids)
         batch_size, top_k = expert_ids.shape
         total_assignments = batch_size * top_k
         capacity = self.compute_capacity(batch_size)
@@ -229,14 +241,17 @@ class CapacityAnalyzer:
 
     def get_stats(self) -> CapacityStats:
         """Get aggregate statistics."""
+        logger.debug("get_stats called")
         return self._stats
 
     def get_batch_history(self) -> list[OverflowInfo]:
         """Get overflow info for all recorded batches."""
+        logger.debug("get_batch_history called")
         return self._batch_history.copy()
 
     def reset(self) -> None:
         """Reset all statistics."""
+        logger.debug("reset called")
         self._stats = CapacityStats(
             capacity_factor=self.capacity_factor, num_experts=self.num_experts
         )
@@ -262,6 +277,7 @@ def compute_expert_capacity(
     Returns:
         Maximum number of tokens each expert can handle.
     """
+    logger.debug("compute_expert_capacity called with batch_size=%s, num_experts=%s, capacity_factor=%s", batch_size, num_experts, capacity_factor)
     if capacity_factor <= 0:
         raise ValueError("capacity_factor must be positive")
     raw_capacity = batch_size * top_k * capacity_factor / num_experts
@@ -280,6 +296,7 @@ def count_expert_assignments(
     Returns:
         [num_experts] array of assignment counts.
     """
+    logger.debug("count_expert_assignments called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     expert_ids_flat = np.asarray(expert_ids).reshape(-1).astype(np.int32)
     # Use bincount for efficient counting
     counts = np.bincount(expert_ids_flat, minlength=num_experts)
@@ -307,6 +324,7 @@ def analyze_overflow_rate(
     Returns:
         CapacityStats with overflow analysis results.
     """
+    logger.debug("analyze_overflow_rate called with expert_load_history=%s, num_experts=%s, capacity_factor=%s", expert_load_history, num_experts, capacity_factor)
     analyzer = CapacityAnalyzer(
         num_experts=num_experts, capacity_factor=capacity_factor, top_k=top_k
     )
@@ -354,6 +372,7 @@ def auto_tune_capacity(
         >>> factor = auto_tune_capacity(history, num_experts=64, target_drop_rate=0.01)
         >>> print(f"Optimal capacity factor: {factor:.2f}")
     """
+    logger.debug("auto_tune_capacity called with expert_load_history=%s, num_experts=%s, target_drop_rate=%s", expert_load_history, num_experts, target_drop_rate)
     if not expert_load_history:
         return min_factor
 
@@ -449,6 +468,7 @@ class DynamicCapacity:
         top_k: int = 2,
         config: DynamicCapacityConfig | None = None,
     ):
+        logger.debug("initializing %s with num_experts=%s, top_k=%s, config=%s", type(self).__name__, num_experts, top_k, config)
         self.num_experts = num_experts
         self.top_k = top_k
         self.config = config or DynamicCapacityConfig()
@@ -459,6 +479,7 @@ class DynamicCapacity:
     @property
     def current_factor(self) -> float:
         """Current capacity factor."""
+        logger.debug("current_factor called")
         return self._current_factor
 
     def get_capacity(self, batch_size: int) -> int:
@@ -470,6 +491,7 @@ class DynamicCapacity:
         Returns:
             Maximum tokens per expert.
         """
+        logger.debug("get_capacity called with batch_size=%s", batch_size)
         return compute_expert_capacity(
             batch_size, self.num_experts, self._current_factor, self.top_k
         )
@@ -483,6 +505,7 @@ class DynamicCapacity:
         Returns:
             Current capacity factor (possibly adjusted).
         """
+        logger.debug("update called with expert_ids=%s", expert_ids)
         batch_size = expert_ids.shape[0]
         capacity = self.get_capacity(batch_size)
 
@@ -506,6 +529,7 @@ class DynamicCapacity:
 
     def _maybe_adjust(self) -> None:
         """Adjust capacity factor if needed."""
+        logger.debug("_maybe_adjust called")
         if len(self._drop_history) < self.config.window_size:
             return
 
@@ -532,6 +556,7 @@ class DynamicCapacity:
 
     def reset(self) -> None:
         """Reset to initial state."""
+        logger.debug("reset called")
         self._current_factor = self.config.base_factor
         self._drop_history.clear()
         self._batches_since_adjust = 0
@@ -542,6 +567,7 @@ class DynamicCapacity:
         Returns:
             Dictionary with current factor, recent drop rates, etc.
         """
+        logger.debug("get_stats called")
         return {
             "current_factor": self._current_factor,
             "recent_drop_rate": (
@@ -585,6 +611,7 @@ def dynamic_capacity(
     Returns:
         Capacity per expert for this batch.
     """
+    logger.debug("dynamic_capacity called with expert_ids=%s, num_experts=%s, target_utilization=%s", expert_ids, num_experts, target_utilization)
     batch_size, top_k = expert_ids.shape
 
     # Count actual expert assignments

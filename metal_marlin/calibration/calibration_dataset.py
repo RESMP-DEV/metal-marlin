@@ -29,10 +29,14 @@ from __future__ import annotations
 import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -86,6 +90,7 @@ class CalibrationDataset:
         Returns:
             Filtered dataset (self if in_place, new instance otherwise).
         """
+        logger.debug("filter called with predicate=%s, in_place=%s", predicate, in_place)
         filtered = [s for s in self.samples if predicate(s)]
         if in_place:
             self.samples = filtered
@@ -125,6 +130,7 @@ class CalibrationDataset:
         Returns:
             CalibrationDataset instance with loaded samples.
         """
+        logger.debug("v3 called with max_samples=%s, cache_dir=%s, force_download=%s", max_samples, cache_dir, force_download)
         cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / "calibration_v3.txt"
@@ -175,6 +181,7 @@ class CalibrationDataset:
         Raises:
             FileNotFoundError: If path does not exist.
         """
+        logger.debug("from_local called with path=%s, min_sample_length=%s", path, min_sample_length)
         import json
 
         path = Path(path)
@@ -248,6 +255,7 @@ class CalibrationDataset:
             List of numpy arrays containing token IDs for each sample.
             Each array has shape [seq_len] where seq_len <= max_length.
         """
+        logger.debug("tokenize called with tokenizer=%s, max_length=%s", tokenizer, max_length)
         tokenized: list[np.ndarray] = []
 
         for sample in self.samples:
@@ -297,17 +305,20 @@ class CalibrationDataset:
         Yields:
             Lists of text samples, each containing up to batch_size samples.
         """
+        logger.debug("get_batches called with batch_size=%s", batch_size)
         for i in range(0, len(self.samples), batch_size):
             yield self.samples[i : i + batch_size]
 
     @property
     def total_chars(self) -> int:
         """Total character count across all samples."""
+        logger.debug("total_chars called")
         return sum(len(s) for s in self.samples)
 
     @property
     def avg_sample_length(self) -> float:
         """Average sample length in characters."""
+        logger.debug("avg_sample_length called")
         if not self.samples:
             return 0.0
         return self.total_chars / len(self.samples)
@@ -318,6 +329,7 @@ class CalibrationDataset:
 
         Returns approximate counts of samples in each domain category.
         """
+        logger.debug("domain_coverage called")
         domains = {
             "code": 0,
             "scientific": 0,
@@ -357,6 +369,7 @@ class CalibrationDataset:
     @staticmethod
     def _download_file(url: str, dest: Path) -> None:
         """Download file from URL."""
+        logger.info("_download_file called with url=%s, dest=%s", url, dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
 
         req = urllib.request.Request(
@@ -375,6 +388,7 @@ class CalibrationDataset:
 
         Consecutive non-blank lines are joined into samples.
         """
+        logger.debug("_parse_v3_text called with text=%s, min_length=%s", text, min_length)
         samples = []
         current: list[str] = []
 
@@ -415,6 +429,7 @@ class CalibrationDataset:
         Returns:
             List of text samples
         """
+        logger.debug("_parse_json_data called with data=%s, min_length=%s", data, min_length)
         samples: list[str] = []
 
         # Handle dict with 'samples' key

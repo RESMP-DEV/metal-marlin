@@ -11,6 +11,7 @@ Modules:
 """
 
 from __future__ import annotations
+import logging
 
 from metal_marlin.memory.buffer_pool import (
     BufferPool,
@@ -31,6 +32,9 @@ from metal_marlin.memory.mmfp4_memory import (
     MMAPWeightStats,
     MMFP4MemoryManager,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "MMFP4MemoryManager",

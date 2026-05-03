@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,11 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel, PreTrainedTokenizer
 
 
+
+logger = logging.getLogger(__name__)
+
 def _require_transformers() -> None:
+    logger.debug("_require_transformers called")
     try:
         import transformers  # noqa: F401
     except ImportError as exc:  # pragma: no cover - import guard
@@ -23,10 +28,12 @@ def _require_transformers() -> None:
 
 
 def _is_local_path(model_id_or_path: str) -> bool:
+    logger.debug("_is_local_path called with model_id_or_path=%s", model_id_or_path)
     return Path(model_id_or_path).exists()
 
 
 def _load_safetensors_keys(path: Path) -> set[str]:
+    logger.info("_load_safetensors_keys called with path=%s", path)
     from safetensors import safe_open
 
     st_path = path / "model.safetensors"
@@ -37,15 +44,18 @@ def _load_safetensors_keys(path: Path) -> set[str]:
 
 
 def _has_weight_packed_keys(path: Path) -> bool:
+    logger.info("_has_weight_packed_keys called with path=%s", path)
     keys = _load_safetensors_keys(path)
     return any(key.endswith(".weight_packed") for key in keys)
 
 
 def _has_quantization_config(path: Path) -> bool:
+    logger.info("_has_quantization_config called with path=%s", path)
     return (path / "quantization_config.json").exists()
 
 
 def _default_dtype_for_device(device: str) -> Any:
+    logger.debug("_default_dtype_for_device called with device=%s", device)
     if torch is None:
         return None
     if device in {"mps", "cuda"}:
@@ -54,6 +64,7 @@ def _default_dtype_for_device(device: str) -> Any:
 
 
 def _apply_chat_template(tokenizer: Any, messages: list[dict[str, Any]]) -> str:
+    logger.debug("_apply_chat_template called with tokenizer=%s, messages=%s", tokenizer, messages)
     if hasattr(tokenizer, "apply_chat_template"):
         return tokenizer.apply_chat_template(
             messages,
@@ -83,6 +94,7 @@ class TransformersMarlinPipeline:
         tokenizer: PreTrainedTokenizer,
         device: str = "mps",
     ) -> None:
+        logger.debug("initializing %s with model=%s, tokenizer=%s, device=%s", type(self).__name__, model, tokenizer, device)
         require_torch()
         assert torch is not None
 
@@ -110,6 +122,7 @@ class TransformersMarlinPipeline:
         If quantize=True and loading from HF, quantizes on the fly.
         If loading from local quantized checkpoint, loads directly.
         """
+        logger.debug("from_pretrained called with model_id_or_path=%s", model_id_or_path)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -247,6 +260,7 @@ class TransformersMarlinPipeline:
         **generate_kwargs: Any,
     ) -> str | Iterator[str]:
         """Generate text for chat-formatted models."""
+        logger.debug("chat called with messages=%s", messages)
         prompt = _apply_chat_template(self.tokenizer, messages)
         return self(prompt, **generate_kwargs)
 
@@ -256,6 +270,7 @@ class TransformersMarlinPipeline:
         **generate_kwargs: Any,
     ) -> list[str]:
         """Batch inference for multiple prompts."""
+        logger.debug("batch_generate called with prompts=%s", prompts)
         require_torch()
         _require_transformers()
         assert torch is not None
@@ -287,10 +302,12 @@ class TransformersMarlinPipeline:
         **generate_kwargs: Any,
     ) -> torch.Tensor:
         """Direct access to model.generate()."""
+        logger.debug("generate called with input_ids=%s", input_ids)
         return self.model.generate(input_ids, **generate_kwargs)
 
 
 def _load_state_dict(model_path: Path) -> dict[str, torch.Tensor]:
+    logger.info("_load_state_dict called with model_path=%s", model_path)
     from safetensors.torch import load_file
 
     state_path = model_path / "model.safetensors"
@@ -304,6 +321,7 @@ def _load_marlin_quantized_model(
     *,
     device: str,
 ) -> PreTrainedModel:
+    logger.info("_load_marlin_quantized_model called with model_path=%s", model_path)
     _require_transformers()
     require_torch()
     assert torch is not None
@@ -382,6 +400,7 @@ def _load_marlin_quantized_model(
 
 
 def _load_quantization_config(model_path: Path) -> dict[str, Any]:
+    logger.info("_load_quantization_config called with model_path=%s", model_path)
     config_path = model_path / "quantization_config.json"
     if not config_path.exists():
         return {}
@@ -391,6 +410,7 @@ def _load_quantization_config(model_path: Path) -> dict[str, Any]:
 
 
 def _replace_module(model: Any, module_name: str, new_module: Any) -> None:
+    logger.debug("_replace_module called with model=%s, module_name=%s, new_module=%s", model, module_name, new_module)
     if not module_name:
         return
     if "." not in module_name:
@@ -407,5 +427,6 @@ def _replace_module(model: Any, module_name: str, new_module: Any) -> None:
 
 
 def _get_submodule_fallback(model: Any, name: str) -> Any | None:
+    logger.debug("_get_submodule_fallback called with model=%s, name=%s", model, name)
     modules = dict(model.named_modules())
     return modules.get(name)

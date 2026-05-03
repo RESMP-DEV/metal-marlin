@@ -26,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import torch
 import torch.nn as nn
@@ -34,6 +35,9 @@ from torch import Tensor
 from ..kv_cache import KVCache
 from .draft import DraftModel, DraftOutput
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TreeDraftOutput(DraftOutput):
@@ -100,6 +104,7 @@ class EagleHead(DraftModel):
         dropout: float = 0.0,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_draft_tokens=%s, tree_width=%s, head_dim=%s", type(self).__name__, hidden_size, vocab_size, num_draft_tokens, tree_width, head_dim)
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.num_draft_tokens = num_draft_tokens
@@ -152,6 +157,7 @@ class EagleHead(DraftModel):
 
         We find the largest d such that this sum <= num_tokens.
         """
+        logger.debug("_compute_max_depth called with num_tokens=%s, width=%s", num_tokens, width)
         if width == 1:
             return num_tokens
 
@@ -185,6 +191,7 @@ class EagleHead(DraftModel):
             DraftOutput with tokens [batch, num_draft_tokens] and
             probs [batch, num_draft_tokens, vocab_size].
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         hidden_states.shape[0]
 
         # Use last position's hidden state
@@ -244,6 +251,7 @@ class EagleHead(DraftModel):
             DraftOutput with proposed tokens and their probability distributions.
             Falls back to uniform distribution if hidden states unavailable.
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         batch_size = input_ids.shape[0]
         num_tokens = min(num_tokens, self.num_draft_tokens)
 
@@ -273,6 +281,7 @@ class EagleHead(DraftModel):
         Returns:
             DraftOutput with tokens and probability distributions.
         """
+        logger.debug("speculate_from_hidden called with hidden_states=%s, num_tokens=%s", hidden_states, num_tokens)
         original_num = self.num_draft_tokens
         self.num_draft_tokens = min(num_tokens, original_num)
         try:
@@ -308,6 +317,7 @@ class EagleHead(DraftModel):
               - tree_tokens: Flattened tree tokens, [batch, num_tree_tokens].
               - tree_mask: Causal attention mask, [batch, num_tree_tokens, num_tree_tokens].
         """
+        logger.info("build_draft_tree starting")
         batch_size = hidden_states.shape[0]
         max_depth = min(max_depth, self._adaptive_depth, len(self.token_heads))
         max_width = min(max_width, self.tree_width)
@@ -439,6 +449,7 @@ class EagleHead(DraftModel):
         Returns:
             TreeDraftOutput with all tree information for verification.
         """
+        logger.info("build_tree_draft_output starting")
         batch_size = hidden_states.shape[0]
         max_depth = min(max_depth, self._adaptive_depth, len(self.token_heads))
         max_width = min(max_width, self.tree_width)
@@ -592,6 +603,7 @@ class EagleHead(DraftModel):
         Args:
             acceptance_rate: Fraction of draft tokens accepted in last step.
         """
+        logger.debug("update_acceptance_rate called with acceptance_rate=%s", acceptance_rate)
         self._acceptance_history.append(acceptance_rate)
 
         # Keep only last 10 steps
@@ -608,6 +620,7 @@ class EagleHead(DraftModel):
 
     def reset(self) -> None:
         """Reset internal state for a new sequence."""
+        logger.debug("reset called")
         self._acceptance_history.clear()
         self._adaptive_depth = self.max_depth
 
@@ -632,6 +645,7 @@ class EagleHead(DraftModel):
         Returns:
             Loaded EagleHead instance.
         """
+        logger.debug("from_pretrained called with model_path=%s, hidden_size=%s, vocab_size=%s", model_path, hidden_size, vocab_size)
         head = cls(
             hidden_size=hidden_size,
             vocab_size=vocab_size,

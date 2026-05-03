@@ -39,6 +39,7 @@ import argparse
 import gc
 import json
 import resource
+import logging
 import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -57,6 +58,9 @@ from metal_marlin.calibration import CalibrationDataset
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 from metal_marlin.quantization.exl3_quantizer import EXL3Quantizer
 from metal_marlin.trellis.packing import pack_indices_vectorized
+
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -136,6 +140,7 @@ class WeightPrefetcher:
     """
 
     def __init__(self, model_path: Path, weight_map: dict[str, str], prefetch_ahead: int = 1):
+        logger.debug("initializing %s with model_path=%s, weight_map=%s, prefetch_ahead=%s", type(self).__name__, model_path, weight_map, prefetch_ahead)
         self.model_path = model_path
         self.weight_map = weight_map
         self.prefetch_ahead = prefetch_ahead
@@ -151,20 +156,24 @@ class WeightPrefetcher:
             self._tensors_by_shard[shard_file].append(tensor_name)
 
     def start(self, layer_indices: list[int]):
+        logger.debug("start called with layer_indices=%s", layer_indices)
         self._stop = False
         self.thread = Thread(target=self._prefetch_loop,
                              args=(layer_indices,), daemon=True)
         self.thread.start()
 
     def stop(self):
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=5)
 
     def get_layer(self, timeout: float = 60.0) -> PrefetchedLayer | None:
+        logger.debug("get_layer called with timeout=%s", timeout)
         return self.queue.get(timeout=timeout)
 
     def _prefetch_loop(self, layer_indices: list[int]):
+        logger.debug("_prefetch_loop called with layer_indices=%s", layer_indices)
         for layer_idx in layer_indices:
             if self._stop:
                 break
@@ -179,6 +188,7 @@ class WeightPrefetcher:
         avoiding loading entire multi-GB shard files into memory.
         The file handle is closed after extraction, releasing mmap pages.
         """
+        logger.info("_load_layer called with layer_idx=%s", layer_idx)
         from safetensors import safe_open
 
         prefix = f"model.layers.{layer_idx}."
@@ -217,6 +227,7 @@ class WeightPrefetcher:
 
     def release_layer(self, layer_idx: int) -> None:
         """No-op - we don't cache anything anymore."""
+        logger.debug("release_layer called with layer_idx=%s", layer_idx)
         pass
 
 
@@ -238,6 +249,7 @@ class HessianPrefetcher:
         calibration_samples: int,
         max_seq_len: int,
     ):
+        logger.debug("initializing %s with quantizer=%s, weight_prefetcher=%s, calibration_samples=%s, max_seq_len=%s", type(self).__name__, quantizer, weight_prefetcher, calibration_samples, max_seq_len)
         self.quantizer = quantizer
         self.weight_prefetcher = weight_prefetcher
         self.calibration_samples = calibration_samples
@@ -250,18 +262,21 @@ class HessianPrefetcher:
 
     def start(self):
         """Start the Hessian prefetcher thread."""
+        logger.debug("start called")
         self._stop = False
         self.thread = Thread(target=self._prefetch_loop, daemon=True)
         self.thread.start()
 
     def stop(self):
         """Stop the prefetcher thread."""
+        logger.debug("stop called")
         self._stop = True
         if self.thread:
             self.thread.join(timeout=10)
 
     def get_prepared_layer(self, timeout: float = 180.0) -> PreparedLayer | None:
         """Get the next layer with Hessians pre-computed."""
+        logger.debug("get_prepared_layer called with timeout=%s", timeout)
         try:
             return self.queue.get(timeout=timeout)
         except Empty:
@@ -273,6 +288,7 @@ class HessianPrefetcher:
         Memory-optimized: Clears each tensor after computing its Hessian,
         rather than keeping all tensors in memory until the layer is done.
         """
+        logger.debug("_prefetch_loop called")
         hidden_size = getattr(self.quantizer.config, "hidden_size", 2048)
 
         while not self._stop:
@@ -353,6 +369,7 @@ class ParallelLayerwiseQuantizer:
         expert_workers: int = 8,
         calibration_source: str = "bartowski-v3",
     ):
+        logger.debug("initializing %s with model_id=%s, min_bits=%s, max_bits=%s, group_size=%s, sigma_reg=%s", type(self).__name__, model_id, min_bits, max_bits, group_size, sigma_reg)
         self.model_id = model_id
         self.min_bits = min_bits
         self.max_bits = max_bits
@@ -383,6 +400,7 @@ class ParallelLayerwiseQuantizer:
         self.calibration_tokens: list[torch.Tensor] | None = None
 
     def initialize(self, calibration_samples: int | None = None) -> None:
+        logger.debug("initialize called with calibration_samples=%s", calibration_samples)
         from huggingface_hub import snapshot_download
 
         print(f"\nInitializing model: {self.model_id}")
@@ -453,6 +471,7 @@ class ParallelLayerwiseQuantizer:
             print(f"  Tokenized {len(self.calibration_tokens)} samples")
 
     def determine_bits(self, tensor_name: str, weight: torch.Tensor, H: np.ndarray) -> int:
+        logger.debug("determine_bits called with tensor_name=%s, weight=%s, H=%s", tensor_name, weight, H)
         name_lower = tensor_name.lower()
         for pattern, bits in SENSITIVE_PATTERNS.items():
             if pattern in name_lower:
@@ -485,6 +504,7 @@ class ParallelLayerwiseQuantizer:
         return max(self.min_bits, min(self.max_bits, bits))
 
     def _compute_sensitivity(self, weight: np.ndarray, H: np.ndarray) -> float:
+        logger.debug("_compute_sensitivity called with weight=%s, H=%s", weight, H)
         w_abs = np.abs(weight)
         p99 = np.percentile(w_abs, 99)
         p50 = np.percentile(w_abs, 50)
@@ -502,6 +522,7 @@ class ParallelLayerwiseQuantizer:
     def compute_hessian(
         self, tensor_name: str, weight: torch.Tensor, activations: torch.Tensor
     ) -> tuple[np.ndarray, int, float]:
+        logger.debug("compute_hessian called with tensor_name=%s, weight=%s, activations=%s", tensor_name, weight, activations)
         out_feat, in_feat = weight.shape
 
         if activations.shape[1] != in_feat:
@@ -532,6 +553,7 @@ class ParallelLayerwiseQuantizer:
         Returns:
             Tuple of (LayerResult metadata, QuantizedTensor data or None on failure)
         """
+        logger.info("quantize_tensor_cpu called with tensor_name=%s, weight=%s, H_np=%s, bits=%s", tensor_name, weight, H_np, bits)
         short_name = tensor_name.split(".")[-2]
         start = time.perf_counter()
 
@@ -589,6 +611,7 @@ class ParallelLayerwiseQuantizer:
         - Worker threads quantize on CPU (parallel) AS SOON AS Hessian is ready
         - This overlaps GPU and CPU work for ~10% speedup on MoE layers
         """
+        logger.info("quantize_layer_parallel called with layer=%s, activations=%s", layer, activations)
         all_tensors = layer.tensors
         total = len(all_tensors)
 
@@ -677,6 +700,7 @@ class ParallelLayerwiseQuantizer:
         Returns:
             List of LayerResult metadata (tensors saved directly to disk)
         """
+        logger.info("quantize_prepared_layer called with prepared=%s, executor=%s, output_path=%s", prepared, executor, output_path)
         total = len(prepared.hessian_data)
         batch_size = min(self.expert_workers, 24)
 
@@ -821,6 +845,7 @@ class ParallelLayerwiseQuantizer:
         everything back into RAM), we keep batch files and create an index.
         This allows streaming reads without holding entire layer in memory.
         """
+        logger.debug("_merge_batch_shards called with layer_idx=%s, temp_dir=%s, output_path=%s", layer_idx, temp_dir, output_path)
         import shutil
 
         # Rename temp dir to permanent location
@@ -874,6 +899,7 @@ class ParallelLayerwiseQuantizer:
         Each layer is saved as a separate shard file.
         Clears each tensor's data immediately after adding to save dict.
         """
+        logger.info("save_layer_to_disk called with layer_idx=%s, quant_tensors=%s, output_path=%s", layer_idx, quant_tensors, output_path)
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
 
@@ -948,6 +974,7 @@ class ParallelLayerwiseQuantizer:
         If calibration data is available, use it to create synthetic activations
         that match the calibration distribution. Otherwise, use Gaussian noise.
         """
+        logger.debug("_generate_activations called with layer_idx=%s, in_features=%s, calibration_samples=%s", layer_idx, in_features, calibration_samples)
         hidden_size = getattr(self.config, "hidden_size", 2048)
 
         if self.calibration_tokens is not None and len(self.calibration_tokens) > 0:
@@ -1022,6 +1049,7 @@ class ParallelLayerwiseQuantizer:
         Returns:
             List of LayerResult metadata (quantized data is saved to disk)
         """
+        logger.info("quantize_model called with output_path=%s, max_layers=%s, calibration_samples=%s, max_seq_len=%s", output_path, max_layers, calibration_samples, max_seq_len)
         self.initialize(calibration_samples=calibration_samples)
 
         num_layers = getattr(self.config, "num_hidden_layers", 32)
@@ -1140,6 +1168,7 @@ class ParallelLayerwiseQuantizer:
         self, results: list[LayerResult], output_path: Path, total_time: float
     ) -> None:
         """Save model index and configuration after quantization completes."""
+        logger.info("_save_model_index called with results=%s, output_path=%s, total_time=%s", results, output_path, total_time)
         from collections import Counter
 
         successful = [r for r in results if r.success]
@@ -1188,6 +1217,7 @@ class ParallelLayerwiseQuantizer:
         print(f"\nSaved model index to {index_path}")
 
     def _print_summary(self, results: list[LayerResult], total_time: float) -> None:
+        logger.debug("_print_summary called with results=%s, total_time=%s", results, total_time)
         from collections import Counter
 
         successful = [r for r in results if r.success]
@@ -1241,6 +1271,7 @@ class ParallelLayerwiseQuantizer:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Parallel mixed-precision EXL3 quantization")
     parser.add_argument("--model", type=str, required=True,

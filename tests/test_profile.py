@@ -1,6 +1,7 @@
 """Tests for metal_marlin.profile module."""
 
 from __future__ import annotations
+import logging
 
 import pytest
 
@@ -21,6 +22,9 @@ from metal_marlin.profile import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMatmulFLOPs:
     """Test matmul FLOPs calculations."""
 
@@ -28,12 +32,14 @@ class TestMatmulFLOPs:
         """Test standard GEMM FLOPs calculation."""
         # C = A @ B where A is [M, K] and B is [K, N]
         # FLOPs = 2 * M * N * K
+        logger.info("running test_standard_gemm")
         flops = calculate_matmul_flops(M=1024, N=1024, K=1024)
         expected = 2 * 1024 * 1024 * 1024  # 2,147,483,648
         assert flops == expected
 
     def test_quantized_gemm(self) -> None:
         """Test quantized GEMM includes dequant overhead."""
+        logger.info("running test_quantized_gemm")
         flops = calculate_matmul_flops(M=1024, N=1024, K=1024, quantized=True)
         # Standard GEMM + dequant overhead (2 * M * N * K)
         expected_base = 2 * 1024 * 1024 * 1024
@@ -42,6 +48,7 @@ class TestMatmulFLOPs:
 
     def test_matmul_tflops_property(self) -> None:
         """Test TFLOPs property conversion."""
+        logger.info("running test_matmul_tflops_property")
         flops = calculate_matmul_flops(M=4096, N=4096, K=4096)
         layer = LayerFLOPs(name="test", total_flops=flops, matmul_flops=flops)
         expected_tflops = flops / 1e12
@@ -53,6 +60,7 @@ class TestAttentionFLOPs:
 
     def test_attention_basic(self) -> None:
         """Test basic attention FLOPs."""
+        logger.info("running test_attention_basic")
         flops = calculate_attention_flops(
             batch=2, seq_len=128, num_heads=8, head_dim=64
         )
@@ -61,6 +69,7 @@ class TestAttentionFLOPs:
 
     def test_attention_causal(self) -> None:
         """Test causal attention reduces FLOPs."""
+        logger.info("running test_attention_causal")
         full_flops = calculate_attention_flops(
             batch=2, seq_len=128, num_heads=8, head_dim=64, causal=False
         )
@@ -77,6 +86,7 @@ class TestFFNFLOPs:
 
     def test_ffn_basic(self) -> None:
         """Test basic FFN FLOPs."""
+        logger.info("running test_ffn_basic")
         flops = calculate_ffn_flops(
             batch=2, seq_len=128, hidden_dim=512, ffn_dim=2048
         )
@@ -84,6 +94,7 @@ class TestFFNFLOPs:
 
     def test_ffn_gated(self) -> None:
         """Test gated FFN has more FLOPs."""
+        logger.info("running test_ffn_gated")
         standard_flops = calculate_ffn_flops(
             batch=2, seq_len=128, hidden_dim=512, ffn_dim=2048, gated=False
         )
@@ -98,6 +109,7 @@ class TestLayerNormFLOPs:
 
     def test_layernorm(self) -> None:
         """Test LayerNorm FLOPs."""
+        logger.info("running test_layernorm")
         flops = calculate_layernorm_flops(batch=2, seq_len=128, hidden_dim=512)
         # ~5 ops per element
         expected = 2 * 128 * 512 * 5
@@ -109,6 +121,7 @@ class TestEmbeddingFLOPs:
 
     def test_embedding(self) -> None:
         """Test embedding FLOPs."""
+        logger.info("running test_embedding")
         flops = calculate_embedding_flops(
             batch=2, seq_len=128, vocab_size=32000, hidden_dim=512
         )
@@ -122,6 +135,7 @@ class TestMarlinLinearFLOPs:
 
     def test_marlin_linear_basic(self) -> None:
         """Test basic Marlin linear FLOPs."""
+        logger.info("running test_marlin_linear_basic")
         flops = estimate_marlin_linear_flops(
             in_features=4096,
             out_features=11008,
@@ -133,6 +147,7 @@ class TestMarlinLinearFLOPs:
 
     def test_marlin_linear_vs_standard(self) -> None:
         """Test quantized has overhead vs standard."""
+        logger.info("running test_marlin_linear_vs_standard")
         standard = estimate_marlin_linear_flops(
             in_features=4096, out_features=11008, batch_size=8, seq_len=128, quantized=False
         )
@@ -143,6 +158,7 @@ class TestMarlinLinearFLOPs:
 
     def test_marlin_linear_with_bias(self) -> None:
         """Test bias adds FLOPs."""
+        logger.info("running test_marlin_linear_with_bias")
         without_bias = estimate_marlin_linear_flops(
             in_features=4096,
             out_features=11008,
@@ -165,6 +181,7 @@ class TestCalculateLayerFLOPs:
 
     def test_linear_layer(self) -> None:
         """Test linear layer FLOPs."""
+        logger.info("running test_linear_layer")
         flops = calculate_layer_flops(
             "linear",
             in_features=4096,
@@ -176,6 +193,7 @@ class TestCalculateLayerFLOPs:
 
     def test_attention_layer(self) -> None:
         """Test attention layer FLOPs."""
+        logger.info("running test_attention_layer")
         flops = calculate_layer_flops(
             "attention",
             batch=8,
@@ -188,6 +206,7 @@ class TestCalculateLayerFLOPs:
 
     def test_ffn_layer(self) -> None:
         """Test FFN layer FLOPs."""
+        logger.info("running test_ffn_layer")
         flops = calculate_layer_flops(
             "ffn",
             batch=8,
@@ -200,6 +219,7 @@ class TestCalculateLayerFLOPs:
 
     def test_layernorm_layer(self) -> None:
         """Test layernorm layer FLOPs."""
+        logger.info("running test_layernorm_layer")
         flops = calculate_layer_flops(
             "layernorm",
             batch=8,
@@ -210,6 +230,7 @@ class TestCalculateLayerFLOPs:
 
     def test_invalid_layer_type(self) -> None:
         """Test invalid layer type raises error."""
+        logger.info("running test_invalid_layer_type")
         with pytest.raises(ValueError, match="Unknown layer_type"):
             calculate_layer_flops("invalid_layer", foo=123)
 
@@ -219,12 +240,14 @@ class TestLayerFLOPsCounter:
 
     def test_empty_counter(self) -> None:
         """Test empty counter has zero FLOPs."""
+        logger.info("running test_empty_counter")
         counter = LayerFLOPsCounter()
         assert counter.total_flops == 0
         assert counter.total_tflops == 0.0
 
     def test_add_matmul(self) -> None:
         """Test adding matmul layer."""
+        logger.info("running test_add_matmul")
         counter = LayerFLOPsCounter()
         counter.add_matmul("test_matmul", M=1024, N=1024, K=1024)
         assert counter.total_flops > 0
@@ -234,18 +257,21 @@ class TestLayerFLOPsCounter:
 
     def test_add_attention(self) -> None:
         """Test adding attention layer."""
+        logger.info("running test_add_attention")
         counter = LayerFLOPsCounter()
         counter.add_attention("test_attn", batch=2, seq_len=128, num_heads=8, head_dim=64)
         assert counter.total_flops > 0
 
     def test_add_ffn(self) -> None:
         """Test adding FFN layer."""
+        logger.info("running test_add_ffn")
         counter = LayerFLOPsCounter()
         counter.add_ffn("test_ffn", batch=2, seq_len=128, hidden_dim=512, ffn_dim=2048)
         assert counter.total_flops > 0
 
     def test_add_transformer_layer(self) -> None:
         """Test adding full transformer layer."""
+        logger.info("running test_add_transformer_layer")
         counter = LayerFLOPsCounter()
         counter.add_transformer_layer(
             "layer_0",
@@ -259,6 +285,7 @@ class TestLayerFLOPsCounter:
 
     def test_clear(self) -> None:
         """Test clearing counter."""
+        logger.info("running test_clear")
         counter = LayerFLOPsCounter()
         counter.add_matmul("test", M=1024, N=1024, K=1024)
         assert counter.total_flops > 0
@@ -271,12 +298,14 @@ class TestLayerFLOPsCalculator:
 
     def test_calculator_init(self) -> None:
         """Test calculator initialization."""
+        logger.info("running test_calculator_init")
         calc = LayerFLOPsCalculator(batch_size=8, seq_len=2048)
         assert calc.config.batch_size == 8
         assert calc.config.seq_len == 2048
 
     def test_empty_calculator(self) -> None:
         """Test empty calculator."""
+        logger.info("running test_empty_calculator")
         calc = LayerFLOPsCalculator()
         assert calc.total_flops == 0
         assert calc.total_params == 0
@@ -284,11 +313,13 @@ class TestLayerFLOPsCalculator:
 
     def test_get_layer_not_found(self) -> None:
         """Test getting non-existent layer returns None."""
+        logger.info("running test_get_layer_not_found")
         calc = LayerFLOPsCalculator()
         assert calc.get_layer("nonexistent") is None
 
     def test_clear_calculator(self) -> None:
         """Test clearing calculator."""
+        logger.info("running test_clear_calculator")
         calc = LayerFLOPsCalculator()
         # Would need to add a module first
         calc.clear()
@@ -300,6 +331,7 @@ class TestTransformerLayerFLOPs:
 
     def test_from_config(self) -> None:
         """Test creating from config."""
+        logger.info("running test_from_config")
         tf_flops = TransformerLayerFLOPs.from_config(
             batch=2,
             seq_len=128,
@@ -319,6 +351,7 @@ class TestProfileModelFLOPs:
 
     def test_profile_model(self) -> None:
         """Test profiling a model configuration."""
+        logger.info("running test_profile_model")
         counter = profile_model_flops(
             batch=1,
             seq_len=512,
@@ -337,6 +370,7 @@ class TestModuleImports:
 
     def test_all_exports(self) -> None:
         """Test that all expected exports exist."""
+        logger.info("running test_all_exports")
         from metal_marlin.profile import (
             LayerFLOPs,
             LayerFLOPsCalculator,

@@ -7,6 +7,7 @@ Tests cover:
 """
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -19,6 +20,9 @@ from metal_marlin.layers.adaptive_depth import (
 )
 from metal_marlin.layers.mmfp4_mtp_head import MMFP4MTPHead
 
+
+logger = logging.getLogger(__name__)
+
 # -----------------------------------------------------------------------------
 # Test AdaptiveSpeculationController
 # -----------------------------------------------------------------------------
@@ -28,6 +32,7 @@ class TestAdaptiveSpeculationController:
     
     def test_initial_depth(self):
         """Controller should start with initial depth."""
+        logger.info("running test_initial_depth")
         config = AdaptiveDepthConfig(initial_depth=4)
         controller = AdaptiveSpeculationController(config)
         
@@ -35,6 +40,7 @@ class TestAdaptiveSpeculationController:
     
     def test_depth_bounds(self):
         """Depth should stay within min/max bounds."""
+        logger.info("running test_depth_bounds")
         config = AdaptiveDepthConfig(min_depth=2, max_depth=6, initial_depth=4)
         controller = AdaptiveSpeculationController(config)
         
@@ -51,6 +57,7 @@ class TestAdaptiveSpeculationController:
     
     def test_increase_on_high_acceptance(self):
         """Depth should increase with sustained high acceptance."""
+        logger.info("running test_increase_on_high_acceptance")
         config = AdaptiveDepthConfig(
             initial_depth=3,
             min_depth=1,
@@ -70,6 +77,7 @@ class TestAdaptiveSpeculationController:
     
     def test_decrease_on_low_acceptance(self):
         """Depth should decrease with sustained low acceptance."""
+        logger.info("running test_decrease_on_low_acceptance")
         config = AdaptiveDepthConfig(
             initial_depth=6,
             min_depth=1,
@@ -89,6 +97,7 @@ class TestAdaptiveSpeculationController:
     
     def test_ema_smoothing(self):
         """EMA should smooth out acceptance rate fluctuations."""
+        logger.info("running test_ema_smoothing")
         config = AdaptiveDepthConfig(ema_alpha=0.3)
         controller = AdaptiveSpeculationController(config)
         
@@ -100,6 +109,7 @@ class TestAdaptiveSpeculationController:
     
     def test_stats_tracking(self):
         """Stats should track cumulative metrics."""
+        logger.info("running test_stats_tracking")
         controller = AdaptiveSpeculationController()
         
         controller.update(3, 4)  # 75% acceptance
@@ -115,6 +125,7 @@ class TestAdaptiveSpeculationController:
     
     def test_reset_clears_state(self):
         """Reset should restore initial state."""
+        logger.info("running test_reset_clears_state")
         config = AdaptiveDepthConfig(initial_depth=4)
         controller = AdaptiveSpeculationController(config)
         
@@ -131,6 +142,7 @@ class TestAdaptiveSpeculationController:
     
     def test_speedup_estimate(self):
         """Speedup estimate should be positive."""
+        logger.info("running test_speedup_estimate")
         controller = AdaptiveSpeculationController()
         
         # Update with some acceptance
@@ -144,6 +156,7 @@ class TestAdaptiveSpeculationController:
     
     def test_should_increase_depth(self):
         """Should suggest increase when acceptance is high."""
+        logger.info("running test_should_increase_depth")
         config = AdaptiveDepthConfig(target_acceptance=0.7)
         controller = AdaptiveSpeculationController(config)
         
@@ -159,6 +172,7 @@ class TestAdaptiveSpeculationController:
     
     def test_should_decrease_depth(self):
         """Should suggest decrease when acceptance is low and depth > min."""
+        logger.info("running test_should_decrease_depth")
         config = AdaptiveDepthConfig(
             target_acceptance=0.7,
             initial_depth=6,
@@ -184,6 +198,7 @@ class TestAdaptiveSpeculationController:
     
     def test_disabled_adjustment(self):
         """When disabled, depth should not change."""
+        logger.info("running test_disabled_adjustment")
         config = AdaptiveDepthConfig(
             initial_depth=4,
             enable_dynamic_adjustment=False,
@@ -198,6 +213,7 @@ class TestAdaptiveSpeculationController:
     
     def test_efficiency_score(self):
         """Efficiency score should reflect acceptance quality."""
+        logger.info("running test_efficiency_score")
         controller = AdaptiveSpeculationController()
         
         # Perfect acceptance
@@ -221,6 +237,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_adaptive_enabled_by_default(self):
         """MTP head should have adaptive depth enabled by default."""
+        logger.info("running test_adaptive_enabled_by_default")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -232,6 +249,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_adaptive_can_be_disabled(self):
         """MTP head adaptive depth can be disabled."""
+        logger.info("running test_adaptive_can_be_disabled")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -244,6 +262,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_current_speculation_depth_adaptive(self):
         """Current depth should come from controller when adaptive."""
+        logger.info("running test_current_speculation_depth_adaptive")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -263,6 +282,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_current_speculation_depth_fixed(self):
         """Current depth should be fixed when adaptive disabled."""
+        logger.info("running test_current_speculation_depth_fixed")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -274,6 +294,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_update_adaptive_depth_returns_new_depth(self):
         """Update should return the new depth."""
+        logger.info("running test_update_adaptive_depth_returns_new_depth")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -287,6 +308,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_get_adaptive_stats(self):
         """Should return stats dict when adaptive enabled."""
+        logger.info("running test_get_adaptive_stats")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -305,6 +327,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_get_adaptive_stats_when_disabled(self):
         """Should return empty dict when adaptive disabled."""
+        logger.info("running test_get_adaptive_stats_when_disabled")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -318,6 +341,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_reset_adaptive_depth(self):
         """Reset should restore initial depth."""
+        logger.info("running test_reset_adaptive_depth")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -336,6 +360,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_forward_with_adaptive(self):
         """Forward pass should work with adaptive depth enabled."""
+        logger.info("running test_forward_with_adaptive")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -352,6 +377,7 @@ class TestMMFP4MTPHeadAdaptive:
     
     def test_speculate_with_adaptive(self):
         """Speculate should work with adaptive depth enabled."""
+        logger.info("running test_speculate_with_adaptive")
         head = MMFP4MTPHead(
             hidden_size=128,
             vocab_size=100,
@@ -376,6 +402,7 @@ class TestAdaptiveDepthConfig:
     
     def test_default_values(self):
         """Config should have sensible defaults."""
+        logger.info("running test_default_values")
         config = AdaptiveDepthConfig()
         
         assert config.initial_depth == 4
@@ -387,6 +414,7 @@ class TestAdaptiveDepthConfig:
     
     def test_custom_values(self):
         """Config should accept custom values."""
+        logger.info("running test_custom_values")
         config = AdaptiveDepthConfig(
             initial_depth=6,
             min_depth=2,
@@ -409,6 +437,7 @@ class TestAdaptiveDepthStats:
     
     def test_default_values(self):
         """Stats should initialize with defaults."""
+        logger.info("running test_default_values")
         stats = AdaptiveDepthStats()
         
         assert stats.current_depth == 4
@@ -417,12 +446,14 @@ class TestAdaptiveDepthStats:
     
     def test_overall_acceptance_rate_empty(self):
         """Overall rate should be 0 when no proposals."""
+        logger.info("running test_overall_acceptance_rate_empty")
         stats = AdaptiveDepthStats()
         
         assert stats.overall_acceptance_rate == 0.0
     
     def test_overall_acceptance_rate_with_data(self):
         """Overall rate should be accepted/proposed."""
+        logger.info("running test_overall_acceptance_rate_with_data")
         stats = AdaptiveDepthStats(
             total_accepted=75,
             total_proposed=100,
@@ -432,6 +463,7 @@ class TestAdaptiveDepthStats:
     
     def test_efficiency_score(self):
         """Efficiency score should match acceptance rate."""
+        logger.info("running test_efficiency_score")
         stats = AdaptiveDepthStats(
             total_accepted=80,
             total_proposed=100,
@@ -449,6 +481,7 @@ class TestAdaptiveDepthIntegration:
     
     def test_adaptive_responds_to_acceptance_pattern(self):
         """Controller should adapt to changing acceptance patterns."""
+        logger.info("running test_adaptive_responds_to_acceptance_pattern")
         config = AdaptiveDepthConfig(
             initial_depth=4,
             min_depth=1,
@@ -476,6 +509,7 @@ class TestAdaptiveDepthIntegration:
     
     def test_depth_never_negative(self):
         """Depth should never go below 0 (or min_depth)."""
+        logger.info("running test_depth_never_negative")
         config = AdaptiveDepthConfig(min_depth=1)
         controller = AdaptiveSpeculationController(config)
         
@@ -487,6 +521,7 @@ class TestAdaptiveDepthIntegration:
     
     def test_concurrent_updates_consistent(self):
         """Multiple updates should maintain consistent state."""
+        logger.info("running test_concurrent_updates_consistent")
         controller = AdaptiveSpeculationController()
         
         # Simulate multiple steps

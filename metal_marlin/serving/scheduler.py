@@ -40,11 +40,15 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
+import logging
 
 from ..paged.allocator import BlockAllocator
 from ..paged.page_table import PageTable
 from .request import GenerationRequest, RequestStatus, SchedulerOutput
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class CachedPrefix:
@@ -69,6 +73,7 @@ class CachedPrefix:
 
     @property
     def num_blocks(self) -> int:
+        logger.debug("num_blocks called")
         return len(self.block_indices)
 
 
@@ -97,6 +102,7 @@ class PrefixCache:
         block_size: int = 16,
         max_cache_entries: int = 1000,
     ) -> None:
+        logger.debug("initializing %s with allocator=%s, block_size=%s, max_cache_entries=%s", type(self).__name__, allocator, block_size, max_cache_entries)
         self.allocator = allocator
         self.block_size = block_size
         self.max_cache_entries = max_cache_entries
@@ -117,6 +123,7 @@ class PrefixCache:
         Returns:
             CachedPrefix if found, None otherwise.
         """
+        logger.debug("get called with tokens=%s", tokens)
         token_hash = self._hash_tokens(tokens)
         cached = self._cache.get(token_hash)
         if cached:
@@ -144,6 +151,7 @@ class PrefixCache:
         Returns:
             True if successfully added, False if cache is full and cannot evict.
         """
+        logger.debug("add called with tokens=%s, block_indices=%s, seq_id=%s", tokens, block_indices, seq_id)
         from time import time
 
         token_hash = self._hash_tokens(tokens)
@@ -182,6 +190,7 @@ class PrefixCache:
         Args:
             cached: The cached prefix to acquire.
         """
+        logger.debug("acquire called with cached=%s", cached)
         cached.ref_count += 1
 
     def release(self, cached: CachedPrefix) -> None:
@@ -193,6 +202,7 @@ class PrefixCache:
         Args:
             cached: The cached prefix to release.
         """
+        logger.debug("release called with cached=%s", cached)
         cached.ref_count = max(0, cached.ref_count - 1)
 
     def remove(self, token_hash: int) -> CachedPrefix | None:
@@ -204,6 +214,7 @@ class PrefixCache:
         Returns:
             The removed CachedPrefix, or None if not found.
         """
+        logger.debug("remove called with token_hash=%s", token_hash)
         cached = self._cache.pop(token_hash, None)
         if cached:
             # Free blocks only if not referenced by page table
@@ -218,6 +229,7 @@ class PrefixCache:
         Returns:
             True if an entry was evicted, False if no evictable entries exist.
         """
+        logger.debug("_evict_one called")
         for token_hash, cached in list(self._cache.items()):
             if cached.ref_count == 0:
                 self.remove(token_hash)
@@ -230,11 +242,13 @@ class PrefixCache:
 
         Uses SHA-256 for minimal collision probability.
         """
+        logger.debug("_hash_tokens called with tokens=%s", tokens)
         token_bytes = ",".join(str(t) for t in tokens).encode()
         return int(sha256(token_bytes).hexdigest(), 16)
 
     def clear(self) -> None:
         """Clear all cache entries, freeing associated blocks."""
+        logger.debug("clear called")
         for token_hash in list(self._cache.keys()):
             cached = self._cache.pop(token_hash)
             if cached.ref_count == 0:
@@ -250,16 +264,19 @@ class PrefixCache:
     @property
     def size(self) -> int:
         """Current number of cache entries."""
+        logger.debug("size called")
         return len(self._cache)
 
     @property
     def stats(self) -> dict[str, int]:
         """Get cache statistics."""
+        logger.debug("stats called")
         return self._stats.copy()
 
     @property
     def hit_rate(self) -> float:
         """Calculate cache hit rate."""
+        logger.debug("hit_rate called")
         total = self._stats["hits"] + self._stats["misses"]
         if total == 0:
             return 0.0
@@ -284,6 +301,7 @@ class CacheInfo:
 
     @property
     def total_tokens(self) -> int:
+        logger.debug("total_tokens called")
         return self.cached_tokens + self.uncached_tokens
 
 
@@ -328,6 +346,7 @@ class FCFSScheduler:
         config: SchedulerConfig,
         allocator: BlockAllocator,
     ) -> None:
+        logger.debug("initializing %s with config=%s, allocator=%s", type(self).__name__, config, allocator)
         self.config = config
         self.allocator = allocator
         self.page_table = PageTable(allocator, config.block_size)
@@ -348,6 +367,7 @@ class FCFSScheduler:
 
     def add_request(self, request: GenerationRequest) -> None:
         """Queue new request for scheduling."""
+        logger.debug("add_request called with request=%s", request)
         request.status = RequestStatus.PENDING
         self.waiting.append(request)
 
@@ -357,6 +377,7 @@ class FCFSScheduler:
         Returns True if the request was found and aborted.
         """
         # Check waiting queue (no blocks allocated yet for these)
+        logger.debug("abort_request called with request_id=%s", request_id)
         for req in list(self.waiting):
             if req.request_id == request_id:
                 self.waiting.remove(req)
@@ -394,6 +415,7 @@ class FCFSScheduler:
         decode, and preempted groups. The engine processes prefill and
         decode requests in a single fused forward pass.
         """
+        logger.debug("schedule called")
         prefill: list[GenerationRequest] = []
         decode: list[GenerationRequest] = []
         preempted: list[GenerationRequest] = []
@@ -512,6 +534,7 @@ class FCFSScheduler:
         Should be called after each generation step to reclaim memory.
         Returns the list of finished requests (for output streaming).
         """
+        logger.debug("free_finished called")
         finished: list[GenerationRequest] = []
         still_running: list[GenerationRequest] = []
 
@@ -541,6 +564,7 @@ class FCFSScheduler:
         Called after the model produces one new token per decode request.
         Allocates new blocks if any sequence fills its current tail block.
         """
+        logger.debug("step_decode called")
         for req in self.running:
             if self.page_table.has_sequence(id(req)):
                 success = self.page_table.append_token(id(req))
@@ -555,6 +579,7 @@ class FCFSScheduler:
         If prefix caching is enabled, attempts to reuse cached blocks.
         Returns False if allocation fails.
         """
+        logger.debug("_allocate_for_prefill called with req=%s, num_tokens=%s", req, num_tokens)
         seq_id = id(req)
         cache_info = CacheInfo()
 
@@ -637,11 +662,13 @@ class FCFSScheduler:
         Rationale: it has consumed the most memory and is potentially
         furthest from completion if generating long outputs.
         """
+        logger.debug("_select_preempt_victim called")
         victim = max(self.running, key=lambda r: len(r.output_tokens))
         return self._preempt(victim)
 
     def _preempt(self, req: GenerationRequest) -> GenerationRequest:
         """Preempt a running sequence: free blocks, move to swapped."""
+        logger.debug("_preempt called with req=%s", req)
         if req in self.running:
             self.running.remove(req)
 
@@ -662,21 +689,25 @@ class FCFSScheduler:
 
     def _blocks_for_tokens(self, num_tokens: int) -> int:
         """Calculate blocks needed for a token count."""
+        logger.debug("_blocks_for_tokens called with num_tokens=%s", num_tokens)
         return (num_tokens + self.config.block_size - 1) // self.config.block_size
 
     @property
     def num_waiting(self) -> int:
         """Number of requests in the waiting queue."""
+        logger.debug("num_waiting called")
         return len(self.waiting)
 
     @property
     def num_running(self) -> int:
         """Number of actively running sequences."""
+        logger.debug("num_running called")
         return len(self.running)
 
     @property
     def num_swapped(self) -> int:
         """Number of preempted sequences."""
+        logger.debug("num_swapped called")
         return len(self.swapped)
 
     def _sort_waiting_by_strategy(self) -> list[GenerationRequest]:
@@ -684,6 +715,7 @@ class FCFSScheduler:
 
         Returns a prioritized list without mutating the original deque.
         """
+        logger.debug("_sort_waiting_by_strategy called")
         waiting_list = list(self.waiting)
 
         match self.config.prefill_strategy:
@@ -702,6 +734,7 @@ class FCFSScheduler:
     @property
     def has_pending_work(self) -> bool:
         """Whether there's any work to do (requests in any queue)."""
+        logger.debug("has_pending_work called")
         return bool(self.waiting or self.running or self.swapped)
 
     def get_cache_info(self, request: GenerationRequest) -> CacheInfo | None:
@@ -713,6 +746,7 @@ class FCFSScheduler:
         Returns:
             CacheInfo if caching is enabled and request was processed, None otherwise.
         """
+        logger.debug("get_cache_info called with request=%s", request)
         return self._cache_info_map.get(id(request))
 
     @property
@@ -722,6 +756,7 @@ class FCFSScheduler:
         Returns:
             Dictionary with cache hits, misses, hit rate, etc., or None if caching disabled.
         """
+        logger.debug("cache_stats called")
         if self.prefix_cache is None:
             return None
         return {
@@ -793,6 +828,7 @@ class BatchScheduler(FCFSScheduler):
             max_queue_size: Maximum size of waiting queue before dropping
                 requests under DROP_IF_FULL policy.
         """
+        logger.debug("initializing %s with config=%s, allocator=%s, max_queue_size=%s", type(self).__name__, config, allocator, max_queue_size)
         super().__init__(config, allocator)
         self.max_queue_size = max_queue_size
         self._insertion_stats: dict[str, int] = {
@@ -812,6 +848,7 @@ class BatchScheduler(FCFSScheduler):
         Raises:
             QueueFullError: If waiting queue is at max capacity.
         """
+        logger.debug("add_request called with request=%s", request)
         if not self._check_queue_capacity():
             raise QueueFullError(
                 f"Cannot add request {request.request_id}: "
@@ -822,6 +859,7 @@ class BatchScheduler(FCFSScheduler):
 
     def _add_request_no_stats(self, request: GenerationRequest) -> None:
         """Add request without updating stats (for batch insertion use)."""
+        logger.debug("_add_request_no_stats called with request=%s", request)
         if not self._check_queue_capacity():
             raise QueueFullError(
                 f"Cannot add request {request.request_id}: "
@@ -847,6 +885,7 @@ class BatchScheduler(FCFSScheduler):
         Raises:
             ValueError: If an invalid insertion policy is provided.
         """
+        logger.debug("insert_batch called with requests=%s, policy=%s", requests, policy)
         self._insertion_stats["batch_insertions"] += 1
         inserted = 0
 
@@ -898,6 +937,7 @@ class BatchScheduler(FCFSScheduler):
         Returns:
             Number of requests successfully inserted.
         """
+        logger.debug("insert_batch_front called with requests=%s", requests)
         return self.insert_batch(requests, InsertionPolicy.MERGE)
 
     def add_request_front(self, request: GenerationRequest) -> None:
@@ -909,6 +949,7 @@ class BatchScheduler(FCFSScheduler):
         Raises:
             QueueFullError: If waiting queue is at max capacity.
         """
+        logger.debug("add_request_front called with request=%s", request)
         if not self._check_queue_capacity():
             raise QueueFullError(
                 f"Cannot add request {request.request_id}: "
@@ -924,6 +965,7 @@ class BatchScheduler(FCFSScheduler):
         Returns:
             True if waiting queue is below max_queue_size, False otherwise.
         """
+        logger.debug("_check_queue_capacity called")
         return len(self.waiting) < self.max_queue_size
 
     @property
@@ -936,10 +978,12 @@ class BatchScheduler(FCFSScheduler):
             - total_dropped: Total number of requests dropped
             - batch_insertions: Number of batch insertion operations
         """
+        logger.debug("insertion_stats called")
         return self._insertion_stats.copy()
 
     def reset_insertion_stats(self) -> None:
         """Reset insertion statistics counters."""
+        logger.debug("reset_insertion_stats called")
         self._insertion_stats = {
             "total_inserted": 0,
             "total_dropped": 0,
@@ -954,6 +998,7 @@ class BatchScheduler(FCFSScheduler):
             Float in range [0.0, 1.0] representing how full the waiting
             queue is. Returns 0.0 if max_queue_size is 0 (unlimited).
         """
+        logger.debug("queue_utilization called")
         if self.max_queue_size == 0:
             return 0.0
         return len(self.waiting) / self.max_queue_size
@@ -964,6 +1009,7 @@ class BatchScheduler(FCFSScheduler):
         Returns:
             Number of requests that were cleared.
         """
+        logger.debug("clear_waiting called")
         count = len(self.waiting)
         self.waiting.clear()
         return count

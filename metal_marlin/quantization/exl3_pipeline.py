@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +38,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 class CalibrationDataset(Protocol):
     """Protocol for calibration datasets."""
@@ -139,6 +143,7 @@ class BartowskiCalibrationV3:
         Raises:
             ValueError: If dataset name is unknown
         """
+        logger.debug("from_name called with name=%s, max_samples=%s", name, max_samples)
         if name == "bartowski-v3":
             return cls._load_v3(max_samples)
         else:
@@ -152,6 +157,7 @@ class BartowskiCalibrationV3:
         this would download from the official source.
         """
         # Generate synthetic samples that match the expected distribution
+        logger.info("_load_v3 called with max_samples=%s", max_samples)
         samples = [
             "The quick brown fox jumps over the lazy dog. " * 20,
             "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n-1)\n",
@@ -193,6 +199,7 @@ class LayerStreamer:
         model_path: Path | str,
         device: str = "cpu",
     ):
+        logger.debug("initializing %s with model_path=%s, device=%s", type(self).__name__, model_path, device)
         self.model_path = Path(model_path) if isinstance(model_path, str) else model_path
         self.device = device
         self._config: dict[str, Any] | None = None
@@ -200,6 +207,7 @@ class LayerStreamer:
 
     def _load_config(self) -> dict[str, Any]:
         """Load model configuration."""
+        logger.info("_load_config called")
         if self._config is not None:
             return self._config
 
@@ -230,6 +238,7 @@ class LayerStreamer:
             This loads the full model to iterate layers. For very large
             models, consider using device_map="auto" for sharding.
         """
+        logger.debug("iter_linear_layers called")
         config = self._load_config()
         num_layers = config.get("num_hidden_layers", 0)
 
@@ -310,6 +319,7 @@ class EXL3Quantizer:
         group_size: int = 128,
         max_workers: int | None = None,
     ):
+        logger.debug("initializing %s with bits=%s, group_size=%s, max_workers=%s", type(self).__name__, bits, group_size, max_workers)
         self.bits = bits
         self.group_size = group_size
         self.max_workers = max_workers
@@ -331,6 +341,7 @@ class EXL3Quantizer:
             QuantizationResult with quantized weights and metadata
         """
 
+        logger.info("quantize_layer called with weight=%s, hessian=%s, layer_name=%s", weight, hessian, layer_name)
         start = time.perf_counter()
 
         # Ensure tensors are on CPU and contiguous
@@ -406,6 +417,7 @@ class EXL3Quantizer:
         original_shape: tuple[int, ...],
     ) -> torch.Tensor:
         """Dequantize weights for reconstruction error calculation."""
+        logger.info("_dequantize called with quantized=%s, scales=%s, original_shape=%s", quantized, scales, original_shape)
         out_features, in_features = original_shape
         result = torch.zeros(out_features, in_features, dtype=torch.float32)
 
@@ -458,6 +470,7 @@ def collect_layer_hessian(
     Returns:
         Hessian matrix [in_features, in_features]
     """
+    logger.debug("collect_layer_hessian called with model_path=%s, layer_name=%s, calibration=%s", model_path, layer_name, calibration)
     model_path = Path(model_path) if isinstance(model_path, str) else model_path
 
     # Load model temporarily to get layer dimensions
@@ -532,6 +545,7 @@ def save_exl3_layer(
         output_path: Directory to save quantized layer
         result: QuantizationResult from quantize_layer
     """
+    logger.info("save_exl3_layer called with output_path=%s, result=%s", output_path, result)
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -576,6 +590,7 @@ def copy_non_linear_tensors(
         model_path: Source model directory
         output_path: Output directory for quantized model
     """
+    logger.debug("copy_non_linear_tensors called with model_path=%s, output_path=%s", model_path, output_path)
     model_path = Path(model_path)
     output_path = Path(output_path)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -638,6 +653,7 @@ def write_exl3_config(
         group_size: Group size used
         results: List of quantization results for all layers
     """
+    logger.info("write_exl3_config called with output_path=%s, bits=%s, group_size=%s, results=%s", output_path, bits, group_size, results)
     output_path = Path(output_path)
 
     config = {
@@ -722,6 +738,7 @@ def quantize_model_exl3(
         ... )
         >>> print(f"Quantized {result['layers_quantized']} layers")
     """
+    logger.info("quantize_model_exl3 called with model_path=%s, output_path=%s, bits=%s, group_size=%s", model_path, output_path, bits, group_size)
     import gc
 
     start = time.perf_counter()

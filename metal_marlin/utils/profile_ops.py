@@ -25,8 +25,12 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerFLOPs:
@@ -53,11 +57,13 @@ class LayerFLOPs:
     @property
     def tflops(self) -> float:
         """Total FLOPs in trillions (TFLOPs)."""
+        logger.debug("tflops called")
         return self.total_flops / 1e12
 
     @property
     def gflops(self) -> float:
         """Total FLOPs in billions (GFLOPs)."""
+        logger.debug("gflops called")
         return self.total_flops / 1e9
 
 
@@ -83,6 +89,7 @@ def calculate_matmul_flops(M: int, N: int, K: int, *, quantized: bool = False) -
         flops = calculate_matmul_flops(4096, 4096, 4096, quantized=True)
     """
     # Standard GEMM: M*N dot products, each requiring K multiply-adds (2K ops)
+    logger.debug("calculate_matmul_flops called with M=%s, N=%s, K=%s", M, N, K)
     gemm_flops = 2 * M * N * K
 
     if quantized:
@@ -124,6 +131,7 @@ def calculate_attention_flops(
         )
     """
     # Q @ K^T: (B, H, S, D) @ (B, H, D, S) -> (B, H, S, S)
+    logger.debug("calculate_attention_flops called with batch=%s, seq_len=%s, num_heads=%s", batch, seq_len, num_heads)
     qk_flops = batch * num_heads * calculate_matmul_flops(seq_len, seq_len, head_dim)
 
     # Softmax: roughly 5 ops per element (exp, sum, div)
@@ -172,6 +180,7 @@ def calculate_ffn_flops(
         # SwiGLU FFN with quantization
         flops = calculate_ffn_flops(8, 2048, 4096, 16384, gated=True, quantized=True)
     """
+    logger.debug("calculate_ffn_flops called with batch=%s, seq_len=%s, hidden_dim=%s", batch, seq_len, hidden_dim)
     tokens = batch * seq_len
 
     # Up-projection: (tokens, hidden) -> (tokens, ffn_dim)
@@ -211,6 +220,7 @@ def calculate_layernorm_flops(batch: int, seq_len: int, hidden_dim: int) -> int:
     Example:
         flops = calculate_layernorm_flops(8, 2048, 4096)
     """
+    logger.debug("calculate_layernorm_flops called with batch=%s, seq_len=%s, hidden_dim=%s", batch, seq_len, hidden_dim)
     num_elements = batch * seq_len * hidden_dim
     # Mean: 1 op, Variance: 2 ops, Normalize: 2 ops (subtract mean, div by std)
     return num_elements * 5
@@ -232,6 +242,7 @@ def calculate_embedding_flops(batch: int, seq_len: int, vocab_size: int, hidden_
         Embedding lookup is memory-bound and doesn't involve FP operations,
         but we count it as 1 op per element for accounting purposes.
     """
+    logger.debug("calculate_embedding_flops called with batch=%s, seq_len=%s, vocab_size=%s", batch, seq_len, vocab_size)
     return batch * seq_len * hidden_dim
 
 
@@ -275,6 +286,7 @@ class TransformerLayerFLOPs:
         Returns:
             TransformerLayerFLOPs with per-component breakdown.
         """
+        logger.debug("from_config called with batch=%s, seq_len=%s, hidden_dim=%s", batch, seq_len, hidden_dim)
         head_dim = hidden_dim // num_heads
 
         attention = calculate_attention_flops(
@@ -307,10 +319,12 @@ class LayerFLOPsCounter:
     """
 
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self._layers: list[LayerFLOPs] = []
 
     def add_layer(self, layer: LayerFLOPs) -> None:
         """Add a pre-computed LayerFLOPs."""
+        logger.debug("add_layer called with layer=%s", layer)
         self._layers.append(layer)
 
     def add_matmul(
@@ -324,6 +338,7 @@ class LayerFLOPsCounter:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add a matrix multiplication layer."""
+        logger.debug("add_matmul called with name=%s, M=%s, N=%s", name, M, N)
         flops = calculate_matmul_flops(M, N, K, quantized=quantized)
         layer = LayerFLOPs(
             name=name,
@@ -345,6 +360,7 @@ class LayerFLOPsCounter:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add an attention layer."""
+        logger.debug("add_attention called with name=%s, batch=%s, seq_len=%s", name, batch, seq_len)
         flops = calculate_attention_flops(batch, seq_len, num_heads, head_dim, causal=causal)
         layer = LayerFLOPs(
             name=name,
@@ -367,6 +383,7 @@ class LayerFLOPsCounter:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add an FFN layer."""
+        logger.debug("add_ffn called with name=%s, batch=%s, seq_len=%s", name, batch, seq_len)
         flops = calculate_ffn_flops(
             batch, seq_len, hidden_dim, ffn_dim, gated=gated, quantized=quantized
         )
@@ -393,6 +410,7 @@ class LayerFLOPsCounter:
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add a full Transformer layer."""
+        logger.debug("add_transformer_layer called with name=%s, batch=%s, seq_len=%s", name, batch, seq_len)
         tf_flops = TransformerLayerFLOPs.from_config(
             batch, seq_len, hidden_dim, num_heads, ffn_dim,
             causal=causal, gated_ffn=gated_ffn, quantized=quantized
@@ -410,20 +428,24 @@ class LayerFLOPsCounter:
     @property
     def total_flops(self) -> int:
         """Total FLOPs across all layers."""
+        logger.debug("total_flops called")
         return sum(layer.total_flops for layer in self._layers)
 
     @property
     def total_tflops(self) -> float:
         """Total FLOPs in trillions."""
+        logger.debug("total_tflops called")
         return self.total_flops / 1e12
 
     @property
     def total_gflops(self) -> float:
         """Total FLOPs in billions."""
+        logger.debug("total_gflops called")
         return self.total_flops / 1e9
 
     def get_layer(self, name: str) -> LayerFLOPs | None:
         """Get a layer by name."""
+        logger.debug("get_layer called with name=%s", name)
         for layer in self._layers:
             if layer.name == name:
                 return layer
@@ -431,6 +453,7 @@ class LayerFLOPsCounter:
 
     def get_layers(self) -> list[LayerFLOPs]:
         """Get all layers."""
+        logger.debug("get_layers called")
         return list(self._layers)
 
     def print_summary(self, *, top_n: int = 20) -> None:
@@ -439,6 +462,7 @@ class LayerFLOPsCounter:
         Args:
             top_n: Number of top layers to show (default 20).
         """
+        logger.debug("print_summary called")
         if not self._layers:
             print("No layers profiled")
             return
@@ -461,6 +485,7 @@ class LayerFLOPsCounter:
 
     def clear(self) -> None:
         """Clear all accumulated layers."""
+        logger.debug("clear called")
         self._layers.clear()
 
 
@@ -504,6 +529,7 @@ def profile_model_flops(
         )
         counter.print_summary()
     """
+    logger.debug("profile_model_flops called with batch=%s, seq_len=%s, num_layers=%s", batch, seq_len, num_layers)
     counter = LayerFLOPsCounter()
 
     # Embedding

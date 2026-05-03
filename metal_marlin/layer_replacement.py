@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 import numpy as np
@@ -10,6 +11,9 @@ import torch.nn as nn
 
 from .inference_metal import MetalQuantizedLinear
 from .mr_gptq import MRGPTQQuantizer, QuantizationFormat
+
+
+logger = logging.getLogger(__name__)
 
 _SUPPORTED_FORMATS = {"fp4", "int4", "nf4"}
 __all__ = [
@@ -74,6 +78,7 @@ class MetalQuantizedMoE(nn.Module):
         format: str,
         shared_expert_weight: float = 1.0,
     ) -> None:
+        logger.debug("initializing %s with gate_up_weight_packed=%s, gate_up_scales=%s, down_weight_packed=%s, down_scales=%s, shared_gate_up_packed=%s", type(self).__name__, gate_up_weight_packed, gate_up_scales, down_weight_packed, down_scales, shared_gate_up_packed)
         super().__init__()
         self.bits = bits
         self.group_size = group_size
@@ -92,6 +97,7 @@ class MetalQuantizedMoE(nn.Module):
 
     @property
     def has_shared_expert(self) -> bool:
+        logger.debug("has_shared_expert called")
         return (
             self.shared_gate_up_packed is not None
             and self.shared_gate_up_scales is not None
@@ -100,6 +106,7 @@ class MetalQuantizedMoE(nn.Module):
         )
 
     def _infer_shared_group_size(self, hidden_dim: int, intermediate: int) -> int:
+        logger.debug("_infer_shared_group_size called with hidden_dim=%s, intermediate=%s", hidden_dim, intermediate)
         gate_scales = self.shared_gate_up_scales
         down_scales = self.shared_down_scales
         if gate_scales is None or down_scales is None:
@@ -122,6 +129,7 @@ class MetalQuantizedMoE(nn.Module):
         *,
         shared_expert_weight: float | None = None,
     ) -> torch.Tensor:
+        logger.debug("_shared_expert_forward called with hidden_states=%s", hidden_states)
         if not self.has_shared_expert:
             raise RuntimeError(
                 "MetalQuantizedMoE has no shared expert weights")
@@ -154,6 +162,7 @@ class MetalQuantizedMoE(nn.Module):
         *,
         shared_expert_weight: float | None = None,
     ) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if expert_ids is None or expert_probs is None:
             raise RuntimeError(
                 "MetalQuantizedMoE requires expert_ids and expert_probs for routed experts."
@@ -190,6 +199,7 @@ def find_linear_layers(model: nn.Module) -> dict[str, nn.Linear]:
     Returns:
         Mapping of layer name -> nn.Linear module.
     """
+    logger.debug("find_linear_layers called with model=%s", model)
     return {name: module for name, module in model.named_modules() if isinstance(module, nn.Linear)}
 
 
@@ -202,6 +212,7 @@ def find_moe_layers(model: nn.Module) -> dict[str, MoEModule]:
     Returns:
         Mapping of layer name -> MoE module.
     """
+    logger.debug("find_moe_layers called with model=%s", model)
     layers: dict[str, MoEModule] = {}
     for name, module in model.named_modules():
         experts = getattr(module, "experts", None)
@@ -233,6 +244,7 @@ def get_parent_module(model: nn.Module, name: str) -> tuple[nn.Module, str]:
     Returns:
         Tuple of (parent_module, attribute_name).
     """
+    logger.debug("get_parent_module called with model=%s, name=%s", model, name)
     if "." not in name:
         return model, name
 
@@ -267,6 +279,7 @@ def quantize_linear_layer(
     Returns:
         Quantized MetalQuantizedLinear layer.
     """
+    logger.info("quantize_linear_layer called with linear=%s, bits=%s, group_size=%s, format=%s", linear, bits, group_size, format)
     if not isinstance(linear, nn.Linear):
         raise TypeError(f"Expected nn.Linear, got {type(linear)}")
     if bits not in (2, 4, 8):
@@ -356,6 +369,7 @@ def quantize_moe_experts(
     Returns:
         MetalQuantizedMoE container with packed weights and scales.
     """
+    logger.info("quantize_moe_experts called with moe_layer=%s, bits=%s, group_size=%s, format=%s", moe_layer, bits, group_size, format)
     if bits != 4:
         raise ValueError(
             "MoE expert quantization currently supports only 4-bit weights.")
@@ -499,6 +513,7 @@ def replace_linear_layers(
         - replaced_layers: list[str]
         - total_params_quantized: int
     """
+    logger.debug("replace_linear_layers called with model=%s", model)
     skip_patterns = skip_patterns or []
     layer_config = layer_config or {}
 
@@ -611,6 +626,7 @@ def replace_moe_layers(
         device: Device for calibration forward passes
         verbose: Print progress
     """
+    logger.debug("replace_moe_layers called with model=%s", model)
     skip_patterns = skip_patterns or []
 
     # Collect expert-level Hessians if calibration data provided
@@ -707,6 +723,7 @@ def replace_glm4_moe_experts(
     Returns:
         Dict with replacement stats
     """
+    logger.debug("replace_glm4_moe_experts called with model=%s, device=%s, group_size=%s", model, device, group_size)
     targets = [
         (name, module)
         for name, module in model.named_modules()
@@ -765,6 +782,7 @@ def replace_glm4_moe_experts(
 
 
 def _extract_hessian(module: nn.Module) -> Any | None:
+    logger.debug("_extract_hessian called with module=%s", module)
     for attr in ("_metal_marlin_hessian", "hessian", "calibration_hessian", "hessian_info"):
         if hasattr(module, attr):
             value = getattr(module, attr)
@@ -774,6 +792,7 @@ def _extract_hessian(module: nn.Module) -> Any | None:
 
 
 def _coerce_hessian(value: Any) -> np.ndarray:
+    logger.debug("_coerce_hessian called with value=%s", value)
     if hasattr(value, "hessian"):
         value = value.hessian
     if isinstance(value, dict) and "hessian" in value:
@@ -786,6 +805,7 @@ def _coerce_hessian(value: Any) -> np.ndarray:
 
 
 def _extract_use_hadamard(module: nn.Module) -> bool:
+    logger.debug("_extract_use_hadamard called with module=%s", module)
     value = getattr(module, "_metal_marlin_use_hadamard", None)
     if value is None:
         return False
@@ -793,12 +813,14 @@ def _extract_use_hadamard(module: nn.Module) -> bool:
 
 
 def _cleanup_layer_overrides(module: nn.Module) -> None:
+    logger.debug("_cleanup_layer_overrides called with module=%s", module)
     for attr in ("_metal_marlin_hessian", "_metal_marlin_use_hadamard", "_metal_marlin_layer_name"):
         if hasattr(module, attr):
             delattr(module, attr)
 
 
 def _resolve_quantized_glm4_moe_experts_class() -> type[nn.Module]:
+    logger.info("_resolve_quantized_glm4_moe_experts_class called")
     cls = globals().get("QuantizedGlm4MoEExperts")
     if isinstance(cls, type):
         return cls
@@ -830,6 +852,7 @@ def _resolve_quantized_glm4_moe_experts_class() -> type[nn.Module]:
 
 
 def _resolve_glm4_moe_dims(module: nn.Module) -> tuple[int, int, int]:
+    logger.debug("_resolve_glm4_moe_dims called with module=%s", module)
     num_experts = getattr(module, "num_experts", None)
     hidden_dim = getattr(module, "hidden_dim", None)
     intermediate_dim = getattr(module, "intermediate_dim", None)
@@ -868,6 +891,7 @@ def _build_quantized_glm4_moe_experts(
     device: str,
     group_size: int,
 ) -> tuple[nn.Module, int]:
+    logger.info("_build_quantized_glm4_moe_experts called with source=%s", source)
     import inspect
     from types import SimpleNamespace
 
@@ -923,6 +947,7 @@ def _build_quantized_glm4_moe_experts(
 
 
 def _resolve_moe_weight(value: Any) -> torch.Tensor | None:
+    logger.debug("_resolve_moe_weight called with value=%s", value)
     if isinstance(value, torch.Tensor):
         return value
     if hasattr(value, "weight") and isinstance(value.weight, torch.Tensor):
@@ -931,6 +956,7 @@ def _resolve_moe_weight(value: Any) -> torch.Tensor | None:
 
 
 def _validate_moe_weight_shape(weight: torch.Tensor, group_size: int) -> None:
+    logger.debug("_validate_moe_weight_shape called with weight=%s, group_size=%s", weight, group_size)
     if weight.ndim != 3:
         raise ValueError(
             "MoE expert weights must be 3D tensors [num_experts, out, in].")
@@ -950,6 +976,7 @@ def _validate_shared_weight_shape(
     *,
     name: str,
 ) -> None:
+    logger.debug("_validate_shared_weight_shape called with weight=%s, group_size=%s", weight, group_size)
     if weight.ndim != 2:
         raise ValueError(f"{name} weight must be 2D [out, in]")
     _out_features, in_features = weight.shape
@@ -969,6 +996,7 @@ def _quantize_moe_weight_stack(
     layer_name: str,
     use_hadamard: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
+    logger.info("_quantize_moe_weight_stack called with weight=%s, quantizer=%s", weight, quantizer)
     weight_np = weight.detach().float().cpu().numpy()
     num_experts, out_features, in_features = weight_np.shape
 
@@ -1018,6 +1046,7 @@ def _quantize_moe_weight_stack_parallel(
             packed_all: [num_experts, K/8, N] uint32
             scales_all: [num_experts, K/group_size, N] float16
     """
+    logger.info("_quantize_moe_weight_stack_parallel called with weight=%s, group_size=%s", weight, group_size)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     weight_np = weight.detach().float().cpu().numpy()
@@ -1053,6 +1082,7 @@ def _quantize_moe_weight_stack_parallel(
         from .mr_gptq import MRGPTQQuantizer, QuantizationFormat
 
         def quantize_expert_gptq(args: tuple) -> tuple[int, np.ndarray, np.ndarray]:
+            logger.info("quantize_expert_gptq called with args=%s", args)
             idx, expert_weight, expert_hessian, gs = args
             quantizer = MRGPTQQuantizer(
                 bits=4,
@@ -1084,6 +1114,7 @@ def _quantize_moe_weight_stack_parallel(
         from .quantize_fp4 import quantize_fp4
 
         def quantize_expert_rtn(idx: int) -> tuple[int, np.ndarray, np.ndarray]:
+            logger.info("quantize_expert_rtn called with idx=%s", idx)
             expert_weight = weight_np[idx]
             packed, scales = quantize_fp4(
                 expert_weight, group_size=group_size, marlin_layout=True)
@@ -1120,6 +1151,7 @@ def collect_moe_expert_hessians(
     Returns:
         Dict mapping layer_name -> {expert_idx: Hessian}
     """
+    logger.debug("collect_moe_expert_hessians called with model=%s, calibration_inputs=%s, device=%s", model, calibration_inputs, device)
     moe_layers = find_moe_layers(model)
     if not moe_layers:
         return {}
@@ -1131,6 +1163,7 @@ def collect_moe_expert_hessians(
     def make_expert_hook(layer_name: str, num_experts: int, in_features: int):
         """Create hook to accumulate Hessians based on expert routing."""
         # Initialize per-expert Hessians
+        logger.debug("make_expert_hook called with layer_name=%s, num_experts=%s, in_features=%s", layer_name, num_experts, in_features)
         if layer_name not in hessian_accumulators:
             hessian_accumulators[layer_name] = {
                 idx: (np.zeros((in_features, in_features), dtype=np.float64), 0)
@@ -1139,6 +1172,7 @@ def collect_moe_expert_hessians(
 
         def hook(module, inputs, output):
             # Get router output to determine which tokens go to which experts
+            logger.debug("hook called with module=%s, inputs=%s, output=%s", module, inputs, output)
             router = getattr(module, "gate", None) or getattr(
                 module, "router", None)
             if router is None:
@@ -1235,6 +1269,7 @@ def _quantize_moe_weight_single(
     layer_name: str,
     use_hadamard: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
+    logger.info("_quantize_moe_weight_single called with weight=%s, quantizer=%s", weight, quantizer)
     weight_np = weight.detach().float().cpu().numpy()
     packed, scales, _meta = quantizer.quantize_layer(
         weight_np,
@@ -1259,6 +1294,7 @@ def _quantize_moe_weight_single_fast(
     Returns:
         (packed, scales) in Marlin layout [K/8, N] and [K/group_size, N]
     """
+    logger.info("_quantize_moe_weight_single_fast called with weight=%s, group_size=%s", weight, group_size)
     from .quantize_fp4 import quantize_fp4
 
     weight_np = weight.detach().float().cpu().numpy()
@@ -1271,6 +1307,7 @@ def _resolve_shared_expert_weights(
     moe_layer: MoEModule,
     experts: Any,
 ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    logger.debug("_resolve_shared_expert_weights called with moe_layer=%s, experts=%s", moe_layer, experts)
     candidates = []
     for container in (moe_layer, experts):
         if container is None:
@@ -1340,6 +1377,7 @@ def collect_single_layer_hessians(
     Returns:
         Dict mapping expert_idx -> Hessian [in_features, in_features]
     """
+    logger.debug("collect_single_layer_hessians called with model=%s, target_layer_name=%s, calibration_inputs=%s", model, target_layer_name, calibration_inputs)
     moe_layers = find_moe_layers(model)
     if target_layer_name not in moe_layers:
         raise ValueError(
@@ -1368,6 +1406,7 @@ def collect_single_layer_hessians(
 
     def expert_hook(module, inputs, output):
         """Accumulate Hessians based on expert routing."""
+        logger.debug("expert_hook called with module=%s, inputs=%s, output=%s", module, inputs, output)
         router = getattr(module, "gate", None) or getattr(
             module, "router", None)
         if router is None:
@@ -1466,6 +1505,7 @@ def replace_moe_layers_streaming(
     Returns:
         Same as replace_moe_layers - dict with replaced_count, params, etc.
     """
+    logger.debug("replace_moe_layers_streaming called with model=%s", model)
     skip_patterns = skip_patterns or []
 
     # Find all MoE layers to process

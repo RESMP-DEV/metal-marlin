@@ -1,4 +1,5 @@
 
+import logging
 import time
 import unittest
 
@@ -7,9 +8,13 @@ import torch
 from metal_marlin.memory.mmfp4_memory import ExpertMetadata, MMFP4MemoryManager
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMMFP4MemoryOptimization(unittest.TestCase):
     def setUp(self):
         # Setup basic params
+        logger.info("setUp starting")
         self.num_layers = 2
         self.num_experts = 4
         self.cache_size = 2
@@ -24,6 +29,7 @@ class TestMMFP4MemoryOptimization(unittest.TestCase):
 
     def test_expert_weight_cache_existence(self):
         """Test that _expert_weight_cache exists."""
+        logger.info("running test_expert_weight_cache_existence")
         self.assertTrue(hasattr(self.memory_manager, "_expert_weight_cache"),
                         "MMFP4MemoryManager should have _expert_weight_cache attribute")
         
@@ -36,6 +42,7 @@ class TestMMFP4MemoryOptimization(unittest.TestCase):
         # If the API doesn't have load_expert, I might need to add it or use an internal method.
         # Let's assume I add get_expert_weights(layer_idx, expert_idx)
         
+        logger.info("running test_smart_caching_behavior")
         if not hasattr(self.memory_manager, "get_expert_weights"):
              self.skipTest("get_expert_weights not implemented yet")
 

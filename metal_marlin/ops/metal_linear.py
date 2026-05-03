@@ -4,6 +4,7 @@ Replaces nn.Linear with a version that uses our custom Metal GEMM kernels.
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,9 @@ import torch.nn as nn
 from .gemm_fp4 import GemmFp4
 from .gemm_int8 import GemmInt8, pack_int8_weights
 
+
+
+logger = logging.getLogger(__name__)
 
 class MetalQuantizedLinear(nn.Module):
     """Linear layer using custom Metal GEMM kernels.
@@ -34,6 +38,7 @@ class MetalQuantizedLinear(nn.Module):
         quant_type: str | None = "int8",
         group_size: int = 128,
     ):
+        logger.debug("initializing %s with in_features=%s, out_features=%s, bias=%s, quant_type=%s, group_size=%s", type(self).__name__, in_features, out_features, bias, quant_type, group_size)
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -95,6 +100,7 @@ class MetalQuantizedLinear(nn.Module):
         Returns:
             Quantized MetalQuantizedLinear layer
         """
+        logger.debug("from_linear called with linear=%s, quant_type=%s, group_size=%s", linear, quant_type, group_size)
         layer = cls(
             in_features=linear.in_features,
             out_features=linear.out_features,
@@ -149,6 +155,7 @@ class MetalQuantizedLinear(nn.Module):
         Returns:
             Output tensor [*, out_features]
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         orig_shape = x.shape
         x_2d = x.view(-1, self.in_features)
 
@@ -179,6 +186,7 @@ class MetalQuantizedLinear(nn.Module):
         return out.view(*orig_shape[:-1], self.out_features)
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, quant_type={self.quant_type}"

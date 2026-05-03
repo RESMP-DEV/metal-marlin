@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -8,7 +9,11 @@ import numpy as np
 import pytest
 
 
+
+logger = logging.getLogger(__name__)
+
 def _load_metal_marlin_module(module_name: str) -> ModuleType:
+    logger.info("_load_metal_marlin_module called with module_name=%s", module_name)
     pkg_root = Path(__file__).resolve().parents[1] / "metal_marlin"
     pkg_name = "metal_marlin"
     if pkg_name not in sys.modules:
@@ -39,16 +44,19 @@ def _load_metal_marlin_module(module_name: str) -> ModuleType:
 
 class TestTrellisV3Format:
     def test_detect_v3_format(self, tmp_path: Path) -> None:
+        logger.info("running test_detect_v3_format")
         (tmp_path / "model.safetensors.index.json").write_text('{"weight_map": {}}')
         hf_loader = _load_metal_marlin_module("hf_loader")
         assert hf_loader.detect_trellis_format(tmp_path) == "v3"
 
     def test_detect_v2_format(self, tmp_path: Path) -> None:
+        logger.info("running test_detect_v2_format")
         (tmp_path / "layer_0000").mkdir()
         hf_loader = _load_metal_marlin_module("hf_loader")
         assert hf_loader.detect_trellis_format(tmp_path) == "v2"
 
     def test_shard_writer_creates_index(self, tmp_path: Path) -> None:
+        logger.info("running test_shard_writer_creates_index")
         shard_writer = _load_metal_marlin_module("trellis.shard_writer")
         writer = shard_writer.ShardWriter(tmp_path, max_shard_size_gb=1.0)
         writer.add_tensor(
@@ -70,6 +78,7 @@ class TestTrellisV3Format:
         assert index["tensors"][0]["name"] == "model.layers.0.mlp.down_proj.weight"
 
     def test_shard_writer_respects_size_limit(self, tmp_path: Path) -> None:
+        logger.info("running test_shard_writer_respects_size_limit")
         shard_writer = _load_metal_marlin_module("trellis.shard_writer")
         writer = shard_writer.ShardWriter(tmp_path, max_shard_size_gb=1e-6)
         tensor = np.ones((512,), dtype=np.uint8)
@@ -92,6 +101,7 @@ class TestTrellisV3Format:
         assert (tmp_path / "trellis_shard_00001.safetensors").exists()
 
     def test_load_v3_weights_round_trip(self, tmp_path: Path) -> None:
+        logger.info("running test_load_v3_weights_round_trip")
         torch = pytest.importorskip("torch")
         pytest.importorskip("safetensors")
 

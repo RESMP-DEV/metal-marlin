@@ -17,6 +17,7 @@ Hybrid Architectures (Jamba, StripedHyena, Zamba):
     Mixed Attention/SSM layers for combining transformer attention with
     state space models, with per-layer routing and state management.
 """
+import logging
 
 # Differential Transformer (always available)
 from .diff_transformer import (
@@ -92,3 +93,6 @@ from .mamba import (
     MarlinMambaBlock,
     SelectiveScanConfig,
 )
+
+
+logger = logging.getLogger(__name__)

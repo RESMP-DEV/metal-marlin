@@ -1,6 +1,7 @@
 """Tests for MoE auxiliary balance loss in TrellisMoELayer."""
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -9,6 +10,9 @@ import torch.nn as nn
 from metal_marlin.trellis.config import TrellisModelConfig
 from metal_marlin.trellis.moe import TrellisMoELayer
 from metal_marlin.trellis.testing import create_mock_trellis_linear
+
+
+logger = logging.getLogger(__name__)
 
 HAS_MPS = torch.backends.mps.is_available()
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required (Apple Silicon)")
@@ -23,6 +27,7 @@ def create_mock_trellis_moe_layer(
     aux_loss_weight=0.0
 ):
     """Create a TrellisMoELayer with mock weights."""
+    logger.debug("create_mock_trellis_moe_layer called with hidden_dim=%s, intermediate_dim=%s, num_experts=%s", hidden_dim, intermediate_dim, num_experts)
     config = TrellisModelConfig(
         hidden_size=hidden_dim,
         intermediate_size=intermediate_dim,
@@ -43,6 +48,7 @@ def create_mock_trellis_moe_layer(
 
         # Helper to extract dict from TrellisLinear
         def get_linear_dict(linear):
+            logger.debug("get_linear_dict called with linear=%s", linear)
             return {
                 "indices": linear.packed_indices,
                 "scales": linear.scales,
@@ -73,6 +79,7 @@ class TestMoEBalanceLoss:
 
     def test_loss_computation(self):
         """Verify balance loss is computed and stored."""
+        logger.info("running test_loss_computation")
         torch.manual_seed(42)
         device = "mps"
 
@@ -105,6 +112,7 @@ class TestMoEBalanceLoss:
 
     def test_loss_gradients(self):
         """Verify gradients flow from balance loss to router weights."""
+        logger.info("running test_loss_gradients")
         torch.manual_seed(42)
         device = "mps"
 
@@ -143,6 +151,7 @@ class TestMoEBalanceLoss:
 
     def test_loss_disabled_inference(self):
         """Verify loss is not computed in eval mode or when disabled."""
+        logger.info("running test_loss_disabled_inference")
         torch.manual_seed(42)
         device = "mps"
 

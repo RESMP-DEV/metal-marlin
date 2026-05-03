@@ -12,15 +12,20 @@ import argparse
 import json
 from typing import Any
 
+import logging
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 
+
+logger = logging.getLogger(__name__)
+
 class ExpertTracker:
     """Tracks expert selection statistics across inference samples."""
 
     def __init__(self, num_layers: int, num_experts: int, top_k: int):
+        logger.debug("initializing %s with num_layers=%s, num_experts=%s, top_k=%s", type(self).__name__, num_layers, num_experts, top_k)
         self.num_layers = num_layers
         self.num_experts = num_experts
         self.top_k = top_k
@@ -43,6 +48,7 @@ class ExpertTracker:
             expert_ids: [batch, top_k] or [batch*seq, top_k] expert selections
             num_tokens: Number of tokens in the batch
         """
+        logger.debug("record_routing called with layer_idx=%s, expert_ids=%s, num_tokens=%s", layer_idx, expert_ids, num_tokens)
         if layer_idx < 0 or layer_idx >= self.num_layers:
             return
 
@@ -62,6 +68,7 @@ class ExpertTracker:
         Returns:
             Dictionary with analysis results.
         """
+        logger.debug("get_summary called")
         results = {
             "num_layers": self.num_layers,
             "num_experts": self.num_experts,
@@ -128,6 +135,7 @@ class ExpertTracker:
 
     def print_report(self) -> None:
         """Print a human-readable report."""
+        logger.debug("print_report called")
         summary = self.get_summary()
 
         print("\n" + "=" * 70)
@@ -182,6 +190,7 @@ def register_hooks(model: torch.nn.Module, tracker: ExpertTracker) -> list:
     Returns:
         List of hook handles (for cleanup)
     """
+    logger.debug("register_hooks called with model=%s, tracker=%s", model, tracker)
     handles = []
 
     # Find all MoE layers and attach hooks
@@ -195,9 +204,11 @@ def register_hooks(model: torch.nn.Module, tracker: ExpertTracker) -> list:
 
             # Create a hook that captures expert_ids
             def make_hook(layer_idx: int):
+                logger.debug("make_hook called with layer_idx=%s", layer_idx)
                 def hook(module, args, kwargs):
                     # The MoE forward pass computes expert_ids
                     # We need to intercept after routing but before expert execution
+                    logger.debug("hook called with module=%s, args=%s, kwargs=%s", module, args, kwargs)
                     input_tensor = args[0]
 
                     # Call the original forward
@@ -250,6 +261,7 @@ def run_inference(
         max_new_tokens: Maximum tokens to generate
         num_samples: Number of samples to run
     """
+    logger.debug("run_inference called with model=%s, tracker=%s, tokenizer=%s", model, tracker, tokenizer)
     print(f"\nRunning inference on {num_samples} samples...")
     print(f"Prompt: {prompt}")
     print(f"Generating {max_new_tokens} tokens per sample")
@@ -282,6 +294,7 @@ def run_inference(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Analyze expert usage and identify pruning candidates",
         formatter_class=argparse.RawDescriptionHelpFormatter,

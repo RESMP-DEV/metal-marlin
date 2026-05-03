@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import tarfile
+import logging
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,9 @@ from typing import Any
 import torch
 import yaml
 
+
+
+logger = logging.getLogger(__name__)
 
 def _extract_nemo_archive(nemo_path: Path, extract_dir: Path) -> dict[str, Any]:
     """Extract .nemo archive and return configuration.
@@ -54,6 +58,7 @@ def _extract_nemo_archive(nemo_path: Path, extract_dir: Path) -> dict[str, Any]:
     Returns:
         Configuration dictionary from model_config.yaml
     """
+    logger.debug("_extract_nemo_archive called with nemo_path=%s, extract_dir=%s", nemo_path, extract_dir)
     with tarfile.open(nemo_path, "r:gz") as tar:
         tar.extractall(extract_dir)
 
@@ -77,6 +82,7 @@ def _load_nemo_state_dict(extract_dir: Path) -> dict[str, torch.Tensor]:
     Returns:
         Raw state_dict from NeMo checkpoint
     """
+    logger.info("_load_nemo_state_dict called with extract_dir=%s", extract_dir)
     weights_path = extract_dir / "model_weights.pt"
     if not weights_path.exists():
         raise FileNotFoundError("model_weights.pt not found in NeMo archive")
@@ -96,6 +102,7 @@ def _map_encoder_weights(state_dict: dict[str, torch.Tensor]) -> dict[str, torch
     Returns:
         Mapped state_dict with standardized encoder weights
     """
+    logger.debug("_map_encoder_weights called with state_dict=%s", state_dict)
     mapped = {}
 
     for key, tensor in state_dict.items():
@@ -124,6 +131,7 @@ def _extract_preprocessor_config(nemo_config: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Preprocessor configuration with mel spectrogram parameters
     """
+    logger.debug("_extract_preprocessor_config called with nemo_config=%s", nemo_config)
     preprocessor_cfg = nemo_config.get("preprocessor", {})
 
     # Extract key mel spectrogram parameters
@@ -149,6 +157,7 @@ def _save_safetensors(state_dict: dict[str, torch.Tensor], output_path: Path) ->
         state_dict: State_dict to save
         output_path: Output path (will be modified to .safetensors)
     """
+    logger.info("_save_safetensors called with state_dict=%s, output_path=%s", state_dict, output_path)
     try:
         from safetensors.torch import save_file
 
@@ -185,6 +194,7 @@ def convert_nemo_to_pytorch(
         FileNotFoundError: If required files are not found in archive
         ValueError: If nemo_path doesn't exist or has wrong extension
     """
+    logger.info("convert_nemo_to_pytorch called with nemo_path=%s, output_path=%s", nemo_path, output_path)
     if not nemo_path.exists():
         raise FileNotFoundError(f"NeMo file not found: {nemo_path}")
 
@@ -263,6 +273,7 @@ def convert_nemo_to_pytorch(
 
 def main() -> None:
     """Command-line interface for NeMo to PyTorch conversion."""
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Convert NeMo checkpoints to standard PyTorch format",
         formatter_class=argparse.RawDescriptionHelpFormatter,

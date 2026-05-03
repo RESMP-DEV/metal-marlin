@@ -28,6 +28,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     if HAS_TORCH:
         import torch.utils.hooks
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HessianCollector:
@@ -78,6 +82,7 @@ class HessianCollector:
                         Accepts numpy arrays or torch tensors.
         """
         # Convert to numpy float64 for accumulation stability
+        logger.debug("update called with activations=%s", activations)
         x = _torch_to_numpy_f64(activations)
 
         # Flatten to 2D: [*, in_features] -> [n_samples, in_features]
@@ -105,6 +110,7 @@ class HessianCollector:
         Returns:
             Damped Hessian [in_features, in_features] as float64.
         """
+        logger.debug("get_damped_hessian called")
         H = self.hessian.copy()
         diag_mean = np.mean(np.diag(H))
         if diag_mean > 0:
@@ -114,6 +120,7 @@ class HessianCollector:
 
     def reset(self) -> None:
         """Clear accumulated Hessian and sample count."""
+        logger.debug("reset called")
         self.hessian.fill(0.0)
         self.n_samples = 0
 
@@ -145,6 +152,7 @@ class CalibrationHooks:
             damping: Damping factor for Hessian regularization (default: 0.01).
                     Higher values improve stability but may affect accuracy.
         """
+        logger.debug("initializing %s with damping=%s", type(self).__name__, damping)
         self.collectors: dict[str, HessianCollector] = {}
         self.handles: list[Any] = []  # torch RemovableHandle
         self.damping = damping
@@ -171,6 +179,7 @@ class CalibrationHooks:
         Raises:
             RuntimeError: If PyTorch is not available or model is not a PyTorch module.
         """
+        logger.debug("register_linear_hooks called with model=%s, layer_filter=%s", model, layer_filter)
         if HAS_TORCH and _is_torch_module(model):
             return self._register_torch_hooks(model, layer_filter)
         else:
@@ -182,6 +191,7 @@ class CalibrationHooks:
         layer_filter: Callable[[str, Any], bool] | None,
     ) -> int:
         """Register forward hooks on PyTorch model."""
+        logger.debug("_register_torch_hooks called with model=%s, layer_filter=%s", model, layer_filter)
         import torch.nn as tnn
 
         count = 0
@@ -203,8 +213,10 @@ class CalibrationHooks:
     def _make_torch_hook(self, name: str) -> Callable:
         """Create a forward hook closure for a named layer."""
 
+        logger.debug("_make_torch_hook called with name=%s", name)
         def hook(module: Any, input: tuple, output: Any) -> None:
             # input is a tuple, first element is the activation tensor
+            logger.debug("hook called with module=%s, input=%s, output=%s", module, input, output)
             if isinstance(input, tuple) and len(input) > 0:
                 x = input[0]
             else:
@@ -238,6 +250,7 @@ class CalibrationHooks:
         Raises:
             ValueError: If module is not a PyTorch Linear layer.
         """
+        logger.debug("collect_from_module called with module_name=%s, module=%s", module_name, module)
         if HAS_TORCH and _is_torch_linear(module):
             in_features = module.in_features
             collector = HessianCollector(in_features=in_features, damping=self.damping)
@@ -252,6 +265,7 @@ class CalibrationHooks:
 
     def remove_hooks(self) -> None:
         """Clean up all registered hooks via RemovableHandle.remove()."""
+        logger.debug("remove_hooks called")
         for handle in self.handles:
             if hasattr(handle, "remove"):
                 handle.remove()
@@ -268,6 +282,7 @@ class CalibrationHooks:
             Dictionary mapping layer names to Hessian matrices.
             Each Hessian has shape [in_features, in_features].
         """
+        logger.debug("get_hessians called with apply_damping=%s", apply_damping)
         result: dict[str, NDArray[np.float64]] = {}
         for name, collector in self.collectors.items():
             if apply_damping:
@@ -282,6 +297,7 @@ class CalibrationHooks:
         Returns:
             Dictionary mapping layer names to number of samples processed.
         """
+        logger.debug("get_sample_counts called")
         return {name: collector.n_samples for name, collector in self.collectors.items()}
 
     def reset(self) -> None:
@@ -290,17 +306,20 @@ class CalibrationHooks:
         Use this to start fresh calibration on a new dataset while keeping
         the same hooks registered.
         """
+        logger.debug("reset called")
         for collector in self.collectors.values():
             collector.reset()
 
     @property
     def num_layers(self) -> int:
         """Number of instrumented layers."""
+        logger.debug("num_layers called")
         return len(self.collectors)
 
     @property
     def layer_names(self) -> list[str]:
         """Names of instrumented layers."""
+        logger.debug("layer_names called")
         return list(self.collectors.keys())
 
 
@@ -341,6 +360,7 @@ class GQACalibrationHooks(CalibrationHooks):
             head_dim: Dimension per attention head.
             damping: Hessian damping factor.
         """
+        logger.debug("initializing %s with num_heads=%s, num_kv_heads=%s, head_dim=%s, damping=%s", type(self).__name__, num_heads, num_kv_heads, head_dim, damping)
         super().__init__(damping=damping)
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
@@ -375,9 +395,11 @@ class GQACalibrationHooks(CalibrationHooks):
         Returns:
             Number of attention projections instrumented.
         """
+        logger.debug("register_attention_hooks called with model=%s, layer_prefix=%s, q_name=%s", model, layer_prefix, q_name)
         attention_patterns = {q_name, k_name, v_name, o_name}
 
         def attention_filter(name: str, module: Any) -> bool:
+            logger.debug("attention_filter called with name=%s, module=%s", name, module)
             if not name.startswith(layer_prefix):
                 return False
             for pattern in attention_patterns:
@@ -395,6 +417,7 @@ class GQACalibrationHooks(CalibrationHooks):
 
 def _torch_to_numpy_f64(arr: Any) -> NDArray[np.float64]:
     """Convert PyTorch tensor or numpy array to numpy float64."""
+    logger.debug("_torch_to_numpy_f64 called with arr=%s", arr)
     if HAS_TORCH and torch is not None:
         if isinstance(arr, torch.Tensor):
             return arr.detach().cpu().numpy().astype(np.float64)
@@ -405,6 +428,7 @@ def _torch_to_numpy_f64(arr: Any) -> NDArray[np.float64]:
 
 def _is_torch_module(obj: Any) -> bool:
     """Check if object is a PyTorch nn.Module."""
+    logger.debug("_is_torch_module called with obj=%s", obj)
     if not HAS_TORCH or torch is None:
         return False
     import torch.nn as tnn
@@ -414,6 +438,7 @@ def _is_torch_module(obj: Any) -> bool:
 
 def _is_torch_linear(obj: Any) -> bool:
     """Check if object is a PyTorch Linear layer."""
+    logger.debug("_is_torch_linear called with obj=%s", obj)
     if not HAS_TORCH or torch is None:
         return False
     import torch.nn as tnn

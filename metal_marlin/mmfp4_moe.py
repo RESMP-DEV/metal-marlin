@@ -5,9 +5,13 @@ is implemented on `MMFP4MoE` in `metal_marlin.layers.mmfp4_moe`.
 """
 
 from __future__ import annotations
+import logging
 
 from .layers.mmfp4_moe import MMFP4Expert, MMFP4MoE
 
+
+
+logger = logging.getLogger(__name__)
 
 class MMFP4MoEExperts(MMFP4MoE):
     """Compatibility alias for older MMFP4 MoE expert naming."""

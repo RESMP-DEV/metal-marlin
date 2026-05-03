@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import time
@@ -15,6 +16,9 @@ from metal_marlin.flash_attention_v2 import flash_attention_v2
 from metal_marlin.fused_attention_mps import fused_attention
 
 
+
+logger = logging.getLogger(__name__)
+
 def benchmark_impl(
     name: str,
     impl_fn: Callable,
@@ -29,6 +33,7 @@ def benchmark_impl(
 ) -> dict[str, Any]:
 
     # Warmup
+    logger.info("benchmark_impl starting with name=%s, impl_fn=%s, q=%s, k=%s", name, impl_fn, q, k)
     try:
         for _ in range(warmup):
             _ = impl_fn(q, k, v, mask=mask, causal=causal)
@@ -84,6 +89,7 @@ def benchmark_impl(
     }
 
 def run_benchmarks():
+    logger.info("run_benchmarks starting")
     print(f"Running Attention Benchmarks on {torch.device('mps') if torch.backends.mps.is_available() else 'cpu'}")
 
     seq_lens = [1, 512, 2048, 8192]
@@ -100,14 +106,17 @@ def run_benchmarks():
 
     # Standard Wrapper
     def run_std(q, k, v, mask=None, causal=False):
+        logger.debug("run_std called with q=%s, k=%s, v=%s", q, k, v)
         return scaled_dot_product_attention_metal(q, k, v, attn_mask=mask, is_causal=causal)
 
     # Fused Wrapper
     def run_fused(q, k, v, mask=None, causal=False):
+        logger.debug("run_fused called with q=%s, k=%s, v=%s", q, k, v)
         return fused_attention(q, k, v, mask=mask, causal=causal)
 
     # Flash Wrapper
     def run_flash(q, k, v, mask=None, causal=False):
+        logger.debug("run_flash called with q=%s, k=%s, v=%s", q, k, v)
         if mask is not None:
             # Flash V2 implies causal mask if causal=True, but doesn't take explicit mask tensor
             pass

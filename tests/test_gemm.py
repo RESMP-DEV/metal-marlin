@@ -21,6 +21,7 @@ Error budget:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -33,6 +34,9 @@ from .conftest import requires_mps, requires_torch
 
 if TYPE_CHECKING:
     import torch as torch_types
+
+
+logger = logging.getLogger(__name__)
 
 torch: Any = _torch
 
@@ -68,6 +72,7 @@ def quantize_fp4_k_packed(
         packed: [K//8, N] uint32 packed FP4 codes
         scales: [K // group_size, N] float16 scale factors
     """
+    logger.info("quantize_fp4_k_packed called with weights=%s, group_size=%s", weights, group_size)
     K, N = weights.shape
     assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
     assert K % 8 == 0, f"K={K} must be divisible by 8"
@@ -111,6 +116,7 @@ def quantize_fp4_n_packed(
         packed: [K, N//8] uint32 packed FP4 codes
         scales: [K // group_size, N] float16 scale factors
     """
+    logger.info("quantize_fp4_n_packed called with weights=%s, group_size=%s", weights, group_size)
     K, N = weights.shape
     assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
     assert N % 8 == 0, f"N={N} must be divisible by 8"
@@ -151,6 +157,7 @@ def quantize_int4(
         scales: [K // group_size, N] float16 scale factors
         zeros: [K // group_size, N] float16 zero points
     """
+    logger.info("quantize_int4 called with weights=%s, group_size=%s", weights, group_size)
     K, N = weights.shape
     assert K % group_size == 0
     assert K % 8 == 0
@@ -189,6 +196,7 @@ def dequant_fp4_k_packed(
     packed: np.ndarray, scales: np.ndarray, group_size: int = 128
 ) -> np.ndarray:
     """Dequantize K-packed FP4 [K//8, N] to float32 [K, N]."""
+    logger.info("dequant_fp4_k_packed called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     K_packed, N = packed.shape
     K = K_packed * 8
 
@@ -210,6 +218,7 @@ def dequant_fp4_n_packed(
     packed: np.ndarray, scales: np.ndarray, K: int, N: int, group_size: int = 128
 ) -> np.ndarray:
     """Dequantize N-packed FP4 [K, N//8] to float32 [K, N]."""
+    logger.info("dequant_fp4_n_packed called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     scales_f32 = scales.astype(np.float32)
     result = np.zeros((K, N), dtype=np.float32)
 
@@ -228,6 +237,7 @@ def dequant_int4(
     packed: np.ndarray, scales: np.ndarray, zeros: np.ndarray, group_size: int = 128
 ) -> np.ndarray:
     """Dequantize K-packed INT4 [K//8, N] to float32 [K, N]."""
+    logger.info("dequant_int4 called with packed=%s, scales=%s, zeros=%s, group_size=%s", packed, scales, zeros, group_size)
     K_packed, N = packed.shape
     K = K_packed * 8
 
@@ -249,6 +259,7 @@ def dequant_int4(
 
 def gemm_reference(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     """FP32 GEMM reference: A @ B with FP32 accumulation."""
+    logger.debug("gemm_reference called with A=%s, B=%s", A, B)
     return (A.astype(np.float32) @ B.astype(np.float32)).astype(np.float16)
 
 
@@ -262,6 +273,7 @@ class TestGEMMFP4Accuracy:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=42)
 
     @requires_torch
@@ -282,6 +294,7 @@ class TestGEMMFP4Accuracy:
     )
     def test_fp4_gemm_accuracy(self, rng: np.random.Generator, M: int, K: int, N: int) -> None:
         """Metal FP4 GEMM matches FP32 reference within FP16 accumulation error."""
+        logger.info("running test_fp4_gemm_accuracy")
         assert torch is not None
 
         A = rng.standard_normal((M, K)).astype(np.float16)
@@ -315,6 +328,7 @@ class TestGEMMFP4Accuracy:
     @requires_mps
     def test_zero_input(self, rng: np.random.Generator) -> None:
         """Zero activations must produce zero output."""
+        logger.info("running test_zero_input")
         assert torch is not None
 
         M, K, N = 16, 256, 256
@@ -339,6 +353,7 @@ class TestGEMMFP4Accuracy:
     @requires_mps
     def test_zero_weight(self) -> None:
         """All-zero weights must produce zero output."""
+        logger.info("running test_zero_weight")
         assert torch is not None
 
         M, K, N = 8, 128, 128
@@ -362,6 +377,7 @@ class TestGEMMFP4Accuracy:
     @pytest.mark.parametrize("group_size", [32, 64, 128])
     def test_group_sizes(self, rng: np.random.Generator, group_size: int) -> None:
         """GEMM accuracy holds across different quantization group sizes."""
+        logger.info("running test_group_sizes")
         assert torch is not None
 
         M, K, N = 8, 512, 512
@@ -392,6 +408,7 @@ class TestGEMMFP4Accuracy:
     @requires_mps
     def test_determinism(self, rng: np.random.Generator) -> None:
         """Multiple runs produce identical results."""
+        logger.info("running test_determinism")
         assert torch is not None
 
         M, K, N = 16, 256, 256
@@ -420,6 +437,7 @@ class TestGEMMFP4Accuracy:
     @requires_mps
     def test_scale_linearity(self, rng: np.random.Generator) -> None:
         """Scaling activations by C scales output by C."""
+        logger.info("running test_scale_linearity")
         assert torch is not None
 
         M, K, N = 8, 256, 256
@@ -457,6 +475,7 @@ class TestGEMMINT4Accuracy:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=123)
 
     @requires_torch
@@ -470,6 +489,7 @@ class TestGEMMINT4Accuracy:
     )
     def test_int4_gemm_vs_reference(self, rng: np.random.Generator, M: int, N: int, K: int) -> None:
         """Metal INT4 GEMM matches reference."""
+        logger.info("running test_int4_gemm_vs_reference")
         assert torch is not None
 
         W_fp16 = np.clip(
@@ -511,6 +531,7 @@ class TestAccumulationPrecision:
     @requires_mps
     def test_large_k_accumulation(self) -> None:
         """Large K should use FP32 accumulators to avoid overflow."""
+        logger.info("running test_large_k_accumulation")
         assert torch is not None
 
         M, N, K = 1, 128, 32768
@@ -545,12 +566,14 @@ class TestNumericalStability:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=7)
 
     @requires_torch
     @requires_mps
     def test_large_values(self, rng: np.random.Generator) -> None:
         """Near FP16 max values don't produce NaN/Inf."""
+        logger.info("running test_large_values")
         assert torch is not None
 
         M, N, K = 4, 128, 256
@@ -591,6 +614,7 @@ class TestNumericalStability:
     @requires_mps
     def test_small_values(self, rng: np.random.Generator) -> None:
         """Near FP16 min values don't underflow to zero incorrectly."""
+        logger.info("running test_small_values")
         assert torch is not None
 
         M, N, K = 4, 128, 256
@@ -618,6 +642,7 @@ class TestNumericalStability:
     @requires_mps
     def test_mixed_signs_cancellation(self, rng: np.random.Generator) -> None:
         """Mixed positive/negative values with potential cancellation."""
+        logger.info("running test_mixed_signs_cancellation")
         assert torch is not None
 
         # Force the FP32 accumulation kernel path to avoid FP16 cancellation artifacts.
@@ -659,6 +684,7 @@ class TestQuantizationQuality:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=99)
 
     @pytest.mark.parametrize(
@@ -671,6 +697,7 @@ class TestQuantizationQuality:
     )
     def test_roundtrip_error_bounded(self, rng: np.random.Generator, K: int, N: int) -> None:
         """Quantize-dequant median relative error is bounded (<50%)."""
+        logger.info("running test_roundtrip_error_bounded")
         B = rng.standard_normal((K, N)).astype(np.float16)
         group_size = min(128, K)
 
@@ -690,6 +717,7 @@ class TestQuantizationQuality:
 
     def test_exact_representable_values(self) -> None:
         """Values exactly representable in FP4 should quantize well."""
+        logger.info("running test_exact_representable_values")
         K, N = 128, 8
         exact_vals = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
         B = np.zeros((K, N), dtype=np.float16)
@@ -710,6 +738,7 @@ class TestQuantizationQuality:
 
     def test_zero_weights_exact(self) -> None:
         """Zero weights are exactly preserved."""
+        logger.info("running test_zero_weights_exact")
         K, N = 128, 64
         B = np.zeros((K, N), dtype=np.float16)
         packed, scales = quantize_fp4_k_packed(B, group_size=128)
@@ -730,6 +759,7 @@ class TestGEMMBoundaries:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=1337)
 
     # -----------------------------------------------------------------------
@@ -741,6 +771,7 @@ class TestGEMMBoundaries:
     @pytest.mark.parametrize("M", [1, 2, 7, 15, 33, 65])
     def test_non_aligned_m(self, rng: np.random.Generator, M: int) -> None:
         """Non-tile-aligned M dimensions are handled correctly."""
+        logger.info("running test_non_aligned_m")
         assert torch is not None
 
         K, N = 128, 128
@@ -776,6 +807,7 @@ class TestGEMMBoundaries:
     @pytest.mark.parametrize("N", [16, 24, 48, 72, 128, 256])
     def test_various_n(self, rng: np.random.Generator, N: int) -> None:
         """Various N dimensions (multiples of 8)."""
+        logger.info("running test_various_n")
         assert torch is not None
 
         M, K = 8, 256
@@ -811,6 +843,7 @@ class TestGEMMBoundaries:
     @pytest.mark.parametrize("M", [1, 3, 15, 16, 17])
     def test_m_tile_boundary(self, rng: np.random.Generator, M: int) -> None:
         """M values at/near TILE_M=16 boundary."""
+        logger.info("running test_m_tile_boundary")
         assert torch is not None
 
         N, K = 64, 128
@@ -840,6 +873,7 @@ class TestGEMMBoundaries:
     @pytest.mark.parametrize("K", [32, 64, 96, 128, 160, 192])
     def test_k_tile_boundary(self, rng: np.random.Generator, K: int) -> None:
         """K values at multiples of 32 near TILE_K=32."""
+        logger.info("running test_k_tile_boundary")
         assert torch is not None
 
         M, N = 4, 64
@@ -872,6 +906,7 @@ class TestGEMMBoundaries:
     @requires_mps
     def test_all_partial_tiles(self, rng: np.random.Generator) -> None:
         """M=13, N=24, K=96: partial tiles in all three dimensions."""
+        logger.info("running test_all_partial_tiles")
         assert torch is not None
 
         M, N, K = 13, 24, 96
@@ -902,6 +937,7 @@ class TestGEMMBoundaries:
     @requires_mps
     def test_prime_m(self, rng: np.random.Generator) -> None:
         """M=97 (prime): never divides evenly into any tile size."""
+        logger.info("running test_prime_m")
         assert torch is not None
 
         M, N, K = 97, 64, 128
@@ -945,6 +981,7 @@ class TestGEMMBoundaries:
     )
     def test_exact_tile_multiples(self, rng: np.random.Generator, M: int, N: int, K: int) -> None:
         """Exact tile multiples should produce correct results."""
+        logger.info("running test_exact_tile_multiples")
         assert torch is not None
 
         A = rng.standard_normal((M, K)).astype(np.float16)
@@ -979,6 +1016,7 @@ class TestGEMMBoundaries:
     @pytest.mark.slow
     def test_very_long_k(self, rng: np.random.Generator) -> None:
         """M=1, N=4096, K=32768: long reduction stresses accumulation."""
+        logger.info("running test_very_long_k")
         assert torch is not None
 
         M, N, K = 1, 4096, 32768
@@ -1010,6 +1048,7 @@ class TestGEMMBoundaries:
     @pytest.mark.slow
     def test_very_wide_n(self, rng: np.random.Generator) -> None:
         """M=1, N=32768, K=4096: wide output stresses N-tiling."""
+        logger.info("running test_very_wide_n")
         assert torch is not None
 
         M, N, K = 1, 32768, 4096
@@ -1041,6 +1080,7 @@ class TestGEMMBoundaries:
     @pytest.mark.slow
     def test_large_m_non_aligned(self, rng: np.random.Generator) -> None:
         """M=127, N=4096, K=4096: large non-aligned M with LLM-scale dims."""
+        logger.info("running test_large_m_non_aligned")
         assert torch is not None
 
         M, N, K = 127, 4096, 4096
@@ -1078,12 +1118,14 @@ class TestEdgeCaseInputs:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=42)
 
     @requires_torch
     @requires_mps
     def test_constant_activations(self, rng: np.random.Generator) -> None:
         """Constant activations: output equals column sums of dequant(B)."""
+        logger.info("running test_constant_activations")
         assert torch is not None
 
         M, N, K = 3, 16, 32
@@ -1115,6 +1157,7 @@ class TestEdgeCaseInputs:
     @requires_mps
     def test_uniform_weight(self, rng: np.random.Generator) -> None:
         """Uniform weight (all same value) reduces to scaled row-sum."""
+        logger.info("running test_uniform_weight")
         assert torch is not None
 
         M, K, N = 4, 128, 128
@@ -1145,6 +1188,7 @@ class TestEdgeCaseInputs:
     @requires_mps
     def test_negative_weights(self, rng: np.random.Generator) -> None:
         """All-negative weights are handled correctly."""
+        logger.info("running test_negative_weights")
         assert torch is not None
 
         M, K, N = 4, 128, 128
@@ -1175,6 +1219,7 @@ class TestEdgeCaseInputs:
     @requires_mps
     def test_identity_weight(self, rng: np.random.Generator) -> None:
         """Identity-ish quantized weight should approximately preserve input."""
+        logger.info("running test_identity_weight")
         assert torch is not None
 
         K = 128

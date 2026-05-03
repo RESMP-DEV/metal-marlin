@@ -15,9 +15,13 @@ Usage:
 from __future__ import annotations
 
 from itertools import combinations
+import logging
 
 import numpy as np
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Reference implementations (matching sparse.metal logic exactly)
@@ -29,6 +33,7 @@ def ref_encode_sparse_2in4(pos0: int, pos1: int) -> int:
 
     Format: bits [1:0] = pos0, bits [3:2] = pos1.
     """
+    logger.debug("ref_encode_sparse_2in4 called with pos0=%s, pos1=%s", pos0, pos1)
     assert 0 <= pos0 <= 3
     assert 0 <= pos1 <= 3
     assert pos0 != pos1
@@ -40,6 +45,7 @@ def ref_decode_sparse_2in4(nibble: int) -> tuple[int, int]:
 
     Returns the two positions (0-3) of non-zero values.
     """
+    logger.debug("ref_decode_sparse_2in4 called with nibble=%s", nibble)
     pos0 = nibble & 0x3
     pos1 = (nibble >> 2) & 0x3
     return pos0, pos1
@@ -47,6 +53,7 @@ def ref_decode_sparse_2in4(nibble: int) -> tuple[int, int]:
 
 def ref_pack_metadata_x8(nibbles: list[int]) -> int:
     """Pack 8 metadata nibbles into a uint32."""
+    logger.info("ref_pack_metadata_x8 called with nibbles=%s", nibbles)
     assert len(nibbles) == 8
     packed = 0
     for i, n in enumerate(nibbles):
@@ -56,6 +63,7 @@ def ref_pack_metadata_x8(nibbles: list[int]) -> int:
 
 def ref_decode_metadata_x8(packed: int) -> list[tuple[int, int]]:
     """Decode a packed uint32 into 8 (pos0, pos1) pairs."""
+    logger.debug("ref_decode_metadata_x8 called with packed=%s", packed)
     positions = []
     for i in range(8):
         nibble = (packed >> (i * 4)) & 0xF
@@ -65,6 +73,7 @@ def ref_decode_metadata_x8(packed: int) -> list[tuple[int, int]]:
 
 def ref_scatter_2in4(val0: float, val1: float, pos0: int, pos1: int) -> list[float]:
     """Scatter two sparse values into a 4-element dense block."""
+    logger.debug("ref_scatter_2in4 called with val0=%s, val1=%s, pos0=%s", val0, val1, pos0)
     block = [0.0, 0.0, 0.0, 0.0]
     block[pos0] = val0
     block[pos1] = val1
@@ -90,6 +99,7 @@ class TestEncodeDecodeSingle:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_roundtrip_all_patterns(self, pos0: int, pos1: int) -> None:
         """Encode then decode must recover original positions."""
+        logger.info("running test_roundtrip_all_patterns")
         nibble = ref_encode_sparse_2in4(pos0, pos1)
         decoded_pos0, decoded_pos1 = ref_decode_sparse_2in4(nibble)
         assert decoded_pos0 == pos0
@@ -98,17 +108,20 @@ class TestEncodeDecodeSingle:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_nibble_range(self, pos0: int, pos1: int) -> None:
         """Encoded nibble must fit in 4 bits."""
+        logger.info("running test_nibble_range")
         nibble = ref_encode_sparse_2in4(pos0, pos1)
         assert 0 <= nibble <= 15
 
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_nibble_values_distinct(self, pos0: int, pos1: int) -> None:
         """Each valid pattern must produce a unique nibble."""
+        logger.info("running test_nibble_values_distinct")
         nibbles = [ref_encode_sparse_2in4(p0, p1) for p0, p1 in ALL_2IN4_PATTERNS]
         assert len(set(nibbles)) == 6
 
     def test_expected_nibble_values(self) -> None:
         """Verify exact encoded values match Metal shader comments."""
+        logger.info("running test_expected_nibble_values")
         expected = {
             (0, 1): 0b0100,  # 4
             (0, 2): 0b1000,  # 8
@@ -131,6 +144,7 @@ class TestPackedX8:
 
     def test_roundtrip_all_same_pattern(self) -> None:
         """8 identical blocks encode/decode correctly."""
+        logger.info("running test_roundtrip_all_same_pattern")
         for pos0, pos1 in ALL_2IN4_PATTERNS:
             nibble = ref_encode_sparse_2in4(pos0, pos1)
             nibbles = [nibble] * 8
@@ -141,6 +155,7 @@ class TestPackedX8:
 
     def test_roundtrip_mixed_patterns(self) -> None:
         """8 different blocks (cycling through patterns) roundtrip correctly."""
+        logger.info("running test_roundtrip_mixed_patterns")
         nibbles = []
         patterns_used = []
         for i in range(8):
@@ -158,6 +173,7 @@ class TestPackedX8:
 
     def test_packed_fits_uint32(self) -> None:
         """Packed result fits in 32 bits."""
+        logger.info("running test_packed_fits_uint32")
         nibbles = [ref_encode_sparse_2in4(p0, p1) for p0, p1 in ALL_2IN4_PATTERNS]
         nibbles.extend([nibbles[0], nibbles[1]])  # pad to 8
         packed = ref_pack_metadata_x8(nibbles)
@@ -165,6 +181,7 @@ class TestPackedX8:
 
     def test_packed_bit_layout(self) -> None:
         """Verify that nibble i occupies bits [4i+3 : 4i]."""
+        logger.info("running test_packed_bit_layout")
         nibbles = [0xA, 0xB, 0xC, 0xD, 0x1, 0x2, 0x3, 0x4]
         packed = ref_pack_metadata_x8(nibbles)
         for i, expected_nibble in enumerate(nibbles):
@@ -183,6 +200,7 @@ class TestScatter:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_scatter_values_in_correct_positions(self, pos0: int, pos1: int) -> None:
         """Non-zero values appear at exactly the encoded positions."""
+        logger.info("running test_scatter_values_in_correct_positions")
         val0, val1 = 1.5, -2.25
         block = ref_scatter_2in4(val0, val1, pos0, pos1)
 
@@ -192,6 +210,7 @@ class TestScatter:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_scatter_zeros_elsewhere(self, pos0: int, pos1: int) -> None:
         """Positions not encoded are zero."""
+        logger.info("running test_scatter_zeros_elsewhere")
         val0, val1 = 3.0, 7.0
         block = ref_scatter_2in4(val0, val1, pos0, pos1)
 
@@ -202,6 +221,7 @@ class TestScatter:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_scatter_produces_2in4_sparsity(self, pos0: int, pos1: int) -> None:
         """Output block has exactly 2 non-zero values out of 4."""
+        logger.info("running test_scatter_produces_2in4_sparsity")
         block = ref_scatter_2in4(1.0, 2.0, pos0, pos1)
         nonzero_count = sum(1 for v in block if v != 0.0)
         assert nonzero_count == 2
@@ -218,6 +238,7 @@ class TestEndToEnd:
     @pytest.mark.parametrize("pos0,pos1", ALL_2IN4_PATTERNS)
     def test_encode_decode_scatter(self, pos0: int, pos1: int) -> None:
         """Full pipeline: encode positions, decode, scatter values."""
+        logger.info("running test_encode_decode_scatter")
         val0 = np.float16(1.5)
         val1 = np.float16(-3.0)
 
@@ -232,6 +253,7 @@ class TestEndToEnd:
 
     def test_packed_decode_scatter_multiple_blocks(self) -> None:
         """Decode 8 blocks from packed uint32 and scatter each."""
+        logger.info("running test_packed_decode_scatter_multiple_blocks")
         rng = np.random.default_rng(42)
         patterns = [ALL_2IN4_PATTERNS[i % 6] for i in range(8)]
         nibbles = [ref_encode_sparse_2in4(p0, p1) for p0, p1 in patterns]
@@ -268,6 +290,7 @@ class TestEndToEnd:
 
     def test_random_patterns_stress(self) -> None:
         """Stress test with 1000 random blocks."""
+        logger.info("running test_random_patterns_stress")
         rng = np.random.default_rng(123)
 
         for _ in range(1000):
@@ -297,21 +320,25 @@ class TestPatternCompleteness:
 
     def test_exactly_6_patterns(self) -> None:
         """C(4,2) = 6 valid 2:4 patterns exist."""
+        logger.info("running test_exactly_6_patterns")
         assert len(ALL_2IN4_PATTERNS) == 6
 
     def test_all_pairs_covered(self) -> None:
         """Every pair of distinct positions in [0,3] is represented."""
+        logger.info("running test_all_pairs_covered")
         expected = {(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)}
         actual = set(ALL_2IN4_PATTERNS)
         assert actual == expected
 
     def test_all_nibbles_unique(self) -> None:
         """Each pattern maps to a distinct nibble value."""
+        logger.info("running test_all_nibbles_unique")
         nibbles = [ref_encode_sparse_2in4(p0, p1) for p0, p1 in ALL_2IN4_PATTERNS]
         assert len(set(nibbles)) == 6
 
     def test_all_nibbles_decodable(self) -> None:
         """Every encoded nibble decodes back to a valid (distinct) pair."""
+        logger.info("running test_all_nibbles_decodable")
         for pos0, pos1 in ALL_2IN4_PATTERNS:
             nibble = ref_encode_sparse_2in4(pos0, pos1)
             dec0, dec1 = ref_decode_sparse_2in4(nibble)

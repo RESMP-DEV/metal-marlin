@@ -1,4 +1,5 @@
 """Test GPTQ dequantization kernel."""
+import logging
 
 import numpy as np
 import pytest
@@ -7,9 +8,13 @@ import torch
 from metal_marlin._compat import HAS_MPS
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not HAS_MPS, reason="MPS required")
 def test_gptq_dequant_kernel():
     """Verify GPTQ dequantization kernel matches CPU reference."""
+    logger.info("running test_gptq_dequant_kernel")
     from metal_marlin.metal_dispatch import (
         MetalKernelLibrary,
         _copy_buffer_to_tensor,

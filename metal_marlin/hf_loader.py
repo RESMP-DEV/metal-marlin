@@ -18,6 +18,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -81,21 +82,25 @@ class ModelConfig:
     @property
     def is_moe(self) -> bool:
         """Check if model uses Mixture of Experts."""
+        logger.debug("is_moe called")
         return self.num_experts is not None and self.num_experts > 1
 
     @property
     def has_mtp(self) -> bool:
         """Check if model has Multi-Token Prediction heads."""
+        logger.debug("has_mtp called")
         return self.num_mtp_heads is not None and self.num_mtp_heads > 0
 
     @property
     def has_delta(self) -> bool:
         """Check if model uses DeltaNet sparse attention."""
+        logger.debug("has_delta called")
         return self.use_delta and self.delta_intermediate_size is not None
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         """Parse from HuggingFace config.json."""
+        logger.debug("from_dict called with d=%s", d)
         text_cfg = d.get("text_config")
         if not isinstance(text_cfg, dict):
             text_cfg = {}
@@ -234,6 +239,7 @@ def download_model(
     Returns:
         Path to the downloaded model directory
     """
+    logger.info("download_model called with model_id=%s, local_dir=%s, revision=%s, token=%s", model_id, local_dir, revision, token)
     from huggingface_hub import snapshot_download
 
     # Download everything except pytorch bins (we only want safetensors)
@@ -249,6 +255,7 @@ def download_model(
 
 def load_model_config(model_path: str | Path) -> ModelConfig:
     """Load and parse model configuration."""
+    logger.info("load_model_config called with model_path=%s", model_path)
     model_path = Path(model_path)
 
     # If it's a HF model ID, download first
@@ -274,6 +281,7 @@ def iter_safetensors_weights(
     Yields:
         (tensor_name, tensor_data, metadata) for each tensor
     """
+    logger.debug("iter_safetensors_weights called with model_path=%s", model_path)
     from safetensors import safe_open
 
     model_path = Path(model_path)
@@ -320,6 +328,7 @@ def should_quantize_tensor(name: str, tensor: np.ndarray) -> bool:
     Only 2D weight matrices with compatible dimensions are quantized.
     """
     # Skip non-weight tensors
+    logger.info("should_quantize_tensor called with name=%s, tensor=%s", name, tensor)
     if "weight" not in name.lower():
         return False
 
@@ -371,6 +380,7 @@ class CalibrationData:
     @classmethod
     def from_json(cls, path: str | Path) -> CalibrationData:
         """Load calibration data from JSON file."""
+        logger.debug("from_json called with path=%s", path)
         with open(path) as f:
             data = json.load(f)
         return cls(
@@ -381,6 +391,7 @@ class CalibrationData:
 
     def to_json(self, path: str | Path) -> None:
         """Save calibration data to JSON file."""
+        logger.debug("to_json called with path=%s", path)
         with open(path, "w") as f:
             json.dump(
                 {
@@ -398,6 +409,7 @@ class CalibrationData:
 
         Returns None if no calibration data for this layer.
         """
+        logger.debug("get_activation_ranges called with layer_name=%s", layer_name)
         if layer_name not in self.layer_ranges:
             return None
 
@@ -435,6 +447,7 @@ def convert_model_to_fp4(
     Returns:
         Statistics dict with counts, sizes, errors
     """
+    logger.info("convert_model_to_fp4 called with model_path=%s, output_path=%s, group_size=%s, validate=%s", model_path, output_path, group_size, validate)
     from safetensors.numpy import save_file
 
     model_path = Path(model_path)
@@ -599,6 +612,7 @@ def detect_trellis_format(model_path: str | Path) -> str:
         "v2" if layer_0000/ directory exists
         "unknown" otherwise
     """
+    logger.debug("detect_trellis_format called with model_path=%s", model_path)
     model_path = Path(model_path)
 
     if (model_path / "model.safetensors.index.json").exists():
@@ -623,6 +637,7 @@ def load_trellis_v3_weights(
     Returns:
         Dict mapping original weight names to TrellisWeight objects
     """
+    logger.info("load_trellis_v3_weights called with model_path=%s, layer_range=%s, device=%s", model_path, layer_range, device)
     from safetensors import safe_open
 
     model_path = Path(model_path)
@@ -695,6 +710,7 @@ def load_trellis_v3_weights(
 
 def _load_trellis_v2_weights(model_path: str | Path) -> dict[str, dict[str, np.ndarray]]:
     """Load Trellis v2 weights from layer directories."""
+    logger.info("_load_trellis_v2_weights called with model_path=%s", model_path)
     model_path = Path(model_path)
     weights = {}
 
@@ -736,6 +752,7 @@ def load_quantized_weights(
         ...
     }
     """
+    logger.info("load_quantized_weights called with model_path=%s", model_path)
     fmt = detect_trellis_format(model_path)
     if fmt == "v3":
         raise ValueError(
@@ -760,6 +777,7 @@ def _load_safetensors_index(model_path: Path) -> dict[str, Any] | None:
     Returns the weight_map from model.safetensors.index.json, or None
     if the model uses a single safetensors file.
     """
+    logger.info("_load_safetensors_index called with model_path=%s", model_path)
     index_path = model_path / "model.safetensors.index.json"
     if not index_path.exists():
         return None
@@ -780,6 +798,7 @@ def _get_layer_weight_files(
 
     Returns a dict mapping tensor names to their file paths.
     """
+    logger.debug("_get_layer_weight_files called with model_path=%s, layer_idx=%s, weight_map=%s", model_path, layer_idx, weight_map)
     from safetensors import safe_open
 
     layer_prefixes = (
@@ -828,6 +847,7 @@ def load_layer_weights(
     Returns:
         Dict mapping tensor names to numpy arrays
     """
+    logger.info("load_layer_weights called with model_path=%s, layer_idx=%s, weight_map=%s", model_path, layer_idx, weight_map)
     from safetensors import safe_open
 
     if weight_map is None:
@@ -874,6 +894,7 @@ def load_non_layer_weights(
     Returns:
         Dict mapping tensor names to numpy arrays
     """
+    logger.info("load_non_layer_weights called with model_path=%s, weight_type=%s, weight_map=%s", model_path, weight_type, weight_map)
     from safetensors import safe_open
 
     prefixes = {
@@ -974,6 +995,7 @@ def convert_model_layerwise(
     Returns:
         Statistics dict with counts, sizes, errors, per-layer info
     """
+    logger.info("convert_model_layerwise called with model_path=%s, output_path=%s, group_size=%s, mixed_precision=%s", model_path, output_path, group_size, mixed_precision)
     import gc
     import shutil
 
@@ -1224,6 +1246,7 @@ def convert_model_layerwise(
 
 def get_available_ram_gb() -> float:
     """Get available system RAM in GB."""
+    logger.debug("get_available_ram_gb called")
     import platform
 
     if platform.system() == "Darwin":  # macOS
@@ -1279,6 +1302,7 @@ def estimate_layer_memory_gb(config: ModelConfig, dtype_bytes: int = 2) -> float
 
     Returns memory in GB, conservatively overestimating for safety.
     """
+    logger.debug("estimate_layer_memory_gb called with config=%s, dtype_bytes=%s", config, dtype_bytes)
     hidden = config.hidden_size
     intermediate = config.intermediate_size
     n_heads = config.num_attention_heads
@@ -1367,6 +1391,7 @@ def convert_model_parallel(
     Returns:
         Statistics dict with counts, sizes, errors, performance metrics
     """
+    logger.info("convert_model_parallel called with model_path=%s, output_path=%s, group_size=%s, mixed_precision=%s", model_path, output_path, group_size, mixed_precision)
     import gc
     import shutil
     import time
@@ -1485,6 +1510,7 @@ def convert_model_parallel(
     # Worker function for quantizing a single layer
     def quantize_layer(layer_idx: int) -> dict[str, Any]:
         """Quantize a single layer and return results."""
+        logger.info("quantize_layer called with layer_idx=%s", layer_idx)
         layer_stats: dict[str, Any] = {
             "layer_idx": layer_idx,
             "quantized": 0,
@@ -1752,6 +1778,7 @@ def convert_onnx_to_fp4(
             - mean_rmse: Average reconstruction error (if validation enabled)
             - layers: Per-layer quantization info
     """
+    logger.info("convert_onnx_to_fp4 called with onnx_path=%s, output_path=%s, group_size=%s, mixed_precision=%s", onnx_path, output_path, group_size, mixed_precision)
     import onnx
     from safetensors.numpy import save_file
 
@@ -1927,6 +1954,7 @@ def convert_onnx_to_fp4(
 
 def _detect_moe_architecture(graph) -> bool:
     """Detect if ONNX graph contains MoE (Mixture of Experts) patterns."""
+    logger.debug("_detect_moe_architecture called with graph=%s", graph)
     moe_patterns = ["router", "expert", "moe_gate", "block_sparse_moe"]
     for init in graph.initializer:
         name_lower = init.name.lower()
@@ -1941,6 +1969,7 @@ def _detect_moe_architecture(graph) -> bool:
 
 def _detect_mtp_heads(graph) -> bool:
     """Detect if ONNX graph contains MTP (Multi-Token Prediction) heads."""
+    logger.debug("_detect_mtp_heads called with graph=%s", graph)
     mtp_patterns = ["mtp", "multi_token", "auxiliary_head", "draft_head", "nextn_predict"]
     for init in graph.initializer:
         name_lower = init.name.lower()
@@ -1955,6 +1984,7 @@ def _should_quantize_onnx_tensor(
     layer_config,
 ) -> bool:
     """Determine if an ONNX tensor should be quantized."""
+    logger.info("_should_quantize_onnx_tensor called with name=%s, tensor=%s, layer_config=%s", name, tensor, layer_config)
     from .mixed_precision import Precision
 
     # FP16 precision means no quantization
@@ -1988,6 +2018,7 @@ def _compute_calibration_scales(
     For weight-only quantization, this analyzes the weight distribution
     using calibration-aware percentiles rather than full min/max range.
     """
+    logger.debug("_compute_calibration_scales called with initializers=%s, calibration=%s", initializers, calibration)
     scales: dict[str, np.ndarray] = {}
 
     for name, tensor in initializers.items():
@@ -2023,6 +2054,9 @@ except ImportError:
         CalibrationDataset = None  # type: ignore[misc,assignment]
 
 
+
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # Calibration data sources
 # ============================================================================
@@ -2051,6 +2085,7 @@ def download_calibration_data(
     Returns:
         List of calibration text prompts.
     """
+    logger.info("download_calibration_data called with source=%s, cache_dir=%s", source, cache_dir)
     import urllib.request
 
     if cache_dir is None:
@@ -2098,6 +2133,7 @@ def _load_hf_calibration_dataset(name: str, num_samples: int | None = None) -> l
     Returns:
         List of calibration text samples.
     """
+    logger.info("_load_hf_calibration_dataset called with name=%s, num_samples=%s", name, num_samples)
     try:
         from datasets import load_dataset
     except ImportError:
@@ -2155,6 +2191,7 @@ def run_calibration(
     Returns:
         Dictionary of activation statistics per layer.
     """
+    logger.debug("run_calibration called with model_id=%s, calibration_source=%s, output_path=%s", model_id, calibration_source, output_path)
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -2194,7 +2231,9 @@ def run_calibration(
     stats: dict[str, dict[str, float]] = {}
 
     def make_hook(name: str):
+        logger.debug("make_hook called with name=%s", name)
         def hook(module, input, output):
+            logger.debug("hook called with module=%s, input=%s, output=%s", module, input, output)
             if isinstance(input, tuple) and len(input) > 0:
                 x = input[0]
             else:
@@ -2314,6 +2353,7 @@ def convert_model_with_calibration(
     Returns:
         Statistics dict with counts, sizes, errors.
     """
+    logger.info("convert_model_with_calibration called with model_path=%s, output_path=%s, calibration_path=%s, calibration_source=%s", model_path, output_path, calibration_path, calibration_source)
     from safetensors.numpy import save_file
 
     from .mixed_precision import MixedPrecisionConfig as MPConfig
@@ -2551,6 +2591,7 @@ def convert_model_transformers(
     Returns:
         Statistics dict with counts, sizes, errors.
     """
+    logger.info("convert_model_transformers called with model_id=%s, output_path=%s, group_size=%s, mixed_precision=%s", model_id, output_path, group_size, mixed_precision)
     from safetensors.numpy import save_file
 
     from .quantize_model import quantize_model
@@ -2634,6 +2675,7 @@ def convert_model_transformers(
 
     # Helper for calibration lookup (support module-name calibration keys)
     def _activation_ranges_for_name(weight_name: str) -> dict[str, Any] | None:
+        logger.debug("_activation_ranges_for_name called with weight_name=%s", weight_name)
         if calib_data is None:
             return None
         ranges = calib_data.get_activation_ranges(weight_name)
@@ -2783,6 +2825,7 @@ def convert_model_transformers(
 
 
 def main():
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

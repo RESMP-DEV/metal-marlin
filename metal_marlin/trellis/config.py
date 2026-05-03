@@ -1,4 +1,8 @@
 from dataclasses import dataclass
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 # Tokenizer ID for GLM-4.7 models
 GLM4_TOKENIZER_ID = "zai-org/GLM-4.7-Flash"
@@ -11,6 +15,7 @@ def _resolve_full_attention_interval(config: object) -> int | None:
     than as a plain attribute.  This helper checks both paths.
     """
     # Direct attribute
+    logger.debug("_resolve_full_attention_interval called with config=%s", config)
     val = getattr(config, "full_attention_interval", None)
     if val is not None:
         try:
@@ -45,6 +50,7 @@ def _resolve_full_attention_interval_from_dict(data: dict) -> int | None:
     or stored at the top level.
     """
     # Check top-level first
+    logger.debug("_resolve_full_attention_interval_from_dict called with data=%s", data)
     val = data.get("full_attention_interval")
     if val is not None:
         try:
@@ -159,6 +165,7 @@ class TrellisModelConfig:
         Reads config.json and maps architecture-specific field names to
         our unified config format.
         """
+        logger.debug("from_pretrained called with model_path=%s", model_path)
         import json
         from pathlib import Path
 
@@ -192,6 +199,7 @@ class TrellisModelConfig:
         """
         # If a nested text_config dict is present, merge its fields so
         # architecture-specific names are resolved uniformly.
+        logger.debug("_from_dict called with data=%s", data)
         if "text_config" in data and isinstance(data["text_config"], dict):
             data = {**data, **data["text_config"]}
 
@@ -269,6 +277,7 @@ class TrellisModelConfig:
         Handles nested ``text_config`` (multimodal Qwen VL models) by
         resolving the effective text config first, then extracting fields.
         """
+        logger.debug("_from_hf_config called with hf_config=%s", hf_config)
         kwargs = {}
 
         # Resolve effective text config for multimodal wrappers
@@ -368,16 +377,19 @@ class TrellisModelConfig:
 
     def is_moe_layer(self, layer_idx: int) -> bool:
         """Check if layer uses MoE (vs dense MLP)."""
+        logger.debug("is_moe_layer called with layer_idx=%s", layer_idx)
         if self.num_experts <= 1:
             return False
         return layer_idx >= self.first_moe_layer
 
     def is_mla_model(self) -> bool:
         """Check if model uses Multi-head Latent Attention."""
+        logger.debug("is_mla_model called")
         return self.kv_lora_rank is not None
 
     def should_skip_layer(self, layer_idx: int) -> bool:
         """Check if layer should be skipped during inference."""
+        logger.debug("should_skip_layer called with layer_idx=%s", layer_idx)
         if self.skip_layers is None:
             return False
         return layer_idx in self.skip_layers
@@ -391,6 +403,7 @@ class TrellisModelConfig:
         Returns:
             New config with skip_layers set.
         """
+        logger.debug("prune_layers called with layers_to_skip=%s", layers_to_skip)
         import copy
 
         new_config = copy.copy(self)
@@ -414,6 +427,7 @@ class TrellisModelConfig:
         Returns:
             Config with skip_layers set based on importance analysis.
         """
+        logger.debug("from_importance_analysis called with base_config=%s, analysis_path=%s, threshold_pct=%s", base_config, analysis_path, threshold_pct)
         import json
         from pathlib import Path
 

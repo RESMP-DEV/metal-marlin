@@ -49,6 +49,7 @@ Usage:
 """
 
 from __future__ import annotations
+import logging
 
 from .decode import (
     DecodeConfig,
@@ -87,6 +88,9 @@ from .prefill import (
     parallel_kv_write,
     speculative_prefill,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Decode exports

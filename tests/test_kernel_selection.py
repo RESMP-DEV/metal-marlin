@@ -9,6 +9,7 @@ Run from project root: uv run python contrib/metal_marlin/tests/test_kernel_sele
 from __future__ import annotations
 
 import inspect
+import logging
 import sys
 from pathlib import Path
 
@@ -38,6 +39,9 @@ else:
         get_kernel_for_batch_size as select_moe_kernel,
     )
 
+
+logger = logging.getLogger(__name__)
+
 _SUPPORTS_AVAILABLE_KERNELS = (
     "available_kernels" in inspect.signature(select_moe_kernel).parameters
 )
@@ -57,6 +61,7 @@ def _call_select_moe_kernel(
     Backward compatibility path keeps this standalone test runnable on older
     selector signatures that don't yet accept ``available_kernels``.
     """
+    logger.debug("_call_select_moe_kernel called with batch_size=%s, use_fp32_acc=%s", batch_size, use_fp32_acc)
     kwargs = {
         "batch_size": batch_size,
         "use_fp32_acc": use_fp32_acc,
@@ -83,6 +88,7 @@ def _call_select_moe_kernel(
 def test_kernel_selection():
     """Test kernel selection for various batch sizes."""
     
+    logger.info("running test_kernel_selection")
     test_cases = [
         # (batch_size, use_fp32_acc, expected_kernel_substring, expected_tile_n)
         (1, False, "decode", 64),

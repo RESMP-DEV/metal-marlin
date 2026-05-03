@@ -40,12 +40,16 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum, auto
+import logging
 from time import time
 
 from ..paged.allocator import BlockAllocator
 from ..paged.page_table import PageTable
 from .request import GenerationRequest, RequestStatus, SchedulerOutput
 
+
+
+logger = logging.getLogger(__name__)
 
 class RequestPriority(IntEnum):
     """Priority levels for request scheduling.
@@ -96,11 +100,13 @@ class RequestState:
     @property
     def remaining_prefill(self) -> int:
         """Tokens remaining to prefill."""
+        logger.debug("remaining_prefill called")
         return len(self.request.prompt_tokens) - self.prefill_progress
 
     @property
     def is_prefill_complete(self) -> bool:
         """Whether prefill is finished for this request."""
+        logger.debug("is_prefill_complete called")
         return self.prefill_progress >= len(self.request.prompt_tokens)
 
     @property
@@ -109,6 +115,7 @@ class RequestState:
 
         Higher priority first, then FIFO within same priority.
         """
+        logger.debug("effective_priority called")
         return (self.priority.value, -self.enqueue_time)
 
     def __lt__(self, other: RequestState) -> bool:
@@ -133,15 +140,18 @@ class IterationPlan:
 
     @property
     def total_tokens(self) -> int:
+        logger.debug("total_tokens called")
         return self.prefill_tokens_used + self.decode_tokens_used
 
     @property
     def is_empty(self) -> bool:
+        logger.debug("is_empty called")
         return not self.prefill_work and not self.decode_work
 
     def to_scheduler_output(self) -> SchedulerOutput:
         """Convert to legacy SchedulerOutput for compatibility with BatchedModelRunner."""
         # For chunked prefill, we include the full request but track progress separately
+        logger.debug("to_scheduler_output called")
         prefill_requests = [state.request for state, _, _ in self.prefill_work]
         decode_requests = [state.request for state in self.decode_work]
         preempted_requests = [state.request for state in self.preempted]
@@ -165,6 +175,7 @@ class KVRegion:
 
     @property
     def num_blocks(self) -> int:
+        logger.debug("num_blocks called")
         return len(self.block_indices)
 
 
@@ -189,6 +200,7 @@ class KVCacheManager:
         *,
         allocator: BlockAllocator | None = None,
     ):
+        logger.debug("initializing %s with num_blocks=%s, block_size=%s", type(self).__name__, num_blocks, block_size)
         self.num_blocks = num_blocks
         self.block_size = block_size
 
@@ -210,6 +222,7 @@ class KVCacheManager:
         Returns:
             Region ID on success, None if OOM.
         """
+        logger.debug("allocate called with request_id=%s, num_tokens=%s", request_id, num_tokens)
         if request_id in self._regions:
             raise ValueError(f"Region already exists for request {request_id}")
 
@@ -248,6 +261,7 @@ class KVCacheManager:
         Returns:
             True on success, False if OOM.
         """
+        logger.debug("extend called with request_id=%s, num_tokens=%s", request_id, num_tokens)
         region = self._regions.get(request_id)
         if region is None:
             return False
@@ -261,22 +275,26 @@ class KVCacheManager:
 
     def free(self, request_id: str) -> None:
         """Free all KV cache for a request."""
+        logger.debug("free called with request_id=%s", request_id)
         region = self._regions.pop(request_id, None)
         if region:
             self.page_table.remove_sequence(region.region_id)
 
     def get_block_table(self, request_id: str) -> list[int] | None:
         """Get block indices for a request (for attention kernel dispatch)."""
+        logger.debug("get_block_table called with request_id=%s", request_id)
         region = self._regions.get(request_id)
         return region.block_indices if region else None
 
     def get_num_tokens(self, request_id: str) -> int:
         """Get number of tokens stored for a request."""
+        logger.debug("get_num_tokens called with request_id=%s", request_id)
         region = self._regions.get(request_id)
         return region.num_tokens if region else 0
 
     def get_slot_mapping(self, request_id: str) -> tuple[int, int] | None:
         """Get (block_idx, slot_offset) for next KV write position."""
+        logger.debug("get_slot_mapping called with request_id=%s", request_id)
         region = self._regions.get(request_id)
         if region is None:
             return None
@@ -288,6 +306,7 @@ class KVCacheManager:
         Returns state that can be used to restore the request later.
         Currently does not support CPU offload; returns only metadata.
         """
+        logger.debug("preempt called with request_id=%s", request_id)
         region = self._regions.get(request_id)
         if region is None:
             return None
@@ -305,27 +324,32 @@ class KVCacheManager:
     @property
     def num_free_blocks(self) -> int:
         """Number of free blocks available."""
+        logger.debug("num_free_blocks called")
         return self.allocator.num_free
 
     @property
     def num_allocated_blocks(self) -> int:
         """Number of blocks currently in use."""
+        logger.debug("num_allocated_blocks called")
         return self.allocator.num_allocated
 
     @property
     def memory_pressure(self) -> float:
         """Memory pressure as fraction [0, 1]. Higher = more pressure."""
+        logger.debug("memory_pressure called")
         if self.num_blocks == 0:
             return 1.0
         return self.num_allocated_blocks / self.num_blocks
 
     def can_allocate(self, num_tokens: int) -> bool:
         """Check if we can allocate space for given tokens."""
+        logger.debug("can_allocate called with num_tokens=%s", num_tokens)
         blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
         return self.allocator.num_free >= blocks_needed
 
     def blocks_for_tokens(self, num_tokens: int) -> int:
         """Calculate blocks needed for a token count."""
+        logger.debug("blocks_for_tokens called with num_tokens=%s", num_tokens)
         return (num_tokens + self.block_size - 1) // self.block_size
 
     def __len__(self) -> int:
@@ -344,6 +368,7 @@ class IterationPlanner:
     """
 
     def __init__(self, config: SchedulerConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
 
     def plan_iteration(
@@ -362,6 +387,7 @@ class IterationPlanner:
         Returns:
             IterationPlan with prefill and decode work assignments.
         """
+        logger.debug("plan_iteration called with waiting=%s, running=%s, kv_manager=%s", waiting, running, kv_manager)
         plan = IterationPlan(
             prefill_work=[],
             decode_work=[],
@@ -455,6 +481,7 @@ class BatchScheduler:
         config: SchedulerConfig,
         kv_manager: KVCacheManager,
     ):
+        logger.debug("initializing %s with config=%s, kv_manager=%s", type(self).__name__, config, kv_manager)
         self.config = config
         self.kv_manager = kv_manager
         self.planner = IterationPlanner(config)
@@ -482,6 +509,7 @@ class BatchScheduler:
             request: The generation request.
             priority: Scheduling priority.
         """
+        logger.debug("add_request called with request=%s, priority=%s", request, priority)
         if request.request_id in self._requests:
             raise ValueError(f"Request {request.request_id} already exists")
 
@@ -500,6 +528,7 @@ class BatchScheduler:
 
         Returns True if the request was found and aborted.
         """
+        logger.debug("abort_request called with request_id=%s", request_id)
         state = self._requests.pop(request_id, None)
         if state is None:
             return False
@@ -523,6 +552,7 @@ class BatchScheduler:
 
         Returns a SchedulerOutput compatible with BatchedModelRunner.
         """
+        logger.debug("schedule called")
         self._check_starvation()
 
         # Sort running by priority (highest first)
@@ -594,6 +624,7 @@ class BatchScheduler:
         Returns:
             List of finished requests.
         """
+        logger.debug("step called with finished_ids=%s", finished_ids)
         finished_ids = finished_ids or []
         finished: list[GenerationRequest] = []
 
@@ -616,6 +647,7 @@ class BatchScheduler:
 
     def free_finished(self) -> list[GenerationRequest]:
         """Free finished sequences. Alias for step() with no finished IDs."""
+        logger.debug("free_finished called")
         return self.step([])
 
     def step_decode(self) -> None:
@@ -623,12 +655,14 @@ class BatchScheduler:
 
         Prefer using step() which handles both finished detection and KV extension.
         """
+        logger.debug("step_decode called")
         for state in list(self._running):
             if not self.kv_manager.extend(state.request.request_id, 1):
                 self._preempt(state)
 
     def _preempt(self, state: RequestState) -> None:
         """Preempt a request, freeing its KV cache."""
+        logger.debug("_preempt called with state=%s", state)
         if state in self._running:
             self._running.remove(state)
         if state in self._waiting:
@@ -644,6 +678,7 @@ class BatchScheduler:
 
     def _select_preempt_victim(self) -> RequestState | None:
         """Select a running request to preempt based on policy."""
+        logger.debug("_select_preempt_victim called")
         if not self._running:
             return None
 
@@ -662,6 +697,7 @@ class BatchScheduler:
 
     def _check_starvation(self) -> None:
         """Promote starving low-priority requests to prevent indefinite waiting."""
+        logger.debug("_check_starvation called")
         now = time()
         timeout = self.config.starvation_timeout_s
 
@@ -687,6 +723,7 @@ class BatchScheduler:
         Returns:
             Number of requests resumed.
         """
+        logger.debug("resume_swapped called with max_to_resume=%s", max_to_resume)
         resumed = 0
         while self._swapped and resumed < max_to_resume:
             state = self._swapped[0]
@@ -704,27 +741,33 @@ class BatchScheduler:
 
     @property
     def num_waiting(self) -> int:
+        logger.debug("num_waiting called")
         return len(self._waiting)
 
     @property
     def num_running(self) -> int:
+        logger.debug("num_running called")
         return len(self._running)
 
     @property
     def num_swapped(self) -> int:
+        logger.debug("num_swapped called")
         return len(self._swapped)
 
     @property
     def has_pending_work(self) -> bool:
+        logger.debug("has_pending_work called")
         return bool(self._waiting or self._running or self._swapped)
 
     def get_request(self, request_id: str) -> GenerationRequest | None:
         """Get request by ID."""
+        logger.debug("get_request called with request_id=%s", request_id)
         state = self._requests.get(request_id)
         return state.request if state else None
 
     def get_stats(self) -> dict:
         """Get scheduler statistics."""
+        logger.debug("get_stats called")
         return {
             "waiting": self.num_waiting,
             "running": self.num_running,
@@ -736,4 +779,5 @@ class BatchScheduler:
 
     def iter_requests(self) -> Iterator[tuple[str, RequestState]]:
         """Iterate over all tracked requests."""
+        logger.debug("iter_requests called")
         yield from self._requests.items()

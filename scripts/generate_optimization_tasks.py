@@ -1,7 +1,11 @@
 
+import logging
 from pathlib import Path
 
 import yaml
+
+
+logger = logging.getLogger(__name__)
 
 _THIS_FILE = Path(__file__).resolve()
 _REPO_ROOT = _THIS_FILE.parents[3]
@@ -10,6 +14,7 @@ _USER_HOME_PATH_RE = r"/(Users|home)/[^/]+/"
 
 
 def generate_optimization_tasks():
+    logger.debug("generate_optimization_tasks called")
     tasks = []
 
     # --- P0: Infrastructure & Critical Fixes (10 tasks) ---

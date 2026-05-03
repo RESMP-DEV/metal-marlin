@@ -1,6 +1,7 @@
 """MoE analysis and profiling tools for routing pattern optimization."""
 
 from __future__ import annotations
+import logging
 
 from .moe_routing import (
     ExpertCooccurrence,
@@ -9,6 +10,9 @@ from .moe_routing import (
     MoERoutingProfiler,
     RoutingPredictability,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "MoERoutingProfiler",

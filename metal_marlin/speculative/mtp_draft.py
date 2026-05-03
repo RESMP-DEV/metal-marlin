@@ -1,6 +1,7 @@
 """MTP-based draft model adapter for speculative decoding."""
 
 from __future__ import annotations
+import logging
 
 import torch
 from torch import Tensor
@@ -9,6 +10,9 @@ from ..kv_cache import KVCache
 from ..layers.mmfp4_mtp_head import MMFP4MTPHead
 from .draft import DraftModel, DraftOutput
 
+
+
+logger = logging.getLogger(__name__)
 
 class MTPDraft(DraftModel):
     """Draft model using Multi-Token Prediction head.
@@ -28,12 +32,14 @@ class MTPDraft(DraftModel):
         mtp_head: MMFP4MTPHead,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with mtp_head=%s, device=%s", type(self).__name__, mtp_head, device)
         self.head = mtp_head
         self.device = device or torch.device("mps")
         self._cached_hidden: Tensor | None = None
     
     def set_hidden_states(self, hidden_states: Tensor) -> None:
         """Cache hidden states from the target model."""
+        logger.debug("set_hidden_states called with hidden_states=%s", hidden_states)
         self._cached_hidden = hidden_states
     
     def speculate(
@@ -43,6 +49,7 @@ class MTPDraft(DraftModel):
         num_tokens: int = 4,
     ) -> DraftOutput:
         """Generate speculative tokens using MTP head."""
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         if self._cached_hidden is None:
             # No hidden states - return uniform fallback
             batch_size = input_ids.shape[0]
@@ -65,10 +72,12 @@ class MTPDraft(DraftModel):
     
     def reset(self) -> None:
         """Reset cached state."""
+        logger.debug("reset called")
         self._cached_hidden = None
     
     def _fallback(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Return uniform distribution when no hidden states."""
+        logger.debug("_fallback called with batch_size=%s, num_tokens=%s", batch_size, num_tokens)
         vocab_size = self.head.vocab_size
         tokens = torch.zeros(
             batch_size, num_tokens,

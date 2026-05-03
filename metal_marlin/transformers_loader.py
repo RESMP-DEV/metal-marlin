@@ -97,15 +97,18 @@ if torch is not None:
         """Wrapper for MoE blocks after expert quantization."""
 
         def __init__(self, moe_module: nn.Module, name: str | None = None) -> None:
+            logger.debug("initializing %s with moe_module=%s, name=%s", type(self).__name__, moe_module, name)
             super().__init__()
             self.moe = moe_module
             self.name = name
 
         def forward(self, *args: Any, **kwargs: Any):
+            logger.debug("forward called")
             return self.moe(*args, **kwargs)
 
 
 def _iter_named_modules_with_parent(model: Any) -> Iterable[tuple[str, Any, Any, str]]:
+    logger.debug("_iter_named_modules_with_parent called with model=%s", model)
     module_map = dict(model.named_modules())
     for name, module in model.named_modules():
         if "." in name:
@@ -118,6 +121,7 @@ def _iter_named_modules_with_parent(model: Any) -> Iterable[tuple[str, Any, Any,
 
 
 def _resolve_moe_type_names(model: Any) -> list[str]:
+    logger.debug("_resolve_moe_type_names called with model=%s", model)
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", "") if config is not None else ""
     model_type = str(model_type).lower()
@@ -140,6 +144,7 @@ def _resolve_moe_type_names(model: Any) -> list[str]:
 
 
 def _resolve_moe_types(type_names: list[str]) -> tuple[type, ...]:
+    logger.debug("_resolve_moe_types called with type_names=%s", type_names)
     resolved: list[type] = []
     try:
         import transformers
@@ -173,6 +178,7 @@ def _resolve_moe_types(type_names: list[str]) -> tuple[type, ...]:
 
 def find_moe_layers(model: Any) -> list[tuple[str, Any, Any, str]]:
     """Find MoE layers for supported Transformers model types."""
+    logger.debug("find_moe_layers called with model=%s", model)
     type_names = _resolve_moe_type_names(model)
     if not type_names:
         return []
@@ -190,6 +196,7 @@ def find_moe_layers(model: Any) -> list[tuple[str, Any, Any, str]]:
 
 def _detect_quantization_targets(config: Any) -> dict[str, list[str]]:
     """Detect MoE-specific module patterns for quantization targets."""
+    logger.info("_detect_quantization_targets called with config=%s", config)
     model_type = str(getattr(config, "model_type", "")).lower()
     include_patterns: list[str] = []
     skip_patterns: list[str] = []
@@ -216,11 +223,13 @@ def _detect_quantization_targets(config: Any) -> dict[str, list[str]]:
 
 
 def _require_torch(feature: str) -> None:
+    logger.debug("_require_torch called with feature=%s", feature)
     if not HAS_TORCH or torch is None:
         raise RuntimeError(f"PyTorch is required for {feature}. Install with: pip install torch")
 
 
 def _require_mps(device: str) -> None:
+    logger.debug("_require_mps called with device=%s", device)
     if device != "mps":
         raise RuntimeError("MetalQuantizedLinear only supports device='mps'.")
     if torch is None or not torch.backends.mps.is_available():
@@ -228,6 +237,7 @@ def _require_mps(device: str) -> None:
 
 
 def _normalize_format(fmt: str) -> str:
+    logger.debug("_normalize_format called with fmt=%s", fmt)
     fmt = (fmt or "fp4").lower()
     if fmt.startswith("marlin_"):
         fmt = fmt[len("marlin_") :]
@@ -241,6 +251,7 @@ def _normalize_format(fmt: str) -> str:
 
 
 def _format_bits(fmt: str) -> int | None:
+    logger.debug("_format_bits called with fmt=%s", fmt)
     if fmt == "fp4":
         return 4
     if fmt == "fp8":
@@ -251,6 +262,7 @@ def _format_bits(fmt: str) -> int | None:
 
 
 def _precision_to_bits_format(precision: Precision) -> tuple[int | None, str | None]:
+    logger.debug("_precision_to_bits_format called with precision=%s", precision)
     if precision == Precision.FP4_E2M1:
         return 4, "fp4"
     if precision == Precision.FP8_E4M3:
@@ -261,11 +273,13 @@ def _precision_to_bits_format(precision: Precision) -> tuple[int | None, str | N
 
 
 def _resolve_skip_patterns(skip_patterns: list[str] | None) -> list[str]:
+    logger.debug("_resolve_skip_patterns called with skip_patterns=%s", skip_patterns)
     patterns = skip_patterns if skip_patterns is not None else _DEFAULT_SKIP_PATTERNS
     return [p.lower() for p in patterns]
 
 
 def _iter_linear_modules(model: Any) -> Iterable[tuple[str, Any, Any, str]]:
+    logger.debug("_iter_linear_modules called with model=%s", model)
     import torch.nn as nn
 
     module_map = dict(model.named_modules())
@@ -291,6 +305,7 @@ def _build_layer_plan(
     mixed_precision_config: MixedPrecisionConfig | None,
     include_names: set[str] | None = None,
 ) -> list[LayerPlan]:
+    logger.info("_build_layer_plan starting")
     skip_patterns = _resolve_skip_patterns(skip_patterns)
     include_names = set(include_names) if include_names else None
     plans: list[LayerPlan] = []
@@ -396,13 +411,16 @@ def _collect_activation_ranges(
     max_length: int,
     target_layers: set[str],
 ) -> dict[str, tuple[float, float]]:
+    logger.debug("_collect_activation_ranges called with model=%s, tokenizer=%s, texts=%s", model, tokenizer, texts)
     import torch.nn as nn
 
     stats: dict[str, dict[str, float]] = {}
     hooks = []
 
     def make_hook(name: str):
+        logger.debug("make_hook called with name=%s", name)
         def hook(module, inputs, output):
+            logger.debug("hook called with module=%s, inputs=%s, output=%s", module, inputs, output)
             if isinstance(inputs, tuple) and inputs:
                 x = inputs[0]
             else:
@@ -467,6 +485,7 @@ def replace_linear_layers(
 
     Returns stats dict with per-layer info and aggregate metrics.
     """
+    logger.debug("replace_linear_layers called with model=%s", model)
     _require_torch("replace_linear_layers")
     _require_mps(device)
 
@@ -624,6 +643,7 @@ def _collect_moe_linear_targets(
     include_patterns: list[str],
     skip_patterns: list[str],
 ) -> set[str]:
+    logger.debug("_collect_moe_linear_targets called with model=%s, moe_layers=%s, include_patterns=%s", model, moe_layers, include_patterns)
     prefixes = [name for name, _module, _parent, _child in moe_layers]
     include_patterns = [p.lower() for p in include_patterns if p]
     skip_patterns = [p.lower() for p in skip_patterns if p]
@@ -662,6 +682,7 @@ def replace_moe_layers(
     validate: bool = True,
 ) -> dict[str, Any]:
     """Quantize MoE expert layers and wrap MoE blocks."""
+    logger.debug("replace_moe_layers called with model=%s", model)
     _require_torch("replace_moe_layers")
     _require_mps(device)
 
@@ -736,6 +757,7 @@ def replace_moe_layers(
 
 def save_quantized(model: Any, path: Path | str, config: dict[str, Any]) -> None:
     """Save quantized model weights and metadata."""
+    logger.info("save_quantized called with model=%s, path=%s, config=%s", model, path, config)
     _require_torch("save_quantized")
 
     from safetensors.torch import save_file
@@ -762,6 +784,7 @@ def save_quantized(model: Any, path: Path | str, config: dict[str, Any]) -> None
 
 def load_quantized(path: Path | str, device: str = "mps") -> Any:
     """Load a previously quantized model saved by save_quantized()."""
+    logger.info("load_quantized called with path=%s, device=%s", path, device)
     _require_torch("load_quantized")
     _require_mps(device)
 
@@ -842,6 +865,7 @@ def load_and_quantize(
     Returns:
         (quantized_model, stats_dict)
     """
+    logger.info("load_and_quantize called with model_id=%s, output_path=%s", model_id, output_path)
     _require_torch("load_and_quantize")
     _require_mps(device)
     if torch_dtype is None:

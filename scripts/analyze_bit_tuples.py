@@ -2,8 +2,12 @@
 """Analyze bit tuple distribution for uniform bits percentage."""
 
 import json
+import logging
 from collections import defaultdict
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 path = Path('models/GLM-4.7-Flash-Trellis-MM/quantization_index.json')
 data = json.load(open(path))

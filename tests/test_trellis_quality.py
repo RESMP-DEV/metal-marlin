@@ -1,15 +1,20 @@
 """Validate trellis dequantization quality against reference."""
+import logging
 
 import numpy as np
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestDequantQuality:
     """Test that dequantization produces reasonable values."""
 
     def test_output_range(self):
         """Verify dequantized weights are in reasonable range."""
+        logger.info("running test_output_range")
         from metal_marlin.trellis.linear import TrellisLinear
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -30,6 +35,7 @@ class TestDequantQuality:
 
     def test_deterministic(self):
         """Verify dequantization is deterministic."""
+        logger.info("running test_deterministic")
         from metal_marlin.trellis.linear import TrellisLinear
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -47,6 +53,7 @@ class TestDequantQuality:
 
     def test_forward_consistency(self):
         """Verify forward pass produces consistent results."""
+        logger.info("running test_forward_consistency")
         from metal_marlin.trellis.linear import TrellisLinear
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -69,6 +76,7 @@ class TestModelQuality:
 
     def test_layer_output_distribution(self):
         """Check layer outputs have reasonable distribution."""
+        logger.info("running test_layer_output_distribution")
         from metal_marlin.trellis.config import TrellisModelConfig
         from metal_marlin.trellis.layer import TrellisDecoderLayer
         from metal_marlin.trellis.loader import TrellisModelLoader

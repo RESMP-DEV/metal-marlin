@@ -20,6 +20,7 @@ When these are not available, functions will raise RuntimeError.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -29,6 +30,9 @@ from ._compat import HAS_MPS, HAS_TORCH, torch
 
 if TYPE_CHECKING:
     from .dtypes import DTypeConfig
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -52,6 +56,7 @@ FP4_PER_U32 = 8
 
 def _require_mps() -> None:
     """Raise RuntimeError if PyTorch MPS is not available."""
+    logger.debug("_require_mps called")
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for metal_marlin. Install with: pip install torch")
     if not HAS_MPS:
@@ -92,6 +97,7 @@ def pack_fp4_weights(
             weight_packed: uint32 array [K, N//8] with packed FP4 nibbles.
             scales: float16 array [K//group_size, N] with per-group scales.
     """
+    logger.info("pack_fp4_weights called with weight=%s, group_size=%s", weight, group_size)
     _require_mps()
 
     # Transpose to [K, N] layout for the kernel (K = in_features, N = out_features)
@@ -219,6 +225,7 @@ def pack_u4_weights(
             scales: float16 array [K // group_size, N] with per-group scales.
             zeros:  float16 array [K // group_size, N] with per-group zero points.
     """
+    logger.info("pack_u4_weights called with weight=%s, group_size=%s", weight, group_size)
     _require_mps()
 
     # Transpose to [K, N] for kernel layout
@@ -294,6 +301,7 @@ def unpack_u4_weights(
     Returns:
         FP16 array [out_features, in_features] (transposed back to PyTorch convention).
     """
+    logger.info("unpack_u4_weights called with packed=%s, scales=%s, zeros=%s, orig_shape=%s", packed, scales, zeros, orig_shape)
     _require_mps()
 
     packed_np = packed.cpu().numpy()
@@ -347,6 +355,7 @@ def _get_e2m1_values() -> np.ndarray:
     Nibble encoding: [sign(1) | exp(2) | mant(1)]
     Bias = 1.
     """
+    logger.debug("_get_e2m1_values called")
     values = np.zeros(16, dtype=np.float32)
     for nibble in range(16):
         sign = (nibble >> 3) & 1
@@ -404,6 +413,7 @@ def quantized_linear(
     Returns:
         Output tensor with same leading dimensions as x, last dim = N.
     """
+    logger.info("quantized_linear called with x=%s, weight_packed=%s, scales=%s, group_size=%s", x, weight_packed, scales, group_size)
     _require_mps()
 
     from .kernels import marlin_gemm_fp4
@@ -441,6 +451,7 @@ _STRIPED_THREADS_PER_TG = 128
 
 
 def _div_ceil(a: int, b: int) -> int:
+    logger.debug("_div_ceil called with a=%s, b=%s", a, b)
     return (a + b - 1) // b
 
 
@@ -474,6 +485,7 @@ def quantized_linear_striped(
     Returns:
         Output tensor with same leading dimensions as x, last dim = N.
     """
+    logger.info("quantized_linear_striped called with x=%s, weight_packed=%s, scales=%s, group_size=%s", x, weight_packed, scales, group_size)
     _require_mps()
 
     # For simplicity, delegate to non-striped version
@@ -509,6 +521,7 @@ class MarlinLinear:
         group_size: int = 32,
         dtype_config: DTypeConfig | None = None,
     ):
+        logger.debug("initializing %s with weight_packed=%s, scales=%s, bias=%s, group_size=%s, dtype_config=%s", type(self).__name__, weight_packed, scales, bias, group_size, dtype_config)
         self.weight_packed = weight_packed
         self.scales = scales
         self.bias = bias
@@ -545,6 +558,7 @@ class MarlinLinear:
         Returns:
             A new MarlinLinear layer with quantized weights.
         """
+        logger.debug("from_linear called with linear=%s, quant_type=%s, group_size=%s", linear, quant_type, group_size)
         if quant_type != "fp4":
             raise NotImplementedError(
                 f"from_linear only supports quant_type='fp4', got {quant_type!r}"
@@ -585,6 +599,7 @@ def dequant_fp4_bulk(
     Returns:
         float16 array [K, N] with dequantized weights.
     """
+    logger.info("dequant_fp4_bulk called with packed=%s, scales=%s, K=%s, group_size=%s", packed, scales, K, group_size)
     _require_mps()
 
     from .kernels import dequant_fp4
@@ -620,6 +635,7 @@ def dequant_int4_bulk(
     Returns:
         float16 array [K, N] with dequantized weights.
     """
+    logger.info("dequant_int4_bulk called with packed=%s, scales=%s, zeros=%s, K=%s", packed, scales, zeros, K)
     _require_mps()
 
     k_blocks, N = packed.shape
@@ -688,6 +704,7 @@ def benchmark_against_native(
     Returns:
         Dict with timing results in milliseconds.
     """
+    logger.info("benchmark_against_native starting with M=%s, K=%s, N=%s, group_size=%s", M, K, N, group_size)
     _require_mps()
 
     print(f"\nBenchmark: M={M}, K={K}, N={N}, group_size={group_size}")
@@ -746,6 +763,7 @@ def benchmark_against_native(
 
 def main():
     """Run accuracy test and benchmark."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Metal Marlin FP4 GEMM")

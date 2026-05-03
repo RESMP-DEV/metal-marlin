@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import logging
 from typing import Any
 
 import torch
@@ -10,7 +11,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+
+logger = logging.getLogger(__name__)
+
 def _resolve_attr(obj: Any, dotted_name: str) -> Any:
+    logger.debug("_resolve_attr called with obj=%s, dotted_name=%s", obj, dotted_name)
     cur = obj
     for part in dotted_name.split("."):
         if not hasattr(cur, part):
@@ -20,6 +25,7 @@ def _resolve_attr(obj: Any, dotted_name: str) -> Any:
 
 
 def _first_tensor(obj: Any, names: tuple[str, ...]) -> torch.Tensor | None:
+    logger.debug("_first_tensor called with obj=%s, names=%s", obj, names)
     for name in names:
         value = _resolve_attr(obj, name)
         if isinstance(value, (torch.Tensor, nn.Parameter)):
@@ -28,6 +34,7 @@ def _first_tensor(obj: Any, names: tuple[str, ...]) -> torch.Tensor | None:
 
 
 def _first_int(obj: Any, names: tuple[str, ...]) -> int | None:
+    logger.debug("_first_int called with obj=%s, names=%s", obj, names)
     for name in names:
         value = _resolve_attr(obj, name)
         if isinstance(value, bool):
@@ -42,6 +49,7 @@ def _first_int(obj: Any, names: tuple[str, ...]) -> int | None:
 
 
 def _copy_with_optional_transpose(dst: torch.Tensor, src: torch.Tensor, name: str) -> None:
+    logger.debug("_copy_with_optional_transpose called with dst=%s, src=%s, name=%s", dst, src, name)
     src = src.detach()
     if src.shape == dst.shape:
         src_copy = src
@@ -64,6 +72,7 @@ def _batch_dequant_fp4_experts(
     Eliminates the need to loop over experts or call tolist().
     Memory: ~18 MB for k=4 experts (intermediate tensors freed immediately).
     """
+    logger.info("_batch_dequant_fp4_experts called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     from .layers.mmfp4_linear import _SHIFT_4BIT, _get_cached_e2m1_table, _get_cached_group_ids
 
     k, out_f, in_packed = packed.shape
@@ -109,6 +118,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         group_size: int = 128,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with num_experts=%s, hidden_size=%s, intermediate_size=%s, group_size=%s, device=%s", type(self).__name__, num_experts, hidden_size, intermediate_size, group_size, device)
         super().__init__()
 
         if num_experts <= 0:
@@ -226,6 +236,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         self, expert_idx: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return (gate_w, up_w, down_w) FP16 for expert_idx; uses LRU cache."""
+        logger.debug("_get_expert_weights called with expert_idx=%s", expert_idx)
         if expert_idx in self._dequant_cache:
             self._dequant_cache.move_to_end(expert_idx)
             return self._dequant_cache[expert_idx]
@@ -245,6 +256,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
 
     def clear_dequant_cache(self) -> None:
         """Clear the dequant weight cache (call between generations if needed)."""
+        logger.info("clear_dequant_cache called")
         self._dequant_cache.clear()
 
     def _get_stacked_expert_weights(
@@ -252,6 +264,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         expert_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return stacked (gate, up, down) FP16 weights for expert_indices."""
+        logger.debug("_get_stacked_expert_weights called with expert_indices=%s", expert_indices)
         if expert_indices.ndim != 1:
             raise ValueError(
                 f"expert_indices must be rank-1, got shape={tuple(expert_indices.shape)}"
@@ -321,6 +334,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         expert_offsets: torch.Tensor,
     ) -> torch.Tensor:
         """Legacy per-expert dispatch path kept as a safe fallback."""
+        logger.debug("_dispatch_batch_legacy called with sorted_inputs=%s, active_experts_t=%s, expert_offsets=%s", sorted_inputs, active_experts_t, expert_offsets)
         compute_device = sorted_inputs.device
         expert_indices: list[int] = []
         expert_inputs: list[torch.Tensor] = []
@@ -358,6 +372,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         expert_offsets: torch.Tensor,
     ) -> torch.Tensor:
         """Chunked batched expert dispatch to reduce Python loop overhead."""
+        logger.debug("_dispatch_batch_vectorized called with sorted_inputs=%s, active_experts_t=%s, expert_counts=%s", sorted_inputs, active_experts_t, expert_counts)
         compute_device = sorted_inputs.device
         sorted_inputs_f16 = (
             sorted_inputs if sorted_inputs.dtype == torch.float16 else sorted_inputs.to(torch.float16)
@@ -426,6 +441,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         packed_kernel: torch.Tensor,
         scales_kernel: torch.Tensor,
     ) -> torch.Tensor:
+        logger.debug("_mmfp4_forward called with x=%s, packed_kernel=%s, scales_kernel=%s", x, packed_kernel, scales_kernel)
         x_fp16 = x if x.dtype == torch.float16 else x.to(torch.float16)
 
         # Use mmfp4_linear.mmfp4_gemm which expects row-packed [out, in//8]
@@ -477,6 +493,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         up_packed: torch.Tensor,
         up_scales: torch.Tensor,
     ) -> torch.Tensor:
+        logger.debug("_mmfp4_fused_gate_up called with x=%s, gate_packed=%s, gate_scales=%s", x, gate_packed, gate_scales)
         x_fp16 = x if x.dtype == torch.float16 else x.to(torch.float16)
         try:
             from .kernels import mmfp4_fused_gate_up as _kernel
@@ -489,6 +506,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         return F.silu(gate) * up
 
     def _run_expert_mlp(self, expert_idx: int, expert_in: torch.Tensor) -> torch.Tensor:
+        logger.debug("_run_expert_mlp called with expert_idx=%s, expert_in=%s", expert_idx, expert_in)
         x_fp16 = expert_in if expert_in.dtype == torch.float16 else expert_in.to(
             torch.float16)
         gate_w, up_w, down_w = self._get_expert_weights(expert_idx)
@@ -503,6 +521,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         weight: float | torch.Tensor,
     ) -> None:
         """Run expert and add weighted result directly into out[0]. No intermediate allocation."""
+        logger.debug("_accumulate_expert_into called with out=%s, expert_idx=%s, expert_in=%s", out, expert_idx, expert_in)
         gate_w, up_w, down_w = self._get_expert_weights(expert_idx)
         activated = F.silu(F.linear(expert_in, gate_w)) * \
             F.linear(expert_in, up_w)
@@ -517,6 +536,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         expert_indices: list[int],
         expert_inputs: list[torch.Tensor],
     ) -> list[torch.Tensor]:
+        logger.debug("_run_expert_mlp_batched called with expert_indices=%s, expert_inputs=%s", expert_indices, expert_inputs)
         if len(expert_indices) != len(expert_inputs):
             raise ValueError(
                 f"expert_indices ({len(expert_indices)}) and expert_inputs ({len(expert_inputs)}) "
@@ -539,6 +559,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         top_k_weights: torch.Tensor,
     ) -> torch.Tensor:
         """Match Glm4MoeLiteNaiveMoe.forward() signature exactly."""
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if hidden_states.shape[-1] != self.hidden_size:
             raise ValueError(
                 f"Expected hidden size {self.hidden_size}, got {hidden_states.shape[-1]}"
@@ -691,6 +712,7 @@ class QuantizedGlm4MoEExperts(nn.Module):
         This infers model dimensions from the source module and performs a
         best-effort copy of already-quantized expert tensors when present.
         """
+        logger.debug("from_naive_moe called with naive_moe=%s, group_size=%s, device=%s", naive_moe, group_size, device)
         gate_packed = _first_tensor(
             naive_moe,
             (

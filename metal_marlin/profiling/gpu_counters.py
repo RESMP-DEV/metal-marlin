@@ -24,6 +24,7 @@ Note:
 from __future__ import annotations
 
 import json
+import logging
 import platform
 import re
 import shutil
@@ -36,6 +37,9 @@ from typing import Any
 from .._compat import HAS_PYOBJC_METAL, Metal
 from .occupancy import detect_gpu
 from .trace import TraceEvent
+
+
+logger = logging.getLogger(__name__)
 
 HAS_METAL_COUNTERS = HAS_PYOBJC_METAL and platform.system() == "Darwin"
 MTLDevice: Any = None
@@ -83,10 +87,12 @@ class GPUCounters:
     @property
     def total_memory_bandwidth(self) -> float:
         """Combined read + write bandwidth (GB/s)."""
+        logger.debug("total_memory_bandwidth called")
         return self.memory_read_bandwidth + self.memory_write_bandwidth
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
+        logger.debug("to_dict called")
         return {
             "timestamp_ns": self.timestamp_ns,
             "gpu_utilization": self.gpu_utilization,
@@ -105,6 +111,7 @@ class GPUCounters:
 
     def to_trace_event(self, *, pid: int = 0, tid: int = 0) -> TraceEvent:
         """Convert to a Chrome trace counter event."""
+        logger.debug("to_trace_event called")
         return TraceEvent(
             name="gpu_counters",
             cat="gpu",
@@ -139,6 +146,7 @@ class GPUPerformanceState:
     temperature_c: float = 0.0
 
     def to_trace_event(self, *, pid: int = 0, tid: int = 0) -> TraceEvent:
+        logger.debug("to_trace_event called")
         return TraceEvent(
             name="gpu_performance_state",
             cat="gpu_state",
@@ -160,6 +168,7 @@ def _get_powermetrics_gpu_stats() -> dict[str, float]:
 
     Returns partial stats if available, empty dict on failure.
     """
+    logger.debug("_get_powermetrics_gpu_stats called")
     if platform.system() != "Darwin":
         return {}
 
@@ -233,6 +242,7 @@ def _estimate_counters_from_timing(
     Returns:
         GPUCounters with estimated values.
     """
+    logger.debug("_estimate_counters_from_timing called with elapsed_ms=%s, flops=%s, bytes_moved=%s", elapsed_ms, flops, bytes_moved)
     elapsed_s = elapsed_ms / 1000.0
 
     if elapsed_s <= 0:
@@ -272,6 +282,7 @@ def _estimate_counters_from_timing(
 
 def _extract_raw_counter_values(sample_buffer: Any) -> dict[str, float]:
     """Best-effort extraction of raw counter values from a Metal sample buffer."""
+    logger.debug("_extract_raw_counter_values called with sample_buffer=%s", sample_buffer)
     if sample_buffer is None:
         return {}
 
@@ -297,6 +308,7 @@ def _extract_raw_counter_values(sample_buffer: Any) -> dict[str, float]:
 
 
 def _find_counter(raw: dict[str, float], *keywords: str) -> float | None:
+    logger.debug("_find_counter called with raw=%s", raw)
     for key, value in raw.items():
         lowered = key.lower()
         if all(word in lowered for word in keywords):
@@ -305,6 +317,7 @@ def _find_counter(raw: dict[str, float], *keywords: str) -> float | None:
 
 
 def _compute_hit_rate(hit: float | None, miss: float | None) -> float:
+    logger.debug("_compute_hit_rate called with hit=%s, miss=%s", hit, miss)
     if hit is None or miss is None:
         return 0.0
     total = hit + miss
@@ -340,6 +353,7 @@ class GPUProfiler:
         enable_counters: bool = True,
         peak_bandwidth_gbs: float | None = None,
     ):
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         self._device = device
         self._enable_counters = enable_counters and HAS_METAL_COUNTERS
         self._peak_bandwidth_gbs = peak_bandwidth_gbs or detect_gpu().peak_bw_gbs
@@ -354,6 +368,7 @@ class GPUProfiler:
 
     def _init_metal_counters(self) -> None:
         """Initialize Metal counter sampling infrastructure."""
+        logger.debug("_init_metal_counters called")
         if not HAS_METAL_COUNTERS:
             return
 
@@ -380,10 +395,12 @@ class GPUProfiler:
     @property
     def counters_available(self) -> bool:
         """Whether direct GPU counter access is available."""
+        logger.debug("counters_available called")
         return self._enable_counters and len(self._counter_sets) > 0
 
     def list_counter_sets(self) -> list[str]:
         """List available counter set names."""
+        logger.debug("list_counter_sets called")
         if not self._enable_counters:
             return []
 
@@ -400,6 +417,7 @@ class GPUProfiler:
 
         Call stop_capture() after kernel execution to retrieve counters.
         """
+        logger.debug("start_capture called")
         self._capture_start_ns = time.time_ns()
 
         if self._enable_counters and self._device is not None:
@@ -422,6 +440,7 @@ class GPUProfiler:
         Returns:
             GPUCounters snapshot.
         """
+        logger.debug("stop_capture called with flops=%s, bytes_moved=%s", flops, bytes_moved)
         end_ns = time.time_ns()
         elapsed_ms = (end_ns - self._capture_start_ns) / 1e6
 
@@ -465,6 +484,7 @@ class GPUProfiler:
         # 1. Resolve the counter sample buffer
         # 2. Parse counter values by name
         # 3. Map to GPUCounters fields
+        logger.debug("_read_metal_counters called")
         counters = GPUCounters(timestamp_ns=time.time_ns())
         raw = _extract_raw_counter_values(self._sample_buffer)
         if not raw:
@@ -501,14 +521,17 @@ class GPUProfiler:
     @property
     def captures(self) -> list[GPUCounters]:
         """All captured counter snapshots."""
+        logger.debug("captures called")
         return list(self._captures)
 
     def clear(self) -> None:
         """Clear captured data."""
+        logger.debug("clear called")
         self._captures.clear()
 
     def print_summary(self) -> None:
         """Print summary of captured counters."""
+        logger.debug("print_summary called")
         if not self._captures:
             print("No captures recorded")
             return
@@ -540,6 +563,7 @@ def read_gpu_counters(
     Returns:
         GPUCounters with available metrics.
     """
+    logger.debug("read_gpu_counters called with flops=%s, bytes_moved=%s", flops, bytes_moved)
     counters = GPUCounters(timestamp_ns=time.time_ns())
 
     # Try powermetrics for GPU utilization
@@ -553,6 +577,7 @@ def read_gpu_counters(
 
 def read_gpu_performance_state() -> GPUPerformanceState | None:
     """Read current GPU performance state from system telemetry."""
+    logger.debug("read_gpu_performance_state called")
     stats = _get_powermetrics_gpu_stats()
     if not stats:
         return None
@@ -575,6 +600,7 @@ class MetalSystemTraceRecorder:
         template: str = "Metal System Trace",
         output_dir: str | Path = "metal_traces",
     ) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.template = template
         self.output_dir = Path(output_dir)
 
@@ -585,6 +611,7 @@ class MetalSystemTraceRecorder:
         duration_s: float = 2.0,
     ) -> Path:
         """Record a system trace while running the given command."""
+        logger.debug("record_command called with command=%s", command)
         if platform.system() != "Darwin":
             raise RuntimeError("Metal system trace requires macOS")
 
@@ -619,6 +646,7 @@ class MetalSystemTraceRecorder:
         duration_s: float = 2.0,
     ) -> Path:
         """Record using a specific Instruments template."""
+        logger.debug("record_with_template called with command=%s", command)
         original = self.template
         try:
             self.template = template
@@ -633,6 +661,7 @@ class MetalSystemTraceRecorder:
         duration_s: float = 2.0,
     ) -> Path:
         """Record GPU Performance State trace while running a command."""
+        logger.debug("record_gpu_performance_state called with command=%s", command)
         return self.record_with_template(
             command,
             template="GPU Performance State",
@@ -641,6 +670,7 @@ class MetalSystemTraceRecorder:
 
     def export_trace_json(self, trace_path: str | Path) -> Path:
         """Export an xctrace recording to JSON for external analysis."""
+        logger.info("export_trace_json called with trace_path=%s", trace_path)
         if shutil.which("xcrun") is None:
             raise RuntimeError("xcrun not found. Install Xcode command line tools.")
 
@@ -663,6 +693,7 @@ class MetalSystemTraceRecorder:
 
     def export_trace_events(self, trace_path: str | Path) -> list[dict[str, Any]]:
         """Load exported trace JSON if available."""
+        logger.info("export_trace_events called with trace_path=%s", trace_path)
         json_path = self.export_trace_json(trace_path)
         with open(json_path) as handle:
             payload = json.load(handle)
@@ -679,6 +710,7 @@ def get_gpu_info() -> dict[str, Any]:
     Returns:
         Dictionary with GPU name, memory, core count, etc.
     """
+    logger.debug("get_gpu_info called")
     info: dict[str, Any] = {
         "platform": platform.system(),
         "counters_available": HAS_METAL_COUNTERS,

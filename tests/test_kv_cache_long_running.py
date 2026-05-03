@@ -1,5 +1,6 @@
 """Tests for long-running KV cache scenarios."""
 
+import logging
 import time
 
 import numpy as np
@@ -13,11 +14,15 @@ from metal_marlin.paged.cache_manager_optimized import (
 from metal_marlin.paged.kv_block import KVBlockConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestLongRunningKVCache:
     """Test scenarios typical of long-running servers."""
 
     def test_frequency_dominance_prevention(self):
         """Test that logarithmic frequency prevents old heavy-hitters from dominating forever."""
+        logger.info("running test_frequency_dominance_prevention")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         # Use a config that would favor frequency strongly
         eviction_config = EvictionConfig(
@@ -72,6 +77,7 @@ class TestLongRunningKVCache:
 
     def test_ghost_cache_adaptation(self):
         """Test that ghost cache hits trigger adaptation."""
+        logger.info("running test_ghost_cache_adaptation")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         eviction_config = EvictionConfig(
             policy=EvictionPolicy.ADAPTIVE,
@@ -112,4 +118,5 @@ class TestLongRunningKVCache:
     def test_sampled_eviction_performance(self):
         """Test performance of sampled eviction vs full sort."""
         # This would require a large number of sequences
+        logger.info("running test_sampled_eviction_performance")
         pass

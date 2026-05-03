@@ -10,11 +10,15 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerWeights:
@@ -40,6 +44,7 @@ class LayerStreamer:
         Args:
             model_path: Path to model directory or single safetensors file.
         """
+        logger.debug("initializing %s with model_path=%s", type(self).__name__, model_path)
         self.model_path = Path(model_path)
         self._index = self._build_tensor_index()
 
@@ -49,6 +54,7 @@ class LayerStreamer:
         Returns:
             Dictionary mapping tensor names to (file_path, tensor_key).
         """
+        logger.info("_build_tensor_index starting")
         index: dict[str, tuple[Path, str]] = {}
 
         if self.model_path.is_file() and self.model_path.suffix == ".safetensors":
@@ -90,6 +96,7 @@ class LayerStreamer:
             True if key is a linear layer weight (ends with .weight and
             contains typical linear layer patterns).
         """
+        logger.debug("_is_linear called with key=%s", key)
         if not key.endswith(".weight"):
             return False
 
@@ -121,6 +128,7 @@ class LayerStreamer:
         Yields:
             LayerWeights for each linear layer found in the model.
         """
+        logger.debug("iter_linear_layers called")
         linear_keys = [k for k in self._index if self._is_linear(k)]
         total = len(linear_keys)
 
@@ -157,6 +165,7 @@ class LayerStreamer:
         Returns:
             Dictionary with memory estimates in bytes for different metrics.
         """
+        logger.debug("estimate_layer_memory called")
         total_params = 0
         max_layer_params = 0
         max_layer_memory = 0
@@ -214,6 +223,7 @@ class LayerStreamer:
         Returns:
             Bytes per element for the given dtype.
         """
+        logger.debug("_dtype_to_bytes called with dtype=%s", dtype)
         dtype_map = {
             "F64": 8,
             "F32": 4,
@@ -236,4 +246,5 @@ class LayerStreamer:
         Returns:
             List of tensor keys available in the model.
         """
+        logger.debug("list_layers called")
         return sorted(self._index.keys())

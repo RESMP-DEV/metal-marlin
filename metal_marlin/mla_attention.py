@@ -56,6 +56,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -74,12 +75,16 @@ try:
 except ImportError:
     _HAS_CPP_MLA = False
 
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     pass
 
 
 def _get_device() -> torch.device:
     """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    logger.debug("_get_device called")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -141,6 +146,7 @@ class MLARoPE(nn.Module):
         rope_ratio: float = 1.0,
         max_seq_len: int = 4096,
     ):
+        logger.debug("initializing %s with dim=%s, base=%s, rope_ratio=%s, max_seq_len=%s", type(self).__name__, dim, base, rope_ratio, max_seq_len)
         super().__init__()
         self.dim = dim
         self.base = base
@@ -158,6 +164,7 @@ class MLARoPE(nn.Module):
     def _build_cache(self, max_seq_len: int) -> None:
         """Build cos/sin cache for the given sequence length."""
         # Ensure positions are created on the same device as inv_freq
+        logger.info("_build_cache starting")
         device = self.inv_freq.device
         positions = torch.arange(max_seq_len, dtype=torch.float32, device=device)
         freqs = torch.outer(positions, self.inv_freq)  # [max_seq, dim/2]
@@ -185,6 +192,7 @@ class MLARoPE(nn.Module):
             Tensor with RoPE applied, same shape as input
         """
         # seq_len is always the second-to-last dimension
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         seq_len = x.shape[-2]
         device = x.device
         dtype = x.dtype
@@ -259,6 +267,7 @@ class MLAAttention(nn.Module):
         group_size: int = 128,
         bias: bool = False,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, kv_lora_rank=%s, q_lora_rank=%s, qk_nope_head_dim=%s", type(self).__name__, hidden_size, num_heads, kv_lora_rank, q_lora_rank, qk_nope_head_dim)
         super().__init__()
         self.hidden_size = hidden_size
         self.num_heads = num_heads
@@ -357,6 +366,7 @@ class MLAAttention(nn.Module):
         error_msgs: list[str],
     ) -> None:
         """Support GLM kv_a_proj_with_mqa weight alias."""
+        logger.info("_load_from_state_dict called with state_dict=%s, prefix=%s, local_metadata=%s, strict=%s", state_dict, prefix, local_metadata, strict)
         alias_prefix = f"{prefix}kv_a_proj_with_mqa."
         target_prefix = f"{prefix}kv_a_proj."
         for key in list(state_dict.keys()):
@@ -378,6 +388,7 @@ class MLAAttention(nn.Module):
     @classmethod
     def from_config(cls, config: MLAConfig) -> MLAAttention:
         """Create MLAAttention from configuration."""
+        logger.debug("from_config called with config=%s", config)
         return cls(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
@@ -413,6 +424,7 @@ class MLAAttention(nn.Module):
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, _ = hidden_states.shape
 
         # Query path
@@ -546,6 +558,7 @@ class MLAAttention(nn.Module):
             group_size: Quantization group size
             wait: Whether to wait for kernel completion
         """
+        logger.debug("mla_proj_fp4_cpp called with ctx=%s, A=%s, B_packed=%s", ctx, A, B_packed)
         if self._cpp_mla is not None:
             self._cpp_mla.mla_proj_fp4(ctx, A, B_packed, scales, C, M, N, K, group_size, wait)
         else:
@@ -578,6 +591,7 @@ class MLAAttention(nn.Module):
             group_size: Quantization group size
             wait: Whether to wait for kernel completion
         """
+        logger.debug("mla_decode_proj_fp4_cpp called with ctx=%s, x=%s, W_packed=%s", ctx, x, W_packed)
         if self._cpp_mla is not None:
             self._cpp_mla.mla_decode_proj_fp4(ctx, x, W_packed, scales, out, K, N, group_size, wait)
         else:
@@ -589,6 +603,7 @@ class MLAAttention(nn.Module):
         Returns:
             True if C++ extension is available and usable.
         """
+        logger.debug("is_cpp_available called")
         return self._cpp_mla is not None
 
 
@@ -610,6 +625,7 @@ def create_mla_from_hf_config(
         Configured MLAAttention instance
     """
     # Extract dimensions
+    logger.debug("create_mla_from_hf_config called with config=%s, quant_type=%s, group_size=%s", config, quant_type, group_size)
     hidden_size = config.get("hidden_size", 4096)
     num_heads = config.get("num_attention_heads", 32)
     qk_rope_head_dim = config.get("qk_rope_head_dim", 64)

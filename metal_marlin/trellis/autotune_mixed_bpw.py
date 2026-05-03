@@ -110,6 +110,7 @@ class KernelConfig:
     @property
     def config_id(self) -> str:
         """Unique identifier for this configuration."""
+        logger.debug("config_id called")
         return (
             f"{self.bit_width}bit_"
             f"{self.tile_size_m}x{self.tile_size_n}_"
@@ -120,6 +121,7 @@ class KernelConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+        logger.debug("to_dict called")
         return asdict(self)
 
 
@@ -149,6 +151,7 @@ class BenchmarkResult:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+        logger.debug("to_dict called")
         return {
             "config": self.config.to_dict(),
             "batch_size": self.batch_size,
@@ -192,10 +195,12 @@ class OptimizedConfig:
     @property
     def lookup_key(self) -> tuple[int, int, int]:
         """Key for lookup table: (batch_size, bit_width, hidden_dim)."""
+        logger.debug("lookup_key called")
         return (self.batch_size, self.bit_width, self.hidden_dim)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
+        logger.debug("to_dict called")
         return asdict(self)
 
 
@@ -240,6 +245,7 @@ class MixedBPWAutoTuner:
             history_length: Number of runtime samples to keep for adaptation.
         """
         # Detect device type if not specified
+        logger.debug("initializing %s with device=%s, warmup_iterations=%s, benchmark_iterations=%s, enable_online_adaptation=%s, history_length=%s", type(self).__name__, device, warmup_iterations, benchmark_iterations, enable_online_adaptation, history_length)
         self.device = device or self._detect_device_type()
 
         # Benchmarking parameters
@@ -269,6 +275,7 @@ class MixedBPWAutoTuner:
         Returns:
             Device type string (m1, m2, m3, m4, or unknown).
         """
+        logger.debug("_detect_device_type called")
         try:
             import subprocess
 
@@ -311,6 +318,7 @@ class MixedBPWAutoTuner:
         Returns:
             List of all kernel configurations to benchmark.
         """
+        logger.debug("generate_configs called with bit_widths=%s, kernel_variants=%s, batch_strategies=%s", bit_widths, kernel_variants, batch_strategies)
         kernel_variants = kernel_variants or KERNEL_VARIANTS
         batch_strategies = batch_strategies or BATCH_STRATEGIES
 
@@ -353,6 +361,7 @@ class MixedBPWAutoTuner:
         Returns:
             Benchmark result with timing and performance metrics.
         """
+        logger.info("benchmark_config starting with config=%s, batch_size=%s, hidden_dim=%s, intermediate_dim=%s", config, batch_size, hidden_dim, intermediate_dim)
         if not HAS_MPS or not HAS_METAL_AVAILABLE():
             return BenchmarkResult(
                 config=config,
@@ -468,6 +477,7 @@ class MixedBPWAutoTuner:
             intermediate_dim: Intermediate dimension.
         """
         # Simulate kernel work based on config
+        logger.debug("_run_synthetic_kernel called with config=%s, hidden_states=%s, expert_indices=%s", config, hidden_states, expert_indices)
         batch_size, seq_len = hidden_states.shape[:2] if hidden_states.dim() == 3 else (hidden_states.shape[0], 1)
 
         # Simulate different workloads based on kernel variant
@@ -537,6 +547,7 @@ class MixedBPWAutoTuner:
             Estimated memory usage in bytes.
         """
         # Base memory for activations
+        logger.debug("_estimate_memory_usage called with config=%s, batch_size=%s, hidden_dim=%s", config, batch_size, hidden_dim)
         activation_memory = batch_size * hidden_dim * 2  # FP16
 
         # Memory for intermediate tensors
@@ -588,6 +599,7 @@ class MixedBPWAutoTuner:
         Returns:
             Dictionary mapping (batch_size, bit_width, hidden_dim) to optimized configs.
         """
+        logger.debug("run_autotune called with bit_widths=%s, batch_sizes=%s, hidden_dims=%s", bit_widths, batch_sizes, hidden_dims)
         logger.info(
             f"Starting auto-tuning for device {self.device}: "
             f"{len(bit_widths)} bit-widths, {len(batch_sizes)} batch sizes, "
@@ -677,6 +689,7 @@ class MixedBPWAutoTuner:
         Returns:
             Optimal configuration, or None if not found.
         """
+        logger.debug("get_optimal_config called with batch_size=%s, bit_width=%s, hidden_dim=%s", batch_size, bit_width, hidden_dim)
         lookup_key = (batch_size, bit_width, hidden_dim)
 
         # Try exact match first
@@ -711,6 +724,7 @@ class MixedBPWAutoTuner:
         Returns:
             Nearest key, or None if no configurations exist.
         """
+        logger.debug("_find_nearest_key called with target_key=%s", target_key)
         if not self.optimized_configs:
             return None
 
@@ -718,6 +732,7 @@ class MixedBPWAutoTuner:
 
         # Calculate distance to each key
         def distance(key):
+            logger.debug("distance called with key=%s", key)
             batch, bit, hidden = key
             # Bit width is MOST important (must match or close)
             # Use exponential penalty for bit width mismatch
@@ -752,6 +767,7 @@ class MixedBPWAutoTuner:
             config_id: Configuration ID used.
             latency_ms: Actual latency observed.
         """
+        logger.debug("record_online_sample called with batch_size=%s, bit_width=%s, hidden_dim=%s", batch_size, bit_width, hidden_dim)
         if not self.enable_online_adaptation:
             return
 
@@ -781,6 +797,7 @@ class MixedBPWAutoTuner:
         Args:
             lookup_key: (batch_size, bit_width, hidden_dim) key.
         """
+        logger.debug("_update_config_from_history called with lookup_key=%s", lookup_key)
         if lookup_key not in self.online_history:
             return
 
@@ -846,6 +863,7 @@ class MixedBPWAutoTuner:
         Args:
             path: Path to output JSON file.
         """
+        logger.info("export_config called with path=%s", path)
         output = {
             "device": self.device,
             "tuner_params": {
@@ -871,6 +889,7 @@ class MixedBPWAutoTuner:
         Args:
             path: Path to JSON configuration file.
         """
+        logger.info("load_config called with path=%s", path)
         with open(path) as f:
             data = json.load(f)
 
@@ -899,6 +918,7 @@ class MixedBPWAutoTuner:
         Returns:
             Dictionary with tuner statistics.
         """
+        logger.debug("get_stats called")
         return {
             "device": self.device,
             "num_benchmarked_configs": len(self.benchmark_results),
@@ -929,6 +949,7 @@ def get_optimal_config(
     Returns:
         Optimal kernel configuration, or None if not found.
     """
+    logger.debug("get_optimal_config called with batch_size=%s, bit_width=%s, hidden_dim=%s", batch_size, bit_width, hidden_dim)
     if config_path is None:
         config_path = Path(__file__).parent / "default_mixed_bpw_configs.json"
 
@@ -943,6 +964,7 @@ def get_optimal_config(
 
 def HAS_METAL_AVAILABLE() -> bool:
     """Check if Metal is available."""
+    logger.debug("HAS_METAL_AVAILABLE called")
     try:
         import Metal
 
@@ -957,6 +979,7 @@ _default_tuner: MixedBPWAutoTuner | None = None
 
 def get_default_tuner() -> MixedBPWAutoTuner:
     """Get the default singleton tuner instance."""
+    logger.debug("get_default_tuner called")
     global _default_tuner
     if _default_tuner is None:
         _default_tuner = MixedBPWAutoTuner()

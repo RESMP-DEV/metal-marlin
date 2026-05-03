@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -37,8 +38,12 @@ except Exception as exc:  # pragma: no cover - surfaces missing integration modu
     ) from exc
 
 
+
+logger = logging.getLogger(__name__)
+
 def _resolve_phi_model_ids() -> list[str]:
     """Return Phi model IDs to test, honoring env overrides."""
+    logger.debug("_resolve_phi_model_ids called")
     extra = os.environ.get("PHI_MODEL_IDS")
     if extra:
         model_ids = [model_id.strip() for model_id in extra.split(",") if model_id.strip()]
@@ -54,6 +59,7 @@ PHI_MODEL_IDS = _resolve_phi_model_ids()
 
 
 def _load_phi_model(model_id: str):
+    logger.info("_load_phi_model called with model_id=%s", model_id)
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -74,21 +80,25 @@ def _load_phi_model(model_id: str):
 
 @pytest.fixture(scope="session", params=PHI_MODEL_IDS, ids=lambda m: m.rsplit("/", 1)[-1])
 def phi_model_id(request):
+    logger.debug("phi_model_id called with request=%s", request)
     return request.param
 
 
 @pytest.fixture(scope="session")
 def phi_model(phi_model_id):
+    logger.debug("phi_model called with phi_model_id=%s", phi_model_id)
     return _load_phi_model(phi_model_id)
 
 
 @pytest.fixture(scope="session")
 def phi_tokenizer(phi_model_id):
+    logger.debug("phi_tokenizer called with phi_model_id=%s", phi_model_id)
     return AutoTokenizer.from_pretrained(phi_model_id, trust_remote_code=True)
 
 
 class TestPhiTransformersIntegration:
     def test_phi_config(self, phi_model_id):
+        logger.info("running test_phi_config")
         config = AutoConfig.from_pretrained(phi_model_id, trust_remote_code=True)
         assert config.model_type in {"phi", "phi3"}
         if config.architectures:
@@ -96,6 +106,7 @@ class TestPhiTransformersIntegration:
 
     @pytest.mark.slow
     def test_phi_quantization(self, phi_model, phi_tokenizer):
+        logger.info("running test_phi_quantization")
         stats = replace_linear_layers(phi_model, bits=4)
         assert stats["replaced_count"] > 0
 

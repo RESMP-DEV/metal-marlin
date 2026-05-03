@@ -33,12 +33,16 @@ Example (programmatic):
 
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None) -> Any:
     """
@@ -56,6 +60,7 @@ def load_tokenizer(model_path: str | Path, fallback_tokenizer: str | None = None
     Returns:
         Tokenizer instance.
     """
+    logger.info("load_tokenizer called with model_path=%s, fallback_tokenizer=%s", model_path, fallback_tokenizer)
     import json
 
     from transformers import AutoTokenizer
@@ -108,6 +113,7 @@ def load_wikitext2(max_samples: int | None = None) -> list[str]:
     Returns:
         List of text samples from WikiText-2 test set.
     """
+    logger.info("load_wikitext2 called with max_samples=%s", max_samples)
     try:
         from datasets import load_dataset
 
@@ -154,6 +160,7 @@ def load_wikitext2(max_samples: int | None = None) -> list[str]:
 
 def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """Numerically stable softmax."""
+    logger.debug("softmax called with x=%s, axis=%s", x, axis)
     x_max = np.max(x, axis=axis, keepdims=True)
     exp_x = np.exp(x - x_max)
     return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
@@ -161,6 +168,7 @@ def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
 
 def log_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """Numerically stable log-softmax."""
+    logger.debug("log_softmax called with x=%s, axis=%s", x, axis)
     x_max = np.max(x, axis=axis, keepdims=True)
     return x - x_max - np.log(np.sum(np.exp(x - x_max), axis=axis, keepdims=True))
 
@@ -185,6 +193,7 @@ def compute_perplexity_from_logits(
     Returns:
         Perplexity (exp of mean cross-entropy)
     """
+    logger.debug("compute_perplexity_from_logits called with logits_fn=%s, tokenizer=%s, texts=%s", logits_fn, tokenizer, texts)
     total_nll = 0.0
     total_tokens = 0
 
@@ -253,6 +262,7 @@ def compute_perplexity_sliding_window(
     Reference:
         llama.cpp/examples/perplexity/perplexity.cpp - hellaswag_score() and perplexity()
     """
+    logger.debug("compute_perplexity_sliding_window called with logits_fn=%s, tokenizer=%s, text=%s", logits_fn, tokenizer, text)
     if stride is None:
         stride = context_length // 2
     if stride <= 0 or stride > context_length:
@@ -364,6 +374,7 @@ def compute_perplexity_wikitext(
     Returns:
         Dict with 'perplexity', 'n_tokens', 'context_length', 'stride'
     """
+    logger.debug("compute_perplexity_wikitext called with logits_fn=%s, tokenizer=%s, max_samples=%s", logits_fn, tokenizer, max_samples)
     texts = load_wikitext2(max_samples)
 
     # Concatenate texts with newlines (matches llama.cpp preprocessing)
@@ -406,6 +417,7 @@ def compute_kl_divergence(
     Returns:
         (mean_kl, max_kl) across all positions
     """
+    logger.debug("compute_kl_divergence called with logits_fn_p=%s, logits_fn_q=%s, tokenizer=%s", logits_fn_p, logits_fn_q, tokenizer)
     all_kl = []
 
     for text in texts[:50]:
@@ -444,12 +456,14 @@ def compute_kl_divergence(
 
 def rms_norm(x: np.ndarray, weight: np.ndarray, eps: float = 1e-6) -> np.ndarray:
     """RMSNorm: x * weight / sqrt(mean(x^2) + eps)"""
+    logger.debug("rms_norm called with x=%s, weight=%s, eps=%s", x, weight, eps)
     rms = np.sqrt(np.mean(x**2, axis=-1, keepdims=True) + eps)
     return x / rms * weight
 
 
 def rope_embed(x: np.ndarray, positions: np.ndarray, theta: float = 10000.0) -> np.ndarray:
     """Apply rotary position embeddings."""
+    logger.debug("rope_embed called with x=%s, positions=%s, theta=%s", x, positions, theta)
     _seq_len, head_dim = x.shape[-2], x.shape[-1]
 
     # Compute frequencies
@@ -483,6 +497,7 @@ def attention_forward(
     rope_theta: float = 10000.0,
 ) -> np.ndarray:
     """Multi-head attention with RoPE."""
+    logger.debug("attention_forward called with x=%s, q_weight=%s, k_weight=%s", x, q_weight, k_weight)
     batch, seq_len, hidden = x.shape
     head_dim = hidden // num_heads
     hidden // num_kv_heads
@@ -546,6 +561,7 @@ def mlp_forward(
     activation: str = "silu",
 ) -> np.ndarray:
     """SwiGLU MLP: down(silu(gate(x)) * up(x))"""
+    logger.debug("mlp_forward called with x=%s, gate_weight=%s, up_weight=%s", x, gate_weight, up_weight)
     gate = x @ gate_weight.T
     up = x @ up_weight.T
 
@@ -563,6 +579,7 @@ def mlp_forward(
 
 
 def main():
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Evaluate model perplexity")

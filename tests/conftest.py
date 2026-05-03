@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -53,11 +54,15 @@ except Exception:  # pragma: no cover - fallback for partial installs
 if TYPE_CHECKING:
     import torch as torch_types
 
+
+logger = logging.getLogger(__name__)
+
 # Skip markers for hardware-dependent tests
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    logger.info("running pytest_addoption")
     parser.addoption(
         "--run-slow",
         action="store_true",
@@ -79,6 +84,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    logger.info("running pytest_configure")
     config.addinivalue_line("markers", "slow: mark test as slow (requires --run-slow)")
     config.addinivalue_line("markers", "expensive: mark test as computationally expensive")
     config.addinivalue_line("markers", "smoke: essential smoke test (always runs)")
@@ -88,6 +94,7 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     # Skip slow tests unless --run-slow is specified
+    logger.info("running pytest_collection_modifyitems")
     if not config.getoption("--run-slow"):
         skip_slow = pytest.mark.skip(reason="Need --run-slow to run")
         for item in items:
@@ -127,6 +134,7 @@ def device(request: pytest.FixtureRequest) -> str:
 
     Can be overridden with --device=<device> option.
     """
+    logger.debug("device called with request=%s", request)
     forced = request.config.getoption("--device")
     if forced:
         return forced
@@ -138,6 +146,7 @@ def device(request: pytest.FixtureRequest) -> str:
 @pytest.fixture(scope="session")
 def mps_device() -> str:
     """Return 'mps' device, skipping if MPS is unavailable."""
+    logger.debug("mps_device called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
     return "mps"
@@ -146,6 +155,7 @@ def mps_device() -> str:
 @pytest.fixture(scope="session")
 def cpu_device() -> str:
     """Return 'cpu' device for reference implementations."""
+    logger.debug("cpu_device called")
     return "cpu"
 
 
@@ -157,6 +167,7 @@ def cpu_device() -> str:
 @pytest.fixture(params=["float16", "bfloat16"])
 def half_dtype(request: pytest.FixtureRequest) -> torch_types.dtype:
     """Parametrized fixture for half-precision dtypes (float16, bfloat16)."""
+    logger.debug("half_dtype called with request=%s", request)
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     dtype_map = {
@@ -169,6 +180,7 @@ def half_dtype(request: pytest.FixtureRequest) -> torch_types.dtype:
 @pytest.fixture
 def float16_dtype() -> torch_types.dtype:
     """Return torch.float16 dtype."""
+    logger.debug("float16_dtype called")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     return torch.float16
@@ -177,6 +189,7 @@ def float16_dtype() -> torch_types.dtype:
 @pytest.fixture
 def bfloat16_dtype() -> torch_types.dtype:
     """Return torch.bfloat16 dtype."""
+    logger.debug("bfloat16_dtype called")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     return torch.bfloat16
@@ -185,6 +198,7 @@ def bfloat16_dtype() -> torch_types.dtype:
 @pytest.fixture
 def float32_dtype() -> torch_types.dtype:
     """Return torch.float32 dtype."""
+    logger.debug("float32_dtype called")
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     return torch.float32
@@ -198,12 +212,14 @@ def float32_dtype() -> torch_types.dtype:
 @pytest.fixture
 def seed() -> int:
     """Fixed seed for reproducible tests."""
+    logger.debug("seed called")
     return 42
 
 
 @pytest.fixture
 def rng(seed: int) -> np.random.Generator:
     """NumPy random generator with fixed seed."""
+    logger.debug("rng called with seed=%s", seed)
     return np.random.default_rng(seed)
 
 
@@ -213,6 +229,7 @@ def torch_rng(seed: int, device: str) -> None:
 
     Sets seeds for CPU and MPS backends.
     """
+    logger.debug("torch_rng called with seed=%s, device=%s", seed, device)
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
     torch.manual_seed(seed)
@@ -232,6 +249,7 @@ def make_tensor(device: str):
 
     Returns a function: (shape, dtype, requires_grad) -> Tensor
     """
+    logger.debug("make_tensor called with device=%s", device)
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -240,6 +258,7 @@ def make_tensor(device: str):
         dtype: torch_types.dtype = torch.float16,
         requires_grad: bool = False,
     ) -> torch_types.Tensor:
+        logger.debug("_make called with shape=%s, dtype=%s, requires_grad=%s", shape, dtype, requires_grad)
         return torch.randn(shape, dtype=dtype, device=device, requires_grad=requires_grad)
 
     return _make
@@ -253,6 +272,7 @@ def make_weight_tensor(device: str, rng: np.random.Generator):
 
     Weights are initialized from N(0, scale) and converted to the target dtype.
     """
+    logger.debug("make_weight_tensor called with device=%s, rng=%s", device, rng)
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -261,6 +281,7 @@ def make_weight_tensor(device: str, rng: np.random.Generator):
         dtype: torch_types.dtype = torch.float16,
         scale: float = 0.02,
     ) -> torch_types.Tensor:
+        logger.debug("_make called with shape=%s, dtype=%s, scale=%s", shape, dtype, scale)
         data = rng.standard_normal(shape).astype(np.float32) * scale
         return torch.from_numpy(data).to(dtype=dtype, device=device)
 
@@ -273,6 +294,7 @@ def make_int_tensor(device: str, rng: np.random.Generator):
 
     Returns a function: (shape, low, high, dtype) -> Tensor
     """
+    logger.debug("make_int_tensor called with device=%s, rng=%s", device, rng)
     if not HAS_TORCH or torch is None:
         pytest.skip("PyTorch not available")
 
@@ -282,6 +304,7 @@ def make_int_tensor(device: str, rng: np.random.Generator):
         high: int = 16,
         dtype: torch_types.dtype = torch.int32,
     ) -> torch_types.Tensor:
+        logger.debug("_make called with shape=%s, low=%s, high=%s", shape, low, high)
         data = rng.integers(low, high, size=shape)
         return torch.from_numpy(data).to(dtype=dtype, device=device)
 
@@ -305,6 +328,7 @@ def make_int_tensor(device: str, rng: np.random.Generator):
 )
 def gemm_dims(request: pytest.FixtureRequest) -> tuple[int, int, int]:
     """Parametrized GEMM dimensions (M, N, K) for common inference shapes."""
+    logger.debug("gemm_dims called with request=%s", request)
     return request.param
 
 
@@ -317,6 +341,7 @@ def gemm_dims(request: pytest.FixtureRequest) -> tuple[int, int, int]:
 )
 def small_gemm_dims(request: pytest.FixtureRequest) -> tuple[int, int, int]:
     """Smaller GEMM dimensions for fast smoke tests."""
+    logger.debug("small_gemm_dims called with request=%s", request)
     return request.param
 
 
@@ -331,6 +356,7 @@ def small_gemm_dims(request: pytest.FixtureRequest) -> tuple[int, int, int]:
 )
 def top_k(request: pytest.FixtureRequest) -> int:
     """Number of experts per token for MoE routing."""
+    logger.debug("top_k called with request=%s", request)
     return request.param
 
 
@@ -340,6 +366,7 @@ def top_k(request: pytest.FixtureRequest) -> int:
 )
 def num_experts(request: pytest.FixtureRequest) -> int:
     """Total number of experts in MoE layer."""
+    logger.debug("num_experts called with request=%s", request)
     return request.param
 
 
@@ -351,36 +378,42 @@ def num_experts(request: pytest.FixtureRequest) -> int:
 @pytest.fixture
 def fp16_atol() -> float:
     """Absolute tolerance for FP16 comparisons."""
+    logger.debug("fp16_atol called")
     return 1e-3
 
 
 @pytest.fixture
 def fp16_rtol() -> float:
     """Relative tolerance for FP16 comparisons."""
+    logger.debug("fp16_rtol called")
     return 1e-2
 
 
 @pytest.fixture
 def bf16_atol() -> float:
     """Absolute tolerance for BF16 comparisons."""
+    logger.debug("bf16_atol called")
     return 5e-3
 
 
 @pytest.fixture
 def bf16_rtol() -> float:
     """Relative tolerance for BF16 comparisons."""
+    logger.debug("bf16_rtol called")
     return 2e-2
 
 
 @pytest.fixture
 def quant_atol() -> float:
     """Absolute tolerance for quantized (FP4/INT4) comparisons."""
+    logger.info("quant_atol called")
     return 0.1
 
 
 @pytest.fixture
 def quant_rtol() -> float:
     """Relative tolerance for quantized (FP4/INT4) comparisons."""
+    logger.info("quant_rtol called")
     return 0.05
 
 
@@ -400,6 +433,7 @@ def assert_close(
 
     Moves tensors to CPU for comparison if needed.
     """
+    logger.debug("assert_close called with actual=%s, expected=%s, atol=%s", actual, expected, atol)
     if torch is None:
         raise RuntimeError("PyTorch required for assert_close")
 
@@ -417,6 +451,7 @@ def assert_close(
 
 def relative_error(actual: torch_types.Tensor, expected: torch_types.Tensor) -> float:
     """Compute relative error between two tensors."""
+    logger.debug("relative_error called with actual=%s, expected=%s", actual, expected)
     if torch is None:
         raise RuntimeError("PyTorch required for relative_error")
 

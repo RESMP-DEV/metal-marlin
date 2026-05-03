@@ -9,6 +9,7 @@ Provides flexible configuration for models that mix different layer types:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,9 @@ from ..mixed_precision import (
 )
 from .base import HybridLayerType
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RoPEScalingConfig:
@@ -49,6 +53,7 @@ class RoPEScalingConfig:
     @classmethod
     def from_hf_config(cls, rope_scaling: dict[str, Any] | None) -> RoPEScalingConfig | None:
         """Create from HuggingFace rope_scaling dict."""
+        logger.debug("from_hf_config called with rope_scaling=%s", rope_scaling)
         if rope_scaling is None:
             return None
 
@@ -71,6 +76,7 @@ class RoPEScalingConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to HuggingFace-style dict."""
+        logger.debug("to_dict called")
         result: dict[str, Any] = {
             "type": self.type,
             "factor": self.factor,
@@ -258,6 +264,7 @@ class HybridArchitectureConfig:
         self, layer_type: HybridLayerType, layer_idx: int
     ) -> HybridLayerConfig:
         """Create default config for a layer based on its type."""
+        logger.debug("_create_layer_config called with layer_type=%s, layer_idx=%s", layer_type, layer_idx)
         if layer_type == HybridLayerType.ATTENTION:
             return HybridLayerConfig(
                 layer_type=layer_type,
@@ -291,6 +298,7 @@ class HybridArchitectureConfig:
 
     def _find_shared_attention_layer(self, current_idx: int) -> int:
         """Find the nearest preceding attention layer for weight sharing."""
+        logger.debug("_find_shared_attention_layer called with current_idx=%s", current_idx)
         for idx in range(current_idx - 1, -1, -1):
             if self.layer_types[idx] == HybridLayerType.ATTENTION:
                 return idx
@@ -299,6 +307,7 @@ class HybridArchitectureConfig:
 
     def get_layer_quant(self, layer_idx: int) -> LayerQuantConfig:
         """Get quantization config for a specific layer."""
+        logger.info("get_layer_quant called with layer_idx=%s", layer_idx)
         if self.layer_configs and layer_idx < len(self.layer_configs):
             cfg = self.layer_configs[layer_idx]
             if cfg.quant_config is not None:
@@ -316,6 +325,7 @@ class HybridArchitectureConfig:
 
     def to_mixed_precision_config(self) -> MixedPrecisionConfig:
         """Convert to MixedPrecisionConfig for quantization pipeline."""
+        logger.debug("to_mixed_precision_config called")
         return MixedPrecisionConfig(
             embeddings=self.embed_quant,
             lm_head=self.embed_quant,
@@ -348,6 +358,7 @@ class HybridArchitectureConfig:
         Returns:
             HybridArchitectureConfig for the model.
         """
+        logger.debug("from_hf_config called with config_dict=%s, architecture_name=%s", config_dict, architecture_name)
         arch = architecture_name or detect_hybrid_architecture(config_dict)
 
         # Common fields
@@ -401,6 +412,7 @@ class HybridArchitectureConfig:
         Returns:
             HybridArchitectureConfig for the model.
         """
+        logger.debug("from_pretrained called with model_path=%s", model_path)
         import json
 
         config_path = Path(model_path) / "config.json"
@@ -415,6 +427,7 @@ class HybridArchitectureConfig:
 
 def _parse_layer_type(name: str) -> HybridLayerType:
     """Parse layer type from string name."""
+    logger.debug("_parse_layer_type called with name=%s", name)
     name_lower = name.lower().strip()
     mapping = {
         "attention": HybridLayerType.ATTENTION,
@@ -451,6 +464,7 @@ def detect_hybrid_architecture(config_dict: dict[str, Any]) -> str:
         Architecture name: "jamba", "zamba", "stripedhyena", "mamba", or "dense".
     """
     # Check model_type field
+    logger.debug("detect_hybrid_architecture called with config_dict=%s", config_dict)
     model_type = config_dict.get("model_type", "").lower()
 
     if "jamba" in model_type:
@@ -503,6 +517,7 @@ def _get_layer_types_for_architecture(
 ) -> list[HybridLayerType]:
     """Generate layer type list for known architectures."""
 
+    logger.debug("_get_layer_types_for_architecture called with arch=%s, num_layers=%s, config_dict=%s", arch, num_layers, config_dict)
     if arch == "jamba":
         # Jamba: Mamba layers with periodic attention
         # Default pattern: attention every 8 layers
@@ -573,6 +588,7 @@ def create_jamba_config(
     Returns:
         HybridArchitectureConfig for Jamba-style model.
     """
+    logger.debug("create_jamba_config called with num_layers=%s, hidden_size=%s, attn_every=%s", num_layers, hidden_size, attn_every)
     layer_types = [
         HybridLayerType.ATTENTION if (i + 1) % attn_every == 0 else HybridLayerType.MAMBA
         for i in range(num_layers)
@@ -606,6 +622,7 @@ def create_zamba_config(
         HybridArchitectureConfig for Zamba-style model.
     """
     # Zamba pattern: one attention layer, rest alternate Mamba + shared attention
+    logger.debug("create_zamba_config called with num_layers=%s, hidden_size=%s", num_layers, hidden_size)
     layer_types = []
     for i in range(num_layers):
         if i == 0:
@@ -645,6 +662,7 @@ def create_interleaved_config(
     Returns:
         HybridArchitectureConfig with alternating layers.
     """
+    logger.debug("create_interleaved_config called with num_layers=%s, hidden_size=%s, layer_a=%s", num_layers, hidden_size, layer_a)
     layer_types = [layer_a if i % 2 == 0 else layer_b for i in range(num_layers)]
 
     return HybridArchitectureConfig(

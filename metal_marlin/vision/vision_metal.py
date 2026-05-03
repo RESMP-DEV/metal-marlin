@@ -31,6 +31,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar, cast
@@ -89,6 +90,7 @@ class VisionMetal:
         Raises:
             RuntimeError: If Metal or PyTorch MPS is not available.
         """
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         if not HAS_PYOBJC_METAL or Metal is None:
             raise RuntimeError(
                 "VisionMetal requires PyObjC Metal. Install with:\n"
@@ -111,6 +113,7 @@ class VisionMetal:
 
     def _get_pipeline(self, function_name: str) -> MTLComputePipelineState:
         """Compile and cache a compute pipeline for the given kernel function."""
+        logger.debug("_get_pipeline called with function_name=%s", function_name)
         if function_name in self._pipelines:
             return self._pipelines[function_name]
 
@@ -149,6 +152,7 @@ class VisionMetal:
         Returns:
             Tensor on MPS device
         """
+        logger.debug("_ensure_mps_tensor called with tensor=%s, dtype=%s", tensor, dtype)
         if torch is None:
             raise RuntimeError("Torch is not available")
 
@@ -176,6 +180,7 @@ class VisionMetal:
         Returns:
             Metal buffer object
         """
+        logger.debug("_create_buffer called with data=%s", data)
         if Metal is None:
             raise RuntimeError("Metal is not available")
 
@@ -194,6 +199,7 @@ class VisionMetal:
         Returns:
             Metal buffer containing tensor data
         """
+        logger.debug("_tensor_to_buffer called with tensor=%s", tensor)
         if torch is None:
             raise RuntimeError("Torch is not available")
 
@@ -216,6 +222,7 @@ class VisionMetal:
         Returns:
             PyTorch tensor on MPS device
         """
+        logger.debug("_buffer_to_tensor called with buffer=%s, shape=%s, dtype=%s", buffer, shape, dtype)
         if torch is None:
             raise RuntimeError("Torch is not available")
 
@@ -246,6 +253,7 @@ class VisionMetal:
             >>> print(resized.shape)
             torch.Size([2, 3, 224, 224])
         """
+        logger.debug("resize_bilinear called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -314,6 +322,7 @@ class VisionMetal:
             >>> image = torch.randn(1, 3, 512, 512, device="mps")
             >>> resized = vision.resize_bicubic(image, (224, 224))
         """
+        logger.debug("resize_bicubic called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -380,6 +389,7 @@ class VisionMetal:
             >>> std = (0.229, 0.224, 0.225)
             >>> normalized = vision.normalize(image, mean, std)
         """
+        logger.debug("normalize called with image=%s, mean=%s, std=%s", image, mean, std)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
 
@@ -476,6 +486,7 @@ class VisionMetal:
             >>> std = (0.229, 0.224, 0.225)
             >>> result = vision.resize_and_normalize(image, (224, 224), mean, std)
         """
+        logger.debug("resize_and_normalize called with image=%s, size=%s, mean=%s", image, size, mean)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
 
@@ -568,6 +579,7 @@ class VisionMetal:
             >>> print(patches.shape)
             torch.Size([1, 196, 768])
         """
+        logger.debug("extract_patches called with image=%s, patch_size=%s", image, patch_size)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
         h, w, channels = image_tensor.shape[1], image_tensor.shape[2], image_tensor.shape[3]
@@ -643,6 +655,7 @@ class VisionMetal:
             >>> image = torch.randn(1, 3, 1080, 1920, device="mps")  # HD image
             >>> processed = vision.preprocess_qwen2vl(image, max_pixels=512*512)
         """
+        logger.debug("preprocess_qwen2vl called with image=%s, max_pixels=%s, patch_size=%s", image, max_pixels, patch_size)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
 
@@ -711,6 +724,9 @@ class VisionMetal:
         Common preprocessing step before resize/normalize for images loaded
         from JPEG/PNG files.
 
+
+logger = logging.getLogger(__name__)
+
         Args:
             image: Input image as uint8 tensor of any shape
 
@@ -723,6 +739,7 @@ class VisionMetal:
             >>> print(float_image.min(), float_image.max())
             tensor(0.) tensor(0.9961)
         """
+        logger.debug("uint8_to_float called with image=%s", image)
         if torch is None:
             raise RuntimeError("Torch is not available")
 
@@ -792,6 +809,7 @@ class VisionMetal:
             >>> print(cropped.shape)
             torch.Size([1, 3, 224, 224])
         """
+        logger.debug("center_crop called with image=%s, size=%s, nhwc=%s", image, size, nhwc)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
 
@@ -869,6 +887,7 @@ class VisionMetal:
             >>> print(resized.shape)
             torch.Size([1, 3, 1024, 1024])
         """
+        logger.debug("resize_bilinear_tiled called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -937,6 +956,7 @@ class VisionMetal:
         Returns:
             Resized image
         """
+        logger.debug("resize_bilinear_tiled_shared called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -1007,6 +1027,7 @@ class VisionMetal:
         Returns:
             Resized image
         """
+        logger.debug("resize_bilinear_4pixel called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -1091,6 +1112,7 @@ class VisionMetal:
             >>> print(result.shape)
             torch.Size([1, 3, 224, 224])
         """
+        logger.debug("preprocess_large_image_fused called with image=%s, crop_size=%s, target_size=%s", image, crop_size, target_size)
         image_tensor = self._ensure_mps_tensor(image)
         batch_size = image_tensor.shape[0]
 
@@ -1194,6 +1216,7 @@ class VisionMetal:
             >>> print(resized.shape)
             torch.Size([1, 3, 1024, 1024])
         """
+        logger.debug("resize_bicubic_8x8 called with input=%s, target_size=%s, nhwc=%s", input, target_size, nhwc)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -1269,6 +1292,7 @@ class VisionMetal:
             torch.Size([1, 3, 1024, 1024])
             >>> # Image scaled to 1024x576 with padding on top/bottom
         """
+        logger.debug("resize_aspect_ratio_preserve called with input=%s, target_size=%s, pad_value=%s", input, target_size, pad_value)
         input_tensor = self._ensure_mps_tensor(input)
         batch_size = input_tensor.shape[0]
 
@@ -1342,6 +1366,7 @@ def preprocess_for_vit(
     Returns:
         Batched preprocessed tensor [N, C, H, W] on MPS device
     """
+    logger.debug("preprocess_for_vit called with images=%s, target_size=%s, mean=%s", images, target_size, mean)
     if torch is None:
         raise RuntimeError("preprocess_for_vit requires PyTorch")
 

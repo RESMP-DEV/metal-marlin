@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
 import torch
 from safetensors.torch import load_file
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class QuantizedTensor:
@@ -34,6 +38,7 @@ class QuantizedModel:
     @classmethod
     def load(cls, path: Path | str) -> QuantizedModel:
         """Load a quantized model from safetensors."""
+        logger.info("load called with path=%s", path)
         path = Path(path)
         config_path = path / "quantization_config.json"
         weights_path = path / "model.safetensors"
@@ -50,6 +55,7 @@ class QuantizedModel:
         hadamard_block_map: dict[str, torch.Tensor] = {}
 
         def base_from_suffix(name: str, suffix: str) -> str:
+            logger.debug("base_from_suffix called with name=%s, suffix=%s", name, suffix)
             return name[: -len(suffix)]
 
         for name, tensor in tensors.items():
@@ -134,6 +140,7 @@ class QuantizedModel:
 
 
 def _decode_quant_type(tensor: torch.Tensor) -> str | None:
+    logger.info("_decode_quant_type called with tensor=%s", getattr(tensor, "shape", tensor))
     if tensor.numel() == 0:
         return None
     if tensor.dtype not in (torch.uint8, torch.int8):
@@ -149,6 +156,7 @@ def _decode_quant_type(tensor: torch.Tensor) -> str | None:
 
 
 def _get_group_size(tensor: torch.Tensor | None, config: dict[str, Any]) -> int:
+    logger.debug("_get_group_size called with tensor=%s, config=%s", tensor, config)
     if tensor is not None and tensor.numel() > 0:
         return int(tensor.view(-1)[0].item())
     if "group_size" in config:
@@ -157,6 +165,7 @@ def _get_group_size(tensor: torch.Tensor | None, config: dict[str, Any]) -> int:
 
 
 def _normalize_format(fmt: str | None) -> str:
+    logger.debug("_normalize_format called with fmt=%s", fmt)
     if not fmt:
         return "fp4"
     fmt = fmt.lower()
@@ -179,6 +188,7 @@ def _infer_original_shape(
     group_size: int,
     fmt: str,
 ) -> tuple[int, ...]:
+    logger.debug("_infer_original_shape called with data=%s, scales=%s, group_size=%s", data, scales, group_size)
     if scales is not None and scales.dim() == 2 and group_size > 0:
         if scales.shape[0] == data.shape[0]:
             return (int(scales.shape[0]), int(scales.shape[1]) * group_size)

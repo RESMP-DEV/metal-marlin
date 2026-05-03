@@ -1,3 +1,4 @@
+import logging
 import math
 
 import pytest
@@ -6,6 +7,9 @@ import torch.nn.functional as F
 
 from metal_marlin.fused_attention_mps import fused_scaled_dot_product_attention
 
+
+
+logger = logging.getLogger(__name__)
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 class TestAttentionAccuracy:
@@ -19,6 +23,7 @@ class TestAttentionAccuracy:
     @pytest.mark.parametrize("is_causal", [True, False])
     def test_attention_matches_torch(self, seq_len_q, seq_len_k, is_causal):
         # Skip invalid configuration for SDPA/Logic
+        logger.info("running test_attention_matches_torch")
         if seq_len_q != seq_len_k and is_causal:
              # Torch SDPA behavior for mismatched lengths + causal is specific.
              # Usually for decode (1 vs N), we treat it as non-causal in the kernel call

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,9 @@ except Exception as exc:  # pragma: no cover - surfaces missing integration modu
         "Ensure layer_replacement is available."
     ) from exc
 
+
+logger = logging.getLogger(__name__)
+
 QWEN3_4B = "Qwen/Qwen3-4B"
 _QWEN3_32B_CANDIDATES = (
     "Qwen/Qwen3-32B-Dense",
@@ -45,6 +49,7 @@ _QWEN3_32B_CANDIDATES = (
 
 
 def _resolve_qwen3_32b_dense() -> str | None:
+    logger.debug("_resolve_qwen3_32b_dense called")
     for model_id in _QWEN3_32B_CANDIDATES:
         try:
             config = AutoConfig.from_pretrained(model_id)
@@ -58,6 +63,7 @@ def _resolve_qwen3_32b_dense() -> str | None:
 @pytest.fixture(scope="session")
 def qwen3_model():
     """Load Qwen3-4B for testing."""
+    logger.debug("qwen3_model called")
     return AutoModelForCausalLM.from_pretrained(
         QWEN3_4B,
         torch_dtype=torch.bfloat16,
@@ -67,12 +73,14 @@ def qwen3_model():
 
 @pytest.fixture(scope="session")
 def qwen3_tokenizer():
+    logger.debug("qwen3_tokenizer called")
     return AutoTokenizer.from_pretrained(QWEN3_4B)
 
 
 class TestQwen3DenseTransformersIntegration:
     def test_qwen3_is_dense(self):
         """Verify Qwen3-4B is dense (not MoE)."""
+        logger.info("running test_qwen3_is_dense")
         config = AutoConfig.from_pretrained(QWEN3_4B)
         assert config.model_type == "qwen3"  # Not qwen3_moe
         assert not hasattr(config, "num_experts")
@@ -80,12 +88,14 @@ class TestQwen3DenseTransformersIntegration:
     @pytest.mark.slow
     def test_replacement_on_qwen3(self, qwen3_model):
         """Test layer replacement on Qwen3."""
+        logger.info("running test_replacement_on_qwen3")
         stats = replace_linear_layers(qwen3_model, bits=4)
         assert stats["replaced_count"] > 0
 
     @pytest.mark.slow
     def test_qwen3_generation(self, qwen3_model, qwen3_tokenizer):
         """Test generation after quantization."""
+        logger.info("running test_qwen3_generation")
         replace_linear_layers(qwen3_model, bits=4)
 
         prompt = "Python is"
@@ -104,6 +114,7 @@ class TestQwen3DenseTransformersIntegration:
 
     def test_qwen3_32b_dense_checkpoint_if_available(self):
         """Verify Qwen3-32B-dense config if the checkpoint exists."""
+        logger.info("running test_qwen3_32b_dense_checkpoint_if_available")
         model_id = _resolve_qwen3_32b_dense()
         if model_id is None:
             pytest.skip("Qwen3-32B dense checkpoint not available.")

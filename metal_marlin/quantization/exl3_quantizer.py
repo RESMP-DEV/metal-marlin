@@ -7,6 +7,7 @@ LDLQ quantization for optimal weight compression.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -53,6 +54,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class EXL3QuantResult:
     """Result of EXL3 quantization for a single layer."""
@@ -93,6 +97,7 @@ class EXL3Quantizer:
         max_workers: int | None = None,
         use_metal: bool = True,
     ):
+        logger.debug("initializing %s with bits=%s, group_size=%s, had_k=%s, sigma_reg=%s, max_workers=%s", type(self).__name__, bits, group_size, had_k, sigma_reg, max_workers)
         self.bits = bits
         self.group_size = group_size
         self.had_k = had_k
@@ -116,6 +121,7 @@ class EXL3Quantizer:
         4. Rotate weights
         5. LDLQ quantization with error compensation
         """
+        logger.info("quantize_layer called with weight=%s, hessian=%s, layer_name=%s", getattr(weight, "shape", weight), hessian, layer_name)
         start = time.perf_counter()
 
         W = weight.float().cpu().numpy()
@@ -192,6 +198,7 @@ def ldlq_quantize_layer(
         scales: Per-group scale factors [n_groups, out_features]
         W_q: Quantized weights [out_features, in_features]
     """
+    logger.info("ldlq_quantize_layer called with W=%s, L=%s, D=%s, codebook=%s", W, L, D, codebook)
     W = np.asarray(W, dtype=np.float32)
     out_features, in_features = W.shape
 

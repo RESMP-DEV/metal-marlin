@@ -12,6 +12,7 @@ The philosophy is to support model formats (ONNX, safetensors, GGUF, NeMo), not
 model architectures (Llama, Mistral, Conformer). This way, any standard model
 works automatically.
 """
+import logging
 
 from .calibration import (
     CalibrationCollector,
@@ -39,6 +40,9 @@ from .safetensors_loader import (
     map_weight_names,
     register_architecture,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "CalibrationCollector",

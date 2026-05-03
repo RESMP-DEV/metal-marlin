@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import struct
 import sys
 from pathlib import Path
@@ -92,11 +93,13 @@ FP4_E2M1_BITS: dict[int, int] = {
 
 def fp16_from_bits(bits: int) -> np.float16:
     """Construct an FP16 value from its raw bit pattern."""
+    logger.debug("fp16_from_bits called with bits=%s", bits)
     return np.frombuffer(struct.pack("<H", bits & 0xFFFF), dtype=np.float16)[0]
 
 
 def float_to_fp16_bits(val: np.float16) -> int:
     """Convert FP16 float to its 16-bit integer representation."""
+    logger.debug("float_to_fp16_bits called with val=%s", val)
     return int(np.array([val]).view(np.uint16)[0])
 
 
@@ -113,6 +116,7 @@ def dequant_fp4_scalar(nibble: int) -> np.float16:
       exp_16  = (E + 14) << 10  [for E>0; maps bias-1 to bias-15]
       mant_16 = M << 9          [1 mantissa bit -> position 9 of 10-bit field]
     """
+    logger.info("dequant_fp4_scalar called with nibble=%s", nibble)
     assert 0 <= nibble <= 15
     S = (nibble >> 3) & 1
     E = (nibble >> 1) & 3
@@ -134,6 +138,7 @@ def dequant_fp4_scalar(nibble: int) -> np.float16:
 
 def dequant_fp4_x8(packed_u32: int, scale: float = 1.0) -> list[np.float16]:
     """Dequantize 8 FP4 values from a packed uint32."""
+    logger.info("dequant_fp4_x8 called with packed_u32=%s, scale=%s", packed_u32, scale)
     results = []
     for i in range(8):
         nibble = (packed_u32 >> (i * 4)) & 0xF
@@ -144,6 +149,7 @@ def dequant_fp4_x8(packed_u32: int, scale: float = 1.0) -> list[np.float16]:
 
 def pack_fp4_values(values: list[int]) -> int:
     """Pack up to 8 FP4 nibble codes into a uint32."""
+    logger.info("pack_fp4_values called with values=%s", values)
     assert len(values) <= 8
     packed = 0
     for i, v in enumerate(values):
@@ -153,6 +159,7 @@ def pack_fp4_values(values: list[int]) -> int:
 
 def magic_dequant_u4_scalar(val_4bit: int) -> float:
     """Magic bias trick for unsigned INT4: OR with 0x6400, subtract 1024.0."""
+    logger.info("magic_dequant_u4_scalar called with val_4bit=%s", val_4bit)
     assert 0 <= val_4bit <= 15
     biased_bits = (val_4bit & 0x000F) | 0x6400
     biased_fp16 = fp16_from_bits(biased_bits)
@@ -162,6 +169,7 @@ def magic_dequant_u4_scalar(val_4bit: int) -> float:
 
 def magic_dequant_s4_scalar(val_4bit: int) -> float:
     """Magic bias trick for signed INT4: OR with 0x6400, subtract 1032.0."""
+    logger.info("magic_dequant_s4_scalar called with val_4bit=%s", val_4bit)
     assert 0 <= val_4bit <= 15
     biased_bits = (val_4bit & 0x000F) | 0x6400
     biased_fp16 = fp16_from_bits(biased_bits)
@@ -171,6 +179,7 @@ def magic_dequant_s4_scalar(val_4bit: int) -> float:
 
 def dequant_u4x8(packed_u32: int, scale: float, zero_point: float) -> list[float]:
     """Reference unsigned INT4 x8 dequant with scale and zero_point."""
+    logger.info("dequant_u4x8 called with packed_u32=%s, scale=%s, zero_point=%s", packed_u32, scale, zero_point)
     results = []
     for i in range(8):
         val = (packed_u32 >> (i * 4)) & 0xF
@@ -182,6 +191,7 @@ def dequant_u4x8(packed_u32: int, scale: float, zero_point: float) -> list[float
 
 def dequant_s4x8(packed_u32: int, scale: float, zero_point: float) -> list[float]:
     """Reference signed INT4 x8 dequant with scale and zero_point."""
+    logger.info("dequant_s4x8 called with packed_u32=%s, scale=%s, zero_point=%s", packed_u32, scale, zero_point)
     results = []
     for i in range(8):
         val = (packed_u32 >> (i * 4)) & 0xF
@@ -195,6 +205,7 @@ def ref_dequant_u4_bulk(
     packed_u32: np.ndarray, scales: np.ndarray, zeros: np.ndarray, group_size: int
 ) -> np.ndarray:
     """Reference bulk unsigned INT4 dequantization."""
+    logger.info("ref_dequant_u4_bulk called with packed_u32=%s, scales=%s, zeros=%s, group_size=%s", packed_u32, scales, zeros, group_size)
     n_packed = len(packed_u32)
     output = np.zeros(n_packed * 8, dtype=np.float16)
     for i, packed in enumerate(packed_u32):
@@ -212,6 +223,7 @@ def ref_dequant_s4_bulk(
     packed_u32: np.ndarray, scales: np.ndarray, zeros: np.ndarray, group_size: int
 ) -> np.ndarray:
     """Reference bulk signed INT4 dequantization (offset binary)."""
+    logger.info("ref_dequant_s4_bulk called with packed_u32=%s, scales=%s, zeros=%s, group_size=%s", packed_u32, scales, zeros, group_size)
     n_packed = len(packed_u32)
     output = np.zeros(n_packed * 8, dtype=np.float16)
     for i, packed in enumerate(packed_u32):
@@ -228,6 +240,7 @@ def ref_dequant_s4_bulk(
 
 def ref_dequant_fp4_bulk(packed_u32: np.ndarray, scales: np.ndarray, group_size: int) -> np.ndarray:
     """Reference bulk FP4 E2M1 dequantization."""
+    logger.info("ref_dequant_fp4_bulk called with packed_u32=%s, scales=%s, group_size=%s", packed_u32, scales, group_size)
     n_packed = len(packed_u32)
     output = np.zeros(n_packed * 8, dtype=np.float16)
     for i, packed in enumerate(packed_u32):
@@ -256,6 +269,7 @@ def ref_dequant_fp8_e5m2(code: int) -> np.float16:
       Infinity (E=31, M=0): +/- Inf
       NaN (E=31, M!=0): NaN
     """
+    logger.info("ref_dequant_fp8_e5m2 called with code=%s", code)
     assert 0 <= code <= 255
     S = (code >> 7) & 1
     E = (code >> 2) & 0x1F
@@ -269,6 +283,7 @@ def ref_dequant_fp8_e5m2(code: int) -> np.float16:
 
 def ref_dequant_fp8_e5m2_value(code: int) -> float:
     """Compute the mathematical value of an FP8 E5M2 code."""
+    logger.info("ref_dequant_fp8_e5m2_value called with code=%s", code)
     S = (code >> 7) & 1
     E = (code >> 2) & 0x1F
     M = code & 0x3
@@ -288,6 +303,7 @@ def ref_dequant_fp8_e5m2_value(code: int) -> float:
 
 def ref_dequant_fp8_e5m2_x4(packed_u32: int, scale: float = 1.0) -> list[np.float16]:
     """Dequantize 4 FP8 E5M2 values from a packed uint32 with scale."""
+    logger.info("ref_dequant_fp8_e5m2_x4 called with packed_u32=%s, scale=%s", packed_u32, scale)
     results = []
     for i in range(4):
         byte_val = (packed_u32 >> (i * 8)) & 0xFF
@@ -298,6 +314,7 @@ def ref_dequant_fp8_e5m2_x4(packed_u32: int, scale: float = 1.0) -> list[np.floa
 
 def build_fp8_e5m2_reference_table() -> np.ndarray:
     """Build the complete 256-entry FP8 E5M2 -> FP16 reference table."""
+    logger.info("build_fp8_e5m2_reference_table starting")
     table = np.zeros(256, dtype=np.uint16)
     for code in range(256):
         S = (code >> 7) & 1
@@ -327,6 +344,7 @@ FP8_E5M2_REFERENCE = build_fp8_e5m2_reference_table()
 
 
 def _check_metal_available() -> bool:
+    logger.debug("_check_metal_available called")
     try:
         import Metal  # noqa: F401
 
@@ -337,6 +355,7 @@ def _check_metal_available() -> bool:
 
 def _read_metal_buffer(buf, nbytes: int) -> bytes:
     """Read bytes from a Metal buffer (handles PyObjC variants)."""
+    logger.debug("_read_metal_buffer called with buf=%s, nbytes=%s", buf, nbytes)
     import ctypes
 
     contents = buf.contents()
@@ -354,6 +373,7 @@ def _read_metal_buffer(buf, nbytes: int) -> bytes:
 
 def _compile_dequant_shader():
     """Compile the dequant.metal shader and return (device, library)."""
+    logger.info("_compile_dequant_shader called")
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -370,6 +390,7 @@ def _compile_dequant_shader():
 
 def _compile_fp8_shader():
     """Compile the dequant_fp8.metal shader and return (device, library)."""
+    logger.info("_compile_fp8_shader starting")
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -386,6 +407,7 @@ def _compile_fp8_shader():
 
 def _compile_bf16_shader():
     """Compile the bf16_kernels.metal shader and return (device, library)."""
+    logger.info("_compile_bf16_shader starting")
     import Metal
 
     device = Metal.MTLCreateSystemDefaultDevice()
@@ -411,6 +433,7 @@ def _compile_bf16_shader():
 
 
 def _bf16_rne_bits(val: np.float32) -> np.uint16:
+    logger.debug("_bf16_rne_bits called with val=%s", val)
     bits = np.array([val], dtype=np.float32).view(np.uint32)[0]
     exp_bits = (bits >> 23) & 0xFF
     mantissa = bits & 0x007FFFFF
@@ -426,12 +449,14 @@ def _bf16_rne_bits(val: np.float32) -> np.uint16:
 
 
 def _bf16_roundtrip(val: np.float32) -> np.float32:
+    logger.debug("_bf16_roundtrip called with val=%s", val)
     bf16_bits = np.uint32(_bf16_rne_bits(val)) << 16
     return np.array([bf16_bits], dtype=np.uint32).view(np.float32)[0]
 
 
 def run_metal_bf16_direct_roundtrip(values: np.ndarray) -> np.ndarray:
     """Run bf16_roundtrip_direct_float8 kernel on Metal hardware."""
+    logger.debug("run_metal_bf16_direct_roundtrip called with values=%s", values)
     import Metal
 
     values = np.asarray(values, dtype=np.float32)
@@ -487,6 +512,7 @@ def run_metal_bf16_direct_roundtrip(values: np.ndarray) -> np.ndarray:
 
 def run_metal_fp4_all_codes() -> np.ndarray:
     """Run test_fp4_all_codes kernel, returns 16 FP16 values."""
+    logger.debug("run_metal_fp4_all_codes called")
     import Metal
 
     device, library = _compile_dequant_shader()
@@ -519,6 +545,7 @@ def run_metal_fp4_all_codes() -> np.ndarray:
 
 def run_metal_fp4_packed_scaled(packed: np.uint32, scale: np.float16) -> np.ndarray:
     """Run test_fp4_packed_scaled kernel: 8 FP4 values with scale."""
+    logger.info("run_metal_fp4_packed_scaled called with packed=%s, scale=%s", packed, scale)
     import Metal
 
     device, library = _compile_dequant_shader()
@@ -565,6 +592,7 @@ def run_metal_int4_dequant(
     is_signed: bool,
 ) -> np.ndarray:
     """Run dequant_int4_kernel on Metal hardware."""
+    logger.info("run_metal_int4_dequant called with packed_weights=%s, scales=%s, zeros=%s, group_size=%s", packed_weights, scales, zeros, group_size)
     import Metal
 
     device, library = _compile_dequant_shader()
@@ -638,6 +666,7 @@ def run_metal_int4_dequant(
 
 def run_metal_fp8_e5m2_all_codes() -> np.ndarray:
     """Run the test_fp8_e5m2_all_codes Metal kernel, returns 256 half values."""
+    logger.debug("run_metal_fp8_e5m2_all_codes called")
     import Metal
 
     device, library = _compile_fp8_shader()
@@ -671,6 +700,7 @@ def run_metal_fp8_e5m2_all_codes() -> np.ndarray:
 
 def run_metal_fp8_e5m2_packed_scaled(packed: np.uint32, scale: np.float16) -> np.ndarray:
     """Run test_fp8_e5m2_packed_scaled kernel: dequant 4 E5M2 values."""
+    logger.info("run_metal_fp8_e5m2_packed_scaled called with packed=%s, scale=%s", packed, scale)
     import Metal
 
     device, library = _compile_fp8_shader()
@@ -741,6 +771,7 @@ class TestFP4ExactValues:
     )
     def test_fp4_code_produces_expected_value(self, code: int, expected_val: float):
         """Each FP4 code maps to exactly one value via bitwise construction."""
+        logger.info("running test_fp4_code_produces_expected_value")
         result = dequant_fp4_scalar(code)
         if expected_val == 0.0:
             result_bits = np.array([result]).view(np.uint16)[0]
@@ -752,6 +783,7 @@ class TestFP4ExactValues:
     @pytest.mark.parametrize("code", range(16))
     def test_fp4_bit_pattern_exact(self, code: int):
         """Verify the exact FP16 bit pattern for each FP4 code."""
+        logger.info("running test_fp4_bit_pattern_exact")
         result = dequant_fp4_scalar(code)
         result_bits = np.array([result]).view(np.uint16)[0]
         expected_bits = FP4_E2M1_BITS[code]
@@ -760,6 +792,7 @@ class TestFP4ExactValues:
     @pytest.mark.parametrize("code", range(16))
     def test_bitwise_matches_lut(self, code: int):
         """Bitwise construction produces same bits as LUT lookup."""
+        logger.info("running test_bitwise_matches_lut")
         bitwise = dequant_fp4_scalar(code)
         lut_val = FP4_E2M1_LUT[code]
         bitwise_bits = np.array([bitwise]).view(np.uint16)[0]
@@ -768,6 +801,7 @@ class TestFP4ExactValues:
 
     def test_positive_negative_symmetry(self):
         """Negative codes are exact negations of positive codes (except zero)."""
+        logger.info("running test_positive_negative_symmetry")
         for pos_code in range(1, 8):
             neg_code = pos_code + 8
             pos_val = float(dequant_fp4_scalar(pos_code))
@@ -776,6 +810,7 @@ class TestFP4ExactValues:
 
     def test_monotonic_positive(self):
         """Positive FP4 values are monotonically increasing (codes 1-7)."""
+        logger.info("running test_monotonic_positive")
         prev = 0.0
         for code in range(1, 8):
             val = float(dequant_fp4_scalar(code))
@@ -784,6 +819,7 @@ class TestFP4ExactValues:
 
     def test_value_range(self):
         """All values lie in [-6.0, 6.0]."""
+        logger.info("running test_value_range")
         for code in range(16):
             val = float(dequant_fp4_scalar(code))
             assert -6.0 <= val <= 6.0
@@ -800,6 +836,7 @@ class TestFP4WithScale:
     @pytest.mark.parametrize("scale", [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 10.0])
     def test_unit_value_scaled(self, scale: float):
         """Code 0b0010 (value 1.0) scaled by various factors."""
+        logger.info("running test_unit_value_scaled")
         packed = pack_fp4_values([0b0010] * 8)
         results = dequant_fp4_x8(packed, scale=scale)
         for i in range(8):
@@ -808,6 +845,7 @@ class TestFP4WithScale:
 
     def test_zero_scale_produces_zeros(self):
         """Zero scale should produce all zeros regardless of input."""
+        logger.info("running test_zero_scale_produces_zeros")
         packed = 0xFFFFFFFF
         results = dequant_fp4_x8(packed, scale=0.0)
         for i, r in enumerate(results):
@@ -815,6 +853,7 @@ class TestFP4WithScale:
 
     def test_large_scale_within_fp16(self):
         """Scale producing values near FP16 max (65504)."""
+        logger.info("running test_large_scale_within_fp16")
         packed = pack_fp4_values([0b0111] * 8)
         scale = np.float16(5000.0)
         results = dequant_fp4_x8(packed, scale=float(scale))
@@ -825,6 +864,7 @@ class TestFP4WithScale:
     @pytest.mark.parametrize("seed", range(20))
     def test_random_packed_scaled(self, seed: int):
         """Random FP4 codes with random scale match element-wise computation."""
+        logger.info("running test_random_packed_scaled")
         rng = np.random.default_rng(seed + 1000)
         nibbles = rng.integers(0, 16, size=8, dtype=np.uint8)
         packed = pack_fp4_values(nibbles.tolist())
@@ -848,6 +888,7 @@ class TestFP4Batch:
 
     def test_single_group(self):
         """Single group of 8 elements."""
+        logger.info("running test_single_group")
         packed = np.array([pack_fp4_values([0, 1, 2, 3, 4, 5, 6, 7])], dtype=np.uint32)
         scales = np.array([1.0], dtype=np.float16)
         result = ref_dequant_fp4_bulk(packed, scales, group_size=128)
@@ -859,6 +900,7 @@ class TestFP4Batch:
 
     def test_multiple_groups_different_scales(self):
         """Two groups with different scales."""
+        logger.info("running test_multiple_groups_different_scales")
         packed = np.array(
             [
                 pack_fp4_values([2, 2, 2, 2, 2, 2, 2, 2]),
@@ -876,6 +918,7 @@ class TestFP4Batch:
 
     def test_large_batch(self):
         """128 elements (16 uint32 words) across 4 groups."""
+        logger.info("running test_large_batch")
         rng = np.random.default_rng(42)
         num_packed = 16
         packed = np.array(
@@ -909,11 +952,13 @@ class TestU4Dequant:
     @pytest.mark.parametrize("val", range(16))
     def test_u4_identity(self, val: int):
         """Each U4 value [0,15] dequants to itself via magic trick."""
+        logger.info("running test_u4_identity")
         result = magic_dequant_u4_scalar(val)
         assert result == pytest.approx(float(val), abs=1e-3)
 
     def test_u4x8_sequential(self):
         """Pack values 0-7 and verify identity dequant."""
+        logger.info("running test_u4x8_sequential")
         packed = pack_fp4_values(list(range(8)))
         results = dequant_u4x8(packed, scale=1.0, zero_point=0.0)
         for i in range(8):
@@ -921,6 +966,7 @@ class TestU4Dequant:
 
     def test_u4x8_max_values(self):
         """All 15s dequant to 15.0."""
+        logger.info("running test_u4x8_max_values")
         packed = 0xFFFFFFFF
         results = dequant_u4x8(packed, scale=1.0, zero_point=0.0)
         for r in results:
@@ -929,6 +975,7 @@ class TestU4Dequant:
     @pytest.mark.parametrize("scale", [0.5, 1.0, 2.0, 0.125])
     def test_u4x8_with_scale(self, scale: float):
         """Scale factor applied correctly."""
+        logger.info("running test_u4x8_with_scale")
         packed = pack_fp4_values(list(range(8)))
         results = dequant_u4x8(packed, scale=scale, zero_point=0.0)
         for i in range(8):
@@ -938,6 +985,7 @@ class TestU4Dequant:
     @pytest.mark.parametrize("zero_point", [0.0, 4.0, 8.0, 15.0])
     def test_u4x8_with_zero_point(self, zero_point: float):
         """Zero point subtracted correctly (asymmetric quantization)."""
+        logger.info("running test_u4x8_with_zero_point")
         packed = pack_fp4_values(list(range(8)))
         results = dequant_u4x8(packed, scale=1.0, zero_point=zero_point)
         for i in range(8):
@@ -966,11 +1014,13 @@ class TestS4Dequant:
     )
     def test_s4_individual_values(self, stored_val: int, expected_signed: float):
         """Verify offset binary mapping: stored - 8 = signed value."""
+        logger.info("running test_s4_individual_values")
         result = magic_dequant_s4_scalar(stored_val)
         assert abs(result - expected_signed) < 0.05
 
     def test_s4_full_range(self):
         """All 16 stored values map to [-8, 7]."""
+        logger.info("running test_s4_full_range")
         for stored in range(16):
             result = magic_dequant_s4_scalar(stored)
             expected = float(stored - 8)
@@ -978,6 +1028,7 @@ class TestS4Dequant:
 
     def test_s4x8_basic(self):
         """S4 x8 dequant with scale=1, zero=0."""
+        logger.info("running test_s4x8_basic")
         packed = pack_fp4_values(list(range(8)))
         results = dequant_s4x8(packed, scale=1.0, zero_point=0.0)
         for i in range(8):
@@ -995,6 +1046,7 @@ class TestINT4Bulk:
 
     def test_u4_single_group(self):
         """U4 bulk: single group, scale=1, zero=0."""
+        logger.info("running test_u4_single_group")
         packed = np.array([0x76543210], dtype=np.uint32)
         scales = np.array([1.0], dtype=np.float16)
         zeros = np.array([0.0], dtype=np.float16)
@@ -1004,6 +1056,7 @@ class TestINT4Bulk:
 
     def test_s4_full_range(self):
         """S4 bulk: two words covering all 16 stored values."""
+        logger.info("running test_s4_full_range")
         packed = np.array([0x76543210, 0xFEDCBA98], dtype=np.uint32)
         scales = np.array([1.0], dtype=np.float16)
         zeros = np.array([0.0], dtype=np.float16)
@@ -1014,6 +1067,7 @@ class TestINT4Bulk:
     @pytest.mark.parametrize("seed", range(10))
     def test_u4_random_large(self, seed: int):
         """Large random U4 buffer correctness."""
+        logger.info("running test_u4_random_large")
         rng = np.random.default_rng(seed + 300)
         group_size = 128
         num_groups = 8
@@ -1040,6 +1094,7 @@ class TestMagicVsReference:
     @pytest.mark.parametrize("seed", range(20))
     def test_u4_magic_matches_direct(self, seed: int):
         """Magic trick U4 values match simple subtraction."""
+        logger.info("running test_u4_magic_matches_direct")
         rng = np.random.default_rng(seed + 400)
         values = rng.integers(0, 16, size=8, dtype=np.uint8)
         packed = pack_fp4_values(values.tolist())
@@ -1059,6 +1114,7 @@ class TestMagicVsReference:
 
     def test_magic_bias_is_1024(self):
         """Verify that 0x6400 in FP16 is exactly 1024.0."""
+        logger.info("running test_magic_bias_is_1024")
         bias = fp16_from_bits(0x6400)
         assert float(bias) == 1024.0
 
@@ -1073,6 +1129,7 @@ class TestFP8E5M2BitwiseConstruction:
 
     def test_all_256_codes_bit_exact(self):
         """Every FP8 E5M2 code [0x00..0xFF] matches the reference table."""
+        logger.info("running test_all_256_codes_bit_exact")
         for code in range(256):
             result = ref_dequant_fp8_e5m2(code)
             result_bits = float_to_fp16_bits(result)
@@ -1081,33 +1138,39 @@ class TestFP8E5M2BitwiseConstruction:
 
     def test_positive_zero(self):
         """Code 0x00 is +0.0."""
+        logger.info("running test_positive_zero")
         val = ref_dequant_fp8_e5m2(0x00)
         assert val == np.float16(0.0)
         assert float_to_fp16_bits(val) == 0x0000
 
     def test_negative_zero(self):
         """Code 0x80 is -0.0."""
+        logger.info("running test_negative_zero")
         val = ref_dequant_fp8_e5m2(0x80)
         assert float_to_fp16_bits(val) == 0x8000
 
     def test_positive_one(self):
         """Code for +1.0: S=0, E=15, M=0 -> byte = 0x3C."""
+        logger.info("running test_positive_one")
         val = ref_dequant_fp8_e5m2(0x3C)
         assert val == np.float16(1.0)
 
     def test_positive_infinity(self):
         """+Inf: S=0, E=31, M=0 -> byte = 0x7C."""
+        logger.info("running test_positive_infinity")
         val = ref_dequant_fp8_e5m2(0x7C)
         assert np.isinf(val) and val > 0
 
     def test_nan_codes(self):
         """E=31, M!=0 are NaN."""
+        logger.info("running test_nan_codes")
         for code in [0x7D, 0x7E, 0x7F, 0xFD, 0xFE, 0xFF]:
             val = ref_dequant_fp8_e5m2(code)
             assert np.isnan(val)
 
     def test_subnormals_positive(self):
         """Positive subnormals: E=0, M in {1,2,3}."""
+        logger.info("running test_subnormals_positive")
         expected_values = [2.0**-16, 2.0**-15, 3.0 * 2.0**-16]
         for m, exp_val in enumerate(expected_values, start=1):
             code = m
@@ -1116,6 +1179,7 @@ class TestFP8E5M2BitwiseConstruction:
 
     def test_max_normal_positive(self):
         """Largest positive normal: S=0, E=30, M=3 -> 57344."""
+        logger.info("running test_max_normal_positive")
         code = (30 << 2) | 3
         val = ref_dequant_fp8_e5m2(code)
         expected = np.float16(57344.0)
@@ -1123,6 +1187,7 @@ class TestFP8E5M2BitwiseConstruction:
 
     def test_mathematical_values_match(self):
         """Cross-check: bitwise construction matches mathematical computation."""
+        logger.info("running test_mathematical_values_match")
         for code in range(256):
             bitwise_val = ref_dequant_fp8_e5m2(code)
             math_val = ref_dequant_fp8_e5m2_value(code)
@@ -1145,6 +1210,7 @@ class TestFP8E5M2PackedDequant:
 
     def test_x4_identity(self):
         """Pack 4 known values and dequant with scale=1."""
+        logger.info("running test_x4_identity")
         packed = 0x00 | (0x3C << 8) | (0xBC << 16) | (0x7C << 24)
         results = ref_dequant_fp8_e5m2_x4(packed, scale=1.0)
 
@@ -1155,6 +1221,7 @@ class TestFP8E5M2PackedDequant:
 
     def test_x4_with_scale(self):
         """Pack normal values and apply scale=0.5."""
+        logger.info("running test_x4_with_scale")
         packed = 0x3C | (0x40 << 8) | (0x38 << 16) | (0x3E << 24)
         results = ref_dequant_fp8_e5m2_x4(packed, scale=0.5)
 
@@ -1165,6 +1232,7 @@ class TestFP8E5M2PackedDequant:
     @pytest.mark.parametrize("seed", range(20))
     def test_random_packed(self, seed):
         """Random packed E5M2 values match element-wise dequant."""
+        logger.info("running test_random_packed")
         rng = np.random.default_rng(seed + 1000)
         bytes_val = rng.integers(0, 256, size=4, dtype=np.uint8)
         packed = (
@@ -1231,6 +1299,7 @@ class TestFP8E5M2NvidiaReference:
     )
     def test_nvidia_reference_value(self, code: int, expected: float):
         """Each reference value matches the dequantized output."""
+        logger.info("running test_nvidia_reference_value")
         result = ref_dequant_fp8_e5m2(code)
         result_f = float(result)
 
@@ -1243,6 +1312,7 @@ class TestFP8E5M2NvidiaReference:
 
     def test_symmetry(self):
         """Positive and negative codes produce values with opposite signs."""
+        logger.info("running test_symmetry")
         for code in range(128):
             pos_val = ref_dequant_fp8_e5m2(code)
             neg_val = ref_dequant_fp8_e5m2(code | 0x80)
@@ -1257,6 +1327,7 @@ class TestFP8E5M2NvidiaReference:
 
     def test_monotonicity_positive_normals(self):
         """Positive normal codes are monotonically increasing."""
+        logger.info("running test_monotonicity_positive_normals")
         prev = -float("inf")
         for code in range(4, 0x7C):
             val = float(ref_dequant_fp8_e5m2(code))
@@ -1274,6 +1345,7 @@ class TestE2M1Properties:
 
     def test_exactly_16_representable_values(self):
         """FP4 has exactly 16 distinct bit patterns."""
+        logger.info("running test_exactly_16_representable_values")
         values = set()
         for code in range(16):
             val = float(dequant_fp4_scalar(code))
@@ -1286,12 +1358,14 @@ class TestE2M1Properties:
 
     def test_exponent_bias_is_1(self):
         """E2M1 uses bias=1, so stored E=1 means actual exponent 0."""
+        logger.info("running test_exponent_bias_is_1")
         assert float(dequant_fp4_scalar(0b0010)) == 1.0
         assert float(dequant_fp4_scalar(0b0100)) == 2.0
         assert float(dequant_fp4_scalar(0b0110)) == 4.0
 
     def test_mantissa_adds_half(self):
         """Setting M=1 multiplies by 1.5 (adds 0.5 to implicit 1.0)."""
+        logger.info("running test_mantissa_adds_half")
         assert float(dequant_fp4_scalar(0b0010)) == 1.0
         assert float(dequant_fp4_scalar(0b0011)) == 1.5
         assert float(dequant_fp4_scalar(0b0100)) == 2.0
@@ -1299,11 +1373,13 @@ class TestE2M1Properties:
 
     def test_subnormal_is_half(self):
         """E=0, M=1 gives the subnormal value 0.5."""
+        logger.info("running test_subnormal_is_half")
         assert float(dequant_fp4_scalar(0b0001)) == 0.5
         assert float(dequant_fp4_scalar(0b1001)) == -0.5
 
     def test_spacing_doubles_per_binade(self):
         """Value spacing doubles with each exponent increment."""
+        logger.info("running test_spacing_doubles_per_binade")
         s1 = float(dequant_fp4_scalar(0b0011)) - float(dequant_fp4_scalar(0b0010))
         s2 = float(dequant_fp4_scalar(0b0101)) - float(dequant_fp4_scalar(0b0100))
         s3 = float(dequant_fp4_scalar(0b0111)) - float(dequant_fp4_scalar(0b0110))
@@ -1322,12 +1398,14 @@ class TestPacking:
 
     def test_pack_identity(self):
         """Pack and extract recovers original nibbles."""
+        logger.info("running test_pack_identity")
         nibbles = [0, 1, 2, 3, 4, 5, 6, 7]
         packed = pack_fp4_values(nibbles)
         assert packed == 0x76543210
 
     def test_pack_all_same(self):
         """All-same nibbles pack correctly."""
+        logger.info("running test_pack_all_same")
         for val in range(16):
             packed = pack_fp4_values([val] * 8)
             for i in range(8):
@@ -1335,12 +1413,14 @@ class TestPacking:
 
     def test_pack_max_value(self):
         """All 0xF nibbles produce 0xFFFFFFFF."""
+        logger.info("running test_pack_max_value")
         packed = pack_fp4_values([0xF] * 8)
         assert packed == 0xFFFFFFFF
 
     @pytest.mark.parametrize("seed", range(50))
     def test_pack_roundtrip_random(self, seed: int):
         """Random nibbles survive pack/unpack."""
+        logger.info("running test_pack_roundtrip_random")
         rng = np.random.default_rng(seed + 2000)
         nibbles = rng.integers(0, 16, size=8).tolist()
         packed = pack_fp4_values(nibbles)
@@ -1358,6 +1438,7 @@ class TestGroupBoundaries:
 
     def test_first_element_of_each_group(self):
         """First element of each group uses that group's scale."""
+        logger.info("running test_first_element_of_each_group")
         group_size = 8
         num_groups = 4
         num_packed = (group_size * num_groups) // 8
@@ -1373,6 +1454,7 @@ class TestGroupBoundaries:
 
     def test_group_transition(self):
         """Elements at group boundary use correct neighboring scales."""
+        logger.info("running test_group_transition")
         group_size = 8
         packed = np.array(
             [
@@ -1398,6 +1480,7 @@ class TestEdgeCases:
 
     def test_fp4_zero_scale_all_codes(self):
         """Zero scale produces exactly 0.0 for all FP4 codes."""
+        logger.info("running test_fp4_zero_scale_all_codes")
         for code in range(16):
             packed = pack_fp4_values([code] * 8)
             results = dequant_fp4_x8(packed, scale=0.0)
@@ -1406,6 +1489,7 @@ class TestEdgeCases:
 
     def test_u4_zero_scale(self):
         """Zero scale for U4 produces all zeros."""
+        logger.info("running test_u4_zero_scale")
         packed = 0xFFFFFFFF
         results = dequant_u4x8(packed, scale=0.0, zero_point=0.0)
         for r in results:
@@ -1413,6 +1497,7 @@ class TestEdgeCases:
 
     def test_fp4_max_representable(self):
         """Largest FP4 value (6.0) with largest safe scale."""
+        logger.info("running test_fp4_max_representable")
         packed = pack_fp4_values([0b0111] * 8)
         results = dequant_fp4_x8(packed, scale=10000.0)
         for r in results:
@@ -1421,6 +1506,7 @@ class TestEdgeCases:
 
     def test_alternating_zero_max(self):
         """Alternating 0 and max values."""
+        logger.info("running test_alternating_zero_max")
         packed = pack_fp4_values([0, 7, 0, 7, 0, 7, 0, 7])
         results = dequant_fp4_x8(packed, scale=1.0)
         expected = [0.0, 6.0, 0.0, 6.0, 0.0, 6.0, 0.0, 6.0]
@@ -1438,6 +1524,7 @@ class TestFP16Precision:
 
     def test_smallest_positive_subnormal(self):
         """FP4 code 0x1 (0.5) is the smallest non-zero positive value."""
+        logger.info("running test_smallest_positive_subnormal")
         result = dequant_fp4_scalar(0x1)
         assert float(result) == 0.5
         bits = np.array([result]).view(np.uint16)[0]
@@ -1446,6 +1533,7 @@ class TestFP16Precision:
 
     def test_fp4_values_are_fp16_exact(self):
         """All 16 FP4 values are exactly representable in FP16."""
+        logger.info("running test_fp4_values_are_fp16_exact")
         for code in range(16):
             val = dequant_fp4_scalar(code)
             val_f32 = np.float32(val)
@@ -1454,6 +1542,7 @@ class TestFP16Precision:
 
     def test_u4_values_are_fp16_exact(self):
         """All 16 U4 integer values [0,15] are exactly representable in FP16."""
+        logger.info("running test_u4_values_are_fp16_exact")
         for val in range(16):
             result = magic_dequant_u4_scalar(val)
             assert result == float(int(result))
@@ -1470,6 +1559,7 @@ class TestMetalFP4Kernels:
 
     def test_all_16_codes(self):
         """Metal kernel produces exact LUT values for all 16 FP4 codes."""
+        logger.info("running test_all_16_codes")
         metal_out = run_metal_fp4_all_codes()
         assert len(metal_out) == 16
 
@@ -1481,6 +1571,7 @@ class TestMetalFP4Kernels:
     @pytest.mark.parametrize("scale", [0.125, 0.5, 1.0, 2.0, 4.0])
     def test_codes_0_to_7_various_scales(self, scale: float):
         """Positive FP4 codes with various scales."""
+        logger.info("running test_codes_0_to_7_various_scales")
         packed = np.uint32(0x76543210)
         metal_out = run_metal_fp4_packed_scaled(packed, np.float16(scale))
         for i in range(8):
@@ -1489,6 +1580,7 @@ class TestMetalFP4Kernels:
 
     def test_negative_codes(self):
         """Negative FP4 codes (8-F) with scale=1."""
+        logger.info("running test_negative_codes")
         packed = np.uint32(0xFEDCBA98)
         metal_out = run_metal_fp4_packed_scaled(packed, np.float16(1.0))
         expected = FP4_E2M1_LUT[8:]
@@ -1500,6 +1592,7 @@ class TestMetalFP4Kernels:
     @pytest.mark.parametrize("seed", range(20))
     def test_random_packed_values(self, seed: int):
         """Random FP4 packed values match reference."""
+        logger.info("running test_random_packed_values")
         rng = np.random.default_rng(seed + 700)
         nibbles = rng.integers(0, 16, size=8, dtype=np.uint8)
         packed_val = pack_fp4_values(nibbles.tolist())
@@ -1519,6 +1612,7 @@ class TestMetalINT4Kernels:
 
     def test_u4_identity(self):
         """U4 with scale=1, zero=0 produces raw integer values."""
+        logger.info("running test_u4_identity")
         packed = np.array([0x76543210], dtype=np.uint32)
         scales = np.array([1.0], dtype=np.float16)
         zeros = np.array([0.0], dtype=np.float16)
@@ -1529,6 +1623,7 @@ class TestMetalINT4Kernels:
 
     def test_s4_identity(self):
         """S4 with scale=1, zero=0 maps stored [0-7] to [-8, -1]."""
+        logger.info("running test_s4_identity")
         packed = np.array([0x76543210], dtype=np.uint32)
         scales = np.array([1.0], dtype=np.float16)
         zeros = np.array([0.0], dtype=np.float16)
@@ -1540,6 +1635,7 @@ class TestMetalINT4Kernels:
     @pytest.mark.parametrize("seed", range(10))
     def test_u4_random_multigroup(self, seed: int):
         """Random U4 buffer with multiple groups."""
+        logger.info("running test_u4_random_multigroup")
         rng = np.random.default_rng(42 + seed)
         group_size = 128
         num_groups = 4
@@ -1558,6 +1654,7 @@ class TestMetalINT4Kernels:
     @pytest.mark.parametrize("group_size", [8, 32, 64, 128, 256])
     def test_u4_various_group_sizes(self, group_size: int):
         """U4 correctness across different quantization group sizes."""
+        logger.info("running test_u4_various_group_sizes")
         rng = np.random.default_rng(999)
         num_elements = 512
         num_packed = num_elements // 8
@@ -1580,6 +1677,7 @@ class TestMetalFP8E5M2Kernel:
 
     def test_all_256_codes_match_reference(self):
         """Metal test_fp8_e5m2_all_codes produces bit-exact reference values."""
+        logger.info("running test_all_256_codes_match_reference")
         metal_out = run_metal_fp8_e5m2_all_codes()
         assert len(metal_out) == 256
 
@@ -1600,6 +1698,7 @@ class TestMetalFP8E5M2Kernel:
 
     def test_zero_codes(self):
         """Verify +0 and -0."""
+        logger.info("running test_zero_codes")
         metal_out = run_metal_fp8_e5m2_all_codes()
         bits = metal_out.view(np.uint16)
         assert bits[0x00] == 0x0000
@@ -1607,18 +1706,21 @@ class TestMetalFP8E5M2Kernel:
 
     def test_infinity_codes(self):
         """Verify +Inf and -Inf."""
+        logger.info("running test_infinity_codes")
         metal_out = run_metal_fp8_e5m2_all_codes()
         assert np.isinf(metal_out[0x7C]) and metal_out[0x7C] > 0
         assert np.isinf(metal_out[0xFC]) and metal_out[0xFC] < 0
 
     def test_nan_codes(self):
         """Verify NaN codes (E=31, M!=0)."""
+        logger.info("running test_nan_codes")
         metal_out = run_metal_fp8_e5m2_all_codes()
         for code in [0x7D, 0x7E, 0x7F, 0xFD, 0xFE, 0xFF]:
             assert np.isnan(metal_out[code])
 
     def test_packed_scale_1(self):
         """Packed codes with scale=1.0."""
+        logger.info("running test_packed_scale_1")
         packed = np.uint32(0x00 | (0x3C << 8) | (0xBC << 16) | (0x40 << 24))
         metal_out = run_metal_fp8_e5m2_packed_scaled(packed, np.float16(1.0))
 
@@ -1630,6 +1732,7 @@ class TestMetalFP8E5M2Kernel:
     @pytest.mark.parametrize("seed", range(20))
     def test_random_packed_e5m2(self, seed):
         """Random packed E5M2 values match element-wise reference."""
+        logger.info("running test_random_packed_e5m2")
         rng = np.random.default_rng(seed + 2000)
 
         valid_codes = [c for c in range(256) if not ((c >> 2) & 0x1F) == 31 or (c & 0x3) == 0]
@@ -1667,6 +1770,7 @@ class TestMetalBF16Compat:
     """Verify BF16 direct load/store conversions."""
 
     def test_direct_roundtrip_float8(self):
+        logger.info("running test_direct_roundtrip_float8")
         values = np.array(
             [0.0, -0.0, 1.0, -2.5, 3.14159, 1e-8, np.inf, np.nan],
             dtype=np.float32,
@@ -1717,10 +1821,14 @@ except ImportError:
     HAS_SUB4BIT = False
 
 
+
+logger = logging.getLogger(__name__)
+
 # Fixtures for sub4bit tests
 @pytest.fixture
 def gaussian_tensor_small():
     """Small Gaussian tensor for quick tests."""
+    logger.debug("gaussian_tensor_small called")
     np.random.seed(42)
     return np.random.randn(64, 192).astype(np.float32) * 0.02
 
@@ -1728,6 +1836,7 @@ def gaussian_tensor_small():
 @pytest.fixture
 def gaussian_tensor_medium():
     """Medium Gaussian tensor for accuracy tests."""
+    logger.debug("gaussian_tensor_medium called")
     np.random.seed(42)
     return np.random.randn(256, 384).astype(np.float32) * 0.02
 
@@ -1735,6 +1844,7 @@ def gaussian_tensor_medium():
 @pytest.fixture
 def uniform_tensor():
     """Uniform distribution tensor (non-Gaussian)."""
+    logger.debug("uniform_tensor called")
     np.random.seed(42)
     return np.random.uniform(-0.05, 0.05, (64, 192)).astype(np.float32)
 
@@ -1745,12 +1855,14 @@ class TestINT2:
 
     def test_levels_correct(self):
         """Verify INT2 quantization levels."""
+        logger.info("running test_levels_correct")
         expected = np.array([-1.5, -0.5, 0.5, 1.5], dtype=np.float32)
         np.testing.assert_array_almost_equal(INT2_LEVELS, expected)
         assert len(INT2_LEVELS) == 4
 
     def test_quantize_roundtrip_accuracy(self, gaussian_tensor_small):
         """Quantize and dequantize, verify reasonable accuracy."""
+        logger.info("running test_quantize_roundtrip_accuracy")
         tensor = gaussian_tensor_small
         packed, scales = quantize_int2(tensor, group_size=64)
         reconstructed = dequantize_int2(packed, scales, group_size=64)
@@ -1766,6 +1878,7 @@ class TestINT2:
 
     def test_packing_correctness(self):
         """Verify 16 INT2 values pack correctly into uint32."""
+        logger.info("running test_packing_correctness")
         np.random.seed(123)
         scale = 0.1
         values = np.array([INT2_LEVELS[i % 4] * scale for i in range(16)])
@@ -1781,6 +1894,7 @@ class TestINT2:
 
     def test_zeros(self):
         """Test quantization of all-zero tensor."""
+        logger.info("running test_zeros")
         tensor = np.zeros((16, 32), dtype=np.float32)
         packed, scales = quantize_int2(tensor, group_size=32)
         reconstructed = dequantize_int2(packed, scales, group_size=32)
@@ -1788,6 +1902,7 @@ class TestINT2:
 
     def test_max_values(self):
         """Test quantization of maximum magnitude values."""
+        logger.info("running test_max_values")
         tensor = np.ones((16, 32), dtype=np.float32) * 1.5
         packed, scales = quantize_int2(tensor, group_size=32)
         reconstructed = dequantize_int2(packed, scales, group_size=32)
@@ -1796,6 +1911,7 @@ class TestINT2:
     @pytest.mark.parametrize("shape", [(32, 64), (128, 320)])
     def test_different_shapes(self, shape):
         """Test various tensor shapes."""
+        logger.info("running test_different_shapes")
         np.random.seed(42)
         tensor = np.random.randn(*shape).astype(np.float32) * 0.02
         packed, scales = quantize_int2(tensor, group_size=64)
@@ -1809,12 +1925,14 @@ class TestINT3:
 
     def test_levels_correct(self):
         """Verify INT3 quantization levels."""
+        logger.info("running test_levels_correct")
         expected = np.array([-3.5, -2.5, -1.5, -0.5, 0.5, 1.5, 2.5, 3.5], dtype=np.float32)
         np.testing.assert_array_almost_equal(INT3_LEVELS, expected)
         assert len(INT3_LEVELS) == 8
 
     def test_quantize_roundtrip_accuracy(self, gaussian_tensor_small):
         """Quantize and dequantize, verify better accuracy than INT2."""
+        logger.info("running test_quantize_roundtrip_accuracy")
         tensor = gaussian_tensor_small
         packed, scales = quantize_int3(tensor, group_size=64)
         reconstructed = dequantize_int3(packed, scales, group_size=64)
@@ -1830,6 +1948,7 @@ class TestINT3:
 
     def test_packing_correctness(self):
         """Verify 10 INT3 values pack correctly into uint32."""
+        logger.info("running test_packing_correctness")
         np.random.seed(123)
         scale = 0.1
         values = np.array([INT3_LEVELS[i % 8] * scale for i in range(10)])
@@ -1845,6 +1964,7 @@ class TestINT3:
 
     def test_zeros(self):
         """Test quantization of all-zero tensor."""
+        logger.info("running test_zeros")
         tensor = np.zeros((16, 30), dtype=np.float32)
         packed, scales = quantize_int3(tensor, group_size=30)
         reconstructed = dequantize_int3(packed, scales, group_size=30)
@@ -1857,6 +1977,7 @@ class TestNF2:
 
     def test_levels_symmetric(self):
         """Verify NF2 levels are symmetric around 0."""
+        logger.info("running test_levels_symmetric")
         assert len(NF2_LEVELS) == 4
         for i in range(2):
             np.testing.assert_almost_equal(NF2_LEVELS[i], -NF2_LEVELS[3 - i], decimal=5)
@@ -1864,6 +1985,7 @@ class TestNF2:
     @pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
     def test_levels_from_gaussian_quantiles(self):
         """Verify NF2 levels are based on Gaussian quantiles."""
+        logger.info("running test_levels_from_gaussian_quantiles")
         quantiles = [0.125, 0.375, 0.625, 0.875]
         expected_raw = stats.norm.ppf(quantiles)
         expected = expected_raw / np.max(np.abs(expected_raw))
@@ -1871,6 +1993,7 @@ class TestNF2:
 
     def test_quantize_roundtrip_accuracy(self, gaussian_tensor_small):
         """Quantize and dequantize Gaussian data; NF2 should be optimal."""
+        logger.info("running test_quantize_roundtrip_accuracy")
         tensor = gaussian_tensor_small
         packed, scales = quantize_nf2(tensor, group_size=64)
         reconstructed = dequantize_nf2(packed, scales, group_size=64)
@@ -1885,6 +2008,7 @@ class TestNF2:
 
     def test_zeros(self):
         """Test quantization of all-zero tensor."""
+        logger.info("running test_zeros")
         tensor = np.zeros((16, 32), dtype=np.float32)
         packed, scales = quantize_nf2(tensor, group_size=32)
         reconstructed = dequantize_nf2(packed, scales, group_size=32)
@@ -1897,6 +2021,7 @@ class TestNF3:
 
     def test_levels_symmetric(self):
         """Verify NF3 levels are symmetric around 0."""
+        logger.info("running test_levels_symmetric")
         assert len(NF3_LEVELS) == 8
         for i in range(4):
             np.testing.assert_almost_equal(NF3_LEVELS[i], -NF3_LEVELS[7 - i], decimal=5)
@@ -1904,6 +2029,7 @@ class TestNF3:
     @pytest.mark.skipif(not HAS_SCIPY, reason="scipy not installed")
     def test_levels_from_gaussian_quantiles(self):
         """Verify NF3 levels are based on Gaussian quantiles."""
+        logger.info("running test_levels_from_gaussian_quantiles")
         n_levels = 8
         quantiles = np.linspace(0.5 / n_levels, 1 - 0.5 / n_levels, n_levels)
         expected_raw = stats.norm.ppf(quantiles)
@@ -1912,6 +2038,7 @@ class TestNF3:
 
     def test_quantize_roundtrip_accuracy(self, gaussian_tensor_small):
         """Quantize and dequantize; NF3 should be more accurate than NF2."""
+        logger.info("running test_quantize_roundtrip_accuracy")
         tensor = gaussian_tensor_small
         packed, scales = quantize_nf3(tensor, group_size=64)
         reconstructed = dequantize_nf3(packed, scales, group_size=64)
@@ -1927,6 +2054,7 @@ class TestNF3:
 
     def test_more_accurate_than_nf2(self, gaussian_tensor_medium):
         """NF3 should have lower quantization error than NF2."""
+        logger.info("running test_more_accurate_than_nf2")
         tensor = gaussian_tensor_medium
 
         packed_nf2, scales_nf2 = quantize_nf2(tensor, group_size=64)
@@ -1944,6 +2072,7 @@ class TestNF3:
 
     def test_zeros(self):
         """Test quantization of all-zero tensor."""
+        logger.info("running test_zeros")
         tensor = np.zeros((16, 30), dtype=np.float32)
         packed, scales = quantize_nf3(tensor, group_size=30)
         reconstructed = dequantize_nf3(packed, scales, group_size=30)
@@ -1957,6 +2086,7 @@ class TestSub4bitUtilityFunctions:
     @pytest.mark.parametrize("quant_type", ["int2", "int3", "nf2", "nf3"])
     def test_compute_quantization_error(self, quant_type, gaussian_tensor_small):
         """Test the error computation utility."""
+        logger.info("running test_compute_quantization_error")
         tensor = gaussian_tensor_small
 
         if quant_type == "int2":
@@ -1982,6 +2112,7 @@ class TestSub4bitUtilityFunctions:
     )
     def test_estimate_compression_ratio(self, quant_type, expected_bits):
         """Test compression ratio estimation."""
+        logger.info("running test_estimate_compression_ratio")
         shape = (4096, 4096)
         group_size = 64
 
@@ -1998,6 +2129,7 @@ class TestSub4bitLUTExport:
 
     def test_get_int2_lut(self):
         """Test INT2 LUT export."""
+        logger.info("running test_get_int2_lut")
         lut = get_int2_lut()
         assert lut.shape == (4,)
         assert lut.dtype == np.float32
@@ -2005,6 +2137,7 @@ class TestSub4bitLUTExport:
 
     def test_get_int3_lut(self):
         """Test INT3 LUT export."""
+        logger.info("running test_get_int3_lut")
         lut = get_int3_lut()
         assert lut.shape == (8,)
         assert lut.dtype == np.float32
@@ -2012,6 +2145,7 @@ class TestSub4bitLUTExport:
 
     def test_get_nf2_lut(self):
         """Test NF2 LUT export."""
+        logger.info("running test_get_nf2_lut")
         lut = get_nf2_lut()
         assert lut.shape == (4,)
         assert lut.dtype == np.float32
@@ -2019,6 +2153,7 @@ class TestSub4bitLUTExport:
 
     def test_get_nf3_lut(self):
         """Test NF3 LUT export."""
+        logger.info("running test_get_nf3_lut")
         lut = get_nf3_lut()
         assert lut.shape == (8,)
         assert lut.dtype == np.float32
@@ -2031,6 +2166,7 @@ class TestSub4bitINTvsNFComparison:
 
     def test_nf2_vs_int2_on_gaussian(self, gaussian_tensor_medium):
         """NF2 should outperform INT2 on Gaussian data."""
+        logger.info("running test_nf2_vs_int2_on_gaussian")
         tensor = gaussian_tensor_medium
 
         packed_int2, scales_int2 = quantize_int2(tensor, group_size=64)
@@ -2050,6 +2186,7 @@ class TestSub4bitEdgeCases:
 
     def test_single_row(self):
         """Test quantization of single-row tensor."""
+        logger.info("running test_single_row")
         tensor = np.random.randn(1, 64).astype(np.float32) * 0.02
 
         for quant_fn, dequant_fn in [
@@ -2062,6 +2199,7 @@ class TestSub4bitEdgeCases:
 
     def test_single_group(self):
         """Test tensor with exactly one quantization group."""
+        logger.info("running test_single_group")
         tensor = np.random.randn(8, 64).astype(np.float32) * 0.02
 
         packed, scales = quantize_int2(tensor, group_size=64)
@@ -2072,6 +2210,7 @@ class TestSub4bitEdgeCases:
 
     def test_very_small_values(self):
         """Test quantization of very small values."""
+        logger.info("running test_very_small_values")
         tensor = np.random.randn(16, 64).astype(np.float32) * 1e-10
 
         packed, scales = quantize_int2(tensor, group_size=64)
@@ -2080,6 +2219,7 @@ class TestSub4bitEdgeCases:
 
     def test_scale_dtype(self):
         """Verify scales are stored as float16."""
+        logger.info("running test_scale_dtype")
         tensor = np.random.randn(16, 64).astype(np.float32) * 0.02
 
         _, scales_int2 = quantize_int2(tensor, group_size=64)
@@ -2094,6 +2234,7 @@ class TestSub4bitEdgeCases:
 
     def test_packed_dtype(self):
         """Verify packed weights are stored as uint32."""
+        logger.info("running test_packed_dtype")
         tensor = np.random.randn(16, 64).astype(np.float32) * 0.02
 
         packed_int2, _ = quantize_int2(tensor, group_size=64)

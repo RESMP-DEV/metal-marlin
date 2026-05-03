@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -50,6 +51,9 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class BenchmarkResult:
     """Results from a single benchmark run."""
@@ -66,11 +70,13 @@ class BenchmarkResult:
 
 def _ceil_div(a: int, b: int) -> int:
     """Ceiling division."""
+    logger.debug("_ceil_div called with a=%s, b=%s", a, b)
     return (a + b - 1) // b
 
 
 def _random_fp4_inputs(K: int, N: int, group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Generate random FP4 packed weights and scales."""
+    logger.debug("_random_fp4_inputs called with K=%s, N=%s, group_size=%s", K, N, group_size)
     k_blocks = _ceil_div(K, 8)
     packed = np.random.randint(0, 2**32 - 1, size=(k_blocks, N), dtype=np.uint32)
     scales = np.random.uniform(0.01, 1.0, size=(K // group_size, N)).astype(np.float16)
@@ -83,6 +89,7 @@ def _random_int4_inputs(
     K: int, N: int, group_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generate random INT4 packed weights, scales, and zeros."""
+    logger.debug("_random_int4_inputs called with K=%s, N=%s, group_size=%s", K, N, group_size)
     k_blocks = _ceil_div(K, 8)
     packed = np.random.randint(0, 2**32 - 1, size=(k_blocks, N), dtype=np.uint32)
     scales = np.random.uniform(0.01, 1.0, size=(K // group_size, N)).astype(np.float16)
@@ -108,6 +115,7 @@ def _setup_metal_dequant(
     Returns:
         Tuple of (buffers, grid, threadgroup)
     """
+    logger.info("_setup_metal_dequant called with lib=%s, device=%s, packed=%s, scales=%s", lib, device, packed, scales)
     k_blocks = _ceil_div(K, 8)
     tg_x, tg_y = 16, 16
     grid = (_ceil_div(N, tg_x), _ceil_div(k_blocks, tg_y), 1)
@@ -161,6 +169,7 @@ def _run_dequant_benchmark(
 ) -> BenchmarkResult:
     """Run benchmark for a single configuration."""
     # Warmup
+    logger.info("_run_dequant_benchmark starting with lib=%s, device=%s, kernel_name=%s, buffers=%s", lib, device, kernel_name, buffers)
     for _ in range(warmup):
         dispatch_kernel(lib, kernel_name, grid, threadgroup, buffers, wait=True)
 
@@ -204,6 +213,7 @@ def benchmark_fp4(
     iterations: int,
 ) -> BenchmarkResult:
     """Benchmark FP4 dequantization."""
+    logger.info("benchmark_fp4 starting with lib=%s, device=%s, M=%s, N=%s", lib, device, M, N)
     packed, scales = _random_fp4_inputs(K, N, group_size)
     buffers, grid, threadgroup = _setup_metal_dequant(
         lib, device, packed, scales, K, N, group_size
@@ -236,6 +246,7 @@ def benchmark_int4(
     iterations: int,
 ) -> BenchmarkResult:
     """Benchmark INT4 dequantization."""
+    logger.info("benchmark_int4 starting with lib=%s, device=%s, M=%s, N=%s", lib, device, M, N)
     packed, scales, zeros = _random_int4_inputs(K, N, group_size)
     buffers, grid, threadgroup = _setup_metal_dequant(
         lib, device, packed, scales, K, N, group_size, zeros
@@ -259,6 +270,7 @@ def benchmark_int4(
 
 def format_result(result: BenchmarkResult) -> str:
     """Format benchmark result for display."""
+    logger.debug("format_result called with result=%s", result)
     return (
         f"  {result.format:6s}: {result.mean_ms:7.3f} ± {result.std_ms:5.3f} ms "
         f"| {result.throughput_gbps:5.2f} GB/s | "
@@ -268,6 +280,7 @@ def format_result(result: BenchmarkResult) -> str:
 
 def main() -> int:
     """Main entry point."""
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Benchmark dequantization performance")
     parser.add_argument(
         "--M",

@@ -1,4 +1,5 @@
 """Tests for custom Metal GEMM kernel integration."""
+import logging
 
 import pytest
 import torch
@@ -6,17 +7,22 @@ import torch
 from metal_marlin.ops.metal_linear import MetalQuantizedLinear
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestMetalQuantizedLinear:
     """Test MetalQuantizedLinear layer."""
 
     def test_int8_layer_creation(self):
         """Test INT8 layer initialization."""
+        logger.info("running test_int8_layer_creation")
         layer = MetalQuantizedLinear(512, 1024, quant_type="int8")
         assert layer.weight_packed.shape == (128, 1024)  # 512//4
         assert layer.scales.shape[1] == 1024
 
     def test_from_linear(self):
         """Test conversion from nn.Linear."""
+        logger.info("running test_from_linear")
         linear = torch.nn.Linear(256, 512)
         metal_linear = MetalQuantizedLinear.from_linear(linear, quant_type="int8")
         assert metal_linear.in_features == 256
@@ -25,6 +31,7 @@ class TestMetalQuantizedLinear:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_forward_mps(self):
         """Test forward pass on MPS."""
+        logger.info("running test_forward_mps")
         linear = torch.nn.Linear(64, 128)
         metal_linear = MetalQuantizedLinear.from_linear(linear, quant_type="int8")
         metal_linear = metal_linear.to("mps")
@@ -38,6 +45,7 @@ class TestMetalQuantizedLinear:
 
     def test_output_similarity(self):
         """Test that quantized output is similar to FP32."""
+        logger.info("running test_output_similarity")
         torch.manual_seed(42)
         linear = torch.nn.Linear(128, 256)
         metal_linear = MetalQuantizedLinear.from_linear(linear, quant_type="int8")

@@ -8,6 +8,7 @@ introduce accuracy regressions.
 """
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -24,6 +25,9 @@ except ImportError:
     TrellisLinear = None  # type: ignore[assignment,misc]
     TrellisCodebook = None  # type: ignore[assignment,misc]
 
+
+
+logger = logging.getLogger(__name__)
 
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required")
 requires_trellis = pytest.mark.skipif(not _HAS_TRELLIS, reason="Trellis modules required")
@@ -51,6 +55,7 @@ def create_test_trellis_linear(
     Returns:
         TrellisLinear ready for testing.
     """
+    logger.info("running create_test_trellis_linear")
     assert TrellisLinear is not None
     assert TrellisCodebook is not None
 
@@ -105,6 +110,7 @@ class TestTrellisLinearAccuracy:
 
     def test_trellis_linear_matches_explicit_dequant(self):
         """Verify fused GEMM matches explicit dequant + matmul."""
+        logger.info("running test_trellis_linear_matches_explicit_dequant")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(256, 128, bits=3, device="mps")
         x = torch.randn(1, 256, dtype=torch.float16, device="mps")
@@ -127,6 +133,7 @@ class TestTrellisLinearAccuracy:
     )
     def test_accuracy_different_sizes(self, in_features: int, out_features: int):
         """Test accuracy across different weight matrix sizes."""
+        logger.info("running test_accuracy_different_sizes")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(in_features, out_features, bits=3, device="mps")
         x = torch.randn(1, in_features, dtype=torch.float16, device="mps")
@@ -146,6 +153,7 @@ class TestTrellisLinearAccuracy:
     @pytest.mark.parametrize("batch_size", [1, 4, 16], ids=["batch1", "batch4", "batch16"])
     def test_accuracy_different_batch_sizes(self, batch_size: int):
         """Test accuracy across different batch sizes."""
+        logger.info("running test_accuracy_different_batch_sizes")
         torch.manual_seed(42)
         in_features, out_features = 256, 128
         linear = create_test_trellis_linear(in_features, out_features, bits=3, device="mps")
@@ -166,6 +174,7 @@ class TestTrellisLinearAccuracy:
     @pytest.mark.parametrize("bits", [2, 3, 4], ids=["2bit", "3bit", "4bit"])
     def test_accuracy_different_bit_widths(self, bits: int):
         """Test accuracy across different quantization bit widths."""
+        logger.info("running test_accuracy_different_bit_widths")
         torch.manual_seed(42)
         in_features, out_features = 256, 128
         linear = create_test_trellis_linear(in_features, out_features, bits=bits, device="mps")
@@ -228,6 +237,7 @@ class TestTrellisLinearAccuracy:
         self, in_features: int, out_features: int, batch_size: int, bits: int
     ):
         """Full parametric test: all size/batch/bit combinations."""
+        logger.info("running test_accuracy_full_matrix")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(in_features, out_features, bits=bits, device="mps")
         x = torch.randn(batch_size, in_features, dtype=torch.float16, device="mps")
@@ -246,6 +256,7 @@ class TestTrellisLinearAccuracy:
 
     def test_determinism(self):
         """Verify fused output is deterministic across runs."""
+        logger.info("running test_determinism")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(256, 128, bits=3, device="mps")
         x = torch.randn(4, 256, dtype=torch.float16, device="mps")
@@ -258,6 +269,7 @@ class TestTrellisLinearAccuracy:
 
     def test_output_finite(self):
         """Verify outputs are finite (no NaN/Inf)."""
+        logger.info("running test_output_finite")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(256, 128, bits=3, device="mps")
         x = torch.randn(4, 256, dtype=torch.float16, device="mps")
@@ -269,6 +281,7 @@ class TestTrellisLinearAccuracy:
 
     def test_correlation_high(self):
         """Verify fused and explicit outputs are highly correlated."""
+        logger.info("running test_correlation_high")
         torch.manual_seed(42)
         linear = create_test_trellis_linear(256, 128, bits=3, device="mps")
         x = torch.randn(8, 256, dtype=torch.float16, device="mps")

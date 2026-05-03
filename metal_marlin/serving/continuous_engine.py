@@ -36,6 +36,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 import uuid
@@ -51,6 +52,9 @@ import torch.nn.functional as F
 if TYPE_CHECKING:
     from ..trellis.model import TrellisForCausalLM
 
+
+
+logger = logging.getLogger(__name__)
 
 class RequestState(IntEnum):
     """State of a generation request."""
@@ -91,10 +95,12 @@ class BatchRequest:
 
     @property
     def num_generated(self) -> int:
+        logger.debug("num_generated called")
         return len(self.generated_tokens)
 
     @property
     def is_finished(self) -> bool:
+        logger.debug("is_finished called")
         return self.state in (RequestState.FINISHED, RequestState.CANCELLED)
 
 
@@ -153,6 +159,7 @@ class ContinuousBatchingEngine:
             tokenizer: HuggingFace tokenizer for encoding/decoding.
             config: Engine configuration (uses defaults if None).
         """
+        logger.debug("initializing %s with model=%s, tokenizer=%s, config=%s", type(self).__name__, model, tokenizer, config)
         self.model = model
         self.tokenizer = tokenizer
         self.config = config or EngineConfig()
@@ -191,6 +198,7 @@ class ContinuousBatchingEngine:
         Returns:
             Future that will contain the generated text when complete.
         """
+        logger.debug("submit called with prompt=%s, config=%s", prompt, config)
         if config is None:
             config = GenerationConfig()
 
@@ -226,6 +234,7 @@ class ContinuousBatchingEngine:
         Returns:
             List of futures for each request.
         """
+        logger.debug("submit_batch called with prompts=%s, config=%s", prompts, config)
         return [self.submit(prompt, config) for prompt in prompts]
 
     def generate(
@@ -244,6 +253,7 @@ class ContinuousBatchingEngine:
         Returns:
             Generated text.
         """
+        logger.debug("generate called with prompt=%s, config=%s", prompt, config)
         future = self.submit(prompt, config)
         return future.result()
 
@@ -263,11 +273,13 @@ class ContinuousBatchingEngine:
         Returns:
             List of generated texts in same order as prompts.
         """
+        logger.debug("generate_batch called with prompts=%s, config=%s", prompts, config)
         futures = self.submit_batch(prompts, config)
         return [f.result() for f in futures]
 
     def start(self) -> None:
         """Start the inference loop in a background thread."""
+        logger.debug("start called")
         if self._running:
             return
 
@@ -281,6 +293,7 @@ class ContinuousBatchingEngine:
         Args:
             wait: If True, waits for the thread to finish.
         """
+        logger.debug("stop called with wait=%s", wait)
         self._running = False
         if wait and self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -294,10 +307,12 @@ class ContinuousBatchingEngine:
         Returns:
             Number of tokens generated in this step.
         """
+        logger.debug("step called")
         return self._step()
 
     def run_until_empty(self) -> None:
         """Run inference until all pending requests are complete."""
+        logger.debug("run_until_empty called")
         while True:
             with self._lock:
                 if not self._pending and not self._active:
@@ -306,6 +321,7 @@ class ContinuousBatchingEngine:
 
     def _inference_loop(self) -> None:
         """Main inference loop (runs in background thread)."""
+        logger.debug("_inference_loop called")
         while self._running:
             tokens = self._step()
             if tokens == 0:
@@ -325,6 +341,7 @@ class ContinuousBatchingEngine:
         Returns:
             Number of tokens generated.
         """
+        logger.debug("_step called")
         start_time = time.time()
 
         # If no active requests, admit a new batch
@@ -366,6 +383,7 @@ class ContinuousBatchingEngine:
         Returns:
             List of newly admitted requests.
         """
+        logger.debug("_admit_requests called")
         with self._lock:
             # How many slots available?
             available = self.config.max_batch_size - len(self._active)
@@ -388,6 +406,7 @@ class ContinuousBatchingEngine:
         For MLA models, prefill computes and caches the compressed KV
         representation for each request's prompt.
         """
+        logger.debug("_run_prefill called with requests=%s", requests)
         if not requests:
             return
 
@@ -445,6 +464,7 @@ class ContinuousBatchingEngine:
         Returns:
             Number of tokens generated.
         """
+        logger.debug("_run_decode called")
         if not self._active:
             return 0
 
@@ -503,6 +523,7 @@ class ContinuousBatchingEngine:
             Sampled token ID.
         """
         # Apply temperature
+        logger.debug("_sample_token called with logits=%s, config=%s", logits, config)
         if config.temperature != 1.0 and config.temperature > 0:
             logits = logits / config.temperature
 
@@ -530,6 +551,7 @@ class ContinuousBatchingEngine:
     def _should_stop(self, request: BatchRequest, token: int) -> bool:
         """Check if generation should stop for a request."""
         # Check max tokens
+        logger.debug("_should_stop called with request=%s, token=%s", request, token)
         if request.num_generated >= request.config.max_new_tokens:
             return True
 
@@ -557,6 +579,7 @@ class ContinuousBatchingEngine:
         Called when all requests in the batch have finished generating.
         Resolves futures and clears the active list for the next wave.
         """
+        logger.debug("_complete_wave called")
         for request in self._active:
             if request.future is not None and not request.future.done():
                 generated_text = self.tokenizer.decode(
@@ -575,10 +598,12 @@ class ContinuousBatchingEngine:
         the entire wave completes to maintain KV cache alignment.
         """
         # Just mark them - they stay in _active until wave completes
+        logger.debug("_complete_finished called")
         pass
 
     def _ensure_kv_cache(self, batch_size: int) -> None:
         """Ensure KV cache is allocated for the given batch size."""
+        logger.debug("_ensure_kv_cache called with batch_size=%s", batch_size)
         from ..kv_cache import TrellisKVCache
 
         if self._kv_cache is None or self._kv_batch_size < batch_size:
@@ -600,6 +625,7 @@ class ContinuousBatchingEngine:
         Returns:
             Dictionary with throughput and latency statistics.
         """
+        logger.debug("get_stats called")
         if not self._batch_stats:
             return {
                 "total_requests": self._total_requests,
@@ -622,17 +648,20 @@ class ContinuousBatchingEngine:
     @property
     def num_pending(self) -> int:
         """Number of requests waiting for prefill."""
+        logger.debug("num_pending called")
         with self._lock:
             return len(self._pending)
 
     @property
     def num_active(self) -> int:
         """Number of requests currently generating."""
+        logger.debug("num_active called")
         return len(self._active)
 
     @property
     def is_idle(self) -> bool:
         """Whether the engine has no work to do."""
+        logger.debug("is_idle called")
         with self._lock:
             return not self._pending and not self._active
 

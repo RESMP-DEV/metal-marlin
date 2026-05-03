@@ -10,6 +10,7 @@ This module provides optimized implementations of the MTP head with:
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 import torch.nn as nn
@@ -18,11 +19,15 @@ from torch import Tensor
 
 from .mmfp4_mtp_head import MMFP4MTPHead
 
+
+logger = logging.getLogger(__name__)
+
 # Check for torch.compile availability (PyTorch 2.0+)
 HAS_COMPILE = hasattr(torch, 'compile')
 
 # JIT scripting for additional speed
 def _jit_script_available() -> bool:
+    logger.debug("_jit_script_available called")
     try:
         import torch.jit
         return True
@@ -34,6 +39,7 @@ HAS_JIT = _jit_script_available()
 # Optimized dtype for matrix multiplications (AMP-like behavior)
 def _get_fast_dtype(device: torch.device) -> torch.dtype:
     """Get the fastest dtype for the device."""
+    logger.debug("_get_fast_dtype called with device=%s", device)
     if device.type == "cuda":
         return torch.float16
     elif device.type == "mps":
@@ -59,6 +65,7 @@ class FusedProjection(nn.Module):
         vocab_size: int,
         num_heads: int,
     ):
+        logger.debug("initializing %s with intermediate_size=%s, vocab_size=%s, num_heads=%s", type(self).__name__, intermediate_size, vocab_size, num_heads)
         super().__init__()
         self.intermediate_size = intermediate_size
         self.vocab_size = vocab_size
@@ -83,6 +90,7 @@ class FusedProjection(nn.Module):
         Returns:
             logits: [batch, num_heads, vocab_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_size = x.shape[0]
         
         # Use einsum for efficient batched matmul
@@ -122,6 +130,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
         group_size: int = 128,
         use_compile: bool = True,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_predictions=%s, group_size=%s, use_compile=%s", type(self).__name__, hidden_size, vocab_size, num_predictions, group_size, use_compile)
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
@@ -161,6 +170,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
     def _forward_impl(self, hidden_states: Tensor) -> Tensor:
         """Internal forward implementation."""
         # Take last position for decode
+        logger.debug("_forward_impl called with hidden_states=%s", hidden_states)
         h = hidden_states[:, -1:, :]  # [batch, 1, hidden]
         
         # Input projection
@@ -185,6 +195,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
         Returns:
             logits: [batch, num_predictions, vocab]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if self._compiled_forward is not None:
             return self._compiled_forward(hidden_states)
         return self._forward_impl(hidden_states)
@@ -196,6 +207,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
         projection weights where possible to reduce memory access.
         """
         # Mark as fused for potential future optimizations
+        logger.debug("fuse_weights called")
         self._weights_fused = True
     
     def speculate_optimized(
@@ -215,6 +227,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
             tokens: [batch, num_tokens]
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate_optimized called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         if num_tokens is None:
             num_tokens = self.num_predictions
         
@@ -261,6 +274,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
             tokens: [batch, num_tokens]
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate_fast called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         if num_tokens is None:
             num_tokens = self.num_predictions
         
@@ -309,6 +323,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
             tokens: [batch, num_tokens]
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate_fused called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         if num_tokens is None:
             num_tokens = self.num_predictions
         
@@ -342,6 +357,7 @@ class OptimizedMMFP4MTPHead(nn.Module):
     
     def reset_buffers(self) -> None:
         """Clear pre-allocated buffers to free memory."""
+        logger.debug("reset_buffers called")
         self._hidden_buffer = None
         self._logits_buffer = None
         self._probs_buffer = None
@@ -368,6 +384,7 @@ class FastSpeculationEngine:
         num_predictions: int = 4,
         enable_caching: bool = True,
     ):
+        logger.debug("initializing %s with mtp_head=%s, num_predictions=%s, enable_caching=%s", type(self).__name__, mtp_head, num_predictions, enable_caching)
         self.mtp_head = mtp_head
         self.num_predictions = num_predictions
         self.enable_caching = enable_caching
@@ -398,6 +415,7 @@ class FastSpeculationEngine:
             tokens: [batch, num_tokens]
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         num_tokens = min(num_tokens, self.num_predictions)
         
         # Use inference mode for speed
@@ -443,6 +461,7 @@ class FastSpeculationEngine:
         device: torch.device,
     ) -> None:
         """Ensure pre-allocated buffers exist and are on correct device."""
+        logger.debug("_ensure_buffers called with batch_size=%s, num_tokens=%s, device=%s", batch_size, num_tokens, device)
         if self._token_buffer is None or self._token_buffer.device != device:
             vocab_size = self.mtp_head.vocab_size
             
@@ -461,11 +480,13 @@ class FastSpeculationEngine:
     
     def clear_cache(self) -> None:
         """Clear cached values."""
+        logger.debug("clear_cache called")
         self._cached_logits = None
         self._cache_valid = False
     
     def reset(self) -> None:
         """Reset engine state."""
+        logger.debug("reset called")
         self.clear_cache()
         self._token_buffer = None
         self._prob_buffer = None
@@ -489,6 +510,7 @@ class BatchedSpeculationEngine:
         num_predictions: int = 4,
         max_batch_size: int = 32,
     ):
+        logger.debug("initializing %s with mtp_head=%s, num_predictions=%s, max_batch_size=%s", type(self).__name__, mtp_head, num_predictions, max_batch_size)
         self.mtp_head = mtp_head
         self.num_predictions = num_predictions
         self.max_batch_size = max_batch_size
@@ -515,6 +537,7 @@ class BatchedSpeculationEngine:
         Returns:
             List of (tokens, probs) tuples
         """
+        logger.debug("speculate_batch called with hidden_states_list=%s, num_tokens=%s, temperature=%s", hidden_states_list, num_tokens, temperature)
         results = []
         
         # Process in chunks for GPU efficiency
@@ -578,6 +601,7 @@ class UltraFastMTPHead(nn.Module):
         use_compile: bool = True,
         dtype: torch.dtype | None = None,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_predictions=%s, group_size=%s, use_compile=%s", type(self).__name__, hidden_size, vocab_size, num_predictions, group_size, use_compile)
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
@@ -639,6 +663,7 @@ class UltraFastMTPHead(nn.Module):
             logits: [batch, num_predictions, vocab]
         """
         # Input projection: [batch, 1, hidden] -> [batch, 1, intermediate]
+        logger.debug("_forward_core called with hidden_states=%s", hidden_states)
         h = self.input_proj(hidden_states)
         h = F.silu(h)
         h = self.norm(h)
@@ -666,6 +691,7 @@ class UltraFastMTPHead(nn.Module):
             logits: [batch, num_predictions, vocab]
         """
         # Take last position for decode
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         h = hidden_states[:, -1:, :]  # [batch, 1, hidden]
         
         if self._compiled_forward is not None:
@@ -693,6 +719,7 @@ class UltraFastMTPHead(nn.Module):
             tokens: [batch, num_tokens]
             probs: [batch, num_tokens, vocab]
         """
+        logger.debug("speculate_ultrafast called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         if num_tokens is None:
             num_tokens = self.num_predictions
         
@@ -715,6 +742,7 @@ class UltraFastMTPHead(nn.Module):
     
     def get_memory_footprint(self) -> dict[str, int]:
         """Get memory usage statistics."""
+        logger.debug("get_memory_footprint called")
         total_params = sum(p.numel() for p in self.parameters())
         total_buffers = sum(b.numel() for b in self.buffers())
         return {
@@ -749,6 +777,7 @@ class DraftSpeedBenchmark:
         Returns:
             Dict with timing statistics
         """
+        logger.info("benchmark_speculate starting with model=%s, hidden_states=%s, num_iterations=%s, warmup=%s", model, hidden_states, num_iterations, warmup)
         import time
         
         device = hidden_states.device
@@ -817,6 +846,7 @@ def create_optimized_mtp_head(
     Returns:
         Optimized MTP head instance
     """
+    logger.debug("create_optimized_mtp_head called with hidden_size=%s, vocab_size=%s, num_predictions=%s", hidden_size, vocab_size, num_predictions)
     if use_ultrafast and HAS_COMPILE:
         return UltraFastMTPHead(
             hidden_size=hidden_size,

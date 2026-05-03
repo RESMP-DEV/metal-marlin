@@ -1,4 +1,5 @@
 """Tests for attention benchmark implementations."""
+import logging
 
 
 import pytest
@@ -19,6 +20,9 @@ except ImportError:
     BENCHMARK_AVAILABLE = False
 
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = [
     pytest.mark.skipif(not BENCHMARK_AVAILABLE, reason="Benchmark not available"),
     pytest.mark.skipif(not torch.backends.mps.is_available() and not torch.cuda.is_available(),
@@ -28,6 +32,7 @@ pytestmark = [
 
 def test_standard_attention_shape():
     """Test standard attention produces correct output shape."""
+    logger.info("running test_standard_attention_shape")
     batch, heads, seq, dim = 2, 4, 16, 32
     q = torch.randn(batch, heads, seq, dim)
     k = torch.randn(batch, heads, seq, dim)
@@ -39,6 +44,7 @@ def test_standard_attention_shape():
 
 def test_standard_attention_causal():
     """Test causal masking in standard attention."""
+    logger.info("running test_standard_attention_causal")
     batch, heads, seq, dim = 1, 1, 8, 16
     torch.manual_seed(42)
     q = torch.randn(batch, heads, seq, dim)
@@ -54,6 +60,7 @@ def test_standard_attention_causal():
 
 def test_flash_attention_tiled_matches_standard():
     """Test flash attention produces similar results to standard attention."""
+    logger.info("running test_flash_attention_tiled_matches_standard")
     batch, heads, seq, dim = 2, 4, 128, 32
     torch.manual_seed(42)
     q = torch.randn(batch, heads, seq, dim)
@@ -69,6 +76,7 @@ def test_flash_attention_tiled_matches_standard():
 
 def test_fused_qkv_attention_shape():
     """Test Fused QKV attention produces correct output shape."""
+    logger.info("running test_fused_qkv_attention_shape")
     batch, seq, hidden = 2, 16, 64
     model = FusedQKVAttention(hidden_dim=hidden, num_heads=4)
     x = torch.randn(batch, seq, hidden)
@@ -79,6 +87,7 @@ def test_fused_qkv_attention_shape():
 
 def test_gqa_attention_shape():
     """Test GQA produces correct output shape."""
+    logger.info("running test_gqa_attention_shape")
     batch, seq, hidden = 2, 16, 64
     num_heads = 8
     num_kv_heads = 2
@@ -94,6 +103,7 @@ def test_gqa_attention_shape():
 
 def test_gqa_reduces_parameters():
     """Test that GQA has fewer parameters than standard MHA."""
+    logger.info("running test_gqa_reduces_parameters")
     hidden, num_heads = 64, 8
     num_kv_heads = 2
 
@@ -109,6 +119,7 @@ def test_gqa_reduces_parameters():
 
 def test_fused_qkv_fewer_kernels():
     """Test that Fused QKV uses one projection instead of three."""
+    logger.info("running test_fused_qkv_fewer_kernels")
     hidden, num_heads = 64, 4
 
     fused = FusedQKVAttention(hidden, num_heads)
@@ -125,6 +136,7 @@ def test_fused_qkv_fewer_kernels():
 
 def test_attention_scale_correctness():
     """Verify attention uses correct scaling factor."""
+    logger.info("running test_attention_scale_correctness")
     batch, heads, seq, dim = 1, 1, 4, 16
     scale = dim ** -0.5
 
@@ -146,6 +158,7 @@ def test_attention_scale_correctness():
 @pytest.mark.parametrize("seq_len", [64, 128, 256])
 def test_flash_attention_various_lengths(seq_len):
     """Test flash attention works with different sequence lengths."""
+    logger.info("running test_flash_attention_various_lengths")
     batch, heads, dim = 2, 4, 32
     q = torch.randn(batch, heads, seq_len, dim)
     k = torch.randn(batch, heads, seq_len, dim)

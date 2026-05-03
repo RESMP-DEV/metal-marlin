@@ -19,6 +19,7 @@ Coverage targets:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -40,6 +41,9 @@ try:
     _HAS_TRELLIS = True
 except Exception:
     _HAS_TRELLIS = False
+
+
+logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.skipif(
     not _HAS_TRELLIS,
@@ -81,6 +85,7 @@ class _ParityFixture:
 
 def _pack_tile_indices(tile_indices: np.ndarray, bits: int) -> np.ndarray:
     """Pack a 16x16 tile of quant indices into Trellis byte layout."""
+    logger.info("_pack_tile_indices called with tile_indices=%s, bits=%s", tile_indices, bits)
     flat = np.asarray(tile_indices, dtype=np.uint8).reshape(-1)
 
     if bits == 4:
@@ -121,6 +126,7 @@ def _pack_tile_indices(tile_indices: np.ndarray, bits: int) -> np.ndarray:
 
 def _quantize_weight_to_trellis(weight: torch.Tensor, bits: int) -> _MockTrellisWeight:
     """Quantize an FP32 matrix into Trellis packed representation."""
+    logger.info("_quantize_weight_to_trellis called with weight=%s, bits=%s", weight, bits)
     matrix = weight.detach().cpu().float().numpy()
     out_features, in_features = matrix.shape
 
@@ -175,6 +181,7 @@ def _quantize_weight_to_trellis(weight: torch.Tensor, bits: int) -> _MockTrellis
 
 def _prepare_quantized_expert(base: _PreparedExpert, bits: int) -> _PreparedExpert:
     """Create a quantized expert by dequantizing TrellisLinear weights once."""
+    logger.info("_prepare_quantized_expert called with base=%s, bits=%s", base, bits)
     gate_linear = TrellisLinear.from_trellis_weight(
         _quantize_weight_to_trellis(base.gate_weight, bits),
         device="cpu",
@@ -197,6 +204,7 @@ def _prepare_quantized_expert(base: _PreparedExpert, bits: int) -> _PreparedExpe
 
 
 def _run_expert(expert: _PreparedExpert, x: torch.Tensor) -> torch.Tensor:
+    logger.debug("_run_expert called with expert=%s, x=%s", expert, x)
     gate = F.silu(x @ expert.gate_weight.t())
     up = x @ expert.up_weight.t()
     return (gate * up) @ expert.down_weight.t()
@@ -207,6 +215,7 @@ def _route_tokens(
     x: torch.Tensor,
     top_k: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    logger.debug("_route_tokens called with router=%s, x=%s, top_k=%s", router, x, top_k)
     logits = x @ router.weight.t()
     routing_weights, selected_experts = torch.topk(
         torch.softmax(logits, dim=-1, dtype=torch.float32),
@@ -228,6 +237,7 @@ def _moe_forward(
     torch.Tensor
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 ):
+    logger.debug("_moe_forward called with x=%s, router=%s, experts=%s", x, router, experts)
     selected_experts, routing_weights = _route_tokens(router, x, top_k)
     output = torch.zeros(x.shape[0], x.shape[1], dtype=torch.float32)
 
@@ -244,11 +254,13 @@ def _moe_forward(
 
 
 def _attention_scores(hidden_states: torch.Tensor) -> torch.Tensor:
+    logger.debug("_attention_scores called with hidden_states=%s", hidden_states)
     scale = 1.0 / math.sqrt(hidden_states.shape[-1])
     return (hidden_states @ hidden_states.t()) * scale
 
 
 def _error_metrics(actual: torch.Tensor, expected: torch.Tensor) -> dict[str, float]:
+    logger.debug("_error_metrics called with actual=%s, expected=%s", actual, expected)
     diff = actual - expected
     return {
         "mse": float(torch.mean(diff.pow(2)).item()),
@@ -267,6 +279,7 @@ def _compute_perplexity(
     experts: tuple[_PreparedExpert, ...],
     top_k: int,
 ) -> float:
+    logger.debug("_compute_perplexity called with validation_tokens=%s, token_embedding=%s, lm_head=%s", validation_tokens, token_embedding, lm_head)
     total_nll = 0.0
     total_tokens = 0
 
@@ -290,6 +303,7 @@ def _compute_perplexity(
 
 @pytest.fixture(scope="module")
 def parity_fixture() -> _ParityFixture:
+    logger.debug("parity_fixture called")
     torch.manual_seed(17)
 
     hidden_dim = 32
@@ -347,6 +361,7 @@ def parity_fixture() -> _ParityFixture:
 
 @pytest.mark.smoke
 def test_mixed_bpw_smoke(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_mixed_bpw_smoke")
     x = torch.randn(2, parity_fixture.hidden_dim, dtype=torch.float32)
     out = _moe_forward(
         x,
@@ -359,6 +374,7 @@ def test_mixed_bpw_smoke(parity_fixture: _ParityFixture) -> None:
 
 
 def test_individual_bit_width_accuracy(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_individual_bit_width_accuracy")
     x = torch.randn(8, parity_fixture.hidden_dim, dtype=torch.float32)
     reference = parity_fixture.reference_experts[0]
     expected = _run_expert(reference, x)
@@ -387,6 +403,7 @@ def test_individual_bit_width_accuracy(parity_fixture: _ParityFixture) -> None:
 
 
 def test_mixed_bpw_vs_fp16_reference(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_mixed_bpw_vs_fp16_reference")
     x = torch.randn(12, parity_fixture.hidden_dim, dtype=torch.float32)
 
     mixed = _moe_forward(
@@ -403,6 +420,7 @@ def test_mixed_bpw_vs_fp16_reference(parity_fixture: _ParityFixture) -> None:
 
 
 def test_mixed_bpw_vs_pure_4bit_parity(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_mixed_bpw_vs_pure_4bit_parity")
     x = torch.randn(12, parity_fixture.hidden_dim, dtype=torch.float32)
 
     mixed = _moe_forward(
@@ -419,6 +437,7 @@ def test_mixed_bpw_vs_pure_4bit_parity(parity_fixture: _ParityFixture) -> None:
 
 
 def test_token_level_output_matching(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_token_level_output_matching")
     x = torch.randn(1, parity_fixture.hidden_dim, dtype=torch.float32)
 
     mixed = _moe_forward(
@@ -432,6 +451,7 @@ def test_token_level_output_matching(parity_fixture: _ParityFixture) -> None:
 
 
 def test_sequence_level_consistency(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_sequence_level_consistency")
     x = torch.randn(14, parity_fixture.hidden_dim, dtype=torch.float32)
     full = _moe_forward(
         x, parity_fixture.router, parity_fixture.mixed_experts, parity_fixture.top_k
@@ -457,6 +477,7 @@ def test_sequence_level_consistency(parity_fixture: _ParityFixture) -> None:
 
 
 def test_batch_processing_consistency(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_batch_processing_consistency")
     x = torch.randn(8, parity_fixture.hidden_dim, dtype=torch.float32)
     batch_out = _moe_forward(
         x, parity_fixture.router, parity_fixture.mixed_experts, parity_fixture.top_k
@@ -477,6 +498,7 @@ def test_batch_processing_consistency(parity_fixture: _ParityFixture) -> None:
 
 
 def test_attention_like_computation_accuracy(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_attention_like_computation_accuracy")
     x = torch.randn(10, parity_fixture.hidden_dim, dtype=torch.float32)
 
     hidden_mixed = _moe_forward(
@@ -495,6 +517,7 @@ def test_attention_like_computation_accuracy(parity_fixture: _ParityFixture) -> 
 
 
 def test_moe_routing_consistency_mixed_bpw(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_moe_routing_consistency_mixed_bpw")
     x = torch.randn(16, parity_fixture.hidden_dim, dtype=torch.float32)
 
     _, idx_mixed, weights_mixed = _moe_forward(
@@ -526,6 +549,7 @@ def test_moe_routing_consistency_mixed_bpw(parity_fixture: _ParityFixture) -> No
 
 
 def test_mixed_bpw_perplexity_approximation(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_mixed_bpw_perplexity_approximation")
     ppl_ref = _compute_perplexity(
         parity_fixture.validation_tokens,
         parity_fixture.token_embedding,
@@ -563,6 +587,7 @@ def test_mixed_bpw_perplexity_approximation(parity_fixture: _ParityFixture) -> N
 
 
 def test_mixed_bpw_regression_detection(parity_fixture: _ParityFixture) -> None:
+    logger.info("running test_mixed_bpw_regression_detection")
     x = torch.randn(12, parity_fixture.hidden_dim, dtype=torch.float32)
 
     mixed = _moe_forward(

@@ -17,6 +17,7 @@ path so they exercise the local Metal compiler/runtime stack directly.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import sys
 from pathlib import Path
@@ -35,6 +36,9 @@ from metal_marlin.metal_dispatch import (
     _CopyBackBuffer,
     mps_tensor_to_metal_buffer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 PROBE_SOURCE = r"""
 #include <metal_stdlib>
@@ -124,16 +128,19 @@ kernel void probe_array_ref_qk(
 
 
 def _copy_back_if_needed(buffer_wrapper: object, tensor: torch.Tensor) -> None:
+    logger.debug("_copy_back_if_needed called with buffer_wrapper=%s, tensor=%s", buffer_wrapper, tensor)
     if isinstance(buffer_wrapper, _CopyBackBuffer):
         _copy_buffer_to_tensor(buffer_wrapper.buffer, tensor)
     torch.mps.synchronize()
 
 
 def _to_mps_tensor(array: np.ndarray, dtype: torch.dtype) -> torch.Tensor:
+    logger.debug("_to_mps_tensor called with array=%s, dtype=%s", array, dtype)
     return torch.from_numpy(array).to(device="mps", dtype=dtype).contiguous()
 
 
 def _run_half_param_probe(lib: MetalKernelLibrary) -> dict[str, object]:
+    logger.debug("_run_half_param_probe called with lib=%s", lib)
     head_dim = 128
     targets = np.array(
         [
@@ -196,6 +203,7 @@ def _run_half_param_probe(lib: MetalKernelLibrary) -> dict[str, object]:
 
 
 def _run_array_ref_probe(lib: MetalKernelLibrary) -> dict[str, object]:
+    logger.debug("_run_array_ref_probe called with lib=%s", lib)
     q = np.array(
         [
             [1.0, 2.0, 3.0, 4.0],
@@ -249,6 +257,7 @@ def _run_array_ref_probe(lib: MetalKernelLibrary) -> dict[str, object]:
 
 
 def main() -> None:
+    logger.info("main starting")
     if not HAS_MPS:
         raise SystemExit("This probe requires PyTorch MPS on Apple Silicon.")
 

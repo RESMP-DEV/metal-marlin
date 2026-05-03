@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+import logging
 import time
 
 import torch
 
 from metal_marlin.trellis.lm import TrellisForCausalLM
+
+
+logger = logging.getLogger(__name__)
 
 print("Loading model...")
 model = TrellisForCausalLM.from_pretrained(

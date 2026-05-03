@@ -1,3 +1,4 @@
+import logging
 import pytest
 import torch
 
@@ -20,6 +21,9 @@ try:
 except ImportError:
     HAS_DECODER_LAYER = False
 
+
+logger = logging.getLogger(__name__)
+
 requires_trellis_model = pytest.mark.skipif(
     not HAS_TRELLIS_MODEL,
     reason="TrellisModel/TrellisForCausalLM not yet implemented",
@@ -34,11 +38,13 @@ requires_decoder_layer = pytest.mark.skipif(
 class TestTrellisModel:
     @pytest.fixture
     def config(self):
+        logger.debug("config called")
         return TrellisModelConfig()
 
     @pytest.fixture
     def glm_config(self):
         """GLM-4.7-Flash style config: MLA, 64 experts, layer 0 dense."""
+        logger.debug("glm_config called")
         return TrellisModelConfig(
             hidden_size=2048,
             num_hidden_layers=47,
@@ -52,6 +58,7 @@ class TestTrellisModel:
     @pytest.fixture
     def qwen_moe_config(self):
         """Qwen3-30B-A3B style config: GQA, 128 experts, all MoE."""
+        logger.debug("qwen_moe_config called")
         return TrellisModelConfig(
             hidden_size=2048,
             num_hidden_layers=48,
@@ -63,6 +70,7 @@ class TestTrellisModel:
 
     def test_config_dense_model(self, config):
         """Default config is a dense model (no MoE)."""
+        logger.info("running test_config_dense_model")
         assert config.num_experts == 1
         assert not config.is_moe_layer(0)
         assert not config.is_moe_layer(10)
@@ -70,6 +78,7 @@ class TestTrellisModel:
 
     def test_config_glm_moe_layers(self, glm_config):
         """GLM-4.7-Flash: layer 0 is dense, layers 1-46 are MoE."""
+        logger.info("running test_config_glm_moe_layers")
         assert not glm_config.is_moe_layer(0)
         assert glm_config.is_moe_layer(1)
         assert glm_config.is_moe_layer(46)
@@ -77,12 +86,14 @@ class TestTrellisModel:
 
     def test_config_qwen_moe_layers(self, qwen_moe_config):
         """Qwen3-30B-A3B: all layers are MoE."""
+        logger.info("running test_config_qwen_moe_layers")
         assert qwen_moe_config.is_moe_layer(0)
         assert qwen_moe_config.is_moe_layer(47)
         assert not qwen_moe_config.is_mla_model()
 
     @requires_trellis_model
     def test_model_creation(self, config):
+        logger.info("running test_model_creation")
         model = TrellisModel(config)
         assert len(model.layers) == 0  # Layers added by from_pretrained
 
@@ -90,6 +101,7 @@ class TestTrellisModel:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_single_layer_forward(self):
         """Test forward through a single loaded layer."""
+        logger.info("running test_single_layer_forward")
         from metal_marlin.trellis.loader import TrellisModelLoader
 
         config = TrellisModelConfig()
@@ -110,6 +122,7 @@ class TestTrellisModelMoE:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_moe_layer_forward(self):
         """Test forward through an MoE layer."""
+        logger.info("running test_moe_layer_forward")
         from metal_marlin.trellis.layer import TrellisDecoderLayer
         from metal_marlin.trellis.loader import TrellisModelLoader
 
@@ -135,6 +148,7 @@ class TestTrellisModelMoE:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_multiple_layers(self):
         """Test forward through multiple layers."""
+        logger.info("running test_multiple_layers")
         from metal_marlin.trellis.layer import TrellisDecoderLayer
         from metal_marlin.trellis.loader import TrellisModelLoader
 

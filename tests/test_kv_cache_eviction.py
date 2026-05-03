@@ -1,5 +1,6 @@
 """Tests for KV cache eviction policy in PagedKVCache."""
 
+import logging
 import time
 
 import numpy as np
@@ -9,6 +10,9 @@ from metal_marlin.paged.cache_manager import EvictionPolicy, PagedKVCache
 from metal_marlin.paged.kv_block import KVBlockConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestKVCacheEviction:
     """Test LRU eviction in PagedKVCache."""
 
@@ -16,6 +20,7 @@ class TestKVCacheEviction:
         """Test that the least recently used sequence is evicted when cache is full."""
         # Create a cache with very few blocks
         # block_size=16, num_blocks=4 -> total capacity 64 tokens
+        logger.info("running test_lru_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         cache = PagedKVCache(config=config, num_blocks=4, eviction_policy=EvictionPolicy.LRU)
 
@@ -78,6 +83,7 @@ class TestKVCacheEviction:
 
     def test_eviction_fails_if_one_sequence_hogs_all(self):
         """Test behavior when a single sequence consumes all blocks (no eviction possible)."""
+        logger.info("running test_eviction_fails_if_one_sequence_hogs_all")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         cache = PagedKVCache(config=config, num_blocks=2, eviction_policy=EvictionPolicy.LRU)
         
@@ -117,6 +123,7 @@ class TestKVCacheEviction:
         
     def test_cow_eviction(self):
         """Test eviction during Copy-On-Write."""
+        logger.info("running test_cow_eviction")
         config = KVBlockConfig(block_size=16, num_heads=1, head_dim=64)
         cache = PagedKVCache(config=config, num_blocks=3, eviction_policy=EvictionPolicy.LRU)
         

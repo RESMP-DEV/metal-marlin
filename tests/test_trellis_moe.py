@@ -16,6 +16,7 @@ Verify: cd contrib/metal_marlin && uv run pytest tests/test_trellis_moe.py -v
 from __future__ import annotations
 
 import gc
+import logging
 from pathlib import Path
 
 import pytest
@@ -49,6 +50,9 @@ try:
 except ImportError:
     HAS_TRELLIS_LM = False
 
+
+logger = logging.getLogger(__name__)
+
 requires_mps = pytest.mark.skipif(
     not HAS_MPS, reason="MPS required (Apple Silicon)")
 requires_trellis = pytest.mark.skipif(
@@ -59,11 +63,13 @@ requires_trellis_lm = pytest.mark.skipif(
 
 def model_available() -> bool:
     """Check if the test model is available."""
+    logger.debug("model_available called")
     return Path(MODEL_PATH).exists()
 
 
 def clear_mps_memory() -> None:
     """Clear MPS memory cache and run garbage collection."""
+    logger.debug("clear_mps_memory called")
     gc.collect()
     if HAS_MPS:
         torch.mps.empty_cache()
@@ -88,6 +94,7 @@ def mock_moe_layer():
     For accuracy against real model weights, use real_moe_layer fixture
     and mark tests with @pytest.mark.slow.
     """
+    logger.debug("mock_moe_layer called")
     if not HAS_MPS:
         pytest.skip("MPS not available")
     if not HAS_TRELLIS:
@@ -119,6 +126,7 @@ def real_model():
     HEAVY: Loads 14GB model. Only use for tests that need real weights.
     For kernel correctness tests, use mock_moe_layer instead.
     """
+    logger.debug("real_model called")
     if not model_available():
         pytest.skip(f"Model not found: {MODEL_PATH}")
     if not HAS_TRELLIS_LM:
@@ -143,6 +151,7 @@ def real_moe_layer(real_model):
 
     HEAVY: Requires loading 14GB model. Use mock_moe_layer for most tests.
     """
+    logger.debug("real_moe_layer called with real_model=%s", real_model)
     layer = real_model.model.layers[1]
     if not hasattr(layer, "mlp"):
         pytest.skip("Layer 1 does not have mlp attribute")
@@ -176,6 +185,7 @@ class TestMoESwiGLUSingleExpert:
 
     def test_moe_swiglu_single_expert_shape(self):
         """Verify output shape for single token input."""
+        logger.info("running test_moe_swiglu_single_expert_shape")
         torch.manual_seed(42)
         device = "mps"
 
@@ -203,6 +213,7 @@ class TestMoESwiGLUSingleExpert:
 
     def test_moe_swiglu_single_expert_matches_reference(self):
         """Verify single expert output matches Python reference."""
+        logger.info("running test_moe_swiglu_single_expert_matches_reference")
         torch.manual_seed(42)
         device = "mps"
 
@@ -238,6 +249,7 @@ class TestMoESwiGLUMultiExpert:
 
     def test_moe_swiglu_multi_expert_per_token_routing(self):
         """Verify each token is routed to different experts correctly."""
+        logger.info("running test_moe_swiglu_multi_expert_per_token_routing")
         torch.manual_seed(123)
         device = "mps"
 
@@ -287,6 +299,7 @@ class TestMoESwiGLUMultiExpert:
 
     def test_moe_swiglu_multi_expert_different_routing(self):
         """Verify different inputs get different expert assignments."""
+        logger.info("running test_moe_swiglu_multi_expert_different_routing")
         torch.manual_seed(456)
         device = "mps"
 
@@ -355,6 +368,7 @@ class TestMoEVsSlowPath:
         Uses random weights which is sufficient to verify kernel correctness
         (fast and slow should produce identical results regardless of weights).
         """
+        logger.info("running test_moe_vs_slow_path_accuracy")
         torch.manual_seed(42)
         device = "mps"
 
@@ -399,6 +413,7 @@ class TestMoEVsSlowPath:
 
     def test_moe_vs_slow_path_correlation(self, mock_moe_layer):
         """Verify fast and slow outputs are highly correlated."""
+        logger.info("running test_moe_vs_slow_path_correlation")
         torch.manual_seed(123)
         device = "mps"
 
@@ -431,6 +446,7 @@ class TestMoEVsSlowPath:
 
     def test_moe_vs_slow_path_different_batch_sizes(self, mock_moe_layer):
         """Test accuracy across different batch sizes."""
+        logger.info("running test_moe_vs_slow_path_different_batch_sizes")
         torch.manual_seed(789)
         device = "mps"
 
@@ -458,6 +474,7 @@ class TestMoENoNaN:
 
     def test_moe_no_nan_synthetic(self):
         """Verify no NaN with random synthetic inputs."""
+        logger.info("running test_moe_no_nan_synthetic")
         torch.manual_seed(42)
         device = "mps"
 
@@ -487,6 +504,7 @@ class TestMoENoNaN:
         which should always be stable. Real model weights have proper scaling to
         handle larger inputs.
         """
+        logger.info("running test_moe_no_nan_edge_cases")
         torch.manual_seed(42)
         device = "mps"
 
@@ -528,6 +546,7 @@ class TestMoENoNaN:
 
         HEAVY: Loads 14GB model. Run with: pytest -m slow
         """
+        logger.info("running test_moe_no_nan_real_model")
         torch.manual_seed(42)
         device = "mps"
 
@@ -552,6 +571,7 @@ class TestMoESwiGLUActivation:
 
     def test_swiglu_matches_torch_silu(self):
         """Verify SiLU(gate) * up matches torch.nn.SiLU reference."""
+        logger.info("running test_swiglu_matches_torch_silu")
         torch.manual_seed(42)
         device = "mps"
 
@@ -578,6 +598,7 @@ class TestMoESwiGLUActivation:
 
     def test_swiglu_through_dense_mlp(self):
         """Verify full SwiGLU through TrellisDenseMLP."""
+        logger.info("running test_swiglu_through_dense_mlp")
         torch.manual_seed(42)
         device = "mps"
 
@@ -599,6 +620,7 @@ class TestMoESwiGLUActivation:
 
     def test_swiglu_activation_range(self):
         """Verify SwiGLU activation produces values in expected range."""
+        logger.info("running test_swiglu_activation_range")
         torch.manual_seed(42)
         device = "mps"
 
@@ -633,6 +655,7 @@ class TestMoEDeterminism:
 
     def test_moe_deterministic(self):
         """Verify MoE output is deterministic."""
+        logger.info("running test_moe_deterministic")
         torch.manual_seed(42)
         device = "mps"
 
@@ -670,6 +693,7 @@ class TestMoEDeterminism:
         With mock weights, the actual MLP outputs may be zero, so we also
         verify that router logits differ (the core routing behavior).
         """
+        logger.info("running test_moe_different_inputs_different_outputs")
         torch.manual_seed(42)
         device = "mps"
 
@@ -705,6 +729,7 @@ class TestMoEDeterminism:
 
     def test_routing_weights_sum_to_one(self):
         """Verify routing weights are properly normalized."""
+        logger.info("running test_routing_weights_sum_to_one")
         torch.manual_seed(42)
         device = "mps"
 
@@ -747,6 +772,7 @@ class TestExpertCache:
 
     def test_cache_initialization(self):
         """Verify cache initializes correctly."""
+        logger.info("running test_cache_initialization")
         device = "cpu"
         num_experts = 16
         cache_size = 8
@@ -768,6 +794,7 @@ class TestExpertCache:
 
     def test_cache_records_selections(self):
         """Verify cache records expert selections correctly."""
+        logger.info("running test_cache_records_selections")
         device = "cpu"
         num_experts = 8
 
@@ -786,6 +813,7 @@ class TestExpertCache:
 
     def test_cache_gets_top_experts(self):
         """Verify top-K experts are selected correctly."""
+        logger.info("running test_cache_gets_top_experts")
         device = "cpu"
         num_experts = 16
         cache_size = 8
@@ -813,6 +841,7 @@ class TestExpertCache:
 
     def test_cache_prefetching(self):
         """Verify prefetching based on router logits."""
+        logger.info("running test_cache_prefetching")
         device = "cpu"
         num_experts = 8
 
@@ -835,6 +864,7 @@ class TestExpertCache:
 
     def test_cache_update(self):
         """Verify cache updates with top-K experts."""
+        logger.info("running test_cache_update")
         device = "cpu"
         num_experts = 16
         cache_size = 4
@@ -865,6 +895,7 @@ class TestExpertCache:
 
     def test_cache_update_with_prefetch_and_eviction(self):
         """Verify cache updates with prefetch and eviction."""
+        logger.info("running test_cache_update_with_prefetch_and_eviction")
         device = "cpu"
         num_experts = 16
         cache_size = 4
@@ -912,6 +943,7 @@ class TestExpertCache:
 
     def test_cache_window_size(self):
         """Verify selection history respects window size."""
+        logger.info("running test_cache_window_size")
         device = "cpu"
         num_experts = 8
         window_size = 3
@@ -932,6 +964,7 @@ class TestExpertCache:
 
     def test_cache_reset(self):
         """Verify cache reset clears all state."""
+        logger.info("running test_cache_reset")
         device = "cpu"
         num_experts = 8
 
@@ -959,6 +992,7 @@ class TestSpeculation:
 
     def test_speculation_trigger(self):
         """Verify layer 1 triggers prefetch in layer 2."""
+        logger.info("running test_speculation_trigger")
         device = "mps"
         config = TrellisModelConfig(
             hidden_size=64,
@@ -1036,6 +1070,7 @@ class TestCapacityFactor:
 
     def test_capacity_limit_drops_tokens(self):
         """Verify tokens are dropped when capacity is exceeded."""
+        logger.info("running test_capacity_limit_drops_tokens")
         device = "mps"
         config = TrellisModelConfig(
             hidden_size=64,
@@ -1086,6 +1121,7 @@ class TestCapacityFactor:
 
     def test_capacity_factor_infinite(self):
         """Verify no drops with infinite capacity."""
+        logger.info("running test_capacity_factor_infinite")
         device = "mps"
         config = TrellisModelConfig(
             hidden_size=64,

@@ -42,6 +42,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -53,6 +54,9 @@ from .device_mesh import Device, DeviceMesh, DeviceType
 if TYPE_CHECKING:
     from ..layers import MarlinLinear
 
+
+
+logger = logging.getLogger(__name__)
 
 class ParallelMode(Enum):
     """Tensor parallelism mode."""
@@ -81,16 +85,19 @@ class ShardSpec:
     @property
     def shard_size(self) -> int:
         """Size of each shard."""
+        logger.debug("shard_size called")
         return self.total_size // self.num_shards
 
     @property
     def start_index(self) -> int:
         """Start index of this shard in the full tensor."""
+        logger.debug("start_index called")
         return self.shard_index * self.shard_size
 
     @property
     def end_index(self) -> int:
         """End index (exclusive) of this shard."""
+        logger.debug("end_index called")
         return self.start_index + self.shard_size
 
 
@@ -109,6 +116,7 @@ def shard_tensor(
     Returns:
         List of tensor shards
     """
+    logger.debug("shard_tensor called with tensor=%s, dim=%s, num_shards=%s", tensor, dim, num_shards)
     arr = to_numpy(tensor)
     size = arr.shape[dim]
 
@@ -153,6 +161,7 @@ def all_reduce(
     Returns:
         Reduced tensor (same on all devices)
     """
+    logger.debug("all_reduce called with tensors=%s, op=%s", tensors, op)
     if not tensors:
         raise ValueError("Cannot all-reduce empty list")
 
@@ -191,6 +200,7 @@ def all_gather(
     Returns:
         Concatenated tensor containing all shards
     """
+    logger.debug("all_gather called with tensors=%s, dim=%s", tensors, dim)
     if not tensors:
         raise ValueError("Cannot all-gather empty list")
 
@@ -211,6 +221,7 @@ def broadcast(
     Returns:
         List of tensor copies (one per device)
     """
+    logger.debug("broadcast called with tensor=%s, num_devices=%s", tensor, num_devices)
     arr = to_numpy(tensor)
     return [arr.copy() for _ in range(num_devices)]
 
@@ -230,6 +241,7 @@ def scatter(
     Returns:
         List of tensor shards (one per device)
     """
+    logger.debug("scatter called with tensor=%s, dim=%s, num_devices=%s", tensor, dim, num_devices)
     return shard_tensor(tensor, dim, num_devices)
 
 
@@ -252,6 +264,7 @@ def reduce_scatter(
         List of tensor shards (one per device)
     """
     # First reduce
+    logger.debug("reduce_scatter called with tensors=%s, dim=%s, op=%s", tensors, dim, op)
     reduced = all_reduce(tensors, op=op)
 
     # Then scatter
@@ -306,6 +319,7 @@ class TensorParallelLinear:
             output_is_parallel: If True, skip output all-reduce/all-gather
             dtype_config: Dtype configuration
         """
+        logger.debug("initializing %s with shards=%s, mesh=%s, mode=%s, in_features=%s, out_features=%s", type(self).__name__, shards, mesh, mode, in_features, out_features)
         self.shards = shards
         self.mesh = mesh
         self.mode = mode
@@ -346,6 +360,7 @@ class TensorParallelLinear:
         Returns:
             TensorParallelLinear wrapping sharded weights
         """
+        logger.debug("from_marlin_linear called with linear=%s, mesh=%s, mode=%s", linear, mesh, mode)
         from ..layers import MarlinLinear
 
         tp_size = mesh.tensor_parallel_size
@@ -500,6 +515,7 @@ class TensorParallelLinear:
     def _forward_column_parallel(self, x: Any) -> Any:
         """Column parallel forward: split N, all-gather after."""
         # Prepare input for each device
+        logger.debug("_forward_column_parallel called with x=%s", x)
         if self.input_is_parallel:
             # Input is already sharded along K from previous row parallel layer
             # Each device has a portion; need to all-gather first
@@ -529,6 +545,7 @@ class TensorParallelLinear:
 
     def _forward_row_parallel(self, x: Any) -> Any:
         """Row parallel forward: split K, all-reduce after."""
+        logger.debug("_forward_row_parallel called with x=%s", x)
         x_np = to_numpy(x)
 
         # Prepare inputs
@@ -558,6 +575,7 @@ class TensorParallelLinear:
             return result
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"in_features={self.in_features}, "
             f"out_features={self.out_features}, "
@@ -577,6 +595,7 @@ def _to_device_array(arr: np.ndarray, device: Device, dtype: Any = None) -> Any:
     Returns:
         Array in device-appropriate format
     """
+    logger.debug("_to_device_array called with arr=%s, device=%s, dtype=%s", arr, device, dtype)
     if dtype is not None:
         arr = arr.astype(dtype)
 
@@ -634,6 +653,7 @@ class TensorParallelAttention:
             head_dim: Dimension per head
             mesh: Device mesh for parallelism
         """
+        logger.debug("initializing %s with q_proj=%s, k_proj=%s, v_proj=%s, o_proj=%s, num_heads=%s", type(self).__name__, q_proj, k_proj, v_proj, o_proj, num_heads)
         self.q_proj = q_proj
         self.k_proj = k_proj
         self.v_proj = v_proj
@@ -672,6 +692,7 @@ class TensorParallelAttention:
         Returns:
             TensorParallelAttention
         """
+        logger.debug("from_attention called with attention=%s, mesh=%s", attention, mesh)
         q_proj = TensorParallelLinear.from_marlin_linear(
             attention.q_proj, mesh, ParallelMode.COLUMN
         )
@@ -758,6 +779,7 @@ class TensorParallelMLP:
             activation: Activation function name
             mesh: Device mesh
         """
+        logger.debug("initializing %s with gate_proj=%s, up_proj=%s, down_proj=%s, activation=%s, mesh=%s", type(self).__name__, gate_proj, up_proj, down_proj, activation, mesh)
         self.gate_proj = gate_proj
         self.up_proj = up_proj
         self.down_proj = down_proj
@@ -780,6 +802,7 @@ class TensorParallelMLP:
         Returns:
             TensorParallelMLP
         """
+        logger.debug("from_mlp called with mlp=%s, mesh=%s", mlp, mesh)
         gate_proj = None
         if hasattr(mlp, "gate_proj") and mlp.gate_proj is not None:
             gate_proj = TensorParallelLinear.from_marlin_linear(

@@ -1,4 +1,5 @@
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,8 +8,12 @@ import torch
 from metal_marlin.inference.mmfp4_pipeline import _fused_sampling, _optimized_generate
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_optimized_generate_passes_buffers():
     """Verify that _optimized_generate passes pre-allocated buffers to _fused_sampling."""
+    logger.info("running test_optimized_generate_passes_buffers")
     if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         pytest.skip("Requires GPU")
     
@@ -30,6 +35,7 @@ def test_optimized_generate_passes_buffers():
     with patch("metal_marlin.inference.mmfp4_pipeline._fused_sampling") as mock_fused:
         # Side effect to actually perform sampling so loop continues correctly
         def side_effect(probs, temperature=1.0, top_p=0.9, top_k=0, out=None, **kwargs):
+            logger.debug("side_effect called with probs=%s, temperature=%s, top_p=%s", probs, temperature, top_p)
             if out is not None:
                 out.fill_(1) # Return token 1
             return out
@@ -63,6 +69,7 @@ def test_optimized_generate_passes_buffers():
 
 def test_optimized_generate_passes_buffers_topk():
     """Verify that _optimized_generate passes pre-allocated buffers when top_k > 0."""
+    logger.info("running test_optimized_generate_passes_buffers_topk")
     if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         pytest.skip("Requires GPU")
     
@@ -80,6 +87,7 @@ def test_optimized_generate_passes_buffers_topk():
     
     with patch("metal_marlin.inference.mmfp4_pipeline._fused_sampling") as mock_fused:
         def side_effect(probs, temperature=1.0, top_p=0.9, top_k=0, out=None, **kwargs):
+            logger.debug("side_effect called with probs=%s, temperature=%s, top_p=%s", probs, temperature, top_p)
             if out is not None:
                 out.fill_(1)
             return out
@@ -111,6 +119,7 @@ def test_optimized_generate_passes_buffers_topk():
 
 def test_fused_sampling_correctness():
     """Verify _fused_sampling works with buffers."""
+    logger.info("running test_fused_sampling_correctness")
     if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         pytest.skip("Requires GPU")
         

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import statistics
 import sys
@@ -31,6 +32,10 @@ if str(_ROOT) not in sys.path:
 
 from metal_marlin._compat import HAS_TORCH, torch  # noqa: E402
 from metal_marlin.trellis.lm import TrellisForCausalLM  # noqa: E402
+from metal_marlin.wandb_helper import wandb_tracker  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 if not HAS_TORCH or torch is None:
     raise RuntimeError("PyTorch is required to run this benchmark.")
@@ -65,6 +70,7 @@ PRESET_CANDIDATES: dict[str, list[str]] = {
 
 
 def _sync_device(device: str) -> None:
+    logger.debug("_sync_device called with device=%s", device)
     if device.startswith("mps") and torch.backends.mps.is_available():
         torch.mps.synchronize()
     elif device.startswith("cuda") and torch.cuda.is_available():
@@ -72,6 +78,7 @@ def _sync_device(device: str) -> None:
 
 
 def _percentile(values: list[float], q: float) -> float:
+    logger.debug("_percentile called with values=%s, q=%s", values, q)
     if not values:
         return 0.0
     sorted_vals = sorted(values)
@@ -80,6 +87,7 @@ def _percentile(values: list[float], q: float) -> float:
 
 
 def _resolve_device(requested: str) -> str:
+    logger.debug("_resolve_device called with requested=%s", requested)
     req = requested.strip().lower()
     if req == "auto":
         if torch.backends.mps.is_available():
@@ -95,6 +103,7 @@ def _resolve_device(requested: str) -> str:
 
 
 def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Callable[[], Any]], list[str]]:
+    logger.debug("_make_fallback_collectors called")
     resetters: list[Callable[[], None]] = []
     collectors: dict[str, Callable[[], Any]] = {}
     unavailable: list[str] = []
@@ -117,6 +126,7 @@ def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Cal
             resetters.append(moe_metrics.reset)
 
         def _collect_moe_metrics() -> dict[str, int]:
+            logger.debug("_collect_moe_metrics called")
             result: dict[str, int] = {}
             fields = ("fallback_used", "fast_path_used", "tokens_processed", "nan_detected")
             for field in fields:
@@ -134,6 +144,7 @@ def _make_fallback_collectors() -> tuple[list[Callable[[], None]], dict[str, Cal
 
 
 def _collect_diagnostics(collectors: dict[str, Callable[[], Any]]) -> dict[str, Any] | None:
+    logger.debug("_collect_diagnostics called with collectors=%s", collectors)
     result: dict[str, Any] = {}
     for name, fn in collectors.items():
         try:
@@ -146,6 +157,7 @@ def _collect_diagnostics(collectors: dict[str, Callable[[], Any]]) -> dict[str, 
 
 
 def _parse_presets(args: argparse.Namespace) -> list[str]:
+    logger.debug("_parse_presets called with args=%s", args)
     presets: list[str] = []
     for raw in args.presets.split(","):
         value = raw.strip()
@@ -174,6 +186,7 @@ def _parse_presets(args: argparse.Namespace) -> list[str]:
 
 
 def _parse_model_path_mappings(values: list[str]) -> dict[str, str]:
+    logger.debug("_parse_model_path_mappings called with values=%s", values)
     overrides: dict[str, str] = {}
     for raw in values:
         if "=" not in raw:
@@ -193,6 +206,7 @@ def _parse_model_path_mappings(values: list[str]) -> dict[str, str]:
 
 
 def _find_model_path(preset: str, overrides: dict[str, str]) -> tuple[str, str]:
+    logger.debug("_find_model_path called with preset=%s, overrides=%s", preset, overrides)
     override = overrides.get(preset)
     if override:
         return override, "cli-override"
@@ -218,6 +232,7 @@ def run_benchmark_for_preset(
     runs: int,
     seed: int,
 ) -> dict[str, Any]:
+    logger.info("run_benchmark_for_preset starting with preset=%s, model_path=%s, device=%s, prompt_len=%s", preset, model_path, device, prompt_len)
     if not model_path or not Path(model_path).exists():
         return {
             "status": "error",
@@ -307,6 +322,7 @@ def run_benchmark_for_preset(
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    logger.info("_build_parser starting")
     parser = argparse.ArgumentParser(description="MoE decode regression benchmark (GLM/Qwen).")
     parser.add_argument(
         "--presets",
@@ -355,10 +371,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: contrib/metal_marlin/benchmarks/results/moe_decode_glm_qwen_regression.json)"
         ),
     )
+    parser.add_argument("--wandb-project", help="Weights & Biases project name")
+    parser.add_argument("--wandb-name", help="Weights & Biases run name")
+    parser.add_argument("--wandb-tags", help="Comma-separated Weights & Biases tags")
     return parser
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = _build_parser()
     args = parser.parse_args()
 
@@ -369,6 +389,25 @@ def main() -> int:
 
     presets = _parse_presets(args)
     device = _resolve_device(args.device)
+
+    # Initialize W&B tracking
+    wb_project = args.wandb_project or os.environ.get("WANDB_PROJECT") or os.environ.get("WB_PROJECT")
+    wb_name = args.wandb_name or os.environ.get("WANDB_NAME") or os.environ.get("WB_NAME")
+    wb_tags_raw = args.wandb_tags or os.environ.get("WANDB_TAGS") or os.environ.get("WB_TAGS")
+    wb_tags = [t.strip() for t in wb_tags_raw.split(",")] if wb_tags_raw else None
+
+    wb_config = {
+        "device_requested": args.device,
+        "device_used": device,
+        "prompt_len": args.prompt_len,
+        "decode_tokens": args.decode_tokens,
+        "warmup": args.warmup,
+        "runs": args.runs,
+        "seed": args.seed,
+        "torch_version": torch.__version__,
+        "selected_presets": presets,
+    }
+    wandb_tracker.init(project=wb_project, name=wb_name, config=wb_config, tags=wb_tags)
 
     overrides = _parse_model_path_mappings(args.model_path)
     if args.glm_model_path:
@@ -432,6 +471,31 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     print(f"\nSummary written to: {output}")
+
+    # Log to W&B
+    if wandb_tracker.enabled:
+        wandb_log_data = {}
+        for preset, res in results.items():
+            if res["status"] == "ok":
+                wandb_log_data[f"{preset}/decode_ms_per_token"] = res["decode_ms_per_token"]
+                wandb_log_data[f"{preset}/decode_tok_per_s"] = res["decode_tok_per_s"]
+                wandb_log_data[f"{preset}/model_load_s"] = res["model_load_s"]
+                wandb_log_data[f"{preset}/p50_ms"] = res["p50_ms"]
+                wandb_log_data[f"{preset}/p95_ms"] = res["p95_ms"]
+                wandb_log_data[f"{preset}/p99_ms"] = res["p99_ms"]
+                if res.get("fallback_diagnostics"):
+                    for diag_name, diag_val in res["fallback_diagnostics"].items():
+                        if isinstance(diag_val, dict):
+                            for k, v in diag_val.items():
+                                wandb_log_data[f"{preset}/fallback/{diag_name}/{k}"] = v
+                        else:
+                            wandb_log_data[f"{preset}/fallback/{diag_name}"] = diag_val
+                
+                # Also log model path info
+                wandb_tracker.run.config.update({f"{preset}_model_path": res["model_path"]})
+
+        wandb_tracker.log(wandb_log_data)
+        wandb_tracker.finish()
     return 0
 
 

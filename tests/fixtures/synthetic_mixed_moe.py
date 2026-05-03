@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from dataclasses import dataclass
@@ -33,6 +34,9 @@ except ImportError:
     HAS_TRELLIS = False
     TrellisLinear = None  # type: ignore
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SyntheticConfig:
@@ -86,6 +90,7 @@ def create_fake_trellis_weights(
         Dict with packed_indices, scales, grid, su, sv tensors
     """
     # Tile dimensions
+    logger.debug("create_fake_trellis_weights called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     tile_k = 32
     tile_n = 16
 
@@ -136,6 +141,7 @@ class FakeTrellisLinear(nn.Module):
         bits: int,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with in_features=%s, out_features=%s, bits=%s, device=%s", type(self).__name__, in_features, out_features, bits, device)
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -158,6 +164,7 @@ class FakeTrellisLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Simple linear forward (ignores quantization for speed)."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         return F.linear(x.float(), self._weight.float()).half()
 
 
@@ -176,6 +183,7 @@ def create_trellis_linear(
     """
     # Always use fake for synthetic benchmarks
     # Real TrellisLinear has different buffer shapes per bit width
+    logger.debug("create_trellis_linear called with in_features=%s, out_features=%s, bits=%s", in_features, out_features, bits)
     return FakeTrellisLinear(in_features, out_features, bits, device)
 
 
@@ -191,6 +199,7 @@ class SyntheticExpert(nn.Module):
         down_bits: int,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with hidden_dim=%s, intermediate_dim=%s, gate_bits=%s, up_bits=%s, down_bits=%s", type(self).__name__, hidden_dim, intermediate_dim, gate_bits, up_bits, down_bits)
         super().__init__()
 
         self.gate_proj = create_trellis_linear(
@@ -202,6 +211,7 @@ class SyntheticExpert(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """SwiGLU forward pass."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate = F.silu(self.gate_proj(x))
         up = self.up_proj(x)
         return self.down_proj(gate * up)
@@ -215,6 +225,7 @@ class SyntheticMoELayer(nn.Module):
         config: SyntheticConfig,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with config=%s, device=%s", type(self).__name__, config, device)
         super().__init__()
 
         self.hidden_dim = config.hidden_dim
@@ -244,6 +255,7 @@ class SyntheticMoELayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward with top-k routing (sequential dispatch)."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_shape = x.shape[:-1]
         x_flat = x.view(-1, self.hidden_dim)
 
@@ -270,6 +282,7 @@ class SyntheticMoELayer(nn.Module):
 
     def batched_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward with batched expert dispatch (fast path)."""
+        logger.debug("batched_forward called with x=%s", x)
         batch_shape = x.shape[:-1]
         x_flat = x.view(-1, self.hidden_dim)
 
@@ -315,6 +328,7 @@ class SyntheticDenseLayer(nn.Module):
         config: SyntheticConfig,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with config=%s, device=%s", type(self).__name__, config, device)
         super().__init__()
 
         self.gate_proj = create_trellis_linear(
@@ -329,6 +343,7 @@ class SyntheticDenseLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """SwiGLU forward pass."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate = F.silu(self.gate_proj(x))
         up = self.up_proj(x)
         return self.down_proj(gate * up)
@@ -350,6 +365,7 @@ class SyntheticMixedMoE(nn.Module):
         config: SyntheticConfig | None = None,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with config=%s, device=%s", type(self).__name__, config, device)
         super().__init__()
 
         self.config = config or SyntheticConfig()
@@ -377,6 +393,7 @@ class SyntheticMixedMoE(nn.Module):
             Logits: [batch, seq_len, vocab_size] float16
         """
         # Handle token IDs vs embeddings
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         if x.dtype in (torch.long, torch.int32):
             h = self.embed(x).half()
         else:
@@ -395,6 +412,7 @@ class SyntheticMixedMoE(nn.Module):
 
     def get_bit_distribution(self) -> dict:
         """Get bit distribution statistics for analysis."""
+        logger.debug("get_bit_distribution called")
         from collections import Counter
 
         bit_counts = Counter(self.moe_layer._bit_tuples)
@@ -425,6 +443,7 @@ def create_synthetic_model(
     Returns:
         SyntheticMixedMoE model ready for benchmarking
     """
+    logger.debug("create_synthetic_model called with device=%s, config=%s", device, config)
     model = SyntheticMixedMoE(config=config, device=device)
     model.eval()
     return model
@@ -472,6 +491,7 @@ def benchmark_forward(
         BenchmarkResult with timing statistics
     """
     # Create input
+    logger.info("benchmark_forward starting with model=%s, batch_size=%s, seq_len=%s, warmup=%s", model, batch_size, seq_len, warmup)
     hidden_dim = model.config.hidden_dim
     x = torch.randn(batch_size, seq_len, hidden_dim,
                     dtype=torch.float16, device=device)

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Micro-benchmark for dispatch_moe_trellis_swiglu with cached buffers."""
+import logging
 import time
 
 import torch
 from metal_marlin.trellis.model import TrellisForCausalLM
 from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
+
+
+logger = logging.getLogger(__name__)
 
 print("Loading model...")
 model = TrellisForCausalLM.from_pretrained(

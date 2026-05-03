@@ -15,6 +15,7 @@ The PyTorch version uses the same underlying Metal shaders dispatched through Py
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -27,6 +28,9 @@ from .conftest import requires_mps, requires_torch
 if TYPE_CHECKING:
     import torch as torch_types
 
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants matching the Metal kernel
@@ -58,6 +62,7 @@ def quantize_to_fp4(weights: np.ndarray, group_size: int = 128) -> tuple[np.ndar
     Wrapper around the correct implementation in metal_marlin.quantize.
     Returns (packed [K//8, N], scales [num_groups, N]).
     """
+    logger.info("quantize_to_fp4 called with weights=%s, group_size=%s", weights, group_size)
     from metal_marlin.quantize import pack_fp4_weights
 
     packed, scales, _meta = pack_fp4_weights(weights, group_size=group_size)
@@ -71,6 +76,7 @@ def dequant_fp4_array(
 
     Wrapper around the correct implementation in metal_marlin.quantize.
     """
+    logger.info("dequant_fp4_array called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     from metal_marlin.quantize import unpack_fp4_weights
 
     meta = {
@@ -85,6 +91,7 @@ def dequant_fp4_array(
 
 def gemm_reference(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     """FP32 GEMM reference: A @ B with FP32 accumulation."""
+    logger.debug("gemm_reference called with A=%s, B=%s", A, B)
     return (A.astype(np.float32) @ B.astype(np.float32)).astype(np.float16)
 
 
@@ -95,6 +102,7 @@ def gemm_reference(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 @pytest.fixture
 def rng() -> np.random.Generator:
+    logger.debug("rng called")
     return np.random.default_rng(seed=42)
 
 
@@ -120,6 +128,7 @@ class TestStripedVsReference:
         self, rng: np.random.Generator, M: int, N: int, K: int
     ) -> None:
         """Stripe kernel output matches numpy FP32 reference within FP16 tolerance."""
+        logger.info("running test_striped_matches_reference")
         assert torch is not None
 
         group_size = 128
@@ -182,6 +191,7 @@ class TestKParallelReduction:
         While the actual K-parallel kernel uses atomic reduction, we can
         verify the arithmetic is correct by explicitly computing partial sums.
         """
+        logger.info("running test_k_parallel_simulation_large_k")
         assert torch is not None
 
         M, K, N = 64, 32768, 256
@@ -231,6 +241,7 @@ class TestKParallelReduction:
     @requires_mps
     def test_deterministic_runs(self, rng: np.random.Generator) -> None:
         """Multiple runs with the same input produce identical results."""
+        logger.info("running test_deterministic_runs")
         assert torch is not None
 
         M, K, N = 128, 4096, 4096
@@ -267,6 +278,7 @@ class TestKParallelReduction:
     @requires_mps
     def test_zero_input(self, rng: np.random.Generator) -> None:
         """Zero input produces zero output."""
+        logger.info("running test_zero_input")
         assert torch is not None
 
         M, K, N = 16, 4096, 128
@@ -317,6 +329,7 @@ class TestLoadBalance:
         The maximum imbalance is therefore at most 1 work unit per TG
         (some TGs get ceil(total_work/num_tgs), others get floor).
         """
+        logger.info("running test_work_distribution_uniformity")
         parallel = 1
         m_tiles = (M + TILE_M - 1) // TILE_M
         n_tiles = (N + TILE_N - 1) // TILE_N
@@ -349,6 +362,7 @@ class TestLoadBalance:
     @pytest.mark.parametrize("parallel", [1, 2, 4])
     def test_all_tiles_covered(self, parallel: int) -> None:
         """Every output tile is assigned to at least one threadgroup."""
+        logger.info("running test_all_tiles_covered")
         M, N = 256, 256
         num_tgs = 40
 
@@ -378,6 +392,7 @@ class TestLoadBalance:
 
     def test_stripe_vs_2d_tile_count(self) -> None:
         """Stripe dispatch processes the same number of total tiles as 2D dispatch."""
+        logger.info("running test_stripe_vs_2d_tile_count")
         M, N, _K = 128, 4096, 4096
         parallel = 1
 
@@ -408,6 +423,7 @@ class TestStripedEdgeCases:
     @pytest.mark.parametrize("group_size", [32, 64, 128])
     def test_different_group_sizes(self, rng: np.random.Generator, group_size: int) -> None:
         """Stripe kernel handles various quantization group sizes correctly."""
+        logger.info("running test_different_group_sizes")
         assert torch is not None
 
         M, K, N = 64, 512, 256
@@ -454,6 +470,7 @@ class TestStripedEdgeCases:
     )
     def test_non_tile_aligned_dims(self, rng: np.random.Generator, M: int, N: int, K: int) -> None:
         """Stripe kernel correctly handles dimensions not aligned to tile boundaries."""
+        logger.info("running test_non_tile_aligned_dims")
         assert torch is not None
 
         group_size = 32
@@ -497,6 +514,7 @@ class TestStripedEdgeCases:
         In a stripe dispatch, when there are more threadgroups than work units,
         excess TGs should early-exit without corrupting output.
         """
+        logger.info("running test_excess_threadgroups_scenario")
         assert torch is not None
 
         # 1x1 tiles = 1 work unit
@@ -534,6 +552,7 @@ class TestStripedEdgeCases:
     @pytest.mark.parametrize("M", [1, 8, 16, 32, 64, 128])
     def test_various_batch_sizes(self, rng: np.random.Generator, M: int) -> None:
         """Striped kernel produces correct output for various batch sizes."""
+        logger.info("running test_various_batch_sizes")
         assert torch is not None
 
         K, N = 512, 256

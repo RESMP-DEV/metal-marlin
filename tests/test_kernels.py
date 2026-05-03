@@ -5,6 +5,7 @@ including the fused QKV projection kernel.
 """
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
@@ -20,12 +21,16 @@ from metal_marlin.kernels import (
     submit_batch,
 )
 
+
+logger = logging.getLogger(__name__)
+
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
 requires_metal = pytest.mark.skipif(not HAS_METAL, reason="Requires Metal/PyObjC")
 
 
 def test_mmfp4_fused_qkv_import():
     """Verify mmfp4_fused_qkv function is properly exported."""
+    logger.info("running test_mmfp4_fused_qkv_import")
     assert callable(mmfp4_fused_qkv)
     
     if HAS_METAL and HAS_MPS:
@@ -39,6 +44,7 @@ def test_mmfp4_fused_qkv_import():
 
 def test_mmfp4_fused_qkv_signature():
     """Verify mmfp4_fused_qkv has the correct function signature."""
+    logger.info("running test_mmfp4_fused_qkv_signature")
     import inspect
     sig = inspect.signature(mmfp4_fused_qkv)
     params = list(sig.parameters.keys())
@@ -62,6 +68,7 @@ def test_mmfp4_fused_qkv_signature():
 
 def test_mmfp4_fused_qkv_stub_raises():
     """Test that stub function raises ImportError when Metal is unavailable."""
+    logger.info("running test_mmfp4_fused_qkv_stub_raises")
     if HAS_METAL and HAS_MPS:
         pytest.skip("Metal is available, skipping stub test")
     
@@ -74,6 +81,7 @@ def test_mmfp4_fused_qkv_stub_raises():
 @requires_metal
 def test_mmfp4_fused_qkv_basic_dispatch():
     """Test basic dispatch of mmfp4_fused_qkv with M=1 (decode phase)."""
+    logger.info("running test_mmfp4_fused_qkv_basic_dispatch")
     device = torch.device("mps")
     torch.manual_seed(42)
     
@@ -121,6 +129,7 @@ def test_mmfp4_fused_qkv_basic_dispatch():
 @requires_metal
 def test_mmfp4_fused_qkv_batched_dispatch():
     """Test mmfp4_fused_qkv with M > 1 (falls back to separate GEMMs)."""
+    logger.info("running test_mmfp4_fused_qkv_batched_dispatch")
     device = torch.device("mps")
     torch.manual_seed(43)
     
@@ -168,6 +177,7 @@ def test_mmfp4_fused_qkv_batched_dispatch():
 @requires_metal
 def test_mmfp4_fused_qkv_matches_separate_gemms():
     """Verify fused QKV produces same results as separate GEMM calls."""
+    logger.info("running test_mmfp4_fused_qkv_matches_separate_gemms")
     device = torch.device("mps")
     torch.manual_seed(44)
     
@@ -215,6 +225,7 @@ def test_mmfp4_fused_qkv_matches_separate_gemms():
 @requires_metal
 def test_mmfp4_fused_qkv_input_validation():
     """Test input validation for mmfp4_fused_qkv."""
+    logger.info("running test_mmfp4_fused_qkv_input_validation")
     device = torch.device("mps")
     
     # Test with non-2D input
@@ -236,6 +247,7 @@ def test_mmfp4_fused_qkv_input_validation():
 @requires_metal
 def test_mmfp4_fused_qkv_different_group_sizes():
     """Test mmfp4_fused_qkv with different group sizes."""
+    logger.info("running test_mmfp4_fused_qkv_different_group_sizes")
     device = torch.device("mps")
     torch.manual_seed(45)
     
@@ -280,6 +292,7 @@ def test_mmfp4_fused_qkv_different_group_sizes():
 @requires_metal
 def test_mmfp4_fused_qkv_large_dimensions():
     """Test mmfp4_fused_qkv with larger dimensions typical of real models."""
+    logger.info("running test_mmfp4_fused_qkv_large_dimensions")
     device = torch.device("mps")
     torch.manual_seed(46)
     
@@ -321,6 +334,7 @@ def test_mmfp4_fused_qkv_large_dimensions():
 @requires_metal
 def test_mmfp4_reusable_command_buffer_dispatch():
     """Test dispatching multiple kernels within a reusable_command_buffer context."""
+    logger.info("running test_mmfp4_reusable_command_buffer_dispatch")
     device = torch.device("mps")
     torch.manual_seed(47)
 
@@ -352,6 +366,7 @@ def test_mmfp4_reusable_command_buffer_dispatch():
 @requires_metal
 def test_mmfp4_submit_batch():
     """Test submit_batch functionality."""
+    logger.info("running test_mmfp4_submit_batch")
     device = torch.device("mps")
     torch.manual_seed(48)
 
@@ -367,6 +382,7 @@ def test_mmfp4_submit_batch():
     results = []
 
     def run_kernel():
+        logger.debug("run_kernel called")
         res = mmfp4_gemm(A, W_packed, W_scales, group_size=group_size)
         results.append(res)
 

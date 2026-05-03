@@ -15,6 +15,7 @@ memory-efficient inference on Apple Silicon.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -27,6 +28,9 @@ from .base import HybridLayerType, LayerState, StateType
 if TYPE_CHECKING:
     import torch as torch_typing
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MambaState:
@@ -51,6 +55,7 @@ class MambaState:
         dtype: Any = None,
     ) -> MambaState:
         """Create zero-initialized state."""
+        logger.debug("zeros called with batch_size=%s, d_state=%s, d_inner=%s", batch_size, d_state, d_inner)
         require_torch("Mamba state initialization")
         assert torch is not None
 
@@ -86,6 +91,7 @@ class SelectiveScanConfig:
 
 def _get_base_class() -> type:
     """Return torch.nn.Module if PyTorch is available, else object."""
+    logger.debug("_get_base_class called")
     if HAS_TORCH and torch is not None:
         return torch.nn.Module
     return object
@@ -153,6 +159,7 @@ class _MambaBlockBase:
             quant_config: Quantization settings for linear layers.
             device: Device for tensor allocation.
         """
+        logger.debug("_init_mamba called with hidden_size=%s, d_state=%s, d_conv=%s", hidden_size, d_state, d_conv)
         require_torch("MambaBlock")
         assert torch is not None
 
@@ -227,6 +234,7 @@ class _MambaBlockBase:
 
     def _get_quant_type(self) -> str:
         """Convert precision enum to string for MarlinLinear."""
+        logger.info("_get_quant_type called")
         precision_map = {
             Precision.FP4_E2M1: "fp4",
             Precision.INT4: "int4",
@@ -239,6 +247,7 @@ class _MambaBlockBase:
 
     def _init_parameters(self) -> None:
         """Initialize SSM parameters for stability."""
+        logger.debug("_init_parameters called")
         assert torch is not None
 
         # A initialization: use S4D-Real scheme for stability
@@ -282,6 +291,7 @@ class _MambaBlockBase:
         Returns:
             (output, new_state) where output is [batch, seq_len, hidden_size]
         """
+        logger.debug("_forward called with hidden_states=%s, position_ids=%s, state=%s", hidden_states, position_ids, state)
         assert torch is not None
         batch_size, seq_len, _ = hidden_states.shape
 
@@ -387,6 +397,7 @@ class _MambaBlockBase:
         Returns:
             (output_sequence, final_ssm_state)
         """
+        logger.debug("_selective_scan called with x=%s, dt=%s, A=%s", x, dt, A)
         assert torch is not None
         batch_size, seq_len, d_inner = x.shape
 
@@ -425,6 +436,7 @@ class _MambaBlockBase:
 
     def _init_state(self, batch_size: int, layer_idx: int) -> LayerState:
         """Initialize state for autoregressive generation."""
+        logger.debug("_init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
         mamba_state = MambaState.zeros(
             batch_size=batch_size,
             d_state=self.d_state,
@@ -488,6 +500,7 @@ class _MarlinMambaBlockBase:
             mlp_activation: Activation for MLP.
             device: Device for tensor allocation.
         """
+        logger.debug("_init_marlin_mamba called with hidden_size=%s, intermediate_size=%s, d_state=%s", hidden_size, intermediate_size, d_state)
         require_torch("MarlinMambaBlock")
 
         self.hidden_size = hidden_size
@@ -526,6 +539,7 @@ class _MarlinMambaBlockBase:
 
     def _get_quant_type_mlp(self, config: LayerQuantConfig) -> str:
         """Convert precision enum to string."""
+        logger.info("_get_quant_type_mlp called with config=%s", config)
         precision_map = {
             Precision.FP4_E2M1: "fp4",
             Precision.INT4: "int4",
@@ -555,6 +569,7 @@ class _MarlinMambaBlockBase:
             (output, new_state)
         """
         # Mamba with residual
+        logger.debug("_forward_block called with hidden_states=%s, position_ids=%s, state=%s", hidden_states, position_ids, state)
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states, new_state = self.mamba(
@@ -575,6 +590,7 @@ class _MarlinMambaBlockBase:
 
     def _init_state_block(self, batch_size: int, layer_idx: int) -> LayerState:
         """Initialize state for autoregressive generation."""
+        logger.debug("_init_state_block called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
         return self.mamba.init_state(batch_size, layer_idx)
 
 
@@ -585,12 +601,14 @@ class _RMSNormBase:
     eps: float
 
     def _init_rmsnorm(self, hidden_size: int, eps: float = 1e-6, device: str = "mps") -> None:
+        logger.debug("_init_rmsnorm called with hidden_size=%s, eps=%s, device=%s", hidden_size, eps, device)
         require_torch("RMSNorm")
         assert torch is not None
         self.weight = torch.nn.Parameter(torch.ones((hidden_size,), device=device))
         self.eps = eps
 
     def _forward_rmsnorm(self, x: torch_typing.Tensor) -> torch_typing.Tensor:
+        logger.debug("_forward_rmsnorm called with x=%s", x)
         assert torch is not None
         variance = torch.mean(x**2, dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
@@ -637,6 +655,7 @@ if HAS_TORCH and torch is not None:
                 quant_config: Quantization settings for linear layers.
                 device: Device for tensor allocation.
             """
+            logger.debug("initializing %s with hidden_size=%s, d_state=%s, d_conv=%s, expand=%s, dt_rank=%s", type(self).__name__, hidden_size, d_state, d_conv, expand, dt_rank)
             torch.nn.Module.__init__(self)
             self._init_mamba(
                 hidden_size,
@@ -657,9 +676,11 @@ if HAS_TORCH and torch is not None:
             state: LayerState | None = None,
             attention_mask: torch_typing.Tensor | None = None,
         ) -> tuple[torch_typing.Tensor, LayerState | None]:
+            logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
             return self._forward(hidden_states, position_ids, state, attention_mask)
 
         def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
             return self._init_state(batch_size, layer_idx)
 
     class MarlinMambaBlock(torch.nn.Module, _MarlinMambaBlockBase):
@@ -700,6 +721,7 @@ if HAS_TORCH and torch is not None:
                 mlp_activation: Activation for MLP.
                 device: Device for tensor allocation.
             """
+            logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, d_state=%s, d_conv=%s, expand=%s", type(self).__name__, hidden_size, intermediate_size, d_state, d_conv, expand)
             torch.nn.Module.__init__(self)
             self._init_marlin_mamba(
                 hidden_size,
@@ -722,19 +744,23 @@ if HAS_TORCH and torch is not None:
             state: LayerState | None = None,
             attention_mask: torch_typing.Tensor | None = None,
         ) -> tuple[torch_typing.Tensor, LayerState | None]:
+            logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
             return self._forward_block(hidden_states, position_ids, state, attention_mask)
 
         def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
             return self._init_state_block(batch_size, layer_idx)
 
     class RMSNorm(torch.nn.Module, _RMSNormBase):
         """RMSNorm for Mamba blocks."""
 
         def __init__(self, hidden_size: int, eps: float = 1e-6, device: str = "mps"):
+            logger.debug("initializing %s with hidden_size=%s, eps=%s, device=%s", type(self).__name__, hidden_size, eps, device)
             torch.nn.Module.__init__(self)
             self._init_rmsnorm(hidden_size, eps, device)
 
         def forward(self, x: torch_typing.Tensor) -> torch_typing.Tensor:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self._forward_rmsnorm(x)
 
 else:
@@ -743,6 +769,7 @@ else:
         """Mamba block stub when PyTorch is not available."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError(
                 "MambaBlock requires PyTorch for inference. Install PyTorch with: pip install torch"
             )
@@ -751,12 +778,14 @@ else:
             raise RuntimeError("MambaBlock requires PyTorch")
 
         def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
             raise RuntimeError("MambaBlock requires PyTorch")
 
     class MarlinMambaBlock(_MarlinMambaBlockBase):  # type: ignore[no-redef]
         """MarlinMambaBlock stub when PyTorch is not available."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError(
                 "MarlinMambaBlock requires PyTorch for inference. "
                 "Install PyTorch with: pip install torch"
@@ -766,12 +795,14 @@ else:
             raise RuntimeError("MarlinMambaBlock requires PyTorch")
 
         def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+            logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
             raise RuntimeError("MarlinMambaBlock requires PyTorch")
 
     class RMSNorm(_RMSNormBase):  # type: ignore[no-redef]
         """RMSNorm stub when PyTorch is not available."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError("RMSNorm requires PyTorch. Install PyTorch with: pip install torch")
 
         def __call__(self, *args: Any, **kwargs: Any) -> Any:

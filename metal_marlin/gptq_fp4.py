@@ -23,10 +23,14 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 # FP4 E2M1 codebook: the 16 representable values
 # Nibble encoding: [sign(1) | exp(2) | mant(1)], bias = 1
@@ -75,6 +79,7 @@ def quantize_to_fp4_grid_vectorized(
             indices: uint8 array of nibble indices (0-15) into FP4_GRID
             quantized: float32 array of dequantized values (scale * FP4_GRID[idx])
     """
+    logger.info("quantize_to_fp4_grid_vectorized called with x=%s, scale=%s", x, scale)
     scale = np.asarray(scale, dtype=np.float32)
     scale = np.maximum(scale, 1e-10)
     x_scaled = x / scale
@@ -122,6 +127,7 @@ def compute_optimal_fp4_scale(
     Returns:
         Optimal scale factor.
     """
+    logger.debug("compute_optimal_fp4_scale called with w_group=%s, method=%s, grid_points=%s", w_group, method, grid_points)
     w_flat = w_group.ravel().astype(np.float32)
     max_abs = np.max(np.abs(w_flat))
 
@@ -209,6 +215,7 @@ class FP4GPTQQuantizer:
             scale_method: Method for computing optimal scales.
             block_size: Column block size for blocked GPTQ.
         """
+        logger.debug("initializing %s with group_size=%s, actorder=%s, damp_factor=%s, scale_method=%s, block_size=%s", type(self).__name__, group_size, actorder, damp_factor, scale_method, block_size)
         self.group_size = group_size
         self.actorder = actorder
         self.damp_factor = damp_factor
@@ -238,6 +245,7 @@ class FP4GPTQQuantizer:
         Returns:
             FP4GPTQResult containing packed weights, scales, and metadata.
         """
+        logger.info("quantize_weight called with W=%s, H=%s", W, H)
         W = np.asarray(W, dtype=np.float32)
         W_orig = W.copy()  # Keep original for MSE computation
         out_features, in_features = W.shape
@@ -426,6 +434,7 @@ def fp4_gptq_quantize_weight(
             scales: float16 array [K_padded // group_size, N_padded]
             meta: Dict with 'orig_K', 'orig_N', etc.
     """
+    logger.info("fp4_gptq_quantize_weight called with W=%s, H=%s, group_size=%s, actorder=%s", W, H, group_size, actorder)
     quantizer = FP4GPTQQuantizer(
         group_size=group_size,
         actorder=actorder,
@@ -450,6 +459,7 @@ def dequantize_fp4_gptq(
     Returns:
         Dequantized weights [orig_N, orig_K] in float16.
     """
+    logger.info("dequantize_fp4_gptq called with packed=%s, scales=%s, meta=%s", packed, scales, meta)
     K = meta["padded_K"]
     N = meta["padded_N"]
     group_size = meta["group_size"]
@@ -499,6 +509,7 @@ def compare_rtn_vs_gptq(
         Dict with 'rtn_mse', 'gptq_mse', 'improvement_pct'.
     """
     # RTN: H=None (identity Hessian), no actorder
+    logger.debug("compare_rtn_vs_gptq called with W=%s, H=%s, group_size=%s", W, H, group_size)
     quantizer_rtn = FP4GPTQQuantizer(group_size=group_size, actorder=False)
     result_rtn = quantizer_rtn.quantize_weight(W, H=None)
 
@@ -531,6 +542,7 @@ def compute_hessian_from_activations(
     Returns:
         Hessian matrix [in_features, in_features].
     """
+    logger.debug("compute_hessian_from_activations called with X=%s, damp_factor=%s", X, damp_factor)
     X = np.asarray(X, dtype=np.float32)
     num_samples = X.shape[0]
 
@@ -547,6 +559,7 @@ def compute_hessian_from_activations(
 
 def main():
     """Test FP4 GPTQ quantization on random tensor."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Test FP4 GPTQ quantization")

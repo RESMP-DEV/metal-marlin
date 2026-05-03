@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,14 @@ from tests.helpers.synthetic_trellis_fixture import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_create_synthetic_trellis_fixture(tmp_path: Path):
     """
     Tests that the synthetic fixture can be created and loaded by TrellisForCausalLM.
     """
+    logger.info("running test_create_synthetic_trellis_fixture")
     fixture_meta = create_synthetic_trellis_fixture(tmp_path)
 
     # 1. Check that the path exists and essential files are present
@@ -50,6 +55,7 @@ def test_create_synthetic_trellis_fixture(tmp_path: Path):
 
 def test_checked_in_synthetic_trellis_fixture_loads() -> None:
     """Checked-in synthetic fixture should load and run a tiny forward pass."""
+    logger.info("running test_checked_in_synthetic_trellis_fixture_loads")
     fixture_path = get_checked_in_synthetic_trellis_fixture_path()
     if not fixture_path.exists():
         pytest.skip(f"Checked-in fixture missing: {fixture_path}")

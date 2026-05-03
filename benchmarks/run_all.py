@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 from datetime import datetime
@@ -19,6 +20,9 @@ from typing import Any
 
 import os
 
+
+logger = logging.getLogger(__name__)
+
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
     print("SKIP: Benchmark disabled in AlphaHENG task mode (ALPHAHENG_TASK_MODE=1)")
@@ -27,6 +31,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 def run_benchmark(script_path: Path, args: list[str] = None) -> dict[str, Any] | None:
     """Run a single benchmark script and capture its JSON output."""
+    logger.info("run_benchmark starting with script_path=%s, args=%s", script_path, args)
     cmd = [sys.executable, str(script_path)]
     if args:
         cmd.extend(args)
@@ -66,6 +71,7 @@ def run_benchmark(script_path: Path, args: list[str] = None) -> dict[str, Any] |
 
 def discover_benchmarks(bench_dir: Path, include: list[str] = None, exclude: list[str] = None) -> list[Path]:
     """Discover benchmark scripts in the benchmarks directory."""
+    logger.info("discover_benchmarks starting with bench_dir=%s, include=%s, exclude=%s", bench_dir, include, exclude)
     patterns = ["bench_*.py", "benchmark_*.py"]
 
     scripts = []
@@ -86,6 +92,7 @@ def discover_benchmarks(bench_dir: Path, include: list[str] = None, exclude: lis
 
 def load_previous_results(results_file: Path) -> dict[str, Any] | None:
     """Load the most recent benchmark results."""
+    logger.info("load_previous_results called with results_file=%s", results_file)
     if not results_file.exists():
         return None
 
@@ -99,6 +106,7 @@ def load_previous_results(results_file: Path) -> dict[str, Any] | None:
 
 def compare_results(current: dict[str, Any], previous: dict[str, Any], threshold: float = 0.1) -> list[dict]:
     """Compare current results against previous run and detect regressions."""
+    logger.debug("compare_results called with current=%s, previous=%s, threshold=%s", current, previous, threshold)
     regressions = []
 
     current_benchmarks = current.get("benchmarks", {})
@@ -153,6 +161,7 @@ def compare_results(current: dict[str, Any], previous: dict[str, Any], threshold
 
 def extract_metrics(benchmark_data: Any) -> dict[str, float]:
     """Extract numeric metrics from benchmark data."""
+    logger.debug("extract_metrics called with benchmark_data=%s", benchmark_data)
     metrics = {}
 
     if isinstance(benchmark_data, dict):
@@ -170,6 +179,7 @@ def extract_metrics(benchmark_data: Any) -> dict[str, float]:
 
 def save_results(results: dict[str, Any], output_file: Path):
     """Save benchmark results to JSON file."""
+    logger.info("save_results called with results=%s, output_file=%s", results, output_file)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     with output_file.open("w") as f:
         json.dump(results, f, indent=2)
@@ -177,6 +187,7 @@ def save_results(results: dict[str, Any], output_file: Path):
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Run all performance benchmarks and report regressions"
     )

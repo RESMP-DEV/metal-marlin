@@ -17,10 +17,14 @@ guarded by availability checks.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 2:4 sparsity utilities
@@ -47,6 +51,7 @@ def prune_to_2_4(
     Raises:
         ValueError: If K is not divisible by 4.
     """
+    logger.debug("prune_to_2_4 called with W=%s", W)
     K, N = W.shape
     if K % 4 != 0:
         raise ValueError(f"K={K} must be divisible by 4 for 2:4 sparsity")
@@ -97,6 +102,7 @@ def prune_to_nm(
         W_sparse: Compressed weights [K * n // m, N_cols].
         mask: Boolean mask [K, N_cols] indicating kept positions.
     """
+    logger.debug("prune_to_nm called with W=%s, n=%s, m=%s", W, n, m)
     K, N_cols = W.shape
     if K % m != 0:
         raise ValueError(f"K={K} must be divisible by m={m}")
@@ -145,6 +151,7 @@ def sparse_gemm_reference(
     Returns:
         Output [M, N] via FP32 accumulation cast to float16.
     """
+    logger.debug("sparse_gemm_reference called with A=%s, W_sparse=%s, meta=%s", A, W_sparse, meta)
     K_sparse, N = W_sparse.shape
     K = K_sparse * 2  # Dense K dimension
     num_blocks = K // 4
@@ -181,6 +188,7 @@ def dense_gemm_reference(
     W: np.ndarray,
 ) -> np.ndarray:
     """Dense FP16 GEMM with FP32 accumulation."""
+    logger.debug("dense_gemm_reference called with A=%s, W=%s", A, W)
     return (A.astype(np.float32) @ W.astype(np.float32)).astype(np.float16)
 
 
@@ -203,6 +211,7 @@ class TestMetadataEncoding:
 
     def test_all_six_patterns_encode_decode(self) -> None:
         """Each of the 6 valid (pos0, pos1) pairs encodes and decodes correctly."""
+        logger.info("running test_all_six_patterns_encode_decode")
         for pos0, pos1 in self.ALL_VALID_PATTERNS:
             nibble = (pos1 << 2) | pos0
             decoded_pos0 = nibble & 0x3
@@ -212,6 +221,7 @@ class TestMetadataEncoding:
 
     def test_nibble_values_match_sparse_metal(self) -> None:
         """Encoded nibble values match those documented in sparse.metal."""
+        logger.info("running test_nibble_values_match_sparse_metal")
         expected = {
             (0, 1): 4,  # 0b0100
             (0, 2): 8,  # 0b1000
@@ -228,6 +238,7 @@ class TestMetadataEncoding:
 
     def test_packed_uint32_roundtrip(self) -> None:
         """8 metadata nibbles pack into uint32 and decode correctly."""
+        logger.info("running test_packed_uint32_roundtrip")
         patterns = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3), (0, 1), (1, 2)]
         nibbles = [(p1 << 2) | p0 for p0, p1 in patterns]
 
@@ -252,6 +263,7 @@ class TestPruneTo24:
     """Validate prune_to_2_4 produces correct structure."""
 
     def test_output_shapes(self) -> None:
+        logger.info("running test_output_shapes")
         K, N = 64, 32
         W = np.random.randn(K, N).astype(np.float16)
         W_sparse, meta = prune_to_2_4(W)
@@ -260,6 +272,7 @@ class TestPruneTo24:
 
     def test_exactly_two_nonzeros_per_block(self) -> None:
         """Each 4-element block in the reconstructed dense matrix has exactly 2 nonzeros."""
+        logger.info("running test_exactly_two_nonzeros_per_block")
         K, N = 128, 64
         rng = np.random.default_rng(42)
         W = rng.standard_normal((K, N)).astype(np.float16)
@@ -286,6 +299,7 @@ class TestPruneTo24:
 
     def test_largest_magnitudes_kept(self) -> None:
         """The two kept values are the largest-magnitude in each 4-element block."""
+        logger.info("running test_largest_magnitudes_kept")
         K, N = 32, 16
         rng = np.random.default_rng(123)
         W = rng.standard_normal((K, N)).astype(np.float32)
@@ -308,6 +322,7 @@ class TestPruneTo24:
 
     def test_canonical_ordering(self) -> None:
         """Metadata always encodes pos0 < pos1."""
+        logger.info("running test_canonical_ordering")
         K, N = 64, 32
         rng = np.random.default_rng(99)
         W = rng.standard_normal((K, N)).astype(np.float16)
@@ -321,11 +336,13 @@ class TestPruneTo24:
                 assert pos0 < pos1, f"Block {block}, col {col}: pos0={pos0} >= pos1={pos1}"
 
     def test_k_not_divisible_by_4_raises(self) -> None:
+        logger.info("running test_k_not_divisible_by_4_raises")
         W = np.random.randn(30, 16).astype(np.float16)
         with pytest.raises(ValueError, match="divisible by 4"):
             prune_to_2_4(W)
 
     def test_dtype_preserved(self) -> None:
+        logger.info("running test_dtype_preserved")
         for dtype in [np.float16, np.float32]:
             W = np.ones((8, 4), dtype=dtype)
             W_sparse, _ = prune_to_2_4(W)
@@ -344,6 +361,7 @@ class TestSparseGEMMExactZeros:
     @pytest.mark.parametrize("K,N", [(128, 128), (256, 256), (512, 512), (4096, 4096)])
     def test_sparse_gemm_exact_zeros(self, M: int, K: int, N: int) -> None:
         """Sparse GEMM result matches dense reference for exact-zero weights."""
+        logger.info("running test_sparse_gemm_exact_zeros")
         rng = np.random.default_rng(42)
 
         # Generate dense weights and prune to 2:4
@@ -382,6 +400,7 @@ class TestSparseGEMMExactZeros:
 
     def test_sparse_gemm_artificial_sparsity_matches_dense(self) -> None:
         """Force exact 2:4 zeros in dense weights, then compare sparse vs dense."""
+        logger.info("running test_sparse_gemm_artificial_sparsity_matches_dense")
         rng = np.random.default_rng(123)
         K, N, M = 512, 512, 16
 
@@ -412,6 +431,7 @@ class TestSparseGEMMExactZeros:
 
     def test_sparse_gemm_identity_activations(self) -> None:
         """With A=I, output equals the weight matrix itself."""
+        logger.info("running test_sparse_gemm_identity_activations")
         K, N = 128, 64
         rng = np.random.default_rng(7)
         W = rng.standard_normal((K, N)).astype(np.float16)
@@ -439,6 +459,7 @@ class TestSparseGEMMExactZeros:
 
     def test_sparse_gemm_zero_activations(self) -> None:
         """Zero activations produce zero output."""
+        logger.info("running test_sparse_gemm_zero_activations")
         K, N, M = 256, 128, 16
         rng = np.random.default_rng(11)
         W = rng.standard_normal((K, N)).astype(np.float16)
@@ -451,6 +472,7 @@ class TestSparseGEMMExactZeros:
 
     def test_sparse_gemm_with_scales(self) -> None:
         """Sparse GEMM with per-group scaling matches scaled dense reference."""
+        logger.info("running test_sparse_gemm_with_scales")
         K, N, M = 256, 128, 8
         group_size = 64
         rng = np.random.default_rng(55)
@@ -501,6 +523,7 @@ class TestNMSparsityPatterns:
     @pytest.mark.parametrize("n,m", [(1, 4), (2, 4), (4, 8)])
     def test_nm_pattern_structure(self, n: int, m: int) -> None:
         """N:M pruning keeps exactly N values per M-element group."""
+        logger.info("running test_nm_pattern_structure")
         K, N_cols = 128, 64
         rng = np.random.default_rng(42)
         W = rng.standard_normal((K, N_cols)).astype(np.float16)
@@ -522,6 +545,7 @@ class TestNMSparsityPatterns:
     @pytest.mark.parametrize("n,m", [(1, 4), (2, 4), (4, 8)])
     def test_nm_gemm_matches_masked_dense(self, n: int, m: int) -> None:
         """N:M sparse GEMM matches dense GEMM with mask applied."""
+        logger.info("running test_nm_gemm_matches_masked_dense")
         K, N_cols, M_batch = 128, 64, 16
         rng = np.random.default_rng(77)
 
@@ -549,6 +573,7 @@ class TestNMSparsityPatterns:
     @pytest.mark.parametrize("n,m", [(1, 4), (2, 4), (4, 8)])
     def test_nm_keeps_largest_magnitudes(self, n: int, m: int) -> None:
         """N:M pruning keeps the N largest-magnitude values per group."""
+        logger.info("running test_nm_keeps_largest_magnitudes")
         K, N_cols = 64, 32
         rng = np.random.default_rng(13)
         W = rng.standard_normal((K, N_cols)).astype(np.float32)
@@ -570,6 +595,7 @@ class TestNMSparsityPatterns:
 
     def test_2_4_specific_reconstruction(self) -> None:
         """2:4 sparse+metadata reconstruction matches the mask approach."""
+        logger.info("running test_2_4_specific_reconstruction")
         K, N = 128, 64
         rng = np.random.default_rng(200)
         W = rng.standard_normal((K, N)).astype(np.float16)
@@ -616,6 +642,7 @@ class TestSparseVsDenseThroughput:
     @pytest.mark.parametrize("K,N", [(4096, 4096), (4096, 14336)])
     def test_sparse_fewer_flops(self, K: int, N: int) -> None:
         """Sparse representation has 2x fewer stored weights."""
+        logger.info("running test_sparse_fewer_flops")
         rng = np.random.default_rng(42)
         W = rng.standard_normal((K, N)).astype(np.float16)
         W_sparse, _ = prune_to_2_4(W)
@@ -638,6 +665,7 @@ class TestSparseVsDenseThroughput:
         The actual Metal kernel advantage will be ~2x due to halved
         memory bandwidth for weight loading.
         """
+        logger.info("running test_sparse_matmul_timing")
         K, N, M = 4096, 4096, 32
         rng = np.random.default_rng(42)
 
@@ -694,6 +722,7 @@ class TestSparseEdgeCases:
 
     def test_all_equal_magnitudes(self) -> None:
         """When all values in a block have equal magnitude, pruning is deterministic."""
+        logger.info("running test_all_equal_magnitudes")
         K, N = 16, 8
         # All values have the same magnitude
         W = np.ones((K, N), dtype=np.float16) * 2.0
@@ -710,6 +739,7 @@ class TestSparseEdgeCases:
 
     def test_single_nonzero_per_block(self) -> None:
         """Block with only one nonzero: both sparse values might be zero/nonzero."""
+        logger.info("running test_single_nonzero_per_block")
         K, N = 8, 4
         W = np.zeros((K, N), dtype=np.float16)
         # Put a single nonzero in each block
@@ -737,6 +767,7 @@ class TestSparseEdgeCases:
 
     def test_negative_values_handled(self) -> None:
         """Negative values are pruned by magnitude, not by value."""
+        logger.info("running test_negative_values_handled")
         _K, N = 8, 4
         W = np.array(
             [
@@ -763,6 +794,7 @@ class TestSparseEdgeCases:
 
     def test_large_dimension_accuracy(self) -> None:
         """Accuracy holds for LLM-scale dimensions."""
+        logger.info("running test_large_dimension_accuracy")
         K, N, M = 4096, 4096, 1
         rng = np.random.default_rng(42)
 
@@ -795,6 +827,7 @@ class TestSparseEdgeCases:
     @pytest.mark.parametrize("seed", range(5))
     def test_reproducibility(self, seed: int) -> None:
         """Same seed produces identical sparse GEMM results."""
+        logger.info("running test_reproducibility")
         K, N, M = 256, 128, 8
         rng = np.random.default_rng(seed)
 

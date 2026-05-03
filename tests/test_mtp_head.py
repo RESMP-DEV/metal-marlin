@@ -1,13 +1,18 @@
 """Unit tests for GLM MTP head."""
 
 from __future__ import annotations
+import logging
 
 import torch
 
 from metal_marlin.layers.mtp_head import GLMMTPHead
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_mtp_head_creation() -> None:
+    logger.info("running test_mtp_head_creation")
     head = GLMMTPHead(hidden_size=16, vocab_size=64, num_tokens=4)
 
     assert head.hidden_size == 16
@@ -22,6 +27,7 @@ def test_mtp_head_creation() -> None:
 
 
 def test_mtp_head_forward_output_count() -> None:
+    logger.info("running test_mtp_head_forward_output_count")
     head = GLMMTPHead(hidden_size=32, vocab_size=128, num_tokens=3)
     hidden = torch.randn(2, 5, 32)
 
@@ -32,6 +38,7 @@ def test_mtp_head_forward_output_count() -> None:
 
 
 def test_mtp_head_forward_output_shapes() -> None:
+    logger.info("running test_mtp_head_forward_output_shapes")
     head = GLMMTPHead(hidden_size=24, vocab_size=100, num_tokens=4)
     hidden = torch.randn(3, 7, 24)
 

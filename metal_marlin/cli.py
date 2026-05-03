@@ -1,6 +1,7 @@
 """Command-line interface for Metal Marlin inference and quantization."""
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -8,6 +9,9 @@ from pathlib import Path
 
 import click
 import numpy as np
+
+
+logger = logging.getLogger(__name__)
 
 # Quantization methods
 QUANT_METHODS = ["rtn", "gptq", "mr-gptq"]
@@ -30,6 +34,7 @@ def _enable_metal_hud() -> None:
     - Memory bandwidth
     - Kernel execution time
     """
+    logger.debug("_enable_metal_hud called")
     os.environ["MTL_HUD_ENABLED"] = "1"
 
 
@@ -43,6 +48,7 @@ def _enable_metal_hud() -> None:
 @click.pass_context
 def cli(ctx: click.Context, metal_hud: bool) -> None:
     """Metal Marlin: FP4-quantized LLM inference on Apple Silicon."""
+    logger.debug("cli called with ctx=%s, metal_hud=%s", ctx, metal_hud)
     ctx.ensure_object(dict)
     if metal_hud:
         _enable_metal_hud()
@@ -58,6 +64,7 @@ def cli(ctx: click.Context, metal_hud: bool) -> None:
 @click.option("--stream", is_flag=True)
 def generate(model, prompt, max_tokens, temperature, top_p, quant, stream):
     """Generate text from a prompt."""
+    logger.debug("generate called with model=%s, prompt=%s, max_tokens=%s", model, prompt, max_tokens)
     from .inference import MarlinPipeline
 
     pipe = MarlinPipeline.from_pretrained(model, quant_type=quant)
@@ -104,6 +111,7 @@ def chat(
     quant: str,
 ) -> None:
     """Interactive chat session (Transformers + Marlin FP4)."""
+    logger.debug("chat called with model=%s, system=%s, bits=%s", model, system, bits)
     if quant != "fp4":
         raise click.ClickException("Only quant='fp4' is supported for chat.")
     if bits != 4:
@@ -113,6 +121,7 @@ def chat(
     from .inference import TransformersMarlinPipeline
 
     def _mps_memory_bytes() -> dict[str, int]:
+        logger.debug("_mps_memory_bytes called")
         if not HAS_TORCH or torch is None or not HAS_MPS:
             return {}
         stats: dict[str, int] = {}
@@ -123,6 +132,7 @@ def chat(
         return stats
 
     def _format_bytes(value: int) -> str:
+        logger.debug("_format_bytes called with value=%s", value)
         sign = "-" if value < 0 else ""
         abs_value = abs(value)
         if abs_value >= 1024**3:
@@ -134,6 +144,7 @@ def chat(
         return f"{sign}{abs_value} B"
 
     def _format_memory_line(prefix: str, stats: dict[str, int] | None) -> str:
+        logger.debug("_format_memory_line called with prefix=%s, stats=%s", prefix, stats)
         if not stats:
             return f"{prefix}: MPS memory unavailable"
         parts = []
@@ -144,6 +155,7 @@ def chat(
         return f"{prefix}: " + ", ".join(parts)
 
     def _format_memory_delta(before: dict[str, int], after: dict[str, int]) -> str:
+        logger.debug("_format_memory_delta called with before=%s, after=%s", before, after)
         if not before or not after:
             return "MPS memory delta unavailable"
         parts = []
@@ -156,6 +168,7 @@ def chat(
         return ", ".join(parts) if parts else "MPS memory delta unavailable"
 
     def _sync_mps() -> None:
+        logger.debug("_sync_mps called")
         if HAS_TORCH and torch is not None and HAS_MPS and hasattr(torch.mps, "synchronize"):
             torch.mps.synchronize()
 
@@ -249,6 +262,7 @@ def serve(
           -H "Content-Type: application/json" \
           -d '{"model": "qwen3_4b_fp4", "messages": [{"role": "user", "content": "Hello"}]}'
     """
+    logger.debug("serve called with model_path=%s, host=%s, port=%s", model_path, host, port)
     import signal
     import sys
 
@@ -260,6 +274,7 @@ def serve(
 
     # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
+        logger.debug("signal_handler called with sig=%s, frame=%s", sig, frame)
         click.echo("\nShutting down server...")
         sys.exit(0)
 
@@ -345,6 +360,7 @@ def convert(
       # Convert existing quantized model to different format
       metal-marlin convert -i ./model-int4 -o ./model-fp4 --quant fp4 --dequant-first
     """
+    logger.info("convert called with input_path=%s, output_path=%s, from_format=%s, to_format=%s", input_path, output_path, from_format, to_format)
     if verbose:
         click.echo(f"Converting: {input_path} → {output_path}")
         click.echo(f"  From format: {from_format}")
@@ -420,6 +436,7 @@ def convert(
 @click.option("--batch-size", default=1, type=int)
 def bench(model, prompt_len, gen_len, batch_size):
     """Benchmark inference performance."""
+    logger.info("bench starting with model=%s, prompt_len=%s, gen_len=%s, batch_size=%s", model, prompt_len, gen_len, batch_size)
     from .benchmarks import benchmark_inference
 
     benchmark_inference(
@@ -598,6 +615,7 @@ def quantize(
           --calibration bartowski-v3 \\
           --samples 512
     """
+    logger.info("quantize called with input_path=%s, output_path=%s, method=%s, bits=%s", input_path, output_path, method, bits)
     import os
 
     # Get token from environment if not provided
@@ -733,6 +751,7 @@ def _quantize_rtn(
     workers: int,
 ):
     """RTN (Round-to-Nearest) quantization - existing implementation."""
+    logger.info("_quantize_rtn called with input_path=%s, output_path=%s, quant_format=%s, group_size=%s", input_path, output_path, quant_format, group_size)
     from .hf_loader import (
         CalibrationData,
         convert_model_layerwise,
@@ -856,6 +875,7 @@ def _quantize_gptq(
 ):
     """GPTQ quantization with Hessian-based error compensation."""
     # Check if GPTQ implementation exists
+    logger.info("_quantize_gptq called with input_path=%s, output_path=%s, quant_format=%s, group_size=%s", input_path, output_path, quant_format, group_size)
     try:
         from .gptq import GPTQQuantizer
     except ImportError:
@@ -913,6 +933,7 @@ def _quantize_mr_gptq(
 ):
     """MR-GPTQ quantization with Hadamard rotation and GPTQ."""
     # Check if MR-GPTQ implementation exists
+    logger.info("_quantize_mr_gptq called with input_path=%s, output_path=%s, quant_format=%s, group_size=%s", input_path, output_path, quant_format, group_size)
     try:
         from .mr_gptq import MRGPTQQuantizer
     except ImportError:
@@ -961,6 +982,7 @@ def _load_calibration_dataset(
     verbose: bool,
 ):
     """Load calibration dataset from source or file."""
+    logger.info("_load_calibration_dataset called with calibration=%s, samples=%s, verbose=%s", calibration, samples, verbose)
     if calibration is None:
         return None
 
@@ -1004,6 +1026,7 @@ def _load_calibration_dataset(
 
 def _print_quantization_summary(stats: dict, output_path: str, method: str):
     """Print quantization summary."""
+    logger.info("_print_quantization_summary called with stats=%s, output_path=%s, method=%s", stats, output_path, method)
     click.echo()
     click.echo("=" * 60)
     click.echo(f"{method} Quantization Complete")
@@ -1025,6 +1048,7 @@ def _print_quantization_summary(stats: dict, output_path: str, method: str):
 
 
 def _normalize_quality_dataset(dataset: str) -> str:
+    logger.debug("_normalize_quality_dataset called with dataset=%s", dataset)
     dataset = dataset.lower()
     if dataset in ("wikitext", "wikitext2"):
         return "wikitext-2"
@@ -1032,6 +1056,7 @@ def _normalize_quality_dataset(dataset: str) -> str:
 
 
 def _load_quality_texts(dataset: str, samples: int) -> list[str]:
+    logger.info("_load_quality_texts called with dataset=%s, samples=%s", dataset, samples)
     from .benchmark_models import load_eval_data
 
     dataset = _normalize_quality_dataset(dataset)
@@ -1039,6 +1064,7 @@ def _load_quality_texts(dataset: str, samples: int) -> list[str]:
 
 
 def _resolve_model_path(model: str, verbose: bool = False) -> Path | None:
+    logger.debug("_resolve_model_path called with model=%s, verbose=%s", model, verbose)
     model_path = Path(model)
     if model_path.exists():
         return model_path
@@ -1056,6 +1082,7 @@ def _resolve_model_path(model: str, verbose: bool = False) -> Path | None:
 
 
 def _estimate_model_memory_gb(model_path: Path, overhead: float = 1.1) -> float | None:
+    logger.debug("_estimate_model_memory_gb called with model_path=%s, overhead=%s", model_path, overhead)
     if model_path is None or not model_path.exists():
         return None
     total_bytes = 0
@@ -1072,6 +1099,7 @@ def _load_quantization_metadata(
     quant_format: str | None = None,
     group_size: int | None = None,
 ) -> tuple[dict[str, int | str | None], float | None]:
+    logger.info("_load_quantization_metadata called with quantized_path=%s, bits=%s, quant_format=%s, group_size=%s", quantized_path, bits, quant_format, group_size)
     meta: dict[str, object] = {}
     config_path = quantized_path / "quantization_config.json"
     if config_path.exists():
@@ -1142,6 +1170,7 @@ def _load_quantization_metadata(
 
 
 def _write_quality_report(report: dict, output_path: str | None) -> None:
+    logger.info("_write_quality_report called with report=%s, output_path=%s", report, output_path)
     payload = json.dumps(report, indent=2)
     if output_path:
         Path(output_path).write_text(payload)
@@ -1155,6 +1184,7 @@ def _compute_layer_rmse(
     quantized_path: Path,
     verbose: bool = False,
 ) -> tuple[dict[str, float], float | None]:
+    logger.debug("_compute_layer_rmse called with model_path=%s, quantized_path=%s, verbose=%s", model_path, quantized_path, verbose)
     from .hf_loader import load_layer_weights, load_model_config, load_quantized_weights
     from .quantize_fp4 import compute_quantization_error
 
@@ -1250,6 +1280,7 @@ def quality_compare(
     verbose: bool,
 ):
     """Compare quantized model quality against a BF16 reference."""
+    logger.debug("quality_compare called with model=%s, quantized=%s, dataset=%s", model, quantized, dataset)
     from .benchmark_models import PUBLISHED_FP16_PPL, _benchmark_marlin, _compute_kl_divergence
 
     quantized_path = Path(quantized)
@@ -1360,6 +1391,7 @@ def quality_quick(
     verbose: bool,
 ):
     """Quick quality check (reduced samples, no layer RMSE)."""
+    logger.debug("quality_quick called with model=%s, bits=%s, quant_format=%s", model, bits, quant_format)
     try:
         bits = int(bits)
     except (TypeError, ValueError):
@@ -1453,6 +1485,7 @@ def quality_layers(
     verbose: bool,
 ):
     """Layer-by-layer RMSE analysis for a quantized model."""
+    logger.debug("quality_layers called with model=%s, quantized=%s, output=%s", model, quantized, output)
     quantized_path = Path(quantized)
     if not quantized_path.exists():
         raise click.ClickException(f"Quantized model path not found: {quantized}")
@@ -1530,6 +1563,7 @@ def eval_model(
       # KL divergence from reference
       metal-marlin eval -m ./model-fp4/ -r ./model-bf16/ --metric kl-divergence
     """
+    logger.debug("eval_model called with model=%s, reference=%s, metric=%s", model, reference, metric)
     from .eval_perplexity import load_tokenizer
 
     click.echo(f"Loading model: {model}")
@@ -1624,6 +1658,7 @@ def analyze(
           --output sensitivity_report.json \\
           --samples 256
     """
+    logger.debug("analyze called with input_path=%s, calibration=%s, output_path=%s", input_path, calibration, output_path)
     import json
     import os
 
@@ -1722,6 +1757,7 @@ def analyze(
 @cli.group("mmfp4")
 def mmfp4():
     """MMFP4 model inference commands."""
+    logger.debug("mmfp4 called")
     pass
 
 
@@ -1733,6 +1769,7 @@ def mmfp4():
 @click.option("--no-fused-moe", is_flag=True, help="Disable fused MoE kernels")
 def mmfp4_generate(model, prompt, max_tokens, temperature, no_fused_moe):
     """Generate text using MMFP4 model."""
+    logger.debug("mmfp4_generate called with model=%s, prompt=%s, max_tokens=%s", model, prompt, max_tokens)
     import torch
     from transformers import AutoTokenizer
 
@@ -1760,6 +1797,7 @@ def mmfp4_generate(model, prompt, max_tokens, temperature, no_fused_moe):
 @click.option("--model", "-m", required=True, help="Model path")
 def mmfp4_bench(model):
     """Benchmark MMFP4 model throughput."""
+    logger.info("mmfp4_bench starting with model=%s", model)
     import time
 
     import torch
@@ -1798,6 +1836,7 @@ def mmfp4_bench(model):
 
 
 def main():
+    logger.info("main starting")
     cli()
 
 

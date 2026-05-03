@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -22,6 +23,9 @@ from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
 if HAS_TORCH:
     import torch
 
+
+logger = logging.getLogger(__name__)
+
 # Metal kernel availability
 _HAS_METAL_ACTIVATION = HAS_PYOBJC_METAL and HAS_MPS and HAS_TORCH
 
@@ -31,6 +35,7 @@ _USE_METAL_ACTIVATION = _HAS_METAL_ACTIVATION
 
 def _ensure_mps(x: torch.Tensor) -> torch.Tensor:
     """Ensure tensor is on MPS device, converting if necessary."""
+    logger.debug("_ensure_mps called with x=%s", x)
     if not x.is_mps:
         return x.to("mps")
     return x
@@ -47,6 +52,7 @@ def silu_metal(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Activated tensor on same device as input
     """
+    logger.debug("silu_metal called with x=%s", x)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 
@@ -66,6 +72,7 @@ def gelu_metal(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Activated tensor on same device as input
     """
+    logger.debug("gelu_metal called with x=%s", x)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 
@@ -84,6 +91,7 @@ def relu_metal(x: torch.Tensor) -> torch.Tensor:
     Returns:
         Activated tensor on same device as input
     """
+    logger.debug("relu_metal called with x=%s", x)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 
@@ -113,6 +121,7 @@ def swiglu_fused_metal(
     Note:
         Both inputs must have the same shape.
     """
+    logger.debug("swiglu_fused_metal called with gate=%s, up=%s", gate, up)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 
@@ -140,6 +149,7 @@ def geglu_fused_metal(
     Note:
         Both inputs must have the same shape.
     """
+    logger.debug("geglu_fused_metal called with gate=%s, up=%s", gate, up)
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 

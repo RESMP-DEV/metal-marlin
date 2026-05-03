@@ -20,6 +20,7 @@ Usage:
 from __future__ import annotations
 
 import gc
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -32,6 +33,9 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 if TYPE_CHECKING:
     import torch as torch_types
 
+
+
+logger = logging.getLogger(__name__)
 
 DECODE_LATENCY_THRESHOLD_MS = float(os.environ.get("PERF_LATENCY_THRESHOLD_MS", "1000"))
 MEMORY_THRESHOLD_GB = float(os.environ.get("PERF_MEMORY_THRESHOLD_GB", "4.0"))
@@ -56,6 +60,7 @@ class PerfResult:
 
 
 def _mps_memory_gb() -> float:
+    logger.debug("_mps_memory_gb called")
     if not HAS_TORCH or torch is None or not HAS_MPS:
         return 0.0
 
@@ -72,11 +77,13 @@ def _mps_memory_gb() -> float:
 
 
 def _sync_gpu() -> None:
+    logger.debug("_sync_gpu called")
     if HAS_TORCH and torch is not None and HAS_MPS:
         torch.mps.synchronize()
 
 
 def _clear_memory() -> None:
+    logger.debug("_clear_memory called")
     gc.collect()
     if HAS_TORCH and torch is not None and HAS_MPS:
         torch.mps.synchronize()
@@ -86,6 +93,7 @@ def _clear_memory() -> None:
 
 class LatencyTimer:
     def __init__(self, sync_gpu: bool = True) -> None:
+        logger.debug("initializing %s with sync_gpu=%s", type(self).__name__, sync_gpu)
         self.sync_gpu = sync_gpu
         self.start_time: float = 0.0
         self.end_time: float = 0.0
@@ -103,11 +111,13 @@ class LatencyTimer:
 
     @property
     def elapsed_ms(self) -> float:
+        logger.debug("elapsed_ms called")
         return (self.end_time - self.start_time) * 1000
 
 
 class MemoryTracker:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.baseline_gb: float = 0.0
         self.peak_gb: float = 0.0
 
@@ -123,17 +133,20 @@ class MemoryTracker:
         self.peak_gb = max(self.peak_gb, final)
 
     def sample(self) -> None:
+        logger.debug("sample called")
         current = _mps_memory_gb()
         self.peak_gb = max(self.peak_gb, current)
 
     @property
     def used_gb(self) -> float:
+        logger.debug("used_gb called")
         return max(0.0, self.peak_gb - self.baseline_gb)
 
 
 @pytest.fixture
 def model_path() -> str:
     """Get model path from environment or use default."""
+    logger.debug("model_path called")
     from pathlib import Path
 
     env_path = os.environ.get("PERF_MODEL_PATH")
@@ -161,6 +174,7 @@ def model_path() -> str:
 @pytest.fixture
 def prompt_text() -> str:
     """Sample prompt for generation."""
+    logger.debug("prompt_text called")
     return "The future of artificial intelligence is"
 
 
@@ -176,6 +190,7 @@ class TestGLM47FlashPerformance:
         Verifies that decoding a single token takes less than the threshold.
         This is critical for interactive applications.
         """
+        logger.info("running test_decode_latency_per_token")
         if not torch:
             pytest.skip("PyTorch not available")
 
@@ -238,6 +253,7 @@ class TestGLM47FlashPerformance:
         Verifies that peak memory stays below the threshold.
         Critical for running on devices with limited memory.
         """
+        logger.info("running test_memory_usage_during_generation")
         if not torch:
             pytest.skip("PyTorch not available")
 
@@ -283,6 +299,7 @@ class TestGLM47FlashPerformance:
 
         Verifies that both performance metrics stay within thresholds.
         """
+        logger.info("running test_latency_and_memory_combined")
         if not torch:
             pytest.skip("PyTorch not available")
 
@@ -347,6 +364,7 @@ class TestPerformanceConfig:
     @pytest.mark.smoke
     def test_thresholds_are_reasonable(self) -> None:
         """Verify that configured thresholds are reasonable."""
+        logger.info("running test_thresholds_are_reasonable")
         print("\nPerformance threshold configuration:")
         print(f"  Decode latency: {DECODE_LATENCY_THRESHOLD_MS}ms/token")
         print(f"  Memory: {MEMORY_THRESHOLD_GB}GB")
@@ -359,6 +377,7 @@ class TestPerformanceConfig:
     @pytest.mark.smoke
     def test_memory_tracking_infrastructure(self) -> None:
         """Verify memory measurement infrastructure works."""
+        logger.info("running test_memory_tracking_infrastructure")
         if not HAS_TORCH or not HAS_MPS:
             pytest.skip("MPS not available")
 
@@ -371,6 +390,7 @@ class TestPerformanceConfig:
     @pytest.mark.smoke
     def test_latency_measurement_infrastructure(self) -> None:
         """Verify latency measurement infrastructure works."""
+        logger.info("running test_latency_measurement_infrastructure")
         with LatencyTimer(sync_gpu=False) as timer:
             time.sleep(0.01)
 

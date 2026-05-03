@@ -26,6 +26,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections.abc import Callable
 from typing import Any
@@ -41,6 +42,9 @@ except ImportError:
     Metal = None
     Foundation = None
 
+
+
+logger = logging.getLogger(__name__)
 
 class AsyncFuture:
     """Future/promise for async command buffer completion.
@@ -63,6 +67,7 @@ class AsyncFuture:
         Args:
             command_buffer: The MTLCommandBuffer being tracked (optional)
         """
+        logger.debug("initializing %s with command_buffer=%s", type(self).__name__, command_buffer)
         self._completed_event = threading.Event()
         self._error: Any | None = None
         self._callback: Callable[[], None] | None = None
@@ -76,6 +81,7 @@ class AsyncFuture:
         Args:
             error: Any error that occurred during execution
         """
+        logger.debug("mark_completed called with error=%s", error)
         self._error = error
         self._completed_event.set()
         
@@ -95,6 +101,7 @@ class AsyncFuture:
         Raises:
             RuntimeError: If an error occurred during GPU execution
         """
+        logger.debug("wait called")
         self._completed_event.wait()
         
         if self._error is not None:
@@ -107,6 +114,7 @@ class AsyncFuture:
             True if the command buffer has completed execution,
             False if still in progress.
         """
+        logger.debug("is_ready called")
         return self._completed_event.is_set()
     
     def on_complete(self, callback: Callable[[], None]) -> None:
@@ -117,6 +125,7 @@ class AsyncFuture:
         Args:
             callback: Function to call when command buffer completes
         """
+        logger.debug("on_complete called with callback=%s", callback)
         if self.is_ready():
             try:
                 callback()
@@ -128,6 +137,7 @@ class AsyncFuture:
     @property
     def error(self) -> Any | None:
         """Any error that occurred during execution, or None."""
+        logger.debug("error called")
         return self._error
 
 
@@ -171,6 +181,7 @@ class AsyncCommandBuffer:
         Raises:
             RuntimeError: If PyObjC Metal is not available
         """
+        logger.debug("initializing %s with command_buffer=%s", type(self).__name__, command_buffer)
         if not HAS_METAL:
             raise RuntimeError(
                 "AsyncCommandBuffer requires PyObjC. Install with:\n"
@@ -193,6 +204,7 @@ class AsyncCommandBuffer:
         Raises:
             RuntimeError: If the buffer has already been committed
         """
+        logger.debug("commit called")
         if self._committed:
             raise RuntimeError("Command buffer already committed")
         
@@ -203,6 +215,7 @@ class AsyncCommandBuffer:
         # The handler is called when the command buffer completes
         def completion_handler(cmd_buffer: Any) -> None:
             """Called by Metal when command buffer completes."""
+            logger.debug("completion_handler called with cmd_buffer=%s", cmd_buffer)
             status = cmd_buffer.status()
             error = None
             
@@ -227,16 +240,19 @@ class AsyncCommandBuffer:
     @property
     def future(self) -> AsyncFuture | None:
         """The AsyncFuture for this command buffer, or None if not committed."""
+        logger.debug("future called")
         return self._future
     
     @property
     def command_buffer(self) -> Any:
         """The underlying MTLCommandBuffer."""
+        logger.debug("command_buffer called")
         return self._command_buffer
     
     @property
     def is_committed(self) -> bool:
         """Whether the command buffer has been committed."""
+        logger.debug("is_committed called")
         return self._committed
 
 
@@ -249,6 +265,7 @@ def create_async_future() -> AsyncFuture:
     Returns:
         A new AsyncFuture instance
     """
+    logger.debug("create_async_future called")
     return AsyncFuture()
 
 
@@ -265,6 +282,7 @@ def commit_async(command_buffer: Any) -> AsyncFuture:
     Returns:
         AsyncFuture for tracking completion
     """
+    logger.debug("commit_async called with command_buffer=%s", command_buffer)
     async_cb = AsyncCommandBuffer(command_buffer)
     return async_cb.commit()
 
@@ -295,6 +313,7 @@ class AsyncCommandQueue:
         Args:
             command_queue: An MTLCommandQueue instance
         """
+        logger.debug("initializing %s with command_queue=%s", type(self).__name__, command_queue)
         self._command_queue = command_queue
     
     def submit(self, command_buffer: Any) -> AsyncFuture:
@@ -306,6 +325,7 @@ class AsyncCommandQueue:
         Returns:
             AsyncFuture for tracking completion
         """
+        logger.debug("submit called with command_buffer=%s", command_buffer)
         return commit_async(command_buffer)
     
     def create_buffer(self) -> Any:
@@ -314,6 +334,7 @@ class AsyncCommandQueue:
         Returns:
             A new MTLCommandBuffer instance
         """
+        logger.debug("create_buffer called")
         return self._command_queue.commandBuffer()
 
 
@@ -327,6 +348,7 @@ def wait_all(futures: list[AsyncFuture]) -> None:
     Args:
         futures: List of AsyncFuture instances to wait for
     """
+    logger.debug("wait_all called with futures=%s", futures)
     for future in futures:
         future.wait()
 
@@ -341,6 +363,7 @@ def wait_any(futures: list[AsyncFuture]) -> int:
         Index of the first completed future
     """
     # Poll with a small timeout to avoid busy waiting
+    logger.debug("wait_any called with futures=%s", futures)
     import time
     
     while True:
@@ -359,6 +382,7 @@ def all_ready(futures: list[AsyncFuture]) -> bool:
     Returns:
         True if all futures have completed
     """
+    logger.debug("all_ready called with futures=%s", futures)
     return all(f.is_ready() for f in futures)
 
 
@@ -371,4 +395,5 @@ def any_ready(futures: list[AsyncFuture]) -> bool:
     Returns:
         True if at least one future has completed
     """
+    logger.debug("any_ready called with futures=%s", futures)
     return any(f.is_ready() for f in futures)

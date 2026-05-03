@@ -1,11 +1,15 @@
 """Utilities for loading GLM-4 MoE expert MMFP4 weights from safetensors."""
 
 from __future__ import annotations
+import logging
 
 import torch
 
 from .mmfp4_loader import MMFP4ModelLoader
 
+
+
+logger = logging.getLogger(__name__)
 
 def _load_expert_projection(
     loader: MMFP4ModelLoader,
@@ -24,6 +28,7 @@ def _load_expert_projection(
     Returns:
         Tuple of (packed_weights, scales) both in [out, ...] layout.
     """
+    logger.info("_load_expert_projection called with loader=%s, layer_idx=%s, expert_idx=%s", loader, layer_idx, expert_idx)
     tensor_name = f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.{proj_name}.weight"
     qweight, scales = loader.get_quantized_weight(tensor_name)
 
@@ -65,6 +70,7 @@ def load_expert_weights(
     - Scales are kept in [out, n_groups] format as stored in safetensors,
       which matches the Metal kernel's expected indexing pattern.
     """
+    logger.info("load_expert_weights called with loader=%s, layer_idx=%s, num_experts=%s", loader, layer_idx, num_experts)
     if num_experts <= 0:
         raise ValueError(f"num_experts must be > 0, got {num_experts}")
 

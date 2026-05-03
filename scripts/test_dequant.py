@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Compare TrellisLinear forward vs manual matmul with dequantized weights."""
 
+import logging
 import torch
 
 from metal_marlin.trellis.testing import create_mock_trellis_linear
+
+
+logger = logging.getLogger(__name__)
 
 torch.manual_seed(0)
 linear = create_mock_trellis_linear(256, 128, bits=3, device="mps")

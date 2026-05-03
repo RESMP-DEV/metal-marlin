@@ -16,6 +16,7 @@ Key assertions check for:
 from __future__ import annotations
 
 import gc
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +41,9 @@ except ImportError:
     HAS_BUFFER_POOL = False
 
 
+
+logger = logging.getLogger(__name__)
+
 requires_mps = pytest.mark.skipif(not HAS_MPS, reason="MPS required (Apple Silicon)")
 requires_buffer_pool = pytest.mark.skipif(not HAS_BUFFER_POOL, reason="Buffer pool modules required")
 requires_metal = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
@@ -47,6 +51,7 @@ requires_metal = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 
 def clear_mps_memory():
     """Clear MPS memory cache."""
+    logger.debug("clear_mps_memory called")
     gc.collect()
     if HAS_MPS:
         torch.mps.empty_cache()
@@ -57,6 +62,7 @@ def clear_mps_memory():
 @pytest.fixture(autouse=True)
 def cleanup_after_test():
     """Cleanup after each test."""
+    logger.info("running cleanup_after_test")
     yield
     clear_mps_memory()
 
@@ -64,6 +70,7 @@ def cleanup_after_test():
 @pytest.fixture
 def metal_device():
     """Get Metal device."""
+    logger.debug("metal_device called")
     import Metal
     device = Metal.MTLCreateSystemDefaultDevice()
     if device is None:
@@ -74,6 +81,7 @@ def metal_device():
 @pytest.fixture
 def metal_lib():
     """Compiled Metal library fixture."""
+    logger.debug("metal_lib called")
     if not HAS_METAL:
         pytest.skip("Metal not available")
     return MetalKernelLibrary.from_source_dir()
@@ -85,6 +93,7 @@ class TestBufferPoolBasics:
 
     def test_buffer_content_preserved(self, metal_device):
         """Data written to buffer should be preserved through release/re-acquire."""
+        logger.info("running test_buffer_content_preserved")
         pool = MetalBufferPool(metal_device)
 
         # Get buffer and write pattern
@@ -112,6 +121,7 @@ class TestBufferPoolBasics:
 
     def test_no_cross_buffer_contamination(self, metal_device):
         """Operations on one buffer shouldn't affect others."""
+        logger.info("running test_no_cross_buffer_contamination")
         pool = MetalBufferPool(metal_device)
 
         # Get multiple buffers
@@ -141,6 +151,7 @@ class TestBufferPoolBasics:
 
     def test_priority_isolation(self, metal_device):
         """Different priority buffers should be managed independently."""
+        logger.info("running test_priority_isolation")
         pool = MetalBufferPool(metal_device)
 
         # Get buffers with different priorities
@@ -172,6 +183,7 @@ class TestTransientRingBuffer:
 
     def test_sequential_allocations_no_overlap(self, metal_device):
         """Sequential allocations should not overlap."""
+        logger.info("running test_sequential_allocations_no_overlap")
         ring = TransientRingBuffer(metal_device, capacity=1024 * 1024)
 
         allocations = []
@@ -193,6 +205,7 @@ class TestTransientRingBuffer:
 
     def test_reset_allows_reuse(self, metal_device):
         """Reset should allow buffer reuse without corruption."""
+        logger.info("running test_reset_allows_reuse")
         ring = TransientRingBuffer(metal_device, capacity=1024 * 1024)
 
         # First allocation pattern
@@ -215,6 +228,7 @@ class TestTransientRingBuffer:
 
     def test_capacity_enforced(self, metal_device):
         """Allocations beyond capacity should raise error."""
+        logger.info("running test_capacity_enforced")
         ring = TransientRingBuffer(metal_device, capacity=1024)
 
         # First allocation should work
@@ -231,6 +245,7 @@ class TestTransientRingBuffer:
 
     def test_can_alloc_check(self, metal_device):
         """can_alloc should correctly predict allocation success."""
+        logger.info("running test_can_alloc_check")
         ring = TransientRingBuffer(metal_device, capacity=4096)
 
         assert ring.can_alloc(2048) is True
@@ -245,6 +260,7 @@ class TestTransientRingBuffer:
 
     def test_alloc_bytes_memoryview(self, metal_device):
         """alloc_bytes should return valid memoryview."""
+        logger.info("running test_alloc_bytes_memoryview")
         ring = TransientRingBuffer(metal_device, capacity=1024 * 1024)
 
         view1, offset1 = ring.alloc_bytes(256)
@@ -269,6 +285,7 @@ class TestBufferPoolEviction:
 
     def test_eviction_removes_correct_buffers(self, metal_device):
         """Eviction should remove low-priority buffers first."""
+        logger.info("running test_eviction_removes_correct_buffers")
         pool = MetalBufferPool(metal_device)
 
         # Create low priority buffers and release them
@@ -303,6 +320,7 @@ class TestBufferPoolEviction:
 
     def test_max_pool_size_enforcement(self, metal_device):
         """max_pool_size should trigger eviction when exceeded."""
+        logger.info("running test_max_pool_size_enforcement")
         pool = MetalBufferPool(metal_device, max_pool_size=8 * 1024)
 
         # Allocate and release to fill pool
@@ -318,6 +336,7 @@ class TestBufferPoolEviction:
 
     def test_ref_count_prevents_eviction(self, metal_device):
         """Buffers with non-zero ref count should not be evicted."""
+        logger.info("running test_ref_count_prevents_eviction")
         pool = MetalBufferPool(metal_device)
 
         # Get buffer (ref_count = 1)
@@ -339,6 +358,7 @@ class TestMoEBufferPool:
 
     def test_output_buffer_zeroing(self, metal_device):
         """Output buffers should be zeroed on get."""
+        logger.info("running test_output_buffer_zeroing")
         from metal_marlin.trellis.moe_dispatch import MoEBufferPool
 
         pool = MoEBufferPool(metal_device, hidden_dim=256, max_batch=8)
@@ -360,6 +380,7 @@ class TestMoEBufferPool:
 
     def test_activation_buffer_copy_isolation(self, metal_device):
         """Activation buffer should copy, not share memory."""
+        logger.info("running test_activation_buffer_copy_isolation")
         from metal_marlin.trellis.moe_dispatch import MoEBufferPool
 
         pool = MoEBufferPool(metal_device, hidden_dim=256, max_batch=8)
@@ -383,6 +404,7 @@ class TestMoEBufferPool:
 
     def test_different_batch_sizes_isolated(self, metal_device):
         """Different batch sizes should have independent buffers."""
+        logger.info("running test_different_batch_sizes_isolated")
         from metal_marlin.trellis.moe_dispatch import MoEBufferPool
 
         pool = MoEBufferPool(metal_device, hidden_dim=256, max_batch=16)
@@ -413,6 +435,7 @@ class TestMoEBufferPool:
 
     def test_expert_ids_buffer_isolation(self, metal_device):
         """Expert IDs buffers should be isolated."""
+        logger.info("running test_expert_ids_buffer_isolation")
         from metal_marlin.trellis.moe_dispatch import MoEBufferPool
 
         pool = MoEBufferPool(metal_device, hidden_dim=256, max_batch=8, top_k_values=(2, 4))
@@ -435,11 +458,13 @@ class TestConcurrentAccess:
 
     def test_concurrent_get_release(self, metal_device):
         """Concurrent get/release should not corrupt pool state."""
+        logger.info("running test_concurrent_get_release")
         pool = MetalBufferPool(metal_device)
         errors = []
         results = []
 
         def worker(worker_id):
+            logger.debug("worker called with worker_id=%s", worker_id)
             try:
                 for i in range(50):
                     buf = pool.get(1024)
@@ -468,11 +493,13 @@ class TestConcurrentAccess:
 
     def test_thread_local_safety(self, metal_device):
         """Each thread should see consistent pool state."""
+        logger.info("running test_thread_local_safety")
         pool = MetalBufferPool(metal_device)
         results = []
 
         def worker():
             # Each thread does get/release
+            logger.debug("worker called")
             buf = pool.get(2048)
             time.sleep(0.001)
             pool.release(buf)
@@ -493,6 +520,7 @@ class TestDefragmentation:
 
     def test_defragment_maintains_pool_integrity(self, metal_device):
         """Defragmentation should leave pool in valid state."""
+        logger.info("running test_defragment_maintains_pool_integrity")
         pool = MetalBufferPool(metal_device)
 
         # Create fragmented pool
@@ -522,6 +550,7 @@ class TestDefragmentation:
 
     def test_compact_frees_memory(self, metal_device):
         """Compact should reduce pooled memory."""
+        logger.info("running test_compact_frees_memory")
         pool = MetalBufferPool(metal_device)
 
         # Create multiple buffers of same size
@@ -549,6 +578,7 @@ class TestEdgeCases:
 
     def test_zero_size_allocation(self, metal_device):
         """Zero-size allocation should be handled gracefully."""
+        logger.info("running test_zero_size_allocation")
         pool = MetalBufferPool(metal_device)
 
         # Should get minimum sized buffer (cache line aligned)
@@ -559,6 +589,7 @@ class TestEdgeCases:
 
     def test_large_allocation(self, metal_device):
         """Large allocations should work correctly."""
+        logger.info("running test_large_allocation")
         pool = MetalBufferPool(metal_device)
 
         # Allocate 1MB
@@ -572,6 +603,7 @@ class TestEdgeCases:
 
     def test_repeated_reset_no_leak(self, metal_device):
         """Repeated ring buffer resets shouldn't leak memory."""
+        logger.info("running test_repeated_reset_no_leak")
         ring = TransientRingBuffer(metal_device, capacity=1024 * 1024)
 
         initial_capacity = ring.capacity
@@ -585,6 +617,7 @@ class TestEdgeCases:
 
     def test_stats_consistency(self, metal_device):
         """Stats should always be consistent."""
+        logger.info("running test_stats_consistency")
         pool = MetalBufferPool(metal_device)
 
         # Allocate some buffers
@@ -623,6 +656,7 @@ class TestGlobalRingBuffer:
 
     def test_get_transient_ring_singleton(self, metal_device):
         """get_transient_ring should return singleton per device."""
+        logger.info("running test_get_transient_ring_singleton")
         ring1 = get_transient_ring(metal_device, capacity=1024 * 1024)
         ring2 = get_transient_ring(metal_device, capacity=1024 * 1024)
 
@@ -630,6 +664,7 @@ class TestGlobalRingBuffer:
 
     def test_reset_transient_ring(self, metal_device):
         """reset_transient_ring should reset the global ring."""
+        logger.info("running test_reset_transient_ring")
         ring = get_transient_ring(metal_device, capacity=1024 * 1024)
 
         # Allocate some space
@@ -643,6 +678,7 @@ class TestGlobalRingBuffer:
 
     def test_transient_ring_stats(self, metal_device):
         """transient_ring_stats should return valid stats."""
+        logger.info("running test_transient_ring_stats")
         ring = get_transient_ring(metal_device, capacity=1024 * 1024)
         ring.reset()
 

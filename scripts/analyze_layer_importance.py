@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -42,6 +43,9 @@ try:
 except ImportError as e:
     raise SystemExit(f"PyTorch required: {e}")
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class LayerImportance:
@@ -76,6 +80,7 @@ class ImportanceAnalysis:
     estimated_speedup_pct: float
 
     def to_json(self) -> dict[str, Any]:
+        logger.debug("to_json called")
         result = asdict(self)
         result["layers"] = [asdict(layer) for layer in self.layers]
         return result
@@ -91,6 +96,7 @@ def load_model_and_tokenizer(
 
     Supports both local trellis-quantized models and HuggingFace models.
     """
+    logger.info("load_model_and_tokenizer called with model_path=%s, model_id=%s, device=%s, dtype=%s", model_path, model_id, device, dtype)
     from transformers import AutoTokenizer
 
     # Resolve device
@@ -153,6 +159,7 @@ def load_model_and_tokenizer(
 def get_model_layers(model: Any) -> list[Any]:
     """Extract transformer layers from model."""
     # Try common attribute paths
+    logger.debug("get_model_layers called with model=%s", model)
     if hasattr(model, "model") and hasattr(model.model, "layers"):
         return list(model.model.layers)
     if hasattr(model, "transformer") and hasattr(model.transformer, "h"):
@@ -167,6 +174,7 @@ class LayerSkipWrapper:
     """Context manager to temporarily skip a layer during forward pass."""
 
     def __init__(self, layer: Any, layer_idx: int):
+        logger.debug("initializing %s with layer=%s, layer_idx=%s", type(self).__name__, layer, layer_idx)
         self.layer = layer
         self.layer_idx = layer_idx
         self.original_forward = None
@@ -177,6 +185,7 @@ class LayerSkipWrapper:
         def skip_forward(hidden_states, *args, **kwargs):
             # Pass hidden states through unchanged (identity)
             # This preserves tensor shape and gradient flow
+            logger.debug("skip_forward called with hidden_states=%s", hidden_states)
             return hidden_states
 
         self.layer.forward = skip_forward
@@ -198,6 +207,7 @@ def compute_perplexity(
     verbose: bool = False,
 ) -> float:
     """Compute perplexity, optionally skipping a specific layer."""
+    logger.debug("compute_perplexity called with model=%s, tokenizer=%s, texts=%s", model, tokenizer, texts)
     from metal_marlin.eval.perplexity import log_softmax
 
     total_nll = 0.0
@@ -263,6 +273,7 @@ def analyze_layer_importance(
     verbose: bool = True,
 ) -> ImportanceAnalysis:
     """Analyze importance of each layer by measuring perplexity impact."""
+    logger.debug("analyze_layer_importance called with model=%s, tokenizer=%s, config=%s", model, tokenizer, config)
     layers = get_model_layers(model)
     num_layers = len(layers)
 
@@ -353,6 +364,7 @@ def analyze_layer_importance(
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Analyze layer importance for model pruning"
     )

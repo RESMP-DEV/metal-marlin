@@ -1,3 +1,4 @@
+import logging
 import torch
 from transformers import AutoTokenizer
 
@@ -8,6 +9,9 @@ from .models.qwen3_moe import QuantizedQwen3MoE
 from .quantized_loader import QuantizedModel
 from .sampler import MetalSampler
 
+
+
+logger = logging.getLogger(__name__)
 
 class MetalInferenceEngine:
     """High-level inference API for quantized models."""
@@ -21,6 +25,7 @@ class MetalInferenceEngine:
     }
 
     def __init__(self, model_path: str, device: str = "mps"):
+        logger.debug("initializing %s with model_path=%s, device=%s", type(self).__name__, model_path, device)
         self.quantized = QuantizedModel.load(model_path)
         self.model = self._load_model()
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -32,6 +37,7 @@ class MetalInferenceEngine:
         )
 
     def _load_model(self):
+        logger.info("_load_model called")
         arch = self.quantized.config.get("architecture")
         model_class = self.MODEL_CLASSES.get(arch)
         if model_class is None:
@@ -45,6 +51,7 @@ class MetalInferenceEngine:
         temperature: float = 0.7,
         top_p: float = 0.9,
     ) -> str:
+        logger.debug("generate called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
         input_ids = self.tokenizer.encode(prompt, return_tensors="pt")
         input_ids = input_ids.to(self.device)
 
@@ -61,6 +68,7 @@ class MetalInferenceEngine:
     def _sample(
         self, logits: torch.Tensor, temperature: float, top_p: float, top_k: int = 0
     ) -> torch.Tensor:
+        logger.debug("_sample called with logits=%s, temperature=%s, top_p=%s", logits, temperature, top_p)
         if temperature == 0:
             token_id = self.sampler.argmax(logits)
         elif top_p < 1.0:

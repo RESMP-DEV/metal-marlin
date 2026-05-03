@@ -15,6 +15,7 @@ Apple Silicon GPU Architecture:
 
 from __future__ import annotations
 
+import logging
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from typing import Any
 
 from .trace import TraceEvent
 
+
+
+logger = logging.getLogger(__name__)
 
 class AppleSiliconGPU(Enum):
     """Apple Silicon GPU variants with their specs."""
@@ -47,18 +51,22 @@ class AppleSiliconGPU(Enum):
 
     @property
     def gpu_cores(self) -> int:
+        logger.debug("gpu_cores called")
         return self.value[0]
 
     @property
     def max_tg_per_eu(self) -> int:
+        logger.debug("max_tg_per_eu called")
         return self.value[1]
 
     @property
     def peak_tflops_fp16(self) -> float:
+        logger.debug("peak_tflops_fp16 called")
         return self.value[2]
 
     @property
     def peak_bw_gbs(self) -> float:
+        logger.debug("peak_bw_gbs called")
         return self.value[3]
 
 
@@ -110,6 +118,7 @@ class OccupancyMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
+        logger.debug("to_dict called")
         return {
             "theoretical_occupancy": self.theoretical_occupancy,
             "achieved_occupancy": self.achieved_occupancy,
@@ -129,6 +138,7 @@ class OccupancyMetrics:
         tid: int = 0,
     ) -> TraceEvent:
         """Convert to a Chrome trace counter event."""
+        logger.debug("to_trace_event called")
         return TraceEvent(
             name="threadgroup_occupancy",
             cat="occupancy",
@@ -152,6 +162,7 @@ def detect_gpu() -> AppleSiliconGPU:
     Returns:
         AppleSiliconGPU enum variant.
     """
+    logger.debug("detect_gpu called")
     if platform.system() != "Darwin":
         return AppleSiliconGPU.UNKNOWN
 
@@ -240,6 +251,7 @@ class OccupancyAnalyzer:
         max_threads_per_eu: int | None = None,
         max_tg_memory_kb: int = 32,
     ):
+        logger.debug("initializing %s with gpu=%s", type(self).__name__, gpu)
         self.gpu = gpu or detect_gpu()
         self.max_tg_memory_bytes = max_tg_memory_kb * 1024
 
@@ -260,6 +272,7 @@ class OccupancyAnalyzer:
         Returns:
             OccupancyMetrics with analysis results.
         """
+        logger.debug("analyze called with config=%s", config)
         recommendations: list[str] = []
         details: dict[str, Any] = {}
 
@@ -379,6 +392,7 @@ class OccupancyAnalyzer:
                 threadgroup_memory_bytes=8192,
             )
         """
+        logger.debug("analyze_quick called with threads_per_tg=%s, simdgroups_per_tg=%s, threadgroup_memory_bytes=%s", threads_per_tg, simdgroups_per_tg, threadgroup_memory_bytes)
         analyzer = cls()
         config = ThreadgroupConfig(
             threads_per_tg=threads_per_tg,
@@ -407,6 +421,7 @@ def estimate_optimal_config(
         # For a GEMM with M=4096, N=4096
         config = estimate_optimal_config(work_items=4096 * 4096)
     """
+    logger.debug("estimate_optimal_config called with work_items=%s, threadgroup_memory_per_item=%s, gpu=%s", work_items, threadgroup_memory_per_item, gpu)
     gpu = gpu or detect_gpu()
     analyzer = OccupancyAnalyzer(gpu)
 
@@ -443,6 +458,7 @@ def print_occupancy_report(config: ThreadgroupConfig) -> None:
     Args:
         config: Threadgroup configuration to analyze.
     """
+    logger.debug("print_occupancy_report called with config=%s", config)
     analyzer = OccupancyAnalyzer()
     metrics = analyzer.analyze(config)
 

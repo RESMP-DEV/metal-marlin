@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,6 +29,9 @@ import torch.nn.functional as F
 if TYPE_CHECKING:
     import pandas as pd
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class BenchmarkResult:
@@ -48,13 +52,16 @@ class BenchmarkResult:
     @property
     def speedup(self) -> float:
         """Speedup relative to 1.0 baseline."""
+        logger.debug("speedup called")
         return getattr(self, "_speedup", 1.0)
     
     @speedup.setter
     def speedup(self, value: float) -> None:
+        logger.debug("speedup called with value=%s", value)
         self._speedup = value
         
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         d = asdict(self)
         d["speedup"] = self.speedup
         return d
@@ -116,6 +123,7 @@ class MixedPrecisionBenchmark:
         config: BenchmarkConfig | None = None,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with model=%s, config=%s, device=%s", type(self).__name__, model, config, device)
         self.model = model
         self.config = config or BenchmarkConfig()
         self.device = device
@@ -125,6 +133,7 @@ class MixedPrecisionBenchmark:
         
     def _create_input(self) -> torch.Tensor:
         """Create input tensor for benchmarking."""
+        logger.debug("_create_input called")
         hidden_dim = self.model.config.hidden_dim
         x = torch.randn(
             self.config.batch_size,
@@ -137,6 +146,7 @@ class MixedPrecisionBenchmark:
     
     def _sync_device(self) -> None:
         """Synchronize device for accurate timing."""
+        logger.debug("_sync_device called")
         if self.device == "mps":
             torch.mps.synchronize()
         elif self.device.startswith("cuda"):
@@ -144,6 +154,7 @@ class MixedPrecisionBenchmark:
             
     def _get_memory_stats(self) -> tuple[float, float]:
         """Get memory statistics (peak, allocated) in MB."""
+        logger.debug("_get_memory_stats called")
         if self.device == "mps":
             allocated = torch.mps.current_allocated_memory() / 1024 / 1024
             # MPS doesn't have peak memory tracking, use allocated
@@ -157,6 +168,7 @@ class MixedPrecisionBenchmark:
     
     def _clear_memory(self) -> None:
         """Clear GPU memory caches."""
+        logger.debug("_clear_memory called")
         gc.collect()
         if self.device == "mps":
             torch.mps.empty_cache()
@@ -178,6 +190,7 @@ class MixedPrecisionBenchmark:
         Returns:
             BenchmarkResult with timing and memory statistics
         """
+        logger.info("_run_benchmark starting with forward_fn=%s, strategy=%s", forward_fn, strategy)
         self._clear_memory()
         x = self._create_input()
         
@@ -244,8 +257,10 @@ class MixedPrecisionBenchmark:
         This is the baseline - sequential dispatch where each expert is
         called individually. Slow but always correct.
         """
+        logger.info("benchmark_slow_path starting")
         def forward(x: torch.Tensor) -> torch.Tensor:
             # Use model's default forward (sequential dispatch)
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self.model(x)
             
         result = self._run_benchmark(forward, "slow_path")
@@ -265,7 +280,9 @@ class MixedPrecisionBenchmark:
         """
         # For synthetic model, just use default forward (which is sequential)
         # In real testing, this would use a uniform-bits model
+        logger.info("benchmark_fast_uniform starting")
         def forward(x: torch.Tensor) -> torch.Tensor:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self.model(x)
             
         result = self._run_benchmark(forward, "fast_uniform")
@@ -280,7 +297,9 @@ class MixedPrecisionBenchmark:
         """
         # Currently falls back to slow path - this will use real fast path
         # after kernel modifications are complete
+        logger.info("benchmark_fast_mixed starting")
         def forward(x: torch.Tensor) -> torch.Tensor:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self.model(x)
             
         result = self._run_benchmark(forward, "fast_mixed")
@@ -294,7 +313,9 @@ class MixedPrecisionBenchmark:
         dispatch for rare ones. Optimizes for the case where most
         selected experts share bit tuples.
         """
+        logger.info("benchmark_hybrid starting")
         def forward(x: torch.Tensor) -> torch.Tensor:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self.model(x)
             
         result = self._run_benchmark(forward, "hybrid")
@@ -307,9 +328,11 @@ class MixedPrecisionBenchmark:
         Pads all projections to max(gate, up, down) bits and uses
         single batched dispatch. Simpler but has compute overhead.
         """
+        logger.info("benchmark_max_bits_padded starting")
         def forward(x: torch.Tensor) -> torch.Tensor:
             # 1. Dense layer (standard)
             # x is [batch, seq, hidden]
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             h = x.half()
             h = h + self.model.dense_layer(h)
             
@@ -363,6 +386,7 @@ class MixedPrecisionBenchmark:
         Returns:
             List of BenchmarkResult objects, sorted by throughput (descending)
         """
+        logger.debug("compare_all called")
         results: list[BenchmarkResult] = []
         
         strategy_methods = {
@@ -402,6 +426,7 @@ class MixedPrecisionBenchmark:
     
     def print_results(self, results: list[BenchmarkResult]) -> None:
         """Print results in a formatted table."""
+        logger.debug("print_results called with results=%s", results)
         print("\nMixed Precision Benchmark Results")
         print("=" * 70)
         print(f"{'Strategy':20s} | {'tok/s':>7s} | {'ms/tok':>7s} | {'Memory':>8s} | {'Speedup':>7s}")
@@ -434,6 +459,7 @@ class MixedPrecisionBenchmark:
         path: str | Path,
     ) -> None:
         """Save results to JSON file."""
+        logger.info("save_results called with results=%s, path=%s", results, path)
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -457,6 +483,7 @@ class MixedPrecisionBenchmark:
 def run_quick_benchmark() -> None:
     """Run a quick benchmark with default settings."""
     # Import here to avoid circular imports
+    logger.info("run_quick_benchmark starting")
     import sys
     sys.path.insert(0, str(Path(__file__).parent.parent))
     

@@ -3,6 +3,7 @@ Unit tests for scatter/gather Metal operations.
 
 Tests verify correctness against PyTorch reference operations.
 """
+import logging
 
 import numpy as np
 import pytest
@@ -11,6 +12,9 @@ pytest.importorskip("torch")
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestGatherRows:
     """Test gather_rows kernel (index_select dim=0)."""
 
@@ -18,6 +22,7 @@ class TestGatherRows:
     def test_gather_basic(self):
         """Basic row gathering."""
         # Create source matrix [N, D]
+        logger.info("running test_gather_basic")
         src = torch.randn(100, 256, device='mps')
         indices = torch.tensor([0, 5, 10, 50, 99], dtype=torch.long, device='mps')
 
@@ -31,6 +36,7 @@ class TestGatherRows:
 
     def test_gather_duplicate_indices(self):
         """Should handle duplicate indices."""
+        logger.info("running test_gather_duplicate_indices")
         src = torch.randn(10, 32)
         indices = torch.tensor([0, 0, 5, 5, 5])
 
@@ -41,6 +47,7 @@ class TestGatherRows:
 
     def test_gather_empty(self):
         """Should handle empty indices."""
+        logger.info("running test_gather_empty")
         src = torch.randn(10, 32)
         indices = torch.tensor([], dtype=torch.long)
 
@@ -53,6 +60,7 @@ class TestScatterAdd:
 
     def test_scatter_add_basic(self):
         """Basic scatter add."""
+        logger.info("running test_scatter_add_basic")
         dst = torch.zeros(10)
         src = torch.ones(5)
         indices = torch.tensor([0, 2, 5, 7, 9])
@@ -67,6 +75,7 @@ class TestScatterAdd:
 
     def test_scatter_add_overlap(self):
         """Should accumulate at overlapping indices."""
+        logger.info("running test_scatter_add_overlap")
         dst = torch.zeros(5)
         src = torch.tensor([1.0, 2.0, 3.0, 4.0])
         indices = torch.tensor([0, 0, 1, 1])  # Two values at each of indices 0 and 1
@@ -82,6 +91,7 @@ class TestScatterAdd:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_scatter_add_mps(self):
         """Test on MPS device."""
+        logger.info("running test_scatter_add_mps")
         dst = torch.zeros(100, device='mps')
         src = torch.randn(50, device='mps')
         indices = torch.randint(0, 100, (50,), device='mps')
@@ -97,6 +107,7 @@ class TestIndexSelect:
 
     def test_index_select_1d(self):
         """1D index select."""
+        logger.info("running test_index_select_1d")
         src = torch.randn(100)
         indices = torch.tensor([10, 20, 30, 40])
 
@@ -107,6 +118,7 @@ class TestIndexSelect:
 
     def test_index_select_2d_dim0(self):
         """2D select along dim 0."""
+        logger.info("running test_index_select_2d_dim0")
         src = torch.randn(50, 64)
         indices = torch.tensor([0, 10, 25, 49])
 
@@ -117,6 +129,7 @@ class TestIndexSelect:
 
     def test_index_select_2d_dim1(self):
         """2D select along dim 1."""
+        logger.info("running test_index_select_2d_dim1")
         src = torch.randn(20, 100)
         indices = torch.tensor([5, 15, 50, 99])
 
@@ -131,6 +144,7 @@ class TestGather2D:
 
     def test_gather_2d_basic(self):
         """Basic 2D element gathering."""
+        logger.info("running test_gather_2d_basic")
         src = torch.randn(10, 20)
         row_indices = torch.tensor([0, 1, 5, 9])
         col_indices = torch.tensor([0, 10, 15, 19])
@@ -147,6 +161,7 @@ class TestGather2D:
 
     def test_gather_2d_batch(self):
         """Batched 2D gathering."""
+        logger.info("running test_gather_2d_batch")
         src = torch.randn(5, 100, 200)
 
         # Select specific elements from each batch
@@ -164,6 +179,7 @@ class TestPerformance:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_large_gather(self):
         """Should handle large tensors efficiently."""
+        logger.info("running test_large_gather")
         src = torch.randn(10000, 4096, device='mps')
         indices = torch.randint(0, 10000, (1000,), device='mps')
 
@@ -174,6 +190,7 @@ class TestPerformance:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
     def test_large_scatter(self):
         """Should handle large scatter operations."""
+        logger.info("running test_large_scatter")
         dst = torch.zeros(10000, device='mps')
         src = torch.randn(5000, device='mps')
         indices = torch.randint(0, 10000, (5000,), device='mps')

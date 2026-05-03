@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import logging
 import sys
 import time
 from collections.abc import Sequence
@@ -50,6 +51,9 @@ from metal_marlin.metal_dispatch import (
     dispatch_kernel,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class DispatchResult:
@@ -79,6 +83,7 @@ def create_metal_kernel_library() -> MetalKernelLibrary:
 
     Returns a library with a simple identity kernel for dispatch testing.
     """
+    logger.debug("create_metal_kernel_library called")
     if not HAS_METAL:
         raise RuntimeError("Metal framework not available")
 
@@ -124,6 +129,7 @@ def prepare_buffers(count: int, size: int = 4096) -> list[Any]:
     Returns:
         List of (input, output) buffer tuples.
     """
+    logger.debug("prepare_buffers called with count=%s, size=%s", count, size)
     if not HAS_MPS:
         raise RuntimeError("MPS backend not available")
 
@@ -148,6 +154,7 @@ def benchmark_python_dispatch(
     Uses the standard dispatch_kernel path through PyObjC.
     """
     # Warmup
+    logger.info("benchmark_python_dispatch starting with lib=%s, n_dispatches=%s, buffers=%s, grid=%s", lib, n_dispatches, buffers, grid)
     for i in range(min(warmup, len(buffers))):
         input_buf, output_buf = buffers[i]
         try:
@@ -215,6 +222,7 @@ def benchmark_cpp_dispatch(
 
     Uses the FastPath class with C++ extension for low-overhead dispatch.
     """
+    logger.info("benchmark_cpp_dispatch starting with lib=%s, n_dispatches=%s, buffers=%s, grid=%s", lib, n_dispatches, buffers, grid)
     fast_path = FastPath(lib)
 
     if not fast_path.available:
@@ -302,6 +310,7 @@ def run_benchmark_suite(
     Returns:
         Tuple of (python_results, cpp_results, comparison).
     """
+    logger.info("run_benchmark_suite starting with counts=%s, buffer_sizes=%s, warmup=%s", counts, buffer_sizes, warmup)
     lib = create_metal_kernel_library()
 
     python_results: list[DispatchResult] = []
@@ -356,6 +365,7 @@ def print_results(
     comparison: ComparisonResult,
 ) -> None:
     """Print benchmark results in a formatted table."""
+    logger.debug("print_results called with python_results=%s, cpp_results=%s, comparison=%s", python_results, cpp_results, comparison)
     print("\n" + "=" * 80)
     print("DISPATCH LATENCY BENCHMARK RESULTS")
     print("=" * 80)
@@ -415,6 +425,7 @@ def print_results(
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Benchmark C++ dispatch latency vs Python dispatch",
         formatter_class=argparse.RawDescriptionHelpFormatter,

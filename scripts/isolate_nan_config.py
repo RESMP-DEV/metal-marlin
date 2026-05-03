@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Isolate which dimension causes NaN in MoE kernel."""
 
+import logging
 import torch
 
 from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+
+logger = logging.getLogger(__name__)
 
 # Test seed 0 with varying configs to isolate issue
 configs = [

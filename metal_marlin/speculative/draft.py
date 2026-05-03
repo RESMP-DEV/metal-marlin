@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
@@ -30,6 +31,9 @@ from torch import Tensor
 
 from ..kv_cache import KVCache
 
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     pass
 
@@ -38,6 +42,7 @@ class CausalLMDraft(Protocol):
     """Protocol for models usable as draft models."""
 
     def __call__(self, input_ids: Tensor, kv_cache: KVCache | None = None) -> Tensor: ...
+    logger.debug("create_kv_cache called")
     def create_kv_cache(self) -> KVCache: ...
 
 
@@ -84,11 +89,13 @@ class DraftModel(ABC):
         Returns:
             DraftOutput with proposed tokens and their probability distributions.
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         ...
 
     @abstractmethod
     def reset(self) -> None:
         """Reset any internal state (caches, statistics) for a new sequence."""
+        logger.debug("reset called")
         ...
 
 
@@ -125,6 +132,7 @@ class SmallModelDraft(DraftModel):
         device: torch.device | None = None,
         cache: KVCache | None = None,
     ):
+        logger.debug("initializing %s with model=%s, max_speculative=%s, device=%s, cache=%s", type(self).__name__, model, max_speculative, device, cache)
         self.model = model
         self.max_speculative = max_speculative
         self._cache: KVCache | None = cache
@@ -169,6 +177,7 @@ class SmallModelDraft(DraftModel):
               - probs: K probability distributions [batch, K, vocab_size]
                 Used by the verifier for rejection sampling calculations.
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         num_tokens = min(num_tokens, self.max_speculative)
         batch_size = input_ids.shape[0]
         device = input_ids.device
@@ -234,6 +243,7 @@ class SmallModelDraft(DraftModel):
 
     def reset(self) -> None:
         """Reset the draft model's KV cache for a new sequence."""
+        logger.debug("reset called")
         if self._cache is not None:
             self._cache.reset()
             self._cache = None
@@ -251,6 +261,7 @@ class SmallModelDraft(DraftModel):
         Args:
             accepted_tokens: The tokens accepted by the target, [batch, n_accepted].
         """
+        logger.debug("sync_after_accept called with accepted_tokens=%s", accepted_tokens)
         if self._cache is None:
             self._cache = self.model.create_kv_cache()
         # Run accepted tokens through draft model to populate its cache
@@ -276,6 +287,7 @@ class NGramDraft(DraftModel):
     def __init__(
         self, ngram_size: int = 3, vocab_size: int = 32000, device: torch.device | None = None
     ):
+        logger.debug("initializing %s with ngram_size=%s, vocab_size=%s, device=%s", type(self).__name__, ngram_size, vocab_size, device)
         self.ngram_size = ngram_size
         self.vocab_size = vocab_size
         self.ngram_counts: dict[tuple[int, ...], dict[int, int]] = {}
@@ -290,6 +302,7 @@ class NGramDraft(DraftModel):
         Args:
             token_ids: Sequence of token IDs to learn from.
         """
+        logger.debug("update_ngrams called with token_ids=%s", token_ids)
         self._history.extend(token_ids)
         # Build n-grams from the extended history
         for i in range(
@@ -310,6 +323,7 @@ class NGramDraft(DraftModel):
         kv_cache: KVCache | None = None,
         num_tokens: int = 4,
     ) -> DraftOutput:
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         batch_size = input_ids.shape[0]
 
         # Extract the last ngram_size tokens from input as initial context
@@ -373,11 +387,13 @@ class NGramDraft(DraftModel):
 
     def reset(self) -> None:
         """Clear n-gram statistics and history for a new sequence."""
+        logger.debug("reset called")
         self.ngram_counts.clear()
         self._history.clear()
 
     def _uniform_fallback(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Return uniform distributions when no context is available."""
+        logger.debug("_uniform_fallback called with batch_size=%s, num_tokens=%s", batch_size, num_tokens)
         tokens = torch.zeros(batch_size, num_tokens, dtype=torch.long, device=self.device)
         probs = (
             torch.ones(1, 1, self.vocab_size, dtype=torch.float32, device=self.device)
@@ -462,6 +478,7 @@ class EagleHeadModule(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.0,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_layers=%s, intermediate_size=%s, num_heads=%s", type(self).__name__, hidden_size, vocab_size, num_layers, intermediate_size, num_heads)
         super().__init__()
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
@@ -510,6 +527,7 @@ class EagleHeadModule(nn.Module):
             Logits for next token, [batch, vocab].
         """
         # Take last position's hidden state
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         h = hidden_states[:, -1:, :]  # [batch, 1, hidden]
 
         # Fuse with draft token embedding if provided
@@ -595,6 +613,7 @@ class EagleHead(DraftModel):
             device: Device for tensors.
             dtype: Data type for computations.
         """
+        logger.debug("initializing %s with head=%s, vocab_size=%s, tree_width=%s, max_depth=%s, temperature=%s", type(self).__name__, head, vocab_size, tree_width, max_depth, temperature)
         self.head = head
         self.vocab_size = vocab_size
         self.tree_width = tree_width
@@ -641,6 +660,7 @@ class EagleHead(DraftModel):
             Configured EagleHead instance.
         """
         # Extract model configuration
+        logger.debug("from_target_model called with target_model=%s, tree_width=%s, max_depth=%s", target_model, tree_width, max_depth)
         config = getattr(target_model, "config", None)
         if config is not None:
             hidden_size = getattr(config, "hidden_size", 4096)
@@ -689,6 +709,7 @@ class EagleHead(DraftModel):
             hidden_states: Hidden states from target model, [batch, seq, hidden].
             position: Sequence position of the hidden states.
         """
+        logger.debug("set_hidden_states called with hidden_states=%s, position=%s", hidden_states, position)
         self._cached_hidden = hidden_states
         self._cached_position = position
 
@@ -713,6 +734,7 @@ class EagleHead(DraftModel):
             For tree speculation, returns the best single path.
             Use speculate_tree() for full tree output.
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         batch_size = input_ids.shape[0]
         num_tokens = min(num_tokens, self.max_depth)
 
@@ -775,6 +797,7 @@ class EagleHead(DraftModel):
         Returns:
             EagleTreeOutput with tree structure and flattened verification data.
         """
+        logger.debug("speculate_tree called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         if self.head is None or self._cached_hidden is None:
             # Return degenerate tree
             root = EagleTreeNode()
@@ -795,6 +818,7 @@ class EagleHead(DraftModel):
         At each node, generates top-k candidate continuations and adds
         them as children. The tree width is controlled by tree_width.
         """
+        logger.info("_build_tree starting")
         width = self._current_width if self.adaptive_width else self.tree_width
         root = EagleTreeNode(depth=0)
 
@@ -847,10 +871,12 @@ class EagleHead(DraftModel):
 
     def _extract_best_path(self, root: EagleTreeNode) -> dict[str, list]:
         """Extract the highest-probability path from the tree."""
+        logger.debug("_extract_best_path called with root=%s", root)
         best_path: dict[str, list] = {"tokens": [], "probs": []}
         best_prob = 0.0
 
         def dfs(node: EagleTreeNode, path: list[int], prob_list: list[Tensor], cum_prob: float):
+            logger.debug("dfs called with node=%s, path=%s, prob_list=%s", node, path, prob_list)
             nonlocal best_path, best_prob
 
             if not node.children:
@@ -879,10 +905,12 @@ class EagleHead(DraftModel):
 
     def _flatten_tree(self, root: EagleTreeNode, max_depth: int) -> EagleTreeOutput:
         """Flatten tree into batched tensors for verification."""
+        logger.debug("_flatten_tree called with root=%s, max_depth=%s", root, max_depth)
         paths: list[list[int]] = []
         probs_list: list[list[Tensor]] = []
 
         def collect_paths(node: EagleTreeNode, path: list[int], probs: list[Tensor]):
+            logger.debug("collect_paths called with node=%s, path=%s, probs=%s", node, path, probs)
             if not node.children or len(path) >= max_depth:
                 if path:  # Skip empty paths
                     paths.append(path)
@@ -936,6 +964,7 @@ class EagleHead(DraftModel):
 
     def _fallback_output(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Generate fallback output when head is not available."""
+        logger.debug("_fallback_output called with batch_size=%s, num_tokens=%s", batch_size, num_tokens)
         tokens = torch.zeros(batch_size, num_tokens, dtype=torch.long, device=self.device)
         probs = (
             torch.ones(batch_size, num_tokens, self.vocab_size, device=self.device) / self.vocab_size
@@ -951,6 +980,7 @@ class EagleHead(DraftModel):
         Args:
             acceptance_rate: Fraction of draft tokens accepted in last step.
         """
+        logger.debug("update_acceptance called with acceptance_rate=%s", acceptance_rate)
         if not self.adaptive_width:
             return
 
@@ -970,6 +1000,7 @@ class EagleHead(DraftModel):
 
     def reset(self) -> None:
         """Reset internal state for a new sequence."""
+        logger.debug("reset called")
         self._cached_hidden = None
         self._cached_position = 0
         self._acceptance_history.clear()

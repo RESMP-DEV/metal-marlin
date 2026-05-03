@@ -17,6 +17,7 @@ KV Quantization:
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -34,6 +35,9 @@ try:
 except ImportError:
     HAS_PAGED_INT4 = False
 
+
+
+logger = logging.getLogger(__name__)
 
 class TrellisKVCache:
     """Trellis-oriented KV cache with optional paged attention support.
@@ -96,6 +100,7 @@ class TrellisKVCache:
             quantize_mode: Quantization mode - "none", "int8", "fp8", or "fp4".
                 Default is "int8" (or METAL_MARLIN_KV_QUANT env var).
         """
+        logger.debug("initializing %s with num_layers=%s, max_seq_len=%s, kv_lora_rank=%s, qk_rope_head_dim=%s, dtype=%s", type(self).__name__, num_layers, max_seq_len, kv_lora_rank, qk_rope_head_dim, dtype)
         self.num_layers = num_layers
         self.max_seq_len = max_seq_len
         self.kv_lora_rank = kv_lora_rank
@@ -123,6 +128,7 @@ class TrellisKVCache:
 
     def _get_cache_dtype(self) -> torch.dtype:
         """Get dtype for cache tensors based on quantization mode."""
+        logger.debug("_get_cache_dtype called")
         if self.quantize_mode == "fp8":
             return torch.uint8  # FP8 stored as uint8
         elif self.quantize_mode == "fp4":
@@ -134,6 +140,7 @@ class TrellisKVCache:
 
     def _init_standard_cache(self) -> None:
         """Initialize standard contiguous tensor cache."""
+        logger.debug("_init_standard_cache called")
         cache_dtype = self._get_cache_dtype()
         self._kv_cache = torch.zeros(
             (self.num_layers, self.max_seq_len, self.cache_dim),
@@ -154,6 +161,7 @@ class TrellisKVCache:
 
     def _init_paged_cache(self) -> None:
         """Initialize paged block-based cache."""
+        logger.debug("_init_paged_cache called")
         from ..paged.attention import paged_attention_v1
         from ..paged.cache_manager import PagedKVCache
         from ..paged.kv_block import KVBlockConfig
@@ -210,6 +218,7 @@ class TrellisKVCache:
         Returns:
             Full cached sequence for the layer [batch, total_seq, cache_dim].
         """
+        logger.debug("update called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         if compressed_kv is None:
             raise ValueError("compressed_kv is required")
 
@@ -222,6 +231,7 @@ class TrellisKVCache:
         self, layer_idx: int, compressed_kv: torch.Tensor
     ) -> torch.Tensor:
         """Update standard contiguous cache."""
+        logger.debug("_update_standard called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         assert self._kv_cache is not None
         assert self._seq_lens is not None
 
@@ -245,6 +255,7 @@ class TrellisKVCache:
         self, layer_idx: int, compressed_kv: torch.Tensor
     ) -> torch.Tensor:
         """Update paged block-based cache."""
+        logger.debug("_update_paged called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         assert self._paged_cache is not None
         assert self._seq_lens is not None
 
@@ -287,6 +298,7 @@ class TrellisKVCache:
         Returns:
             Cached sequence [batch, seq_len, cache_dim] or None if empty.
         """
+        logger.debug("get called with layer_idx=%s", layer_idx)
         if self.use_paged:
             return self._get_paged(layer_idx)
         else:
@@ -294,6 +306,7 @@ class TrellisKVCache:
 
     def _get_standard(self, layer_idx: int) -> torch.Tensor | None:
         """Get from standard cache."""
+        logger.debug("_get_standard called with layer_idx=%s", layer_idx)
         assert self._kv_cache is not None
         assert self._seq_lens is not None
 
@@ -305,6 +318,7 @@ class TrellisKVCache:
 
     def _get_paged(self, layer_idx: int) -> torch.Tensor | None:
         """Get from paged cache."""
+        logger.debug("_get_paged called with layer_idx=%s", layer_idx)
         assert self._paged_cache is not None
         assert self._seq_lens is not None
 
@@ -328,16 +342,19 @@ class TrellisKVCache:
 
     def get_seq_len(self) -> int:
         """Get current sequence length (last layer)."""
+        logger.debug("get_seq_len called")
         assert self._seq_lens is not None
         return int(self._seq_lens[-1].item())
 
     @property
     def seq_len(self) -> int:
         """Current sequence length (last layer)."""
+        logger.debug("seq_len called")
         return self.get_seq_len()
 
     def reset(self) -> None:
         """Reset cache state."""
+        logger.debug("reset called")
         if self._seq_lens is not None:
             self._seq_lens.zero_()
 
@@ -350,6 +367,7 @@ class TrellisKVCache:
 
     def memory_usage_mb(self) -> float:
         """Calculate memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         if self.use_paged:
             return self._paged_memory_usage_mb()
         else:
@@ -357,6 +375,7 @@ class TrellisKVCache:
 
     def _standard_memory_usage_mb(self) -> float:
         """Calculate standard cache memory usage."""
+        logger.debug("_standard_memory_usage_mb called")
         if self._kv_cache is None:
             return 0.0
 
@@ -366,6 +385,7 @@ class TrellisKVCache:
 
     def _paged_memory_usage_mb(self) -> float:
         """Calculate paged cache memory usage."""
+        logger.debug("_paged_memory_usage_mb called")
         if self._paged_cache is None:
             return 0.0
 
@@ -378,6 +398,7 @@ class TrellisKVCache:
         Returns:
             paged_attention_v1 function if use_paged=True, else None.
         """
+        logger.debug("get_paged_attention_fn called")
         if not self.use_paged:
             return None
         return getattr(self, "_paged_attention_fn", None)
@@ -388,6 +409,7 @@ class TrellisKVCache:
         Returns:
             PagedKVCache instance if use_paged=True, else None.
         """
+        logger.debug("get_paged_cache called")
         return self._paged_cache
 
     def get_kv(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -399,6 +421,7 @@ class TrellisKVCache:
         Returns:
             Tuple of (k, v) tensors.
         """
+        logger.debug("get_kv called with layer_idx=%s", layer_idx)
         kv = self.get(layer_idx)
         if kv is None:
             raise ValueError(f"No KV cache for layer {layer_idx}")
@@ -414,6 +437,7 @@ class TrellisKVCache:
         MLA already compresses KV 8.9× via low-rank projection.
         INT4 reduces storage another 4×, giving 35.6× total compression.
         """
+        logger.debug("compress_to_int4 called with threshold_seq_len=%s", threshold_seq_len)
         if not HAS_PAGED_INT4:
             return
         if self.seq_len < threshold_seq_len:

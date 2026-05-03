@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import json
+import logging
 import os
 import time
 import uuid
@@ -35,6 +36,9 @@ except ImportError:
     ServingCppEngineWrapper = None  # type: ignore
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class RequestLatencyMetrics:
     """Per-request latency tracking."""
@@ -51,6 +55,7 @@ class RequestLatencyMetrics:
     @property
     def time_to_first_token(self) -> float | None:
         """Time from arrival to first token (TTFT)."""
+        logger.debug("time_to_first_token called")
         if self.first_token_time:
             return self.first_token_time - self.arrival_time
         return None
@@ -58,6 +63,7 @@ class RequestLatencyMetrics:
     @property
     def prefill_latency(self) -> float | None:
         """Time spent in prefill phase."""
+        logger.debug("prefill_latency called")
         if self.prefill_start and self.prefill_end:
             return self.prefill_end - self.prefill_start
         return None
@@ -65,6 +71,7 @@ class RequestLatencyMetrics:
     @property
     def decode_latency(self) -> float | None:
         """Time spent generating tokens after prefill."""
+        logger.debug("decode_latency called")
         if self.first_token_time and self.completion_time:
             return self.completion_time - self.first_token_time
         return None
@@ -72,6 +79,7 @@ class RequestLatencyMetrics:
     @property
     def total_latency(self) -> float | None:
         """Total time from arrival to completion."""
+        logger.debug("total_latency called")
         if self.completion_time:
             return self.completion_time - self.arrival_time
         return None
@@ -79,6 +87,7 @@ class RequestLatencyMetrics:
     @property
     def tokens_per_second(self) -> float | None:
         """Average token generation rate."""
+        logger.debug("tokens_per_second called")
         if self.completion_tokens > 0 and self.decode_latency:
             return self.completion_tokens / self.decode_latency
         return None
@@ -127,6 +136,7 @@ def _get_config_value(config: dict, *keys: str, default: Any = None) -> Any:
     Handles nested text_config dictionaries for multimodal models.
     """
     # First check text_config if present (for multimodal models)
+    logger.debug("_get_config_value called with config=%s", config)
     text_cfg = config.get("text_config")
     if isinstance(text_cfg, dict):
         for key in keys:
@@ -143,6 +153,7 @@ def _get_config_value(config: dict, *keys: str, default: Any = None) -> Any:
 
 def _is_moe_config(config: dict) -> bool:
     """Check if config indicates a Mixture of Experts model."""
+    logger.debug("_is_moe_config called with config=%s", config)
     for key in MOE_EXPERT_COUNTS:
         val = _get_config_value(config, key, default=0)
         try:
@@ -155,6 +166,7 @@ def _is_moe_config(config: dict) -> bool:
 
 def _has_deltanet_layers(config: dict) -> bool:
     """Check if config has DeltaNet hybrid layer types."""
+    logger.debug("_has_deltanet_layers called with config=%s", config)
     layer_types = _get_config_value(config, "layer_types")
     if isinstance(layer_types, list) and layer_types:
         # Check if any layer type matches DeltaNet patterns
@@ -187,6 +199,7 @@ def _is_qwen_deltanet_family(config: dict, model_name: str = "") -> bool:
 
     Uses config markers instead of hard-coded vocab size heuristics.
     """
+    logger.debug("_is_qwen_deltanet_family called with config=%s, model_name=%s", config, model_name)
     model_type = _get_config_value(config, "model_type", default="").lower()
     model_name_lower = model_name.lower()
 
@@ -244,6 +257,7 @@ def _detect_model_format(model_path: str) -> str:
         'trellis' if model uses Trellis quantization
         'marlin' otherwise (default)
     """
+    logger.debug("_detect_model_format called with model_path=%s", model_path)
     path = Path(model_path)
     if not path.exists():
         return "marlin"  # Will fail later with proper error
@@ -341,6 +355,7 @@ def _normalize_model_name(model_path: str) -> str:
     Maps Qwen DeltaNet family model identifiers to canonical API names
     without inventing new incompatible naming schemes.
     """
+    logger.debug("_normalize_model_name called with model_path=%s", model_path)
     model_name = model_path.split("/")[-1] if model_path else "mock-model"
     model_name_lower = model_name.lower()
 
@@ -373,6 +388,7 @@ class _MockTokenizer:
         tokenize: bool = False,
         add_generation_prompt: bool = True,
     ) -> str:
+        logger.debug("apply_chat_template called with messages=%s", messages)
         parts = []
         for message in messages:
             role = message.get("role", "user")
@@ -384,15 +400,18 @@ class _MockTokenizer:
 
     def encode(self, text: str) -> list[int]:
         # Simple tokenization by whitespace for counting.
+        logger.debug("encode called with text=%s", text)
         return [idx for idx, _ in enumerate(text.split())]
 
     def decode(self, tokens: list[int]) -> str:
         # Simple decoding for mock mode.
+        logger.debug("decode called with tokens=%s", tokens)
         return " ".join(f"token{i}" for i in range(len(tokens)))
 
 
 class _MockPipeline:
     def __init__(self, model_name: str):
+        logger.debug("initializing %s with model_name=%s", type(self).__name__, model_name)
         self.tokenizer = _MockTokenizer()
         self.device = "cpu"
         self._model_name = model_name
@@ -438,6 +457,7 @@ class ServingEngine:
     """
 
     def __init__(self, config: EngineConfig):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         use_mock = os.getenv("METAL_MARLIN_MOCK_MODEL") == "1"
         model_name = os.getenv("METAL_MARLIN_MOCK_MODEL_NAME")
@@ -446,8 +466,8 @@ class ServingEngine:
                 str(config.model_path).split("/")[-1] if config.model_path else "mock-model"
             )
 
-        # Normalize model name for API compatibility using config-driven detection
-        model_name = _normalize_model_name(config.model_path)
+        # Normalize the selected model name without discarding explicit overrides.
+        model_name = _normalize_model_name(model_name)
 
         model_format = _detect_model_format(config.model_path)
         self._model_format = model_format
@@ -502,16 +522,19 @@ class ServingEngine:
     @property
     def has_cpp_serving(self) -> bool:
         """Return True if C++ serving path is active."""
+        logger.debug("has_cpp_serving called")
         return self._serving_cpp is not None and self._serving_cpp.available
 
     def get_serving_cpp_metrics(self) -> dict[str, Any]:
         """Get C++ serving metrics if available."""
+        logger.debug("get_serving_cpp_metrics called")
         if self._serving_cpp is not None and self._serving_cpp.available:
             return self._serving_cpp.get_metrics()
         return {"dispatch_count": 0, "total_dispatch_us": 0, "avg_dispatch_us": 0}
 
     def _load_mmfp4_pipeline(self, config: EngineConfig) -> MMFP4Pipeline:
         """Load an MMFP4 pipeline for GLM-4.7-Flash style checkpoints."""
+        logger.info("_load_mmfp4_pipeline called with config=%s", config)
         if not Path(config.model_path).exists():
             raise FileNotFoundError(f"Model not found: {config.model_path}")
 
@@ -540,6 +563,7 @@ class ServingEngine:
         # model = TrellisModel.from_pretrained(config.model_path)
         # return TrellisGenerator(model, tokenizer)
 
+        logger.info("_load_trellis_pipeline called with config=%s", config)
         raise NotImplementedError(
             f"Trellis format detected for {config.model_path}, "
             "but TrellisGenerator is not yet integrated. "
@@ -552,6 +576,7 @@ class ServingEngine:
     ) -> ChatCompletionResponse | AsyncIterator[ChatCompletionChunk]:
         """Handle /v1/chat/completions endpoint."""
         # Apply chat template
+        logger.debug("chat_completion called with request=%s", request)
         prompt_val = self.pipeline.tokenizer.apply_chat_template(
             [{"role": m.role, "content": m.content} for m in request.messages],
             tokenize=False,
@@ -575,6 +600,7 @@ class ServingEngine:
         request: CompletionRequest,
     ) -> CompletionResponse | AsyncIterator[CompletionResponse]:
         """Handle /v1/completions endpoint."""
+        logger.debug("completion called with request=%s", request)
         if request.stream:
             return self._stream_completion(request)
         return await self._completion(request)
@@ -584,6 +610,7 @@ class ServingEngine:
         prompt: str,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
+        logger.debug("_generate called with prompt=%s, request=%s", prompt, request)
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
         self._active_requests[request_id] = metrics
@@ -655,6 +682,7 @@ class ServingEngine:
         )
 
     async def _completion(self, request: CompletionRequest) -> CompletionResponse:
+        logger.debug("_completion called with request=%s", request)
         request_id = f"cmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
         self._active_requests[request_id] = metrics
@@ -723,6 +751,7 @@ class ServingEngine:
         prompt: str,
         request: ChatCompletionRequest,
     ) -> AsyncIterator[ChatCompletionChunk]:
+        logger.debug("_stream_generate called with prompt=%s, request=%s", prompt, request)
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         metrics = RequestLatencyMetrics(request_id=request_id)
         self._active_requests[request_id] = metrics
@@ -744,6 +773,7 @@ class ServingEngine:
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
         def _run_stream() -> None:
+            logger.debug("_run_stream called")
             try:
                 stream_output = self._call_pipeline(
                     prompt,
@@ -833,12 +863,14 @@ class ServingEngine:
         self,
         request: CompletionRequest,
     ) -> AsyncIterator[CompletionResponse]:
+        logger.debug("_stream_completion called with request=%s", request)
         prompt = request.prompt if isinstance(request.prompt, str) else request.prompt[0]
         start_time = time.time()
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[str | None] = asyncio.Queue()
 
         def _run_stream() -> None:
+            logger.debug("_run_stream called")
             try:
                 stream_output = self._call_pipeline(
                     prompt,
@@ -891,6 +923,7 @@ class ServingEngine:
         temperature: float,
         top_p: float,
     ) -> str:
+        logger.debug("_run_pipeline called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             self._executor,
@@ -912,6 +945,7 @@ class ServingEngine:
         top_p: float,
         stream: bool = False,
     ) -> str | Iterator[str]:
+        logger.debug("_call_pipeline called with prompt=%s", prompt)
         if self._model_format == "mmfp4":
             return self.pipeline(
                 prompt,
@@ -929,11 +963,13 @@ class ServingEngine:
         )
 
     def _strip_prompt(self, full_text: str, prompt: str) -> str:
+        logger.debug("_strip_prompt called with full_text=%s, prompt=%s", full_text, prompt)
         if full_text.startswith(prompt):
             return full_text[len(prompt) :]
         return full_text
 
     def _apply_stop_sequences(self, text: str, stops: list[str]) -> tuple[str, bool]:
+        logger.debug("_apply_stop_sequences called with text=%s, stops=%s", text, stops)
         if not stops:
             return text, False
 
@@ -953,6 +989,7 @@ class ServingEngine:
         return text[:stop_pos], True
 
     def _count_tokens(self, text: str) -> int:
+        logger.debug("_count_tokens called with text=%s", text)
         return len(self.pipeline.tokenizer.encode(text))
 
     def _track_request(
@@ -963,6 +1000,7 @@ class ServingEngine:
         top_p: float,
         stop_sequences: list[str],
     ) -> GenerationRequest:
+        logger.debug("_track_request called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
         request_id = f"req-{uuid.uuid4().hex[:8]}"
         prompt_tokens = self.pipeline.tokenizer.encode(prompt)
         req = GenerationRequest(
@@ -981,6 +1019,7 @@ class ServingEngine:
 
         Used by /v1/models/{model_id} endpoint.
         """
+        logger.debug("get_model_info called")
         vocab_size = 32000
         hidden_size = 4096
         num_layers = 32
@@ -1029,6 +1068,7 @@ class ServingEngine:
         Returns:
             Dictionary with p50, p95, p99 latencies and throughput metrics.
         """
+        logger.debug("get_latency_stats called")
         if not self._latency_history:
             return {
                 "total_requests": 0,
@@ -1046,6 +1086,7 @@ class ServingEngine:
         tps = [m.tokens_per_second for m in self._latency_history if m.tokens_per_second]
 
         def percentile(data: list[float], p: float) -> float:
+            logger.debug("percentile called with data=%s, p=%s", data, p)
             if not data:
                 return 0.0
             sorted_data = sorted(data)
@@ -1077,6 +1118,7 @@ class ServingEngine:
         This method integrates with the BatchScheduler for efficient
         request processing when batching is enabled.
         """
+        logger.debug("_batched_generate called with prompt=%s, request=%s", prompt, request)
         from .continuous_batch import RequestPriority
 
         request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"

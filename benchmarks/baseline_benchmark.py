@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import statistics
@@ -41,6 +42,9 @@ except Exception:  # pragma: no cover - optional dependency
     AutoTokenizer = None
 
 
+
+logger = logging.getLogger(__name__)
+
 @dataclass
 class EndToEndMetrics:
     tokens_per_second: float
@@ -52,12 +56,14 @@ class EndToEndMetrics:
 
 class MemoryTracker:
     def __init__(self, device: str):
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         self.device = device
         self.peak_bytes = 0
         if self.device == "cuda" and torch is not None:
             torch.cuda.reset_peak_memory_stats()
 
     def update(self) -> None:
+        logger.debug("update called")
         if torch is None:
             return
         if self.device == "mps" and hasattr(torch.mps, "current_allocated_memory"):
@@ -70,10 +76,12 @@ class MemoryTracker:
 
     @property
     def peak_gb(self) -> float:
+        logger.debug("peak_gb called")
         return self.peak_bytes / (1024 * 1024 * 1024)
 
 
 def _get_process_memory_bytes() -> int:
+    logger.debug("_get_process_memory_bytes called")
     import resource
     import sys as _sys
 
@@ -85,11 +93,13 @@ def _get_process_memory_bytes() -> int:
 
 
 def _require_torch(feature: str) -> None:
+    logger.debug("_require_torch called with feature=%s", feature)
     if not HAS_TORCH or torch is None:
         raise RuntimeError(f"PyTorch is required for {feature}.")
 
 
 def _require_mps(feature: str) -> None:
+    logger.debug("_require_mps called with feature=%s", feature)
     _require_torch(feature)
     if not HAS_MPS:
         raise RuntimeError(
@@ -97,11 +107,13 @@ def _require_mps(feature: str) -> None:
 
 
 def _mps_sync() -> None:
+    logger.debug("_mps_sync called")
     if torch is not None and torch.backends.mps.is_available():
         torch.mps.synchronize()
 
 
 def _percentile(values: list[float], quantile: float) -> float:
+    logger.debug("_percentile called with values=%s, quantile=%s", values, quantile)
     if not values:
         return 0.0
     sorted_vals = sorted(values)
@@ -110,6 +122,7 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 
 def _get_config_value(config: Any, names: list[str], default: int) -> int:
+    logger.debug("_get_config_value called with config=%s, names=%s, default=%s", config, names, default)
     for name in names:
         if hasattr(config, name):
             value = getattr(config, name)
@@ -124,6 +137,7 @@ def _get_config_value(config: Any, names: list[str], default: int) -> int:
 
 
 def _estimate_kv_bytes_per_elem(dtype: str | None) -> float:
+    logger.debug("_estimate_kv_bytes_per_elem called with dtype=%s", dtype)
     if dtype in ("fp16", "bf16"):
         return 2.0
     if dtype == "fp8":
@@ -142,6 +156,7 @@ def _estimate_decode_bandwidth(
     head_dim: int,
     bytes_per_elem: float,
 ) -> tuple[float | None, float | None, float | None]:
+    logger.debug("_estimate_decode_bandwidth called with fn=%s", fn)
     try:
         profiler = MemoryBandwidthProfiler()
     except Exception:
@@ -168,6 +183,7 @@ def _estimate_decode_bandwidth(
 
 
 def _build_input_ids(tokenizer: Any, prompt: str, device: str):
+    logger.info("_build_input_ids starting")
     if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
         inputs = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
@@ -188,6 +204,7 @@ def benchmark_metal_marlin(
     num_tokens: int,
     num_runs: int,
 ) -> tuple[EndToEndMetrics, dict[str, Any]]:
+    logger.info("benchmark_metal_marlin starting with model_path=%s, prompt=%s, num_tokens=%s, num_runs=%s", model_path, prompt, num_tokens, num_runs)
     _require_mps("Metal Marlin inference")
     assert torch is not None
 
@@ -250,6 +267,7 @@ def benchmark_metal_marlin(
     kv_bytes_per_elem = 2.0
 
     def _decode_step() -> None:
+        logger.debug("_decode_step called")
         kv_cache = model.create_kv_cache(batch_size=1)
         logits = model(input_ids, kv_cache=kv_cache)
         kv_cache.advance(input_ids.shape[1])
@@ -293,6 +311,7 @@ def benchmark_torch_mps(
     num_tokens: int,
     num_runs: int,
 ) -> tuple[EndToEndMetrics, dict[str, Any]]:
+    logger.info("benchmark_torch_mps starting with model_path=%s, prompt=%s, num_tokens=%s, num_runs=%s", model_path, prompt, num_tokens, num_runs)
     _require_mps("PyTorch MPS inference")
     if AutoModelForCausalLM is None or AutoTokenizer is None:
         raise RuntimeError(
@@ -367,6 +386,7 @@ def benchmark_torch_mps(
     head_dim = hidden_size // num_heads if num_heads else 0
 
     def _decode_step() -> None:
+        logger.debug("_decode_step called")
         outputs = model(input_ids, use_cache=True)
         past = outputs.past_key_values
         next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1)
@@ -407,6 +427,7 @@ def benchmark_gemm(
     warmup: int,
     iterations: int,
 ) -> list[dict[str, Any]]:
+    logger.info("benchmark_gemm starting")
     _require_mps("GEMM benchmarking")
     assert torch is not None
 
@@ -432,6 +453,7 @@ def benchmark_gemm(
         _mps_sync()
 
         def fn(a: Any = A, b: Any = B) -> Any:
+            logger.debug("fn called with a=%s, b=%s", a, b)
             return a @ b
 
         result = bench.run(label, fn, M, N, K)
@@ -455,6 +477,7 @@ def benchmark_attention(
     warmup: int,
     iterations: int,
 ) -> dict[str, Any]:
+    logger.info("benchmark_attention starting")
     _require_mps("attention benchmarking")
     if torch is None:
         raise RuntimeError("PyTorch not available.")
@@ -470,6 +493,7 @@ def benchmark_attention(
     scale = 1.0 / math.sqrt(head_dim)
 
     def fn() -> Any:
+        logger.debug("fn called")
         return F.scaled_dot_product_attention(q, k, v, scale=scale)
 
     for _ in range(warmup):
@@ -504,6 +528,7 @@ def benchmark_moe(
     warmup: int,
     iterations: int,
 ) -> dict[str, Any]:
+    logger.info("benchmark_moe starting")
     _require_mps("MoE benchmarking")
     assert torch is not None
 
@@ -519,6 +544,7 @@ def benchmark_moe(
         active_experts, device="mps").repeat_interleave(tokens_per_expert)
 
     def run_grouped() -> tuple[float, float]:
+        logger.debug("run_grouped called")
         t0 = time.perf_counter()
         order = torch.argsort(router)
         x_sorted = x.index_select(0, order).view(
@@ -573,6 +599,7 @@ def benchmark_kv_cache(
     iterations: int,
     cache_dtype: str,
 ) -> dict[str, Any]:
+    logger.info("benchmark_kv_cache starting")
     _require_mps("KV cache benchmarking")
     assert torch is not None
 
@@ -592,6 +619,7 @@ def benchmark_kv_cache(
                         dtype=torch.float16, device="mps")
 
     def write_once() -> None:
+        logger.info("write_once called")
         for layer in range(num_layers):
             cache._slice_update(
                 cache.k_cache[layer], k_new, cache.cache_position, 1)
@@ -599,6 +627,7 @@ def benchmark_kv_cache(
                 cache.v_cache[layer], v_new, cache.cache_position, 1)
 
     def read_once() -> None:
+        logger.debug("read_once called")
         for layer in range(num_layers):
             _ = cache.k_cache[layer][:, :,
                                      : cache.cache_position + 1, :].clone()
@@ -664,6 +693,7 @@ def benchmark_llama_cpp(
     prompt: str,
     num_tokens: int,
 ) -> dict[str, Any]:
+    logger.info("benchmark_llama_cpp starting")
     if gguf_path is None:
         return {"status": "skipped", "reason": "no gguf model path provided"}
 
@@ -703,6 +733,7 @@ def benchmark_mlx(
     prompt: str,
     num_tokens: int,
 ) -> dict[str, Any]:
+    logger.info("benchmark_mlx starting")
     if model_name is None:
         return {"status": "skipped", "reason": "no MLX model provided"}
 
@@ -744,6 +775,7 @@ def benchmark_mlx(
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Baseline benchmark for GLM-4.7-Flash")
     parser.add_argument("--model-path", type=Path,

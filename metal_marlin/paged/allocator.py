@@ -24,13 +24,18 @@ import hashlib
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 from typing import Any
 
 from numpy.typing import NDArray
 
 
+
+logger = logging.getLogger(__name__)
+
 def _ceil_pow2(n: int) -> int:
     """Return the smallest power of 2 >= n."""
+    logger.debug("_ceil_pow2 called with n=%s", n)
     if n <= 1:
         return 1
     return 1 << (n - 1).bit_length()
@@ -38,6 +43,7 @@ def _ceil_pow2(n: int) -> int:
 
 def _floor_pow2(n: int) -> int:
     """Return the largest power of 2 <= n."""
+    logger.debug("_floor_pow2 called with n=%s", n)
     if n <= 1:
         return 1
     return 1 << ((n - 1).bit_length() - 1)
@@ -120,6 +126,7 @@ class SequenceModality:
         block_indices: list[int],
     ) -> None:
         """Register an image token region."""
+        logger.debug("add_image_region called with start_pos=%s, num_tokens=%s, image_hash=%s", start_pos, num_tokens, image_hash)
         self.image_regions.append(
             ImageRegion(
                 start_pos=start_pos,
@@ -131,20 +138,24 @@ class SequenceModality:
 
     def add_text_range(self, start: int, end: int) -> None:
         """Register a text token range."""
+        logger.debug("add_text_range called with start=%s, end=%s", start, end)
         self.text_ranges.append((start, end))
 
     @property
     def total_image_tokens(self) -> int:
         """Total number of image tokens across all regions."""
+        logger.debug("total_image_tokens called")
         return sum(r.num_tokens for r in self.image_regions)
 
     @property
     def total_text_tokens(self) -> int:
         """Total number of text tokens across all ranges."""
+        logger.debug("total_text_tokens called")
         return sum(end - start for start, end in self.text_ranges)
 
     def get_modality_at(self, pos: int) -> TokenModality:
         """Return the modality of the token at given position."""
+        logger.debug("get_modality_at called with pos=%s", pos)
         for region in self.image_regions:
             if region.start_pos <= pos < region.start_pos + region.num_tokens:
                 return TokenModality.IMAGE
@@ -182,6 +193,7 @@ class BlockAllocator:
     _MAX_RUNS_BEFORE_COMPACT = 32  # Max contiguous runs before triggering compaction
 
     def __init__(self, num_blocks: int):
+        logger.debug("initializing %s with num_blocks=%s", type(self).__name__, num_blocks)
         self.num_blocks = num_blocks
         self.blocks: list[BlockState] = [BlockState(block_idx=i) for i in range(num_blocks)]
         
@@ -201,15 +213,18 @@ class BlockAllocator:
 
     @property
     def num_free(self) -> int:
+        logger.debug("num_free called")
         return len(self._free_list)
 
     @property
     def num_allocated(self) -> int:
+        logger.debug("num_allocated called")
         return self.num_blocks - self.num_free
 
     @property
     def fragmentation_score(self) -> float:
         """Current fragmentation score (0.0 = optimal, 1.0 = highly fragmented)."""
+        logger.debug("fragmentation_score called")
         return self._fragmentation_score
 
     def allocate(self) -> int | None:
@@ -217,6 +232,7 @@ class BlockAllocator:
         
         Time complexity: O(1)
         """
+        logger.debug("allocate called")
         if not self._free_list:
             return None
         # Pop from right for O(1) operation (maintains LIFO within address ordering)
@@ -245,6 +261,7 @@ class BlockAllocator:
             
         Time complexity: O(num_blocks) for allocation, O(n) for run finding
         """
+        logger.debug("allocate_contiguous called with num_blocks=%s", num_blocks)
         if num_blocks <= 0:
             return []
         if num_blocks == 1:
@@ -298,6 +315,7 @@ class BlockAllocator:
 
     def _rebuild_free_runs(self) -> None:
         """Rebuild the contiguous free runs data structure."""
+        logger.info("_rebuild_free_runs starting")
         self._contiguous_runs = []
         if not self._free_list:
             self._free_runs = {}
@@ -336,6 +354,7 @@ class BlockAllocator:
         
         Uses buddy system: rounds up to power of 2 and finds smallest fit.
         """
+        logger.debug("_find_best_fit_run called with num_blocks=%s", num_blocks)
         if self._free_runs is None:
             return None
             
@@ -368,6 +387,7 @@ class BlockAllocator:
         
         Time complexity: O(1) amortized
         """
+        logger.debug("free called with block_idx=%s", block_idx)
         block = self.blocks[block_idx]
         block.ref_count -= 1
         
@@ -389,6 +409,7 @@ class BlockAllocator:
         Args:
             block_indices: List of block indices to free.
         """
+        logger.debug("free_contiguous called with block_indices=%s", block_indices)
         for idx in block_indices:
             block = self.blocks[idx]
             if block.ref_count > 0:
@@ -404,6 +425,7 @@ class BlockAllocator:
         Returns the new block index (or original if already exclusive).
         Returns None if a copy is needed but pool is exhausted.
         """
+        logger.info("copy_on_write called with block_idx=%s", block_idx)
         block = self.blocks[block_idx]
         if block.ref_count == 1:
             return block_idx  # Already exclusive
@@ -419,6 +441,7 @@ class BlockAllocator:
 
     def _should_compact(self) -> bool:
         """Check if compaction should be triggered."""
+        logger.debug("_should_compact called")
         if self._free_count < 10:
             return False
         # Trigger if we have many small runs
@@ -433,6 +456,7 @@ class BlockAllocator:
         Sorts the free list to ensure address-ordered allocation,
         which maximizes the chance of contiguous allocations.
         """
+        logger.debug("_compact_free_list called")
         if len(self._free_list) < 2:
             return
             
@@ -444,6 +468,7 @@ class BlockAllocator:
 
     def _update_fragmentation_metric(self) -> None:
         """Update fragmentation score based on free list distribution."""
+        logger.debug("_update_fragmentation_metric called")
         if not self._free_list:
             self._fragmentation_score = 0.0
             return
@@ -466,6 +491,7 @@ class BlockAllocator:
 
     def get_contiguous_stats(self) -> dict[str, Any]:
         """Get statistics about contiguous free runs."""
+        logger.debug("get_contiguous_stats called")
         if self._free_runs_dirty:
             self._rebuild_free_runs()
             
@@ -513,6 +539,7 @@ class MultimodalBlockAllocator:
     _ALLOCATIONS_BEFORE_DEFRAG = 256  # Check fragmentation every N allocations
 
     def __init__(self, num_blocks: int, block_size: int = 16):
+        logger.debug("initializing %s with num_blocks=%s, block_size=%s", type(self).__name__, num_blocks, block_size)
         self.num_blocks = num_blocks
         self.block_size = block_size
 
@@ -546,22 +573,27 @@ class MultimodalBlockAllocator:
 
     @property
     def num_free(self) -> int:
+        logger.debug("num_free called")
         return len(self._free_list)
 
     @property
     def num_allocated(self) -> int:
+        logger.debug("num_allocated called")
         return self.num_blocks - self.num_free
 
     @property
     def image_blocks_allocated(self) -> int:
+        logger.debug("image_blocks_allocated called")
         return self._image_blocks_allocated
 
     @property
     def text_blocks_allocated(self) -> int:
+        logger.debug("text_blocks_allocated called")
         return self._text_blocks_allocated
 
     @property
     def prefix_cache_hits(self) -> int:
+        logger.debug("prefix_cache_hits called")
         return self._prefix_cache_hits
 
     def allocate(
@@ -581,6 +613,7 @@ class MultimodalBlockAllocator:
             Block index, or None if OOM.
         """
         # Check prefix cache for image blocks
+        logger.debug("allocate called with modality=%s, content_hash=%s", modality, content_hash)
         if modality == TokenModality.IMAGE and content_hash is not None:
             cached = self._prefix_cache.get(content_hash)
             if cached:
@@ -631,6 +664,7 @@ class MultimodalBlockAllocator:
         Returns:
             List of block indices, or None if OOM.
         """
+        logger.debug("allocate_image_blocks called with num_tokens=%s, image_hash=%s", num_tokens, image_hash)
         num_blocks_needed = (num_tokens + self.block_size - 1) // self.block_size
 
         # Check prefix cache
@@ -686,6 +720,7 @@ class MultimodalBlockAllocator:
 
     def free(self, block_idx: int) -> None:
         """Decrement ref_count; return block to pool when it reaches zero."""
+        logger.debug("free called with block_idx=%s", block_idx)
         import bisect
         
         block = self.blocks[block_idx]
@@ -723,6 +758,7 @@ class MultimodalBlockAllocator:
 
         Preserves modality information in the new block.
         """
+        logger.info("copy_on_write called with block_idx=%s", block_idx)
         block = self.blocks[block_idx]
         if block.ref_count == 1:
             return block_idx
@@ -742,14 +778,17 @@ class MultimodalBlockAllocator:
 
     def register_sequence(self, seq_id: int) -> None:
         """Register a new sequence for modality tracking."""
+        logger.debug("register_sequence called with seq_id=%s", seq_id)
         self._sequence_modality[seq_id] = SequenceModality(seq_id=seq_id)
 
     def unregister_sequence(self, seq_id: int) -> None:
         """Remove sequence modality tracking."""
+        logger.debug("unregister_sequence called with seq_id=%s", seq_id)
         self._sequence_modality.pop(seq_id, None)
 
     def get_sequence_modality(self, seq_id: int) -> SequenceModality | None:
         """Get modality information for a sequence."""
+        logger.debug("get_sequence_modality called with seq_id=%s", seq_id)
         return self._sequence_modality.get(seq_id)
 
     def add_image_region(
@@ -761,12 +800,14 @@ class MultimodalBlockAllocator:
         block_indices: list[int],
     ) -> None:
         """Record an image region in a sequence's modality map."""
+        logger.debug("add_image_region called with seq_id=%s, start_pos=%s, num_tokens=%s", seq_id, start_pos, num_tokens)
         modality = self._sequence_modality.get(seq_id)
         if modality:
             modality.add_image_region(start_pos, num_tokens, image_hash, block_indices)
 
     def add_text_range(self, seq_id: int, start: int, end: int) -> None:
         """Record a text token range in a sequence's modality map."""
+        logger.debug("add_text_range called with seq_id=%s, start=%s, end=%s", seq_id, start, end)
         modality = self._sequence_modality.get(seq_id)
         if modality:
             modality.add_text_range(start, end)
@@ -787,6 +828,7 @@ class MultimodalBlockAllocator:
         Returns:
             List of modalities, one per position.
         """
+        logger.debug("get_modality_mask called with seq_id=%s, total_len=%s", seq_id, total_len)
         modality = self._sequence_modality.get(seq_id)
         if not modality:
             return [TokenModality.TEXT] * total_len
@@ -805,6 +847,7 @@ class MultimodalBlockAllocator:
         Lower score = better locality (contiguous free blocks).
         Score = average gap size between consecutive free blocks.
         """
+        logger.debug("_update_fragmentation_metric called")
         if len(self._free_list) <= 1:
             self._fragmentation_score = 0.0
             return
@@ -817,6 +860,7 @@ class MultimodalBlockAllocator:
 
     def get_stats(self) -> dict[str, int | float]:
         """Return allocator statistics."""
+        logger.debug("get_stats called")
         total_cached_blocks = sum(len(blocks) for blocks in self._prefix_cache.values())
         return {
             "num_blocks": self.num_blocks,
@@ -856,6 +900,7 @@ class VisionEncoderCache:
         max_entries: int = 100,
         max_memory_bytes: int = 1024 * 1024 * 1024,  # 1GB default
     ):
+        logger.debug("initializing %s with max_entries=%s, max_memory_bytes=%s", type(self).__name__, max_entries, max_memory_bytes)
         self.max_entries = max_entries
         self.max_memory_bytes = max_memory_bytes
 
@@ -871,6 +916,7 @@ class VisionEncoderCache:
         Uses SHA-256 for collision resistance. The hash uniquely identifies
         the image content for cache lookup.
         """
+        logger.debug("compute_image_hash called with image_bytes=%s", image_bytes)
         return hashlib.sha256(image_bytes).hexdigest()
 
     def get(self, image_hash: str) -> tuple[NDArray[Any], int] | None:
@@ -882,6 +928,7 @@ class VisionEncoderCache:
         Returns:
             Tuple of (encoder_output, num_tokens) or None if not cached.
         """
+        logger.debug("get called with image_hash=%s", image_hash)
         entry = self._cache.get(image_hash)
         if entry is None:
             return None
@@ -914,6 +961,7 @@ class VisionEncoderCache:
             True if cached successfully, False if tensor too large.
         """
         # Calculate memory usage
+        logger.debug("put called with image_hash=%s, encoder_output=%s, num_tokens=%s", image_hash, encoder_output, num_tokens)
         mem_bytes = encoder_output.nbytes
 
         # Check if single entry exceeds limit
@@ -936,6 +984,7 @@ class VisionEncoderCache:
 
     def _evict_lru(self) -> None:
         """Evict least recently used entry."""
+        logger.debug("_evict_lru called")
         if not self._access_order:
             return
 
@@ -947,12 +996,14 @@ class VisionEncoderCache:
 
     def clear(self) -> None:
         """Clear all cached entries."""
+        logger.debug("clear called")
         self._cache.clear()
         self._access_order.clear()
         self._total_memory = 0
 
     def remove(self, image_hash: str) -> bool:
         """Remove a specific entry from cache."""
+        logger.debug("remove called with image_hash=%s", image_hash)
         entry = self._cache.pop(image_hash, None)
         if entry:
             _, _, mem_bytes, _ = entry
@@ -964,6 +1015,7 @@ class VisionEncoderCache:
 
     def get_stats(self) -> dict[str, int | float]:
         """Return cache statistics."""
+        logger.debug("get_stats called")
         total_accesses = sum(entry[3] for entry in self._cache.values())
         return {
             "num_entries": len(self._cache),

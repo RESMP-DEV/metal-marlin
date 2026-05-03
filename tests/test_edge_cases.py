@@ -19,6 +19,7 @@ Metal kernel dispatch is not tested here as it requires MLX.
 
 from __future__ import annotations
 
+import logging
 import struct
 import sys
 from pathlib import Path
@@ -39,6 +40,9 @@ pytestmark = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 # Import quantization functions (CPU-based, no Metal dispatch)
 from metal_marlin.quantize import pack_fp4_weights
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Reference implementations for numerical validation
 # ---------------------------------------------------------------------------
@@ -52,11 +56,13 @@ FP4_E2M1_TABLE: np.ndarray = np.array(
 
 def ref_fp4_dequant(code: int, scale: float = 1.0) -> float:
     """Reference FP4 E2M1 dequantization."""
+    logger.info("ref_fp4_dequant called with code=%s, scale=%s", code, scale)
     return float(FP4_E2M1_TABLE[code & 0xF]) * scale
 
 
 def ref_u4_dequant(code: int, scale: float, zero_point: float) -> float:
     """Reference INT4 (U4) dequantization: (code - zero_point) * scale."""
+    logger.info("ref_u4_dequant called with code=%s, scale=%s, zero_point=%s", code, scale, zero_point)
     return (float(code & 0xF) - zero_point) * scale
 
 
@@ -67,6 +73,7 @@ def ref_fp8_e5m2_dequant(code: int) -> np.float16:
     FP16: [S:1][E:5][M:10]
     Since they share the same exponent bias (15), it's a direct bit rearrangement.
     """
+    logger.info("ref_fp8_e5m2_dequant called with code=%s", code)
     assert 0 <= code <= 255
     S = (code >> 7) & 1
     E = (code >> 2) & 0x1F
@@ -78,6 +85,7 @@ def ref_fp8_e5m2_dequant(code: int) -> np.float16:
 
 def pack_u4_to_uint32(codes: list[int]) -> int:
     """Pack 8 U4 nibbles into a uint32 (code[0] in LSB nibble)."""
+    logger.info("pack_u4_to_uint32 called with codes=%s", codes)
     assert len(codes) == 8
     result = 0
     for i, c in enumerate(codes):
@@ -108,6 +116,7 @@ def reference_u4_gemm(
     Returns:
         Output [M, N]
     """
+    logger.debug("reference_u4_gemm called with A=%s, packed=%s, scales=%s", A, packed, scales)
     A.shape[0]
     # Dequantize weights to [K, N]
     W = np.zeros((K, N), dtype=np.float32)
@@ -152,6 +161,7 @@ def reference_fp4_gemm(
         Output [M, N]
     """
     # Dequantize weights to [K, N]
+    logger.debug("reference_fp4_gemm called with A=%s, packed=%s, scales=%s", A, packed, scales)
     W = np.zeros((K, N), dtype=np.float32)
     k_packs = K // 8
     max_fp4 = 6.0  # Max representable FP4 value
@@ -197,6 +207,7 @@ def create_quantized_weights(
         (packed, scales, meta) tuple with packed weights and metadata.
     """
     # Generate random weights as numpy array
+    logger.info("create_quantized_weights called with K=%s, N=%s, group_size=%s", K, N, group_size)
     np.random.seed(42)
     weights = np.random.randn(K, N).astype(np.float32) * 2.0
 
@@ -231,6 +242,7 @@ def cpu_fp4_matmul(
     Returns:
         Output tensor [M, N] or [*, N]
     """
+    logger.debug("cpu_fp4_matmul called with A=%s, packed=%s, scales=%s", A, packed, scales)
     K = meta["padded_K"]
     N = meta["padded_N"]
 
@@ -282,6 +294,7 @@ class TestDimensionEdgeCases:
 
     def test_m_equals_1(self):
         """Single token (M=1) is critical for inference."""
+        logger.info("running test_m_equals_1")
         M, N, K = 1, 4096, 4096
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N)
@@ -292,6 +305,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("M", [1, 7, 33, 65, 127])
     def test_non_tile_aligned_m(self, M: int):
         """M not divisible by tile size (TILE_M=16)."""
+        logger.info("running test_non_tile_aligned_m")
         K, N = 4096, 4096
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N)
@@ -302,6 +316,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("N", [64, 128, 256, 512, 4096])
     def test_tile_aligned_n(self, N: int):
         """N must be divisible by 8 (packing factor) for non-padded path."""
+        logger.info("running test_tile_aligned_n")
         M, K = 32, 4096
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N)
@@ -312,6 +327,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("N", [1, 63, 65, 127, 4097])
     def test_non_packing_aligned_n(self, N: int):
         """N not divisible by 8 requires padding quantizer."""
+        logger.info("running test_non_packing_aligned_n")
         M, K = 32, 4096
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, allow_padding=True)
@@ -323,6 +339,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("K", [100, 200, 300])
     def test_non_group_aligned_k(self, K: int):
         """K not divisible by group_size requires padding."""
+        logger.info("running test_non_group_aligned_k")
         M, N, group_size = 32, 256, 128
 
         # Create weights with the padded quantizer
@@ -341,6 +358,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.slow
     def test_large_batch(self):
         """Large batch size (M >> typical)."""
+        logger.info("running test_large_batch")
         M = 8192
         K, N = 4096, 4096
         A = torch.randn(M, K)
@@ -352,6 +370,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("size", [8, 16, 32])
     def test_very_small_matrices(self, size: int):
         """Tiny matrices (overhead test). K must be >= group_size."""
+        logger.info("running test_very_small_matrices")
         M = 1
         # group_size can't exceed K, so use group_size=size
         A = torch.randn(M, size)
@@ -362,6 +381,7 @@ class TestDimensionEdgeCases:
 
     def test_typical_llm_shapes(self):
         """Standard LLM weight matrix dimensions."""
+        logger.info("running test_typical_llm_shapes")
         shapes = [
             (1, 4096, 4096),  # Self-attention Q/K/V single token
             (1, 4096, 11008),  # MLP up-projection single token
@@ -377,6 +397,7 @@ class TestDimensionEdgeCases:
     @pytest.mark.parametrize("group_size", [32, 64, 128])
     def test_various_group_sizes(self, group_size: int):
         """Different group sizes for quantization."""
+        logger.info("running test_various_group_sizes")
         M, K, N = 16, 4096, 4096
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=group_size)
@@ -395,6 +416,7 @@ class TestMemoryEdgeCases:
 
     def test_sliced_input_rows(self):
         """Input tensor from a row slice (potentially misaligned)."""
+        logger.info("running test_sliced_input_rows")
         K, N = 4096, 4096
         large = torch.randn(100, K)
         # Slice that may not start at aligned boundary
@@ -406,6 +428,7 @@ class TestMemoryEdgeCases:
 
     def test_strided_input(self):
         """Non-contiguous input tensor (every other row)."""
+        logger.info("running test_strided_input")
         K, N = 4096, 4096
         A = torch.randn(64, K)
         A_strided = A[::2, :]  # Every other row -> shape (32, K)
@@ -416,6 +439,7 @@ class TestMemoryEdgeCases:
 
     def test_transposed_then_contiguous(self):
         """Input that was transposed and made contiguous."""
+        logger.info("running test_transposed_then_contiguous")
         K, N = 4096, 4096
         A_t = torch.randn(K, 16)
         A = A_t.T.contiguous()
@@ -426,6 +450,7 @@ class TestMemoryEdgeCases:
 
     def test_concatenated_input(self):
         """Input formed by concatenation (tests internal buffer alignment)."""
+        logger.info("running test_concatenated_input")
         K, N = 4096, 4096
         A1 = torch.randn(7, K)
         A2 = torch.randn(9, K)
@@ -437,6 +462,7 @@ class TestMemoryEdgeCases:
 
     def test_broadcast_batch_dim(self):
         """3D input with batch dimension."""
+        logger.info("running test_broadcast_batch_dim")
         B_dim, M, K, N = 4, 8, 4096, 4096
         A = torch.randn(B_dim, M, K)
         B, scales, meta = create_quantized_weights(K, N)
@@ -454,6 +480,7 @@ class TestNumericalEdgeCases:
 
     def test_zero_input(self):
         """All-zero activation should produce all-zero output."""
+        logger.info("running test_zero_input")
         M, K, N = 16, 4096, 4096
         A = torch.zeros(M, K)
         B, scales, meta = create_quantized_weights(K, N)
@@ -465,6 +492,7 @@ class TestNumericalEdgeCases:
 
     def test_identity_like_input(self):
         """Single row of ones; result should equal sum of weight columns."""
+        logger.info("running test_identity_like_input")
         M, K, N = 1, 32, 32
         A = torch.ones(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=32)
@@ -476,6 +504,7 @@ class TestNumericalEdgeCases:
 
     def test_large_magnitude_input(self):
         """Large activation values shouldn't overflow FP16 output."""
+        logger.info("running test_large_magnitude_input")
         M, K, N = 16, 4096, 4096
         A = torch.ones(M, K) * 100.0  # Large but within FP16 range
         B, scales, meta = create_quantized_weights(K, N)
@@ -489,6 +518,7 @@ class TestNumericalEdgeCases:
 
     def test_negative_input(self):
         """All-negative input values."""
+        logger.info("running test_negative_input")
         M, K, N = 16, 4096, 4096
         A = torch.randn(M, K) - 5.0  # Shifted negative
         B, scales, meta = create_quantized_weights(K, N)
@@ -508,6 +538,7 @@ class TestGroupSizeBoundary:
 
     def test_k_equals_group_size(self):
         """K exactly equals group_size (single group)."""
+        logger.info("running test_k_equals_group_size")
         M, N, group_size = 16, 256, 32
         K = group_size
         A = torch.randn(M, K)
@@ -518,6 +549,7 @@ class TestGroupSizeBoundary:
 
     def test_k_is_two_groups(self):
         """K = 2 * group_size (minimum multi-group case)."""
+        logger.info("running test_k_is_two_groups")
         M, N, group_size = 16, 256, 32
         K = 2 * group_size
         A = torch.randn(M, K)
@@ -529,6 +561,7 @@ class TestGroupSizeBoundary:
     @pytest.mark.parametrize("num_groups", [1, 2, 3, 7, 16, 128])
     def test_various_num_groups(self, num_groups: int):
         """Variable number of K-groups."""
+        logger.info("running test_various_num_groups")
         M, N, group_size = 8, 128, 32
         K = num_groups * group_size
         A = torch.randn(M, K)
@@ -577,6 +610,7 @@ class TestSmallestMatrices:
     )
     def test_small_matrix_correctness(self, M: int, K: int, N: int, group_size: int):
         """Validate small matrices produce correct shapes and finite values."""
+        logger.info("running test_small_matrix_correctness")
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=group_size)
 
@@ -602,6 +636,7 @@ class TestSmallestMatrices:
         are reasonable (mean near zero, bounded variance).
         """
         # Seed for reproducibility
+        logger.info("running test_small_matrix_numerical_accuracy")
         torch.manual_seed(42)
 
         # Generate inputs
@@ -622,6 +657,7 @@ class TestSmallestMatrices:
 
     def test_single_element_row_column(self):
         """M=1, N=8 (minimum packing unit) - single output row."""
+        logger.info("running test_single_element_row_column")
         M, K, N = 1, 32, 8
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=32)
@@ -631,6 +667,7 @@ class TestSmallestMatrices:
 
     def test_k_exactly_one_tile(self):
         """K = TILE_K = 32 exactly."""
+        logger.info("running test_k_exactly_one_tile")
         M, N, K = 16, 64, 32
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=32)
@@ -641,6 +678,7 @@ class TestSmallestMatrices:
     def test_all_below_tile_sizes(self):
         """M < TILE_M, K < TILE_K, N < TILE_N simultaneously."""
         # M=8 < 64, K=16 < 32, N=16 < 64
+        logger.info("running test_all_below_tile_sizes")
         M, K, N = 8, 16, 16
         A = torch.randn(M, K)
         # group_size must be <= K and divide K
@@ -652,6 +690,7 @@ class TestSmallestMatrices:
 
     def test_non_packing_aligned_n_small(self):
         """N=1 requires padding to N=8 for packing."""
+        logger.info("running test_non_packing_aligned_n_small")
         M, K = 64, 32
         # Use padded quantizer for N=1
         B, scales, meta = create_quantized_weights(K, 1, group_size=32, allow_padding=True)
@@ -664,6 +703,7 @@ class TestSmallestMatrices:
     @pytest.mark.parametrize("K", [8, 16, 24, 32])
     def test_very_small_k(self, K: int):
         """Very small K dimensions (at or below tile size)."""
+        logger.info("running test_very_small_k")
         M, N = 16, 64
         group_size = min(8, K) if K >= 8 else K
         if K % group_size != 0:
@@ -699,6 +739,7 @@ def create_u4_quantized_weights(
         (packed [K/8, N], scales [K/group_size, N], zeros [K/group_size, N])
     """
     # Generate random weights and quantize to U4 [0, 15]
+    logger.info("create_u4_quantized_weights called with K=%s, N=%s, group_size=%s", K, N, group_size)
     np.random.seed(42)
     weights = np.random.randn(K, N).astype(np.float32)
 
@@ -762,6 +803,7 @@ def cpu_u4_matmul(
     Returns:
         Output tensor [M, N]
     """
+    logger.debug("cpu_u4_matmul called with A=%s, packed=%s, scales=%s", A, packed, scales)
     A_np = A.numpy()
     packed_np = packed.numpy()
     scales_np = scales.numpy().astype(np.float32)
@@ -781,6 +823,7 @@ class TestCrossVariantConsistency:
 
     def test_fp4_determinism(self):
         """FP4 GEMM is deterministic across multiple calls."""
+        logger.info("running test_fp4_determinism")
         M, K, N = 32, 256, 256
         A = torch.randn(M, K)
         B, scales, meta = create_quantized_weights(K, N, group_size=32)

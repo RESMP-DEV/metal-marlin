@@ -12,9 +12,13 @@ Test categories:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # FP4 E2M1 constants and helpers (duplicated from test_accuracy.py for
@@ -35,6 +39,7 @@ def quantize_to_fp4(weights: np.ndarray, group_size: int = 128) -> tuple[np.ndar
 
     Returns packed uint32 array [K/8, N] and scales [K/group_size, N].
     """
+    logger.info("quantize_to_fp4 called with weights=%s, group_size=%s", getattr(weights, "shape", weights), group_size)
     K, N = weights.shape
     assert K % group_size == 0, f"K={K} must be divisible by group_size={group_size}"
     assert K % 8 == 0, f"K={K} must be divisible by 8"
@@ -84,6 +89,7 @@ def dequant_fp4_array(
     group_size: int = 128,
 ) -> np.ndarray:
     """Dequantize packed FP4 array back to FP16."""
+    logger.info("dequant_fp4_array called with packed=%s, scales=%s, K=%s, N=%s", packed, scales, K, N)
     result = np.zeros((K, N), dtype=np.float32)
 
     for k in range(K):
@@ -105,6 +111,7 @@ def make_all_ones_fp4(K: int, N: int, group_size: int = 128) -> tuple[np.ndarray
 
     With scale=1.0, every dequantized weight is exactly 1.0.
     """
+    logger.debug("make_all_ones_fp4 called with K=%s, N=%s, group_size=%s", K, N, group_size)
     assert K % 8 == 0
     assert K % group_size == 0
 
@@ -125,6 +132,7 @@ def make_max_fp4(K: int, N: int, group_size: int = 128) -> tuple[np.ndarray, np.
 
     With scale=1.0, every dequantized weight is exactly 6.0.
     """
+    logger.debug("make_max_fp4 called with K=%s, N=%s, group_size=%s", K, N, group_size)
     assert K % 8 == 0
     assert K % group_size == 0
 
@@ -146,6 +154,7 @@ def gemm_fp16_accumulation(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     This mimics what simdgroup_multiply_accumulate does with half accumulators.
     Numpy doesn't have native FP16 matmul, so we simulate step-by-step.
     """
+    logger.debug("gemm_fp16_accumulation called with A=%s, B=%s", A, B)
     M, K = A.shape
     _, N = B.shape
     A_fp16 = A.astype(np.float16)
@@ -173,6 +182,7 @@ def gemm_fp32_accumulation(A: np.ndarray, B: np.ndarray, *, output_fp16: bool = 
         output_fp16: If True, cast result to FP16 (default, matches kernel output).
             If False, keep FP32 result (useful for checking overflow-free computation).
     """
+    logger.debug("gemm_fp32_accumulation called with A=%s, B=%s", A, B)
     result = A.astype(np.float32) @ B.astype(np.float32)
     if output_fp16:
         return result.astype(np.float16)
@@ -196,6 +206,7 @@ class TestFP16Overflow:
         Note: The FP32 result exceeds FP16 representable range so we keep it
         in FP32 to verify the accumulator itself didn't overflow.
         """
+        logger.info("running test_k32768_all_max_overflows_fp16")
         K = 32768
         N = 8  # small N for speed
 
@@ -232,6 +243,7 @@ class TestFP16Overflow:
         By 4096 (ULP=4), 1.0 is below half-ULP and rounds to zero. The
         accumulator stalls, producing a result far below the true sum.
         """
+        logger.info("running test_k32768_all_ones_no_overflow_fp16")
         K = 32768
         N = 8
 
@@ -272,6 +284,7 @@ class TestFP16Overflow:
 
         sum = K * 6.0. Overflow when K * 6 > 65504, i.e. K > 10917.
         """
+        logger.info("running test_max_weights_overflow_threshold")
         N = 4
         A = np.ones((1, K), dtype=np.float16)
         B_dequant = np.full((K, N), 6.0, dtype=np.float16)
@@ -297,11 +310,13 @@ class TestFP32Accumulation:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=123)
 
     @pytest.mark.parametrize("K", [2048, 4096, 8192, 16384, 32768])
     def test_fp32_acc_matches_reference(self, rng: np.random.Generator, K: int) -> None:
         """FP32 accumulation should match FP64 reference within FP32 epsilon."""
+        logger.info("running test_fp32_acc_matches_reference")
         M, N = 4, 64
         A = rng.standard_normal((M, K)).astype(np.float16)
         B = rng.standard_normal((K, N)).astype(np.float16)
@@ -326,6 +341,7 @@ class TestFP32Accumulation:
     @pytest.mark.parametrize("K", [32768, 65536])
     def test_fp32_acc_large_k_no_overflow(self, rng: np.random.Generator, K: int) -> None:
         """FP32 accumulation handles K=32768+ without overflow."""
+        logger.info("running test_fp32_acc_large_k_no_overflow")
         M, N = 1, 32
         # Use uniform [0,1] to ensure positive accumulation (worst case for overflow)
         A = rng.uniform(0, 1, (M, K)).astype(np.float16)
@@ -350,6 +366,7 @@ class TestErrorScaling:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=456)
 
     def test_error_grows_with_k(self, rng: np.random.Generator) -> None:
@@ -358,6 +375,7 @@ class TestErrorScaling:
         We compare FP16-accumulated result against FP32-accumulated reference
         across increasing K values and verify error growth rate.
         """
+        logger.info("running test_error_grows_with_k")
         M, N = 8, 64
         k_values = [128, 256, 512, 1024, 2048, 4096]
         errors: list[float] = []
@@ -406,6 +424,7 @@ class TestErrorScaling:
         self, rng: np.random.Generator, K: int, max_rel_error: float
     ) -> None:
         """FP16 accumulation median relative error is bounded for each K."""
+        logger.info("running test_fp16_error_bounds")
         M, N = 16, 128
         A = rng.standard_normal((M, K)).astype(np.float16)
         B = rng.standard_normal((K, N)).astype(np.float16)
@@ -438,11 +457,13 @@ class TestQuantizedPrecision:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=789)
 
     @pytest.mark.parametrize("K", [128, 512, 2048, 4096])
     def test_quantized_gemm_fp16_vs_fp32_acc(self, rng: np.random.Generator, K: int) -> None:
         """For quantized weights, FP32 acc should be closer to ground truth."""
+        logger.info("running test_quantized_gemm_fp16_vs_fp32_acc")
         M, N = 4, 64
         group_size = 128
 
@@ -482,6 +503,7 @@ class TestQuantizedPrecision:
         All FP4 codes set to 2 (value=1.0), scale=1.0.
         Sum per output = 32768 * 1.0 = 32768 (within FP16 range but precision-degraded).
         """
+        logger.info("running test_k32768_quantized_overflow")
         K = 32768
         N = 16
         group_size = 128
@@ -514,6 +536,7 @@ class TestQuantizedPrecision:
         All FP4 codes set to 7 (value=6.0), scale=1.0.
         Sum per output = 32768 * 6.0 = 196608 > 65504 (FP16 max).
         """
+        logger.info("running test_k32768_max_weights_overflow_detection")
         K = 32768
         N = 8
         group_size = 128
@@ -549,6 +572,7 @@ class TestKParallelPrecision:
 
     @pytest.fixture
     def rng(self) -> np.random.Generator:
+        logger.debug("rng called")
         return np.random.default_rng(seed=101)
 
     @pytest.mark.parametrize("parallel", [1, 2, 4, 8])
@@ -558,6 +582,7 @@ class TestKParallelPrecision:
         Splitting K into `parallel` slices means each slice accumulates K/parallel
         terms, reducing per-slice error. Final reduction adds `parallel` terms.
         """
+        logger.info("running test_k_parallel_reduces_fp16_error")
         K = 4096
         M, N = 4, 32
         A = rng.standard_normal((M, K)).astype(np.float16)
@@ -601,6 +626,7 @@ class TestKParallelPrecision:
         Both paths compute in FP32 internally; differences arise only from
         floating-point non-associativity and final FP16 output quantization.
         """
+        logger.info("running test_k_parallel_fp32_no_benefit")
         K = 8192
         M, N = 4, 32
         parallel = 4

@@ -40,11 +40,15 @@ CalibrationDataset:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
 import torch
 import torch.nn as nn
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # CalibrationDataset: Pre-loaded calibration data for quantization
@@ -110,6 +114,7 @@ class CalibrationDataset:
         Returns:
             CalibrationDataset with loaded samples.
         """
+        logger.debug("bartowski_v3 called with max_samples=%s, cache_dir=%s", max_samples, cache_dir)
         cache_dir = Path(cache_dir) if cache_dir else _DEFAULT_CACHE_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file = cache_dir / "bartowski_v3.txt"
@@ -150,6 +155,7 @@ class CalibrationDataset:
         Returns:
             CalibrationDataset with loaded samples.
         """
+        logger.debug("from_file called with path=%s, max_samples=%s, name=%s", path, max_samples, name)
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Calibration file not found: {path}")
@@ -184,6 +190,7 @@ class CalibrationDataset:
         Returns:
             CalibrationDataset with the provided samples.
         """
+        logger.debug("from_texts called with texts=%s, name=%s", texts, name)
         return cls(samples=texts, name=name, source="custom")
 
     def tokenize(
@@ -202,6 +209,7 @@ class CalibrationDataset:
         Returns:
             List of tokenized samples (dict with input_ids, attention_mask).
         """
+        logger.debug("tokenize called with tokenizer=%s, max_length=%s, return_tensors=%s", tokenizer, max_length, return_tensors)
         results = []
         for text in self.samples:
             encoded = tokenizer(
@@ -275,6 +283,7 @@ class CalibrationCollector:
         method: str = "histogram",
         num_bins: int = _DEFAULT_NUM_BINS,
     ):
+        logger.debug("initializing %s with model=%s, layers_to_calibrate=%s, percentile_low=%s, percentile_high=%s, method=%s", type(self).__name__, model, layers_to_calibrate, percentile_low, percentile_high, method)
         if method not in ("histogram", "exact"):
             raise ValueError(f"method must be 'histogram' or 'exact', got {method!r}")
 
@@ -292,12 +301,14 @@ class CalibrationCollector:
 
     def _is_target_layer(self, module: nn.Module) -> bool:
         """Check if a module is a quantization target (linear layer)."""
+        logger.debug("_is_target_layer called with module=%s", module)
         return isinstance(module, nn.Linear)
 
     def _register_hooks(
         self, model: nn.Module, layers_to_calibrate: list[str] | None
     ) -> None:
         """Walk the module tree and register forward hooks on target layers."""
+        logger.debug("_register_hooks called with model=%s, layers_to_calibrate=%s", model, layers_to_calibrate)
         for name, module in model.named_modules():
             if layers_to_calibrate is not None:
                 if not any(name.startswith(p) for p in layers_to_calibrate):
@@ -310,9 +321,11 @@ class CalibrationCollector:
     def _register_hook(self, name: str, module: nn.Module) -> None:
         """Register a forward hook to capture input activations."""
 
+        logger.debug("_register_hook called with name=%s, module=%s", name, module)
         def hook_fn(
             mod: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor
         ) -> None:
+            logger.debug("hook_fn called with mod=%s, inputs=%s, output=%s", mod, inputs, output)
             if inputs and len(inputs) > 0:
                 x = inputs[0]
                 if isinstance(x, torch.Tensor):
@@ -323,6 +336,7 @@ class CalibrationCollector:
 
     def _update_stats(self, name: str, x: torch.Tensor) -> None:
         """Update running statistics for a layer given input activations."""
+        logger.debug("_update_stats called with name=%s, x=%s", name, x)
         with torch.no_grad():
             flat = x.reshape(-1).float()  # Use float32 for accumulation
 
@@ -382,6 +396,7 @@ class CalibrationCollector:
             Dictionary mapping layer names to CalibrationStats with
             percentile_low and percentile_high populated.
         """
+        logger.debug("get_stats called")
         p_low = self.percentile_low / 100.0
         p_high = self.percentile_high / 100.0
 
@@ -403,12 +418,14 @@ class CalibrationCollector:
 
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
+        logger.debug("remove_hooks called")
         for handle in self._hooks:
             handle.remove()
         self._hooks.clear()
 
     def reset(self) -> None:
         """Clear all accumulated statistics without removing hooks."""
+        logger.debug("reset called")
         self.stats.clear()
         self._histograms.clear()
         self._exact_buffers.clear()
@@ -416,6 +433,7 @@ class CalibrationCollector:
     @property
     def num_layers(self) -> int:
         """Number of layers being calibrated."""
+        logger.debug("num_layers called")
         return len(self._hooks)
 
 
@@ -442,6 +460,7 @@ def compute_scales(
     Raises:
         ValueError: If quant_type is not recognized.
     """
+    logger.debug("compute_scales called with stats=%s, quant_type=%s, use_percentile=%s", stats, quant_type, use_percentile)
     result: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {}
 
     for name, s in stats.items():
@@ -501,6 +520,7 @@ def _histogram(values: torch.Tensor, bin_edges: torch.Tensor) -> torch.Tensor:
     Uses searchsorted to assign bins, then scatter_add for counting.
     Returns int64 counts array of shape [num_bins].
     """
+    logger.debug("_histogram called with values=%s, bin_edges=%s", values, bin_edges)
     num_bins = bin_edges.shape[0] - 1
     indices = torch.searchsorted(bin_edges[1:], values)
     indices = torch.clamp(indices, 0, num_bins - 1)
@@ -520,6 +540,7 @@ def _rebin_histogram(
     Uses CDF interpolation: builds cumulative distribution from old counts,
     evaluates it at new bin edges, then differences to get new bin counts.
     """
+    logger.debug("_rebin_histogram called with old_counts=%s, old_edges=%s, new_edges=%s", old_counts, old_edges, new_edges)
     num_new = new_edges.shape[0] - 1
 
     old_cdf = torch.cumsum(old_counts.float(), dim=0)
@@ -552,6 +573,7 @@ def _interp(x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor
         Interpolated values at x.
     """
     # Clamp x to xp range
+    logger.debug("_interp called with x=%s, xp=%s, fp=%s", x, xp, fp)
     x_clamped = torch.clamp(x, xp[0], xp[-1])
 
     # Find insertion indices
@@ -587,6 +609,7 @@ def _percentile_from_histogram(
     Returns:
         Scalar float16 value at the given percentile.
     """
+    logger.debug("_percentile_from_histogram called with counts=%s, bin_edges=%s, percentile=%s", counts, bin_edges, percentile)
     cdf = torch.cumsum(counts.float(), dim=0)
     total = float(cdf[-1].item())
     if total == 0:
@@ -677,6 +700,7 @@ class HessianCollector:
         layers_to_calibrate: list[str] | None = None,
         damping_factor: float = 0.01,
     ):
+        logger.debug("initializing %s with model=%s, layers_to_calibrate=%s, damping_factor=%s", type(self).__name__, model, layers_to_calibrate, damping_factor)
         self.damping_factor = damping_factor
         self._hessians: dict[str, torch.Tensor] = {}  # Running H = X^T @ X
         self._sample_counts: dict[str, int] = {}
@@ -687,12 +711,14 @@ class HessianCollector:
 
     def _is_target_layer(self, module: nn.Module) -> bool:
         """Check if a module is a quantization target (linear layer)."""
+        logger.debug("_is_target_layer called with module=%s", module)
         return isinstance(module, nn.Linear)
 
     def _register_hooks(
         self, model: nn.Module, layers_to_calibrate: list[str] | None
     ) -> None:
         """Walk the module tree and register forward hooks on target layers."""
+        logger.debug("_register_hooks called with model=%s, layers_to_calibrate=%s", model, layers_to_calibrate)
         for name, module in model.named_modules():
             if layers_to_calibrate is not None:
                 if not any(name.startswith(p) for p in layers_to_calibrate):
@@ -705,9 +731,11 @@ class HessianCollector:
     def _register_hook(self, name: str, module: nn.Module) -> None:
         """Register a forward hook to capture input activations for Hessian."""
 
+        logger.debug("_register_hook called with name=%s, module=%s", name, module)
         def hook_fn(
             mod: nn.Module, inputs: tuple[torch.Tensor, ...], output: torch.Tensor
         ) -> None:
+            logger.debug("hook_fn called with mod=%s, inputs=%s, output=%s", mod, inputs, output)
             if inputs and len(inputs) > 0:
                 x = inputs[0]
                 if isinstance(x, torch.Tensor):
@@ -725,6 +753,7 @@ class HessianCollector:
 
         Uses float32 accumulation for numerical stability.
         """
+        logger.debug("_update_hessian called with name=%s, x=%s", name, x)
         with torch.no_grad():
             # Flatten to 2D: [*, in_features] -> [num_samples, in_features]
             in_features = x.shape[-1]
@@ -763,6 +792,7 @@ class HessianCollector:
         Raises:
             KeyError: If layer_name was not instrumented or has no data.
         """
+        logger.debug("collect_hessian called with layer_name=%s", layer_name)
         if layer_name not in self._hessians:
             raise KeyError(
                 f"No Hessian data for layer {layer_name!r}. "
@@ -792,6 +822,7 @@ class HessianCollector:
         Returns:
             Dictionary mapping layer names to HessianStats.
         """
+        logger.debug("get_hessians called with apply_damping=%s", apply_damping)
         result: dict[str, HessianStats] = {}
 
         for name in self._hessians:
@@ -810,12 +841,14 @@ class HessianCollector:
 
     def remove_hooks(self) -> None:
         """Remove all registered forward hooks."""
+        logger.debug("remove_hooks called")
         for handle in self._hooks:
             handle.remove()
         self._hooks.clear()
 
     def reset(self) -> None:
         """Clear all accumulated Hessians without removing hooks."""
+        logger.debug("reset called")
         self._hessians.clear()
         self._sample_counts.clear()
         self._in_features.clear()
@@ -823,11 +856,13 @@ class HessianCollector:
     @property
     def num_layers(self) -> int:
         """Number of layers being calibrated."""
+        logger.debug("num_layers called")
         return len(self._hooks)
 
     @property
     def layer_names(self) -> list[str]:
         """Names of instrumented layers."""
+        logger.debug("layer_names called")
         return list(self._hessians.keys())
 
 
@@ -885,6 +920,7 @@ def compute_layer_hessians(
         >>> q_proj_hessian = hessians["model.layers.0.self_attn.q_proj"]
     """
 
+    logger.debug("compute_layer_hessians called with model=%s, calibration_data=%s, layers=%s", model, calibration_data, layers)
     cache_path = Path(cache_dir) if cache_dir else None
     if cache_path:
         cache_path.mkdir(parents=True, exist_ok=True)
@@ -895,6 +931,7 @@ def compute_layer_hessians(
     if forward_fn is None:
 
         def forward_fn(m: nn.Module, batch: Any) -> Any:
+            logger.debug("forward_fn called with m=%s, batch=%s", m, batch)
             if isinstance(batch, dict):
                 input_ids = batch["input_ids"]
                 if isinstance(input_ids, torch.Tensor):
@@ -933,6 +970,7 @@ def compute_layer_hessians(
 
 def _cache_hessians(hessians: dict[str, torch.Tensor], path: Path) -> None:
     """Cache Hessians to disk as numpy arrays."""
+    logger.debug("_cache_hessians called with hessians=%s, path=%s", hessians, path)
     import numpy as np
 
     np_hessians = {}
@@ -954,6 +992,7 @@ def load_cached_hessians(
     Returns:
         Dictionary mapping layer names to Hessian tensors.
     """
+    logger.info("load_cached_hessians called with cache_dir=%s, device=%s", cache_dir, device)
     import numpy as np
 
     cache_path = Path(cache_dir)
@@ -1003,6 +1042,7 @@ def compute_moe_hessians(
         Nested dict: {layer_prefix: {expert_idx: Hessian}}.
     """
     # Track per-expert activations
+    logger.debug("compute_moe_hessians called with model=%s, calibration_data=%s, expert_layers=%s", model, calibration_data, expert_layers)
     expert_hessians: dict[str, dict[int, torch.Tensor]] = {}
     expert_counts: dict[str, dict[int, int]] = {}
 

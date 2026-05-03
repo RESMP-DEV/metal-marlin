@@ -7,6 +7,7 @@ Measures actual memory throughput for different access patterns:
 - Random access (worst case)
 """
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -15,6 +16,9 @@ import torch
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -39,6 +43,7 @@ def benchmark_sequential_bandwidth(
     num_iterations: int = 100,
 ) -> BandwidthResult:
     """Benchmark sequential access along a dimension."""
+    logger.info("benchmark_sequential_bandwidth starting with tensor=%s, dim=%s, num_iterations=%s", tensor, dim, num_iterations)
     device = tensor.device
     seq_len = tensor.shape[dim]
 
@@ -92,6 +97,7 @@ def benchmark_contiguous_copy(
     num_iterations: int = 100,
 ) -> BandwidthResult:
     """Benchmark contiguous memory copy (best case)."""
+    logger.info("benchmark_contiguous_copy starting with src=%s, dst=%s, num_iterations=%s", src, dst, num_iterations)
     device = src.device
 
     # Warmup
@@ -127,6 +133,7 @@ def benchmark_strided_access(
     num_iterations: int = 100,
 ) -> BandwidthResult:
     """Benchmark strided access (worst case for cache)."""
+    logger.info("benchmark_strided_access starting with tensor=%s, stride_dim=%s, num_iterations=%s", tensor, stride_dim, num_iterations)
     device = tensor.device
     shape = tensor.shape
 
@@ -176,6 +183,7 @@ def benchmark_kv_cache_patterns(
     dtype: torch.dtype = torch.float16,
 ):
     """Benchmark different access patterns for KV cache."""
+    logger.info("benchmark_kv_cache_patterns starting with batch_size=%s, num_heads=%s, seq_len=%s, head_dim=%s", batch_size, num_heads, seq_len, head_dim)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*70}")
@@ -349,6 +357,7 @@ def benchmark_paged_attention_pattern(
     dtype: torch.Tensor = torch.float16,
 ):
     """Benchmark paged attention memory patterns."""
+    logger.info("benchmark_paged_attention_pattern starting with batch_size=%s, num_heads=%s, head_dim=%s, page_size=%s", batch_size, num_heads, head_dim, page_size)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"\n{'='*70}")
@@ -426,6 +435,7 @@ def benchmark_paged_attention_pattern(
 def main():
     """Run all bandwidth benchmarks."""
     # Basic bandwidth test
+    logger.info("main starting")
     benchmark_kv_cache_patterns(
         batch_size=1,
         num_heads=8,

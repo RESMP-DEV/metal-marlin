@@ -1,4 +1,5 @@
 """Tests for EXL3-style trellis quantization."""
+import logging
 
 import numpy as np
 import pytest
@@ -9,6 +10,7 @@ class TestTrellisCodebook:
 
     def test_codebook_roundtrip(self):
         """Quantize and dequantize should approximately recover values."""
+        logger.info("running test_codebook_roundtrip")
         from metal_marlin.quantization.viterbi_quant import TrellisCodebook, quantize_tile_viterbi
 
         cb = TrellisCodebook(bits=4)
@@ -31,6 +33,7 @@ class TestTrellisCodebook:
 
     def test_codebook_scale(self):
         """Scaling should work correctly."""
+        logger.info("running test_codebook_scale")
         from metal_marlin.quantization.viterbi_quant import TrellisCodebook, quantize_tile_greedy
 
         cb = TrellisCodebook(bits=4)
@@ -54,6 +57,7 @@ class TestTrellisCodebook:
 
     def test_codebook_different_bits(self):
         """Codebook should support different bit widths."""
+        logger.info("running test_codebook_different_bits")
         from metal_marlin.quantization.viterbi_quant import TrellisCodebook
 
         for bits in [2, 3, 4, 5]:
@@ -66,6 +70,7 @@ class TestTrellisCodebook:
 
     def test_viterbi_vs_greedy(self):
         """Viterbi should perform better or equal to greedy quantization."""
+        logger.info("running test_viterbi_vs_greedy")
         from metal_marlin.quantization.viterbi_quant import (
             TrellisCodebook,
             compute_quantization_error,
@@ -97,6 +102,7 @@ class TestTrellisTile:
 
     def test_tile_reshape_roundtrip(self):
         """Reshape and reconstruct should preserve values."""
+        logger.info("running test_tile_reshape_roundtrip")
         W = np.random.randn(64, 128).astype(np.float32)
 
         # Extract 16x16 tiles
@@ -127,6 +133,7 @@ class TestTrellisTile:
 
     def test_tile_shapes(self):
         """Tiles should have correct shapes."""
+        logger.info("running test_tile_shapes")
         W = np.random.randn(64, 128).astype(np.float32)
 
         tile_h, tile_w = 16, 16
@@ -143,6 +150,7 @@ class TestTrellisTile:
 
     def test_tile_different_sizes(self):
         """Tiling should work with different matrix sizes."""
+        logger.info("running test_tile_different_sizes")
         tile_h, tile_w = 16, 16
 
         for shape in [(32, 32), (48, 64), (100, 200)]:
@@ -173,6 +181,7 @@ class TestLDLDecomposition:
 
     def test_ldl_decomp(self):
         """LDL decomposition should satisfy H = L @ D @ L.T"""
+        logger.info("running test_ldl_decomp")
         from metal_marlin.quantization.ldl_decomp import block_ldl
 
         # Create SPD matrix
@@ -187,6 +196,7 @@ class TestLDLDecomposition:
 
     def test_ldl_lower_triangular(self):
         """L should be lower triangular with unit diagonal blocks."""
+        logger.info("running test_ldl_lower_triangular")
         from metal_marlin.quantization.ldl_decomp import block_ldl
 
         A = np.random.randn(32, 32)
@@ -203,6 +213,7 @@ class TestLDLDecomposition:
 
     def test_ldl_block_diagonal_d(self):
         """D should be block diagonal."""
+        logger.info("running test_ldl_block_diagonal_d")
         from metal_marlin.quantization.ldl_decomp import block_ldl
 
         A = np.random.randn(32, 32)
@@ -219,6 +230,7 @@ class TestLDLDecomposition:
 
     def test_ldl_different_sizes(self):
         """LDL should work for different matrix sizes."""
+        logger.info("running test_ldl_different_sizes")
         from metal_marlin.quantization.ldl_decomp import block_ldl
 
         for size in [16, 32, 64, 128]:
@@ -231,6 +243,7 @@ class TestLDLDecomposition:
 
     def test_ldl_solve(self):
         """LDL solve should correctly solve linear systems."""
+        logger.info("running test_ldl_solve")
         from metal_marlin.quantization.ldl_decomp import block_ldl, ldl_solve
 
         A = np.random.randn(32, 32)
@@ -249,6 +262,7 @@ class TestHadamardPreprocess:
 
     def test_hadamard_preprocess(self):
         """Hadamard preprocessing should rotate Hessian correctly."""
+        logger.info("running test_hadamard_preprocess")
         from metal_marlin.quantization.hadamard_preprocess import preprocess_hessian_exl3
 
         # Create SPD matrix
@@ -267,6 +281,7 @@ class TestHadamardPreprocess:
 
     def test_weight_rotation_roundtrip(self):
         """Rotate then unrotate should recover original weights."""
+        logger.info("running test_weight_rotation_roundtrip")
         from metal_marlin.quantization.hadamard_preprocess import (
             preprocess_hessian_exl3,
             rotate_weights_exl3,
@@ -297,6 +312,7 @@ class TestHadamardPreprocess:
 
     def test_blockwise_hadamard(self):
         """Blockwise Hadamard should apply transform correctly."""
+        logger.info("running test_blockwise_hadamard")
         from metal_marlin.quantization.hadamard_preprocess import blockwise_hadamard
 
         X = np.random.randn(128, 64).astype(np.float64)
@@ -311,6 +327,7 @@ class TestHadamardPreprocess:
 
     def test_hadamard_preprocess_preserves_norm(self):
         """Hadamard transform should preserve Frobenius norm."""
+        logger.info("running test_hadamard_preprocess_preserves_norm")
         from metal_marlin.quantization.hadamard_preprocess import blockwise_hadamard
 
         X = np.random.randn(128, 128).astype(np.float64)
@@ -327,6 +344,7 @@ class TestViterbiQuantizer:
 
     def test_viterbi_quantizer(self):
         """Viterbi should find valid quantization."""
+        logger.info("running test_viterbi_quantizer")
         from metal_marlin.quantization.viterbi_quant import TrellisCodebook, quantize_tile_viterbi
 
         # Create synthetic tile
@@ -346,6 +364,7 @@ class TestViterbiQuantizer:
 
     def test_viterbi_reduces_error(self):
         """Viterbi should reduce quantization error vs naive."""
+        logger.info("running test_viterbi_reduces_error")
         from metal_marlin.quantization.viterbi_quant import (
             TrellisCodebook,
             compute_quantization_error,
@@ -375,6 +394,7 @@ class TestStreamingHessian:
 
     def test_streaming_hessian(self):
         """Streaming Hessian matches batch computation."""
+        logger.info("running test_streaming_hessian")
         import torch
 
         from metal_marlin.quantization.hessian_streaming import StreamingHessianCollector
@@ -397,6 +417,7 @@ class TestStreamingHessian:
 
     def test_streaming_hessian_accumulation(self):
         """Streaming Hessian should accumulate correctly."""
+        logger.info("running test_streaming_hessian_accumulation")
         import torch
 
         from metal_marlin.quantization.hessian_streaming import StreamingHessianCollector
@@ -417,6 +438,7 @@ class TestStreamingHessian:
 
     def test_streaming_hessian_regularization(self):
         """Streaming Hessian should support regularization."""
+        logger.info("running test_streaming_hessian_regularization")
         import torch
 
         from metal_marlin.quantization.hessian_streaming import StreamingHessianCollector
@@ -436,6 +458,7 @@ class TestLayerStreamer:
 
     def test_layer_streamer_init(self):
         """Layer streamer should initialize correctly."""
+        logger.info("running test_layer_streamer_init")
         import tempfile
         from pathlib import Path
 
@@ -449,6 +472,7 @@ class TestLayerStreamer:
 
     def test_layer_weights_dataclass(self):
         """LayerWeights dataclass should hold data correctly."""
+        logger.info("running test_layer_weights_dataclass")
         import torch
 
         from metal_marlin.quantization.layer_streamer import LayerWeights
@@ -476,6 +500,7 @@ class TestCalibrationStreamer:
 
     def test_calibration_streamer_init(self):
         """Calibration streamer should initialize correctly."""
+        logger.info("running test_calibration_streamer_init")
         from metal_marlin.quantization.calibration_streamer import CalibrationStreamer
 
         class MockDataset:
@@ -511,6 +536,7 @@ class TestCalibrationStreamer:
 
     def test_calibration_batch_dataclass(self):
         """CalibrationBatch dataclass should hold data correctly."""
+        logger.info("running test_calibration_batch_dataclass")
         import torch
 
         from metal_marlin.quantization.calibration_streamer import CalibrationBatch
@@ -542,6 +568,7 @@ class TestMetalDispatchViterbi:
         2. Returns correct output shapes and types
         3. Produces reasonable quantization results
         """
+        logger.info("running test_metal_dispatch_viterbi")
         try:
             import torch
         except ImportError:
@@ -605,8 +632,12 @@ import torch
 from metal_marlin.quantization.layer_streamer import LayerStreamer
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_layer_streamer():
     """Test LayerStreamer basic functionality."""
+    logger.info("running test_layer_streamer")
     with tempfile.TemporaryDirectory() as tmpdir:
         model_path = Path(tmpdir) / "model.safetensors"
 
@@ -645,6 +676,7 @@ def test_exl3_quantizer():
     3. Output shapes match expected dimensions
     4. Reconstruction MSE is reasonable
     """
+    logger.info("running test_exl3_quantizer")
     import numpy as np
     import torch
 
@@ -763,6 +795,7 @@ class TestExl3ToMarlinConversion:
         3. Verify output shapes and dtypes are correct
         4. Verify values are reasonable (no NaN, Inf, etc.)
         """
+        logger.info("running test_exl3_to_marlin_conversion")
         from metal_marlin.quantization.exl3_to_marlin import TrellisCodebook, exl3_layer_to_marlin
 
         # Setup: Create synthetic EXL3 layer data
@@ -841,6 +874,7 @@ class TestExl3ToMarlinConversion:
 
     def test_exl3_to_marlin_basic(self):
         """Test basic EXL3 to Marlin conversion with simple data."""
+        logger.info("running test_exl3_to_marlin_basic")
         from metal_marlin.quantization.exl3_to_marlin import TrellisCodebook, exl3_layer_to_marlin
 
         # Create simple EXL3 data with dimensions compatible with had_k=128
@@ -862,6 +896,7 @@ class TestExl3ToMarlinConversion:
 
     def test_exl3_to_marlin_shapes(self):
         """Test conversion produces correct output shapes for various sizes."""
+        logger.info("running test_exl3_to_marlin_shapes")
         from metal_marlin.quantization.exl3_to_marlin import TrellisCodebook, exl3_layer_to_marlin
 
         test_cases = [
@@ -893,6 +928,7 @@ class TestExl3ToMarlinHelpers:
 
     def test_quantize_to_fp4_positive(self):
         """Test FP4 quantization of positive values."""
+        logger.info("running test_quantize_to_fp4_positive")
         from metal_marlin.quantization.exl3_to_marlin import _quantize_to_fp4_indices
 
         values = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
@@ -903,6 +939,7 @@ class TestExl3ToMarlinHelpers:
 
     def test_quantize_to_fp4_negative(self):
         """Test FP4 quantization of negative values."""
+        logger.info("running test_quantize_to_fp4_negative")
         from metal_marlin.quantization.exl3_to_marlin import _quantize_to_fp4_indices
 
         # Test strictly negative values map to indices 9-15
@@ -920,6 +957,7 @@ class TestExl3ToMarlinHelpers:
 
     def test_inverse_hadamard_roundtrip(self):
         """Test that inverse Hadamard correctly reverses the transform."""
+        logger.info("running test_inverse_hadamard_roundtrip")
         from metal_marlin.hadamard import hadamard_matrix
         from metal_marlin.quantization.exl3_to_marlin import _inverse_hadamard_weight_rotation
 
@@ -958,6 +996,7 @@ class TestExl3ToMarlinHelpers:
 
     def test_pack_fp4_shapes(self):
         """Test FP4 packing produces correct shapes."""
+        logger.info("running test_pack_fp4_shapes")
         from metal_marlin.quantization.exl3_to_marlin import _pack_fp4_to_marlin
 
         out_feat, in_feat = 256, 512
@@ -975,6 +1014,7 @@ class TestConvertExl3ToMarlinModel:
 
     def test_convert_nonexistent_path(self, tmp_path):
         """Test conversion with non-existent input path."""
+        logger.info("running test_convert_nonexistent_path")
         from metal_marlin.quantization.exl3_to_marlin import convert_exl3_to_marlin
 
         nonexistent = tmp_path / "does_not_exist"
@@ -987,6 +1027,7 @@ class TestConvertExl3ToMarlinModel:
 
     def test_convert_stats_structure(self, tmp_path):
         """Test that convert_exl3_to_marlin returns proper stats."""
+        logger.info("running test_convert_stats_structure")
         from metal_marlin.quantization.exl3_to_marlin import convert_exl3_to_marlin
 
         input_dir = tmp_path / "dummy_exl3"

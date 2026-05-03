@@ -33,6 +33,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from .._compat import HAS_TORCH, torch
@@ -90,6 +91,7 @@ if HAS_TORCH and torch is not None:
                 max_seq_len: Maximum sequence length to allocate for
                 num_layers: Number of transformer layers
             """
+            logger.debug("initializing %s with mla_layer=%s, max_batch_size=%s, max_seq_len=%s, num_layers=%s", type(self).__name__, mla_layer, max_batch_size, max_seq_len, num_layers)
             super().__init__()
 
             # Store reference to MLA layer for weight access
@@ -135,6 +137,7 @@ if HAS_TORCH and torch is not None:
             This self-test runs during __init__ to ensure the FP4 cache is
             properly configured and functional before use.
             """
+            logger.debug("_validate_fp4_cache called")
             import torch
 
             # 1. Verify cache was created with FP4 mode
@@ -243,6 +246,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 q_latent: Projected query [batch, num_heads, kv_lora_rank]
             """
+            logger.debug("_project_query_to_latent called with q_nope=%s", q_nope)
             batch_size, num_heads, _ = q_nope.shape
 
             # Get kv_b_proj weight from MLA layer
@@ -300,6 +304,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 attn_out: Output in V space [batch, num_heads, v_head_dim]
             """
+            logger.debug("_project_output_from_latent called with attn_latent=%s", attn_latent)
             batch_size, num_heads, _ = attn_latent.shape
 
             if hasattr(self.mla_layer, "kv_b_proj"):
@@ -356,6 +361,7 @@ if HAS_TORCH and torch is not None:
             # MLAKVCache stores as unified kv_cache in FP4 mode
             # Shape: [num_layers, batch, max_seq, cache_dim]
             # For FP4: kv_cache is uint8 packed, kv_scales contains scales
+            logger.debug("_get_fp4_cache_buffers called with layer_idx=%s", layer_idx)
             k_cache = self.cache.kv_cache[layer_idx]  # [batch, max_seq, cache_dim]
             v_cache = k_cache  # MLA uses same cache for K and V latent
 
@@ -381,6 +387,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 block_tables: [batch, max_blocks] int32
             """
+            logger.info("_build_block_tables starting")
             max_blocks = (self.max_seq_len + 15) // 16  # BLOCK_SIZE=16
             block_tables = torch.arange(
                 batch_size * max_blocks, dtype=torch.int32, device=self.cache.kv_cache.device
@@ -401,6 +408,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 full_cache: Full cached sequence for the layer
             """
+            logger.debug("update_cache called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
             return self.cache.update_compressed(layer_idx, compressed_kv)
 
         def forward(
@@ -421,6 +429,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 attn_output: [batch, num_heads, v_head_dim]
             """
+            logger.debug("forward: input shape=%s dtype=%s", q_nope.shape if hasattr(q_nope, "shape") else type(q_nope).__name__, q_nope.dtype if hasattr(q_nope, "dtype") else "N/A")
             batch_size, num_heads, _ = q_nope.shape
             device = q_nope.device
 
@@ -523,10 +532,12 @@ if HAS_TORCH and torch is not None:
 
         def get_cache(self) -> MLAKVCache:
             """Get the underlying MLAKVCache instance."""
+            logger.debug("get_cache called")
             return self.cache
 
         def reset_cache(self) -> None:
             """Reset the KV cache for a new sequence."""
+            logger.debug("reset_cache called")
             self.cache.reset()
 
 else:
@@ -535,10 +546,15 @@ else:
         """Stub when PyTorch is unavailable."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError("MMFP4PagedAttention requires PyTorch")
 
         def forward(self, *args: Any, **kwargs: Any) -> Any:
+            logger.debug("forward called")
             raise RuntimeError("MMFP4PagedAttention requires PyTorch")
 
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["MMFP4PagedAttention"]

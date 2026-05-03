@@ -7,13 +7,18 @@ threadgroups in parallel.
 """
 
 from __future__ import annotations
+import logging
 
+
+
+logger = logging.getLogger(__name__)
 
 def select_moe_kernel(batch_size: int, use_fp32_acc: bool) -> tuple[str, int]:
     """Select optimal MoE kernel and tile size for given batch size.
 
     Mirrors the logic in metal_marlin/trellis/moe_dispatch.py
     """
+    logger.debug("select_moe_kernel called with batch_size=%s, use_fp32_acc=%s", batch_size, use_fp32_acc)
     if batch_size == 1:
         base = "moe_trellis_swiglu_decode"
         tile_n = 32
@@ -45,6 +50,7 @@ def compute_grid(
         grid: (grid_x, grid_y, grid_z) threadgroup counts
         threads_per_tg: Threads per threadgroup
     """
+    logger.debug("compute_grid called with batch_size=%s, hidden_dim=%s, top_k=%s", batch_size, hidden_dim, top_k)
     kernel_name, tile_n = select_moe_kernel(batch_size, use_fp32_acc)
     is_decode_kernel = kernel_name == "moe_trellis_swiglu_decode"
     is_prefill4_kernel = "prefill4" in kernel_name
@@ -77,6 +83,7 @@ def analyze_parallelism(
     m4_max_exec_units: int = 40,
 ) -> None:
     """Analyze MoE kernel parallelism for given configuration."""
+    logger.debug("analyze_parallelism called with batch_size=%s, hidden_dim=%s, intermediate_dim=%s", batch_size, hidden_dim, intermediate_dim)
     kernel_name, tile_n, grid, threads_per_tg = compute_grid(
         batch_size, hidden_dim, top_k, use_fp32_acc
     )
@@ -137,6 +144,7 @@ def analyze_parallelism(
 def main() -> None:
     """Analyze grid dimensions for typical MoE configurations."""
     # DeepSeek-style config
+    logger.info("main starting")
     configs = [
         # (batch_size, hidden_dim, intermediate_dim, top_k, description)
         (1, 2048, 1536, 8, "Decode (batch=1)"),

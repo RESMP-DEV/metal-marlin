@@ -5,10 +5,14 @@ and related prefill utilities.
 """
 
 from __future__ import annotations
+import logging
 
 import pytest
 import torch
 import torch.nn as nn
+
+
+logger = logging.getLogger(__name__)
 
 # Check if MPS is available for full tests
 HAS_MPS = torch.backends.mps.is_available()
@@ -23,6 +27,7 @@ pytestmark = pytest.mark.skipif(not HAS_MPS, reason="MPS required for prefill te
 
 def get_device() -> torch.device:
     """Get the appropriate device for testing."""
+    logger.debug("get_device called")
     return torch.device("mps" if HAS_MPS else "cpu")
 
 
@@ -34,6 +39,7 @@ def get_device() -> torch.device:
 @pytest.fixture
 def model_config():
     """Standard test model configuration."""
+    logger.debug("model_config called")
     return {
         "vocab_size": 32000,
         "hidden_size": 256,  # Small for testing
@@ -49,6 +55,7 @@ def model_config():
 @pytest.fixture
 def kv_cache(model_config):
     """Create a test KV cache."""
+    logger.debug("kv_cache called with model_config=%s", model_config)
     from metal_marlin.kv_cache import CacheConfig, KVCache
 
     cache_config = CacheConfig(
@@ -65,6 +72,7 @@ class MockModel:
     """Mock model for testing prefill."""
 
     def __init__(self, config: dict):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config
         self._call_count = 0
         self._device = get_device()
@@ -83,6 +91,7 @@ class MockModel:
         )
 
     def create_kv_cache(self, batch_size: int = 1):
+        logger.debug("create_kv_cache called with batch_size=%s", batch_size)
         from metal_marlin.kv_cache import CacheConfig, KVCache
 
         cache_config = CacheConfig(
@@ -98,6 +107,7 @@ class MockModel:
 @pytest.fixture
 def mock_model(model_config):
     """Create a mock model for testing."""
+    logger.debug("mock_model called with model_config=%s", model_config)
     return MockModel(model_config)
 
 
@@ -111,6 +121,7 @@ class TestPrefillConfig:
 
     def test_default_config(self):
         """Test default configuration values."""
+        logger.info("running test_default_config")
         from metal_marlin.inference.prefill import PrefillConfig
 
         config = PrefillConfig()
@@ -121,6 +132,7 @@ class TestPrefillConfig:
 
     def test_custom_config(self):
         """Test custom configuration."""
+        logger.info("running test_custom_config")
         from metal_marlin.inference.prefill import PrefillConfig
 
         config = PrefillConfig(
@@ -143,6 +155,7 @@ class TestChunkedPrefill:
 
     def test_short_prompt_single_chunk(self, mock_model, model_config):
         """Test that short prompts use single chunk."""
+        logger.info("running test_short_prompt_single_chunk")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()
@@ -158,6 +171,7 @@ class TestChunkedPrefill:
 
     def test_long_prompt_multiple_chunks(self, mock_model, model_config):
         """Test that long prompts are chunked correctly."""
+        logger.info("running test_long_prompt_multiple_chunks")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()
@@ -173,6 +187,7 @@ class TestChunkedPrefill:
 
     def test_prefill_stats(self, mock_model):
         """Test that stats are populated correctly."""
+        logger.info("running test_prefill_stats")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()
@@ -189,6 +204,7 @@ class TestChunkedPrefill:
 
     def test_progress_callback(self, mock_model):
         """Test progress callback invocation."""
+        logger.info("running test_progress_callback")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()
@@ -198,6 +214,7 @@ class TestChunkedPrefill:
         progress_calls = []
 
         def on_progress(done, total):
+            logger.debug("on_progress called with done=%s, total=%s", done, total)
             progress_calls.append((done, total))
 
         chunked_prefill(mock_model, input_ids, config=config, progress_callback=on_progress)
@@ -207,6 +224,7 @@ class TestChunkedPrefill:
 
     def test_invalid_batch_size(self, mock_model):
         """Test that batch_size > 1 raises error."""
+        logger.info("running test_invalid_batch_size")
         from metal_marlin.inference.prefill import chunked_prefill
 
         device = get_device()
@@ -217,6 +235,7 @@ class TestChunkedPrefill:
 
     def test_sequence_exceeds_cache(self, mock_model, kv_cache):
         """Test that exceeding cache capacity raises error."""
+        logger.info("running test_sequence_exceeds_cache")
         from metal_marlin.inference.prefill import chunked_prefill
 
         device = get_device()
@@ -237,6 +256,7 @@ class TestParallelKVWrite:
 
     def test_basic_write(self, kv_cache, model_config):
         """Test basic parallel KV write."""
+        logger.info("running test_basic_write")
         from metal_marlin.inference.prefill import parallel_kv_write
 
         device = get_device()
@@ -264,6 +284,7 @@ class TestParallelKVWrite:
 
     def test_mismatched_keys_values(self, kv_cache, model_config):
         """Test that mismatched key/value counts raise error."""
+        logger.info("running test_mismatched_keys_values")
         from metal_marlin.inference.prefill import parallel_kv_write
 
         device = get_device()
@@ -287,6 +308,7 @@ class TestFlashPrefillAttention:
 
     def test_basic_attention(self):
         """Test basic flash attention computation."""
+        logger.info("running test_basic_attention")
         from metal_marlin.inference.prefill import flash_prefill_attention
 
         device = get_device()
@@ -303,6 +325,7 @@ class TestFlashPrefillAttention:
 
     def test_gqa_attention(self):
         """Test GQA (num_kv_heads < num_heads)."""
+        logger.info("running test_gqa_attention")
         from metal_marlin.inference.prefill import flash_prefill_attention
 
         device = get_device()
@@ -319,6 +342,7 @@ class TestFlashPrefillAttention:
 
     def test_causal_masking(self):
         """Test that causal masking prevents attending to future."""
+        logger.info("running test_causal_masking")
         from metal_marlin.inference.prefill import flash_prefill_attention
 
         device = get_device()
@@ -345,6 +369,7 @@ class TestFlashPrefillAttention:
 
     def test_custom_scale(self):
         """Test custom attention scale."""
+        logger.info("running test_custom_scale")
         from metal_marlin.inference.prefill import flash_prefill_attention
 
         device = get_device()
@@ -370,6 +395,7 @@ class TestBatchedKVProjection:
 
     def test_basic_projection(self, model_config):
         """Test basic batched KV projection."""
+        logger.info("running test_basic_projection")
         from metal_marlin.inference.prefill import batched_kv_projection
 
         device = get_device()
@@ -382,6 +408,7 @@ class TestBatchedKVProjection:
 
         class MockAttention(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 self.num_kv_heads = num_kv_heads
                 self.head_dim = head_dim
@@ -395,6 +422,7 @@ class TestBatchedKVProjection:
 
         class MockLayer(nn.Module):
             def __init__(self):
+                logger.debug("initializing %s", type(self).__name__)
                 super().__init__()
                 self.self_attn = MockAttention()
 
@@ -424,6 +452,7 @@ class TestSpeculativePrefill:
 
     def test_disabled_speculation(self, mock_model):
         """Test that disabled speculation returns empty tokens."""
+        logger.info("running test_disabled_speculation")
         from metal_marlin.inference.prefill import (
             SpeculativePrefillConfig,
             speculative_prefill,
@@ -443,6 +472,7 @@ class TestSpeculativePrefill:
 
     def test_enabled_speculation(self, mock_model):
         """Test speculative prefill with speculation enabled."""
+        logger.info("running test_enabled_speculation")
         from metal_marlin.inference.prefill import (
             SpeculativePrefillConfig,
             speculative_prefill,
@@ -475,6 +505,7 @@ class TestPrefillIntegration:
 
     def test_prefill_then_decode(self, mock_model, model_config):
         """Test prefill followed by decode simulation."""
+        logger.info("running test_prefill_then_decode")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()
@@ -494,6 +525,7 @@ class TestPrefillIntegration:
 
     def test_prefill_memory_estimate(self, mock_model):
         """Test that memory estimation is reasonable."""
+        logger.info("running test_prefill_memory_estimate")
         from metal_marlin.inference.prefill import PrefillConfig, chunked_prefill
 
         device = get_device()

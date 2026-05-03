@@ -1,8 +1,13 @@
+import logging
 import os
 import re
 
 
+
+logger = logging.getLogger(__name__)
+
 def find_metal_files(root_dir):
+    logger.debug("find_metal_files called with root_dir=%s", root_dir)
     metal_files = []
     for root, _, files in os.walk(root_dir):
         for file in files:
@@ -11,6 +16,7 @@ def find_metal_files(root_dir):
     return metal_files
 
 def get_includes(file_path, root_dir):
+    logger.debug("get_includes called with file_path=%s, root_dir=%s", file_path, root_dir)
     includes = []
     try:
         with open(file_path) as f:
@@ -40,12 +46,14 @@ def get_includes(file_path, root_dir):
     return includes
 
 def find_all_cycles(graph):
+    logger.debug("find_all_cycles called with graph=%s", graph)
     cycles = []
     visited = set()
     path = []
     path_set = set()
 
     def visit(u):
+        logger.debug("visit called with u=%s", u)
         if u in path_set:
             cycle_start_index = path.index(u)
             cycles.append(path[cycle_start_index:] + [u])
@@ -69,6 +77,7 @@ def find_all_cycles(graph):
     return cycles
 
 def main():
+    logger.info("main starting")
     root_dir = "contrib/metal_marlin"
     metal_files = find_metal_files(root_dir)
 

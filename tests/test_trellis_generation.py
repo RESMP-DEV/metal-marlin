@@ -8,6 +8,7 @@ Verify: cd contrib/metal_marlin && uv run pytest tests/test_trellis_generation.p
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,9 @@ import torch
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
 
+
+
+logger = logging.getLogger(__name__)
 
 # Model path for integration tests
 MODEL_PATH = "models/GLM-4.7-Flash-EXL3-3bpw"
@@ -44,6 +48,7 @@ COHERENCE_PATTERNS = {
 @pytest.fixture(scope="module")
 def model_available():
     """Check if test model is available."""
+    logger.debug("model_available called")
     if not Path(MODEL_PATH).exists():
         pytest.skip(f"Model not found: {MODEL_PATH}")
     return True
@@ -52,6 +57,7 @@ def model_available():
 @pytest.fixture(scope="module")
 def trellis_model(model_available, mps_device):
     """Load TrellisForCausalLM model."""
+    logger.debug("trellis_model called with model_available=%s, mps_device=%s", model_available, mps_device)
     try:
         from metal_marlin.trellis.lm import TrellisForCausalLM
     except ImportError:
@@ -65,6 +71,7 @@ def trellis_model(model_available, mps_device):
 @pytest.fixture(scope="module")
 def tokenizer(model_available):
     """Load tokenizer for the model."""
+    logger.debug("tokenizer called with model_available=%s", model_available)
     try:
         from transformers import AutoTokenizer
     except ImportError:
@@ -105,6 +112,7 @@ class TestTrellisGenerationQuality:
         This test checks that the model produces reasonable, human-readable
         output rather than garbage tokens or repetitive nonsense.
         """
+        logger.info("running test_generation_not_garbage")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         prompt = SAMPLE_PROMPTS[prompt_name]
@@ -169,6 +177,7 @@ class TestTrellisGenerationQuality:
         Running the same prompt twice with temperature=0 should produce
         identical results.
         """
+        logger.info("running test_greedy_generation_deterministic")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -204,6 +213,7 @@ class TestTrellisGenerationQuality:
         This test verifies that the model assigns reasonable probabilities
         to tokens, without requiring an FP16 reference model.
         """
+        logger.info("running test_top5_token_probabilities")
         prompt = SAMPLE_PROMPTS[prompt_name]
 
         # Tokenize
@@ -254,6 +264,7 @@ class TestTrellisGenerationQuality:
         - Low temperature (< 0.5): Should be more focused/deterministic
         - High temperature (> 1.0): Should be more diverse
         """
+        logger.info("running test_generation_with_different_temperatures")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -298,6 +309,7 @@ class TestTrellisGenerationQuality:
         The same prompt generated individually and in a batch should
         produce similar outputs (with some variance due to sampling).
         """
+        logger.info("running test_batch_generation_consistency")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -340,6 +352,7 @@ class TestTrellisGenerationQuality:
         When using greedy decoding, streaming and non-streaming should
         produce identical results.
         """
+        logger.info("running test_streaming_generation_matches_non_streaming")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -371,6 +384,7 @@ class TestTrellisGenerationQuality:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test that EOS token properly stops generation."""
+        logger.info("running test_eos_token_handling")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -410,6 +424,7 @@ class TestTrellisGenerationQuality:
 
         With repetition penalty > 1.0, outputs should be less repetitive.
         """
+        logger.info("running test_repetition_penalty_effect")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -439,6 +454,7 @@ class TestTrellisGenerationQuality:
         # Check repetition in each output
         def count_repetitions(text: str) -> int:
             """Count consecutive word repetitions."""
+            logger.debug("count_repetitions called with text=%s", text)
             words = text.split()
             repeats = 0
             for i in range(1, len(words)):
@@ -464,6 +480,7 @@ class TestTrellisGenerationEdgeCases:
     @pytest.mark.slow
     def test_empty_prompt(self, trellis_model, tokenizer: PreTrainedTokenizer):
         """Test generation with minimal/empty prompt."""
+        logger.info("running test_empty_prompt")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -478,6 +495,7 @@ class TestTrellisGenerationEdgeCases:
     @pytest.mark.slow
     def test_long_prompt(self, trellis_model, tokenizer: PreTrainedTokenizer):
         """Test generation with longer prompt."""
+        logger.info("running test_long_prompt")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)
@@ -505,6 +523,7 @@ class TestTrellisGenerationEdgeCases:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test generation with special characters in prompt."""
+        logger.info("running test_special_characters_in_prompt")
         from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
 
         generator = TrellisGenerator(trellis_model, tokenizer)

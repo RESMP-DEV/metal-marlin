@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +209,210 @@ def is_qwen_hybrid_deltanet(config: Any) -> bool:
 # --------------------------------------------------------------------------------------
 
 
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------------------
+# Qwen hybrid / DeltaNet-family config helpers
+# --------------------------------------------------------------------------------------
+
+_QWEN3_NEXT_MODEL_TYPES = frozenset({
+    "qwen3_next",
+    "qwen3_vl_moe_text",
+    "qwen3_5_moe_text",
+    "qwen3_6_moe_text",
+})
+_QWEN_MULTIMODAL_TYPES = frozenset({"qwen2_5_vl", "qwen3_vl_moe", "qwen2_vl", "qwen2_5_omni", "qwen3_omni_moe"})
+_QWEN_DENSE_TYPES = frozenset({"qwen3", "qwen2", "qwen2_moe", "qwen3_moe"})
+
+
+def get_effective_text_config(config: Any) -> Any:
+    """Return the text sub-config for multimodal Qwen models.
+
+    Qwen VL / VL-MoE models store language dimensions inside a nested
+    ``text_config`` object (e.g. ``Qwen2_5_VLConfig``).  All other configs
+    are returned as-is.
+
+    Args:
+        config: A HuggingFace PreTrainedConfig (or dict-compatible object).
+
+    Returns:
+        The config object that carries ``vocab_size`` / ``hidden_size`` / etc.
+        For multimodal models this is ``config.text_config``; otherwise ``config``.
+    """
+    logger.debug("get_effective_text_config called with config=%s", config)
+    if hasattr(config, "text_config"):
+        text_cfg = getattr(config, "text_config", None)
+        if text_cfg is not None and hasattr(text_cfg, "vocab_size"):
+            return text_cfg
+    return config
+
+
+def get_layer_types(config: Any) -> list[str] | None:
+    """Return the ``layer_types`` list for a Qwen-family config.
+
+    Checks both the top-level attribute and the effective text config
+    (for multimodal models) before returning ``None``.
+
+    Args:
+        config: A HuggingFace PreTrainedConfig.
+
+    Returns:
+        The ``layer_types`` list (``["full_attention", "linear_attention", ...]``)
+        when present, otherwise ``None``.
+    """
+    # Direct attribute first (flat configs: Qwen3Config, Qwen3NextConfig, VLText configs)
+    logger.debug("get_layer_types called with config=%s", config)
+    if hasattr(config, "layer_types"):
+        val = getattr(config, "layer_types")
+        if isinstance(val, list):
+            return val
+
+    # Multimodal: check nested text_config
+    text_cfg = get_effective_text_config(config)
+    if text_cfg is not config and hasattr(text_cfg, "layer_types"):
+        val = getattr(text_cfg, "layer_types")
+        if isinstance(val, list):
+            return val
+
+    return None
+
+
+def get_full_attention_interval(config: Any) -> int | None:
+    """Return ``full_attention_interval`` for Qwen3-Next-family configs.
+
+    ``full_attention_interval`` is stored as a ``kwargs`` default in
+    ``Qwen3NextConfig.__init__`` and is only accessible via
+    ``config.to_dict()`` or direct ``getattr`` on the config object.
+
+    Checks both the top-level config and the nested ``text_config``
+    (for multimodal models) before returning ``None``.
+
+    Args:
+        config: A HuggingFace PreTrainedConfig.
+
+    Returns:
+        The interval as an integer if present, otherwise ``None``.
+    """
+    # Check top-level first, then multimodal text sub-config
+    logger.debug("get_full_attention_interval called with config=%s", config)
+    candidates = [config]
+    text_cfg = get_effective_text_config(config)
+    if text_cfg is not config:
+        candidates.append(text_cfg)
+
+    for candidate in candidates:
+        if hasattr(candidate, "full_attention_interval"):
+            val = getattr(candidate, "full_attention_interval")
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+
+        # Fallback: look inside the raw config dict stored by PreTrainedConfig
+        as_dict: dict[str, Any] = {}
+        if hasattr(candidate, "to_dict"):
+            try:
+                as_dict = candidate.to_dict()
+            except Exception:
+                pass
+        elif hasattr(candidate, "__dict__"):
+            as_dict = candidate.__dict__
+
+        if "full_attention_interval" in as_dict:
+            val = as_dict["full_attention_interval"]
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+
+    return None
+
+
+def get_deltanet_metadata(config: Any) -> dict[str, Any] | None:
+    """Surface DeltaNet linear-attention metadata from a Qwen3-Next-family config.
+
+    Returns ``None`` when the config is not a DeltaNet-family model or the
+    fields are absent.
+
+    The five DeltaNet-specific fields read from ``Qwen3NextConfig`` are:
+
+    - ``linear_key_head_dim``
+    - ``linear_value_head_dim``
+    - ``linear_num_key_heads``
+    - ``linear_num_value_heads``
+    - ``linear_conv_kernel_dim``
+
+    Args:
+        config: A HuggingFace PreTrainedConfig.
+
+    Returns:
+        A dict with the five fields above when available, otherwise ``None``.
+    """
+    # Resolve the config object that actually carries DeltaNet fields.
+    # For multimodal wrappers the fields live in text_config; for flat
+    # configs they live at top level.
+    logger.debug("get_deltanet_metadata called with config=%s", config)
+    source_cfg = config
+    model_type = getattr(config, "model_type", "") or ""
+    if model_type not in _QWEN3_NEXT_MODEL_TYPES:
+        # Multimodal wrapper: check text sub-config
+        text_cfg = get_effective_text_config(config)
+        if text_cfg is not config:
+            model_type = getattr(text_cfg, "model_type", "") or ""
+            source_cfg = text_cfg
+        else:
+            model_type = ""
+
+    if model_type not in _QWEN3_NEXT_MODEL_TYPES:
+        return None
+
+    fields = (
+        "linear_key_head_dim",
+        "linear_value_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_conv_kernel_dim",
+    )
+    result: dict[str, Any] = {}
+    for name in fields:
+        val = getattr(source_cfg, name, None)
+        if val is None:
+            return None  # Field missing → not a complete DeltaNet config
+        result[name] = val
+
+    return result
+
+
+def is_qwen_hybrid_deltanet(config: Any) -> bool:
+    """Detect whether a config belongs to the Qwen hybrid linear / full-attention family.
+
+    This family is characterised by a ``layer_types`` list containing
+    ``"linear_attention"`` (DeltaNet) alongside ``"full_attention"`` entries.
+
+    Backward-compatible: returns ``False`` for dense Qwen models (``Qwen3Config``,
+    ``Qwen2Config``, …) that only use ``"full_attention"`` and
+    ``"sliding_attention"``.
+
+    Args:
+        config: A HuggingFace PreTrainedConfig.
+
+    Returns:
+        ``True`` if the config describes a DeltaNet-family hybrid model.
+    """
+    logger.debug("is_qwen_hybrid_deltanet called with config=%s", config)
+    layer_types = get_layer_types(config)
+    if layer_types is None:
+        return False
+    return "linear_attention" in layer_types
+
+
+# --------------------------------------------------------------------------------------
+# Existing public API
+# --------------------------------------------------------------------------------------
+
+
 def _load_mtp_head_from_checkpoint(
     model: Any,
     config: Any,
@@ -218,6 +423,7 @@ def _load_mtp_head_from_checkpoint(
     GLM 4.7 Flash stores auxiliary next-token predictor weights under:
     `model.layers.<num_hidden_layers>.shared_head.head.weight`.
     """
+    logger.info("_load_mtp_head_from_checkpoint called with model=%s, config=%s, loader=%s", model, config, loader)
     num_tokens_hint = (
         getattr(config, "num_nextn_predict_layers", None)
         or getattr(config, "num_mtp_heads", None)
@@ -312,6 +518,7 @@ def load_prequantized_mmfp4_model(
     Returns:
         Tuple of (model, tokenizer)
     """
+    logger.info("load_prequantized_mmfp4_model called with model_path=%s, device=%s, bits=%s", model_path, device, bits)
     print(f"Loading MMFP4 model from {model_path}...")
     quantized_path = Path(model_path)
 

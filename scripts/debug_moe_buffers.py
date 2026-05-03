@@ -7,6 +7,7 @@ The Metal kernel uses flat indexing:
 
 If tensors are 2D [num_experts, dim], this works only if contiguous (row-major).
 """
+import logging
 
 import torch
 import torch.nn.functional as F
@@ -14,8 +15,12 @@ import torch.nn.functional as F
 from metal_marlin.trellis.testing import create_mock_moe_mlp
 
 
+
+logger = logging.getLogger(__name__)
+
 def compare_expert_forward(moe, x, expert_id):
     """Compare single expert computation."""
+    logger.debug("compare_expert_forward called with moe=%s, x=%s, expert_id=%s", moe, x, expert_id)
     expert = moe.experts[expert_id]
 
     # Slow path
@@ -50,6 +55,7 @@ def verify_sign_layout(moe) -> dict[str, bool]:
     Returns:
         Dictionary with verification results for each buffer.
     """
+    logger.debug("verify_sign_layout called with moe=%s", moe)
     results = {}
 
     gate_su = moe.gate_su_stacked
@@ -131,6 +137,7 @@ def verify_sign_layout(moe) -> dict[str, bool]:
 
 def check_weight_buffer_shapes(moe):
     """Verify stacked weight buffer shapes match kernel expectations."""
+    logger.debug("check_weight_buffer_shapes called with moe=%s", moe)
     print("\nWeight buffer shapes:")
     print(f"  gate_weights_stacked: {moe.gate_weights_stacked.shape}")
     print(f"  gate_scales_stacked: {moe.gate_scales_stacked.shape}")
@@ -151,6 +158,7 @@ def check_weight_buffer_shapes(moe):
 
 def verify_weight_strides(moe) -> None:
     """Verify weight tensor strides are correct for Metal dispatch."""
+    logger.debug("verify_weight_strides called with moe=%s", moe)
     print("\n=== Weight Tensor Stride Analysis ===")
 
     weights = {
@@ -185,6 +193,7 @@ def verify_scale_layout(moe):
     The kernel computes n_groups = (K_dim + group_size - 1) / group_size
     But moe_dispatch.py passes group_size=32 while scales are stored with group_size=128!
     """
+    logger.debug("verify_scale_layout called with moe=%s", moe)
     print("\n" + "=" * 70)
     print("SCALE BUFFER LAYOUT VERIFICATION")
     print("=" * 70)
@@ -284,6 +293,7 @@ def check_nan_sources(moe, x: torch.Tensor) -> None:
         moe: TrellisMoEMLP instance.
         x: Sample input tensor [batch, hidden_dim].
     """
+    logger.debug("check_nan_sources called with moe=%s, x=%s", moe, x)
     print("\n=== NaN Source Tracing ===")
 
     # Check input

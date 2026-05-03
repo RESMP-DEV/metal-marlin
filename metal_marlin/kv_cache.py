@@ -44,6 +44,7 @@ The module now contains the following primary classes:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Literal
 
 from ._compat import require_torch, torch
@@ -51,6 +52,9 @@ from .dtypes import DTypeConfig, get_default_config
 
 if TYPE_CHECKING:
     import torch as torch_typing
+
+
+logger = logging.getLogger(__name__)
 
 # Mapping from dtype config strings to PyTorch dtypes
 if TYPE_CHECKING:
@@ -84,6 +88,7 @@ def _get_from_pool(
     
     The pool is keyed by (shape, dtype, device) for type-safe reuse.
     """
+    logger.debug("_get_from_pool called with shape=%s, dtype=%s, device=%s", shape, dtype, device)
     device_str = str(device)
     key = (shape, dtype, device_str)
     if key in _kv_pool and _kv_pool[key]:
@@ -102,6 +107,7 @@ def _return_to_pool(tensor: torch.Tensor | None) -> None:
     This enables subsequent _get_from_pool calls to reuse the buffer,
     avoiding expensive GPU memory allocations.
     """
+    logger.debug("_return_to_pool called with tensor=%s", tensor)
     if tensor is None:
         return
     device_str = str(tensor.device)
@@ -114,6 +120,7 @@ def _return_to_pool(tensor: torch.Tensor | None) -> None:
 
 def _return_list_to_pool(tensors: list[torch.Tensor] | None) -> None:
     """Return a list of tensors to the pool."""
+    logger.debug("_return_list_to_pool called with tensors=%s", tensors)
     if tensors is None:
         return
     for tensor in tensors:
@@ -122,6 +129,7 @@ def _return_list_to_pool(tensors: list[torch.Tensor] | None) -> None:
 
 def clear_pool() -> None:
     """Clear all pooled buffers."""
+    logger.debug("clear_pool called")
     _pool_metrics["evictions"] += sum(len(v) for v in _kv_pool.values())
     _kv_pool.clear()
 
@@ -137,6 +145,7 @@ def get_pool_stats() -> dict[str, int]:
         - pooled_tensors: Current tensors in pool
         - hit_rate: Ratio of hits to total requests (0.0-1.0)
     """
+    logger.debug("get_pool_stats called")
     total_requests = _pool_metrics["hits"] + _pool_metrics["misses"]
     hit_rate = _pool_metrics["hits"] / total_requests if total_requests > 0 else 0.0
     pooled_tensors = sum(len(v) for v in _kv_pool.values())
@@ -149,6 +158,7 @@ def get_pool_stats() -> dict[str, int]:
 
 def reset_pool_metrics() -> None:
     """Reset pool metrics counters."""
+    logger.debug("reset_pool_metrics called")
     _pool_metrics.update({"hits": 0, "misses": 0, "returns": 0, "evictions": 0})
 
 
@@ -199,6 +209,7 @@ def _kv_prealloc(
         ... )
         >>> # buffers['k_cache'] is a list of 32 pre-allocated tensors
     """
+    logger.debug("_kv_prealloc called with num_layers=%s, batch_size=%s, max_seq_len=%s", num_layers, batch_size, max_seq_len)
     require_torch("_kv_prealloc")
 
     # Determine storage dtype
@@ -339,6 +350,7 @@ def _kv_prealloc(
 
 def require_mps(feature: str = "KV cache") -> None:
     """Raise if PyTorch MPS is not available."""
+    logger.debug("require_mps called with feature=%s", feature)
     require_torch(feature)
     # Check for MPS availability safely (torch is guaranteed not None by require_torch)
     if not hasattr(torch.backends, "mps") or not torch.backends.mps.is_available():  # type: ignore
@@ -350,6 +362,7 @@ def require_mps(feature: str = "KV cache") -> None:
 
 def _get_torch_dtype(dtype_str: str) -> torch.dtype:
     """Convert dtype string to PyTorch dtype."""
+    logger.debug("_get_torch_dtype called with dtype_str=%s", dtype_str)
     require_torch("dtype conversion")
 
     if not _DTYPE_TO_TORCH_CACHE:
@@ -379,6 +392,7 @@ def _get_torch_dtype(dtype_str: str) -> torch.dtype:
 
 def _resolve_dtype(dtype: torch.dtype | str) -> torch.dtype:
     """Resolve dtype string to torch dtype (helper for MLA)."""
+    logger.debug("_resolve_dtype called with dtype=%s", dtype)
     if isinstance(dtype, str):
         return _get_torch_dtype(dtype)
     return dtype
@@ -390,6 +404,7 @@ _SHIFTS_CACHE: dict[str, torch.Tensor] = {}
 
 def _get_shifts(device: torch.device | str) -> torch.Tensor:
     """Get cached shifts tensor for vectorized packing/unpacking."""
+    logger.debug("_get_shifts called with device=%s", device)
     device_str = str(device)
     if device_str not in _SHIFTS_CACHE:
         _SHIFTS_CACHE[device_str] = torch.tensor(
@@ -411,6 +426,7 @@ def _vectorized_unpack(packed: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     # scale: [..., 1] (float16) or [..., dim] if per-channel
     
     # Shape handling
+    logger.info("_vectorized_unpack called with packed=%s, scale=%s", packed, scale)
     orig_shape = packed.shape
     packed_dim = orig_shape[-1]
     
@@ -446,6 +462,7 @@ def _vectorized_pack(quantized_reshaped: torch.Tensor) -> torch.Tensor:
     Reduces from 7 sequential ops to single kernel launch.
     """
     # quantized_reshaped: [..., 8] (uint8) values in 0-15
+    logger.info("_vectorized_pack called with quantized_reshaped=%s", quantized_reshaped)
     device = quantized_reshaped.device
     
     # Shift amounts: [0, 4, 8, 12, 16, 20, 24, 28] (LSB first)
@@ -525,6 +542,7 @@ class KVCacheTorch:
         dtype_config: DTypeConfig | None = None,
         device: str = "mps",
     ):
+        logger.debug("initializing %s with config=%s, batch_size=%s, dtype_config=%s, device=%s", type(self).__name__, config, batch_size, dtype_config, device)
         require_mps("KV cache")
 
         self.config = config
@@ -590,6 +608,7 @@ class KVCacheTorch:
         Args:
             layer_idx: Specific layer to clear, or None to clear all layers
         """
+        logger.info("_pre_dequant_cache_clear called with layer_idx=%s", layer_idx)
         if layer_idx is not None:
             self._pre_dequant_cache.pop(layer_idx, None)
         else:
@@ -622,6 +641,7 @@ class KVCacheTorch:
             Cached (k_dequant, v_dequant) tuple or None if cache miss
         """
         # Check if we have a valid cached entry for this layer at current seq_len
+        logger.info("_pre_dequant_cache_get called with layer_idx=%s, k_cache=%s, v_cache=%s, k_scales=%s", layer_idx, k_cache, v_cache, k_scales)
         if layer_idx not in self._pre_dequant_cache:
             return None
             
@@ -650,6 +670,7 @@ class KVCacheTorch:
             k_dequant: Dequantized K tensor
             v_dequant: Dequantized V tensor
         """
+        logger.info("_pre_dequant_cache_set called with layer_idx=%s, k_dequant=%s, v_dequant=%s", layer_idx, k_dequant, v_dequant)
         self._pre_dequant_cache[layer_idx] = (k_dequant, v_dequant)
 
     def update(
@@ -660,6 +681,7 @@ class KVCacheTorch:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Update cache with new K, V and return full cached K, V."""
         # Clear pre-dequant cache for this layer since underlying data is changing
+        logger.debug("update called with layer_idx=%s, k_new=%s, v_new=%s", layer_idx, k_new, v_new)
         self._pre_dequant_cache_clear(layer_idx)
         
         new_seq_len = k_new.shape[2]
@@ -819,6 +841,7 @@ class KVCacheTorch:
 
     def advance(self, num_tokens: int = 1) -> None:
         """Advance sequence position after processing tokens."""
+        logger.debug("advance called with num_tokens=%s", num_tokens)
         self.seq_len += num_tokens
         self.cache_position = self.seq_len
         self._update_id += 1
@@ -832,6 +855,7 @@ class KVCacheTorch:
         usable with pre-allocated max context buffers.
         """
         # Clear pre-dequant cache before reset
+        logger.debug("reset called")
         self._pre_dequant_cache_clear()
         
         # Return cache tensors to pool for reuse
@@ -868,6 +892,7 @@ class KVCacheTorch:
         Uses pre-dequantization cache to avoid redundant dequantization
         operations when the same K/V values are accessed multiple times.
         """
+        logger.debug("get_kv called with layer_idx=%s", layer_idx)
         if self.seq_len == 0:
             return None, None
 
@@ -959,6 +984,7 @@ class KVCacheTorch:
 
     def memory_usage_mb(self) -> float:
         """Return current memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         if self._quantize_mode == "fp4":
             scale_bytes = 4.0 if self.dtype_config.scales == "fp32" else 2.0
             bytes_per_element = 0.5 + scale_bytes / self.config.head_dim
@@ -983,6 +1009,7 @@ class KVCacheTorch:
         return elements * bytes_per_element / 1024 / 1024
 
     def _reset_positions(self) -> None:
+        logger.debug("_reset_positions called")
         self.seq_len = 0
         self.cache_position = 0
         self._update_id = 0
@@ -990,6 +1017,7 @@ class KVCacheTorch:
 
     def _maybe_evict(self, new_seq_len: int) -> None:
         """Evict old entries when cache would overflow."""
+        logger.debug("_maybe_evict called with new_seq_len=%s", new_seq_len)
         end_pos = self.cache_position + new_seq_len
         if end_pos <= self.config.max_seq_len:
             return
@@ -1001,6 +1029,7 @@ class KVCacheTorch:
         self._last_eviction_update_id = self._update_id
 
     def _shift_cache_left(self, shift: int) -> None:
+        logger.debug("_shift_cache_left called with shift=%s", shift)
         if shift <= 0 or self.seq_len == 0:
             return
         
@@ -1011,6 +1040,7 @@ class KVCacheTorch:
 
         if self._layout == "BSHD":
             def _shift_list_bshd(tensors: list[torch.Tensor]) -> None:
+                logger.debug("_shift_list_bshd called with tensors=%s", tensors)
                 for tensor in tensors:
                     if new_len == 0:
                         continue
@@ -1021,6 +1051,7 @@ class KVCacheTorch:
             _shift_list_bshd(self.v_cache)
         else:
             def _shift_list_bhsd(tensors: list[torch.Tensor]) -> None:
+                logger.debug("_shift_list_bhsd called with tensors=%s", tensors)
                 for tensor in tensors:
                     if new_len == 0:
                         continue
@@ -1046,6 +1077,7 @@ class KVCacheTorch:
         dtype_override: torch.dtype | None = None,
     ) -> None:
         """In-place slice update without reallocating the cache tensor."""
+        logger.debug("_slice_update called with target=%s, update=%s, start=%s", target, update, start)
         if dtype_override is not None and update.dtype != dtype_override:
             update = update.to(dtype_override)
         elif update.dtype != target.dtype:
@@ -1063,6 +1095,7 @@ class KVCacheTorch:
         dtype_override: torch.dtype | None = None,
     ) -> None:
         """In-place slice update for BSHD layout."""
+        logger.debug("_slice_update_bshd called with target=%s, update=%s, start=%s", target, update, start)
         if dtype_override is not None and update.dtype != dtype_override:
             update = update.to(dtype_override)
         elif update.dtype != target.dtype:
@@ -1095,6 +1128,7 @@ class KVCacheTorch:
         """
         # Ensure contiguous layout FIRST, before any dtype conversion
         # This is the key optimization - avoids temp tensors during conversion
+        logger.debug("_kv_contiguous_layout called with tensor=%s, target_dtype=%s", tensor, target_dtype)
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
         
@@ -1128,6 +1162,7 @@ class KVCacheTorch:
             dtype_override: Optional dtype to convert update to before storing
         """
         # Determine target dtype for the cache
+        logger.debug("_kv_transfer called with target=%s, update=%s, start=%s", target, update, start)
         target_dtype = dtype_override if dtype_override is not None else target.dtype
         
         # Use optimized layout conversion: ensure contiguous FIRST, then convert dtype
@@ -1147,6 +1182,7 @@ class KVCacheTorch:
 
     def _quantize_fp4(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP4 packed format."""
+        logger.info("_quantize_fp4 called with tensor=%s", getattr(tensor, "shape", tensor))
         abs_max = tensor.abs().amax(dim=-1, keepdim=True)
         abs_max = torch.clamp(abs_max, min=1e-8)
         scale = abs_max / 6.0
@@ -1165,10 +1201,12 @@ class KVCacheTorch:
 
     def _dequant_fp4(self, packed: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """Dequantize FP4 packed tensor to float."""
+        logger.info("_dequant_fp4 called with packed=%s, scale=%s", packed, scale)
         return _vectorized_unpack(packed, scale)
 
     def _quantize_fp8(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to FP8 format (E4M3 or E5M2 based on mode)."""
+        logger.info("_quantize_fp8 called with tensor=%s", getattr(tensor, "shape", tensor))
         if self._quantize_mode == "fp8_e5m2":
             FP8_MAX = 57344.0  # E5M2 max finite value
         else:
@@ -1190,6 +1228,7 @@ class KVCacheTorch:
 
     def _dequant_fp8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """Dequantize FP8 tensor to float (E4M3 or E5M2 based on mode)."""
+        logger.info("_dequant_fp8 called with quantized=%s, scale=%s", quantized, scale)
         if self._quantize_mode == "fp8_e5m2":
             FP8_MAX = 57344.0  # E5M2 max finite value
         else:
@@ -1199,6 +1238,7 @@ class KVCacheTorch:
 
     def _quantize_int8(self, tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize tensor to INT8 format with symmetric quantization."""
+        logger.info("_quantize_int8 called with tensor=%s", getattr(tensor, "shape", tensor))
         INT8_MAX = 127.0
         abs_max = tensor.abs().amax(dim=-1, keepdim=True)
         abs_max = torch.clamp(abs_max, min=1e-8)
@@ -1211,6 +1251,7 @@ class KVCacheTorch:
 
     def _dequant_int8(self, quantized: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
         """Dequantize INT8 tensor to float."""
+        logger.info("_dequant_int8 called with quantized=%s, scale=%s", quantized, scale)
         return quantized.float() * scale.float()
 
 
@@ -1284,6 +1325,7 @@ class MLAKVCache:
     ) -> None:
         """Initialize MLA KV Cache with optional max_batch_size alias for compatibility."""
         # Handle max_batch_size alias for backward compatibility
+        logger.debug("initializing %s with num_layers=%s, batch_size=%s, max_seq_len=%s, kv_lora_rank=%s, qk_rope_head_dim=%s", type(self).__name__, num_layers, batch_size, max_seq_len, kv_lora_rank, qk_rope_head_dim)
         if max_batch_size is not None:
             batch_size = max_batch_size
 
@@ -1309,6 +1351,7 @@ class MLAKVCache:
         v_head_dim: int,
     ) -> None:
         """Initialize caching for decompressed states to avoid re-projection."""
+        logger.debug("init_decompressed_cache called with num_kv_heads=%s, qk_nope_head_dim=%s, v_head_dim=%s", num_kv_heads, qk_nope_head_dim, v_head_dim)
         self.decompressed_dims = (num_kv_heads, qk_nope_head_dim, v_head_dim)
         
         # BHSD layout: [layers, batch, heads, seq, dim]
@@ -1341,6 +1384,7 @@ class MLAKVCache:
         Uses the global KV cache pool to reuse previously allocated buffers,
         avoiding expensive GPU memory allocations when possible.
         """
+        logger.debug("_allocate called with max_seq_len=%s", max_seq_len)
         if self.quantize_mode == "none":
             self.kv_cache = _get_from_pool(
                 (self.num_layers, self.batch_size, max_seq_len, self.cache_dim),
@@ -1442,6 +1486,7 @@ class MLAKVCache:
 
     def _ensure_capacity(self, required_len: int) -> None:
         """Grow cache if needed."""
+        logger.debug("_ensure_capacity called with required_len=%s", required_len)
         if required_len <= self.max_seq_len:
             return
 
@@ -1535,6 +1580,7 @@ class MLAKVCache:
             k_head_dim: Key head dimension (before packing)
             v_head_dim: Value head dimension (before packing)
         """
+        logger.debug("_ensure_fp4_separate_buffers called with batch=%s, num_heads=%s, k_head_dim=%s", batch, num_heads, k_head_dim)
         k_packed_dim = k_head_dim // 8
         v_packed_dim = v_head_dim // 8
         
@@ -1595,15 +1641,18 @@ class MLAKVCache:
     @property
     def seq_lens(self) -> list[int] | torch_typing.Tensor:
         """Sequence lengths per layer (first batch item for compatibility)."""
+        logger.debug("seq_lens called")
         return [int(v) for v in self._seq_lens[:, 0].tolist()]
 
     @property
     def seq_len(self) -> int:
         """Current sequence length across layers."""
+        logger.debug("seq_len called")
         return int(self._seq_lens[:, 0].max().item())
 
     def get_seq_len(self) -> int:
         """Get current sequence length (for backward compatibility)."""
+        logger.debug("get_seq_len called")
         return self.seq_len
 
     def update_decompressed(
@@ -1613,6 +1662,7 @@ class MLAKVCache:
         v_new: torch_typing.Tensor,
     ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
         """Update decompressed cache with new tokens and return full sequence."""
+        logger.debug("update_decompressed called with layer_idx=%s, k_nope_new=%s, v_new=%s", layer_idx, k_nope_new, v_new)
         if self.k_nope_cache is None or self.v_cache is None:
             raise RuntimeError("Decompressed cache not initialized. Call init_decompressed_cache() first.")
             
@@ -1653,6 +1703,7 @@ class MLAKVCache:
         layer_idx: int
     ) -> tuple[torch_typing.Tensor, torch_typing.Tensor] | None:
         """Get full decompressed k_nope and v for a layer."""
+        logger.debug("get_decompressed called with layer_idx=%s", layer_idx)
         if self.k_nope_cache is None or self.v_cache is None:
             return None
             
@@ -1683,6 +1734,7 @@ class MLAKVCache:
         For FP4 quantize_mode with k_new/v_new: packs K/V separately using _pack_fp4()
         and stores in _k_packed/_v_packed with separate scales.
         """
+        logger.debug("update called with layer_idx=%s, c_kv_new=%s, k_pe_new=%s", layer_idx, c_kv_new, k_pe_new)
         if compressed_kv is not None:
             # Unified update (TrellisKVCache style)
             return self.update_compressed(layer_idx, compressed_kv)
@@ -1721,6 +1773,7 @@ class MLAKVCache:
             Tuple of (k_full, v_full) dequantized tensors with original shapes restored
         """
         # Handle different input shapes
+        logger.debug("_update_fp4_separate called with layer_idx=%s, k_new=%s, v_new=%s", layer_idx, k_new, v_new)
         if k_new.dim() == 4:
             # [batch, heads, seq, head_dim]
             batch, heads, seq_len, head_dim = k_new.shape
@@ -1782,6 +1835,7 @@ class MLAKVCache:
             Tuple of (k_full, v_full) dequantized tensors with original shapes restored
         """
         # Retrieve packed K/V: [batch, seq_len, heads, packed_dim]
+        logger.debug("_get_fp4_separate called with layer_idx=%s, seq_len=%s", layer_idx, seq_len)
         k_packed = self._k_packed[layer_idx, :, :seq_len, :, :]  # type: ignore[index]
         v_packed = self._v_packed[layer_idx, :, :seq_len, :, :]  # type: ignore[index]
         k_scales = self._k_scales[layer_idx, :, :seq_len, :, :]  # type: ignore[index]
@@ -1812,6 +1866,7 @@ class MLAKVCache:
         k_pe_new: torch_typing.Tensor,
     ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
         """Update cache components and return full dequantized components."""
+        logger.debug("update_components called with layer_idx=%s, c_kv_new=%s, k_pe_new=%s", layer_idx, c_kv_new, k_pe_new)
         res = self.update(layer_idx, c_kv_new=c_kv_new, k_pe_new=k_pe_new)
         assert isinstance(res, tuple)
         return res
@@ -1822,6 +1877,7 @@ class MLAKVCache:
         compressed_kv: torch_typing.Tensor,
     ) -> torch_typing.Tensor:
         """Update cache with combined compressed KV [B, S, Rank+RoPE]."""
+        logger.debug("update_compressed called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         batch, seq_len, input_dim = compressed_kv.shape
 
         if input_dim != self.cache_dim:
@@ -1863,6 +1919,7 @@ class MLAKVCache:
 
     def get(self, layer_idx: int) -> torch_typing.Tensor | None:
         """Retrieve full cached sequence for a layer."""
+        logger.debug("get called with layer_idx=%s", layer_idx)
         seq_len = int(self._seq_lens[layer_idx, 0].item())
         if seq_len == 0:
             return None
@@ -1890,6 +1947,7 @@ class MLAKVCache:
 
     def _quantize_int8(self, tensor: torch_typing.Tensor) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
         """Int8 per-token or per-channel symmetric quantization."""
+        logger.info("_quantize_int8 called with tensor=%s", getattr(tensor, "shape", tensor))
         dim = -1 if self.fp8_scale_method == "channel" else (-1,)
         abs_max = tensor.abs().amax(dim=dim, keepdim=True).clamp(min=1e-5)
         scale = abs_max / 127.0
@@ -1897,9 +1955,11 @@ class MLAKVCache:
         return quantized, scale.to(self._scale_dtype)
 
     def _dequantize_int8(self, quantized: torch_typing.Tensor, scales: torch_typing.Tensor) -> torch_typing.Tensor:
+        logger.info("_dequantize_int8 called with quantized=%s, scales=%s", quantized, scales)
         return (quantized.to(self.dtype) * scales.to(self.dtype))
 
     def _quantize_fp8(self, tensor: torch_typing.Tensor) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
+        logger.info("_quantize_fp8 called with tensor=%s", getattr(tensor, "shape", tensor))
         dim = -1 if self.fp8_scale_method == "channel" else (-1,)
         abs_max = tensor.abs().amax(dim=dim, keepdim=True).clamp(min=1e-8)
         scale = abs_max / _FP8_E4M3_MAX
@@ -1910,6 +1970,7 @@ class MLAKVCache:
         return quantized, scale.to(self._scale_dtype)
 
     def _dequantize_fp8(self, quantized: torch_typing.Tensor, scale: torch_typing.Tensor) -> torch_typing.Tensor:
+        logger.info("_dequantize_fp8 called with quantized=%s, scale=%s", quantized, scale)
         signed = quantized.float() - 128.0
         return (signed / 127.0 * _FP8_E4M3_MAX * scale.float()).to(self.dtype)
 
@@ -1919,6 +1980,7 @@ class MLAKVCache:
         FP8 E5M2 has wider dynamic range (max ~57344) compared to E4M3 (max 448),
         making it more suitable for gradients and training scenarios.
         """
+        logger.info("_quantize_fp8_e5m2 called with tensor=%s", getattr(tensor, "shape", tensor))
         dim = -1 if self.fp8_scale_method == "channel" else (-1,)
         abs_max = tensor.abs().amax(dim=dim, keepdim=True).clamp(min=1e-8)
         scale = abs_max / _FP8_E5M2_MAX
@@ -1931,6 +1993,7 @@ class MLAKVCache:
 
     def _dequantize_fp8_e5m2(self, quantized: torch_typing.Tensor, scale: torch_typing.Tensor) -> torch_typing.Tensor:
         """Dequantize FP8 E5M2 tensor to float."""
+        logger.info("_dequantize_fp8_e5m2 called with quantized=%s, scale=%s", quantized, scale)
         signed = quantized.float() - 128.0
         return (signed / 127.0 * _FP8_E5M2_MAX * scale.float()).to(self.dtype)
 
@@ -1950,6 +2013,7 @@ class MLAKVCache:
             packed_uint32: Packed uint32 tensor [..., cache_dim // 8]
             scales_fp16: Scale factors in float16
         """
+        logger.info("_pack_fp4 called with tensor=%s", getattr(tensor, "shape", tensor))
         require_torch("_pack_fp4")
         # Quantize: scale and convert to 4-bit indices (0-15)
         abs_max = tensor.abs().amax(dim=-1, keepdim=True)
@@ -1981,6 +2045,7 @@ class MLAKVCache:
         Returns:
             Dequantized float16 tensor [batch, seq_len, cache_dim]
         """
+        logger.info("_unpack_fp4 called with packed=%s, scales=%s", packed, scales)
         require_torch("_unpack_fp4")
         return _vectorized_unpack(packed, scales).to(torch.float16)
 
@@ -1992,6 +2057,7 @@ class MLAKVCache:
         efficient buffer reuse while keeping the cache usable.
         """
         # Return cache tensors to pool
+        logger.debug("reset called")
         _return_to_pool(self.kv_cache)
         _return_to_pool(self.kv_scales)
         _return_to_pool(self.k_nope_cache)
@@ -2017,6 +2083,7 @@ class MLAKVCache:
 
     def memory_usage_mb(self) -> float:
         """Return memory usage in MB."""
+        logger.debug("memory_usage_mb called")
         active_seq = int(self._seq_lens[:, 0].max().item())
         if active_seq == 0:
             return 0.0
@@ -2040,6 +2107,7 @@ class MLAKVCache:
 
     def prefetch_layer(self, layer_idx: int) -> torch_typing.Tensor | None:
         """Warm GPU caches for a layer."""
+        logger.debug("prefetch_layer called with layer_idx=%s", layer_idx)
         kv = self.get(layer_idx)
         if kv is not None:
             return kv[0, 0, 0]
@@ -2047,6 +2115,7 @@ class MLAKVCache:
 
     def get_layer_slices(self, layer_idx: int) -> tuple[torch_typing.Tensor, torch_typing.Tensor] | None:
         """Get raw slice views split into c_kv and k_pe components."""
+        logger.debug("get_layer_slices called with layer_idx=%s", layer_idx)
         kv = self.get(layer_idx)
         if kv is None:
             return None
@@ -2054,6 +2123,7 @@ class MLAKVCache:
 
     def get_layer_for_attention(self, layer_idx: int) -> torch_typing.Tensor | None:
         """Get cached KV in BHSD format for attention kernels (zero-copy transpose)."""
+        logger.debug("get_layer_for_attention called with layer_idx=%s", layer_idx)
         kv = self.get(layer_idx)
         if kv is None:
             return None
@@ -2062,6 +2132,7 @@ class MLAKVCache:
 
     def get_snapshot(self) -> dict[str, torch_typing.Tensor]:
         """Get a snapshot of the KV cache state for prompt caching."""
+        logger.debug("get_snapshot called")
         snapshot = {
             "kv_cache": self.kv_cache.clone(),
             "seq_lens": self._seq_lens.clone(),
@@ -2072,6 +2143,7 @@ class MLAKVCache:
 
     def restore_snapshot(self, snapshot: dict[str, torch_typing.Tensor]) -> None:
         """Restore KV cache state from a snapshot."""
+        logger.debug("restore_snapshot called with snapshot=%s", snapshot)
         self.kv_cache.copy_(snapshot["kv_cache"])
         self._seq_lens.copy_(snapshot["seq_lens"])
         if self.kv_scales is not None and "kv_scales" in snapshot:
@@ -2080,18 +2152,22 @@ class MLAKVCache:
     # Backwards compatibility properties
     @property
     def c_kv(self) -> torch_typing.Tensor:
+        logger.debug("c_kv called")
         return self.kv_cache[..., : self.kv_lora_rank].contiguous()
 
     @property
     def k_pe(self) -> torch_typing.Tensor:
+        logger.debug("k_pe called")
         return self.kv_cache[..., self.kv_lora_rank:].contiguous()
 
     @property
     def c_kv_scales(self) -> torch_typing.Tensor | None:
+        logger.debug("c_kv_scales called")
         return self.kv_scales
 
     @property
     def k_pe_scales(self) -> torch_typing.Tensor | None:
+        logger.debug("k_pe_scales called")
         return self.kv_scales
 
 
@@ -2111,10 +2187,12 @@ class CompressedKVCache(MLAKVCache):
             self.num_layers, dtype=torch.long, device=self.device)
 
     def _should_use_sliding_window(self, layer_idx: int) -> bool:
+        logger.debug("_should_use_sliding_window called with layer_idx=%s", layer_idx)
         return layer_idx >= self.sliding_window_layer_threshold
 
     def update_compressed(self, layer_idx: int, compressed_kv: torch_typing.Tensor) -> torch_typing.Tensor:
         # Simple override for now, can be extended with full logic from Trellis version
+        logger.debug("update_compressed called with layer_idx=%s, compressed_kv=%s", layer_idx, compressed_kv)
         return super().update_compressed(layer_idx, compressed_kv)
 
 
@@ -2125,15 +2203,18 @@ class TrellisKVCache(MLAKVCache):
     @property
     def seq_lens(self) -> torch_typing.Tensor:
         """Per-layer, per-batch sequence lengths tensor."""
+        logger.debug("seq_lens called")
         return self._seq_lens
 
     @property
     def seq_len(self) -> int:
         """Committed sequence length of the last layer."""
+        logger.debug("seq_len called")
         return int(self._seq_lens[-1, 0].item())
 
     def memory_usage_mb(self) -> float:
         """Return allocated memory usage in MB (Trellis compatibility)."""
+        logger.debug("memory_usage_mb called")
         if self.quantize_mode == "none":
             bpe = 2 if self.dtype in (torch.float16, torch.bfloat16) else 4
             scale_bpe = 0

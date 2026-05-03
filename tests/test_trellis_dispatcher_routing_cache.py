@@ -1,3 +1,4 @@
+import logging
 import torch
 
 from metal_marlin.trellis.optimizations import (
@@ -6,7 +7,11 @@ from metal_marlin.trellis.optimizations import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_expert_selection_cache_multi_entry_lookup_and_eviction() -> None:
+    logger.info("running test_expert_selection_cache_multi_entry_lookup_and_eviction")
     cache = ExpertSelectionCache(max_entries=2, similarity_threshold=0.95)
 
     x0 = torch.randn(1, 128, dtype=torch.float16)
@@ -34,19 +39,23 @@ def test_expert_selection_cache_multi_entry_lookup_and_eviction() -> None:
 
 class _DummyWorkspacePool:
     def get_output_buffer(self, batch_size: int) -> torch.Tensor:
+        logger.debug("get_output_buffer called with batch_size=%s", batch_size)
         return torch.zeros(batch_size, 128, dtype=torch.float16)
 
 
 class _DummyCmdManager:
     def begin_batch(self) -> None:
+        logger.debug("begin_batch called")
         return None
 
     def commit_and_wait(self) -> None:
+        logger.debug("commit_and_wait called")
         return None
 
 
 class _DummyRouter:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.calls = 0
 
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
@@ -57,6 +66,7 @@ class _DummyRouter:
 
 class _DummyLayer:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.router = _DummyRouter()
         self.num_experts_per_tok = 2
         self.hidden_dim = 128
@@ -65,13 +75,16 @@ class _DummyLayer:
         self._bit_group_buffers = {}
 
     def _get_workspace_buffer_pool(self) -> _DummyWorkspacePool:
+        logger.debug("_get_workspace_buffer_pool called")
         return _DummyWorkspacePool()
 
     def _get_async_cmd_manager(self) -> _DummyCmdManager:
+        logger.debug("_get_async_cmd_manager called")
         return _DummyCmdManager()
 
 
 def test_mixed_bpw_dispatcher_uses_routing_cache_before_router() -> None:
+    logger.info("running test_mixed_bpw_dispatcher_uses_routing_cache_before_router")
     layer = _DummyLayer()
     dispatcher = MixedBPWMoEDispatcher(layer)
     x = torch.randn(1, 128, dtype=torch.float16)

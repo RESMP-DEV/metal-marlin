@@ -2,6 +2,7 @@
 
 Tests for GPU memory growth across 100 forward passes.
 """
+import logging
 
 import gc
 import weakref
@@ -14,12 +15,16 @@ from metal_marlin.quantized_linear import QuantizedLinear
 from metal_marlin.quantized_loader import QuantizedTensor
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="Requires MPS")
 class TestMemoryLeaks:
     """Memory leak detection tests."""
 
     def test_buffer_pool_no_leak_across_forward_passes(self):
         """Test that buffer pool doesn't leak memory over 100 forward passes."""
+        logger.info("running test_buffer_pool_no_leak_across_forward_passes")
         device = torch.device("mps")
 
         # Create a simple quantized layer
@@ -87,6 +92,7 @@ class TestMemoryLeaks:
 
     def test_buffer_pool_weak_references(self):
         """Test that buffers are released when no strong references exist."""
+        logger.info("running test_buffer_pool_weak_references")
         device = torch.device("mps")
         pool = MetalBufferPool.get_instance()
 
@@ -121,6 +127,7 @@ class TestMemoryLeaks:
 
     def test_buffer_pool_no_orphaned_buffers(self):
         """Test that no buffers are orphaned after many acquire/release cycles."""
+        logger.info("running test_buffer_pool_no_orphaned_buffers")
         device = torch.device("mps")
         pool = MetalBufferPool.get_instance()
 
@@ -151,6 +158,7 @@ class TestMemoryLeaks:
 
     def test_buffer_pool_memory_growth_rate(self):
         """Test that memory growth rate is bounded across forward passes."""
+        logger.info("running test_buffer_pool_memory_growth_rate")
         device = torch.device("mps")
 
         # Create a simple quantized layer
@@ -209,6 +217,7 @@ class TestMemoryLeaks:
 
     def test_buffer_pool_no_fragmentation_leak(self):
         """Test that buffer pool fragmentation doesn't grow unbounded."""
+        logger.info("running test_buffer_pool_no_fragmentation_leak")
         device = torch.device("mps")
         pool = MetalBufferPool.get_instance()
 

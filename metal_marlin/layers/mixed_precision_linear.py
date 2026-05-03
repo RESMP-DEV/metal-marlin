@@ -26,6 +26,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from .._compat import HAS_TORCH, get_e2m1_torch_table, torch
@@ -90,6 +91,7 @@ if HAS_TORCH and torch is not None:
             fp4_group_size: int = 128,
             use_fp4_weights: bool = False,
         ) -> None:
+            logger.debug("initializing %s with in_features=%s, out_features=%s, bias=%s, fp4_group_size=%s, use_fp4_weights=%s", type(self).__name__, in_features, out_features, bias, fp4_group_size, use_fp4_weights)
             super().__init__()
             self.in_features = in_features
             self.out_features = out_features
@@ -152,6 +154,7 @@ if HAS_TORCH and torch is not None:
                 ValueError: If input features don't match or if input_scales
                     are missing for FP4 inputs.
             """
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             input_dtype = x.dtype
             
             # Detect input precision and dispatch
@@ -197,6 +200,7 @@ if HAS_TORCH and torch is not None:
             """
             # For uint32 inputs, we need to compute base output in float dtype
             # since LoRA operations require floating point arithmetic
+            logger.debug("batch_aware_dispatch called with x=%s, lora_u=%s, lora_v=%s", x, lora_u, lora_v)
             input_dtype = x.dtype
             if input_dtype in (torch.uint32, torch.int32, torch.int64):
                 # FP4 packed input - compute base output in float dtype
@@ -261,6 +265,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 BF16 output tensor [batch, *, out_features].
             """
+            logger.debug("_forward_bf16 called with x=%s", x)
             bias = self.bias.to(x.dtype) if self.bias is not None else None
             out = F.linear(x, self.weight_bf16, bias)
             return out
@@ -277,6 +282,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 FP16 output tensor [batch, *, out_features].
             """
+            logger.debug("_forward_fp16 called with x=%s", x)
             if self.use_fp4_weights:
                 # Use FP4 weights - dequantize on the fly
                 weight_fp16 = self._dequantize_fp4_weights()
@@ -306,6 +312,7 @@ if HAS_TORCH and torch is not None:
                 FP16 output tensor [batch, *, out_features].
             """
             # Ensure input is on same device
+            logger.debug("_forward_fp4 called with x=%s, input_scales=%s", x, input_scales)
             if x.device != self.weight_fp4_packed.device:
                 x = x.to(self.weight_fp4_packed.device)
             if input_scales.device != self.weight_fp4_packed.device:
@@ -331,6 +338,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 Dequantized weight tensor [out_features, in_features] as FP16.
             """
+            logger.info("_dequantize_fp4_weights called")
             return _fast_dequant(
                 self.weight_fp4_packed,
                 self.scales,
@@ -355,6 +363,7 @@ if HAS_TORCH and torch is not None:
                 Dequantized FP16 tensor [batch, *, in_features].
             """
             # Convert to uint32 if needed
+            logger.info("_dequantize_fp4_input called with x=%s, scales=%s", x, scales)
             x_u32 = x.to(torch.uint32) if x.dtype != torch.uint32 else x
             
             # Get shapes
@@ -429,6 +438,7 @@ if HAS_TORCH and torch is not None:
                 - packed_weights: [out_features, in_features//8] uint32
                 - scales: [n_groups, out_features] float16
             """
+            logger.info("_pack_weights_fp4 called with weight=%s, group_size=%s", weight, group_size)
             out_features, in_features = weight.shape
             
             if in_features % 8 != 0:
@@ -498,6 +508,7 @@ if HAS_TORCH and torch is not None:
                 >>> linear = nn.Linear(512, 256)
                 >>> mixed_layer = MixedPrecisionLinear.from_linear(linear)
             """
+            logger.debug("from_linear called with linear=%s, fp4_group_size=%s, use_fp4_weights=%s", linear, fp4_group_size, use_fp4_weights)
             layer = cls(
                 in_features=linear.in_features,
                 out_features=linear.out_features,
@@ -524,6 +535,7 @@ if HAS_TORCH and torch is not None:
         
         def extra_repr(self) -> str:
             """String representation for printing."""
+            logger.debug("extra_repr called")
             return (
                 f"in_features={self.in_features}, "
                 f"out_features={self.out_features}, "
@@ -542,17 +554,23 @@ else:
         """
         
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError(
                 "MixedPrecisionLinear requires PyTorch. "
                 "Install PyTorch with: pip install torch"
             )
         
         def forward(self, *args: Any, **kwargs: Any) -> Any:
+            logger.debug("forward called")
             raise RuntimeError("MixedPrecisionLinear requires PyTorch")
         
         @classmethod
         def from_linear(cls, *args: Any, **kwargs: Any) -> MixedPrecisionLinear:
+            logger.debug("from_linear called")
             raise RuntimeError("MixedPrecisionLinear requires PyTorch")
 
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["MixedPrecisionLinear"]

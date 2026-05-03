@@ -35,6 +35,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import sys
@@ -82,6 +83,9 @@ from scripts._qwen_moe_shared import (
     save_quantization_config,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # =====================================================================
 # Model constants – Qwen3.6-35B-A3B
 # =====================================================================
@@ -104,6 +108,7 @@ HADAMARD_BLOCK_SIZE = 64
 # =====================================================================
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description=(
             "Quantize Qwen3.6-35B-A3B to MMFP4 (FP4 E2M1) with "
@@ -124,6 +129,7 @@ def parse_args() -> argparse.Namespace:
 # =====================================================================
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
     verbose = not args.quiet
 

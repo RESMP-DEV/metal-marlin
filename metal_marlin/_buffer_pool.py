@@ -30,6 +30,7 @@ Metrics and Tuning:
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
@@ -37,6 +38,9 @@ from typing import Any
 
 import Metal
 
+
+
+logger = logging.getLogger(__name__)
 
 class BufferPriority(IntEnum):
     """Buffer eviction priority. Lower values = evicted first."""
@@ -115,6 +119,7 @@ class BufferPoolMetrics:
     @property
     def hit_rate(self) -> float:
         """Calculate hit rate as ratio of cache hits to total requests."""
+        logger.debug("hit_rate called")
         total = self.cache_hits + self.cache_misses
         if total == 0:
             return 0.0
@@ -123,11 +128,13 @@ class BufferPoolMetrics:
     @property
     def total_requests(self) -> int:
         """Total allocation requests."""
+        logger.debug("total_requests called")
         return self.cache_hits + self.cache_misses
 
     @property
     def reuse_ratio(self) -> float:
         """Ratio of releases that were later reused."""
+        logger.debug("reuse_ratio called")
         if self.releases == 0:
             return 0.0
         return self.cache_hits / max(self.releases, 1)
@@ -139,6 +146,7 @@ class BufferPoolMetrics:
         Combines hit rate and fragmentation into a single metric.
         Higher is better.
         """
+        logger.debug("pool_efficiency called")
         if self.total_requests < 10:
             return 0.0  # Not enough data
 
@@ -155,11 +163,13 @@ class BufferPoolMetrics:
             new_hit: True if this was a cache hit
             alpha: Smoothing factor (higher = more responsive)
         """
+        logger.debug("update_smoothed_hit_rate called with new_hit=%s, alpha=%s", new_hit, alpha)
         self.hit_rate_smoothed = (alpha * (1.0 if new_hit else 0.0) +
                                   (1 - alpha) * self.hit_rate_smoothed)
 
     def record_buffer_lifetime(self, lifetime_seconds: float) -> None:
         """Record a buffer's lifetime in the pool."""
+        logger.debug("record_buffer_lifetime called with lifetime_seconds=%s", lifetime_seconds)
         self.total_buffer_lifetime_sum += lifetime_seconds
         self.buffer_lifetime_count += 1
         self.avg_buffer_lifetime = self.total_buffer_lifetime_sum / self.buffer_lifetime_count
@@ -168,6 +178,7 @@ class BufferPoolMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert metrics to dictionary for serialization."""
+        logger.debug("to_dict called")
         return {
             # Hit rate
             "cache_hits": self.cache_hits,
@@ -208,6 +219,7 @@ class BufferPoolMetrics:
 
     def get_tuning_recommendations(self) -> list[str]:
         """Generate tuning recommendations based on metrics."""
+        logger.debug("get_tuning_recommendations called")
         recommendations: list[str] = []
 
         if self.total_requests < 100:
@@ -259,6 +271,7 @@ def _round_up(value: int, alignment: int = CACHE_LINE_BYTES) -> int:
     Default alignment is 128 bytes (M3 Max cache line).
     For large buffers (>64KB), use page alignment (16KB) instead.
     """
+    logger.debug("_round_up called with value=%s, alignment=%s", value, alignment)
     return ((value + alignment - 1) // alignment) * alignment
 
 
@@ -268,6 +281,7 @@ def _align_buffer_size(size: int) -> int:
     - Small buffers: 128-byte cache line alignment
     - Large buffers (>64KB): 16KB page alignment to reduce TLB misses
     """
+    logger.debug("_align_buffer_size called with size=%s", size)
     if size >= LARGE_BUFFER_THRESHOLD:
         return _round_up(size, PAGE_SIZE_BYTES)
     return _round_up(size, CACHE_LINE_BYTES)
@@ -325,6 +339,7 @@ class MetalBufferPool:
             max_pool_size: Maximum total pooled bytes (0 = unlimited).
                           When exceeded, low-priority buffers are evicted.
         """
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         self._device = device
         self._storage_mode = storage_mode
         self._max_pool_size = max_pool_size
@@ -351,27 +366,32 @@ class MetalBufferPool:
     @property
     def total_pooled_bytes(self) -> int:
         """Total bytes in pool available for reuse."""
+        logger.debug("total_pooled_bytes called")
         return self._metrics.current_pooled
 
     @property
     def total_allocated_bytes(self) -> int:
         """Total bytes allocated (in use + pooled)."""
+        logger.debug("total_allocated_bytes called")
         return self._metrics.current_allocated
 
     @property
     def eviction_count(self) -> int:
         """Number of buffers evicted."""
+        logger.debug("eviction_count called")
         return self._metrics.evictions
 
     @property
     def metrics(self) -> BufferPoolMetrics:
         """Get the current metrics snapshot."""
         # Update fragmentation before returning
+        logger.debug("metrics called")
         self._metrics.fragmentation_ratio = self._fragmentation_ratio()
         return self._metrics
 
     def reset_metrics(self) -> None:
         """Reset all metrics to initial state."""
+        logger.debug("reset_metrics called")
         self._metrics = BufferPoolMetrics()
 
     def get(
@@ -389,6 +409,7 @@ class MetalBufferPool:
             MTLBuffer of at least the requested size.
         """
         # Check for periodic defragmentation
+        logger.debug("get called with size=%s, priority=%s", size, priority)
         self._alloc_count += 1
         if self._defrag_interval > 0 and self._alloc_count >= self._defrag_interval:
             now = time.monotonic()
@@ -484,18 +505,22 @@ class MetalBufferPool:
 
     def get_weight(self, size: int) -> Any:
         """Get buffer for weight storage (PINNED, never evicted)."""
+        logger.debug("get_weight called with size=%s", size)
         return self.get(size, BufferPriority.PINNED)
 
     def get_activation(self, size: int) -> Any:
         """Get buffer for activations (HIGH priority, hot path)."""
+        logger.debug("get_activation called with size=%s", size)
         return self.get(size, BufferPriority.HIGH)
 
     def get_output(self, size: int) -> Any:
         """Get buffer for outputs (LOW priority, recycled first)."""
+        logger.debug("get_output called with size=%s", size)
         return self.get(size, BufferPriority.LOW)
 
     def _allocate_buffer(self, alloc_size: int) -> Any | None:
         """Allocate a new Metal buffer. Returns None on failure."""
+        logger.debug("_allocate_buffer called with alloc_size=%s", alloc_size)
         if self._storage_mode == Metal.MTLResourceStorageModeShared:
             backing = bytearray(alloc_size)
             buffer = self._device.newBufferWithBytesNoCopy_length_options_deallocator_(
@@ -514,6 +539,7 @@ class MetalBufferPool:
 
     def pin(self, buf: Any) -> None:
         """Pin a buffer to prevent eviction (sets PINNED priority)."""
+        logger.debug("pin called with buf=%s", buf)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         if tracked is not None:
@@ -523,6 +549,7 @@ class MetalBufferPool:
         self, buf: Any, new_priority: BufferPriority = BufferPriority.NORMAL
     ) -> None:
         """Unpin buffer, restoring it to specified eviction priority."""
+        logger.debug("unpin called with buf=%s, new_priority=%s", buf, new_priority)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         if tracked is not None and tracked.priority == BufferPriority.PINNED:
@@ -530,6 +557,7 @@ class MetalBufferPool:
 
     def set_priority(self, buf: Any, priority: BufferPriority) -> None:
         """Set buffer eviction priority."""
+        logger.debug("set_priority called with buf=%s, priority=%s", buf, priority)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         if tracked is not None:
@@ -537,12 +565,14 @@ class MetalBufferPool:
 
     def get_priority(self, buf: Any) -> BufferPriority | None:
         """Get buffer eviction priority, or None if not tracked."""
+        logger.debug("get_priority called with buf=%s", buf)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         return tracked.priority if tracked is not None else None
 
     def release(self, buf: Any) -> None:
         """Return buffer to pool for reuse."""
+        logger.debug("release called with buf=%s", buf)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         if tracked is None:
@@ -563,6 +593,7 @@ class MetalBufferPool:
     def _evict_one(self) -> TrackedBuffer | None:
         """Evict one low-priority buffer. Returns evicted buffer or None."""
         # Find lowest priority non-empty pool
+        logger.debug("_evict_one called")
         for priority in BufferPriority:
             if priority == BufferPriority.PINNED:
                 continue  # Never evict pinned buffers
@@ -597,6 +628,7 @@ class MetalBufferPool:
         Returns:
             Actual bytes freed.
         """
+        logger.debug("evict called with target_bytes=%s", target_bytes)
         freed = 0
         while freed < target_bytes and self._metrics.current_pooled > 0:
             evicted_buf = self._evict_one()
@@ -616,6 +648,7 @@ class MetalBufferPool:
            (smaller buffers are released, larger ones kept)
         2. Clean up empty pools
         """
+        logger.debug("defragment called")
         self._alloc_count = 0
         self._last_defrag_time = time.monotonic()
 
@@ -687,6 +720,7 @@ class MetalBufferPool:
 
         Returns the number of bytes freed.
         """
+        logger.debug("compact called")
         bytes_freed = 0
 
         for size, pool in list(self._pools.items()):
@@ -728,6 +762,7 @@ class MetalBufferPool:
         - peak_memory_bytes: Peak memory usage
         - avg_buffer_lifetime_sec: Average time buffers spend in pool
         """
+        logger.debug("stats called")
         pool_count = len(self._pools)
         buffer_count = sum(len(pool) for pool in self._pools.values())
         size_distribution = {size: len(pool) for size, pool in self._pools.items() if pool}
@@ -776,6 +811,7 @@ class MetalBufferPool:
 
         Based on the variance in pool sizes relative to a uniform distribution.
         """
+        logger.debug("_fragmentation_ratio called")
         if not self._pools:
             return 0.0
 
@@ -846,6 +882,7 @@ class TransientRingBuffer:
             capacity: Total capacity in bytes
             storage_mode: Metal storage mode (default: MTLResourceStorageModeShared)
         """
+        logger.debug("initializing %s with device=%s, capacity=%s", type(self).__name__, device, capacity)
         if storage_mode is None:
             storage_mode = Metal.MTLResourceStorageModeShared
 
@@ -875,35 +912,42 @@ class TransientRingBuffer:
     @property
     def capacity(self) -> int:
         """Total buffer capacity in bytes."""
+        logger.debug("capacity called")
         return self._capacity
 
     @property
     def used(self) -> int:
         """Currently used bytes since last reset."""
+        logger.debug("used called")
         return self._offset
 
     @property
     def available(self) -> int:
         """Available bytes for allocation."""
+        logger.debug("available called")
         return self._capacity - self._offset
 
     @property
     def high_water_mark(self) -> int:
         """Peak usage since creation (bytes)."""
+        logger.debug("high_water_mark called")
         return self._high_water_mark
 
     @property
     def buffer(self) -> Any:
         """Underlying Metal buffer for direct access."""
+        logger.debug("buffer called")
         return self._buffer
 
     def reset(self) -> None:
         """Reset allocation pointer to start. Call at beginning of forward pass."""
+        logger.debug("reset called")
         self._offset = 0
         self._allocation_count = 0
 
     def can_alloc(self, size: int) -> bool:
         """Check if allocation of given size would succeed."""
+        logger.debug("can_alloc called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
         return self._offset + aligned_size <= self._capacity
 
@@ -919,6 +963,7 @@ class TransientRingBuffer:
         Raises:
             RuntimeError: If allocation exceeds capacity
         """
+        logger.debug("alloc called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
 
         if self._offset + aligned_size > self._capacity:
@@ -949,6 +994,7 @@ class TransientRingBuffer:
         Returns:
             Tuple of (memoryview into backing storage, byte_offset)
         """
+        logger.debug("alloc_bytes called with size=%s", size)
         aligned_size = _round_up(size, CACHE_LINE_BYTES)
 
         if self._offset + aligned_size > self._capacity:
@@ -971,6 +1017,7 @@ class TransientRingBuffer:
 
     def stats(self) -> dict[str, Any]:
         """Return ring buffer statistics."""
+        logger.debug("stats called")
         return {
             "capacity_bytes": self._capacity,
             "used_bytes": self._offset,
@@ -1005,6 +1052,7 @@ def get_transient_ring(
     Returns:
         TransientRingBuffer instance for the device
     """
+    logger.debug("get_transient_ring called with device=%s, capacity=%s", device, capacity)
     global _transient_ring, _transient_ring_device_id
 
     device_id = id(device)
@@ -1021,6 +1069,7 @@ def reset_transient_ring() -> None:
     Call at the start of each forward pass to reclaim all transient allocations.
     This is O(1) and does not deallocate or reallocate any memory.
     """
+    logger.debug("reset_transient_ring called")
     global _transient_ring
     if _transient_ring is not None:
         _transient_ring.reset()
@@ -1028,6 +1077,7 @@ def reset_transient_ring() -> None:
 
 def transient_ring_stats() -> dict[str, Any] | None:
     """Get statistics for the transient ring buffer, if initialized."""
+    logger.debug("transient_ring_stats called")
     global _transient_ring
     if _transient_ring is not None:
         return _transient_ring.stats()

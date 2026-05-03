@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -28,6 +29,9 @@ import torch
 
 if TYPE_CHECKING:
     from metal_marlin.trellis.model import TrellisForCausalLM
+
+
+logger = logging.getLogger(__name__)
 
 # Track the current process
 _PROCESS = psutil.Process(os.getpid())
@@ -50,6 +54,7 @@ def get_memory_mb() -> tuple[float, float]:
         Tuple of (RSS in MB, MPS reported in MB)
     """
     # Force sync before measuring
+    logger.debug("get_memory_mb called")
     if torch.backends.mps.is_available():
         torch.mps.synchronize()
 
@@ -62,12 +67,14 @@ def get_memory_mb() -> tuple[float, float]:
 
 def get_mps_memory_mb() -> float:
     """Get current MPS allocated memory in MB (kept for compatibility)."""
+    logger.debug("get_mps_memory_mb called")
     rss, _ = get_memory_mb()
     return rss  # Return RSS instead of MPS
 
 
 def force_gc() -> None:
     """Force garbage collection and MPS synchronization."""
+    logger.debug("force_gc called")
     gc.collect()
     if torch.backends.mps.is_available():
         torch.mps.synchronize()
@@ -83,6 +90,7 @@ def profile_model_load(model_path: str) -> tuple[TrellisForCausalLM, list[Memory
     Returns:
         Tuple of (loaded model, list of memory snapshots).
     """
+    logger.info("profile_model_load called with model_path=%s", model_path)
     from metal_marlin.trellis.model import TrellisForCausalLM
 
     snapshots: list[MemorySnapshot] = []
@@ -116,6 +124,7 @@ def profile_layer_forward(
     Returns:
         List of memory snapshots, one per layer plus embedding/norm stages.
     """
+    logger.debug("profile_layer_forward called with model=%s, input_ids=%s, verbose=%s", model, input_ids, verbose)
     snapshots: list[MemorySnapshot] = []
     device = input_ids.device
 
@@ -220,6 +229,7 @@ def profile_moe_detailed(
     Returns:
         List of memory snapshots for sub-operations within the MoE layer.
     """
+    logger.debug("profile_moe_detailed called with model=%s, layer_idx=%s, input_ids=%s", model, layer_idx, input_ids)
     import torch.nn.functional as F
 
     from metal_marlin.trellis.model import TrellisMoEMLP
@@ -374,6 +384,7 @@ def estimate_metal_buffer_memory(model: TrellisForCausalLM) -> float:
     Returns:
         Total Metal buffer memory in MB.
     """
+    logger.debug("estimate_metal_buffer_memory called with model=%s", model)
     total_bytes = 0
 
     for layer in model.model.layers:
@@ -413,6 +424,7 @@ def analyze_snapshots(
         snapshots: List of memory snapshots from profiling.
         model: Optional model for Metal buffer memory estimation.
     """
+    logger.debug("analyze_snapshots called with snapshots=%s, model=%s", snapshots, model)
     if not snapshots:
         return
 
@@ -463,6 +475,7 @@ def analyze_snapshots(
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Profile memory allocation during Trellis model forward pass"
     )

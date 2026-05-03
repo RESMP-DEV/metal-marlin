@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,9 @@ from .metal_dispatch import (
 
 if HAS_METAL:
     import Metal
+
+
+logger = logging.getLogger(__name__)
 
 # Tile sizes matching the Metal kernels
 GATHER_TILE_TOKENS = 64
@@ -114,6 +118,7 @@ class ScatterGatherDispatcher:
             max_batch: Maximum batch size to preallocate buffers for.
             max_top_k: Maximum top_k value to support.
         """
+        logger.debug("initializing %s with lib=%s, hidden_dim=%s, max_batch=%s, max_top_k=%s", type(self).__name__, lib, hidden_dim, max_batch, max_top_k)
         self.lib = lib
         self.hidden_dim = hidden_dim
         self.max_batch = max_batch
@@ -126,6 +131,7 @@ class ScatterGatherDispatcher:
 
     def _preallocate_buffers(self, max_batch: int, max_top_k: int) -> None:
         """Preallocate buffers for common operation sizes."""
+        logger.debug("_preallocate_buffers called with max_batch=%s, max_top_k=%s", max_batch, max_top_k)
         max_total = max_batch * max_top_k
 
         # Gathered activations buffer
@@ -166,6 +172,7 @@ class ScatterGatherDispatcher:
         Returns:
             [total_tokens, hidden_dim] gathered activations in sorted order.
         """
+        logger.debug("gather called with activations=%s, sorted_indices=%s, total_tokens=%s", activations, sorted_indices, total_tokens)
         batch_size = activations.shape[0]
         hidden_dim = activations.shape[1]
 
@@ -224,6 +231,7 @@ class ScatterGatherDispatcher:
         Returns:
             [batch, hidden_dim] combined output in original token order.
         """
+        logger.debug("scatter_combine called with expert_outputs=%s, expert_probs=%s, inverse_indices=%s", expert_outputs, expert_probs, inverse_indices)
         hidden_dim = expert_outputs.shape[1]
 
         expert_outputs_buf = mps_tensor_to_metal_buffer(expert_outputs.contiguous(), self.device)
@@ -280,6 +288,7 @@ class ScatterGatherDispatcher:
         Returns:
             FP32 accumulator tensor (call finalize_output to convert to FP16).
         """
+        logger.debug("scatter_atomic called with expert_output=%s, weight=%s, batch_size=%s", expert_output, weight, batch_size)
         hidden_dim = expert_output.shape[1]
 
         # Use provided accumulator or create new one
@@ -327,6 +336,7 @@ class ScatterGatherDispatcher:
         Returns:
             [batch, hidden_dim] FP16 output tensor.
         """
+        logger.debug("finalize_output called with accumulator=%s, batch_size=%s", accumulator, batch_size)
         hidden_dim = accumulator.shape[1]
 
         # Output tensor
@@ -369,6 +379,7 @@ class ScatterGatherDispatcher:
         Returns:
             [num_experts] token counts per expert.
         """
+        logger.debug("count_tokens called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
         batch_size, top_k = expert_ids.shape
         total_entries = batch_size * top_k
 
@@ -416,6 +427,7 @@ class ScatterGatherDispatcher:
             [num_experts + 1] expert offsets (exclusive prefix sum).
         """
         # Expert offsets tensor
+        logger.debug("compute_offsets called with expert_counts=%s, num_experts=%s", expert_counts, num_experts)
         expert_offsets = torch.zeros(num_experts + 1, dtype=torch.int32, device="mps")
 
         # Prepare buffers
@@ -440,6 +452,7 @@ class ScatterGatherDispatcher:
 
     def _make_uint_buffer(self, value: int) -> Any:
         """Create a Metal buffer containing a single uint32 value."""
+        logger.debug("_make_uint_buffer called with value=%s", value)
         data = np.array([value], dtype=np.uint32)
         return self.device.newBufferWithBytes_length_options_(
             data.tobytes(), data.nbytes, Metal.MTLResourceStorageModeShared
@@ -466,6 +479,7 @@ def gather_vec8(
     Returns:
         [total_tokens, hidden_dim] gathered activations.
     """
+    logger.debug("gather_vec8 called with lib=%s, activations=%s, sorted_indices=%s", lib, activations, sorted_indices)
     dispatcher = ScatterGatherDispatcher(
         lib,
         hidden_dim=activations.shape[1],
@@ -498,6 +512,7 @@ def scatter_weighted_vec8(
     Returns:
         [batch, hidden_dim] combined output.
     """
+    logger.debug("scatter_weighted_vec8 called with lib=%s, expert_outputs=%s, expert_probs=%s", lib, expert_outputs, expert_probs)
     dispatcher = ScatterGatherDispatcher(
         lib,
         hidden_dim=expert_outputs.shape[1],

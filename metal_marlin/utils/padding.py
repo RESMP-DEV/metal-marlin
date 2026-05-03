@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -12,8 +13,12 @@ except ImportError:  # pragma: no cover - torch is optional for CPU-only tooling
     torch = None  # type: ignore[assignment]
 
 
+
+logger = logging.getLogger(__name__)
+
 def round_up(value: int, multiple: int) -> int:
     """Round value up to the nearest multiple."""
+    logger.debug("round_up called with value=%s, multiple=%s", value, multiple)
     if multiple <= 0:
         raise ValueError("multiple must be positive")
     return ((value + multiple - 1) // multiple) * multiple
@@ -27,6 +32,7 @@ def pad_numpy_2d(
     value: float = 0.0,
 ) -> tuple[np.ndarray, tuple[int, int]]:
     """Pad a 2D numpy array to the requested multiples."""
+    logger.debug("pad_numpy_2d called with array=%s", array)
     rows, cols = array.shape
     pad_rows = (rows_multiple - (rows % rows_multiple)) % rows_multiple
     pad_cols = (cols_multiple - (cols % cols_multiple)) % cols_multiple
@@ -49,6 +55,7 @@ def pad_torch_2d(
     value: float = 0.0,
 ) -> tuple[Any, tuple[int, int]]:
     """Pad a 2D torch tensor to the requested multiples."""
+    logger.debug("pad_torch_2d called with tensor=%s", tensor)
     if torch is None:
         raise ImportError("torch is required for pad_torch_2d")
     rows, cols = tensor.shape

@@ -1,11 +1,16 @@
 """Tests for Qwen3.6 nested text-config parsing in ``ModelConfig``."""
+import logging
 
 from metal_marlin.hf_loader import ModelConfig
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_qwen36_config():
     """Qwen3.6 nested text configs should normalize cadence fields consistently."""
 
+    logger.info("running test_qwen36_config")
     cfg = ModelConfig.from_dict(
         {
             "model_type": "qwen3_6_moe",

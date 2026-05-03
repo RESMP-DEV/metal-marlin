@@ -14,6 +14,7 @@ Reference:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 from numpy.typing import NDArray
@@ -26,6 +27,9 @@ try:
 except ImportError:
     pass
 
+
+
+logger = logging.getLogger(__name__)
 
 def block_ldl(
     H: NDArray[np.float64],
@@ -65,6 +69,7 @@ def block_ldl(
         True
     """
     # Fast path: use Cython + Accelerate LAPACK
+    logger.debug("block_ldl called with H=%s, block_size=%s, verbose=%s", H, block_size, verbose)
     if _USE_FAST_LDL and not verbose:
         try:
             return block_ldl_fast(H, block_size)
@@ -170,6 +175,7 @@ def ldl_solve(
         >>> np.allclose(H @ x, b)
         True
     """
+    logger.debug("ldl_solve called with L=%s, D=%s, b=%s", L, D, b)
     L = np.asarray(L, dtype=np.float64)
     D = np.asarray(D, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
@@ -243,6 +249,7 @@ def _detect_block_size(D: NDArray[np.float64]) -> int:
     Returns:
         Detected block size (1 if truly diagonal)
     """
+    logger.debug("_detect_block_size called with D=%s", D)
     n = D.shape[0]
 
     # Check for 1x1 blocks (true diagonal)
@@ -293,6 +300,7 @@ def ldl_inverse(
         >>> np.allclose(H_inv, np.linalg.inv(H))
         True
     """
+    logger.debug("ldl_inverse called with L=%s, D=%s", L, D)
     L = np.asarray(L, dtype=np.float64)
     D = np.asarray(D, dtype=np.float64)
     n = L.shape[0]
@@ -337,6 +345,7 @@ def chol2ldl(
         L: Lower triangular factor with unit diagonal blocks [N, N]
         D: Block diagonal factor [N, N]
     """
+    logger.debug("chol2ldl called with C=%s, block_size=%s", C, block_size)
     C = np.asarray(C, dtype=np.float64)
     n = C.shape[0]
 

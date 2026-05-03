@@ -42,6 +42,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -56,6 +57,9 @@ if TYPE_CHECKING:
     from ..kv_cache import KVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Backend availability
 # ---------------------------------------------------------------------------
@@ -63,11 +67,13 @@ if TYPE_CHECKING:
 
 def _check_mps() -> bool:
     """Check if MPS backend is available."""
+    logger.debug("_check_mps called")
     return HAS_TORCH and torch.backends.mps.is_available()
 
 
 def require_mps(feature: str = "this operation") -> None:
     """Raise RuntimeError if MPS is not available."""
+    logger.debug("require_mps called with feature=%s", feature)
     if not _check_mps():
         raise RuntimeError(
             f"MPS backend is required for {feature}. "
@@ -77,6 +83,7 @@ def require_mps(feature: str = "this operation") -> None:
 
 def _sync_mps() -> None:
     """Synchronize MPS device."""
+    logger.debug("_sync_mps called")
     if _check_mps():
         torch.mps.synchronize()
 
@@ -155,6 +162,7 @@ class PrefillModel(Protocol):
 
     def create_kv_cache(self, batch_size: int = 1) -> KVCache:
         """Create KV cache for incremental decoding."""
+        logger.debug("create_kv_cache called with batch_size=%s", batch_size)
         ...
 
 
@@ -217,6 +225,7 @@ def chunked_prefill(
         )
         print(f"Throughput: {stats.tokens_per_second:.0f} tok/s")
     """
+    logger.debug("chunked_prefill called with model=%s, input_ids=%s, kv_cache=%s", model, input_ids, kv_cache)
     config = config or PrefillConfig()
     stats = PrefillStats()
 
@@ -300,6 +309,7 @@ def _simple_prefill(
     stats: PrefillStats,
 ) -> tuple[torch.Tensor, PrefillStats]:
     """Single-pass prefill for short prompts."""
+    logger.debug("_simple_prefill called with model=%s, input_ids=%s, kv_cache=%s", model, input_ids, kv_cache)
     seq_len = input_ids.shape[1]
     stats.num_chunks = 1
 
@@ -323,6 +333,7 @@ def _estimate_peak_memory(
     config: PrefillConfig,
 ) -> float:
     """Estimate peak memory usage during prefill in MB."""
+    logger.debug("_estimate_peak_memory called with kv_cache=%s, chunk_size=%s, config=%s", kv_cache, chunk_size, config)
     cfg = kv_cache.config
 
     # KV cache memory (already allocated)
@@ -393,6 +404,7 @@ def parallel_kv_write(
         # Write all at once
         parallel_kv_write(all_keys, all_values, kv_cache)
     """
+    logger.info("parallel_kv_write called with keys=%s, values=%s, kv_cache=%s", keys, values, kv_cache)
     if len(keys) != len(values):
         raise ValueError(f"keys ({len(keys)}) and values ({len(values)}) count mismatch")
 
@@ -436,6 +448,7 @@ def _update_cache_slot(
     nothing, suitable for batched parallel writes where we don't need
     the returned full K/V immediately.
     """
+    logger.debug("_update_cache_slot called with kv_cache=%s, layer_idx=%s, k_new=%s", kv_cache, layer_idx, k_new)
     new_seq_len = k_new.shape[2]
     end_pos = kv_cache.seq_len + new_seq_len
 
@@ -514,6 +527,7 @@ def batched_kv_projection(
             k, v = kv_result.keys[i], kv_result.values[i]
             # ... use k, v in attention
     """
+    logger.debug("batched_kv_projection called with hidden_states=%s, layers=%s, rope_offset=%s", hidden_states, layers, rope_offset)
     start_time = time.perf_counter()
 
     keys = []
@@ -594,6 +608,7 @@ def flash_prefill_attention(
         GQA (num_kv_heads < num_heads) is handled automatically.
         The key/value tensors are expanded internally if needed.
     """
+    logger.debug("flash_prefill_attention called with query=%s, key=%s, value=%s", query, key, value)
     batch, num_heads, seq_len, head_dim = query.shape
     num_kv_heads = key.shape[1]
     kv_len = key.shape[2]
@@ -648,6 +663,7 @@ def _flash_attention_ref(
     causal: bool,
 ) -> torch.Tensor:
     """Reference Flash Attention implementation (tiled, O(n) memory)."""
+    logger.debug("_flash_attention_ref called with query=%s, key=%s, value=%s", query, key, value)
     batch, num_heads, seq_len, head_dim = query.shape
     kv_len = key.shape[2]
     device = query.device
@@ -805,6 +821,7 @@ def speculative_prefill(
         This is experimental. The decode loop must check for speculative
         hits and handle cache invalidation on mismatch.
     """
+    logger.debug("speculative_prefill called with model=%s, input_ids=%s, kv_cache=%s", model, input_ids, kv_cache)
     config = config or SpeculativePrefillConfig()
 
     if not config.enabled:

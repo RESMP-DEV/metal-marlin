@@ -23,6 +23,7 @@ Example:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -39,6 +40,9 @@ from metal_marlin.quantization.layer_streamer import LayerStreamer, LayerWeights
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class StreamingQuantResult:
@@ -114,6 +118,7 @@ class StreamingQuantizer:
         max_workers: int | None = None,
         use_metal: bool = True,
     ):
+        logger.debug("initializing %s with model_path=%s, output_path=%s, bits=%s, group_size=%s, had_k=%s", type(self).__name__, model_path, output_path, bits, group_size, had_k)
         self.model_path = Path(model_path)
         self.output_path = Path(output_path)
         self.bits = bits
@@ -162,6 +167,7 @@ class StreamingQuantizer:
             ValueError: If calibration dataset is empty or model has no linear layers
         """
         # Create calibration streamer
+        logger.info("quantize_streaming called with calibration_dataset=%s, tokenizer=%s", calibration_dataset, tokenizer)
         calib_streamer = CalibrationStreamer(
             dataset=calibration_dataset,
             tokenizer=tokenizer,
@@ -247,6 +253,7 @@ class StreamingQuantizer:
         Returns:
             Hessian matrix [in_features, in_features] as float64
         """
+        logger.debug("_collect_layer_hessian called with layer_weights=%s, calib_streamer=%s", layer_weights, calib_streamer)
         in_features = layer_weights.weight.shape[1]
         
         # In a full implementation, we would:
@@ -281,6 +288,7 @@ class StreamingQuantizer:
             Path to saved file
         """
         # Create safe filename from layer name
+        logger.info("_save_quantized_layer called with result=%s", result)
         safe_name = result.name.replace(".", "_").replace("/", "_")
         output_file = self.output_path / f"{safe_name}.npz"
         
@@ -321,6 +329,7 @@ class StreamingQuantizer:
         Raises:
             FileNotFoundError: If quantized layer file does not exist
         """
+        logger.info("load_quantized_layer called with layer_name=%s", layer_name)
         safe_name = layer_name.replace(".", "_").replace("/", "_")
         layer_file = self.output_path / f"{safe_name}.npz"
         
@@ -353,6 +362,7 @@ class StreamingQuantizer:
             - hessian_memory_gb: Memory for Hessian accumulation
             - total_peak_gb: Estimated peak memory usage
         """
+        logger.debug("estimate_memory_requirements called")
         mem_info = self.layer_streamer.estimate_layer_memory()
         max_layer_gb = mem_info["max_layer_memory_bytes"] / 1e9
         
@@ -414,6 +424,7 @@ def quantize_model_streaming(
         >>> avg_mse = np.mean([r.reconstruction_mse for r in results])
         >>> print(f"Average MSE: {avg_mse:.6f}")
     """
+    logger.info("quantize_model_streaming called with model_path=%s, output_path=%s, calibration_dataset=%s, tokenizer=%s", model_path, output_path, calibration_dataset, tokenizer)
     quantizer = StreamingQuantizer(
         model_path=model_path,
         output_path=output_path,

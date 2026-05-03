@@ -14,6 +14,7 @@ The COW mechanism is implemented via:
 from __future__ import annotations
 
 import hashlib
+import logging
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -27,8 +28,12 @@ from .kv_block import KVBlockConfig
 from .page_table import PageTable
 
 
+
+logger = logging.getLogger(__name__)
+
 def _compute_prompt_hash(tokens: list[int]) -> str:
     """Compute hash for prompt prefix matching."""
+    logger.debug("_compute_prompt_hash called with tokens=%s", tokens)
     token_bytes = b"".join(t.to_bytes(4, "little") for t in tokens)
     return hashlib.sha256(token_bytes).hexdigest()[:16]
 
@@ -84,6 +89,7 @@ class WeightedScore:
     """Helper for weighted score calculation."""
     @staticmethod
     def calculate(recency: float, frequency: float, size: float, fragmentation: float, config: EvictionConfig) -> float:
+        logger.debug("calculate called with recency=%s, frequency=%s, size=%s", recency, frequency, size)
         return (
             recency * config.recency_weight +
             frequency * config.frequency_weight +
@@ -93,6 +99,7 @@ class WeightedScore:
 
     @staticmethod
     def normalize_scores(scores: list[float]) -> list[float]:
+        logger.debug("normalize_scores called with scores=%s", scores)
         if not scores:
             return []
         min_score = min(scores)
@@ -170,6 +177,7 @@ class PagedKVCache:
         eviction_policy: EvictionPolicy = EvictionPolicy.LRU,
         eviction_config: EvictionConfig | None = None,
     ) -> None:
+        logger.debug("initializing %s with config=%s, num_blocks=%s, use_multimodal=%s, eviction_policy=%s, eviction_config=%s", type(self).__name__, config, num_blocks, use_multimodal, eviction_policy, eviction_config)
         self.config = config or KVBlockConfig()
         self.num_blocks = num_blocks
         self.use_multimodal = use_multimodal
@@ -224,6 +232,7 @@ class PagedKVCache:
     ) -> bool:
         """Add a new sequence."""
         # Ensure we have at least one block available for the new sequence
+        logger.debug("add_sequence called with seq_id=%s, priority=%s, ttl=%s", seq_id, priority, ttl)
         if self.allocator.num_free == 0:
             if not self._evict(num_blocks_needed=1):
                 return False
@@ -249,6 +258,7 @@ class PagedKVCache:
 
     def remove_sequence(self, seq_id: int) -> None:
         """Remove a sequence."""
+        logger.debug("remove_sequence called with seq_id=%s", seq_id)
         if self.use_multimodal and isinstance(self.allocator, MultimodalBlockAllocator):
             self.allocator.unregister_sequence(seq_id)
         self.page_table.remove_sequence(seq_id)
@@ -261,6 +271,7 @@ class PagedKVCache:
         value: NDArray[Any],
     ) -> bool:
         """Append KV with automatic COW on shared blocks."""
+        logger.debug("append_kv called with seq_id=%s, key=%s, value=%s", seq_id, key, value)
         if not self.page_table.has_sequence(seq_id):
             raise ValueError(f"Sequence {seq_id} not registered")
 
@@ -341,6 +352,7 @@ class PagedKVCache:
         Returns:
             True if successful, False on OOM.
         """
+        logger.debug("append_kv_batch called with seq_id=%s, keys=%s, values=%s", seq_id, keys, values)
         if not self.page_table.has_sequence(seq_id):
             raise ValueError(f"Sequence {seq_id} not registered")
 
@@ -421,6 +433,7 @@ class PagedKVCache:
 
     def get_kv(self, seq_id: int) -> tuple[NDArray[Any], NDArray[Any]]:
         """Get all KV for a sequence."""
+        logger.debug("get_kv called with seq_id=%s", seq_id)
         if not self.page_table.has_sequence(seq_id):
             raise ValueError(f"Sequence {seq_id} not registered")
 
@@ -481,6 +494,7 @@ class PagedKVCache:
 
     def _compute_eviction_score(self, seq_id: int, override_config: EvictionConfig | None = None) -> float:
         """Compute eviction score for a sequence. Higher score = LESS likely to evict."""
+        logger.debug("_compute_eviction_score called with seq_id=%s, override_config=%s", seq_id, override_config)
         if seq_id not in self._eviction_metadata:
             return 0.0
             
@@ -529,6 +543,7 @@ class PagedKVCache:
 
     def _detect_workload_pattern(self):
         """Detect workload pattern for adaptive policy."""
+        logger.info("_detect_workload_pattern called")
         if not self._eviction_metadata:
             return "working_set"
             
@@ -543,10 +558,12 @@ class PagedKVCache:
         return "working_set"
 
     def get_memory_pressure(self) -> float:
+        logger.debug("get_memory_pressure called")
         return 1.0 - (self.allocator.num_free / self.num_blocks)
 
     def cleanup_expired(self) -> int:
         """Cleanup expired sequences."""
+        logger.debug("cleanup_expired called")
         if not self.eviction_config.enable_ttl:
             return 0
         
@@ -563,6 +580,7 @@ class PagedKVCache:
 
     def do_proactive_eviction(self, target_pressure: float) -> int:
         """Evict until pressure <= target_pressure."""
+        logger.debug("do_proactive_eviction called with target_pressure=%s", target_pressure)
         current_free = self.allocator.num_free
         target_free = int((1.0 - target_pressure) * self.num_blocks)
         needed = target_free - current_free
@@ -583,6 +601,7 @@ class PagedKVCache:
             True if enough blocks were freed, False otherwise.
         """
         # Optimization: cleanup expired first to free space without forced eviction
+        logger.debug("_evict called with num_blocks_needed=%s", num_blocks_needed)
         if self.eviction_config.enable_ttl:
             self.cleanup_expired()
             if self.allocator.num_free >= num_blocks_needed:
@@ -733,6 +752,7 @@ class PagedKVCache:
 
     def fork_sequence(self, src_id: int, dst_id: int) -> bool:
         """Fork sequence with zero-copy COW."""
+        logger.debug("fork_sequence called with src_id=%s, dst_id=%s", src_id, dst_id)
         success = self.page_table.fork_sequence(src_id, dst_id)
         if success:
             src_state = self.page_table.sequences.get(src_id)
@@ -773,6 +793,7 @@ class PagedKVCache:
         reuse_prefix: bool = True,
     ) -> bool:
         """Add sequence with prompt prefix sharing."""
+        logger.debug("add_sequence_with_prompt called with seq_id=%s, prompt_tokens=%s, reuse_prefix=%s", seq_id, prompt_tokens, reuse_prefix)
         if not reuse_prefix or not prompt_tokens:
             return self.add_sequence(seq_id)
         
@@ -816,6 +837,7 @@ class PagedKVCache:
         num_prefix_tokens: int | None = None,
     ) -> list[bool]:
         """Share prompt prefix across multiple sequences."""
+        logger.debug("share_prompt_blocks called with src_seq_id=%s, dst_seq_ids=%s, num_prefix_tokens=%s", src_seq_id, dst_seq_ids, num_prefix_tokens)
         if not self.page_table.has_sequence(src_seq_id):
             return [False] * len(dst_seq_ids)
         
@@ -841,6 +863,7 @@ class PagedKVCache:
     
     def get_shared_blocks(self, seq_id: int) -> list[int]:
         """Get indices of shared blocks (refcount > 1)."""
+        logger.debug("get_shared_blocks called with seq_id=%s", seq_id)
         if not self.page_table.has_sequence(seq_id):
             return []
         
@@ -856,18 +879,22 @@ class PagedKVCache:
 
     def get_block_table(self, seq_id: int) -> list[int]:
         """Get block table for a sequence."""
+        logger.debug("get_block_table called with seq_id=%s", seq_id)
         return self.page_table.get_block_table(seq_id)
 
     def get_eviction_stats(self) -> EvictionStats:
         """Get eviction statistics."""
+        logger.debug("get_eviction_stats called")
         return self._eviction_stats
 
     def get_detailed_stats(self) -> dict:
         """Get detailed eviction statistics."""
+        logger.debug("get_detailed_stats called")
         return self._detailed_stats
 
     def get_stats(self) -> CacheStats:
         """Get cache statistics."""
+        logger.debug("get_stats called")
         total_tokens = sum(
             state.logical_len for state in self.page_table.sequences.values()
         )
@@ -904,15 +931,18 @@ class PagedKVCache:
 
     def has_sequence(self, seq_id: int) -> bool:
         """Check if sequence registered."""
+        logger.debug("has_sequence called with seq_id=%s", seq_id)
         return self.page_table.has_sequence(seq_id)
 
     @property
     def num_sequences(self) -> int:
         """Number of sequences."""
+        logger.debug("num_sequences called")
         return self.page_table.num_sequences
 
     def sequence_ids(self) -> list[int]:
         """Get sequence IDs."""
+        logger.debug("sequence_ids called")
         return self.page_table.sequence_ids()
 
     def __repr__(self) -> str:

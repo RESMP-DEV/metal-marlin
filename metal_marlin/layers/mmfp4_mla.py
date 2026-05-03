@@ -45,6 +45,7 @@ if HAS_TORCH and torch is not None:
             base: float = 10000.0,
             rope_ratio: float = 1.0,
         ) -> None:
+            logger.debug("initializing %s with dim=%s, max_position_embeddings=%s, base=%s, rope_ratio=%s", type(self).__name__, dim, max_position_embeddings, base, rope_ratio)
             super().__init__()
             if dim % 2 != 0:
                 raise ValueError(f"RoPE dimension must be even, got {dim}")
@@ -69,6 +70,7 @@ if HAS_TORCH and torch is not None:
             self._ensure_cache(1, device=inv_freq.device)
 
         def _ensure_cache(self, seq_len: int, device: torch.device) -> None:
+            logger.debug("_ensure_cache called with seq_len=%s, device=%s", seq_len, device)
             if (
                 self._cached_seq_len >= seq_len
                 and self._cos_cached.device == device
@@ -89,6 +91,7 @@ if HAS_TORCH and torch is not None:
             position_ids: torch.Tensor,
             dtype: torch.dtype,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            logger.debug("get_cos_sin called with position_ids=%s, dtype=%s", position_ids, dtype)
             if position_ids.ndim == 1:
                 position_ids = position_ids.unsqueeze(0)
 
@@ -124,6 +127,7 @@ if HAS_TORCH and torch is not None:
                 x: Tensor of shape [B, H, S, D] or [B, S, D].
                 position_ids: [B, S] or [S].
             """
+            logger.debug("apply called with x=%s, position_ids=%s", x, position_ids)
             cos, sin = self.get_cos_sin(position_ids, dtype=x.dtype)
 
             if x.ndim == 4:
@@ -195,6 +199,7 @@ if HAS_TORCH and torch is not None:
             kv_quant_group_size: int = 128,
             sliding_window: int = 0,  # 0 = disabled, >0 = window size
         ):
+            logger.debug("initializing %s with hidden_size=%s, num_heads=%s, num_kv_heads=%s, q_lora_rank=%s, kv_lora_rank=%s", type(self).__name__, hidden_size, num_heads, num_kv_heads, q_lora_rank, kv_lora_rank)
             super().__init__()
             if num_heads <= 0 or num_kv_heads <= 0:
                 raise ValueError("num_heads and num_kv_heads must be > 0")
@@ -238,6 +243,7 @@ if HAS_TORCH and torch is not None:
             # Helper to create dummy weights for MMFP4Linear
             def create_dummy_linear(in_features: int, out_features: int) -> MMFP4Linear:
                 # MMFP4Linear expects [out_features, in_features // 8] packed weights
+                logger.debug("create_dummy_linear called with in_features=%s, out_features=%s", in_features, out_features)
                 if in_features % 8 != 0:
                     # In practice, in_features should be divisible by 8 for FP4 packing
                     pass
@@ -324,6 +330,7 @@ if HAS_TORCH and torch is not None:
             seq_len: int,
             device: torch.device,
         ) -> torch.Tensor:
+            logger.debug("_normalize_position_ids called with position_ids=%s, batch_size=%s, seq_len=%s", position_ids, batch_size, seq_len)
             if position_ids.ndim == 1:
                 position_ids = position_ids.unsqueeze(0)
             if position_ids.ndim != 2:
@@ -348,6 +355,7 @@ if HAS_TORCH and torch is not None:
             total_seq_len: int,
         ) -> torch.Tensor:
             """Infer full key positions from current query positions."""
+            logger.info("_build_full_position_ids starting")
             current_seq_len = current_position_ids.shape[1]
             if total_seq_len == current_seq_len:
                 return current_position_ids
@@ -372,10 +380,12 @@ if HAS_TORCH and torch is not None:
             key_positions: torch.Tensor,
         ) -> torch.Tensor:
             # Shape: [B, 1, Q, K], True = can attend.
+            logger.info("_build_attention_mask starting")
             return (query_positions.unsqueeze(-1) >= key_positions.unsqueeze(-2)).unsqueeze(1)
 
         def _get_or_create_paged_adapter(self) -> Any:
             """Lazy initialization of paged attention adapter."""
+            logger.debug("_get_or_create_paged_adapter called")
             if self._paged_adapter is None:
                 from ..paged.mmfp4_paged_adapter import MMFP4PagedAttention
                 self._paged_adapter = MMFP4PagedAttention(
@@ -406,6 +416,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 attn_output: [B, num_heads, 1, v_head_dim]
             """
+            logger.debug("_forward_paged_attention called with q_states=%s, k_states=%s, v_states=%s", q_states, k_states, v_states)
             adapter = self._get_or_create_paged_adapter()
 
             # Split q_states into nope and rope components
@@ -445,6 +456,7 @@ if HAS_TORCH and torch is not None:
             2. Uses raw cache buffers for zero-copy kernel access
             3. Leverages mla_fused_attention_decode for computation
             """
+            logger.debug("_mla_streaming called with x=%s, position_ids=%s, kv_cache=%s", x, position_ids, kv_cache)
             batch_size = x.shape[0]
             
             # 1. Update KV cache
@@ -490,6 +502,7 @@ if HAS_TORCH and torch is not None:
 
             # Kernel layout helpers
             def _kernel_layout(linear: MMFP4Linear) -> tuple[torch.Tensor, torch.Tensor]:
+                logger.debug("_kernel_layout called with linear=%s", linear)
                 packed = linear.packed_weights
                 scales = linear.scales
                 if packed.device != x.device:
@@ -577,6 +590,7 @@ if HAS_TORCH and torch is not None:
             When kv_quant is enabled, the cache is quantized on-the-fly and scales
             are passed to the kernel for dequantization during attention.
             """
+            logger.debug("_forward_fused_decode called with x=%s, cache_start_pos=%s, kv_cache=%s", x, cache_start_pos, kv_cache)
             if self.use_fused_qkv:
                 raise RuntimeError(
                     "Fused decode path requires split q/kv projections")
@@ -726,6 +740,7 @@ if HAS_TORCH and torch is not None:
             def _kernel_layout(
                 linear: MMFP4Linear,
             ) -> tuple[torch.Tensor, torch.Tensor]:
+                logger.debug("_kernel_layout called with linear=%s", linear)
                 packed = linear.packed_weights
                 scales = linear.scales
                 if packed.device != x.device:
@@ -818,6 +833,7 @@ if HAS_TORCH and torch is not None:
             to cache AND READ the full cache (including the newly written tokens)
             for attention computation.
             """
+            logger.debug("_forward_fused_prefill called with x=%s, position_ids=%s, kv_cache=%s", x, position_ids, kv_cache)
             if self.use_fused_qkv:
                 raise RuntimeError(
                     "Fused prefill path requires split q/kv projections")
@@ -858,6 +874,7 @@ if HAS_TORCH and torch is not None:
             def _kernel_layout(
                 linear: MMFP4Linear,
             ) -> tuple[torch.Tensor, torch.Tensor]:
+                logger.debug("_kernel_layout called with linear=%s", linear)
                 packed = linear.packed_weights
                 scales = linear.scales
                 if packed.device != x.device:
@@ -953,6 +970,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 Attention output [B, seq_q, num_heads, v_head_dim]
             """
+            logger.debug("_forward_fused_rope_attention called with q_nope=%s, q_rope_pre=%s, k_nope=%s", q_nope, q_rope_pre, k_nope)
             if key_positions is None:
                 key_positions = position_ids
                 
@@ -1039,6 +1057,7 @@ if HAS_TORCH and torch is not None:
             Returns:
                 Attention output [batch, seq_len, hidden_size]
             """
+            logger.debug("_forward_chunked_prefill called with x=%s, position_ids=%s, kv_cache=%s", x, position_ids, kv_cache)
             if self.use_fused_qkv:
                 raise RuntimeError(
                     "Chunked prefill requires split q/kv projections")
@@ -1072,6 +1091,7 @@ if HAS_TORCH and torch is not None:
             def _kernel_layout(
                 linear: MMFP4Linear,
             ) -> tuple[torch.Tensor, torch.Tensor]:
+                logger.debug("_kernel_layout called with linear=%s", linear)
                 packed = linear.packed_weights
                 scales = linear.scales
                 if packed.device != x.device:
@@ -1158,6 +1178,7 @@ if HAS_TORCH and torch is not None:
                 - k_scales: Scale factors for K dequantization [seq_len, n_groups]
                 - v_scales: Scale factors for V dequantization [seq_len, n_groups]
             """
+            logger.info("_quantize_kv_cache called with kv_cache=%s", kv_cache)
             seq_len, kv_dim = kv_cache.shape
             device = kv_cache.device
             
@@ -1215,6 +1236,7 @@ if HAS_TORCH and torch is not None:
             # RoPE cache management is handled internally by YaRNRoPEMetal
             # No need to pre-allocate here
 
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             if x.ndim != 3:
                 raise ValueError(
                     f"x must have shape [B, S, H], got {tuple(x.shape)}")
@@ -1532,12 +1554,14 @@ else:
         """Stub when PyTorch is unavailable."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError("MMFP4Linear requires PyTorch")
 
     class MMFP4MLA:  # type: ignore[no-redef]
         """Stub when PyTorch is unavailable."""
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            logger.debug("initializing %s", type(self).__name__)
             raise RuntimeError("MMFP4MLA requires PyTorch")
 
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +30,9 @@ from metal_marlin._compat import HAS_PYOBJC_METAL, Metal  # noqa: E402
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_kernel  # noqa: E402
 
 import os
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -118,12 +122,14 @@ class BenchResult:
 
 
 def _parse_iters(raw: str) -> list[int]:
+    logger.debug("_parse_iters called with raw=%s", raw)
     if "," in raw:
         return [int(part) for part in raw.split(",") if part.strip()]
     return [int(raw)]
 
 
 def _make_uint_buffer(device: object, value: int) -> object:
+    logger.debug("_make_uint_buffer called with device=%s, value=%s", device, value)
     arr = np.array([value], dtype=np.uint32)
     return device.newBufferWithBytes_length_options_(
         arr.tobytes(), arr.nbytes, Metal.MTLResourceStorageModeShared
@@ -140,6 +146,7 @@ def _benchmark(
     warmup: int,
     repeats: int,
 ) -> BenchResult:
+    logger.info("_benchmark starting")
     for _ in range(warmup):
         dispatch_kernel(lib, kernel_name, grid, threadgroup, buffers, wait=True)
 
@@ -162,6 +169,7 @@ def _benchmark(
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Device vs threadgroup memory access benchmark")
     parser.add_argument("--elements", type=int, default=1 << 20, help="Number of half elements")
     parser.add_argument(

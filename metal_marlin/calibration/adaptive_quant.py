@@ -23,10 +23,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -171,6 +175,7 @@ class AdaptiveQuantizer:
             refinement_iterations: Number of iterative refinement passes.
                 More iterations = better quality but slower. Default: 3.
         """
+        logger.debug("initializing %s with error_budget=%s, min_bits=%s, max_bits=%s, group_size=%s, prefer_nf=%s", type(self).__name__, error_budget, min_bits, max_bits, group_size, prefer_nf)
         if min_bits < 2:
             raise ValueError(f"min_bits must be >= 2, got {min_bits}")
         if max_bits > 8:
@@ -194,6 +199,7 @@ class AdaptiveQuantizer:
 
     def _build_candidate_formats(self) -> list[QuantizationFormat]:
         """Build ordered list of candidate formats within bit range."""
+        logger.info("_build_candidate_formats starting")
         candidates = []
         for bits in range(self.min_bits, self.max_bits + 1):
             for fmt, fmt_bits in FORMAT_BITS.items():
@@ -203,6 +209,7 @@ class AdaptiveQuantizer:
 
         # Sort: bits ascending, NF before INT at same bits
         def sort_key(fmt: QuantizationFormat) -> tuple[int, int]:
+            logger.debug("sort_key called with fmt=%s", fmt)
             bits = FORMAT_BITS[fmt]
             # NF formats get priority 0, INT formats get priority 1
             is_nf = fmt.value.startswith("nf")
@@ -232,6 +239,7 @@ class AdaptiveQuantizer:
         Returns:
             Scalar sensitivity score (higher = more sensitive).
         """
+        logger.debug("compute_sensitivity called with hessian=%s", hessian)
         diag = np.diag(hessian).astype(np.float64)
         # Use mean rather than sum to normalize across layer sizes
         return float(np.mean(diag))
@@ -257,6 +265,7 @@ class AdaptiveQuantizer:
         Returns:
             AdaptiveQuantResult with selected format and quantized weights.
         """
+        logger.info("quantize_layer_adaptive called with weight=%s, hessian=%s, target_error=%s", weight, hessian, target_error)
         W = np.asarray(weight, dtype=np.float64)
         H = np.asarray(hessian, dtype=np.float64)
 
@@ -318,6 +327,7 @@ class AdaptiveQuantizer:
         Returns:
             (quantized_weights, scales, packed_weights)
         """
+        logger.info("_quantize_with_format called with W=%s, H=%s, fmt=%s", W, H, fmt)
         out_feat, in_feat = W.shape
         bits = FORMAT_BITS[fmt]
 
@@ -348,6 +358,7 @@ class AdaptiveQuantizer:
         fmt: QuantizationFormat,
     ) -> NDArray[np.float32]:
         """Get the quantization grid for a format."""
+        logger.info("_get_quantization_grid called with fmt=%s", fmt)
         if fmt == QuantizationFormat.FP4:
             return np.array(
                 [
@@ -393,6 +404,7 @@ class AdaptiveQuantizer:
 
     def _compute_nf_grid(self, bits: int) -> NDArray[np.float32]:
         """Compute NormalFloat grid from Gaussian quantiles."""
+        logger.debug("_compute_nf_grid called with bits=%s", bits)
         from scipy import stats
 
         n_levels = 2**bits
@@ -425,6 +437,7 @@ class AdaptiveQuantizer:
         Returns:
             (quantized_weights, indices)
         """
+        logger.info("_gptq_quantize called with W=%s, H=%s, grid=%s, scales=%s", W, H, grid, scales)
         W = W.copy()
         out_feat, in_feat = W.shape
         n_groups = in_feat // self.group_size
@@ -492,6 +505,7 @@ class AdaptiveQuantizer:
         Returns:
             Packed uint32 array.
         """
+        logger.info("_pack_weights called with indices=%s, bits=%s", indices, bits)
         out_feat, in_feat = indices.shape
 
         if bits == 2:
@@ -544,6 +558,7 @@ class AdaptiveQuantizer:
         Returns:
             Refined AdaptiveQuantResult.
         """
+        logger.debug("_apply_refinement called with W=%s, H=%s, initial=%s", W, H, initial)
         if self.refinement_iterations == 0:
             return initial
 
@@ -587,6 +602,7 @@ class AdaptiveQuantizer:
         Returns:
             Refined AdaptiveQuantResult.
         """
+        logger.debug("iterative_refinement called with weight=%s, hessian=%s, initial_quant=%s", weight, hessian, initial_quant)
         W = np.asarray(weight, dtype=np.float64)
         np.asarray(hessian, dtype=np.float64)
         Q = np.asarray(initial_quant, dtype=np.float64)
@@ -693,6 +709,7 @@ class AdaptiveQuantizer:
             ModelBudgetAllocation with per-layer bit assignments.
         """
         # Compute sensitivity for each layer
+        logger.debug("allocate_model_budget called with layer_hessians=%s, layer_shapes=%s, target_bits=%s", layer_hessians, layer_shapes, target_bits)
         sensitivities: dict[str, float] = {}
         for name, H in layer_hessians.items():
             sensitivities[name] = self.compute_sensitivity(H)
@@ -744,6 +761,7 @@ class AdaptiveQuantizer:
 
     def _select_format_for_bits(self, bits: int) -> QuantizationFormat:
         """Select best format for given bit count."""
+        logger.debug("_select_format_for_bits called with bits=%s", bits)
         bits = int(np.clip(bits, self.min_bits, self.max_bits))
 
         # Prefer NF formats if configured
@@ -790,6 +808,7 @@ def compute_moe_expert_sensitivity(
     Returns:
         Per-expert sensitivity scores [n_experts].
     """
+    logger.debug("compute_moe_expert_sensitivity called with expert_hessians=%s, router_logits=%s", expert_hessians, router_logits)
     n_experts = len(expert_hessians)
     base_sensitivity = np.zeros(n_experts, dtype=np.float64)
 

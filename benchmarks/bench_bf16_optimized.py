@@ -10,6 +10,7 @@ Covers:
 """
 
 from __future__ import annotations
+import logging
 import os
 
 import argparse
@@ -40,16 +41,21 @@ except Exception:  # pragma: no cover - torch optional
     F = None
 
 
+
+logger = logging.getLogger(__name__)
+
 BASELINE_PATH = Path(__file__).parent / "baseline_bf16.json"
 RESULTS_DIR = Path(__file__).parent / "results"
 
 
 def _require_torch(feature: str) -> None:
+    logger.debug("_require_torch called with feature=%s", feature)
     if not HAS_TORCH or torch is None:
         raise RuntimeError(f"PyTorch is required for {feature}.")
 
 
 def _require_mps(feature: str) -> None:
+    logger.debug("_require_mps called with feature=%s", feature)
     _require_torch(feature)
     if not HAS_MPS:
         raise RuntimeError(
@@ -57,11 +63,13 @@ def _require_mps(feature: str) -> None:
 
 
 def _mps_sync() -> None:
+    logger.debug("_mps_sync called")
     if torch is not None:
         torch.mps.synchronize()
 
 
 def _mps_memory() -> dict[str, int]:
+    logger.debug("_mps_memory called")
     if not HAS_TORCH or torch is None:
         return {"current": 0, "driver": 0}
     if not torch.backends.mps.is_available():
@@ -78,6 +86,7 @@ def _mps_memory() -> dict[str, int]:
 
 
 def _time_stage(fn) -> tuple[float, Any]:
+    logger.debug("_time_stage called with fn=%s", fn)
     _mps_sync()
     start = time.perf_counter()
     out = fn()
@@ -86,14 +95,17 @@ def _time_stage(fn) -> tuple[float, Any]:
 
 
 def _mean(values: list[float]) -> float:
+    logger.debug("_mean called with values=%s", values)
     return float(statistics.mean(values)) if values else 0.0
 
 
 def _gemm_flops(M: int, N: int, K: int) -> float:
+    logger.debug("_gemm_flops called with M=%s, N=%s, K=%s", M, N, K)
     return 2.0 * M * N * K
 
 
 def _gemm_bytes_old(M: int, N: int, K: int) -> int:
+    logger.debug("_gemm_bytes_old called with M=%s, N=%s, K=%s", M, N, K)
     a = M * K
     b = K * N
     c = M * N
@@ -102,6 +114,7 @@ def _gemm_bytes_old(M: int, N: int, K: int) -> int:
 
 
 def _gemm_bytes_new(M: int, N: int, K: int) -> int:
+    logger.debug("_gemm_bytes_new called with M=%s, N=%s, K=%s", M, N, K)
     a = M * K
     b = K * N
     c = M * N
@@ -117,6 +130,7 @@ def _benchmark_gemm(
     warmup: int,
     iterations: int,
 ) -> dict[str, Any]:
+    logger.info("_benchmark_gemm starting")
     _require_mps("GEMM benchmarking")
     assert torch is not None
 
@@ -124,6 +138,7 @@ def _benchmark_gemm(
     B = torch.randn(K, N, dtype=torch.bfloat16, device="mps")
 
     def _run_old() -> dict[str, float]:
+        logger.debug("_run_old called")
         t1, (a_fp32, b_fp32) = _time_stage(lambda: (A.float(), B.float()))
         t2, (a_fp16, b_fp16) = _time_stage(
             lambda: (a_fp32.half(), b_fp32.half()))
@@ -139,6 +154,7 @@ def _benchmark_gemm(
         }
 
     def _run_new() -> dict[str, float]:
+        logger.debug("_run_new called")
         t1, (a_fp32, b_fp32) = _time_stage(lambda: (A.float(), B.float()))
         t2, c_fp32 = _time_stage(lambda: a_fp32 @ b_fp32)
         t3, _ = _time_stage(lambda: c_fp32.to(torch.bfloat16))
@@ -161,6 +177,7 @@ def _benchmark_gemm(
         new_samples.append(_run_new())
 
     def _summarize(samples: list[dict[str, float]], is_old: bool) -> dict[str, Any]:
+        logger.debug("_summarize called with samples=%s, is_old=%s", samples, is_old)
         keys = samples[0].keys()
         means = {k: _mean([s[k] for s in samples]) for k in keys}
         total_ms = sum(means.values())
@@ -197,6 +214,7 @@ def _benchmark_attention(
     warmup: int,
     iterations: int,
 ) -> dict[str, Any]:
+    logger.info("_benchmark_attention starting")
     _require_mps("attention benchmarking")
     if F is None:
         raise RuntimeError(
@@ -213,6 +231,7 @@ def _benchmark_attention(
     scale = 1.0 / math.sqrt(head_dim)
 
     def _run_old() -> float:
+        logger.debug("_run_old called")
         q_fp16 = q_bf16.float().half()
         k_fp16 = k_bf16.float().half()
         v_fp16 = v_bf16.float().half()
@@ -220,6 +239,7 @@ def _benchmark_attention(
         return 0.0
 
     def _run_new() -> float:
+        logger.debug("_run_new called")
         q_fp32 = q_bf16.float()
         k_fp32 = k_bf16.float()
         v_fp32 = v_bf16.float()
@@ -285,6 +305,7 @@ def _benchmark_moe(
     warmup: int,
     iterations: int,
 ) -> dict[str, Any]:
+    logger.info("_benchmark_moe starting")
     _require_mps("MoE benchmarking")
     assert torch is not None
 
@@ -302,6 +323,7 @@ def _benchmark_moe(
         active_experts, device="mps").repeat_interleave(tokens_per_expert)
 
     def _run_old() -> tuple[float, float]:
+        logger.debug("_run_old called")
         dispatch_ms = 0.0
         compute_ms = 0.0
         for expert in range(active_experts):
@@ -318,6 +340,7 @@ def _benchmark_moe(
         return dispatch_ms, compute_ms
 
     def _run_new() -> tuple[float, float]:
+        logger.debug("_run_new called")
         t0 = time.perf_counter()
         order = torch.argsort(router)
         x_sorted = x.index_select(0, order).view(
@@ -369,14 +392,17 @@ def _benchmark_moe(
 
 class MemoryTracker:
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self.peak_bytes = 0
 
     def update(self) -> None:
+        logger.debug("update called")
         mem = _mps_memory()["driver"]
         self.peak_bytes = max(self.peak_bytes, mem)
 
     @property
     def peak_mb(self) -> float:
+        logger.debug("peak_mb called")
         return self.peak_bytes / (1024 * 1024)
 
 
@@ -387,6 +413,7 @@ def _benchmark_inference(
     max_new_tokens: int,
     runs: int,
 ) -> dict[str, Any]:
+    logger.info("_benchmark_inference starting")
     _require_mps("inference benchmarking")
     assert torch is not None
 
@@ -465,6 +492,7 @@ def _benchmark_inference(
 
 
 def _load_baseline(path: Path) -> dict[str, Any]:
+    logger.info("_load_baseline called with path=%s", path)
     if path.exists():
         with open(path) as f:
             return json.load(f)
@@ -472,12 +500,14 @@ def _load_baseline(path: Path) -> dict[str, Any]:
 
 
 def _save_json(path: Path, payload: dict[str, Any]) -> None:
+    logger.info("_save_json called with path=%s, payload=%s", path, payload)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
 
 
 def _get_path(obj: dict[str, Any], path: str) -> float | None:
+    logger.debug("_get_path called with obj=%s, path=%s", obj, path)
     cur: Any = obj
     for part in path.split("."):
         if not isinstance(cur, dict) or part not in cur:
@@ -489,6 +519,7 @@ def _get_path(obj: dict[str, Any], path: str) -> float | None:
 
 
 def _percent_improvement(new_val: float, base_val: float, higher_is_better: bool) -> float | None:
+    logger.debug("_percent_improvement called with new_val=%s, base_val=%s, higher_is_better=%s", new_val, base_val, higher_is_better)
     if base_val <= 0:
         return None
     if higher_is_better:
@@ -497,6 +528,7 @@ def _percent_improvement(new_val: float, base_val: float, higher_is_better: bool
 
 
 def _compare_to_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    logger.debug("_compare_to_baseline called with current=%s, baseline=%s", current, baseline)
     metrics = [
         ("gemm.old.tflops", True),
         ("gemm.new.tflops", True),
@@ -523,6 +555,7 @@ def _compare_to_baseline(current: dict[str, Any], baseline: dict[str, Any]) -> d
 
 
 def _print_report(results: dict[str, Any]) -> None:
+    logger.debug("_print_report called with results=%s", results)
     gemm = results["gemm"]
     attention = results["attention"]
     moe = results["moe"]
@@ -571,6 +604,7 @@ def _print_report(results: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="BF16 optimization benchmark suite")
     parser.add_argument(

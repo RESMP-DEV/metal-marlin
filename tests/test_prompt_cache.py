@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -21,11 +22,15 @@ from metal_marlin.cache.prompt_cache import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestHashFunctions:
     """Test token hashing functions."""
 
     def test_hash_tokens_deterministic(self):
         """Same tokens produce same hash."""
+        logger.info("running test_hash_tokens_deterministic")
         tokens = [1, 2, 3, 4, 5]
         h1 = hash_tokens(tokens)
         h2 = hash_tokens(tokens)
@@ -33,6 +38,7 @@ class TestHashFunctions:
 
     def test_hash_tokens_different_input(self):
         """Different tokens produce different hash."""
+        logger.info("running test_hash_tokens_different_input")
         tokens1 = [1, 2, 3, 4, 5]
         tokens2 = [1, 2, 3, 4, 6]
         h1 = hash_tokens(tokens1)
@@ -41,18 +47,21 @@ class TestHashFunctions:
 
     def test_hash_tokens_algorithm_md5(self):
         """MD5 hash algorithm works."""
+        logger.info("running test_hash_tokens_algorithm_md5")
         tokens = [1, 2, 3, 4, 5]
         h = hash_tokens(tokens, algorithm="md5")
         assert len(h) == 32  # MD5 produces 32 hex chars
 
     def test_hash_tokens_algorithm_sha256(self):
         """SHA256 hash algorithm works."""
+        logger.info("running test_hash_tokens_algorithm_sha256")
         tokens = [1, 2, 3, 4, 5]
         h = hash_tokens(tokens, algorithm="sha256")
         assert len(h) == 64  # SHA256 produces 64 hex chars
 
     def test_hash_prefix_block_aligned(self):
         """Hash prefix produces one hash per complete block."""
+        logger.info("running test_hash_prefix_block_aligned")
         tokens = list(range(48))  # 3 blocks of 16
         block_size = 16
         hashes = hash_prefix(tokens, block_size)
@@ -60,6 +69,7 @@ class TestHashFunctions:
 
     def test_hash_prefix_partial_block_ignored(self):
         """Partial blocks at the end are not hashed."""
+        logger.info("running test_hash_prefix_partial_block_ignored")
         tokens = list(range(40))  # 2 complete blocks + 8 extra
         block_size = 16
         hashes = hash_prefix(tokens, block_size)
@@ -68,6 +78,7 @@ class TestHashFunctions:
     def test_hash_prefix_chain_dependency(self):
         """Block hashes depend on previous blocks (chain hashing)."""
         # Two sequences with same first block but different second
+        logger.info("running test_hash_prefix_chain_dependency")
         tokens1 = list(range(32))
         tokens2 = list(range(16)) + list(range(100, 116))
 
@@ -83,6 +94,7 @@ class TestHashFunctions:
     def test_hash_prefix_shared_prefix(self):
         """Shared prefixes have identical hash chains up to divergence."""
         # System prompt + different user messages
+        logger.info("running test_hash_prefix_shared_prefix")
         system_prompt = list(range(32))  # 2 blocks
         user1 = list(range(200, 216))  # 1 block
         user2 = list(range(300, 316))  # 1 block
@@ -106,6 +118,7 @@ class TestPrefixCacheConfig:
 
     def test_default_config(self):
         """Default config has reasonable values."""
+        logger.info("running test_default_config")
         config = PrefixCacheConfig(
             num_layers=32,
             num_heads=32,
@@ -117,6 +130,7 @@ class TestPrefixCacheConfig:
 
     def test_bytes_per_block(self):
         """Bytes per block calculation is correct."""
+        logger.info("running test_bytes_per_block")
         config = PrefixCacheConfig(
             num_layers=32,
             num_heads=32,
@@ -134,6 +148,7 @@ class TestPrefixCache:
     @pytest.fixture
     def simple_config(self) -> PrefixCacheConfig:
         """Simple cache config for testing."""
+        logger.debug("simple_config called")
         return PrefixCacheConfig(
             num_layers=4,
             num_heads=8,
@@ -146,16 +161,19 @@ class TestPrefixCache:
     @pytest.fixture
     def cache(self, simple_config: PrefixCacheConfig) -> PrefixCache:
         """Create a prefix cache for testing."""
+        logger.debug("cache called with simple_config=%s", simple_config)
         return PrefixCache(simple_config)
 
     def test_cache_creation(self, cache: PrefixCache):
         """Cache is created in empty state."""
+        logger.info("running test_cache_creation")
         assert len(cache._gpu_blocks) == 0
         assert len(cache._ram_blocks) == 0
         assert cache.metrics.hits == 0
 
     def test_match_empty_cache(self, cache: PrefixCache):
         """Empty cache returns no matches."""
+        logger.info("running test_match_empty_cache")
         tokens = list(range(32))
         match = cache.match_prefix(tokens)
         assert match.num_matched_tokens == 0
@@ -164,6 +182,7 @@ class TestPrefixCache:
 
     def test_match_short_input(self, cache: PrefixCache):
         """Input shorter than block size returns no match."""
+        logger.info("running test_match_short_input")
         tokens = list(range(10))  # < 16 block size
         match = cache.match_prefix(tokens)
         assert match.num_matched_tokens == 0
@@ -171,6 +190,7 @@ class TestPrefixCache:
 
     def test_store_and_match(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Store blocks and retrieve them."""
+        logger.info("running test_store_and_match")
         tokens = list(range(32))  # 2 blocks
 
         # Create fake KV data for 2 blocks
@@ -196,6 +216,7 @@ class TestPrefixCache:
     def test_partial_match(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Partial prefix match works correctly."""
         # Store 2 blocks
+        logger.info("running test_partial_match")
         tokens_short = list(range(32))
         kv_blocks = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
@@ -212,6 +233,7 @@ class TestPrefixCache:
 
     def test_get_blocks(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Retrieved blocks match stored data."""
+        logger.info("running test_get_blocks")
         tokens = list(range(16))  # 1 block
         original_data = [[np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]]
         stored_hashes = cache.store_prefix(tokens, original_data)
@@ -227,6 +249,7 @@ class TestPrefixCache:
 
     def test_release_blocks(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Releasing blocks decrements ref count."""
+        logger.info("running test_release_blocks")
         tokens = list(range(16))
         kv_blocks = [[np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)]]
         stored_hashes = cache.store_prefix(tokens, kv_blocks)
@@ -241,6 +264,7 @@ class TestPrefixCache:
     def test_extend_from_cache_numpy(self, cache: PrefixCache):
         """extend_from_cache concatenates numpy arrays correctly."""
         # Prefix KV: 2 blocks
+        logger.info("running test_extend_from_cache_numpy")
         prefix_kv = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)],
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)],
@@ -257,6 +281,7 @@ class TestPrefixCache:
 
     def test_memory_usage(self, cache: PrefixCache, simple_config: PrefixCacheConfig):
         """Memory usage tracking works."""
+        logger.info("running test_memory_usage")
         tokens = list(range(32))
         kv_blocks = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
@@ -275,6 +300,7 @@ class TestCacheEviction:
     @pytest.fixture
     def small_cache(self) -> PrefixCache:
         """Cache with very limited capacity for eviction testing."""
+        logger.debug("small_cache called")
         config = PrefixCacheConfig(
             num_layers=2,
             num_heads=4,
@@ -288,6 +314,7 @@ class TestCacheEviction:
     def test_evict_to_ram(self, small_cache: PrefixCache):
         """Blocks evict from GPU to RAM when full."""
         # Store 3 blocks (exceeds max_gpu_blocks=2)
+        logger.info("running test_evict_to_ram")
         for i in range(3):
             tokens = list(range(i * 100, i * 100 + 8))
             kv = [[np.random.randn(2, 8, 4, 32).astype(np.float16) for _ in range(2)]]
@@ -301,6 +328,7 @@ class TestCacheEviction:
 
     def test_evict_to_disk(self):
         """Blocks evict from RAM to disk when full."""
+        logger.info("running test_evict_to_disk")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = PrefixCacheConfig(
                 num_layers=2,
@@ -326,6 +354,7 @@ class TestCacheEviction:
 
     def test_load_from_disk(self):
         """Blocks can be loaded back from disk."""
+        logger.info("running test_load_from_disk")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = PrefixCacheConfig(
                 num_layers=2,
@@ -365,6 +394,7 @@ class TestRadixPrefixCache:
     @pytest.fixture
     def radix_cache(self) -> RadixPrefixCache:
         """Create a radix prefix cache for testing."""
+        logger.debug("radix_cache called")
         config = PrefixCacheConfig(
             num_layers=4,
             num_heads=8,
@@ -376,6 +406,7 @@ class TestRadixPrefixCache:
 
     def test_radix_store_and_match(self, radix_cache: RadixPrefixCache):
         """Radix cache stores and matches prefixes."""
+        logger.info("running test_radix_store_and_match")
         tokens = list(range(32))
         kv_blocks = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
@@ -388,6 +419,7 @@ class TestRadixPrefixCache:
     def test_radix_partial_match(self, radix_cache: RadixPrefixCache):
         """Radix cache handles partial matches."""
         # Store system prompt
+        logger.info("running test_radix_partial_match")
         system = list(range(32))
         kv_system = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
@@ -403,6 +435,7 @@ class TestRadixPrefixCache:
 
     def test_radix_clear(self, radix_cache: RadixPrefixCache):
         """Clear removes radix tree nodes."""
+        logger.info("running test_radix_clear")
         tokens = list(range(32))
         kv_blocks = [
             [np.random.randn(2, 16, 8, 64).astype(np.float16) for _ in range(4)] for _ in range(2)
@@ -420,16 +453,19 @@ class TestCacheMetrics:
 
     def test_hit_rate_calculation(self):
         """Hit rate calculation is correct."""
+        logger.info("running test_hit_rate_calculation")
         metrics = CacheMetrics(hits=80, misses=10, partial_hits=10)
         assert metrics.hit_rate == 0.8
 
     def test_hit_rate_empty(self):
         """Hit rate is 0 when no accesses."""
+        logger.info("running test_hit_rate_empty")
         metrics = CacheMetrics()
         assert metrics.hit_rate == 0.0
 
     def test_metrics_reset(self):
         """Reset clears all metrics."""
+        logger.info("running test_metrics_reset")
         metrics = CacheMetrics(hits=10, misses=5, evictions=3)
         metrics.reset()
         assert metrics.hits == 0
@@ -442,6 +478,7 @@ class TestThreadSafety:
 
     def test_concurrent_access(self):
         """Cache handles concurrent access."""
+        logger.info("running test_concurrent_access")
         import threading
 
         config = PrefixCacheConfig(
@@ -456,6 +493,7 @@ class TestThreadSafety:
         errors = []
 
         def store_worker(thread_id: int):
+            logger.debug("store_worker called with thread_id=%s", thread_id)
             try:
                 for i in range(10):
                     tokens = list(range(thread_id * 1000 + i * 100, thread_id * 1000 + i * 100 + 8))
@@ -465,6 +503,7 @@ class TestThreadSafety:
                 errors.append(e)
 
         def match_worker(thread_id: int):
+            logger.debug("match_worker called with thread_id=%s", thread_id)
             try:
                 for i in range(10):
                     tokens = list(range(thread_id * 1000 + i * 100, thread_id * 1000 + i * 100 + 8))
@@ -491,10 +530,12 @@ class TestTorchIntegration:
     @pytest.fixture
     def torch_available(self):
         """Check if PyTorch is available."""
+        logger.debug("torch_available called")
         return HAS_TORCH
 
     def test_extend_from_cache_torch(self, torch_available):
         """extend_from_cache works with PyTorch tensors."""
+        logger.info("running test_extend_from_cache_torch")
         if not torch_available or torch is None:
             pytest.skip("PyTorch not available")
 
@@ -516,6 +557,7 @@ class TestTorchIntegration:
 
         # Custom concat function for PyTorch tensors
         def torch_concat(a, b):
+            logger.debug("torch_concat called with a=%s, b=%s", a, b)
             return torch.cat([a, b], dim=1)
 
         combined = cache.extend_from_cache(prefix_kv, new_kv, concat_fn=torch_concat)
@@ -526,6 +568,7 @@ class TestTorchIntegration:
 
     def test_store_and_retrieve_torch_tensors(self, torch_available):
         """Store PyTorch tensors (converted to numpy) and retrieve them."""
+        logger.info("running test_store_and_retrieve_torch_tensors")
         if not torch_available or torch is None:
             pytest.skip("PyTorch not available")
 
@@ -556,6 +599,7 @@ class TestTorchIntegration:
 
     def test_torch_mps_compatibility(self, torch_available):
         """Test that tensors on MPS device can be converted for cache use."""
+        logger.info("running test_torch_mps_compatibility")
         if not torch_available or torch is None:
             pytest.skip("PyTorch not available")
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import os
 import statistics
@@ -30,6 +31,9 @@ from typing import Protocol
 
 import torch
 from metal_marlin.kernels import HAS_MPS
+
+
+logger = logging.getLogger(__name__)
 
 # Ensure metal_marlin is importable
 _ROOT = Path(__file__).parent.parent
@@ -102,6 +106,7 @@ class KernelVariant:
 
 def mps_sync() -> None:
     """Synchronize MPS device."""
+    logger.debug("mps_sync called")
     torch.mps.synchronize()
 
 
@@ -113,6 +118,7 @@ def welchs_ttest(
 
     Returns (t_statistic, p_value).
     """
+    logger.info("running welchs_ttest")
     n_a, n_b = len(samples_a), len(samples_b)
     mean_a = statistics.mean(samples_a)
     mean_b = statistics.mean(samples_b)
@@ -147,6 +153,7 @@ def _normal_sf(x: float) -> float:
     """Survival function (1 - CDF) for standard normal distribution."""
     # Using complementary error function approximation
     # erfc(x/sqrt(2))/2
+    logger.debug("_normal_sf called with x=%s", x)
     return 0.5 * math.erfc(x / math.sqrt(2))
 
 
@@ -156,6 +163,7 @@ def cohens_d(samples_a: Sequence[float], samples_b: Sequence[float]) -> float:
 
     Uses pooled standard deviation.
     """
+    logger.debug("cohens_d called with samples_a=%s, samples_b=%s", samples_a, samples_b)
     n_a, n_b = len(samples_a), len(samples_b)
     mean_a = statistics.mean(samples_a)
     mean_b = statistics.mean(samples_b)
@@ -178,6 +186,7 @@ def mann_whitney_u(
 
     Returns (U_statistic, p_value).
     """
+    logger.debug("mann_whitney_u called with samples_a=%s, samples_b=%s", samples_a, samples_b)
     n_a, n_b = len(samples_a), len(samples_b)
 
     # Count how many times a value from A exceeds a value from B
@@ -253,6 +262,7 @@ class ABTester:
         n_bootstrap: int = 10000,
         ci_level: float = 0.95,
     ):
+        logger.debug("initializing %s with warmup=%s, iterations=%s, alpha=%s, effect_size_threshold=%s, n_bootstrap=%s", type(self).__name__, warmup, iterations, alpha, effect_size_threshold, n_bootstrap)
         self.warmup = warmup
         self.iterations = iterations
         self.alpha = alpha
@@ -276,6 +286,7 @@ class ABTester:
         Interleaves A and B runs to reduce systematic bias from thermal
         throttling or background processes.
         """
+        logger.info("run starting")
         print(f"\n{'='*60}")
         print(f"A/B Test: {kernel_name}")
         print(f"  Variant A: {variant_a.name} - {variant_a.description}")
@@ -398,6 +409,7 @@ class ABTester:
 
     def _print_result(self, r: ABTestResult) -> None:
         """Print formatted test result."""
+        logger.debug("_print_result called with r=%s", r)
         print("\nResults:")
         print(f"  Variant A ({r.variant_a}):")
         print(f"    Mean: {r.mean_a:.3f} ms ± {r.std_a:.3f} ms")
@@ -441,11 +453,13 @@ class ABTester:
 
     def export_json(self, path: str | Path) -> None:
         """Export all results to JSON."""
+        logger.info("export_json called with path=%s", path)
         with open(path, "w") as f:
             json.dump([asdict(r) for r in self.results], f, indent=2)
 
     def print_summary(self) -> None:
         """Print summary of all A/B tests."""
+        logger.debug("print_summary called")
         if not self.results:
             print("No test results.")
             return
@@ -476,11 +490,13 @@ class ABTester:
 
 def create_gemm_baseline(M: int, N: int, K: int, **_) -> KernelFn:
     """Create baseline FP16 GEMM kernel function."""
+    logger.debug("create_gemm_baseline called with M=%s, N=%s, K=%s", M, N, K)
     A = torch.randn(M, K, dtype=torch.float16, device="mps")
     B = torch.randn(K, N, dtype=torch.float16, device="mps")
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         return A @ B
 
     return fn
@@ -489,12 +505,14 @@ def create_gemm_baseline(M: int, N: int, K: int, **_) -> KernelFn:
 def create_gemm_batched(M: int, N: int, K: int, batch_size: int = 4, **_) -> KernelFn:
     """Create batched GEMM for comparison."""
     # Simulate batched by doing multiple smaller GEMMs
+    logger.debug("create_gemm_batched called with M=%s, N=%s, K=%s", M, N, K)
     A = torch.randn(batch_size, M // batch_size, K,
                     dtype=torch.float16, device="mps")
     B = torch.randn(K, N, dtype=torch.float16, device="mps")
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         return torch.einsum("bik,kj->bij", A, B)
 
     return fn
@@ -504,6 +522,7 @@ def create_attention_baseline(
     M: int, N: int, K: int, num_heads: int = 8, **_
 ) -> KernelFn:
     """Create baseline attention kernel (scaled dot-product)."""
+    logger.debug("create_attention_baseline called with M=%s, N=%s, K=%s", M, N, K)
     seq_len = M
     head_dim = K // num_heads
     batch = 1
@@ -518,6 +537,7 @@ def create_attention_baseline(
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         scores = torch.matmul(Q, K_mat.transpose(-2, -1)) * scale
         probs = torch.softmax(scores, dim=-1)
         return torch.matmul(probs, V)
@@ -527,6 +547,7 @@ def create_attention_baseline(
 
 def create_attention_sdpa(M: int, N: int, K: int, num_heads: int = 8, **_) -> KernelFn:
     """Create attention using PyTorch's scaled_dot_product_attention."""
+    logger.debug("create_attention_sdpa called with M=%s, N=%s, K=%s", M, N, K)
     seq_len = M
     head_dim = K // num_heads
     batch = 1
@@ -540,6 +561,7 @@ def create_attention_sdpa(M: int, N: int, K: int, num_heads: int = 8, **_) -> Ke
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         return torch.nn.functional.scaled_dot_product_attention(Q, K_mat, V)
 
     return fn
@@ -549,6 +571,7 @@ def create_moe_baseline(
     M: int, N: int, K: int, num_experts: int = 8, top_k: int = 2, **_
 ) -> KernelFn:
     """Create baseline MoE dispatch (naive loop over experts)."""
+    logger.debug("create_moe_baseline called with M=%s, N=%s, K=%s", M, N, K)
     batch = M
     hidden = K
     out_dim = N
@@ -565,6 +588,7 @@ def create_moe_baseline(
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         output = torch.zeros(batch, out_dim, dtype=torch.float16, device="mps")
         for b in range(batch):
             for k in range(top_k):
@@ -581,6 +605,7 @@ def create_moe_batched(
     M: int, N: int, K: int, num_experts: int = 8, top_k: int = 2, **_
 ) -> KernelFn:
     """Create batched MoE dispatch (group tokens by expert)."""
+    logger.debug("create_moe_batched called with M=%s, N=%s, K=%s", M, N, K)
     batch = M
     hidden = K
     out_dim = N
@@ -596,6 +621,7 @@ def create_moe_batched(
     mps_sync()
 
     def fn() -> torch.Tensor:
+        logger.debug("fn called")
         output = torch.zeros(batch, out_dim, dtype=torch.float16, device="mps")
 
         # Group by expert
@@ -648,6 +674,7 @@ KERNEL_TESTS: dict[str, tuple[KernelVariant, KernelVariant, tuple[int, int, int]
 
 def main() -> None:
     """Main entry point for A/B kernel testing."""
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="A/B test kernel implementations with statistical validation",
         formatter_class=argparse.RawDescriptionHelpFormatter,

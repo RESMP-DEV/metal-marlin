@@ -1,4 +1,5 @@
 """Test Viterbi quantization implementation."""
+import logging
 
 import numpy as np
 import pytest
@@ -11,8 +12,12 @@ from metal_marlin.quantization.viterbi_quant import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_viterbi_quantizer():
     """Quick sanity test for Viterbi quantizer."""
+    logger.info("running test_viterbi_quantizer")
     np.random.seed(42)
     tile = np.random.randn(16, 16).astype(np.float32)
     codebook = TrellisCodebook(bits=4)
@@ -36,6 +41,7 @@ def test_viterbi_quantizer():
 
 def test_quantize_tile_shape():
     """Test output shapes are correct."""
+    logger.info("running test_quantize_tile_shape")
     tile = np.random.randn(16, 16).astype(np.float32)
     codebook = TrellisCodebook(bits=3)
     scale = 1.0
@@ -50,6 +56,7 @@ def test_quantize_tile_shape():
 
 def test_viterbi_vs_greedy():
     """Viterbi should produce error <= greedy."""
+    logger.info("running test_viterbi_vs_greedy")
     tile = np.random.randn(16, 16).astype(np.float32)
     codebook = TrellisCodebook(bits=3)
     scale = 1.0

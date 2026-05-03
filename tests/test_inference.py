@@ -8,6 +8,7 @@ Requires:
     - PyTorch with MPS backend
     - PyObjC Metal bindings (for kernel dispatch tests)
 """
+import logging
 
 import pytest
 
@@ -46,6 +47,9 @@ if HAS_TORCH:
         # Metal kernels have compilation issues, skip dependent tests
         _METAL_KERNELS_OK = False
 
+
+logger = logging.getLogger(__name__)
+
 # Marker for tests requiring working Metal kernel dispatch
 requires_metal_kernels = pytest.mark.skipif(
     not _METAL_KERNELS_OK, reason="Metal GEMM kernels have compilation errors"
@@ -60,12 +64,14 @@ requires_metal_kernels = pytest.mark.skipif(
 @pytest.fixture
 def device() -> str:
     """Return MPS device."""
+    logger.debug("device called")
     return "mps"
 
 
 @pytest.fixture
 def small_config() -> dict:
     """Small model config for testing."""
+    logger.debug("small_config called")
     return {
         "vocab_size": 1000,
         "hidden_size": 256,
@@ -88,6 +94,7 @@ class TestMetalKVCache:
     @pytest.mark.smoke
     def test_cache_creation(self):
         """Test basic cache creation."""
+        logger.info("running test_cache_creation")
         config = MetalKVCacheConfig(
             num_layers=2,
             num_kv_heads=4,
@@ -102,6 +109,7 @@ class TestMetalKVCache:
 
     def test_cache_shapes(self):
         """Test cache tensor shapes."""
+        logger.info("running test_cache_shapes")
         config = MetalKVCacheConfig(
             num_layers=4,
             num_kv_heads=8,
@@ -117,6 +125,7 @@ class TestMetalKVCache:
 
     def test_cache_update(self):
         """Test cache update and retrieval."""
+        logger.info("running test_cache_update")
         config = MetalKVCacheConfig(
             num_layers=2,
             num_kv_heads=4,
@@ -139,6 +148,7 @@ class TestMetalKVCache:
 
     def test_cache_sequential_updates(self):
         """Test multiple sequential cache updates."""
+        logger.info("running test_cache_sequential_updates")
         config = MetalKVCacheConfig(
             num_layers=2,
             num_kv_heads=4,
@@ -167,6 +177,7 @@ class TestMetalKVCache:
 
     def test_cache_reset(self):
         """Test cache reset."""
+        logger.info("running test_cache_reset")
         config = MetalKVCacheConfig(
             num_layers=2,
             num_kv_heads=4,
@@ -199,6 +210,7 @@ class TestMetalQuantizedLinear:
     def test_layer_creation_fp4(self):
         """Test FP4 quantized layer creation."""
         # Dimensions must be divisible by group_size and pack_factor
+        logger.info("running test_layer_creation_fp4")
         layer = MetalQuantizedLinear(
             in_features=256,  # divisible by 128
             out_features=128,  # can be any size (kernel handles padding)
@@ -215,6 +227,7 @@ class TestMetalQuantizedLinear:
 
     def test_layer_creation_fp8(self):
         """Test FP8 quantized layer creation."""
+        logger.info("running test_layer_creation_fp8")
         layer = MetalQuantizedLinear(
             in_features=256,
             out_features=128,
@@ -228,6 +241,7 @@ class TestMetalQuantizedLinear:
 
     def test_layer_creation_int2(self):
         """Test INT2 quantized layer creation."""
+        logger.info("running test_layer_creation_int2")
         layer = MetalQuantizedLinear(
             in_features=256,
             out_features=256,
@@ -241,6 +255,7 @@ class TestMetalQuantizedLinear:
 
     def test_layer_with_bias(self):
         """Test quantized layer with bias."""
+        logger.info("running test_layer_with_bias")
         layer_with_bias = MetalQuantizedLinear(256, 128, bias=True)
         layer_no_bias = MetalQuantizedLinear(256, 128, bias=False)
 
@@ -250,6 +265,7 @@ class TestMetalQuantizedLinear:
     @requires_metal_kernels
     def test_forward_shape(self):
         """Test forward pass output shape."""
+        logger.info("running test_forward_shape")
         layer = MetalQuantizedLinear(256, 128, bits=4, group_size=128)
 
         # 2D input
@@ -274,6 +290,7 @@ class TestMetalRMSNorm:
     @pytest.mark.smoke
     def test_rms_norm_shape(self):
         """Test RMSNorm preserves shape."""
+        logger.info("running test_rms_norm_shape")
         norm = MetalRMSNorm(256).to("mps")
 
         x = torch.randn(4, 8, 256, device="mps")
@@ -283,6 +300,7 @@ class TestMetalRMSNorm:
 
     def test_rms_norm_numerical(self):
         """Test RMSNorm numerical correctness."""
+        logger.info("running test_rms_norm_numerical")
         hidden_size = 256
         norm = MetalRMSNorm(hidden_size).to("mps")
 
@@ -306,6 +324,7 @@ class TestMetalRoPE:
     @pytest.mark.smoke
     def test_rope_shape(self):
         """Test RoPE preserves shape."""
+        logger.info("running test_rope_shape")
         rope = MetalRoPE(dim=64, base=10000.0, max_seq_len=512).to("mps")
 
         # [batch, heads, seq, head_dim]
@@ -316,6 +335,7 @@ class TestMetalRoPE:
 
     def test_rope_with_offset(self):
         """Test RoPE with position offset."""
+        logger.info("running test_rope_with_offset")
         rope = MetalRoPE(dim=64, max_seq_len=512).to("mps")
 
         x = torch.randn(1, 4, 8, 64, device="mps", dtype=torch.float16)
@@ -331,6 +351,7 @@ class TestMetalRoPE:
 
     def test_rope_ratio(self):
         """Test RoPE with rope_ratio scaling."""
+        logger.info("running test_rope_ratio")
         rope1 = MetalRoPE(dim=64, rope_ratio=1.0, max_seq_len=512).to("mps")
         rope2 = MetalRoPE(dim=64, rope_ratio=2.0, max_seq_len=512).to("mps")
 
@@ -355,6 +376,7 @@ class TestMetalTransformerBlock:
     @requires_metal_kernels
     def test_block_forward(self):
         """Test transformer block forward pass."""
+        logger.info("running test_block_forward")
         block = MetalTransformerBlock(
             hidden_size=256,
             num_heads=4,
@@ -372,6 +394,7 @@ class TestMetalTransformerBlock:
     @requires_metal_kernels
     def test_block_with_kv_cache(self):
         """Test transformer block with KV cache."""
+        logger.info("running test_block_with_kv_cache")
         block = MetalTransformerBlock(
             hidden_size=256,
             num_heads=4,
@@ -407,6 +430,7 @@ class TestMetalTransformerBlock:
     @requires_metal_kernels
     def test_block_gqa(self):
         """Test transformer block with grouped query attention."""
+        logger.info("running test_block_gqa")
         block = MetalTransformerBlock(
             hidden_size=256,
             num_heads=8,
@@ -445,6 +469,7 @@ class SimpleMetalTransformer(nn.Module):
         intermediate_size: int = 512,
         max_position_embeddings: int = 512,
     ):
+        logger.debug("initializing %s with vocab_size=%s, hidden_size=%s, num_layers=%s, num_heads=%s, intermediate_size=%s", type(self).__name__, vocab_size, hidden_size, num_layers, num_heads, intermediate_size)
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
@@ -481,6 +506,7 @@ class SimpleMetalTransformer(nn.Module):
         kv_cache: MetalKVCache | None = None,
     ) -> torch.Tensor:
         """Forward pass returning logits."""
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         hidden_states = self.embed_tokens(input_ids)
 
         for i, layer in enumerate(self.layers):
@@ -493,6 +519,7 @@ class SimpleMetalTransformer(nn.Module):
 
     def create_kv_cache(self, batch_size: int = 1) -> MetalKVCache:
         """Create KV cache for this model."""
+        logger.debug("create_kv_cache called with batch_size=%s", batch_size)
         config = MetalKVCacheConfig(
             num_layers=self.num_layers,
             num_kv_heads=self.num_heads,
@@ -505,6 +532,7 @@ class SimpleMetalTransformer(nn.Module):
 @pytest.fixture
 def small_model() -> SimpleMetalTransformer:
     """Create tiny model for testing."""
+    logger.debug("small_model called")
     if not _METAL_KERNELS_OK:
         pytest.skip("Metal GEMM kernels have compilation errors")
     model = SimpleMetalTransformer(
@@ -529,6 +557,7 @@ class TestModelForward:
     @pytest.mark.smoke
     def test_forward_pass(self, small_model):
         """Test basic forward pass."""
+        logger.info("running test_forward_pass")
         input_ids = torch.randint(0, 1000, (1, 5), device="mps")
 
         logits = small_model(input_ids)
@@ -539,6 +568,7 @@ class TestModelForward:
 
     def test_forward_batch(self, small_model):
         """Test batched forward pass."""
+        logger.info("running test_forward_batch")
         input_ids = torch.randint(0, 1000, (4, 8), device="mps")
 
         logits = small_model(input_ids)
@@ -547,6 +577,7 @@ class TestModelForward:
 
     def test_forward_with_cache(self, small_model):
         """Test forward pass with KV cache."""
+        logger.info("running test_forward_with_cache")
         cache = small_model.create_kv_cache()
 
         # Prefill
@@ -576,6 +607,7 @@ class TestGeneration:
     @pytest.mark.smoke
     def test_greedy_generation(self, small_model):
         """Test greedy decoding generation."""
+        logger.info("running test_greedy_generation")
         input_ids = torch.randint(0, 1000, (1, 5), device="mps")
         max_new_tokens = 10
 
@@ -591,6 +623,7 @@ class TestGeneration:
 
     def test_sampling_generation(self, small_model):
         """Test temperature sampling generation."""
+        logger.info("running test_sampling_generation")
         input_ids = torch.randint(0, 1000, (1, 3), device="mps")
 
         generated = _simple_generate(
@@ -605,6 +638,7 @@ class TestGeneration:
 
     def test_generation_determinism(self, small_model):
         """Test that greedy generation is deterministic."""
+        logger.info("running test_generation_determinism")
         input_ids = torch.randint(0, 1000, (1, 5), device="mps")
 
         gen1 = _simple_generate(small_model, input_ids, max_new_tokens=10, do_sample=False)
@@ -640,6 +674,7 @@ def _simple_generate(
     Returns:
         [1, total_len] full sequence
     """
+    logger.debug("_simple_generate called with model=%s, input_ids=%s, max_new_tokens=%s", model, input_ids, max_new_tokens)
     cache = model.create_kv_cache()
 
     # Prefill

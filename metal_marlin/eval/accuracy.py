@@ -22,11 +22,15 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class KLResult:
@@ -42,6 +46,7 @@ class KLResult:
 
     def quality_rating(self) -> str:
         """Return quality rating based on KL divergence."""
+        logger.debug("quality_rating called")
         if self.kl_mean < 0.01:
             return "excellent"
         elif self.kl_mean < 0.05:
@@ -79,12 +84,14 @@ def compute_kl_divergence_np(
         (kl_mean, kl_max, kl_std, kl_p95)
     """
     # Apply temperature scaling
+    logger.debug("compute_kl_divergence_np called with original_logits=%s, quantized_logits=%s, temperature=%s", original_logits, quantized_logits, temperature)
     if temperature != 1.0:
         original_logits = original_logits / temperature
         quantized_logits = quantized_logits / temperature
 
     # Numerically stable log-softmax
     def log_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+        logger.debug("log_softmax called with x=%s, axis=%s", x, axis)
         x_max = np.max(x, axis=axis, keepdims=True)
         return x - x_max - np.log(np.sum(np.exp(x - x_max), axis=axis, keepdims=True))
 
@@ -142,6 +149,7 @@ def evaluate_kl_divergence(
     Returns:
         KLResult with comprehensive statistics
     """
+    logger.debug("evaluate_kl_divergence called with original_logits_fn=%s, quantized_logits_fn=%s, tokenizer=%s", original_logits_fn, quantized_logits_fn, tokenizer)
     all_kl: list[float] = []
     total_tokens = 0
 
@@ -228,6 +236,7 @@ def evaluate_kl_from_paths(
     Returns:
         KLResult with KL divergence statistics
     """
+    logger.debug("evaluate_kl_from_paths called with original_path=%s, quantized_path=%s, texts=%s", original_path, quantized_path, texts)
     from .perplexity import load_tokenizer, load_wikitext2
 
     if verbose:
@@ -256,6 +265,7 @@ def evaluate_kl_from_paths(
     from transformers import AutoModelForCausalLM
 
     def _load_transformers_model(path: Path) -> Any:
+        logger.info("_load_transformers_model called with path=%s", path)
         model = AutoModelForCausalLM.from_pretrained(
             str(path),
             torch_dtype=torch_dtype,
@@ -266,6 +276,7 @@ def evaluate_kl_from_paths(
         return model
 
     def _is_marlin_quantized(path: Path) -> bool:
+        logger.info("_is_marlin_quantized called with path=%s", path)
         config_path = path / "config.json"
         weights_path = path / "model.safetensors"
         if not config_path.exists() or not weights_path.exists():
@@ -306,7 +317,9 @@ def evaluate_kl_from_paths(
         max_length = min(max_length, int(max_position_embeddings))
 
     def make_logits_fn(model: Any, is_marlin: bool = False) -> Callable[[np.ndarray], np.ndarray]:
+        logger.debug("make_logits_fn called with model=%s, is_marlin=%s", model, is_marlin)
         def _logits_fn(input_ids: np.ndarray) -> np.ndarray:
+            logger.debug("_logits_fn called with input_ids=%s", input_ids)
             input_tensor = torch.from_numpy(input_ids).to(device)
             with torch.inference_mode():
                 if is_marlin:
@@ -331,6 +344,7 @@ def evaluate_kl_from_paths(
 
 def main():
     """CLI for KL divergence evaluation."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

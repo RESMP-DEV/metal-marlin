@@ -1,13 +1,18 @@
 """Test Metal dequantization shaders produce correct output."""
+import logging
 
 import numpy as np
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def small_indices_weight():
     """Create small indices weight for testing."""
+    logger.debug("small_indices_weight called")
     K, N = 32, 32  # 2x2 tiles
     bits = 3
     tiles_k, tiles_n = 2, 2
@@ -24,6 +29,7 @@ def small_indices_weight():
 
 def cpu_dequant_reference(indices, scales, grid, su, sv, K, N):
     """CPU reference implementation for verification."""
+    logger.info("cpu_dequant_reference called with indices=%s, scales=%s, grid=%s, su=%s", indices, scales, grid, su)
     tiles_k = (K + 15) // 16
     tiles_n = (N + 15) // 16
     n_levels = grid.shape[0]
@@ -46,6 +52,7 @@ def cpu_dequant_reference(indices, scales, grid, su, sv, K, N):
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
 def test_metal_matches_cpu(small_indices_weight):
     """Verify Metal output matches CPU reference."""
+    logger.info("running test_metal_matches_cpu")
     from metal_marlin.metal_dispatch import MetalKernelLibrary
     from metal_marlin.quantization.trellis_codebook import TrellisCodebook
     from metal_marlin.trellis.dispatch import dispatch_trellis_dequant_fused

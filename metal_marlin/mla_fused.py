@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -50,6 +51,9 @@ HAS_METAL_DISPATCH: bool = HAS_MPS and HAS_PYOBJC_METAL
 
 if TYPE_CHECKING:
     import torch
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants matching attention_mla_fused.metal
@@ -115,6 +119,7 @@ class MLAAttentionParams:
     def to_struct(self) -> np.ndarray:
         """Convert to numpy array for Metal buffer binding."""
         # Map kv_quant_mode to integer for Metal
+        logger.debug("to_struct called")
         kv_quant_mode_map = {"none": 0, "fp4": 1, "fp8": 2, "int8": 3}
         kv_quant_mode_int = kv_quant_mode_map.get(self.kv_quant_mode, 0)
         
@@ -146,6 +151,7 @@ _metal_lib: Any = None
 
 def _get_metal_library() -> Any:
     """Get or create the Metal kernel library."""
+    logger.debug("_get_metal_library called")
     global _metal_lib
     if _metal_lib is None:
         from metal_marlin.metal_dispatch import get_default_library
@@ -155,6 +161,7 @@ def _get_metal_library() -> Any:
 
 def _require_mps() -> None:
     """Raise if MPS is not available."""
+    logger.debug("_require_mps called")
     if not HAS_MPS:
         raise RuntimeError(
             "MLA fused kernel dispatch requires PyTorch with MPS backend.\n"
@@ -181,6 +188,7 @@ def _mla_fused_decode_numpy(
     This implements the same logic as the Metal kernel but on CPU.
     Used for testing and when Metal is unavailable.
     """
+    logger.debug("_mla_fused_decode_numpy called with hidden=%s, q_a_weights=%s, kv_a_weights=%s", hidden, q_a_weights, kv_a_weights)
     batch, seq_q, hidden_size = hidden.shape
     
     # Step 1: Compute Q via two-stage projection
@@ -236,6 +244,7 @@ def _apply_rope_numpy(
 ) -> np.ndarray:
     """Apply rotary position embedding (CPU fallback)."""
     # x: [batch, seq, rope_dim]
+    logger.debug("_apply_rope_numpy called with x=%s, params=%s", x, params)
     batch, seq, rope_dim = x.shape
     
     # Compute frequencies
@@ -312,6 +321,7 @@ def mla_fused_attention_decode(
     Returns:
         output: Attention output [batch, seq_q, hidden_size]
     """
+    logger.debug("mla_fused_attention_decode called with hidden=%s, q_a_weights_packed=%s, q_a_scales=%s", hidden, q_a_weights_packed, q_a_scales)
     _require_mps()
     
     from metal_marlin.metal_dispatch import dispatch_kernel
@@ -426,6 +436,7 @@ def mla_fused_attention_prefill(
     Returns:
         output: Attention output [batch, seq_q, hidden_size]
     """
+    logger.debug("mla_fused_attention_prefill called with hidden=%s, q_a_weights_packed=%s, q_a_scales=%s", hidden, q_a_weights_packed, q_a_scales)
     _require_mps()
     
     from metal_marlin.metal_dispatch import dispatch_kernel
@@ -543,6 +554,7 @@ def mla_chunked_prefill_attention(
     Returns:
         output: Attention output [batch, seq_q, hidden_size]
     """
+    logger.debug("mla_chunked_prefill_attention called with hidden=%s, q_a_weights_packed=%s, q_a_scales=%s", hidden, q_a_weights_packed, q_a_scales)
     _require_mps()
     
     batch_size, seq_len, hidden_size = hidden.shape
@@ -729,6 +741,7 @@ def create_glm_mla_params(
     Returns:
         MLAAttentionParams configured for GLM-4.7-Flash
     """
+    logger.debug("create_glm_mla_params called with batch=%s, seq_q=%s, seq_k=%s", batch, seq_q, seq_k)
     head_dim = head_dim or hidden_size // num_heads
     scale = head_dim ** -0.5
     

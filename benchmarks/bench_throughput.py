@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,11 +37,13 @@ class BenchmarkStats:
 
 
 def _require_torch() -> None:
+    logger.debug("_require_torch called")
     if not HAS_TORCH or torch is None:
         raise RuntimeError("PyTorch is required for throughput benchmarking.")
 
 
 def _get_device() -> str:
+    logger.debug("_get_device called")
     _require_torch()
     assert torch is not None
     if torch.backends.mps.is_available():
@@ -51,6 +54,7 @@ def _get_device() -> str:
 
 
 def _sync_device(device: str) -> None:
+    logger.debug("_sync_device called with device=%s", device)
     _require_torch()
     assert torch is not None
     if device == "mps":
@@ -61,6 +65,7 @@ def _sync_device(device: str) -> None:
 
 class MemoryTracker:
     def __init__(self, device: str):
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         _require_torch()
         assert torch is not None
         self.device = device
@@ -69,6 +74,7 @@ class MemoryTracker:
             torch.cuda.reset_peak_memory_stats()
 
     def update(self) -> None:
+        logger.debug("update called")
         _require_torch()
         assert torch is not None
         if self.device == "mps" and hasattr(torch.mps, "current_allocated_memory"):
@@ -81,14 +87,19 @@ class MemoryTracker:
 
     @property
     def peak_mb(self) -> float:
+        logger.debug("peak_mb called")
         return self.peak_bytes / (1024 * 1024)
 
 
 def _get_process_memory_bytes() -> int:
+    logger.debug("_get_process_memory_bytes called")
     import resource
     import sys
 
 import os
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -104,6 +115,7 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 
 def _percentile(values: list[float], quantile: float) -> float:
+    logger.debug("_percentile called with values=%s, quantile=%s", values, quantile)
     if not values:
         return 0.0
     sorted_vals = sorted(values)
@@ -112,6 +124,7 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 
 def _build_input_ids(tokenizer: Any, prompt: str, device: str):
+    logger.info("_build_input_ids starting")
     _require_torch()
     assert torch is not None
     if hasattr(tokenizer, "apply_chat_template") and getattr(tokenizer, "chat_template", None):
@@ -134,6 +147,7 @@ def _apply_quantized_weights(
     *,
     device: str,
 ) -> int:
+    logger.info("_apply_quantized_weights called with model=%s, quantized=%s", model, quantized)
     _require_torch()
     assert torch is not None
     loaded = 0
@@ -162,6 +176,7 @@ def _load_quantized_transformers_model(
     *,
     bits: int = 4,
 ) -> tuple[Any, Any]:
+    logger.info("_load_quantized_transformers_model called with model_id=%s, quantized_path=%s, device=%s", model_id, quantized_path, device)
     _require_torch()
     if AutoModelForCausalLM is None or AutoTokenizer is None:
         raise RuntimeError("transformers is required for quantized benchmarking.")
@@ -197,6 +212,7 @@ def _benchmark_transformers_model(
     num_runs: int,
     device: str,
 ) -> tuple[BenchmarkStats, int, str]:
+    logger.info("_benchmark_transformers_model starting with model=%s, tokenizer=%s, prompt=%s, num_tokens=%s", model, tokenizer, prompt, num_tokens)
     _require_torch()
     assert torch is not None
 
@@ -272,6 +288,7 @@ def _benchmark_quantized_model(
     num_tokens: int,
     num_runs: int,
 ) -> tuple[BenchmarkStats, int, str]:
+    logger.info("_benchmark_quantized_model starting with model_id=%s, quantized_path=%s, prompt=%s, num_tokens=%s", model_id, quantized_path, prompt, num_tokens)
     _require_torch()
     assert torch is not None
     device = _get_device()
@@ -296,6 +313,7 @@ def _benchmark_bf16_model(
     num_tokens: int,
     num_runs: int,
 ) -> tuple[BenchmarkStats, int, str]:
+    logger.info("_benchmark_bf16_model starting with model_path=%s, prompt=%s, num_tokens=%s, num_runs=%s", model_path, prompt, num_tokens, num_runs)
     _require_torch()
     assert torch is not None
 
@@ -334,6 +352,7 @@ def benchmark_model(
     num_runs: int = 5,
 ) -> dict:
     """Benchmark tokens/second for quantized model."""
+    logger.info("benchmark_model starting with model_id=%s, quantized_path=%s, prompt=%s, num_tokens=%s", model_id, quantized_path, prompt, num_tokens)
     stats, prompt_tokens, device = _benchmark_quantized_model(
         model_id=model_id,
         quantized_path=quantized_path,
@@ -367,6 +386,7 @@ def benchmark_bf16_model(
     num_runs: int = 5,
 ) -> dict:
     """Benchmark tokens/second for BF16 model."""
+    logger.info("benchmark_bf16_model starting with model_path=%s, prompt=%s, num_tokens=%s, num_runs=%s", model_path, prompt, num_tokens, num_runs)
     stats, prompt_tokens, device = _benchmark_bf16_model(
         model_path=model_path,
         prompt=prompt,
@@ -398,6 +418,7 @@ def benchmark_compare(
     num_tokens: int,
     num_runs: int,
 ) -> dict[str, dict]:
+    logger.info("benchmark_compare starting with quantized_path=%s, bf16_path=%s, prompt=%s, num_tokens=%s", quantized_path, bf16_path, prompt, num_tokens)
     quantized = benchmark_model(
         bf16_path,
         quantized_path,
@@ -415,6 +436,7 @@ def benchmark_compare(
 
 
 def _format_report(label: str, result: dict) -> str:
+    logger.debug("_format_report called with label=%s, result=%s", label, result)
     latency = result["latency_ms"]
     return (
         f"{label} ({result['backend']} on {result['device']}):\n"
@@ -427,6 +449,7 @@ def _format_report(label: str, result: dict) -> str:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Throughput benchmark (quantized vs BF16).")
     parser.add_argument("--quantized", required=True, help="Path to quantized model directory")
     parser.add_argument("--bf16", required=True, help="Path or HF ID for BF16 model")

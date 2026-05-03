@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 import numpy as np
@@ -37,18 +38,24 @@ except ImportError:
     swiglu_fused_metal = None  # type: ignore[misc]
 
 
+
+logger = logging.getLogger(__name__)
+
 def _silu_numpy(x: np.ndarray) -> np.ndarray:
     """SiLU (Swish) activation: x * sigmoid(x)."""
+    logger.debug("_silu_numpy called with x=%s", x)
     return x * (1.0 / (1.0 + np.exp(-x)))
 
 
 def _gelu_numpy(x: np.ndarray) -> np.ndarray:
     """GELU activation using the approximate formula."""
+    logger.debug("_gelu_numpy called with x=%s", x)
     return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3)))
 
 
 def _relu_numpy(x: np.ndarray) -> np.ndarray:
     """ReLU activation."""
+    logger.debug("_relu_numpy called with x=%s", x)
     return np.maximum(x, 0)
 
 
@@ -73,6 +80,7 @@ class _MarlinMLPBase:
         quant_type: str,
         group_size: int,
     ) -> None:
+        logger.debug("_init_layers called with hidden_size=%s, intermediate_size=%s, activation=%s", hidden_size, intermediate_size, activation)
         self.gated = gated
         self.activation = activation
 
@@ -110,6 +118,7 @@ class _MarlinMLPBase:
         )
 
     def _forward(self, x: Any) -> Any:
+        logger.debug("_forward called with x=%s", x)
         if self.gated and self.gate_proj is not None:
             # Use fused SwiGLU path for MPS tensors when available
             if (
@@ -133,12 +142,14 @@ class _MarlinMLPBase:
         return self.down_proj(x)
 
     def _activate(self, x: Any) -> Any:
+        logger.debug("_activate called with x=%s", x)
         if HAS_TORCH and torch is not None:
             return self._activate_torch(x)
         return self._activate_numpy(x)
 
     def _activate_torch(self, x: Any) -> Any:
         """PyTorch activation functions with Metal dispatch for MPS tensors."""
+        logger.debug("_activate_torch called with x=%s", x)
         assert torch is not None
 
         # Use Metal activation functions for MPS tensors when available
@@ -162,6 +173,7 @@ class _MarlinMLPBase:
 
     def _activate_numpy(self, x: Any) -> Any:
         """Numpy fallback activation functions."""
+        logger.debug("_activate_numpy called with x=%s", x)
         x_np = np.asarray(x)
         if self.activation == "silu":
             return _silu_numpy(x_np)
@@ -204,12 +216,14 @@ if HAS_TORCH and torch is not None:
             quant_type: str = "fp4",
             group_size: int = 128,
         ):
+            logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, activation=%s, gated=%s, quant_type=%s", type(self).__name__, hidden_size, intermediate_size, activation, gated, quant_type)
             torch.nn.Module.__init__(self)
             self._init_layers(
                 hidden_size, intermediate_size, activation, gated, quant_type, group_size
             )
 
         def forward(self, x: Any) -> Any:
+            logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
             return self._forward(x)
 
 else:
@@ -246,6 +260,7 @@ else:
             quant_type: str = "fp4",
             group_size: int = 128,
         ):
+            logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, activation=%s, gated=%s, quant_type=%s", type(self).__name__, hidden_size, intermediate_size, activation, gated, quant_type)
             self._init_layers(
                 hidden_size, intermediate_size, activation, gated, quant_type, group_size
             )

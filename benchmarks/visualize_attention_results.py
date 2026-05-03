@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -25,12 +29,14 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 
 def load_results(filepath: Path) -> list[dict[str, Any]]:
     """Load benchmark results from JSON file."""
+    logger.info("load_results called with filepath=%s", filepath)
     with open(filepath) as f:
         return json.load(f)
 
 
 def print_summary(results: list[dict[str, Any]]) -> None:
     """Print a summary of benchmark results."""
+    logger.debug("print_summary called with results=%s", results)
     print("\n" + "=" * 80)
     print("ATTENTION BENCHMARK SUMMARY")
     print("=" * 80)
@@ -66,6 +72,7 @@ def print_summary(results: list[dict[str, Any]]) -> None:
 
 def print_scaling_analysis(results: list[dict[str, Any]]) -> None:
     """Analyze how implementations scale with sequence length."""
+    logger.debug("print_scaling_analysis called with results=%s", results)
     print("\n" + "=" * 80)
     print("SCALING ANALYSIS (Sequence Length)")
     print("=" * 80)
@@ -95,6 +102,7 @@ def print_scaling_analysis(results: list[dict[str, Any]]) -> None:
 
 def print_memory_analysis(results: list[dict[str, Any]]) -> None:
     """Analyze memory usage patterns."""
+    logger.debug("print_memory_analysis called with results=%s", results)
     print("\n" + "=" * 80)
     print("MEMORY USAGE ANALYSIS")
     print("=" * 80)
@@ -119,6 +127,7 @@ def print_memory_analysis(results: list[dict[str, Any]]) -> None:
 
 def print_accuracy_analysis(results: list[dict[str, Any]]) -> None:
     """Print accuracy comparison (max error vs reference)."""
+    logger.debug("print_accuracy_analysis called with results=%s", results)
     print("\n" + "=" * 80)
     print("ACCURACY ANALYSIS")
     print("=" * 80)
@@ -137,6 +146,7 @@ def print_accuracy_analysis(results: list[dict[str, Any]]) -> None:
 
 def print_theoretical_analysis(results: list[dict[str, Any]]) -> None:
     """Print theoretical analysis of attention mechanisms."""
+    logger.debug("print_theoretical_analysis called with results=%s", results)
     print("\n" + "=" * 80)
     print("THEORETICAL COMPLEXITY COMPARISON")
     print("=" * 80)
@@ -165,6 +175,7 @@ def print_theoretical_analysis(results: list[dict[str, Any]]) -> None:
 
 def print_recommendations(results: list[dict[str, Any]]) -> None:
     """Print recommendations based on benchmark results."""
+    logger.debug("print_recommendations called with results=%s", results)
     print("\n" + "=" * 80)
     print("RECOMMENDATIONS")
     print("=" * 80)
@@ -195,6 +206,7 @@ def print_recommendations(results: list[dict[str, Any]]) -> None:
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Visualize attention benchmark results")
     parser.add_argument("results_file", type=Path, help="Path to JSON results file")
     parser.add_argument(

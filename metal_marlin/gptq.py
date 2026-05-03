@@ -27,6 +27,7 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -46,6 +47,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 
+
+logger = logging.getLogger(__name__)
+
 def _cholesky_numpy(
     H_damped: NDArray[np.float64],
     H: NDArray[np.float64],
@@ -63,6 +67,7 @@ def _cholesky_numpy(
     Returns:
         Lower triangular Cholesky factor L where H = L @ L^T
     """
+    logger.debug("_cholesky_numpy called with H_damped=%s, H=%s, diag_mean=%s", H_damped, H, diag_mean)
     try:
         L = np.linalg.cholesky(H_damped)
     except np.linalg.LinAlgError:
@@ -131,6 +136,7 @@ class GPTQQuantizer:
             block_size: Number of columns to process in each block for the
                 lazy batch update optimization. Default: 128.
         """
+        logger.debug("initializing %s with bits=%s, group_size=%s, sym=%s, actorder=%s, damp=%s", type(self).__name__, bits, group_size, sym, actorder, damp)
         if bits not in (2, 3, 4, 8):
             raise ValueError(f"bits must be 2, 3, 4, or 8, got {bits}")
         if group_size != -1 and group_size <= 0:
@@ -177,6 +183,7 @@ class GPTQQuantizer:
         Raises:
             ValueError: If dimensions don't match or Hessian is invalid.
         """
+        logger.info("quantize_weight called with W=%s, H=%s", W, H)
         W = np.asarray(W, dtype=np.float64)
         H = np.asarray(H, dtype=np.float64)
 
@@ -346,6 +353,7 @@ def compute_hessian(
     Returns:
         Hessian matrix [in_features, in_features].
     """
+    logger.debug("compute_hessian called with activations=%s, normalize=%s", activations, normalize)
     X = np.asarray(activations, dtype=np.float64)
     if X.ndim != 2:
         raise ValueError(f"activations must be 2D, got shape {X.shape}")
@@ -384,6 +392,7 @@ def compute_hessian_streaming(
         ...     add_batch(H, batch)
         >>> H /= total_samples  # Final normalization
     """
+    logger.debug("compute_hessian_streaming called with in_features=%s, normalize_count=%s", in_features, normalize_count)
     H = np.zeros((in_features, in_features), dtype=np.float64)
 
     def add_batch(
@@ -391,6 +400,7 @@ def compute_hessian_streaming(
         activations: NDArray[np.floating],
     ) -> None:
         """Add batch contribution to Hessian accumulator (in-place)."""
+        logger.debug("add_batch called with H_acc=%s, activations=%s", H_acc, activations)
         X = np.asarray(activations, dtype=np.float64)
         H_acc += 2.0 * (X.T @ X)
 
@@ -423,6 +433,7 @@ def quantize_layer_gptq(
     Returns:
         GPTQResult with quantized weights and metadata.
     """
+    logger.info("quantize_layer_gptq called with W=%s, activations=%s, bits=%s, group_size=%s", W, activations, bits, group_size)
     W = np.asarray(W, dtype=np.float64)
     activations = np.asarray(activations, dtype=np.float64)
 
@@ -466,6 +477,7 @@ def pack_gptq_int4(
         Tuple of (packed_weights, scales, zeros) where packed_weights is
         uint32 with 8 INT4 values packed per word.
     """
+    logger.info("pack_gptq_int4 called with Q=%s, scales=%s, zeros=%s, group_size=%s", Q, scales, zeros, group_size)
     Q = np.asarray(Q, dtype=np.float32)
     out_features, in_features = Q.shape
 
@@ -523,6 +535,7 @@ def quantize_rtn(
     Returns:
         GPTQResult with quantized weights (no actorder/perm).
     """
+    logger.info("quantize_rtn called with W=%s, bits=%s, group_size=%s, sym=%s", W, bits, group_size, sym)
     W = np.asarray(W, dtype=np.float64)
     out_features, in_features = W.shape
 
@@ -602,6 +615,7 @@ def compare_gptq_vs_rtn(
     Returns:
         Dict with comparison metrics.
     """
+    logger.debug("compare_gptq_vs_rtn called with W=%s, H=%s, bits=%s", W, H, bits)
     W = np.asarray(W, dtype=np.float64)
 
     # RTN baseline

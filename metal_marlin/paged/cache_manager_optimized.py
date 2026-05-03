@@ -7,6 +7,7 @@ and Priority-based eviction for long-running servers.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -15,6 +16,9 @@ from typing import Any
 from .cache_manager import EvictionStats, PagedKVCache, SequenceEvictionMetadata
 from .kv_block import KVBlockConfig
 
+
+
+logger = logging.getLogger(__name__)
 
 class EvictionPolicy(Enum):
     """Cache eviction policy."""
@@ -65,6 +69,7 @@ class WeightedScore:
     """Helper for weighted score calculation."""
     @staticmethod
     def calculate(recency: float, frequency: float, size: float, fragmentation: float, config: EvictionConfig) -> float:
+        logger.debug("calculate called with recency=%s, frequency=%s, size=%s", recency, frequency, size)
         return (
             recency * config.recency_weight +
             frequency * config.frequency_weight +
@@ -74,6 +79,7 @@ class WeightedScore:
 
     @staticmethod
     def normalize_scores(scores: list[float]) -> list[float]:
+        logger.debug("normalize_scores called with scores=%s", scores)
         if not scores:
             return []
         min_score = min(scores)
@@ -100,6 +106,7 @@ class PagedKVCacheOptimized(PagedKVCache):
         eviction_policy: Any = None,
     ) -> None:
         # Initialize base
+        logger.debug("initializing %s with config=%s, num_blocks=%s, use_multimodal=%s, eviction_config=%s, eviction_policy=%s", type(self).__name__, config, num_blocks, use_multimodal, eviction_config, eviction_policy)
         super().__init__(
             config=config,
             num_blocks=num_blocks,
@@ -121,6 +128,7 @@ class PagedKVCacheOptimized(PagedKVCache):
     def add_sequence(self, seq_id: int, priority: int = 0, ttl: float | None = None) -> bool:
         """Add a new sequence with priority and TTL."""
         # Ensure we have at least one block available
+        logger.debug("add_sequence called with seq_id=%s, priority=%s, ttl=%s", seq_id, priority, ttl)
         if self.allocator.num_free == 0:
             if not self._evict(num_blocks_needed=1):
                 return False
@@ -145,6 +153,7 @@ class PagedKVCacheOptimized(PagedKVCache):
 
     def fork_sequence(self, src_id: int, dst_id: int) -> bool:
         """Fork sequence with zero-copy COW."""
+        logger.debug("fork_sequence called with src_id=%s, dst_id=%s", src_id, dst_id)
         success = super().fork_sequence(src_id, dst_id)
         if success:
             # Update metadata to be OptimizedSequenceEvictionMetadata
@@ -169,6 +178,7 @@ class PagedKVCacheOptimized(PagedKVCache):
 
     def _compute_eviction_score(self, seq_id: int, override_config: EvictionConfig | None = None) -> float:
         """Compute eviction score for a sequence. Higher score = LESS likely to evict."""
+        logger.debug("_compute_eviction_score called with seq_id=%s, override_config=%s", seq_id, override_config)
         if seq_id not in self._eviction_metadata:
             return 0.0
             
@@ -218,6 +228,7 @@ class PagedKVCacheOptimized(PagedKVCache):
     def _evict(self, num_blocks_needed: int) -> bool:
         """Optimized eviction."""
         # Optimization: cleanup expired first to free space without forced eviction
+        logger.debug("_evict called with num_blocks_needed=%s", num_blocks_needed)
         if self.eviction_config.enable_ttl:
             self.cleanup_expired()
             if self.allocator.num_free >= num_blocks_needed:
@@ -357,11 +368,13 @@ class PagedKVCacheOptimized(PagedKVCache):
 
     def _update_fragmentation_info(self):
         """Update fragmentation stats."""
+        logger.debug("_update_fragmentation_info called")
         stats = self.get_stats()
         self._fragmentation_info['fragmentation_ratio'] = stats.fragmentation_ratio
 
     def _detect_workload_pattern(self):
         """Detect workload pattern for adaptive policy."""
+        logger.info("_detect_workload_pattern called")
         if not self._eviction_metadata:
             return "working_set"
             
@@ -377,6 +390,7 @@ class PagedKVCacheOptimized(PagedKVCache):
         
     def cleanup_expired(self) -> int:
         """Cleanup expired sequences."""
+        logger.debug("cleanup_expired called")
         if not self.eviction_config.enable_ttl:
             return 0
         
@@ -392,16 +406,20 @@ class PagedKVCacheOptimized(PagedKVCache):
         return len(expired)
 
     def get_eviction_stats(self) -> EvictionStats:
+        logger.debug("get_eviction_stats called")
         return self._eviction_stats
         
     def get_detailed_stats(self) -> dict:
+        logger.debug("get_detailed_stats called")
         return self._detailed_stats
         
     def get_memory_pressure(self) -> float:
+        logger.debug("get_memory_pressure called")
         return 1.0 - (self.allocator.num_free / self.num_blocks)
         
     def do_proactive_eviction(self, target_pressure: float) -> int:
         """Evict until pressure <= target_pressure."""
+        logger.debug("do_proactive_eviction called with target_pressure=%s", target_pressure)
         current_free = self.allocator.num_free
         target_free = int((1.0 - target_pressure) * self.num_blocks)
         needed = target_free - current_free

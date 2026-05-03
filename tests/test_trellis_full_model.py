@@ -5,6 +5,7 @@ attention projections, forward pass correctness, and memory usage.
 """
 
 from __future__ import annotations
+import logging
 
 import gc
 
@@ -48,12 +49,14 @@ requires_model_files = pytest.mark.skipif(
 @pytest.fixture
 def model_path():
     """Model path for testing."""
+    logger.debug("model_path called")
     return MODEL_PATH
 
 
 @pytest.fixture
 def config(model_path):
     """Load model configuration."""
+    logger.debug("config called with model_path=%s", model_path)
     if not HAS_CONFIG:
         pytest.skip("TrellisModelConfig not available")
 
@@ -66,6 +69,7 @@ def config(model_path):
 @pytest.fixture
 def model_loader(model_path):
     """Create model loader."""
+    logger.info("model_loader called with model_path=%s", model_path)
     if not HAS_TRELLIS_MODEL:
         pytest.skip("TrellisModel not available")
 
@@ -78,6 +82,7 @@ def model_loader(model_path):
 @requires_model_files
 def test_config_layer_counts(config):
     """Test model configuration has correct layer counts."""
+    logger.info("running test_config_layer_counts")
     assert config.num_hidden_layers == 47, f"Expected 47 layers, got {config.num_hidden_layers}"
     assert config.hidden_size == 2048, f"Expected hidden_size=2048, got {config.hidden_size}"
     assert config.num_attention_heads == 32, f"Expected 32 heads, got {config.num_attention_heads}"
@@ -88,6 +93,7 @@ def test_config_layer_counts(config):
 def test_moe_layer_detection(config):
     """Test MoE layer detection - layer 0 is dense, 1-46 are MoE."""
     # Layer 0 should be dense
+    logger.info("running test_moe_layer_detection")
     assert not config.is_moe_layer(0), "Layer 0 should be dense (first layer)"
 
     # Layers 1-46 should be MoE
@@ -103,6 +109,7 @@ def test_moe_layer_detection(config):
 @pytest.mark.slow
 def test_model_loads_all_layers(model_path, config):
     """Test TrellisModel.from_pretrained() loads all 47 layers."""
+    logger.info("running test_model_loads_all_layers")
     if not HAS_MPS:
         pytest.skip("MPS required for model loading")
 
@@ -130,6 +137,7 @@ def test_model_loads_all_layers(model_path, config):
 @pytest.mark.slow
 def test_layer_mlp_types(model_loader, config):
     """Test each layer has correct MLP type (dense for 0, MoE for 1-46)."""
+    logger.info("running test_layer_mlp_types")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -173,6 +181,7 @@ def test_layer_mlp_types(model_loader, config):
 @pytest.mark.slow
 def test_attention_projection_shapes(model_loader, config):
     """Test attention projections have correct shapes."""
+    logger.info("running test_attention_projection_shapes")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -236,6 +245,7 @@ def test_attention_projection_shapes(model_loader, config):
 @pytest.mark.slow
 def test_forward_pass_shapes(model_path, config):
     """Test forward pass produces output of correct shape."""
+    logger.info("running test_forward_pass_shapes")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -276,6 +286,7 @@ def test_forward_pass_shapes(model_path, config):
 @pytest.mark.slow
 def test_memory_usage(model_path, config):
     """Test memory usage is reasonable (~3-4 bytes per parameter)."""
+    logger.info("running test_memory_usage")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -318,6 +329,7 @@ def test_memory_usage(model_path, config):
 @pytest.mark.slow
 def test_model_with_kv_cache(model_path, config):
     """Test model forward pass with KV cache for generation."""
+    logger.info("running test_model_with_kv_cache")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -380,6 +392,7 @@ def test_model_with_kv_cache(model_path, config):
 @pytest.mark.slow
 def test_model_deterministic(model_path, config):
     """Test model produces deterministic outputs with same input."""
+    logger.info("running test_model_deterministic")
     if not HAS_MPS:
         pytest.skip("MPS required")
 
@@ -416,3 +429,6 @@ def test_model_deterministic(model_path, config):
 # Import TrellisDecoderLayer for tests that need it
 if HAS_TRELLIS_MODEL:
     from metal_marlin.trellis.model import TrellisDecoderLayer
+
+
+logger = logging.getLogger(__name__)

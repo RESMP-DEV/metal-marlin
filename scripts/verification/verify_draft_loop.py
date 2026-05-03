@@ -10,6 +10,7 @@ This script checks that:
 This is a static code verification that doesn't require running the actual models.
 """
 
+import logging
 import re
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from pathlib import Path
 def verify_implementation():
     """Verify the draft model generation loop is complete."""
     
+    logger.debug("verify_implementation called")
     print("Verifying Speculative Decoding Draft Model Generation Loop Implementation")
     print("=" * 70)
     
@@ -127,3 +129,6 @@ def verify_implementation():
 if __name__ == "__main__":
     import sys
     sys.exit(verify_implementation())
+
+
+logger = logging.getLogger(__name__)

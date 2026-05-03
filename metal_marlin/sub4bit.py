@@ -25,6 +25,7 @@ Reference implementations:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 
@@ -36,6 +37,9 @@ try:
 except ImportError:
     HAS_SCIPY = False
     stats = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # INT2 Quantization (4 levels: -1.5, -0.5, 0.5, 1.5 scaled)
@@ -66,6 +70,7 @@ def quantize_int2(
         - packed: [out_features, in_features // 16] as uint32
         - scales: [out_features, in_features // group_size] as float16
     """
+    logger.info("quantize_int2 called with weight=%s, group_size=%s", weight, group_size)
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -107,6 +112,7 @@ def dequantize_int2(
     group_size: int = 64,
 ) -> np.ndarray:
     """Dequantize INT2 packed weights back to float16."""
+    logger.info("dequantize_int2 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     out_feat = packed.shape[0]
     in_feat = packed.shape[1] * 16
 
@@ -155,6 +161,7 @@ def quantize_int3(
         - packed: [out_features, ceil(in_features / 10)] as uint32
         - scales: [out_features, in_features // group_size] as float16
     """
+    logger.info("quantize_int3 called with weight=%s, group_size=%s", weight, group_size)
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -210,6 +217,7 @@ def dequantize_int3(
     original_in_feat: int | None = None,
 ) -> np.ndarray:
     """Dequantize INT3 packed weights back to float16."""
+    logger.info("dequantize_int3 called with packed=%s, scales=%s, group_size=%s, original_in_feat=%s", packed, scales, group_size, original_in_feat)
     out_feat = packed.shape[0]
     in_feat_padded = packed.shape[1] * 10
 
@@ -258,6 +266,7 @@ def _compute_nf_levels(n_bits: int) -> np.ndarray:
 
     These minimize MSE for Gaussian-distributed inputs, per the NF4 paper.
     """
+    logger.debug("_compute_nf_levels called with n_bits=%s", n_bits)
     if HAS_SCIPY:
         n_levels = 2**n_bits
         # Compute quantiles at midpoints of n_levels equal-probability bins
@@ -312,6 +321,7 @@ def quantize_nf2(
         - packed: [out_features, in_features // 16] as uint32
         - scales: [out_features, in_features // group_size] as float16
     """
+    logger.info("quantize_nf2 called with weight=%s, group_size=%s", weight, group_size)
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -354,6 +364,7 @@ def dequantize_nf2(
     group_size: int = 64,
 ) -> np.ndarray:
     """Dequantize NF2 packed weights back to float16."""
+    logger.info("dequantize_nf2 called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     out_feat = packed.shape[0]
     in_feat = packed.shape[1] * 16
 
@@ -398,6 +409,7 @@ def quantize_nf3(
         - packed: [out_features, ceil(in_features / 10)] as uint32
         - scales: [out_features, in_features // group_size] as float16
     """
+    logger.info("quantize_nf3 called with weight=%s, group_size=%s", weight, group_size)
     w = weight.astype(np.float32)
     out_feat, in_feat = w.shape
 
@@ -452,6 +464,7 @@ def dequantize_nf3(
     original_in_feat: int | None = None,
 ) -> np.ndarray:
     """Dequantize NF3 packed weights back to float16."""
+    logger.info("dequantize_nf3 called with packed=%s, scales=%s, group_size=%s, original_in_feat=%s", packed, scales, group_size, original_in_feat)
     out_feat = packed.shape[0]
     in_feat_padded = packed.shape[1] * 10
 
@@ -504,6 +517,7 @@ def compute_quantization_error(
     Returns:
         Dict with mse, rmse, max_error, mean_relative_error
     """
+    logger.info("compute_quantization_error called with original=%s, packed=%s, scales=%s, quant_type=%s", original, packed, scales, quant_type)
     dequant_funcs = {
         "int2": dequantize_int2,
         "int3": dequantize_int3,
@@ -555,6 +569,7 @@ def estimate_compression_ratio(
     Returns:
         Compression ratio vs FP16 (e.g., 8.0 means 8x smaller)
     """
+    logger.debug("estimate_compression_ratio called with shape=%s, quant_type=%s, group_size=%s", shape, quant_type, group_size)
     out_feat, in_feat = shape
 
     # Original size in bits (FP16 = 16 bits)
@@ -593,6 +608,7 @@ def select_sub4bit_format(
         One of 'int2', 'int3', 'nf2', 'nf3'
     """
     # Analyze tensor distribution
+    logger.debug("select_sub4bit_format called with tensor=%s, target_compression=%s, quality_priority=%s", tensor, target_compression, quality_priority)
     vals = tensor.flatten().astype(np.float32)
 
     if HAS_SCIPY:
@@ -623,21 +639,25 @@ def select_sub4bit_format(
 
 def get_int2_lut() -> np.ndarray:
     """Get INT2 dequantization lookup table for Metal shaders."""
+    logger.debug("get_int2_lut called")
     return INT2_LEVELS.copy()
 
 
 def get_int3_lut() -> np.ndarray:
     """Get INT3 dequantization lookup table for Metal shaders."""
+    logger.debug("get_int3_lut called")
     return INT3_LEVELS.copy()
 
 
 def get_nf2_lut() -> np.ndarray:
     """Get NF2 dequantization lookup table for Metal shaders."""
+    logger.debug("get_nf2_lut called")
     return NF2_LEVELS.copy()
 
 
 def get_nf3_lut() -> np.ndarray:
     """Get NF3 dequantization lookup table for Metal shaders."""
+    logger.debug("get_nf3_lut called")
     return NF3_LEVELS.copy()
 
 
@@ -648,6 +668,7 @@ def get_nf3_lut() -> np.ndarray:
 
 def main():
     """Test sub-4-bit quantization on random tensor."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(description="Test sub-4-bit quantization")

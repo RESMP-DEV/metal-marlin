@@ -17,6 +17,7 @@ Requirements:
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -34,6 +35,9 @@ from .metal_dispatch import (
     mps_tensor_to_metal_buffer,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Check MPS availability
 # ---------------------------------------------------------------------------
@@ -41,6 +45,7 @@ from .metal_dispatch import (
 
 def require_mps() -> None:
     """Raise if PyTorch MPS is not available."""
+    logger.debug("require_mps called")
     if not torch.backends.mps.is_available():
         raise RuntimeError(
             "Metal inference requires PyTorch with MPS backend.\n"
@@ -50,6 +55,7 @@ def require_mps() -> None:
 
 def _mps_buffer(tensor: torch.Tensor, device: Any) -> Any:
     """Get a zero-copy MTLBuffer for an MPS tensor."""
+    logger.debug("_mps_buffer called with tensor=%s, device=%s", tensor, device)
     return mps_tensor_to_metal_buffer(tensor, device)
 
 
@@ -97,6 +103,7 @@ class MetalQuantizedLinear(nn.Module):
         bias: bool = False,
         max_batch_size: int = 1,
     ):
+        logger.debug("initializing %s with in_features=%s, out_features=%s, bits=%s, group_size=%s, bias=%s", type(self).__name__, in_features, out_features, bits, group_size, bias)
         super().__init__()
         require_mps()
 
@@ -184,6 +191,7 @@ class MetalQuantizedLinear(nn.Module):
         This is ONLY used for decode (M=1) where PyObjC overhead dominates.
         For batched inputs, the custom Metal kernel is more efficient.
         """
+        logger.info("_ensure_dequant_weight called")
         if self._dequant_weight is not None:
             return self._dequant_weight
 
@@ -209,6 +217,7 @@ class MetalQuantizedLinear(nn.Module):
     @property
     def lib(self) -> MetalKernelLibrary:
         """Lazily get Metal kernel library."""
+        logger.debug("lib called")
         if self._lib is None:
             self._lib = get_default_library()
         return self._lib
@@ -223,6 +232,7 @@ class MetalQuantizedLinear(nn.Module):
             Output tensor [*, out_features] as float16
         """
         # Handle batched input
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         orig_shape = x.shape
         orig_dtype = x.dtype
         x_2d = x.reshape(-1, self.in_features)
@@ -332,6 +342,7 @@ class MetalQuantizedLinear(nn.Module):
         Returns:
             Quantized MetalQuantizedLinear layer
         """
+        logger.debug("from_float called with linear=%s, bits=%s, group_size=%s", linear, bits, group_size)
         require_mps()
 
         out_features, in_features = linear.weight.shape
@@ -379,6 +390,7 @@ class MetalQuantizedLinear(nn.Module):
             (packed [in_features // 8, out_features] uint32 (K-dim packing),
              scales [in_features // group_size, out_features] float16)
         """
+        logger.info("_quantize_fp4 called with weight=%s, group_size=%s", weight, group_size)
         out_features, in_features = weight.shape
 
         # Transpose to [K, N] for kernel layout
@@ -415,6 +427,7 @@ class MetalQuantizedLinear(nn.Module):
     @staticmethod
     def _quantize_fp8(weight: torch.Tensor, group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize weight to FP8 E4M3 format."""
+        logger.info("_quantize_fp8 called with weight=%s, group_size=%s", weight, group_size)
         out_features, in_features = weight.shape
 
         w = weight.T.contiguous()
@@ -443,6 +456,7 @@ class MetalQuantizedLinear(nn.Module):
     @staticmethod
     def _quantize_int2(weight: torch.Tensor, group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Quantize weight to INT2 format (extreme compression)."""
+        logger.info("_quantize_int2 called with weight=%s, group_size=%s", weight, group_size)
         out_features, in_features = weight.shape
 
         w = weight.T.contiguous()
@@ -470,6 +484,7 @@ class MetalQuantizedLinear(nn.Module):
         return packed, scales.to(torch.float16)
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"in_features={self.in_features}, "
             f"out_features={self.out_features}, "
@@ -494,6 +509,7 @@ class MetalRMSNorm(nn.Module):
     def __init__(
         self, hidden_size: int, eps: float = 1e-6, device: str | torch.device | None = None
     ):
+        logger.debug("initializing %s with hidden_size=%s, eps=%s, device=%s", type(self).__name__, hidden_size, eps, device)
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
@@ -501,6 +517,7 @@ class MetalRMSNorm(nn.Module):
             self.to(device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return self.weight * x
@@ -524,6 +541,7 @@ class MetalRoPE(nn.Module):
         rope_ratio: float = 1.0,
         max_seq_len: int = 4096,
     ):
+        logger.debug("initializing %s with dim=%s, base=%s, rope_ratio=%s, max_seq_len=%s", type(self).__name__, dim, base, rope_ratio, max_seq_len)
         super().__init__()
         self.dim = dim
         self.base = base
@@ -552,6 +570,7 @@ class MetalRoPE(nn.Module):
         Returns:
             Tensor with RoPE applied
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         seq_len = x.shape[-2]
         positions = torch.arange(
             position_offset, position_offset + seq_len, device=x.device)
@@ -596,6 +615,7 @@ class MetalKVCache:
     """KV cache for Metal inference using MPS tensors."""
 
     def __init__(self, config: MetalKVCacheConfig, batch_size: int = 1):
+        logger.debug("initializing %s with config=%s, batch_size=%s", type(self).__name__, config, batch_size)
         require_mps()
 
         self.config = config
@@ -625,6 +645,7 @@ class MetalKVCache:
         v_new: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Update cache with new K, V and return full cached K, V."""
+        logger.debug("update called with layer_idx=%s, k_new=%s, v_new=%s", layer_idx, k_new, v_new)
         new_seq_len = k_new.shape[2]
         end_pos = self.seq_len + new_seq_len
 
@@ -644,10 +665,12 @@ class MetalKVCache:
 
     def advance(self, num_tokens: int = 1) -> None:
         """Advance sequence position."""
+        logger.debug("advance called with num_tokens=%s", num_tokens)
         self.seq_len += num_tokens
 
     def reset(self) -> None:
         """Reset cache for new sequence."""
+        logger.debug("reset called")
         self.seq_len = 0
 
 
@@ -680,6 +703,7 @@ class MetalMoELayer(nn.Module):
         bits: Literal[2, 4, 8] = 4,
         group_size: int = 128,
     ):
+        logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, num_experts=%s, top_k=%s, bits=%s", type(self).__name__, hidden_size, intermediate_size, num_experts, top_k, bits)
         super().__init__()
         require_mps()
 
@@ -712,6 +736,7 @@ class MetalMoELayer(nn.Module):
         Returns:
             [batch, seq, hidden_size]
         """
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, hidden_size = hidden_states.shape
         # [batch*seq, hidden]
         hidden_flat = hidden_states.view(-1, hidden_size)
@@ -771,6 +796,7 @@ class MetalMoELayer(nn.Module):
             hidden = silu(gate) * up
             output = W_down @ hidden
         """
+        logger.debug("forward_fused_gate_up called with hidden_states=%s, gate_up_packed=%s, gate_up_scales=%s", hidden_states, gate_up_packed, gate_up_scales)
         from .moe_ops import fused_moe_forward
 
         return fused_moe_forward(
@@ -820,6 +846,7 @@ class MetalTransformerBlock(nn.Module):
         rope_ratio: float = 1.0,
         max_position_embeddings: int = 4096,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, intermediate_size=%s, num_kv_heads=%s, bits=%s", type(self).__name__, hidden_size, num_heads, intermediate_size, num_kv_heads, bits)
         super().__init__()
 
         self.input_layernorm = MetalRMSNorm(hidden_size, eps=rms_norm_eps)
@@ -879,6 +906,7 @@ class MetalTransformerBlock(nn.Module):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Forward pass through the transformer block."""
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         if self._needs_device_move(hidden_states.device):
             self.to(hidden_states.device)
         # Self-attention with residual
@@ -901,6 +929,7 @@ class MetalTransformerBlock(nn.Module):
         return hidden_states
 
     def _needs_device_move(self, device: torch.device) -> bool:
+        logger.debug("_needs_device_move called with device=%s", device)
         param = next(self.parameters(), None)
         if param is None:
             return False
@@ -913,6 +942,7 @@ class MetalTransformerBlock(nn.Module):
         kv_cache: MetalKVCache | None = None,
         layer_idx: int = 0,
     ) -> torch.Tensor:
+        logger.debug("_self_attention called with hidden_states=%s, attention_mask=%s, kv_cache=%s", hidden_states, attention_mask, kv_cache)
         batch_size, seq_len, _ = hidden_states.shape
 
         q = self.attn_q_proj(hidden_states)
@@ -987,6 +1017,7 @@ class MetalMLAAttention(nn.Module):
         o_proj_group_size: int | None = None,
         bias: bool = False,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, kv_lora_rank=%s, q_lora_rank=%s, qk_rope_head_dim=%s", type(self).__name__, hidden_size, num_heads, kv_lora_rank, q_lora_rank, qk_rope_head_dim)
         super().__init__()
 
         self.hidden_size = hidden_size
@@ -1007,6 +1038,7 @@ class MetalMLAAttention(nn.Module):
             o_proj_group_size = group_size
 
         def _compatible_group_size(in_features: int, default_group_size: int) -> int:
+            logger.debug("_compatible_group_size called with in_features=%s, default_group_size=%s", in_features, default_group_size)
             if in_features % default_group_size == 0:
                 return default_group_size
             return math.gcd(in_features, default_group_size) or 1
@@ -1091,6 +1123,7 @@ class MetalMLAAttention(nn.Module):
         kv_cache: Any | None = None,
         layer_idx: int = 0,
     ) -> torch.Tensor:
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         batch_size, seq_len, _ = hidden_states.shape
 
         # Query path

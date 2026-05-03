@@ -1,9 +1,13 @@
 """Tests for fixed MMFP4 fused MoE decode kernel."""
+import logging
 import pytest
 import torch
 
 from metal_marlin.layers.mmfp4_expert import MMFP4Expert
 
+
+
+logger = logging.getLogger(__name__)
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
 class TestMMFP4FusedDecode:
@@ -12,6 +16,7 @@ class TestMMFP4FusedDecode:
     @pytest.fixture
     def glm47_expert(self):
         """Create MMFP4Expert with GLM-4.7 dimensions."""
+        logger.debug("glm47_expert called")
         return MMFP4Expert(
             hidden_size=2048,
             moe_intermediate_size=1536,
@@ -21,6 +26,7 @@ class TestMMFP4FusedDecode:
 
     def test_fused_decode_no_nan(self, glm47_expert):
         """Verify fused kernel doesn't produce NaN/Inf."""
+        logger.info("running test_fused_decode_no_nan")
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         output = glm47_expert(x)
         
@@ -30,6 +36,7 @@ class TestMMFP4FusedDecode:
 
     def test_fused_vs_standard_parity(self, glm47_expert):
         """Verify fused kernel matches standard 3-kernel path."""
+        logger.info("running test_fused_vs_standard_parity")
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         
         # Fused path
@@ -45,6 +52,7 @@ class TestMMFP4FusedDecode:
 
     def test_intermediate_size_1536(self, glm47_expert):
         """Verify kernel handles full intermediate_size=1536."""
+        logger.info("running test_intermediate_size_1536")
         assert glm47_expert.intermediate_size == 1536
         x = torch.randn(1, 2048, dtype=torch.float16, device="mps")
         output = glm47_expert(x)
@@ -52,6 +60,7 @@ class TestMMFP4FusedDecode:
 
     def test_fused_batch_8(self, glm47_expert):
         """Verify fused kernel with batch size 8."""
+        logger.info("running test_fused_batch_8")
         x = torch.randn(8, 2048, dtype=torch.float16, device="mps")
         
         # Fused path

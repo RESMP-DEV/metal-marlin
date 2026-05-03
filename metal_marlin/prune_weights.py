@@ -10,9 +10,13 @@ position metadata for reconstruction.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 def prune_to_2_4(
     weights: np.ndarray,
@@ -40,6 +44,7 @@ def prune_to_2_4(
     Raises:
         ValueError: If K is not divisible by 4 or group_size != 4.
     """
+    logger.debug("prune_to_2_4 called with weights=%s, group_size=%s", weights, group_size)
     if group_size != 4:
         raise ValueError(f"Only 2:4 sparsity supported (group_size=4), got {group_size}")
 
@@ -106,6 +111,7 @@ def unprune_2_4(
         dense: [K, N] float16 reconstructed weight matrix (with zeros
                at pruned positions).
     """
+    logger.debug("unprune_2_4 called with sparse_weights=%s, metadata=%s", sparse_weights, metadata)
     half_K, N = sparse_weights.shape
     num_blocks = half_K // 2
     K = num_blocks * 4
@@ -151,6 +157,7 @@ def measure_pruning_loss(
             sparsity: Fraction of zero elements in pruned matrix.
             max_abs_error: Maximum absolute element-wise error.
     """
+    logger.debug("measure_pruning_loss called with original=%s, pruned=%s", original, pruned)
     orig_f32 = original.astype(np.float32)
     pruned_f32 = pruned.astype(np.float32)
 

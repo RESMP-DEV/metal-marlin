@@ -1,4 +1,5 @@
 
+import logging
 import os
 import time
 
@@ -8,8 +9,12 @@ import torch
 from metal_marlin.layers.mmfp4_linear import MMFP4Linear
 
 
+
+logger = logging.getLogger(__name__)
+
 # Helper to run test
 def run_test_mmfp4_trellis():
+    logger.info("running run_test_mmfp4_trellis")
     if not torch.backends.mps.is_available():
         print("MPS not available, skipping test")
         return

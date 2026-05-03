@@ -16,14 +16,19 @@ Test organization:
 """
 
 import gc
+import logging
 import time
 
 import pytest
 import torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def _has_metal() -> bool:
     """Check if Metal is available."""
+    logger.debug("_has_metal called")
     try:
         from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
 
@@ -43,6 +48,7 @@ def mock_moe_weights():
     Creates minimal MoE weights that exercise the same code paths
     as the real 14GB model, just with smaller dimensions.
     """
+    logger.debug("mock_moe_weights called")
     num_experts = 4
     hidden = 256
     intermediate = 192
@@ -108,6 +114,7 @@ def mock_moe_weights():
 @pytest.fixture
 def metal_lib():
     """Compiled Metal library fixture."""
+    logger.debug("metal_lib called")
     from metal_marlin.metal_dispatch import MetalKernelLibrary
 
     return MetalKernelLibrary.from_source_dir()
@@ -116,6 +123,7 @@ def metal_lib():
 @pytest.fixture
 def mps_activations(mock_moe_weights):
     """Sample activations on MPS device."""
+    logger.debug("mps_activations called with mock_moe_weights=%s", mock_moe_weights)
     batch_size = 4
     return torch.randn(
         batch_size, mock_moe_weights["hidden_dim"], dtype=torch.float16, device="mps"
@@ -125,6 +133,7 @@ def mps_activations(mock_moe_weights):
 @pytest.fixture
 def mps_routing(mock_moe_weights):
     """Sample routing info on MPS device."""
+    logger.debug("mps_routing called with mock_moe_weights=%s", mock_moe_weights)
     batch_size = 4
     num_experts = mock_moe_weights["num_experts"]
     top_k = mock_moe_weights["top_k"]
@@ -145,6 +154,7 @@ class TestVec4Loading:
     def test_vec4_weight_shapes_valid(self, mock_moe_weights):
         """Weight shapes are vec4-compatible (dimensions divisible by 4)."""
         # Vec4 loading requires dimensions to be multiples of 4
+        logger.info("running test_vec4_weight_shapes_valid")
         hidden = mock_moe_weights["hidden_dim"]
         intermediate = mock_moe_weights["intermediate_dim"]
 
@@ -158,6 +168,7 @@ class TestVec4Loading:
     def test_vec4_scale_tensor_layout(self, mock_moe_weights):
         """Scale tensors have vec4-friendly layout."""
         # Scales are [num_experts, n_groups, dim] - last dim should be vec4 aligned
+        logger.info("running test_vec4_scale_tensor_layout")
         gate_scales = mock_moe_weights["gate_scales"]
         up_scales = mock_moe_weights["up_scales"]
         down_scales = mock_moe_weights["down_scales"]
@@ -172,6 +183,7 @@ class TestVec4Loading:
 
     def test_vec4_sign_tensor_layout(self, mock_moe_weights):
         """Sign tensors (su, sv) have vec4-friendly layout."""
+        logger.info("running test_vec4_sign_tensor_layout")
         for name in ["gate_su", "gate_sv", "up_su", "up_sv", "down_su", "down_sv"]:
             tensor = mock_moe_weights[name]
             assert tensor.dtype == torch.float16, f"{name} should be float16"
@@ -187,11 +199,13 @@ class TestCoalescedActivation:
 
     def test_coalesced_load_pattern(self, mps_activations):
         """Activations are contiguous for coalesced access."""
+        logger.info("running test_coalesced_load_pattern")
         assert mps_activations.is_contiguous(), "Activations must be contiguous for coalesced load"
         assert mps_activations.dtype == torch.float16, "Activations should be half for vec loads"
 
     def test_activation_stride_pattern(self, mps_activations, mock_moe_weights):
         """Verify activation memory layout matches kernel expectations."""
+        logger.info("running test_activation_stride_pattern")
         batch, hidden = mps_activations.shape
         expected_hidden = mock_moe_weights["hidden_dim"]
 
@@ -210,6 +224,7 @@ class TestPrefetch:
     def test_prefetch_buffer_sizes(self, mock_moe_weights):
         """Verify prefetch buffers fit in threadgroup memory."""
         # Metal has ~32KB threadgroup memory limit
+        logger.info("running test_prefetch_buffer_sizes")
         THREADGROUP_LIMIT = 32 * 1024  # 32KB
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -226,6 +241,7 @@ class TestPrefetch:
 
     def test_scale_layout_for_prefetch(self, mock_moe_weights):
         """Scale tensor layout enables efficient prefetch."""
+        logger.info("running test_scale_layout_for_prefetch")
         gate_scales = mock_moe_weights["gate_scales"]
         # [num_experts, n_groups, dim] - expert-first layout enables bulk prefetch
         assert gate_scales.dim() == 3, "Scales should be [num_experts, n_groups, dim]"
@@ -247,6 +263,7 @@ class TestSIMD:
     def test_simd_tile_size_compatibility(self, mock_moe_weights):
         """Dimensions are compatible with SIMD tile sizes."""
         # SIMD matmul typically works with 8x8 tiles
+        logger.info("running test_simd_tile_size_compatibility")
         hidden = mock_moe_weights["hidden_dim"]
         intermediate = mock_moe_weights["intermediate_dim"]
 
@@ -257,6 +274,7 @@ class TestSIMD:
     def test_weight_alignment_for_simd(self, mock_moe_weights):
         """Packed weights aligned for SIMD access."""
         # The Trellis 16x16 tile packing is designed for SIMD-friendly access
+        logger.info("running test_weight_alignment_for_simd")
         tile_size = 16
         gate_weights = mock_moe_weights["gate_weights"]
 
@@ -267,6 +285,7 @@ class TestSIMD:
 
     def test_simd_kernel_single_token(self, mock_moe_weights, metal_lib):
         """SIMD kernel handles single token (decode scenario)."""
+        logger.info("running test_simd_kernel_single_token")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -312,6 +331,7 @@ class TestSIMD:
 
     def test_simd_vs_scalar_equivalence(self, mock_moe_weights, metal_lib):
         """SIMD and scalar kernels produce equivalent results."""
+        logger.info("running test_simd_vs_scalar_equivalence")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -397,6 +417,7 @@ class TestSIMD:
 
     def test_simd_dimension_divisibility(self, mock_moe_weights):
         """Dimensions divisible by 8 for optimal SIMD performance."""
+        logger.info("running test_simd_dimension_divisibility")
         hidden = mock_moe_weights["hidden_dim"]
         intermediate = mock_moe_weights["intermediate_dim"]
 
@@ -408,6 +429,7 @@ class TestSIMD:
     def test_simd_threadgroup_memory_fit(self, mock_moe_weights):
         """SIMD kernel threadgroup memory fits within Metal limits."""
         # Metal has ~32KB threadgroup memory limit
+        logger.info("running test_simd_threadgroup_memory_fit")
         THREADGROUP_LIMIT = 32 * 1024  # 32KB
 
         # SIMD kernel memory layout (from kernel comments):
@@ -437,6 +459,7 @@ class TestSwiGLU:
     def test_swiglu_correctness(self):
         """SwiGLU computation is numerically correct."""
         # Reference SwiGLU implementation
+        logger.info("running test_swiglu_correctness")
         gate = torch.randn(4, 64, dtype=torch.float32)
         up = torch.randn(4, 64, dtype=torch.float32)
 
@@ -451,6 +474,7 @@ class TestSwiGLU:
 
     def test_swiglu_half_precision(self):
         """SwiGLU works correctly in half precision."""
+        logger.info("running test_swiglu_half_precision")
         gate = torch.randn(4, 64, dtype=torch.float16, device="mps")
         up = torch.randn(4, 64, dtype=torch.float16, device="mps")
 
@@ -461,6 +485,7 @@ class TestSwiGLU:
 
     def test_swiglu_vec4_divisible(self, mock_moe_weights):
         """Intermediate dimension supports vec4 SwiGLU."""
+        logger.info("running test_swiglu_vec4_divisible")
         intermediate = mock_moe_weights["intermediate_dim"]
         # Vec4 SwiGLU processes 4 elements at a time
         # Padding handles non-divisible cases, but aligned is faster
@@ -476,6 +501,7 @@ class TestDecode:
 
     def test_decode_single_token(self, mock_moe_weights, metal_lib):
         """Decode kernel handles single token correctly."""
+        logger.info("running test_decode_single_token")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -531,6 +557,7 @@ class TestPrefill:
 
     def test_prefill_batch4(self, mock_moe_weights, metal_lib):
         """Prefill kernel handles batch_size=4."""
+        logger.info("running test_prefill_batch4")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -580,6 +607,7 @@ class TestPrefill:
 
     def test_prefill_batch8(self, mock_moe_weights, metal_lib):
         """Prefill kernel handles batch_size=8."""
+        logger.info("running test_prefill_batch8")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -637,6 +665,7 @@ class TestLargeBatch:
 
     def test_large_batch_32(self, mock_moe_weights, metal_lib):
         """Large batch kernel handles batch_size=32."""
+        logger.info("running test_large_batch_32")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -686,6 +715,7 @@ class TestLargeBatch:
 
     def test_large_batch_64(self, mock_moe_weights, metal_lib):
         """Large batch kernel handles batch_size=64."""
+        logger.info("running test_large_batch_64")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -743,6 +773,7 @@ class TestBufferPool:
 
     def test_buffer_pool_reuse(self):
         """Buffer pool returns same buffer for same size."""
+        logger.info("running test_buffer_pool_reuse")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
         from metal_marlin.trellis.model import OutputBufferPool
 
@@ -760,6 +791,7 @@ class TestBufferPool:
 
     def test_buffer_pool_different_sizes(self):
         """Buffer pool manages different batch sizes."""
+        logger.info("running test_buffer_pool_different_sizes")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
         from metal_marlin.trellis.model import OutputBufferPool
 
@@ -780,6 +812,7 @@ class TestBufferPool:
 
     def test_buffer_pool_preallocate(self):
         """Preallocate creates buffers for specified sizes."""
+        logger.info("running test_buffer_pool_preallocate")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
         from metal_marlin.trellis.model import OutputBufferPool
 
@@ -797,6 +830,7 @@ class TestBufferPool:
 
     def test_buffer_pool_memory_usage(self):
         """Memory usage calculation is correct."""
+        logger.info("running test_buffer_pool_memory_usage")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
         from metal_marlin.trellis.model import OutputBufferPool
 
@@ -815,6 +849,7 @@ class TestBufferPool:
 
     def test_buffer_pool_clear(self):
         """Clear releases all buffers."""
+        logger.info("running test_buffer_pool_clear")
         from metal_marlin.metal_dispatch import MetalKernelLibrary
         from metal_marlin.trellis.model import OutputBufferPool
 
@@ -830,6 +865,7 @@ class TestBufferPool:
 
     def test_memory_not_leaked(self, mock_moe_weights, metal_lib):
         """Repeated dispatch calls don't leak memory."""
+        logger.info("running test_memory_not_leaked")
         from metal_marlin.trellis.moe_dispatch import dispatch_moe_trellis_swiglu
 
         hidden = mock_moe_weights["hidden_dim"]
@@ -887,6 +923,7 @@ class TestCachedWeightBuffers:
 
     def test_cached_buffers_creation(self, mock_moe_weights, metal_lib):
         """Cached weight buffers can be created."""
+        logger.info("running test_cached_buffers_creation")
         from metal_marlin.trellis.moe_dispatch import create_cached_weight_buffers
 
         weights_mps = {k: v.to("mps") if isinstance(v, torch.Tensor) else v for k, v in mock_moe_weights.items()}
@@ -918,6 +955,7 @@ class TestCachedWeightBuffers:
 
     def test_cached_dispatch_faster(self, mock_moe_weights, metal_lib):
         """Dispatch with cached buffers avoids buffer recreation."""
+        logger.info("running test_cached_dispatch_faster")
         from metal_marlin.trellis.moe_dispatch import (
             create_cached_weight_buffers,
             dispatch_moe_trellis_swiglu,
@@ -990,6 +1028,7 @@ class TestValidation:
 
     def test_shape_validation(self, mock_moe_weights, metal_lib):
         """Invalid shapes raise MoEDispatchValidationError."""
+        logger.info("running test_shape_validation")
         from metal_marlin.trellis.moe_dispatch import (
             MoEDispatchValidationError,
             dispatch_moe_trellis_swiglu,
@@ -1034,6 +1073,7 @@ class TestValidation:
 
     def test_dtype_validation(self, mock_moe_weights, metal_lib):
         """Wrong dtypes raise MoEDispatchValidationError."""
+        logger.info("running test_dtype_validation")
         from metal_marlin.trellis.moe_dispatch import (
             MoEDispatchValidationError,
             dispatch_moe_trellis_swiglu,
@@ -1080,6 +1120,7 @@ class TestValidation:
 # Placeholder test to ensure file runs without Metal
 def test_fixtures_valid(mock_moe_weights):
     """Verify mock weights have expected structure."""
+    logger.info("running test_fixtures_valid")
     assert mock_moe_weights["num_experts"] == 4
     assert mock_moe_weights["hidden_dim"] == 256
     assert mock_moe_weights["intermediate_dim"] == 192

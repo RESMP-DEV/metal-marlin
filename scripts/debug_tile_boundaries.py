@@ -1,8 +1,12 @@
 """Check for NaN at tile boundaries in MoE kernel."""
+import logging
 
 import torch
 
 from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+
+logger = logging.getLogger(__name__)
 
 # Test with different intermediate_dim values
 # 512 = 8 tiles (no boundary issues expected)

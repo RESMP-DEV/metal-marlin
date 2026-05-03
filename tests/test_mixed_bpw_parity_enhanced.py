@@ -17,6 +17,7 @@ Test that mixed BPW produces same results as reference:
    - Perplexity comparison on validation set
 """
 
+import logging
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -35,8 +36,12 @@ from metal_marlin.trellis.linear import TrellisLinear
 from metal_marlin.trellis.model import TrellisMoEMLP
 
 
+
+logger = logging.getLogger(__name__)
+
 def _has_metal() -> bool:
     """Check if Metal is available and MPS is initialized."""
+    logger.debug("_has_metal called")
     try:
         from metal_marlin.metal_dispatch import HAS_METAL, HAS_MPS
         return HAS_METAL and HAS_MPS
@@ -55,6 +60,7 @@ def create_test_trellis_linear(
     device: str = "mps"
 ) -> TrellisLinear:
     """Creates and initializes a `TrellisLinear` layer for testing purposes."""
+    logger.info("running create_test_trellis_linear")
     layer = TrellisLinear(in_features, out_features, bits, device=device)
     
     codebook = TrellisCodebook(bits=bits)
@@ -76,6 +82,7 @@ def create_test_expert(
     device: str = "mps"
 ) -> TrellisDenseMLP:
     """Creates a `TrellisDenseMLP` expert for testing."""
+    logger.info("running create_test_expert")
     gate_proj = create_test_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     up_proj = create_test_trellis_linear(hidden_dim, intermediate_dim, bits, device)
     down_proj = create_test_trellis_linear(intermediate_dim, hidden_dim, bits, device)
@@ -89,15 +96,18 @@ def create_mixed_bit_experts(
     device: str = "mps"
 ) -> list[TrellisDenseMLP]:
     """Create experts with specified bit pattern."""
+    logger.debug("create_mixed_bit_experts called with hidden_dim=%s, intermediate_dim=%s, bit_pattern=%s", hidden_dim, intermediate_dim, bit_pattern)
     return [create_test_expert(hidden_dim, intermediate_dim, bits, device) for bits in bit_pattern]
 
 class ExplicitMoEReference:
     """A reference MoE implementation that uses explicit dequantization for parity checking."""
     def __init__(self, layer: TrellisMoEMLP):
+        logger.debug("initializing %s with layer=%s", type(self).__name__, layer)
         self.layer = layer
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Performs a forward pass using explicit dequantization."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         router_logits = x @ self.layer.router.weight.T
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
         topk_weights, topk_indices = torch.topk(routing_weights, self.layer.num_experts_per_tok, dim=-1)
@@ -131,6 +141,7 @@ class ExplicitMoEReference:
 class FP16ReferenceMoE:
     """FP16 reference implementation for comparison."""
     def __init__(self, experts: list[TrellisDenseMLP], router: nn.Linear, top_k: int = 2):
+        logger.debug("initializing %s with experts=%s, router=%s, top_k=%s", type(self).__name__, experts, router, top_k)
         self.experts = experts
         self.router = router
         self.top_k = top_k
@@ -149,6 +160,7 @@ class FP16ReferenceMoE:
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with FP16 weights."""
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         router_logits = x @ self.router.weight.T
         routing_weights = F.softmax(router_logits, dim=-1, dtype=torch.float32)
         topk_weights, topk_indices = torch.topk(routing_weights, self.top_k, dim=-1)
@@ -174,6 +186,7 @@ class FP16ReferenceMoE:
 @pytest.fixture(scope="module")
 def mixed_bit_experts_fixture():
     """Provides a shared set of mixed-bit experts for testing."""
+    logger.debug("mixed_bit_experts_fixture called")
     torch.manual_seed(42)
     device = "mps"
     num_experts = 8
@@ -192,6 +205,7 @@ def mixed_bit_experts_fixture():
 @pytest.fixture(scope="module")
 def pure_4bit_experts_fixture():
     """Provides a shared set of pure 4-bit experts for comparison."""
+    logger.debug("pure_4bit_experts_fixture called")
     torch.manual_seed(42)
     device = "mps"
     num_experts = 8
@@ -212,6 +226,7 @@ def pure_4bit_experts_fixture():
 @pytest.mark.parametrize("bits", [2, 3, 4])
 def test_individual_bit_width_parity_fp16(bits):
     """Test each bit-width individually against FP16 reference."""
+    logger.info("running test_individual_bit_width_parity_fp16")
     torch.manual_seed(bits)
     device = "mps"
     hidden_dim, intermediate_dim = 64, 128
@@ -251,6 +266,7 @@ def test_individual_bit_width_parity_fp16(bits):
 
 def test_mixed_2_3_4_bit_vs_pure_4bit(mixed_bit_experts_fixture, pure_4bit_experts_fixture):
     """Compare mixed (2+3+4)-bit experts vs pure 4-bit experts."""
+    logger.info("running test_mixed_2_3_4_bit_vs_pure_4bit")
     router_mixed, experts_mixed, bit_pattern = mixed_bit_experts_fixture
     router_4bit, experts_4bit = pure_4bit_experts_fixture
     
@@ -293,6 +309,7 @@ def test_mixed_2_3_4_bit_vs_pure_4bit(mixed_bit_experts_fixture, pure_4bit_exper
 
 def test_mixed_bpw_vs_fp16_reference(mixed_bit_experts_fixture):
     """Compare mixed BPW output with FP16 reference implementation."""
+    logger.info("running test_mixed_bpw_vs_fp16_reference")
     router, experts, bit_pattern = mixed_bit_experts_fixture
     
     layer = TrellisMoEMLP(
@@ -326,6 +343,7 @@ def test_mixed_bpw_vs_fp16_reference(mixed_bit_experts_fixture):
 
 def test_token_level_output_consistency(mixed_bit_experts_fixture):
     """Verify token-level consistency across different batch configurations."""
+    logger.info("running test_token_level_output_consistency")
     router, experts, _ = mixed_bit_experts_fixture
     
     layer = TrellisMoEMLP(
@@ -362,6 +380,7 @@ def test_token_level_output_consistency(mixed_bit_experts_fixture):
 
 def test_attention_score_accuracy():
     """Test attention score accuracy in mixed BPW context."""
+    logger.info("running test_attention_score_accuracy")
     device = "mps"
     
     # Create query, key, value projections with mixed bit-widths
@@ -433,6 +452,7 @@ def test_attention_score_accuracy():
 
 def test_expert_routing_decision_consistency(mixed_bit_experts_fixture):
     """Verify routing decisions are consistent regardless of bit-width."""
+    logger.info("running test_expert_routing_decision_consistency")
     router, experts, bit_pattern = mixed_bit_experts_fixture
     
     layer = TrellisMoEMLP(
@@ -478,6 +498,7 @@ def test_expert_routing_decision_consistency(mixed_bit_experts_fixture):
 
 def test_mixed_bpw_regression_detection():
     """Regression test to catch precision regressions in CI."""
+    logger.info("running test_mixed_bpw_regression_detection")
     torch.manual_seed(12345)
     device = "mps"
     
@@ -539,6 +560,7 @@ def test_mixed_bpw_regression_detection():
 
 def test_perplexity_comparison_smoke():
     """Smoke test for perplexity comparison (doesn't run full validation)."""
+    logger.info("running test_perplexity_comparison_smoke")
     device = "mps"
     
     # Create a small test model
@@ -604,6 +626,7 @@ def test_perplexity_comparison_smoke():
 
 def test_edge_cases():
     """Test edge cases for mixed BPW inference."""
+    logger.info("running test_edge_cases")
     device = "mps"
     
     # Test 1: All experts same bit-width (should still work)

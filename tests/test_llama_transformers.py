@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -43,8 +44,12 @@ except Exception as exc:  # pragma: no cover - surfaces missing integration modu
     ) from exc
 
 
+
+logger = logging.getLogger(__name__)
+
 def _resolve_model_ids() -> list[str]:
     """Return model IDs to test, honoring env overrides."""
+    logger.debug("_resolve_model_ids called")
     extra = os.environ.get("LLAMA_MODEL_IDS")
     if extra:
         model_ids = [model_id.strip() for model_id in extra.split(",") if model_id.strip()]
@@ -63,6 +68,7 @@ LLAMA_MODEL_IDS = _resolve_model_ids()
 
 
 def _load_llama_model(model_id: str):
+    logger.info("_load_llama_model called with model_id=%s", model_id)
     try:
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
@@ -83,23 +89,27 @@ def _load_llama_model(model_id: str):
 
 @pytest.fixture(scope="session", params=LLAMA_MODEL_IDS, ids=lambda m: m.rsplit("/", 1)[-1])
 def llama_model_id(request):
+    logger.debug("llama_model_id called with request=%s", request)
     return request.param
 
 
 @pytest.fixture(scope="session")
 def llama_model(llama_model_id):
     """Load the requested Llama variant for testing."""
+    logger.debug("llama_model called with llama_model_id=%s", llama_model_id)
     return _load_llama_model(llama_model_id)
 
 
 @pytest.fixture(scope="session")
 def llama_tokenizer(llama_model_id):
+    logger.debug("llama_tokenizer called with llama_model_id=%s", llama_model_id)
     return AutoTokenizer.from_pretrained(llama_model_id)
 
 
 class TestLlamaTransformersIntegration:
     def test_llama_architecture_recognized(self, llama_model_id):
         """Verify Llama loads as standard architecture."""
+        logger.info("running test_llama_architecture_recognized")
         config = AutoConfig.from_pretrained(llama_model_id)
         assert config.model_type == "llama"
         if config.architectures:
@@ -108,6 +118,7 @@ class TestLlamaTransformersIntegration:
     @pytest.mark.slow
     def test_layer_replacement_on_llama(self, llama_model):
         """Verify layer replacement works on Llama."""
+        logger.info("running test_layer_replacement_on_llama")
         linear_count = sum(
             1 for module in llama_model.modules() if isinstance(module, torch.nn.Linear)
         )
@@ -121,6 +132,7 @@ class TestLlamaTransformersIntegration:
     @pytest.mark.slow
     def test_llama_generation_after_quantization(self, llama_model, llama_tokenizer):
         """Verify generation works after quantization."""
+        logger.info("running test_llama_generation_after_quantization")
         replace_linear_layers(llama_model, bits=4)
 
         prompt = "The quick brown fox"
@@ -135,6 +147,7 @@ class TestLlamaTransformersIntegration:
     @pytest.mark.slow
     def test_llama_quality_acceptable(self, llama_model, llama_tokenizer, llama_model_id):
         """Verify quantization quality is acceptable."""
+        logger.info("running test_llama_quality_acceptable")
         ref_model = _load_llama_model(llama_model_id)
 
         replace_linear_layers(llama_model, bits=4)

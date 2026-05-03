@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import logging
 import sys
 import types
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 importlib.import_module("metal_marlin")
 
@@ -36,10 +40,12 @@ load_glm47 = _MODULE.load_glm47
 
 
 def test_glm47_loader_defaults_kv_quantization_to_int8() -> None:
+    logger.info("running test_glm47_loader_defaults_kv_quantization_to_int8")
     loader = GLM47Loader("contrib/metal_marlin/models/placeholder")
     assert loader.kv_quantize_mode == DEFAULT_KV_QUANTIZE_MODE
 
 
 def test_load_glm47_signature_uses_default_kv_quantization() -> None:
+    logger.info("running test_load_glm47_signature_uses_default_kv_quantization")
     signature = inspect.signature(load_glm47)
     assert signature.parameters["kv_quantize_mode"].default == DEFAULT_KV_QUANTIZE_MODE

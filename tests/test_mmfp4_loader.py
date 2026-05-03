@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -8,8 +9,12 @@ from safetensors.torch import save_file
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_mmfp4_loader_mock(tmp_path):
     # 1. Create mock safetensors shards
+    logger.info("running test_mmfp4_loader_mock")
     shard1_path = tmp_path / "model-00001-of-00002.safetensors"
     shard2_path = tmp_path / "model-00002-of-00002.safetensors"
     

@@ -1,3 +1,4 @@
+import logging
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -6,9 +7,13 @@ import torch
 from metal_marlin.memory.mmfp4_memory import MLACompressionRatio, MMFP4MemoryManager
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestZeroCopy(unittest.TestCase):
     def setUp(self):
         # Mocking init to avoid complex setup
+        logger.info("setUp starting")
         with patch('metal_marlin.memory.mmfp4_memory.MMFP4ModelLoader'):
             self.manager = MMFP4MemoryManager(
                 model_path=".",
@@ -21,6 +26,7 @@ class TestZeroCopy(unittest.TestCase):
 
     def test_same_device(self):
         # Create a tensor on the same device (mocked)
+        logger.info("running test_same_device")
         t = MagicMock(spec=torch.Tensor)
         t.device = MagicMock()
         t.device.type = "mps"
@@ -30,6 +36,7 @@ class TestZeroCopy(unittest.TestCase):
 
     def test_cpu_unified(self):
         # Create a tensor on CPU
+        logger.info("running test_cpu_unified")
         t = MagicMock(spec=torch.Tensor)
         t.device = MagicMock()
         t.device.type = "cpu"
@@ -51,6 +58,7 @@ class TestZeroCopy(unittest.TestCase):
 
     def test_cpu_unified_already_pinned(self):
         # Create a tensor on CPU, already pinned
+        logger.info("running test_cpu_unified_already_pinned")
         t = MagicMock(spec=torch.Tensor)
         t.device = MagicMock()
         t.device.type = "cpu"

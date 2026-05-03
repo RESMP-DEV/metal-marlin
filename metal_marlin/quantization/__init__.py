@@ -9,6 +9,7 @@ EXL3-style trellis quantization with:
 """
 
 from __future__ import annotations
+import logging
 
 from metal_marlin.quantization.calibration_streamer import CalibrationBatch, CalibrationStreamer
 
@@ -102,6 +103,9 @@ except ImportError:
     StreamingQuantizer = None  # type: ignore[assignment, misc]
     StreamingQuantResult = None  # type: ignore[assignment, misc]
     quantize_model_streaming = None  # type: ignore[assignment]
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Feature flags

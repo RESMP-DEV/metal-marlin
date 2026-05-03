@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -8,6 +9,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from metal_marlin.eval.perplexity import compute_perplexity_wikitext
+
+
+logger = logging.getLogger(__name__)
 
 # Default model
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -20,10 +24,12 @@ def test_accuracy_regression(monkeypatch):
     Fail if delta > 0.01.
     """
     # Monkeypatch load_wikitext2 to fallback to dummy data if real data fails
+    logger.info("running test_accuracy_regression")
     import metal_marlin.eval.perplexity
     original_load = metal_marlin.eval.perplexity.load_wikitext2
 
     def patched_load_wikitext2(max_samples=None):
+        logger.info("patched_load_wikitext2 called with max_samples=%s", max_samples)
         try:
             return original_load(max_samples)
         except Exception as e:
@@ -72,6 +78,7 @@ def test_accuracy_regression(monkeypatch):
     # It expects input_ids as np.ndarray and returns logits as np.ndarray
     def logits_fn(input_ids):
         # input_ids: [1, seq_len]
+        logger.debug("logits_fn called with input_ids=%s", input_ids)
         input_tensor = torch.tensor(input_ids, device=device)
         with torch.no_grad():
             outputs = model(input_tensor)

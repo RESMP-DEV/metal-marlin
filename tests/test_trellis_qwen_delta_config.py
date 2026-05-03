@@ -7,12 +7,16 @@ shared expert size, and nested text_config handling for Qwen3.5/3.6 hybrids.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 from pathlib import Path
 
 import pytest
 
 from metal_marlin.trellis.config import TrellisModelConfig
+
+
+logger = logging.getLogger(__name__)
 
 # ============================================================================
 # Fixtures: Qwen3.5/3.6 DeltaNet-style configs
@@ -29,6 +33,7 @@ def qwen35_deltanet_config_dict() -> dict:
     - DeltaNet linear_* dimensions
     - Hybrid MoE with shared experts
     """
+    logger.debug("qwen35_deltanet_config_dict called")
     return {
         "model_type": "qwen3_next",
         "vocab_size": 151936,
@@ -64,6 +69,7 @@ def qwen35_multimodal_config_dict() -> dict:
     
     The vision encoder wraps the text LLM in a text_config sub-dict.
     """
+    logger.debug("qwen35_multimodal_config_dict called")
     return {
         "model_type": "qwen3_vl_moe",
         "vision_config": {
@@ -103,6 +109,7 @@ def qwen3_dense_config_dict() -> dict:
     
     Should NOT be detected as hybrid DeltaNet.
     """
+    logger.debug("qwen3_dense_config_dict called")
     return {
         "model_type": "qwen3",
         "vocab_size": 151936,
@@ -125,6 +132,7 @@ def glm47_config_dict() -> dict:
     
     Should work correctly without DeltaNet fields.
     """
+    logger.debug("glm47_config_dict called")
     return {
         "model_type": "glm4_moe",
         "vocab_size": 154880,
@@ -162,6 +170,7 @@ class TestFromPretrainedConfigJson:
 
     def test_qwen35_deltanet_loads_all_fields(self, qwen35_deltanet_config_dict):
         """Qwen3.5 DeltaNet config should load all hybrid fields."""
+        logger.info("running test_qwen35_deltanet_loads_all_fields")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             with open(config_path, "w") as f:
@@ -197,6 +206,7 @@ class TestFromPretrainedConfigJson:
 
     def test_qwen35_multimodal_loads_text_config(self, qwen35_multimodal_config_dict):
         """Multimodal Qwen3.5-VL-MoE should extract fields from text_config."""
+        logger.info("running test_qwen35_multimodal_loads_text_config")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             with open(config_path, "w") as f:
@@ -225,6 +235,7 @@ class TestFromPretrainedConfigJson:
 
     def test_qwen3_dense_no_deltanet_fields(self, qwen3_dense_config_dict):
         """Dense Qwen3 should not have DeltaNet fields populated."""
+        logger.info("running test_qwen3_dense_no_deltanet_fields")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             with open(config_path, "w") as f:
@@ -245,6 +256,7 @@ class TestFromPretrainedConfigJson:
 
     def test_glm47_mla_no_deltanet(self, glm47_config_dict):
         """GLM-4.7 MLA should work without DeltaNet fields."""
+        logger.info("running test_glm47_mla_no_deltanet")
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "config.json"
             with open(config_path, "w") as f:
@@ -277,6 +289,7 @@ class TestFromDict:
 
     def test_deltanet_fields_direct_mapping(self, qwen35_deltanet_config_dict):
         """DeltaNet fields should map directly when present."""
+        logger.info("running test_deltanet_fields_direct_mapping")
         config = TrellisModelConfig._from_dict(qwen35_deltanet_config_dict)
 
         assert config.layer_types == qwen35_deltanet_config_dict["layer_types"]
@@ -286,6 +299,7 @@ class TestFromDict:
 
     def test_nested_text_config_merging(self, qwen35_multimodal_config_dict):
         """Nested text_config should be merged into top-level."""
+        logger.info("running test_nested_text_config_merging")
         config = TrellisModelConfig._from_dict(qwen35_multimodal_config_dict)
 
         # Should get text_config values
@@ -295,6 +309,7 @@ class TestFromDict:
 
     def test_full_attention_interval_from_nested_dict(self):
         """full_attention_interval in nested text_config should be found."""
+        logger.info("running test_full_attention_interval_from_nested_dict")
         data = {
             "model_type": "qwen3_vl_moe",
             "text_config": {
@@ -308,6 +323,7 @@ class TestFromDict:
 
     def test_layer_types_must_be_list(self):
         """Invalid layer_types (non-list) should be rejected."""
+        logger.info("running test_layer_types_must_be_list")
         data = {
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -318,6 +334,7 @@ class TestFromDict:
 
     def test_shared_expert_intermediate_size(self):
         """shared_expert_intermediate_size should be loaded."""
+        logger.info("running test_shared_expert_intermediate_size")
         data = {
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -338,9 +355,11 @@ class _MockHFConfig:
     """Mock HuggingFace PreTrainedConfig for testing."""
 
     def __init__(self, **kwargs):
+        logger.debug("initializing %s", type(self).__name__)
         self.__dict__.update(kwargs)
 
     def to_dict(self):
+        logger.debug("to_dict called")
         return dict(self.__dict__)
 
 
@@ -348,6 +367,7 @@ class _MockMultimodalHFConfig:
     """Mock multimodal HF config wrapping text_config."""
 
     def __init__(self, text_config, **kwargs):
+        logger.debug("initializing %s with text_config=%s", type(self).__name__, text_config)
         self.text_config = text_config
         self.__dict__.update(kwargs)
 
@@ -357,6 +377,7 @@ class TestFromHFConfig:
 
     def test_qwen35_deltanet_attributes(self, qwen35_deltanet_config_dict):
         """HF config with DeltaNet attributes should be extracted."""
+        logger.info("running test_qwen35_deltanet_attributes")
         hf_cfg = _MockHFConfig(**qwen35_deltanet_config_dict)
         config = TrellisModelConfig._from_hf_config(hf_cfg)
 
@@ -367,6 +388,7 @@ class TestFromHFConfig:
 
     def test_full_attention_interval_via_to_dict(self):
         """full_attention_interval in to_dict() should be found."""
+        logger.info("running test_full_attention_interval_via_to_dict")
         hf_cfg = _MockHFConfig(
             vocab_size=151936,
             hidden_size=2048,
@@ -375,6 +397,7 @@ class TestFromHFConfig:
         original_to_dict = hf_cfg.to_dict
 
         def custom_to_dict():
+            logger.debug("custom_to_dict called")
             d = original_to_dict()
             d["full_attention_interval"] = 5
             return d
@@ -385,6 +408,7 @@ class TestFromHFConfig:
 
     def test_multimodal_nested_text_config(self, qwen35_deltanet_config_dict):
         """Multimodal HF config should extract from text_config."""
+        logger.info("running test_multimodal_nested_text_config")
         text_cfg = _MockHFConfig(**qwen35_deltanet_config_dict)
         mm_cfg = _MockMultimodalHFConfig(
             text_config=text_cfg,
@@ -398,6 +422,7 @@ class TestFromHFConfig:
 
     def test_multimodal_text_config_without_vocab_size_fallback(self):
         """If text_config lacks vocab_size, use parent config."""
+        logger.info("running test_multimodal_text_config_without_vocab_size_fallback")
         text_cfg = _MockHFConfig(
             hidden_size=2048,
             layer_types=["linear_attention"],
@@ -424,6 +449,7 @@ class TestHelperMethods:
 
     def test_is_moe_layer_deltanet_hybrid(self, qwen35_deltanet_config_dict):
         """is_moe_layer should work for DeltaNet hybrid MoE."""
+        logger.info("running test_is_moe_layer_deltanet_hybrid")
         config = TrellisModelConfig._from_dict(qwen35_deltanet_config_dict)
 
         assert config.num_experts == 128
@@ -435,6 +461,7 @@ class TestHelperMethods:
 
     def test_is_moe_layer_first_moe_layer_offset(self):
         """is_moe_layer should respect first_moe_layer offset."""
+        logger.info("running test_is_moe_layer_first_moe_layer_offset")
         config = TrellisModelConfig(
             num_experts=64,
             first_moe_layer=1,
@@ -446,16 +473,19 @@ class TestHelperMethods:
 
     def test_is_mla_model_glm(self, glm47_config_dict):
         """is_mla_model should return True for GLM MLA config."""
+        logger.info("running test_is_mla_model_glm")
         config = TrellisModelConfig._from_dict(glm47_config_dict)
         assert config.is_mla_model() is True
 
     def test_is_mla_model_qwen_deltanet(self, qwen35_deltanet_config_dict):
         """is_mla_model should return False for Qwen DeltaNet (GQA)."""
+        logger.info("running test_is_mla_model_qwen_deltanet")
         config = TrellisModelConfig._from_dict(qwen35_deltanet_config_dict)
         assert config.is_mla_model() is False
 
     def test_should_skip_layer(self):
         """should_skip_layer should check skip_layers list."""
+        logger.info("running test_should_skip_layer")
         config = TrellisModelConfig(skip_layers=[2, 5, 8])
 
         assert config.should_skip_layer(2) is True
@@ -465,6 +495,7 @@ class TestHelperMethods:
 
     def test_prune_layers(self):
         """prune_layers should create new config with skip_layers."""
+        logger.info("running test_prune_layers")
         base = TrellisModelConfig(hidden_size=2048)
         pruned = base.prune_layers([1, 3, 5])
 
@@ -482,6 +513,7 @@ class TestBackwardCompatibility:
 
     def test_glm_defaults_preserved(self):
         """GLM config should preserve MLA defaults."""
+        logger.info("running test_glm_defaults_preserved")
         config = TrellisModelConfig(
             kv_lora_rank=512,
             q_lora_rank=768,
@@ -496,6 +528,7 @@ class TestBackwardCompatibility:
 
     def test_qwen3_dense_defaults_preserved(self):
         """Dense Qwen3 config should work without DeltaNet fields."""
+        logger.info("running test_qwen3_dense_defaults_preserved")
         config = TrellisModelConfig(
             hidden_size=2048,
             num_hidden_layers=24,
@@ -510,6 +543,7 @@ class TestBackwardCompatibility:
 
     def test_deepseek_mla_compatibility(self):
         """DeepSeek MLA config should work."""
+        logger.info("running test_deepseek_mla_compatibility")
         config = TrellisModelConfig(
             kv_lora_rank=512,
             q_lora_rank=768,
@@ -531,6 +565,7 @@ class TestEdgeCases:
 
     def test_empty_layer_types_list(self):
         """Empty layer_types list should be preserved."""
+        logger.info("running test_empty_layer_types_list")
         config = TrellisModelConfig._from_dict({
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -540,6 +575,7 @@ class TestEdgeCases:
 
     def test_full_attention_interval_string_coerced(self):
         """String full_attention_interval should be coerced to int."""
+        logger.info("running test_full_attention_interval_string_coerced")
         config = TrellisModelConfig._from_dict({
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -549,6 +585,7 @@ class TestEdgeCases:
 
     def test_full_attention_interval_invalid_string(self):
         """Invalid string full_attention_interval should be ignored."""
+        logger.info("running test_full_attention_interval_invalid_string")
         config = TrellisModelConfig._from_dict({
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -558,6 +595,7 @@ class TestEdgeCases:
 
     def test_partial_deltanet_fields(self):
         """Partial DeltaNet fields should be loaded (no validation error)."""
+        logger.info("running test_partial_deltanet_fields")
         config = TrellisModelConfig._from_dict({
             "vocab_size": 151936,
             "hidden_size": 2048,
@@ -569,6 +607,7 @@ class TestEdgeCases:
 
     def test_num_shared_experts_field_mapping(self):
         """num_shared_experts should map correctly."""
+        logger.info("running test_num_shared_experts_field_mapping")
         config = TrellisModelConfig._from_dict({
             "vocab_size": 151936,
             "hidden_size": 2048,

@@ -11,12 +11,14 @@ import metal_marlin.metallib_loader as metallib_loader
 
 
 def _write_shader(path: Path, contents: str) -> Path:
+    logger.info("_write_shader called with path=%s, contents=%s", path, contents)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(contents)
     return path
 
 
 def _make_fake_metallib_tree(tmp_path: Path) -> tuple[Path, Path]:
+    logger.debug("_make_fake_metallib_tree called with tmp_path=%s", tmp_path)
     metallib_path = tmp_path / "metal_marlin" / "lib" / "metal_marlin.metallib"
     metallib_path.parent.mkdir(parents=True, exist_ok=True)
     metallib_path.write_bytes(b"fake metallib")
@@ -29,6 +31,7 @@ def _make_fake_metallib_tree(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def test_staleness_details_detect_modified_added_and_removed_files(tmp_path: Path) -> None:
+    logger.info("running test_staleness_details_detect_modified_added_and_removed_files")
     metallib_path, shader_path = _make_fake_metallib_tree(tmp_path)
 
     metallib_loader.save_checksum_manifest(metallib_path)
@@ -65,6 +68,7 @@ def test_staleness_details_detect_modified_added_and_removed_files(tmp_path: Pat
 
 
 def test_staleness_details_fall_back_to_source_hash(tmp_path: Path) -> None:
+    logger.info("running test_staleness_details_fall_back_to_source_hash")
     metallib_path, shader_path = _make_fake_metallib_tree(tmp_path)
 
     metallib_loader.save_source_hash(metallib_path)
@@ -85,6 +89,7 @@ def test_load_metallib_warns_for_stale_cached_library(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    logger.info("running test_load_metallib_warns_for_stale_cached_library")
     metallib_path, shader_path = _make_fake_metallib_tree(tmp_path)
     metallib_loader.save_checksum_manifest(metallib_path)
 

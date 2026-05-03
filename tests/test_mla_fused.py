@@ -16,6 +16,7 @@ Uses GLM-4.7-Flash style dimensions:
 - qk_rope_head_dim=32
 """
 
+import logging
 import math
 
 import numpy as np
@@ -30,6 +31,9 @@ from metal_marlin.mla_fused import (
     mla_fused_attention_decode,
 )
 from metal_marlin.quantize_fp4 import quantize_fp4
+
+
+logger = logging.getLogger(__name__)
 
 # Skip tests if MPS unavailable
 pytestmark = pytest.mark.skipif(not HAS_MPS, reason="Requires MPS (Apple Silicon)")
@@ -46,6 +50,7 @@ class TestMLAFused:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Create FP4 quantized weights from random float16 weights."""
         # Random float16 weights
+        logger.info("running _create_test_weights")
         weights = torch.randn(in_features, out_features, dtype=torch.float16, device=device)
         
         # Quantize to FP4 - use a group_size that divides in_features evenly
@@ -59,6 +64,7 @@ class TestMLAFused:
 
     def test_params_to_struct(self):
         """Test MLAAttentionParams serialization."""
+        logger.info("running test_params_to_struct")
         params = MLAAttentionParams(
             batch=2,
             seq_q=8,
@@ -103,6 +109,7 @@ class TestMLAFused:
 
     def test_create_glm_mla_params(self):
         """Test GLM-4.7-Flash parameter creation."""
+        logger.info("running test_create_glm_mla_params")
         params = create_glm_mla_params(
             batch=1,
             seq_q=1,
@@ -141,6 +148,7 @@ class TestMLAFused:
 
     def test_fused_q_projection(self):
         """Test fused Q projection (hidden -> q_latent -> q_heads)."""
+        logger.info("running test_fused_q_projection")
         device = torch.device("mps" if HAS_MPS else "cpu")
         
         hidden_size = 256
@@ -170,6 +178,7 @@ class TestMLAFused:
 
     def test_fused_kv_projection(self):
         """Test fused KV projection (hidden -> kv_latent -> k, v)."""
+        logger.info("running test_fused_kv_projection")
         device = torch.device("mps" if HAS_MPS else "cpu")
         
         hidden_size = 256
@@ -196,6 +205,7 @@ class TestMLAFused:
 
     def test_output_projection(self):
         """Test output projection (attention -> hidden)."""
+        logger.info("running test_output_projection")
         device = torch.device("mps" if HAS_MPS else "cpu")
         
         num_heads = 4
@@ -213,6 +223,7 @@ class TestMLAFused:
 
     def test_kernel_dispatch_shape(self):
         """Test kernel dispatch with correct shapes (integration test)."""
+        logger.info("running test_kernel_dispatch_shape")
         device = torch.device("mps" if HAS_MPS else "cpu")
         
         # GLM-4.7-Flash style configuration (small for fast test)
@@ -283,6 +294,7 @@ class TestMLAFused:
 
     def test_attention_scale_computation(self):
         """Test attention scale is correctly computed."""
+        logger.info("running test_attention_scale_computation")
         head_dim = 64
         params = create_glm_mla_params(
             batch=1,
@@ -297,6 +309,7 @@ class TestMLAFused:
     def test_different_head_dims(self):
         """Test parameter creation with different head dimensions."""
         # Head dim = 64
+        logger.info("running test_different_head_dims")
         params_64 = create_glm_mla_params(
             batch=1,
             seq_q=1,
@@ -320,6 +333,7 @@ class TestMLAFused:
 
     def test_batch_processing(self):
         """Test batch processing configuration."""
+        logger.info("running test_batch_processing")
         for batch_size in [1, 2, 4, 8]:
             params = create_glm_mla_params(
                 batch=batch_size,

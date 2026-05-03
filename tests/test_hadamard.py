@@ -9,6 +9,7 @@ Validates:
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -28,6 +29,7 @@ class TestHadamardMatrix:
     @pytest.mark.smoke
     def test_orthonormality(self, n: int) -> None:
         """H @ H.T should equal identity matrix."""
+        logger.info("running test_orthonormality")
         H = hadamard_matrix(n)
         result = H @ H.T
         expected = np.eye(n, dtype=np.float32)
@@ -37,6 +39,7 @@ class TestHadamardMatrix:
     @pytest.mark.smoke
     def test_self_inverse(self, n: int) -> None:
         """Normalized Hadamard should be self-inverse: H @ H = I."""
+        logger.info("running test_self_inverse")
         H = hadamard_matrix(n)
         # For normalized Hadamard, H^T = H (symmetric) so H @ H = H @ H^T = I
         result = H @ H
@@ -46,18 +49,21 @@ class TestHadamardMatrix:
     @pytest.mark.parametrize("n", [1, 2, 4, 8, 16, 32, 64])
     def test_symmetric(self, n: int) -> None:
         """Normalized Hadamard should be symmetric: H = H.T."""
+        logger.info("running test_symmetric")
         H = hadamard_matrix(n)
         np.testing.assert_allclose(H, H.T, rtol=1e-6)
 
     @pytest.mark.parametrize("n", [2, 4, 8, 16])
     def test_entries_magnitude(self, n: int) -> None:
         """All entries should have magnitude 1/sqrt(n)."""
+        logger.info("running test_entries_magnitude")
         H = hadamard_matrix(n)
         expected_mag = 1.0 / np.sqrt(n)
         np.testing.assert_allclose(np.abs(H), expected_mag, rtol=1e-6)
 
     def test_invalid_not_power_of_two(self) -> None:
         """Should raise ValueError for non-power-of-2 input."""
+        logger.info("running test_invalid_not_power_of_two")
         with pytest.raises(ValueError, match="power of 2"):
             hadamard_matrix(3)
         with pytest.raises(ValueError, match="power of 2"):
@@ -65,6 +71,7 @@ class TestHadamardMatrix:
 
     def test_invalid_zero_or_negative(self) -> None:
         """Should raise ValueError for zero or negative input."""
+        logger.info("running test_invalid_zero_or_negative")
         with pytest.raises(ValueError, match="positive"):
             hadamard_matrix(0)
         with pytest.raises(ValueError, match="positive"):
@@ -78,6 +85,7 @@ class TestApplyHadamardRotation:
     @pytest.mark.smoke
     def test_roundtrip_exact_divisible(self, block_size: int) -> None:
         """Rotation should be perfectly reversible for aligned dimensions."""
+        logger.info("running test_roundtrip_exact_divisible")
         K, N = block_size * 4, 128
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -90,6 +98,7 @@ class TestApplyHadamardRotation:
     def test_roundtrip_needs_padding(self, block_size: int) -> None:
         """Rotation should handle non-aligned dimensions with padding."""
         # K not divisible by block_size
+        logger.info("running test_roundtrip_needs_padding")
         K, N = block_size * 3 + 7, 128
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -100,6 +109,7 @@ class TestApplyHadamardRotation:
 
     def test_roundtrip_axis_1(self) -> None:
         """Rotation along N axis should also be reversible."""
+        logger.info("running test_roundtrip_axis_1")
         K, N = 256, 256
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -110,6 +120,7 @@ class TestApplyHadamardRotation:
 
     def test_metadata_correct(self) -> None:
         """Metadata should correctly capture dimensions and parameters."""
+        logger.info("running test_metadata_correct")
         K, N = 200, 512
         block_size = 64
 
@@ -123,6 +134,7 @@ class TestApplyHadamardRotation:
     @pytest.mark.parametrize("block_size", [96, 160, 192])
     def test_roundtrip_non_power_of_2(self, block_size: int) -> None:
         """Rotation should work for non-power-of-2 block sizes via decomposition."""
+        logger.info("running test_roundtrip_non_power_of_2")
         K, N = block_size * 4, 128
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -136,6 +148,7 @@ class TestApplyHadamardRotation:
     def test_roundtrip_non_power_of_2_needs_padding(self, block_size: int) -> None:
         """Non-power-of-2 rotation should handle padding correctly."""
         # K not divisible by block_size
+        logger.info("running test_roundtrip_non_power_of_2_needs_padding")
         K, N = block_size * 3 + 7, 128
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -146,12 +159,14 @@ class TestApplyHadamardRotation:
 
     def test_invalid_block_size(self) -> None:
         """Should raise ValueError for unsupported block_size."""
+        logger.info("running test_invalid_block_size")
         W = np.random.randn(128, 128).astype(np.float32)
         with pytest.raises(ValueError, match="block_size must be"):
             apply_hadamard_rotation(W, block_size=100)
 
     def test_invalid_axis(self) -> None:
         """Should raise ValueError for invalid axis."""
+        logger.info("running test_invalid_axis")
         W = np.random.randn(128, 128).astype(np.float32)
         with pytest.raises(ValueError, match="axis must be 0 or 1"):
             apply_hadamard_rotation(W, axis=2)
@@ -163,6 +178,7 @@ class TestOutlierDispersal:
     @pytest.mark.smoke
     def test_single_outlier_dispersed(self) -> None:
         """A single large outlier should be dispersed across the block."""
+        logger.info("running test_single_outlier_dispersed")
         K, N = 256, 512
         W = np.random.randn(K, N).astype(np.float32) * 0.1
 
@@ -181,6 +197,7 @@ class TestOutlierDispersal:
     @pytest.mark.smoke
     def test_max_mean_ratio_reduced(self) -> None:
         """Max/mean ratio should decrease after rotation."""
+        logger.info("running test_max_mean_ratio_reduced")
         K, N = 256, 512
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -198,6 +215,7 @@ class TestOutlierDispersal:
 
     def test_energy_preservation(self) -> None:
         """Total energy (sum of squares) should be preserved."""
+        logger.info("running test_energy_preservation")
         K, N = 256, 512
         W = np.random.randn(K, N).astype(np.float32) * 10
 
@@ -209,6 +227,7 @@ class TestOutlierDispersal:
 
     def test_channel_wise_variance_more_uniform(self) -> None:
         """Per-channel variance should become more uniform after rotation."""
+        logger.info("running test_channel_wise_variance_more_uniform")
         K, N = 256, 512
         W = np.random.randn(K, N).astype(np.float32)
 
@@ -230,6 +249,7 @@ class TestComputeOutlierStats:
 
     def test_basic_stats(self) -> None:
         """Should compute correct basic statistics."""
+        logger.info("running test_basic_stats")
         W = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
         stats = compute_outlier_stats(W)
 
@@ -239,6 +259,7 @@ class TestComputeOutlierStats:
 
     def test_kurtosis_normal(self) -> None:
         """Normal distribution should have near-zero excess kurtosis."""
+        logger.info("running test_kurtosis_normal")
         np.random.seed(42)
         W = np.random.randn(10000).astype(np.float32)
         stats = compute_outlier_stats(W)
@@ -248,6 +269,7 @@ class TestComputeOutlierStats:
 
     def test_kurtosis_outliers(self) -> None:
         """Distribution with outliers should have positive excess kurtosis."""
+        logger.info("running test_kurtosis_outliers")
         np.random.seed(42)
         W = np.random.randn(10000).astype(np.float32)
         # Add some extreme outliers
@@ -273,6 +295,7 @@ class TestLLMScaleDimensions:
     )
     def test_roundtrip_llm_dims(self, K: int, N: int) -> None:
         """Rotation should work correctly for LLM-scale dimensions."""
+        logger.info("running test_roundtrip_llm_dims")
         np.random.seed(42)
         W = np.random.randn(K, N).astype(np.float32) * 0.02  # Xavier-like init
 
@@ -284,6 +307,7 @@ class TestLLMScaleDimensions:
     @pytest.mark.parametrize("block_size", [64, 128])
     def test_quantization_group_aligned(self, block_size: int) -> None:
         """Block size should align with typical quantization group sizes."""
+        logger.info("running test_quantization_group_aligned")
         K, N = 4096, 4096
         np.random.seed(42)
         W = np.random.randn(K, N).astype(np.float32) * 0.02
@@ -306,6 +330,7 @@ def hadamard_transform_numpy(x: np.ndarray, normalize: bool = True) -> np.ndarra
     Returns:
         Transformed array of same shape.
     """
+    logger.debug("hadamard_transform_numpy called with x=%s, normalize=%s", x, normalize)
     block_size = x.shape[-1]
     H = hadamard_matrix(block_size)
     if not normalize:
@@ -327,6 +352,9 @@ try:
 except ImportError:
     HAS_MPS = False
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 
 
@@ -335,12 +363,14 @@ class TestHadamardMetalKernel:
 
     def test_import(self):
         """Test that hadamard_transform can be imported."""
+        logger.info("running test_import")
         from metal_marlin.kernels import hadamard_transform
 
         assert callable(hadamard_transform)
 
     def test_block_size_32(self):
         """Test Hadamard transform with block_size=32."""
+        logger.info("running test_block_size_32")
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
@@ -353,6 +383,7 @@ class TestHadamardMetalKernel:
 
     def test_block_size_64(self):
         """Test Hadamard transform with block_size=64."""
+        logger.info("running test_block_size_64")
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
@@ -364,6 +395,7 @@ class TestHadamardMetalKernel:
 
     def test_block_size_128(self):
         """Test Hadamard transform with block_size=128."""
+        logger.info("running test_block_size_128")
         from metal_marlin.kernels import hadamard_transform
 
         batch = 16
@@ -375,6 +407,7 @@ class TestHadamardMetalKernel:
 
     def test_accuracy_block_32(self):
         """Test accuracy of block_size=32 against numpy reference."""
+        logger.info("running test_accuracy_block_32")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)
@@ -395,6 +428,7 @@ class TestHadamardMetalKernel:
 
     def test_accuracy_block_64(self):
         """Test accuracy of block_size=64 against numpy reference."""
+        logger.info("running test_accuracy_block_64")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)
@@ -414,6 +448,7 @@ class TestHadamardMetalKernel:
 
     def test_accuracy_block_128(self):
         """Test accuracy of block_size=128 against numpy reference."""
+        logger.info("running test_accuracy_block_128")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)
@@ -433,6 +468,7 @@ class TestHadamardMetalKernel:
 
     def test_orthogonality(self):
         """Test that H @ H @ x = x (with normalized transforms)."""
+        logger.info("running test_orthogonality")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)
@@ -451,6 +487,7 @@ class TestHadamardMetalKernel:
 
     def test_unnormalized(self):
         """Test unnormalized Hadamard transform."""
+        logger.info("running test_unnormalized")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)
@@ -472,6 +509,7 @@ class TestHadamardMetalKernel:
 
     def test_invalid_block_size(self):
         """Test that invalid block sizes raise errors."""
+        logger.info("running test_invalid_block_size")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(4, 64, device="mps")
@@ -484,6 +522,7 @@ class TestHadamardMetalKernel:
 
     def test_mismatched_dimension(self):
         """Test that mismatched dimensions raise errors."""
+        logger.info("running test_mismatched_dimension")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(4, 100, device="mps")
@@ -493,6 +532,7 @@ class TestHadamardMetalKernel:
 
     def test_3d_input(self):
         """Test with 3D input tensor."""
+        logger.info("running test_3d_input")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(2, 8, 64, device="mps")
@@ -503,6 +543,7 @@ class TestHadamardMetalKernel:
 
     def test_single_vector(self):
         """Test with a single vector."""
+        logger.info("running test_single_vector")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(1, 64, device="mps")
@@ -513,6 +554,7 @@ class TestHadamardMetalKernel:
 
     def test_large_batch(self):
         """Test with large batch size."""
+        logger.info("running test_large_batch")
         from metal_marlin.kernels import hadamard_transform
 
         batch = 1024
@@ -524,6 +566,7 @@ class TestHadamardMetalKernel:
 
     def test_dtype_float16_input(self):
         """Test that float16 input is handled correctly."""
+        logger.info("running test_dtype_float16_input")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(4, 64, device="mps", dtype=torch.float16)
@@ -534,6 +577,7 @@ class TestHadamardMetalKernel:
 
     def test_dtype_float32_input(self):
         """Test that float32 input is converted to float16 for kernel."""
+        logger.info("running test_dtype_float32_input")
         from metal_marlin.kernels import hadamard_transform
 
         x = torch.randn(4, 64, device="mps", dtype=torch.float32)
@@ -545,6 +589,7 @@ class TestHadamardMetalKernel:
 
     def test_energy_preservation(self):
         """Test that total energy (Frobenius norm) is preserved."""
+        logger.info("running test_energy_preservation")
         from metal_marlin.kernels import hadamard_transform
 
         torch.manual_seed(42)

@@ -10,14 +10,19 @@ insertion of requests with all required features:
 - Queue capacity management
 """
 
+import logging
 import sys
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 # Add metal_marlin to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 def verify_imports():
     """Verify all required components can be imported."""
+    logger.debug("verify_imports called")
     print("=" * 70)
     print("VERIFICATION: BatchScheduler Import Check")
     print("=" * 70)
@@ -45,6 +50,7 @@ def verify_imports():
 
 def verify_class_structure():
     """Verify BatchScheduler has all required methods."""
+    logger.debug("verify_class_structure called")
     print("\n" + "=" * 70)
     print("VERIFICATION: BatchScheduler Class Structure")
     print("=" * 70)
@@ -75,6 +81,7 @@ def verify_class_structure():
 
 def verify_insertion_policies():
     """Verify InsertionPolicy enum has all required values."""
+    logger.debug("verify_insertion_policies called")
     print("\n" + "=" * 70)
     print("VERIFICATION: InsertionPolicy Enum")
     print("=" * 70)
@@ -95,6 +102,7 @@ def verify_insertion_policies():
 
 def verify_dynamic_insertion():
     """Verify dynamic insertion functionality works."""
+    logger.debug("verify_dynamic_insertion called")
     print("\n" + "=" * 70)
     print("VERIFICATION: Dynamic Request Insertion")
     print("=" * 70)
@@ -162,6 +170,7 @@ def verify_dynamic_insertion():
 
 def main():
     """Run all verification tests."""
+    logger.info("main starting")
     print("\nBatchScheduler Implementation Verification")
     print("=" * 70)
     

@@ -18,11 +18,15 @@ Usage:
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from typing import Any, Literal
 
 import torch.nn as torch_nn
 
 from .layers import MarlinLinear
+
+
+logger = logging.getLogger(__name__)
 
 # Constants
 FP4_PER_U32 = 8  # 8 FP4 values packed per uint32
@@ -42,7 +46,9 @@ def _quantize_torch(
 ) -> Any:
     """Quantize PyTorch model in-place."""
 
+    logger.info("_quantize_torch called with model=%s, quant_type=%s, group_size=%s, skip_layers=%s", model, quant_type, group_size, skip_layers)
     def _should_quantize(name: str, module: Any) -> bool:
+        logger.info("_should_quantize called with name=%s, module=%s", name, module)
         if not isinstance(module, torch_nn.Linear):
             return False
         if any(skip in name for skip in skip_layers):
@@ -107,6 +113,7 @@ def quantize_model(
     Returns:
         The same model instance with qualifying layers replaced in-place.
     """
+    logger.info("quantize_model called with model=%s, quant_type=%s, group_size=%s, skip_layers=%s", model, quant_type, group_size, skip_layers)
     if quant_type != "fp4":
         raise NotImplementedError(
             f"Only quant_type='fp4' is currently supported, got {quant_type!r}"
@@ -139,6 +146,7 @@ def estimate_model_size(model: torch_nn.Module, group_size: int = 128) -> dict[s
             num_quantized_layers: Count of MarlinLinear layers.
             num_unquantized_layers: Count of remaining nn.Linear layers.
     """
+    logger.debug("estimate_model_size called with model=%s, group_size=%s", model, group_size)
     if not isinstance(model, torch_nn.Module):
         raise TypeError(f"Model type {type(model)} not supported. Requires PyTorch nn.Module.")
 

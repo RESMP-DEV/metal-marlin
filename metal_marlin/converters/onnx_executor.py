@@ -23,6 +23,7 @@ Requirements:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,11 +39,15 @@ try:
 except ImportError:
     from metal_marlin import pack_fp4_weights_cpu as pack_fp4_weights
 
+
+logger = logging.getLogger(__name__)
+
 __all__ = ["ONNXExecutor", "load_onnx_model", "pack_fp4_weights"]
 
 
 def _get_device() -> torch.device:
     """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    logger.debug("_get_device called")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -116,6 +121,7 @@ class ONNXExecutor:
             quantized_weights: Optional dict of {weight_name: (packed, scales)}
                                for quantized layers
         """
+        logger.debug("initializing %s with graph=%s, quantized_weights=%s", type(self).__name__, graph, quantized_weights)
         self.graph = graph
         self.quantized_weights = quantized_weights or {}
         self._mha_patterns = _detect_mha_patterns(graph)
@@ -136,6 +142,7 @@ class ONNXExecutor:
         Returns:
             Configured executor
         """
+        logger.debug("from_file called with path=%s, quantize=%s", path, quantize)
         graph = load_onnx_model(path)
 
         if quantize:
@@ -184,6 +191,7 @@ class ONNXExecutor:
 
     def _dispatch_node(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Dispatch a single node to the appropriate kernel."""
+        logger.debug("_dispatch_node called with node=%s, inputs=%s", node, inputs)
         handler = self._op_dispatch.get(node.op_type)
         if handler is None:
             raise NotImplementedError(f"ONNX op not supported: {node.op_type}")
@@ -191,6 +199,7 @@ class ONNXExecutor:
 
     def _build_dispatch_table(self) -> dict:
         """Build op_type -> handler function mapping."""
+        logger.info("_build_dispatch_table starting")
         return {
             # Matrix operations
             "MatMul": self._handle_matmul,
@@ -242,6 +251,7 @@ class ONNXExecutor:
         Returns:
             Output tensor [batch, seq_len, hidden_size]
         """
+        logger.debug("_handle_fused_attention called with pattern=%s, values=%s", pattern, values)
         from ..attention import MarlinAttention
 
         hidden_states = values[pattern.input_name]
@@ -275,6 +285,7 @@ class ONNXExecutor:
         This handles the case where an ONNX graph has already been fused into
         a single MultiHeadAttention node (e.g., via onnxruntime graph optimization).
         """
+        logger.debug("_handle_fused_attention_dispatch called with node=%s, inputs=%s", node, inputs)
         from ..attention import MarlinAttention
 
         hidden_states = inputs[0]
@@ -316,6 +327,7 @@ class ONNXExecutor:
 
         We reshape to match SDPA's expected layout.
         """
+        logger.debug("_handle_attention_op called with node=%s, inputs=%s", node, inputs)
         query = inputs[0]
         key = inputs[1]
         value = inputs[2]
@@ -349,6 +361,7 @@ class ONNXExecutor:
 
     def _handle_matmul(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle MatMul - use quantized kernel if weights are quantized."""
+        logger.debug("_handle_matmul called with node=%s, inputs=%s", node, inputs)
         a, b = inputs
 
         # Check if B is a quantized weight
@@ -367,6 +380,7 @@ class ONNXExecutor:
 
     def _handle_gemm(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Gemm (MatMul + bias)."""
+        logger.debug("_handle_gemm called with node=%s, inputs=%s", node, inputs)
         a, b = inputs[:2]
         bias = inputs[2] if len(inputs) > 2 else None
 
@@ -391,6 +405,7 @@ class ONNXExecutor:
         ONNX LayerNormalization has inputs: X, Scale, [Bias]
         Bias is optional (can be 2 or 3 inputs).
         """
+        logger.debug("_handle_layernorm called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         scale = inputs[1]
         bias = inputs[2] if len(inputs) > 2 else None
@@ -419,25 +434,30 @@ class ONNXExecutor:
 
     def _handle_softmax(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Softmax."""
+        logger.debug("_handle_softmax called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axis = node.attrs.get("axis", -1)
         return [F.softmax(x, dim=axis)]
 
     def _handle_mul(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise multiply."""
+        logger.debug("_handle_mul called with node=%s, inputs=%s", node, inputs)
         return [inputs[0] * inputs[1]]
 
     def _handle_add(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise add."""
+        logger.debug("_handle_add called with node=%s, inputs=%s", node, inputs)
         return [inputs[0] + inputs[1]]
 
     def _handle_reshape(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Reshape."""
+        logger.debug("_handle_reshape called with node=%s, inputs=%s", node, inputs)
         x, shape = inputs
         return [x.reshape(shape.tolist())]
 
     def _handle_transpose(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Transpose."""
+        logger.debug("_handle_transpose called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         perm = node.attrs.get("perm")
         if perm:
@@ -451,18 +471,22 @@ class ONNXExecutor:
 
     def _handle_relu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReLU activation."""
+        logger.debug("_handle_relu called with node=%s, inputs=%s", node, inputs)
         return [F.relu(inputs[0])]
 
     def _handle_sigmoid(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Sigmoid activation."""
+        logger.debug("_handle_sigmoid called with node=%s, inputs=%s", node, inputs)
         return [torch.sigmoid(inputs[0])]
 
     def _handle_tanh(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Tanh activation."""
+        logger.debug("_handle_tanh called with node=%s, inputs=%s", node, inputs)
         return [torch.tanh(inputs[0])]
 
     def _handle_gelu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle GELU activation (approximate or exact based on attrs)."""
+        logger.debug("_handle_gelu called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         approximate = node.attrs.get("approximate", "none")
         if approximate == "tanh":
@@ -474,6 +498,7 @@ class ONNXExecutor:
 
     def _handle_silu(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle SiLU/Swish activation: x * sigmoid(x)."""
+        logger.debug("_handle_silu called with node=%s, inputs=%s", node, inputs)
         return [F.silu(inputs[0])]
 
     # -------------------------------------------------------------------------
@@ -482,22 +507,27 @@ class ONNXExecutor:
 
     def _handle_sub(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise subtract."""
+        logger.debug("_handle_sub called with node=%s, inputs=%s", node, inputs)
         return [inputs[0] - inputs[1]]
 
     def _handle_div(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise divide."""
+        logger.debug("_handle_div called with node=%s, inputs=%s", node, inputs)
         return [inputs[0] / inputs[1]]
 
     def _handle_pow(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise power."""
+        logger.debug("_handle_pow called with node=%s, inputs=%s", node, inputs)
         return [torch.pow(inputs[0], inputs[1])]
 
     def _handle_sqrt(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle element-wise sqrt."""
+        logger.debug("_handle_sqrt called with node=%s, inputs=%s", node, inputs)
         return [torch.sqrt(inputs[0])]
 
     def _handle_neg(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle negation."""
+        logger.debug("_handle_neg called with node=%s, inputs=%s", node, inputs)
         return [-inputs[0]]
 
     # -------------------------------------------------------------------------
@@ -506,6 +536,7 @@ class ONNXExecutor:
 
     def _handle_squeeze(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Squeeze - remove dimensions of size 1."""
+        logger.debug("_handle_squeeze called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axes = node.attrs.get("axes")
         if axes is None and len(inputs) > 1:
@@ -520,6 +551,7 @@ class ONNXExecutor:
 
     def _handle_unsqueeze(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Unsqueeze - add dimensions of size 1."""
+        logger.debug("_handle_unsqueeze called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axes = node.attrs.get("axes")
         if axes is None and len(inputs) > 1:
@@ -531,11 +563,13 @@ class ONNXExecutor:
 
     def _handle_concat(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Concat - concatenate tensors along axis."""
+        logger.debug("_handle_concat called with node=%s, inputs=%s", node, inputs)
         axis = node.attrs.get("axis", 0)
         return [torch.cat(inputs, dim=axis)]
 
     def _handle_split(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Split - split tensor into chunks."""
+        logger.debug("_handle_split called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axis = node.attrs.get("axis", 0)
         num_outputs = node.attrs.get("num_outputs")
@@ -556,6 +590,7 @@ class ONNXExecutor:
 
     def _handle_gather(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle Gather - select slices from tensor."""
+        logger.debug("_handle_gather called with node=%s, inputs=%s", node, inputs)
         data, indices = inputs
         axis = node.attrs.get("axis", 0)
         return [torch.index_select(data, axis, indices.flatten()).reshape(*indices.shape, *data.shape[axis+1:])]
@@ -566,6 +601,7 @@ class ONNXExecutor:
 
     def _handle_reduce_mean(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReduceMean."""
+        logger.debug("_handle_reduce_mean called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axes = node.attrs.get("axes")
         keepdims = bool(node.attrs.get("keepdims", 1))
@@ -577,6 +613,7 @@ class ONNXExecutor:
 
     def _handle_reduce_sum(self, node: ONNXNode, inputs: list[torch.Tensor]) -> list[torch.Tensor]:
         """Handle ReduceSum."""
+        logger.debug("_handle_reduce_sum called with node=%s, inputs=%s", node, inputs)
         x = inputs[0]
         axes = node.attrs.get("axes")
         keepdims = bool(node.attrs.get("keepdims", 1))
@@ -619,6 +656,7 @@ def _detect_mha_patterns(graph: ONNXGraph) -> list[MHAPattern]:
         List of detected patterns (may be empty if no patterns found)
     """
     # Build producer map: output_name -> (node_index, node)
+    logger.debug("_detect_mha_patterns called with graph=%s", graph)
     producer: dict[str, tuple[int, ONNXNode]] = {}
     for idx, node in enumerate(graph.nodes):
         for out in node.outputs:
@@ -764,6 +802,7 @@ def _trace_proj_chain(
     The tensor_name is the input to the QK^T or AV matmul, which should be
     the output of a Transpose node.
     """
+    logger.debug("_trace_proj_chain called with tensor_name=%s, producer=%s, graph=%s", tensor_name, producer, graph)
     if tensor_name not in producer:
         return None
 
@@ -807,6 +846,7 @@ def _trace_output_chain(
     graph: ONNXGraph,
 ) -> _OutputChain | None:
     """Trace forward from AV output: Transpose -> Reshape -> O_proj (MatMul)."""
+    logger.debug("_trace_output_chain called with tensor_name=%s, consumer=%s, producer=%s", tensor_name, consumer, producer)
     consumers = consumer.get(tensor_name, [])
     if not consumers:
         return None
@@ -864,6 +904,7 @@ def _trace_back_to_matmul(
     Returns:
         (matmul_index, matmul_node, list_of_intermediate_indices)
     """
+    logger.debug("_trace_back_to_matmul called with tensor_name=%s, producer=%s, graph=%s", tensor_name, producer, graph)
     intermediate: list[int] = []
     current = tensor_name
 
@@ -889,6 +930,7 @@ def _find_consumer_matmul(
     graph: ONNXGraph,
 ) -> tuple[int | None, ONNXNode | None]:
     """Find the attn @ V MatMul that consumes the Softmax output."""
+    logger.debug("_find_consumer_matmul called with tensor_name=%s, consumer=%s, graph=%s", tensor_name, consumer, graph)
     consumers = consumer.get(tensor_name, [])
     for idx, node in consumers:
         if node.op_type == "MatMul":
@@ -898,6 +940,7 @@ def _find_consumer_matmul(
 
 def _has_weight_initializer(node: ONNXNode, graph: ONNXGraph) -> bool:
     """Check if a MatMul/Gemm node has a weight tensor in graph initializers."""
+    logger.debug("_has_weight_initializer called with node=%s, graph=%s", node, graph)
     for inp in node.inputs[1:]:
         if inp in graph.initializers:
             return True
@@ -912,6 +955,7 @@ def _infer_head_geometry(chain: _ProjChain, graph: ONNXGraph) -> tuple[int | Non
     The shape tensor is usually a constant initializer like [0, 0, num_heads, head_dim]
     or [-1, seq_len, num_heads, head_dim].
     """
+    logger.debug("_infer_head_geometry called with chain=%s, graph=%s", chain, graph)
     reshape_node = graph.nodes[chain.reshape_idx]
     if len(reshape_node.inputs) < 2:
         return None, None
@@ -948,6 +992,7 @@ def _load_proj_weights(
     If the weight is already quantized (present in quantized_weights),
     load the packed representation directly. Otherwise, quantize on the fly.
     """
+    logger.info("_load_proj_weights called with proj_layer=%s, weight_name=%s, graph=%s, quantized_weights=%s", proj_layer, weight_name, graph, quantized_weights)
     if weight_name in quantized_weights:
         packed, scales = quantized_weights[weight_name]
         proj_layer.weight_packed = packed
@@ -973,6 +1018,7 @@ def load_onnx_model(path: str | Path) -> ONNXGraph:
     Returns:
         Parsed graph structure
     """
+    logger.info("load_onnx_model called with path=%s", path)
     try:
         import onnx
     except ImportError as e:
@@ -1016,6 +1062,7 @@ def load_onnx_model(path: str | Path) -> ONNXGraph:
 
 def _parse_attr(attr):
     """Parse ONNX attribute to Python value."""
+    logger.debug("_parse_attr called with attr=%s", attr)
     import onnx
 
     if attr.type == onnx.AttributeProto.FLOAT:
@@ -1042,6 +1089,7 @@ def _quantize_linear_weights(graph: ONNXGraph) -> dict[str, tuple]:
     Returns:
         Dict of {weight_name: (packed_weights, scales)}
     """
+    logger.info("_quantize_linear_weights called with graph=%s", graph)
     quantized = {}
 
     for node in graph.nodes:

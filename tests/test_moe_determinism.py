@@ -5,11 +5,15 @@ from __future__ import annotations
 import gc
 import json
 from contextlib import ExitStack
+import logging
 from pathlib import Path
 from typing import Any
 
 import pytest
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 pytestmark = pytest.mark.requires_mps
 
@@ -20,6 +24,7 @@ def _copy_with_optional_transpose(
     *,
     device: str,
 ) -> None:
+    logger.debug("_copy_with_optional_transpose called with dst=%s, src=%s", dst, src)
     if src.shape == dst.shape:
         aligned = src
     elif src.ndim == dst.ndim and src.transpose(-1, -2).shape == dst.shape:
@@ -41,7 +46,9 @@ def _load_layer_moe_weights(
     safe_open: Any,
     device: str,
 ) -> None:
+    logger.info("_load_layer_moe_weights called")
     def _name(expert_idx: int, proj_name: str, suffix: str) -> str:
+        logger.debug("_name called with expert_idx=%s, proj_name=%s, suffix=%s", expert_idx, proj_name, suffix)
         return f"model.layers.{layer_idx}.mlp.experts.{expert_idx}.{proj_name}.{suffix}"
 
     layer_prefix = f"model.layers.{layer_idx}.mlp.experts."
@@ -76,6 +83,7 @@ def _load_layer_moe_weights(
 
 
 def test_moe_forward_deterministic() -> None:
+    logger.info("running test_moe_forward_deterministic")
     if not torch.backends.mps.is_available():
         pytest.skip("MPS backend required for MoE determinism test.")
 

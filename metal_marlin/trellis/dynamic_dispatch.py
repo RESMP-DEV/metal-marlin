@@ -49,6 +49,7 @@ def _normalize_tensor_for_cpp_bridge(
     allowed_dtypes: tuple[torch.dtype, ...],
 ) -> torch.Tensor:
     """Normalize tensors before wrapping as nanobind ManagedBuffer."""
+    logger.debug("_normalize_tensor_for_cpp_bridge called with tensor=%s", tensor)
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(
             f"Unsupported input for C++ bridge: "
@@ -124,6 +125,7 @@ def is_dynamic_moe_available() -> bool:
     Returns:
         True if the C++ extension is available and Metal is enabled.
     """
+    logger.debug("is_dynamic_moe_available called")
     if not HAS_METAL:
         return False
 
@@ -175,6 +177,7 @@ class DynamicMoEDispatch:
         Raises:
             RuntimeError: If dynamic dispatch is not available
         """
+        logger.debug("initializing %s with lib=%s, expert_bits=%s", type(self).__name__, lib, expert_bits)
         if not is_dynamic_moe_available():
             raise RuntimeError(
                 "C++ dynamic MoE dispatch not available. "
@@ -202,6 +205,7 @@ class DynamicMoEDispatch:
     def _build_bit_lookup_tables(self) -> None:
         """Build lookup tables for fast bit width resolution."""
         # Extract bit widths into tensor format for GPU access
+        logger.info("_build_bit_lookup_tables starting")
         self._gate_bits = torch.tensor(
             [eb.gate_bits for eb in self._expert_bits],
             dtype=torch.int32,
@@ -284,6 +288,7 @@ class DynamicMoEDispatch:
         Raises:
             RuntimeError: If dispatch fails
         """
+        logger.debug("dispatch called with activations=%s, expert_ids=%s, expert_probs=%s", activations, expert_ids, expert_probs)
         import os
         import time
 
@@ -325,6 +330,7 @@ class DynamicMoEDispatch:
                     allowed_dtypes: tuple[torch.dtype, ...],
                     required: bool = True,
                 ) -> None:
+                    logger.info("convert_field called with attr_name=%s, tensor_attr=%s, expected_dtype=%s, allowed_dtypes=%s", attr_name, getattr(tensor_attr, "shape", tensor_attr), expected_dtype, allowed_dtypes)
                     current_val = getattr(weight_buffers, attr_name, None)
                     # Already converted for C++ fast path
                     if (
@@ -599,14 +605,17 @@ class DynamicMoEDispatch:
             Dictionary mapping (gate_bits, up_bits, down_bits) tuples to
             lists of expert indices with that configuration.
         """
+        logger.debug("get_bit_groups called")
         return self._bit_groups.copy()
 
     @property
     def num_bit_groups(self) -> int:
         """Number of unique bit width groups."""
+        logger.debug("num_bit_groups called")
         return len(self._bit_groups)
 
     @property
     def num_experts(self) -> int:
         """Total number of experts."""
+        logger.debug("num_experts called")
         return self._num_experts

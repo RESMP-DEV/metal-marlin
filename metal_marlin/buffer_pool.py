@@ -20,6 +20,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from typing import Any
@@ -33,6 +34,7 @@ class _Buffer:
     __slots__ = ("buffer", "size", "acquire_count")
 
     def __init__(self, buffer: Any, size: int) -> None:
+        logger.debug("initializing %s with buffer=%s, size=%s", type(self).__name__, buffer, size)
         self.buffer = buffer
         self.size = size
         self.acquire_count = 0
@@ -78,6 +80,7 @@ class MetalBufferPool:
                 have one buffer created in its corresponding bucket.
                 If None, no buffers are pre-allocated.
         """
+        logger.debug("initializing %s with device=%s, initial_sizes=%s", type(self).__name__, device, initial_sizes)
         self._device = device
         self._lock = threading.Lock()
 
@@ -106,6 +109,7 @@ class MetalBufferPool:
         Returns:
             Bucket index (0 = 128 bytes, 1 = 256 bytes, etc.)
         """
+        logger.debug("_size_to_bucket called with size=%s", size)
         if size <= self.MIN_BUFFER_SIZE:
             return 0
         # Calculate ceil(log2(size)) - 6, since 2^7 = 128
@@ -122,6 +126,7 @@ class MetalBufferPool:
         Returns:
             Buffer size for this bucket (power of 2).
         """
+        logger.debug("_bucket_to_size called with bucket=%s", bucket)
         return self.MIN_BUFFER_SIZE << bucket
 
     def _create_buffer(self, bucket: int) -> _Buffer:
@@ -133,6 +138,7 @@ class MetalBufferPool:
         Returns:
             New _Buffer instance.
         """
+        logger.debug("_create_buffer called with bucket=%s", bucket)
         size = self._bucket_to_size(bucket)
 
         # Allocate with shared storage for CPU/GPU access
@@ -150,6 +156,7 @@ class MetalBufferPool:
         Args:
             bucket: Bucket index to ensure exists.
         """
+        logger.debug("_ensure_bucket_exists called with bucket=%s", bucket)
         if bucket not in self._buckets:
             self._buckets[bucket] = deque()
             self._bucket_misses[bucket] = 0
@@ -166,6 +173,7 @@ class MetalBufferPool:
         Returns:
             MTLBuffer of at least the requested size.
         """
+        logger.debug("acquire called with size=%s", size)
         bucket = self._size_to_bucket(size)
 
         with self._lock:
@@ -194,6 +202,7 @@ class MetalBufferPool:
         Args:
             buffer: MTLBuffer to return to the pool.
         """
+        logger.debug("release called with buffer=%s", buffer)
         if buffer is None:
             return
 
@@ -224,6 +233,7 @@ class MetalBufferPool:
             - bucket_count: Number of size buckets
             - bucket_misses: Number of times buckets were empty (auto-grew)
         """
+        logger.debug("stats called")
         with self._lock:
             available = sum(len(bucket) for bucket in self._buckets.values())
             total_misses = sum(self._bucket_misses.values())
@@ -244,6 +254,7 @@ class MetalBufferPool:
         This releases all pooled buffers (not in-use buffers).
         Call this to free memory when the pool is no longer needed.
         """
+        logger.debug("clear called")
         with self._lock:
             self._buckets.clear()
             # Note: We don't decrement _total_buffers because
@@ -266,6 +277,9 @@ from metal_marlin._buffer_pool import (
     TrackedBuffer,
     TransientRingBuffer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "MetalBufferPool",

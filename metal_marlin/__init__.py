@@ -316,6 +316,7 @@ except ImportError:
 
 # Preload metallib at import time for faster first kernel dispatch
 def _preload_metallib() -> None:
+    logger.info("_preload_metallib called")
     try:
         from .metallib_loader import get_precompiled_library
 

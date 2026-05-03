@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import json
+import logging
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
@@ -30,6 +31,9 @@ except ImportError:
     HAS_MATPLOTLIB = False
     print("Warning: matplotlib not available. Charts will be skipped.", file=sys.stderr)
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class BenchmarkResult:
@@ -63,6 +67,7 @@ class CpuBaselineResult:
 
 def load_json(file_path: Path) -> dict[str, Any]:
     """Load and parse JSON file with error handling."""
+    logger.info("load_json called with file_path=%s", file_path)
     if not file_path.exists():
         raise FileNotFoundError(f"Benchmark file not found: {file_path}")
 
@@ -75,6 +80,7 @@ def load_json(file_path: Path) -> dict[str, Any]:
 
 def parse_comprehensive_results(data: dict[str, Any]) -> list[BenchmarkResult]:
     """Parse comprehensive benchmark results."""
+    logger.debug("parse_comprehensive_results called with data=%s", data)
     results = []
     for result_data in data.get("results", []):
         result = BenchmarkResult(
@@ -91,6 +97,7 @@ def parse_comprehensive_results(data: dict[str, Any]) -> list[BenchmarkResult]:
 
 def parse_scaling_results(data: dict[str, Any]) -> dict[str, list[BenchmarkResult]]:
     """Parse audio scaling benchmark results by configuration."""
+    logger.debug("parse_scaling_results called with data=%s", data)
     config_results = defaultdict(list)
 
     for result_data in data.get("results", []):
@@ -110,6 +117,7 @@ def parse_scaling_results(data: dict[str, Any]) -> dict[str, list[BenchmarkResul
 
 def parse_baseline_results(data: dict[str, Any]) -> tuple[MpsBaselineResult, CpuBaselineResult]:
     """Parse MPS baseline benchmark results."""
+    logger.debug("parse_baseline_results called with data=%s", data)
     mps_data = data.get("mps", {})
     mps_metrics = mps_data.get("metrics", {})
     mps_result = MpsBaselineResult(
@@ -131,6 +139,7 @@ def parse_baseline_results(data: dict[str, Any]) -> tuple[MpsBaselineResult, Cpu
 
 def generate_summary_table(comprehensive_results: list[BenchmarkResult]) -> str:
     """Generate markdown summary table of benchmark results."""
+    logger.debug("generate_summary_table called with comprehensive_results=%s", comprehensive_results)
     if not comprehensive_results:
         return "No comprehensive benchmark results available.\n"
 
@@ -174,6 +183,7 @@ def generate_summary_table(comprehensive_results: list[BenchmarkResult]) -> str:
 
 def generate_scaling_analysis(scaling_results: dict[str, list[BenchmarkResult]]) -> str:
     """Generate analysis of audio scaling performance."""
+    logger.debug("generate_scaling_analysis called with scaling_results=%s", scaling_results)
     if not scaling_results:
         return "No scaling benchmark results available.\n"
 
@@ -225,6 +235,7 @@ def generate_throughput_chart(
     scaling_results: dict[str, list[BenchmarkResult]], output_path: Path
 ) -> None:
     """Generate throughput comparison chart."""
+    logger.debug("generate_throughput_chart called with scaling_results=%s, output_path=%s", scaling_results, output_path)
     if not HAS_MATPLOTLIB or not scaling_results:
         return
 
@@ -252,6 +263,7 @@ def generate_memory_chart(
     scaling_results: dict[str, list[BenchmarkResult]], output_path: Path
 ) -> None:
     """Generate memory usage comparison chart."""
+    logger.debug("generate_memory_chart called with scaling_results=%s, output_path=%s", scaling_results, output_path)
     if not HAS_MATPLOTLIB or not scaling_results:
         return
 
@@ -281,6 +293,7 @@ def generate_m4_max_recommendations(
     mps_baseline: MpsBaselineResult | None = None,
 ) -> str:
     """Generate M4 Max specific recommendations."""
+    logger.debug("generate_m4_max_recommendations called with comprehensive_results=%s, scaling_results=%s, mps_baseline=%s", comprehensive_results, scaling_results, mps_baseline)
     recommendations = "## M4 Max Recommendations\n\n"
 
     if not comprehensive_results and not scaling_results:
@@ -375,6 +388,7 @@ def generate_report(
 ) -> None:
     """Generate complete benchmark report."""
     # Load data
+    logger.debug("generate_report called with comprehensive_path=%s, scaling_path=%s, baseline_path=%s", comprehensive_path, scaling_path, baseline_path)
     comprehensive_data = load_json(comprehensive_path)
     scaling_data = load_json(scaling_path)
     baseline_data = load_json(baseline_path) if baseline_path.exists() else None
@@ -441,6 +455,7 @@ def generate_report(
 
 def main():
     """Main entry point."""
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="Analyze Parakeet-TDT benchmark results")
     parser.add_argument(
         "--comprehensive",

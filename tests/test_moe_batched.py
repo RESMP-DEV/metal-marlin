@@ -5,10 +5,14 @@ correctly across different batch sizes and expert configurations.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 # Skip entire module if MPS not available
 pytestmark = pytest.mark.skipif(
@@ -19,24 +23,28 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def hidden_dim() -> int:
     """Default hidden dimension for tests."""
+    logger.debug("hidden_dim called")
     return 256
 
 
 @pytest.fixture
 def intermediate_dim() -> int:
     """Default intermediate dimension for expert FFN."""
+    logger.debug("intermediate_dim called")
     return 512
 
 
 @pytest.fixture
 def num_experts() -> int:
     """Default number of experts."""
+    logger.debug("num_experts called")
     return 8
 
 
 @pytest.fixture
 def top_k() -> int:
     """Default number of experts per token."""
+    logger.debug("top_k called")
     return 2
 
 
@@ -48,6 +56,7 @@ class TestMoEBatchSizes:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE dispatch info has correct shape for various batch sizes."""
+        logger.info("running test_moe_batch_sizes_dispatch_info")
         from metal_marlin.moe_dispatch import group_tokens_by_expert_full
 
         # Generate random expert assignments
@@ -79,6 +88,7 @@ class TestMoEBatchSizes:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE gather/scatter roundtrip preserves shape and data for various batch sizes."""
+        logger.info("running test_moe_batch_sizes_gather_scatter")
         from metal_marlin.moe_dispatch import (
             gather_for_experts,
             group_tokens_by_expert_full,
@@ -123,6 +133,7 @@ class TestMoEBatchSizes:
         num_experts: int, top_k: int
     ) -> None:
         """MoE output shape correct for various batch sizes with actual expert FFN."""
+        logger.info("running test_moe_output_shape_with_expert_ffn")
         from metal_marlin.moe_dispatch import (
             gather_for_experts,
             group_tokens_by_expert_full,
@@ -181,6 +192,7 @@ class TestMoEVariableExpertsPerToken:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Verify expert_ids indexing is correct in dispatch."""
+        logger.info("running test_expert_ids_indexing_is_correct")
         from metal_marlin.moe_dispatch import group_tokens_by_expert_full
 
         batch_size = 16
@@ -218,6 +230,7 @@ class TestMoEVariableExpertsPerToken:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Verify probability weighting is applied correctly."""
+        logger.info("running test_probability_weighting_is_correct")
         from metal_marlin.moe_dispatch import (
             gather_for_experts,
             group_tokens_by_expert_full,
@@ -263,6 +276,7 @@ class TestMoEVariableExpertsPerToken:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Verify dispatch handles unequal expert load correctly."""
+        logger.info("running test_unequal_expert_load")
         from metal_marlin.moe_dispatch import (
             compute_expert_load,
             group_tokens_by_expert_full,
@@ -289,6 +303,7 @@ class TestMoEVariableExpertsPerToken:
         self, hidden_dim: int, num_experts: int
     ) -> None:
         """Verify dispatch handles empty experts (no tokens) correctly."""
+        logger.info("running test_empty_experts_handled")
         from metal_marlin.moe_dispatch import (
             gather_for_experts,
             group_tokens_by_expert_full,
@@ -331,6 +346,7 @@ class TestMoERouterTopK:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Router produces correct output shapes for various batch sizes."""
+        logger.info("running test_router_topk_output_shapes")
         from metal_marlin.kernels import moe_router_topk
 
         torch.manual_seed(42)
@@ -347,6 +363,7 @@ class TestMoERouterTopK:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Router probabilities sum to 1 for each token."""
+        logger.info("running test_router_topk_probs_sum_to_one")
         from metal_marlin.kernels import moe_router_topk
 
         batch_size = 16
@@ -366,6 +383,7 @@ class TestMoERouterTopK:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Router expert IDs are in valid range."""
+        logger.info("running test_router_topk_ids_in_range")
         from metal_marlin.kernels import moe_router_topk
 
         batch_size = 32
@@ -383,6 +401,7 @@ class TestMoERouterTopK:
         self, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """Each token's top-k expert IDs are unique."""
+        logger.info("running test_router_topk_ids_unique_per_token")
         from metal_marlin.kernels import moe_router_topk
 
         batch_size = 16
@@ -409,6 +428,7 @@ class TestMoEExpertGEMM:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE expert GEMM produces correct output shape."""
+        logger.info("running test_moe_expert_gemm_fp4_output_shape")
         from metal_marlin.kernels import moe_expert_gemm_fp4
 
         out_dim = hidden_dim * 2  # Common FFN expansion
@@ -449,6 +469,7 @@ class TestMoEDispatcher:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE dispatcher produces correct output shape."""
+        logger.info("running test_moe_dispatcher_output_shape")
         from metal_marlin.moe_dispatch import MoEDispatcher
 
         torch.manual_seed(42)
@@ -479,6 +500,7 @@ class TestMoEDispatcher:
         self, batch_size: int, hidden_dim: int, num_experts: int, top_k: int
     ) -> None:
         """MoE dispatcher handles 3D [batch, seq, hidden] input."""
+        logger.info("running test_moe_dispatcher_3d_input")
         from metal_marlin.moe_dispatch import MoEDispatcher
 
         seq_len = 16

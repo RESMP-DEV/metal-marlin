@@ -3,10 +3,14 @@
 On Apple Silicon, CPU and GPU share the same physical memory.
 MPS tensors can be accessed by Metal directly via data_ptr().
 """
+import logging
 from typing import Any
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 def mps_tensor_to_metal_buffer_zerocopy(
     tensor: torch.Tensor,
@@ -21,6 +25,7 @@ def mps_tensor_to_metal_buffer_zerocopy(
     Returns:
         Metal buffer pointing to same memory as tensor
     """
+    logger.debug("mps_tensor_to_metal_buffer_zerocopy called with tensor=%s, device=%s", tensor, device)
     if tensor.device.type != 'mps':
         raise ValueError(f"Expected MPS tensor, got {tensor.device}")
     
@@ -37,4 +42,5 @@ def mps_tensor_to_metal_buffer_zerocopy(
 
 def ensure_contiguous_if_needed(tensor: torch.Tensor) -> torch.Tensor:
     """Only call .contiguous() if tensor is not already contiguous."""
+    logger.debug("ensure_contiguous_if_needed called with tensor=%s", tensor)
     return tensor if tensor.is_contiguous() else tensor.contiguous()

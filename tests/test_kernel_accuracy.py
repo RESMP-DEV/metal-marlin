@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pytest
 import torch
@@ -15,16 +16,21 @@ try:
 except ImportError:
     HAS_KERNELS = False
 
+
+logger = logging.getLogger(__name__)
+
 # Skip all tests if MPS is not available
 if not torch.backends.mps.is_available():
     pytest.skip("MPS not available", allow_module_level=True)
 
 @pytest.fixture
 def device():
+    logger.debug("device called")
     return torch.device("mps")
 
 def get_fp4_e2m1_table(device):
     """Returns the E2M1 lookup table for FP4 dequantization."""
+    logger.debug("get_fp4_e2m1_table called with device=%s", device)
     return torch.tensor(
         [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
          -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
@@ -37,6 +43,7 @@ def dequant_fp4_torch(packed_weights, scales, group_size, K, N):
     packed_weights: [K/8, N] uint32
     scales: [K/group_size, N] float16
     """
+    logger.info("dequant_fp4_torch called with packed_weights=%s, scales=%s, group_size=%s, K=%s", packed_weights, scales, group_size, K)
     device = packed_weights.device
     fp4_table = get_fp4_e2m1_table(device)
 
@@ -71,6 +78,7 @@ def dequant_fp4_torch(packed_weights, scales, group_size, K, N):
 def check_accuracy(output, reference, atol=1e-3, cos_sim_thr=0.9999):
     """Validates output against reference."""
     # Ensure both are float32 for comparison to avoid half precision artifacts in error calc
+    logger.debug("check_accuracy called with output=%s, reference=%s, atol=%s", output, reference, atol)
     out_f32 = output.float()
     ref_f32 = reference.float()
 
@@ -96,6 +104,7 @@ def check_accuracy(output, reference, atol=1e-3, cos_sim_thr=0.9999):
 @pytest.mark.parametrize("group_size", [32, 64])
 def test_dequant_fp4_accuracy(K, N, group_size, device):
     """Test standalone FP4 dequantization kernel accuracy."""
+    logger.info("running test_dequant_fp4_accuracy")
     torch.manual_seed(42)
 
     # Generate random FP16 weights to pack
@@ -123,6 +132,7 @@ def test_dequant_fp4_accuracy(K, N, group_size, device):
 @pytest.mark.parametrize("group_size", [32, 64])
 def test_marlin_gemm_fp4_accuracy(M, N, K, group_size, device):
     """Test fused FP4 GEMM kernel accuracy."""
+    logger.info("running test_marlin_gemm_fp4_accuracy")
     torch.manual_seed(42)
 
     # Inputs
@@ -149,6 +159,7 @@ def test_marlin_gemm_fp4_accuracy(M, N, K, group_size, device):
 @pytest.mark.parametrize("batch_dims", [(1,), (4,), (2, 8)])
 def test_marlin_gemm_fp4_shapes(batch_dims, device):
     """Test FP4 GEMM with various batch dimensions."""
+    logger.info("running test_marlin_gemm_fp4_shapes")
     M = int(np.prod(batch_dims))
     N, K = 64, 1024
     group_size = 32

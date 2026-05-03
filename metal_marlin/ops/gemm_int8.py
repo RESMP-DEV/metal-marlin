@@ -6,12 +6,16 @@ using Metal-optimized kernels for Apple Silicon.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import torch
 
 from ..metal_dispatch import HAS_METAL, HAS_MPS, get_default_library
 
+
+
+logger = logging.getLogger(__name__)
 
 def load_metal_kernel(filename: str, function_name: str) -> Any:
     """Load a Metal kernel from file.
@@ -23,6 +27,7 @@ def load_metal_kernel(filename: str, function_name: str) -> Any:
     Returns:
         Metal kernel pipeline
     """
+    logger.info("load_metal_kernel called with filename=%s, function_name=%s", filename, function_name)
     lib = get_default_library()
     return lib.get_pipeline(function_name, filename.replace(".metal", ""))
 
@@ -36,6 +41,7 @@ class GemmInt8:
         Args:
             device: Device to use (default: "mps")
         """
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         if not HAS_METAL or not HAS_MPS:
             raise ImportError(
                 "INT8 GEMM requires Metal and MPS support. "
@@ -65,6 +71,7 @@ class GemmInt8:
         Returns:
             Output tensor [M, N] with FP16 activations
         """
+        logger.debug("forward: input shape=%s dtype=%s", activations.shape if hasattr(activations, "shape") else type(activations).__name__, activations.dtype if hasattr(activations, "dtype") else "N/A")
         import numpy as np
 
         from ..metal_dispatch import (
@@ -165,6 +172,7 @@ def pack_int8_weights(weights: torch.Tensor) -> torch.Tensor:
         Packed INT8 weights [K//4, N] as uint32
     """
     # Convert to INT8
+    logger.info("pack_int8_weights called with weights=%s", weights)
     if weights.dtype != torch.float16:
         weights = weights.to(torch.float16)
 

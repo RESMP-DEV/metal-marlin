@@ -32,6 +32,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any
 
 from metal_marlin._compat import HAS_PYOBJC_METAL, Metal, torch
@@ -44,6 +45,9 @@ if TYPE_CHECKING:
     MTLBuffer = Any
     MTLResourceOptions = int
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class PartitionRegion:
@@ -94,6 +98,7 @@ class WorkspaceBuffer:
             capacity: Total capacity in bytes (default 256MB)
             storage_mode: Metal storage mode (default: MTLResourceStorageModeShared)
         """
+        logger.debug("initializing %s with device=%s, capacity=%s, storage_mode=%s", type(self).__name__, device, capacity, storage_mode)
         if not HAS_PYOBJC_METAL or Metal is None:
             raise RuntimeError("Metal required. Install with: pip install pyobjc-framework-Metal")
 
@@ -138,6 +143,7 @@ class WorkspaceBuffer:
         Returns:
             WorkspaceBuffer instance for the device
         """
+        logger.debug("get_instance called with device=%s, capacity=%s", device, capacity)
         device_id = id(device)
         if device_id not in cls._instances:
             cls._instances[device_id] = WorkspaceBuffer(device, capacity)
@@ -149,6 +155,7 @@ class WorkspaceBuffer:
         Call at the beginning of each forward pass to reclaim all partitions.
         This is O(1) - no actual deallocation occurs.
         """
+        logger.debug("reset called")
         self._offset = 0
         self._partitions.clear()
         self._reset_count += 1
@@ -173,6 +180,7 @@ class WorkspaceBuffer:
             RuntimeError: If allocation exceeds capacity
         """
         # Align to cache line boundary
+        logger.debug("alloc called with size=%s, name=%s, dtype=%s", size, name, dtype)
         aligned_size = self._align_size(size)
 
         # Check capacity
@@ -225,6 +233,7 @@ class WorkspaceBuffer:
         Raises:
             RuntimeError: If allocation exceeds capacity or name already exists
         """
+        logger.debug("alloc_partition called with name=%s, size=%s, dtype=%s", name, size, dtype)
         if name in self._partitions:
             raise RuntimeError(f"Partition '{name}' already allocated in this forward pass")
 
@@ -240,6 +249,7 @@ class WorkspaceBuffer:
         Returns:
             Tuple of (metal_buffer, byte_offset) or None if not found
         """
+        logger.debug("get_partition called with name=%s", name)
         region = self._partitions.get(name)
         if region is None:
             return None
@@ -247,35 +257,42 @@ class WorkspaceBuffer:
 
     def _align_size(self, size: int) -> int:
         """Align size to cache line boundary."""
+        logger.debug("_align_size called with size=%s", size)
         return ((size + self.CACHE_LINE_BYTES - 1) // self.CACHE_LINE_BYTES) * self.CACHE_LINE_BYTES
 
     @property
     def used(self) -> int:
         """Currently used bytes since last reset."""
+        logger.debug("used called")
         return self._offset
 
     @property
     def available(self) -> int:
         """Available bytes for allocation."""
+        logger.debug("available called")
         return self.capacity - self._offset
 
     @property
     def high_water_mark(self) -> int:
         """Peak usage across all forward passes."""
+        logger.debug("high_water_mark called")
         return self._high_water_mark
 
     @property
     def utilization(self) -> float:
         """Current utilization ratio (0.0 to 1.0)."""
+        logger.debug("utilization called")
         return self._offset / self.capacity if self.capacity > 0 else 0.0
 
     @property
     def peak_utilization(self) -> float:
         """Peak utilization ratio across all passes."""
+        logger.debug("peak_utilization called")
         return self._high_water_mark / self.capacity if self.capacity > 0 else 0.0
 
     def stats(self) -> dict[str, Any]:
         """Return workspace buffer statistics."""
+        logger.debug("stats called")
         return {
             "capacity_bytes": self.capacity,
             "used_bytes": self.used,
@@ -294,6 +311,7 @@ class WorkspaceBuffer:
 
     def _show_allocation_info(self) -> None:
         """Show allocation info when overflow occurs."""
+        logger.debug("_show_allocation_info called")
         print("\nWorkspace Buffer Overflow")
         print("=" * 60)
         print(f"Capacity: {self.capacity:,} bytes ({self.capacity / 1024 / 1024:.1f} MB)")
@@ -314,6 +332,7 @@ class WorkspaceBuffer:
 
         Call this when shutting down to release the large buffer.
         """
+        logger.debug("clear_singleton called")
         device_id = id(self.device)
         WorkspaceBuffer._instances.pop(device_id, None)
 
@@ -333,6 +352,7 @@ def get_workspace_buffer(
     Returns:
         WorkspaceBuffer instance for the device
     """
+    logger.debug("get_workspace_buffer called with device=%s, capacity=%s", device, capacity)
     return WorkspaceBuffer.get_instance(device, capacity)
 
 
@@ -341,6 +361,7 @@ def reset_workspace_buffer() -> None:
 
     Call this to reset all active workspace buffers.
     """
+    logger.debug("reset_workspace_buffer called")
     for workspace in WorkspaceBuffer._instances.values():
         workspace.reset()
 
@@ -350,6 +371,7 @@ def clear_all_workspace_buffers() -> None:
 
     Call this when shutting down to release all allocated buffers.
     """
+    logger.debug("clear_all_workspace_buffers called")
     WorkspaceBuffer._instances.clear()
 
 
@@ -371,6 +393,7 @@ def alloc_activations(
     Returns:
         Tuple of (metal_buffer, byte_offset)
     """
+    logger.debug("alloc_activations called with workspace=%s, batch_size=%s, hidden_dim=%s", workspace, batch_size, hidden_dim)
     element_size = 2 if dtype == "fp16" else 4
     size = batch_size * hidden_dim * element_size
     return workspace.alloc_partition("activations", size, dtype)
@@ -393,6 +416,7 @@ def alloc_logits(
     Returns:
         Tuple of (metal_buffer, byte_offset)
     """
+    logger.debug("alloc_logits called with workspace=%s, batch_size=%s, vocab_size=%s", workspace, batch_size, vocab_size)
     element_size = 2 if dtype == "fp16" else 4
     size = batch_size * vocab_size * element_size
     return workspace.alloc_partition("logits", size, dtype)
@@ -415,6 +439,7 @@ def alloc_intermediate(
     Returns:
         Tuple of (metal_buffer, byte_offset)
     """
+    logger.debug("alloc_intermediate called with workspace=%s, batch_size=%s, hidden_dim=%s", workspace, batch_size, hidden_dim)
     element_size = 2 if dtype == "fp16" else 4
     size = batch_size * hidden_dim * element_size
     return workspace.alloc_partition("intermediate", size, dtype)
@@ -435,6 +460,7 @@ def alloc_workspace_from_tensor(
     Returns:
         Tuple of (metal_buffer, byte_offset)
     """
+    logger.debug("alloc_workspace_from_tensor called with workspace=%s, tensor=%s, name=%s", workspace, tensor, name)
     if torch is None:
         raise RuntimeError("Torch is not available")
 

@@ -17,12 +17,16 @@ from __future__ import annotations
 import argparse
 import json
 from collections import defaultdict
+import logging
 from pathlib import Path
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+
+
+logger = logging.getLogger(__name__)
 
 def find_missing_weights(mmfp4_path: Path, num_hidden_layers: int = 47) -> dict[str, str]:
     """Find weights that are in index but missing from actual shard files.
@@ -31,6 +35,7 @@ def find_missing_weights(mmfp4_path: Path, num_hidden_layers: int = 47) -> dict[
     Extra layers in checkpoint (like layer 47 in a 47-layer model) are NOT
     part of the model architecture and should be ignored.
     """
+    logger.debug("find_missing_weights called with mmfp4_path=%s, num_hidden_layers=%s", mmfp4_path, num_hidden_layers)
     index_path = mmfp4_path / "model.safetensors.index.json"
     if not index_path.exists():
         print("No index file found - single shard model")
@@ -77,6 +82,7 @@ def find_missing_nonquant_weights(
     - gate.weight (MoE router weights)
     """
     # Patterns for non-quantized weights that must be preserved
+    logger.info("find_missing_nonquant_weights called with mmfp4_path=%s, original_path=%s, num_hidden_layers=%s", mmfp4_path, original_path, num_hidden_layers)
     NONQUANT_PATTERNS = [
         r"\.e_score_correction_bias$",  # MoE routing bias
         r"\.gate\.weight$",  # MoE router weights
@@ -133,6 +139,7 @@ def load_weights_from_original(
     keys_to_load: set[str],
 ) -> dict[str, torch.Tensor]:
     """Load specified weights from original FP16 model."""
+    logger.info("load_weights_from_original called with original_path=%s, keys_to_load=%s", original_path, keys_to_load)
     loaded: dict[str, torch.Tensor] = {}
 
     # Find all safetensors files
@@ -152,6 +159,7 @@ def load_weights_from_original(
 
 def rebuild_index(mmfp4_path: Path) -> dict[str, str]:
     """Rebuild weight_map by scanning actual shard contents."""
+    logger.info("rebuild_index starting")
     weight_map: dict[str, str] = {}
 
     for sf_path in sorted(mmfp4_path.glob("model-*.safetensors")):
@@ -170,6 +178,7 @@ def rebuild_index(mmfp4_path: Path) -> dict[str, str]:
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Repair corrupted MMFP4 checkpoint",
     )

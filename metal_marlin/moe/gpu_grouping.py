@@ -14,10 +14,14 @@ Key features:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     pass
@@ -53,10 +57,12 @@ class GPUGroupingResult:
     @property
     def total_assignments(self) -> int:
         """Total number of token-expert assignments (num_tokens * top_k)."""
+        logger.debug("total_assignments called")
         return self.num_tokens * self.top_k
     
     def to_dispatch_info(self) -> MoEDispatchInfo:
         """Convert to MoEDispatchInfo for compatibility with existing code."""
+        logger.debug("to_dispatch_info called")
         from metal_marlin.moe_dispatch import MoEDispatchInfo
         
         return MoEDispatchInfo(
@@ -76,6 +82,7 @@ _HAS_METAL_KERNELS = None
 
 def _has_metal_kernels() -> bool:
     """Check if Metal kernels are available."""
+    logger.debug("_has_metal_kernels called")
     global _HAS_METAL_KERNELS
     if _HAS_METAL_KERNELS is None:
         try:
@@ -108,6 +115,7 @@ def group_tokens_by_expert_gpu_optimized(
     Raises:
         RuntimeError: If Metal is not available.
     """
+    logger.debug("group_tokens_by_expert_gpu_optimized called with expert_ids=%s, expert_probs=%s, num_experts=%s", expert_ids, expert_probs, num_experts)
     if num_experts is None:
         num_experts = int(expert_ids.max().item()) + 1
     
@@ -160,6 +168,7 @@ def group_tokens_by_expert_fast(
     Returns:
         GPUGroupingResult with sorted indices.
     """
+    logger.debug("group_tokens_by_expert_fast called with expert_ids=%s, num_experts=%s", expert_ids, num_experts)
     if num_experts is None:
         num_experts = int(expert_ids.max().item()) + 1
     
@@ -229,6 +238,7 @@ def group_tokens_by_expert_auto(
     Returns:
         GPUGroupingResult with sorted indices.
     """
+    logger.debug("group_tokens_by_expert_auto called with expert_ids=%s, expert_probs=%s, num_experts=%s", expert_ids, expert_probs, num_experts)
     if num_experts is None:
         # Need to do this on CPU first to avoid sync issues
         num_experts = int(expert_ids.max().item()) + 1
@@ -296,6 +306,7 @@ class GPUExpertGrouping:
             device: Target device. If None, uses MPS if available.
             prefer_gpu: If True, prefer GPU-based grouping when available.
         """
+        logger.debug("initializing %s with num_experts=%s, device=%s, prefer_gpu=%s", type(self).__name__, num_experts, device, prefer_gpu)
         self.num_experts = num_experts
         self.prefer_gpu = prefer_gpu
         
@@ -329,6 +340,7 @@ class GPUExpertGrouping:
             GPUGroupingResult with sorted indices.
         """
         # Move to target device if needed
+        logger.debug("group called with expert_ids=%s, expert_probs=%s", expert_ids, expert_probs)
         if expert_ids.device != self.device:
             expert_ids = expert_ids.to(self.device)
         if expert_probs is not None and expert_probs.device != self.device:
@@ -371,6 +383,7 @@ class GPUExpertGrouping:
         Returns:
             [total_assignments, hidden_dim] gathered activations.
         """
+        logger.debug("gather_activations called with hidden_states=%s, grouping_result=%s", hidden_states, grouping_result)
         return hidden_states[grouping_result.sorted_token_indices]
     
     def scatter_outputs(
@@ -389,6 +402,7 @@ class GPUExpertGrouping:
         Returns:
             [batch, out_dim] combined outputs.
         """
+        logger.debug("scatter_outputs called with expert_outputs=%s, expert_probs=%s, grouping_result=%s", expert_outputs, expert_probs, grouping_result)
         from metal_marlin.moe_dispatch import scatter_expert_outputs
         
         dispatch_info = grouping_result.to_dispatch_info()

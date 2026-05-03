@@ -1,6 +1,7 @@
 """Extract MoE router weights from base model for trellis inference."""
 
 import argparse
+import logging
 from pathlib import Path
 
 from huggingface_hub import hf_hub_download, list_repo_files
@@ -8,8 +9,12 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 
+
+logger = logging.getLogger(__name__)
+
 def extract_router_weights(model_name: str, output_path: Path):
     """Extract router gate weights from MoE model using safetensors directly."""
+    logger.debug("extract_router_weights called with model_name=%s, output_path=%s", model_name, output_path)
     print(f"Scanning {model_name} for safetensors files...")
 
     # Find all safetensors files in the repo

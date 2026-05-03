@@ -140,6 +140,7 @@ class WorkerConnection:
         backend: Backend,
         address: str | None = None,
     ):
+        logger.debug("initializing %s with worker_id=%s, backend=%s, address=%s", type(self).__name__, worker_id, backend, address)
         self._worker_id = worker_id
         self._backend = backend
         self._address = address
@@ -150,18 +151,22 @@ class WorkerConnection:
 
     @property
     def worker_id(self) -> str:
+        logger.debug("worker_id called")
         return self._worker_id
 
     @property
     def is_remote(self) -> bool:
+        logger.debug("is_remote called")
         return self._backend == Backend.REMOTE_CUDA
 
     @property
     def is_busy(self) -> bool:
+        logger.debug("is_busy called")
         return self._busy
 
     def connect(self) -> None:
         """Establish connection to worker."""
+        logger.debug("connect called")
         if self._backend == Backend.REMOTE_CUDA and self._address:
             self._client = RemoteGPTQClient(self._address)
             self._client.connect()
@@ -170,6 +175,7 @@ class WorkerConnection:
 
     def disconnect(self) -> None:
         """Close connection."""
+        logger.debug("disconnect called")
         if isinstance(self._client, RemoteGPTQClient):
             self._client.close()
         self._client = None
@@ -181,6 +187,7 @@ class WorkerConnection:
         config: GPTQConfig,
     ) -> GPTQLayerResult:
         """Quantize a layer on this worker."""
+        logger.info("quantize_layer called with weights=%s, hessian=%s, config=%s", getattr(weights, "shape", weights), hessian, config)
         self._busy = True
         t_start = time.perf_counter()
 
@@ -221,6 +228,7 @@ class WorkerConnection:
         config: GPTQConfig,
     ) -> GPTQLayerResult:
         """Quantize on remote worker."""
+        logger.info("_quantize_remote called with weights=%s, hessian=%s, config=%s", getattr(weights, "shape", weights), hessian, config)
         assert isinstance(self._client, RemoteGPTQClient)
 
         # For remote, we use the Hessian directly since calibration was local
@@ -241,6 +249,7 @@ class WorkerConnection:
         config: GPTQConfig,
     ) -> GPTQLayerResult:
         """Quantize on local backend."""
+        logger.info("_quantize_local called with weights=%s, hessian=%s, config=%s", getattr(weights, "shape", weights), hessian, config)
         assert isinstance(self._client, GPTQAccelerated)
 
         # Store Hessian temporarily
@@ -259,11 +268,13 @@ class WorkerPool:
     """Pool of distributed workers for quantization."""
 
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self._workers: list[WorkerConnection] = []
         self._worker_semaphores: dict[str, asyncio.Semaphore] = {}
 
     def add_remote_worker(self, address: str) -> None:
         """Add a remote CUDA worker."""
+        logger.debug("add_remote_worker called with address=%s", address)
         worker_id = f"remote:{address}"
         worker = WorkerConnection(
             worker_id=worker_id,
@@ -275,6 +286,7 @@ class WorkerPool:
 
     def add_local_worker(self, backend: Backend = Backend.AUTO) -> None:
         """Add a local worker."""
+        logger.debug("add_local_worker called with backend=%s", backend)
         if backend == Backend.AUTO:
             backend = detect_best_backend()
 
@@ -288,6 +300,7 @@ class WorkerPool:
 
     def connect_all(self) -> None:
         """Connect all workers."""
+        logger.debug("connect_all called")
         for worker in self._workers:
             try:
                 worker.connect()
@@ -297,11 +310,13 @@ class WorkerPool:
 
     def disconnect_all(self) -> None:
         """Disconnect all workers."""
+        logger.debug("disconnect_all called")
         for worker in self._workers:
             worker.disconnect()
 
     async def get_available_worker(self) -> WorkerConnection:
         """Get the next available worker (round-robin with semaphore)."""
+        logger.debug("get_available_worker called")
         while True:
             for worker in self._workers:
                 sem = self._worker_semaphores[worker.worker_id]
@@ -315,15 +330,18 @@ class WorkerPool:
 
     def release_worker(self, worker: WorkerConnection) -> None:
         """Release a worker back to the pool."""
+        logger.debug("release_worker called with worker=%s", worker)
         sem = self._worker_semaphores[worker.worker_id]
         sem.release()
 
     @property
     def num_workers(self) -> int:
+        logger.debug("num_workers called")
         return len(self._workers)
 
     @property
     def worker_ids(self) -> list[str]:
+        logger.debug("worker_ids called")
         return [w.worker_id for w in self._workers]
 
 
@@ -377,6 +395,7 @@ class DistributedQuantizer:
             config: GPTQ configuration
             hessian_cache: Optional Hessian caching configuration
         """
+        logger.debug("initializing %s with workers=%s, local_workers=%s, local_backend=%s, config=%s, hessian_cache=%s", type(self).__name__, workers, local_workers, local_backend, config, hessian_cache)
         self._pool = WorkerPool()
         self._config = config or GPTQConfig()
         self._hessian_cache = hessian_cache
@@ -421,6 +440,7 @@ class DistributedQuantizer:
         Returns:
             DistributedQuantizationReport
         """
+        logger.info("quantize_model called with model_path=%s, calibration=%s, output_path=%s, tokenizer=%s", model_path, calibration, output_path, tokenizer)
         import torch
 
         model_path = Path(model_path)
@@ -561,6 +581,7 @@ class DistributedQuantizer:
         verbose: bool,
     ) -> dict[str, NDArray[np.float32]]:
         """Collect Hessians from calibration forward passes."""
+        logger.debug("_collect_hessians called with model=%s, calibration=%s, tokenizer=%s", model, calibration, tokenizer)
         import torch
 
         # Streaming Hessian accumulators
@@ -571,7 +592,9 @@ class DistributedQuantizer:
         import torch.nn as nn
 
         def make_hook(name: str, in_features: int):
+            logger.debug("make_hook called with name=%s, in_features=%s", name, in_features)
             def hook(module, input, output):
+                logger.debug("hook called with module=%s, input=%s, output=%s", module, input, output)
                 if isinstance(input, tuple):
                     x = input[0]
                 else:
@@ -660,6 +683,7 @@ class DistributedQuantizer:
         verbose: bool,
     ) -> dict[str, GPTQLayerResult]:
         """Distribute layer quantization to workers."""
+        logger.info("_distribute_quantization called with model_path=%s, hessians=%s, verbose=%s", model_path, hessians, verbose)
         from safetensors import safe_open
 
         # Find safetensors files
@@ -686,6 +710,7 @@ class DistributedQuantizer:
 
         async def process_layer(st_file: Path, tensor_name: str) -> tuple[str, GPTQLayerResult]:
             # Load weight
+            logger.debug("process_layer called with st_file=%s, tensor_name=%s", st_file, tensor_name)
             with safe_open(str(st_file), framework="numpy") as f:
                 weights = f.get_tensor(tensor_name)
 
@@ -737,6 +762,7 @@ class DistributedQuantizer:
         verbose: bool,
     ) -> None:
         """Save quantized model to output directory."""
+        logger.info("_save_quantized_model called with model_path=%s, output_path=%s, results=%s, verbose=%s", model_path, output_path, results, verbose)
         import shutil
 
         from safetensors import safe_open
@@ -786,6 +812,7 @@ class DistributedQuantizer:
 
     def _pack_fp4(self, indices: NDArray[np.int32]) -> NDArray[np.uint32]:
         """Pack FP4 indices to uint32."""
+        logger.info("_pack_fp4 called with indices=%s", indices)
         out_feat, in_feat = indices.shape
         if in_feat % 8 != 0:
             raise ValueError(f"in_features must be divisible by 8, got {in_feat}")
@@ -811,6 +838,7 @@ async def distributed_quantize_cli(
     verbose: bool = True,
 ) -> None:
     """CLI wrapper for distributed quantization."""
+    logger.info("distributed_quantize_cli called with model_path=%s, output_path=%s, workers=%s, local_workers=%s", model_path, output_path, workers, local_workers)
     from .calibration import CalibrationDatasetLoader
 
     if verbose:
@@ -855,6 +883,7 @@ async def distributed_quantize_cli(
 
 def main():
     """CLI entry point."""
+    logger.info("main starting")
     import argparse
 
     parser = argparse.ArgumentParser(

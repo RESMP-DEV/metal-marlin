@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ from .._compat import HAS_MATPLOTLIB, plt
 from .occupancy import AppleSiliconGPU, detect_gpu
 from .trace import TraceEvent
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RooflineConfig:
@@ -47,6 +51,7 @@ class RooflineConfig:
     @classmethod
     def from_gpu(cls, gpu: AppleSiliconGPU | None = None) -> RooflineConfig:
         """Create config from detected or specified GPU."""
+        logger.debug("from_gpu called with gpu=%s", gpu)
         gpu = gpu or detect_gpu()
         return cls(
             peak_tflops=gpu.peak_tflops_fp16,
@@ -57,6 +62,7 @@ class RooflineConfig:
     @property
     def ridge_point(self) -> float:
         """Arithmetic intensity at ridge point (FLOP/byte)."""
+        logger.debug("ridge_point called")
         return (self.peak_tflops * 1000) / self.peak_bw_gbs
 
 
@@ -103,6 +109,7 @@ class KernelPoint:
         Returns:
             KernelPoint with computed metrics.
         """
+        logger.debug("from_measurement called with name=%s, elapsed_ms=%s, flops=%s", name, elapsed_ms, flops)
         if elapsed_ms <= 0 or bytes_moved <= 0:
             return cls(
                 name=name,
@@ -155,6 +162,7 @@ class KernelPoint:
             KernelPoint.
         """
         # GEMM FLOPs: 2*M*N*K (multiply + accumulate)
+        logger.debug("from_gemm called with name=%s, M=%s, N=%s", name, M, N)
         flops = 2.0 * M * N * K
 
         # Memory traffic
@@ -180,6 +188,7 @@ class KernelPoint:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON export."""
+        logger.debug("to_dict called")
         return {
             "name": self.name,
             "tflops": self.tflops,
@@ -195,6 +204,7 @@ class KernelPoint:
         pid: int = 0,
         tid: int = 0,
     ) -> TraceEvent:
+        logger.debug("to_trace_event called")
         return TraceEvent(
             name="roofline_point",
             cat="roofline",
@@ -234,6 +244,7 @@ class RooflineAnalyzer:
     """
 
     def __init__(self, config: RooflineConfig | None = None):
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or RooflineConfig.from_gpu()
         self._kernels: list[KernelPoint] = []
 
@@ -272,6 +283,7 @@ class RooflineAnalyzer:
         Raises:
             ValueError: If insufficient parameters provided.
         """
+        logger.debug("add_kernel called with name=%s", name)
         if tflops is not None and arithmetic_intensity is not None:
             # Direct specification
             point = KernelPoint(
@@ -332,6 +344,7 @@ class RooflineAnalyzer:
         Returns:
             Created KernelPoint.
         """
+        logger.debug("add_gemm called with name=%s, M=%s, N=%s", name, M, N)
         point = KernelPoint.from_gemm(name, M, N, K, elapsed_ms, **kwargs)
         self._kernels.append(point)
         return point
@@ -339,10 +352,12 @@ class RooflineAnalyzer:
     @property
     def kernels(self) -> list[KernelPoint]:
         """All added kernel measurements."""
+        logger.debug("kernels called")
         return list(self._kernels)
 
     def clear(self) -> None:
         """Clear all kernel measurements."""
+        logger.debug("clear called")
         self._kernels.clear()
 
     def analyze_kernel(self, kernel: KernelPoint) -> dict[str, Any]:
@@ -354,6 +369,7 @@ class RooflineAnalyzer:
         Returns:
             Analysis dictionary with bound type, utilization, etc.
         """
+        logger.debug("analyze_kernel called with kernel=%s", kernel)
         ridge = self.config.ridge_point
 
         if kernel.arithmetic_intensity < ridge:
@@ -383,6 +399,7 @@ class RooflineAnalyzer:
 
     def print_analysis(self) -> None:
         """Print analysis of all kernels."""
+        logger.debug("print_analysis called")
         if not self._kernels:
             print("No kernels added")
             return
@@ -433,6 +450,7 @@ class RooflineAnalyzer:
         Raises:
             ImportError: If matplotlib not available.
         """
+        logger.debug("plot called with output_path=%s", output_path)
         if not HAS_MATPLOTLIB:
             raise ImportError(
                 "matplotlib required for plotting. Install with: pip install matplotlib"
@@ -537,6 +555,7 @@ class RooflineAnalyzer:
         Args:
             output_path: Path for JSON output.
         """
+        logger.info("export_json called with output_path=%s", output_path)
         data = {
             "config": {
                 "peak_tflops": self.config.peak_tflops,
@@ -560,6 +579,7 @@ class RooflineAnalyzer:
 
     def export_trace(self, output_path: str | Path) -> None:
         """Export kernel points as Chrome trace counters."""
+        logger.info("export_trace called with output_path=%s", output_path)
         from .trace import ChromeTrace
 
         trace = ChromeTrace()
@@ -597,6 +617,7 @@ def quick_roofline(
         ]
         analyzer = quick_roofline(measurements, "my_roofline.png")
     """
+    logger.debug("quick_roofline called with measurements=%s, output_path=%s", measurements, output_path)
     analyzer = RooflineAnalyzer()
 
     for m in measurements:

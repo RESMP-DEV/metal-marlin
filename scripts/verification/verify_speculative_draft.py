@@ -11,6 +11,7 @@ is correctly implemented by checking:
 4. The draft tokens and probabilities are valid tensors
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -28,6 +29,7 @@ class MockDraftModel:
     """Minimal mock model for testing draft generation loop."""
 
     def __init__(self, vocab_size=100):
+        logger.debug("initializing %s with vocab_size=%s", type(self).__name__, vocab_size)
         self.vocab_size = vocab_size
         self._cache_config = CacheConfig(
             num_layers=1,
@@ -43,11 +45,13 @@ class MockDraftModel:
         return torch.randn(batch_size, seq_len, self.vocab_size)
 
     def create_kv_cache(self) -> KVCache:
+        logger.debug("create_kv_cache called")
         return KVCache(self._cache_config, batch_size=1, device="cpu")
 
 
 def verify_draft_generation_loop():
     """Verify the draft model generation loop implementation."""
+    logger.debug("verify_draft_generation_loop called")
     print("Verifying draft model generation loop...")
 
     # Create mock model and draft wrapper
@@ -104,3 +108,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+logger = logging.getLogger(__name__)

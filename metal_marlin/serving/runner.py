@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Protocol, cast
 
 import torch
@@ -36,8 +37,12 @@ if TYPE_CHECKING:
     from ..paged.allocator import BlockAllocator
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_device() -> torch.device:
     """Get the appropriate device (MPS on Apple Silicon, else CPU)."""
+    logger.debug("_get_device called")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
@@ -141,6 +146,7 @@ class BatchedModelRunner:
         allocator: BlockAllocator,
         use_metal_kernels: bool = True,
     ):
+        logger.debug("initializing %s with model=%s, config=%s, allocator=%s, use_metal_kernels=%s", type(self).__name__, model, config, allocator, use_metal_kernels)
         self.model = model
         self.config = config
         self.allocator = allocator
@@ -162,6 +168,7 @@ class BatchedModelRunner:
             Prefill sequences return logits for the last prompt token.
             Returns empty array if schedule is empty.
         """
+        logger.debug("execute called with schedule=%s", schedule)
         if schedule.is_empty:
             return torch.empty(0, dtype=torch.float16, device=self.device)
 
@@ -181,6 +188,7 @@ class BatchedModelRunner:
         - Per-sequence metadata (seq_starts, seq_lengths) tracking boundaries
         - Padded block tables to accommodate varying context sizes
         """
+        logger.info("_build_batch starting")
         input_ids_list: list[int] = []
         positions_list: list[int] = []
         block_tables_list: list[list[int]] = []
@@ -254,6 +262,7 @@ class BatchedModelRunner:
         Returns:
             Logits for the last token of each sequence [num_seqs, vocab_size].
         """
+        logger.debug("_forward called with batch=%s", batch)
         num_seqs = len(batch.seq_starts)
 
         # Token embedding
@@ -292,6 +301,7 @@ class BatchedModelRunner:
         Decomposes the block's pre-norm -> attention -> residual -> norm -> MLP
         pattern to intercept the attention computation with paged KV.
         """
+        logger.debug("_layer_forward called with layer=%s, layer_idx=%s, hidden=%s", layer, layer_idx, hidden)
         num_seqs = len(batch.seq_starts)
         head_dim = self.config.head_dim
         num_heads = self.config.num_heads
@@ -381,6 +391,7 @@ class BatchedModelRunner:
         Returns:
             Tensor with RoPE applied [total_tokens, num_heads, head_dim].
         """
+        logger.debug("_apply_rope_flat called with rope=%s, x=%s, positions=%s", rope, x, positions)
         dims = rope.dims
         device = x.device
         dtype = x.dtype
@@ -443,6 +454,7 @@ class BatchedModelRunner:
             Attention output [num_seqs, num_heads, seq_len, head_dim].
         """
         # Try Metal kernel dispatch first if available and enabled
+        logger.debug("_paged_attention called with query=%s, block_pool=%s, block_tables=%s", query, block_pool, block_tables)
         if self._use_metal_kernels and HAS_METAL and query.device.type == "mps":
             return paged_attention_fp4(
                 query=query,
@@ -533,6 +545,7 @@ class BatchedModelRunner:
         For each sequence, determines the target block and slot from the
         block table and slot offset, then writes K/V values.
         """
+        logger.info("_write_kv_to_cache called with keys=%s, values=%s, batch=%s", keys, values, batch)
         num_seqs = len(batch.seq_starts)
         block_size = self.block_size
         pool = self._get_layer_pool(layer_idx)
@@ -562,12 +575,14 @@ class BatchedModelRunner:
         returns the appropriate one. Otherwise returns the allocator's
         shared storage.
         """
+        logger.debug("_get_layer_pool called with layer_idx=%s", layer_idx)
         if self._layer_pools is not None:
             return self._layer_pools[layer_idx]
         return self.allocator._storage
 
     def _set_layer_pool(self, layer_idx: int, pool: torch.Tensor) -> None:
         """Update the KV block pool for a specific layer."""
+        logger.debug("_set_layer_pool called with layer_idx=%s, pool=%s", layer_idx, pool)
         if self._layer_pools is not None:
             self._layer_pools[layer_idx] = pool
         else:
@@ -592,6 +607,7 @@ class BatchedModelRunner:
             num_kv_heads: Number of KV heads.
             head_dim: Dimension per attention head.
         """
+        logger.debug("init_layer_pools called with num_blocks=%s, block_size=%s, num_kv_heads=%s", num_blocks, block_size, num_kv_heads)
         self._layer_pools = [
             torch.zeros(
                 (num_blocks, 2, block_size, num_kv_heads, head_dim),
@@ -604,9 +620,11 @@ class BatchedModelRunner:
     @property
     def block_size(self) -> int:
         """Block size from the allocator."""
+        logger.debug("block_size called")
         return getattr(self.allocator, "block_size", 16)
 
     @property
     def num_free_blocks(self) -> int:
         """Number of free blocks in the allocator."""
+        logger.debug("num_free_blocks called")
         return getattr(self.allocator, "num_free", 0)

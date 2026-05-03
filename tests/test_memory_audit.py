@@ -1,5 +1,6 @@
 """Tests for the memory access pattern auditor."""
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,9 @@ from metal_marlin.profiling.memory_audit import (
     generate_full_report,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # Test data directory
 SHADER_DIR = Path(__file__).parent.parent / "src"
 
@@ -23,6 +27,7 @@ class TestAccessPatternEnum:
     """Test AccessPattern enum values."""
 
     def test_pattern_values(self):
+        logger.info("running test_pattern_values")
         assert AccessPattern.COALESCED.value == "coalesced"
         assert AccessPattern.STRIDED.value == "strided"
         assert AccessPattern.SCATTERED.value == "scattered"
@@ -35,16 +40,19 @@ class TestMemoryAuditor:
 
     @pytest.fixture
     def auditor(self):
+        logger.debug("auditor called")
         return MemoryAuditor(shader_dir=SHADER_DIR)
 
     def test_init_default_dir(self):
         """Test auditor initializes with default shader directory."""
+        logger.info("running test_init_default_dir")
         auditor = MemoryAuditor()
         assert auditor.shader_dir.exists() or not auditor.shader_dir.exists()
         # Just verify it doesn't raise
 
     def test_init_custom_dir(self, auditor):
         """Test auditor with custom shader directory."""
+        logger.info("running test_init_custom_dir")
         assert auditor.shader_dir == SHADER_DIR
 
     @pytest.mark.skipif(
@@ -52,6 +60,7 @@ class TestMemoryAuditor:
     )
     def test_analyze_dequant_shader(self, auditor):
         """Test analysis of dequant.metal."""
+        logger.info("running test_analyze_dequant_shader")
         analysis = auditor.analyze_file(SHADER_DIR / "dequant.metal")
 
         assert isinstance(analysis, ShaderAnalysis)
@@ -67,6 +76,7 @@ class TestMemoryAuditor:
     )
     def test_analyze_attention_shader(self, auditor):
         """Test analysis of attention.metal."""
+        logger.info("running test_analyze_attention_shader")
         analysis = auditor.analyze_file(SHADER_DIR / "attention.metal")
 
         assert isinstance(analysis, ShaderAnalysis)
@@ -80,6 +90,7 @@ class TestMemoryAuditor:
     )
     def test_analyze_moe_router_shader(self, auditor):
         """Test analysis of moe_router.metal."""
+        logger.info("running test_analyze_moe_router_shader")
         analysis = auditor.analyze_file(SHADER_DIR / "moe_router.metal")
 
         assert isinstance(analysis, ShaderAnalysis)
@@ -90,6 +101,7 @@ class TestMemoryAuditor:
 
     def test_analyze_nonexistent_file(self, auditor):
         """Test analysis of non-existent file."""
+        logger.info("running test_analyze_nonexistent_file")
         analysis = auditor.analyze_file("/nonexistent/path.metal")
 
         assert len(analysis.warnings) > 0
@@ -98,6 +110,7 @@ class TestMemoryAuditor:
     @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_audit_priority_kernels(self, auditor):
         """Test auditing priority kernels."""
+        logger.info("running test_audit_priority_kernels")
         report = auditor.audit_priority_kernels()
 
         # Should have some analyses
@@ -106,6 +119,7 @@ class TestMemoryAuditor:
 
     def test_audit_all_empty_dir(self, tmp_path):
         """Test audit_all on empty directory."""
+        logger.info("running test_audit_all_empty_dir")
         auditor = MemoryAuditor(shader_dir=tmp_path)
         report = auditor.audit_all()
 
@@ -117,6 +131,7 @@ class TestShaderAnalysis:
 
     def test_critical_count(self):
         """Test critical issue counting."""
+        logger.info("running test_critical_count")
         analysis = ShaderAnalysis(file_path=Path("test.metal"))
         analysis.accesses = [
             MemoryAccess(
@@ -157,6 +172,7 @@ class TestPatternAnalysis:
 
     def test_dequant_analysis_structure(self):
         """Test dequant analysis returns expected structure."""
+        logger.info("running test_dequant_analysis_structure")
         result = analyze_dequant_patterns()
 
         assert "kernel" in result
@@ -171,6 +187,7 @@ class TestPatternAnalysis:
 
     def test_attention_analysis_structure(self):
         """Test attention analysis returns expected structure."""
+        logger.info("running test_attention_analysis_structure")
         result = analyze_attention_patterns()
 
         assert "kernel" in result
@@ -186,6 +203,7 @@ class TestPatternAnalysis:
 
     def test_moe_analysis_structure(self):
         """Test MoE analysis returns expected structure."""
+        logger.info("running test_moe_analysis_structure")
         result = analyze_moe_patterns()
 
         assert "kernel" in result
@@ -202,6 +220,7 @@ class TestReportGeneration:
     @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_generate_report(self):
         """Test full report generation."""
+        logger.info("running test_generate_report")
         report = generate_full_report()
 
         assert isinstance(report, str)
@@ -211,6 +230,7 @@ class TestReportGeneration:
     @pytest.mark.skipif(not SHADER_DIR.exists(), reason="Shader directory not found")
     def test_generate_report_to_file(self, tmp_path):
         """Test report written to file."""
+        logger.info("running test_generate_report_to_file")
         output_path = tmp_path / "audit_report.txt"
         report = generate_full_report(output_path=output_path)
 
@@ -223,6 +243,7 @@ class TestMemoryAccessClassification:
 
     @pytest.fixture
     def auditor(self):
+        logger.debug("auditor called")
         return MemoryAuditor(shader_dir=SHADER_DIR)
 
     def test_strided_pattern_detection(self, auditor):
@@ -245,6 +266,7 @@ class TestEdgeCases:
 
     def test_empty_shader(self, tmp_path):
         """Test analysis of empty shader file."""
+        logger.info("running test_empty_shader")
         empty_shader = tmp_path / "empty.metal"
         empty_shader.write_text("")
 
@@ -256,6 +278,7 @@ class TestEdgeCases:
 
     def test_shader_with_only_comments(self, tmp_path):
         """Test shader with only comments."""
+        logger.info("running test_shader_with_only_comments")
         comment_shader = tmp_path / "comments.metal"
         comment_shader.write_text("""
 // This is a comment
@@ -274,6 +297,7 @@ class TestEdgeCases:
 
     def test_shader_with_preprocessor(self, tmp_path):
         """Test shader with preprocessor directives."""
+        logger.info("running test_shader_with_preprocessor")
         pp_shader = tmp_path / "preprocessor.metal"
         pp_shader.write_text("""
 #include <metal_stdlib>

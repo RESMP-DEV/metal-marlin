@@ -8,9 +8,13 @@ copy-on-write forking for beam search / speculative decoding.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 
 from .allocator import BlockAllocator
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class SequenceState:
@@ -22,6 +26,7 @@ class SequenceState:
 
     @property
     def num_blocks(self) -> int:
+        logger.debug("num_blocks called")
         return len(self.block_indices)
 
 
@@ -40,6 +45,7 @@ class PageTable:
     """
 
     def __init__(self, allocator: BlockAllocator, block_size: int = 16):
+        logger.debug("initializing %s with allocator=%s, block_size=%s", type(self).__name__, allocator, block_size)
         self.allocator = allocator
         self.block_size = block_size
         self.sequences: dict[int, SequenceState] = {}
@@ -49,6 +55,7 @@ class PageTable:
 
         Returns False if the allocator is out of memory.
         """
+        logger.debug("add_sequence called with seq_id=%s", seq_id)
         block_idx = self.allocator.allocate()
         if block_idx is None:
             return False
@@ -66,6 +73,7 @@ class PageTable:
         Allocates a new block if the current tail block is full.
         Returns False if out of memory.
         """
+        logger.debug("append_token called with seq_id=%s", seq_id)
         state = self.sequences[seq_id]
         state.logical_len += 1
 
@@ -85,6 +93,7 @@ class PageTable:
 
         Atomic: either all tokens are appended or none are (on OOM).
         """
+        logger.debug("append_tokens called with seq_id=%s, num_tokens=%s", seq_id, num_tokens)
         state = self.sequences[seq_id]
         new_len = state.logical_len + num_tokens
         blocks_needed = (new_len + self.block_size - 1) // self.block_size
@@ -105,6 +114,7 @@ class PageTable:
 
     def remove_sequence(self, seq_id: int) -> None:
         """Free all blocks for sequence."""
+        logger.debug("remove_sequence called with seq_id=%s", seq_id)
         state = self.sequences.pop(seq_id, None)
         if state:
             for block_idx in state.block_indices:
@@ -116,6 +126,7 @@ class PageTable:
         Shares all blocks via reference counting. The first write to a
         shared block triggers copy_on_write in the allocator.
         """
+        logger.debug("fork_sequence called with src_id=%s, dst_id=%s", src_id, dst_id)
         src = self.sequences.get(src_id)
         if not src:
             return False
@@ -137,6 +148,7 @@ class PageTable:
         If the block is shared (ref_count > 1), allocates a fresh copy.
         Returns the (possibly new) block index, or None on OOM.
         """
+        logger.debug("cow_block called with seq_id=%s, block_offset=%s", seq_id, block_offset)
         state = self.sequences[seq_id]
         old_idx = state.block_indices[block_offset]
         new_idx = self.allocator.copy_on_write(old_idx)
@@ -147,6 +159,7 @@ class PageTable:
 
     def get_block_table(self, seq_id: int) -> list[int]:
         """Get block indices for attention kernel dispatch."""
+        logger.debug("get_block_table called with seq_id=%s", seq_id)
         return self.sequences[seq_id].block_indices
 
     def get_slot_mapping(self, seq_id: int) -> tuple[int, int]:
@@ -154,6 +167,7 @@ class PageTable:
 
         Useful for the attention kernel to know where to write new KV entries.
         """
+        logger.debug("get_slot_mapping called with seq_id=%s", seq_id)
         state = self.sequences[seq_id]
         if state.logical_len == 0:
             return state.block_indices[0], 0
@@ -170,11 +184,14 @@ class PageTable:
 
     def has_sequence(self, seq_id: int) -> bool:
         """Check if a sequence is registered in the page table."""
+        logger.debug("has_sequence called with seq_id=%s", seq_id)
         return seq_id in self.sequences
 
     @property
     def num_sequences(self) -> int:
+        logger.debug("num_sequences called")
         return len(self.sequences)
 
     def sequence_ids(self) -> list[int]:
+        logger.debug("sequence_ids called")
         return list(self.sequences.keys())

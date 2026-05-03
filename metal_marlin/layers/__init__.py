@@ -8,12 +8,14 @@ This package keeps that API stable while allowing submodules like
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
 from types import ModuleType
 
 
 def _load_legacy_layers_module() -> ModuleType:
+    logger.info("_load_legacy_layers_module called")
     module_name = "metal_marlin._layers_legacy"
     cached = sys.modules.get(module_name)
     if cached is not None:
@@ -56,6 +58,9 @@ try:
     from .mmfp4_fused_moe import MMFP4FusedMoE
 except ImportError:
     MMFP4FusedMoE = None
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "MarlinLinear",

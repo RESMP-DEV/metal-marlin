@@ -7,6 +7,7 @@ outputs.
 
 from __future__ import annotations
 
+import logging
 import math
 
 import numpy as np
@@ -23,11 +24,15 @@ from metal_marlin.paged.validation import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestValidationConfig:
     """Test validation configuration."""
     
     def test_default_config(self):
         """Test default validation configuration."""
+        logger.info("running test_default_config")
         config = ValidationConfig()
         assert config.atol == 1e-5
         assert config.rtol == 0.01
@@ -38,6 +43,7 @@ class TestValidationConfig:
     
     def test_custom_config(self):
         """Test custom validation configuration."""
+        logger.info("running test_custom_config")
         config = ValidationConfig(
             atol=1e-3,
             rtol=0.05,
@@ -59,6 +65,7 @@ class TestParityValidationResult:
     
     def test_valid_result_str(self):
         """Test string representation of valid result."""
+        logger.info("running test_valid_result_str")
         result = ParityValidationResult(
             is_valid=True,
             max_diff=1e-6,
@@ -71,6 +78,7 @@ class TestParityValidationResult:
     
     def test_invalid_result_str(self):
         """Test string representation of invalid result."""
+        logger.info("running test_invalid_result_str")
         result = ParityValidationResult(
             is_valid=False,
             max_diff=0.1,
@@ -88,6 +96,7 @@ class TestValidatePagedLinearParity:
     
     def test_identical_arrays(self):
         """Test validation passes for identical arrays."""
+        logger.info("running test_identical_arrays")
         arr = np.random.randn(2, 4, 8, 64).astype(np.float32)
         result = validate_paged_linear_parity(arr, arr)
         
@@ -98,6 +107,7 @@ class TestValidatePagedLinearParity:
     
     def test_arrays_within_tolerance(self):
         """Test validation passes for arrays within tolerance."""
+        logger.info("running test_arrays_within_tolerance")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1 + 1e-6  # Small difference
         
@@ -108,6 +118,7 @@ class TestValidatePagedLinearParity:
     
     def test_arrays_outside_tolerance(self):
         """Test validation fails for arrays outside tolerance."""
+        logger.info("running test_arrays_outside_tolerance")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1 + 1.0  # Large difference
         
@@ -119,6 +130,7 @@ class TestValidatePagedLinearParity:
     
     def test_custom_tolerance(self):
         """Test validation with custom tolerance."""
+        logger.info("running test_custom_tolerance")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1 + 0.1
         
@@ -133,6 +145,7 @@ class TestValidatePagedLinearParity:
     
     def test_shape_mismatch(self):
         """Test validation fails on shape mismatch."""
+        logger.info("running test_shape_mismatch")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = np.ones((2, 4, 8, 32), dtype=np.float32)
         
@@ -143,6 +156,7 @@ class TestValidatePagedLinearParity:
     
     def test_shape_mismatch_allowed(self):
         """Test shape mismatch can be allowed (but may still fail on broadcast)."""
+        logger.info("running test_shape_mismatch_allowed")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = np.ones((2, 4, 8, 64), dtype=np.float32)  # Same shape now
         
@@ -154,6 +168,7 @@ class TestValidatePagedLinearParity:
     
     def test_nan_detection(self):
         """Test NaN detection."""
+        logger.info("running test_nan_detection")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1.copy()
         arr2[0, 0, 0, 0] = np.nan
@@ -165,6 +180,7 @@ class TestValidatePagedLinearParity:
     
     def test_nan_detection_disabled(self):
         """Test NaN detection can be disabled."""
+        logger.info("running test_nan_detection_disabled")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1.copy()
         arr2[0, 0, 0, 0] = np.nan
@@ -177,6 +193,7 @@ class TestValidatePagedLinearParity:
     
     def test_inf_detection(self):
         """Test Inf detection."""
+        logger.info("running test_inf_detection")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1.copy()
         arr2[0, 0, 0, 0] = np.inf
@@ -189,6 +206,7 @@ class TestValidatePagedLinearParity:
     def test_relative_tolerance(self):
         """Test relative tolerance checking."""
         # Large values with small relative difference
+        logger.info("running test_relative_tolerance")
         arr1 = np.array([1000.0, 2000.0, 3000.0], dtype=np.float32)
         arr2 = arr1 + 1.0  # 0.1%, 0.05%, 0.033% relative difference
         
@@ -205,6 +223,7 @@ class TestComputeLinearAttention:
     
     def test_basic_attention(self):
         """Test basic linear attention computation."""
+        logger.info("running test_basic_attention")
         batch = 2
         num_heads = 4
         q_len = 8
@@ -224,6 +243,7 @@ class TestComputeLinearAttention:
     
     def test_causal_attention(self):
         """Test causal linear attention."""
+        logger.info("running test_causal_attention")
         batch = 1
         num_heads = 2
         seq_len = 8
@@ -240,6 +260,7 @@ class TestComputeLinearAttention:
     
     def test_gqa_attention(self):
         """Test linear attention with GQA."""
+        logger.info("running test_gqa_attention")
         batch = 2
         num_heads = 8
         num_kv_heads = 2  # GQA ratio of 4
@@ -261,6 +282,7 @@ class TestValidatePagedV1Parity:
     
     def test_v1_decode_parity(self):
         """Test parity for decode (single query token)."""
+        logger.info("running test_v1_decode_parity")
         np.random.seed(42)
         
         num_seqs = 2
@@ -303,6 +325,7 @@ class TestValidatePagedV1Parity:
         Note: paged_attention_v1 requires cache heads == query heads,
         so we use num_kv_heads = num_heads for this test.
         """
+        logger.info("running test_v1_gqa_parity")
         np.random.seed(42)
         
         num_seqs = 1
@@ -335,6 +358,7 @@ class TestValidatePagedBlockPoolParity:
     
     def test_block_pool_decode_parity(self):
         """Test parity for block pool decode."""
+        logger.info("running test_block_pool_decode_parity")
         np.random.seed(42)
         
         num_seqs = 1
@@ -372,6 +396,7 @@ class TestValidatePagedBlockPoolParity:
     
     def test_block_pool_prefill_parity(self):
         """Test parity for block pool prefill."""
+        logger.info("running test_block_pool_prefill_parity")
         np.random.seed(42)
         
         num_seqs = 1
@@ -409,6 +434,7 @@ class TestParityValidator:
     
     def test_validator_initialization(self):
         """Test validator initialization."""
+        logger.info("running test_validator_initialization")
         config = ValidationConfig(atol=1e-3)
         validator = ParityValidator(config)
         
@@ -417,6 +443,7 @@ class TestParityValidator:
     
     def test_validator_default_config(self):
         """Test validator with default config."""
+        logger.info("running test_validator_default_config")
         validator = ParityValidator()
         
         assert validator.config.atol == 1e-5
@@ -424,6 +451,7 @@ class TestParityValidator:
     
     def test_validator_validate_v1(self):
         """Test validator validate_v1 method."""
+        logger.info("running test_validator_validate_v1")
         np.random.seed(42)
         validator = ParityValidator(ValidationConfig(atol=1e-4))
         
@@ -446,6 +474,7 @@ class TestParityValidator:
     
     def test_validator_get_statistics(self):
         """Test validator statistics."""
+        logger.info("running test_validator_get_statistics")
         validator = ParityValidator()
         
         # Initially empty
@@ -468,6 +497,7 @@ class TestParityValidator:
     
     def test_validator_reset(self):
         """Test validator reset."""
+        logger.info("running test_validator_reset")
         validator = ParityValidator()
         validator.results.append(ParityValidationResult(is_valid=True, max_diff=1e-6, mean_diff=1e-7, rel_diff=1e-8))
         
@@ -483,6 +513,7 @@ class TestEdgeCases:
     
     def test_single_token(self):
         """Test validation with single token."""
+        logger.info("running test_single_token")
         arr1 = np.ones((1, 1, 1, 1), dtype=np.float32)
         arr2 = arr1.copy()
         
@@ -493,6 +524,7 @@ class TestEdgeCases:
     
     def test_large_values(self):
         """Test validation with large values."""
+        logger.info("running test_large_values")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32) * 1e6
         arr2 = arr1 + 0.1  # Small absolute difference
         
@@ -503,6 +535,7 @@ class TestEdgeCases:
     
     def test_small_values(self):
         """Test validation with small values."""
+        logger.info("running test_small_values")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32) * 1e-8
         arr2 = arr1 + 1e-9  # 10% relative difference
         
@@ -514,6 +547,7 @@ class TestEdgeCases:
     
     def test_different_dtypes(self):
         """Test validation with different dtypes."""
+        logger.info("running test_different_dtypes")
         arr1 = np.ones((2, 4, 8, 64), dtype=np.float32)
         arr2 = arr1.astype(np.float64)
         

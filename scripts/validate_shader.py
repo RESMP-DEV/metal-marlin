@@ -20,11 +20,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 # Project root
 _ROOT = Path(__file__).parent.parent
@@ -45,6 +49,7 @@ def validate_with_metal_compiler(shader_path: Path) -> tuple[bool, str]:
     Returns:
         (success, output) tuple
     """
+    logger.info("validate_with_metal_compiler starting")
     if not shader_path.exists():
         return False, f"Shader file not found: {shader_path}"
 
@@ -119,6 +124,7 @@ def check_duplicate_kernels(shader_path: Path) -> list[str]:
     Returns:
         List of duplicated kernel names.
     """
+    logger.debug("check_duplicate_kernels called with shader_path=%s", shader_path)
     if not shader_path.exists():
         return []
 
@@ -149,6 +155,7 @@ def extract_kernel_names(shader_path: Path) -> list[str]:
     Returns:
         List of kernel names found in the source.
     """
+    logger.debug("extract_kernel_names called with shader_path=%s", shader_path)
     if not shader_path.exists():
         return []
 
@@ -164,6 +171,7 @@ def check_mps_available() -> tuple[bool, str]:
     Returns:
         (available, message) tuple
     """
+    logger.debug("check_mps_available called")
     try:
         import torch
 
@@ -193,6 +201,7 @@ def validate_shader(shader_path: Path, verbose: bool = True) -> bool:
     Returns:
         True if all validations pass, False otherwise.
     """
+    logger.debug("validate_shader called with shader_path=%s, verbose=%s", shader_path, verbose)
     if verbose:
         print(f"\n{'=' * 60}")
         print(f"Validating: {shader_path.name}")
@@ -268,6 +277,7 @@ def validate_all_shaders(src_dir: Path, verbose: bool = True) -> dict[str, bool]
     Returns:
         dict mapping filename -> success
     """
+    logger.debug("validate_all_shaders called with src_dir=%s, verbose=%s", src_dir, verbose)
     results: dict[str, bool] = {}
 
     metal_files = sorted(src_dir.glob("*.metal"))
@@ -287,6 +297,7 @@ def validate_all_shaders(src_dir: Path, verbose: bool = True) -> dict[str, bool]
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Validate Metal shader compilation",
         formatter_class=argparse.RawDescriptionHelpFormatter,

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Protocol
 
 from ._compat import require_torch, torch
@@ -26,6 +27,9 @@ if TYPE_CHECKING:
 
     from .kv_cache import KVCache as KVCacheTorch
 
+
+
+logger = logging.getLogger(__name__)
 
 class CausalLM(Protocol):
     """Protocol for causal language models compatible with this generator.
@@ -43,11 +47,13 @@ class CausalLM(Protocol):
 
     def create_kv_cache(self) -> KVCacheTorch:
         """Create a KV cache for incremental decoding."""
+        logger.debug("create_kv_cache called")
         ...
 
     @property
     def vocab_size(self) -> int:
         """Return the vocabulary size."""
+        logger.debug("vocab_size called")
         ...
 
 
@@ -88,6 +94,7 @@ def generate(
     Returns:
         Full sequence (prompt + generated) as [1, total_len]
     """
+    logger.debug("generate called with model=%s, input_ids=%s, config=%s", model, input_ids, config)
     require_torch()
 
     if config is None:
@@ -172,6 +179,7 @@ def generate_stream(
     Yields:
         Individual generated token IDs (excluding prompt and EOS)
     """
+    logger.debug("generate_stream called with model=%s, input_ids=%s, config=%s", model, input_ids, config)
     require_torch()
 
     if config is None:
@@ -237,6 +245,7 @@ def generate_batch(
     Returns:
         Generated sequences [batch, max_len] (padded to longest output)
     """
+    logger.debug("generate_batch called with model=%s, input_ids=%s, config=%s", model, input_ids, config)
     require_torch()
 
     if config is None:

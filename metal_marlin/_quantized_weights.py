@@ -1,3 +1,4 @@
+import logging
 import re
 from itertools import permutations
 from typing import Any
@@ -5,6 +6,9 @@ from typing import Any
 import torch
 
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
+
+
+logger = logging.getLogger(__name__)
 
 # Updated to handle Qwen3.5/3.6 official naming: model.language_model.layers.{idx}
 _LAYER_INDEX_RE = re.compile(r"(?:^|\.)(?:layers|h)\.(\d+)(?:\.|$)")
@@ -25,6 +29,7 @@ def _normalize_qwen_tensor_name(name: str) -> str:
     Returns:
         Normalized tensor name
     """
+    logger.debug("_normalize_qwen_tensor_name called with name=%s", name)
     if name.startswith(_QWEN_LANG_MODEL_PREFIX):
         return name.replace(_QWEN_LANG_MODEL_PREFIX, _STANDARD_MODEL_PREFIX, 1)
     if name.startswith("language_model.layers."):
@@ -33,6 +38,7 @@ def _normalize_qwen_tensor_name(name: str) -> str:
 
 
 def _normalize_key(key: str) -> str:
+    logger.debug("_normalize_key called with key=%s", key)
     return re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
 
 
@@ -43,6 +49,7 @@ def _flatten_tensor_tree(
     depth: int = 0,
     max_depth: int = 4,
 ) -> dict[str, torch.Tensor]:
+    logger.debug("_flatten_tensor_tree called with value=%s", value)
     if depth > max_depth:
         return {}
 
@@ -99,6 +106,7 @@ def _find_tensor_by_alias(
     tensor_lookup: dict[str, torch.Tensor],
     aliases: tuple[str, ...],
 ) -> torch.Tensor | None:
+    logger.debug("_find_tensor_by_alias called with tensor_lookup=%s, aliases=%s", tensor_lookup, aliases)
     normalized_aliases = tuple(_normalize_key(a) for a in aliases)
 
     for alias in normalized_aliases:
@@ -117,10 +125,12 @@ def _has_alias(
     tensor_lookup: dict[str, torch.Tensor],
     aliases: tuple[str, ...],
 ) -> bool:
+    logger.debug("_has_alias called with tensor_lookup=%s, aliases=%s", tensor_lookup, aliases)
     return _find_tensor_by_alias(tensor_lookup, aliases) is not None
 
 
 def _align_for_copy(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+    logger.debug("_align_for_copy called with src=%s, dst=%s", src, dst)
     if src.shape == dst.shape:
         return src.contiguous()
 
@@ -143,6 +153,7 @@ def _align_for_copy(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
 
 
 def _copy_tensor(dst: torch.Tensor, src: torch.Tensor, device: str) -> None:
+    logger.debug("_copy_tensor called with dst=%s, src=%s, device=%s", dst, src, device)
     aligned = _align_for_copy(src, dst)
     target_device = dst.device if dst.device.type != "meta" else torch.device(
         device)
@@ -154,6 +165,7 @@ def _concat_for_target(
     right: torch.Tensor,
     target: torch.Tensor,
 ) -> torch.Tensor | None:
+    logger.debug("_concat_for_target called with left=%s, right=%s, target=%s", left, right, target)
     if left.ndim != right.ndim:
         return None
 
@@ -188,9 +200,11 @@ def _apply_quantized_weights(
     Returns:
         Number of weights loaded
     """
+    logger.info("_apply_quantized_weights called with model=%s, loader=%s, device=%s", model, loader, device)
     from metal_marlin.inference_metal import MetalQuantizedLinear
 
     def _candidate_weight_names(module_name: str) -> list[str]:
+        logger.debug("_candidate_weight_names called with module_name=%s", module_name)
         names = [f"{module_name}.weight"]
 
         if module_name.startswith("model.language_model."):
@@ -275,6 +289,7 @@ def _apply_moe_expert_weights(
     Returns:
         Number of expert layers loaded
     """
+    logger.debug("_apply_moe_expert_weights called with model=%s, loader=%s, device=%s", model, loader, device)
     try:
         from metal_marlin.glm4_expert_loader import load_expert_weights
         from metal_marlin.glm4_moe_experts import QuantizedGlm4MoEExperts
@@ -457,6 +472,7 @@ def _apply_moe_expert_weights(
         copied_any = False
 
         def copy_alias(logical_name: str) -> bool:
+            logger.debug("copy_alias called with logical_name=%s", logical_name)
             dst = _find_tensor_by_alias(
                 buffer_lookup, dst_aliases[logical_name])
             src = _find_tensor_by_alias(

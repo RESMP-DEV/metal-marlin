@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 import warnings
@@ -42,6 +43,9 @@ except ImportError:
     _HAS_METAL = False
     Metal = None  # type: ignore[assignment,misc]
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ProfileEvent:
@@ -96,6 +100,7 @@ class MetalProfiler:
             enabled: Whether to enable profiling. If False, all
                 profiling calls are no-ops.
         """
+        logger.debug("initializing %s with enabled=%s", type(self).__name__, enabled)
         self.enabled = enabled
         self._events: list[ProfileEvent] = []
         self._region_stack: list[ProfileRegion] = []
@@ -126,6 +131,7 @@ class MetalProfiler:
         Args:
             name: Name of the region/kernel being profiled
         """
+        logger.debug("start_region called with name=%s", name)
         if not self.enabled:
             return
 
@@ -155,6 +161,7 @@ class MetalProfiler:
 
     def end_region(self) -> None:
         """End the current profiled region."""
+        logger.debug("end_region called")
         if not self.enabled:
             return
 
@@ -204,6 +211,7 @@ class MetalProfiler:
         Args:
             path: Output file path for the trace JSON
         """
+        logger.info("export_trace called with path=%s", path)
         if not self.enabled:
             return
 
@@ -280,6 +288,7 @@ class MetalProfiler:
                 }
             }
         """
+        logger.debug("get_summary called")
         if not self.enabled:
             return {}
 
@@ -309,6 +318,7 @@ class MetalProfiler:
 
     def print_summary(self) -> None:
         """Print a formatted summary of profiling results."""
+        logger.debug("print_summary called")
         summary = self.get_summary()
         
         if not summary:
@@ -329,6 +339,7 @@ class MetalProfiler:
 
     def clear(self) -> None:
         """Clear all profiling data."""
+        logger.debug("clear called")
         self._events.clear()
         self._region_stack.clear()
         self._tid_counter = 1

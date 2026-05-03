@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -29,6 +30,9 @@ from .linear import TrellisLinear
 if TYPE_CHECKING:
     from .loader import TrellisModelLoader
 
+
+
+logger = logging.getLogger(__name__)
 
 class TrellisDenseMLP(nn.Module):
     """Dense MLP with trellis-quantized weights (for non-MoE layers).
@@ -60,6 +64,7 @@ class TrellisDenseMLP(nn.Module):
             up_proj: TrellisLinear for up projection.
             down_proj: TrellisLinear for down projection.
         """
+        logger.debug("initializing %s with gate_proj=%s, up_proj=%s, down_proj=%s", type(self).__name__, gate_proj, up_proj, down_proj)
         super().__init__()
         self.gate_proj = gate_proj
         self.up_proj = up_proj
@@ -75,6 +80,7 @@ class TrellisDenseMLP(nn.Module):
             Output tensor [..., hidden_size].
         """
         # SwiGLU activation: silu(gate) * up
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate = F.silu(self.gate_proj(x))
         up = self.up_proj(x)
         return self.down_proj(gate * up)
@@ -102,6 +108,7 @@ class TrellisDenseMLP(nn.Module):
         Raises:
             KeyError: If any of the required MLP weights are not found.
         """
+        logger.info("from_loader called with loader=%s, layer_idx=%s, device=%s", loader, layer_idx, device)
         layer_weights = loader.load_layer(layer_idx)
         prefix = f"model.layers.{layer_idx}.mlp"
 
@@ -122,6 +129,7 @@ class TrellisDenseMLP(nn.Module):
 
     def extra_repr(self) -> str:
         """String representation for printing."""
+        logger.debug("extra_repr called")
         return (
             f"gate_proj={self.gate_proj.out_features}x{self.gate_proj.in_features}, "
             f"up_proj={self.up_proj.out_features}x{self.up_proj.in_features}, "
@@ -161,6 +169,7 @@ class TrellisFusedDenseMLP(nn.Module):
             down: TrellisLinear for down projection.
             intermediate_size: Intermediate dimension size for splitting gate_up.
         """
+        logger.debug("initializing %s with gate_up=%s, down=%s, intermediate_size=%s", type(self).__name__, gate_up, down, intermediate_size)
         super().__init__()
         self.gate_up = gate_up
         self.down = down
@@ -176,6 +185,7 @@ class TrellisFusedDenseMLP(nn.Module):
             Output tensor [..., hidden_size].
         """
         # Fused gate+up: output is [gate, up] concatenated
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         gate_up_out = self.gate_up(x)
 
         # Split fused output into gate and up
@@ -212,6 +222,7 @@ class TrellisFusedDenseMLP(nn.Module):
         Raises:
             KeyError: If any of the required MLP weights are not found.
         """
+        logger.info("from_loader called with loader=%s, layer_idx=%s, device=%s", loader, layer_idx, device)
         layer_weights = loader.load_layer(layer_idx)
         prefix = f"model.layers.{layer_idx}.mlp"
 
@@ -251,6 +262,7 @@ class TrellisFusedDenseMLP(nn.Module):
             TrellisFusedDenseMLP with gate and up weights fused.
         """
         # Get the packed weights from both projections
+        logger.debug("from_separate_weights called with gate_proj=%s, up_proj=%s, down_proj=%s", gate_proj, up_proj, down_proj)
         gate_packed = gate_proj.packed_indices
         up_packed = up_proj.packed_indices
         gate_scales = gate_proj.scales
@@ -290,6 +302,7 @@ class TrellisFusedDenseMLP(nn.Module):
 
     def extra_repr(self) -> str:
         """String representation for printing."""
+        logger.debug("extra_repr called")
         return (
             f"gate_up={self.gate_up.out_features}x{self.gate_up.in_features}, "
             f"down={self.down.out_features}x{self.down.in_features}"

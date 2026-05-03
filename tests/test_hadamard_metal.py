@@ -6,6 +6,7 @@ Tests verify:
 3. Self-inverse property
 4. Numerical accuracy
 """
+import logging
 
 import numpy as np
 import pytest
@@ -28,16 +29,21 @@ except ImportError:
     HAS_MPS = False
 
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(not HAS_METAL, reason="Metal not available")
 
 
 def _is_power_of_two(n: int) -> bool:
     """Check if n is a power of two."""
+    logger.debug("_is_power_of_two called with n=%s", n)
     return n > 0 and (n & (n - 1)) == 0
 
 
 def _generate_hadamard_matrix(n: int) -> np.ndarray:
     """Generate unnormalized Hadamard matrix via Sylvester construction."""
+    logger.debug("_generate_hadamard_matrix called with n=%s", n)
     H = np.array([[1.0]], dtype=np.float32)
     while H.shape[0] < n:
         H = np.block([[H, H], [H, -H]])
@@ -49,11 +55,13 @@ class TestUtilities:
 
     def test_is_power_of_two_valid(self):
         """Valid powers of two."""
+        logger.info("running test_is_power_of_two_valid")
         for n in [1, 2, 4, 8, 16, 32, 64, 128, 256]:
             assert _is_power_of_two(n), f"{n} should be power of 2"
 
     def test_is_power_of_two_invalid(self):
         """Invalid values."""
+        logger.info("running test_is_power_of_two_invalid")
         for n in [0, 3, 5, 6, 7, 9, 15, 100]:
             assert not _is_power_of_two(n), f"{n} should not be power of 2"
 
@@ -63,12 +71,14 @@ class TestHadamardMatrix:
 
     def test_matrix_size_2(self):
         """H_2 should be [[1, 1], [1, -1]]."""
+        logger.info("running test_matrix_size_2")
         H = _generate_hadamard_matrix(2)
         expected = np.array([[1, 1], [1, -1]], dtype=np.float32)
         np.testing.assert_array_equal(H, expected)
 
     def test_matrix_entries(self):
         """All entries should be ±1."""
+        logger.info("running test_matrix_entries")
         for n in [4, 8, 16, 32]:
             H = _generate_hadamard_matrix(n)
             assert set(H.flatten().tolist()) == {1.0, -1.0}
@@ -76,6 +86,7 @@ class TestHadamardMatrix:
     def test_matrix_recursive_construction(self):
         """Sylvester construction should produce valid Hadamard."""
         # H_4 = [[H_2, H_2], [H_2, -H_2]]
+        logger.info("running test_matrix_recursive_construction")
         H2 = _generate_hadamard_matrix(2)
         H4 = _generate_hadamard_matrix(4)
         expected = np.block([[H2, H2], [H2, -H2]])
@@ -87,6 +98,7 @@ class TestOrthogonality:
 
     def test_orthogonality_unnormalized(self):
         """H @ H^T should equal n * I."""
+        logger.info("running test_orthogonality_unnormalized")
         for n in [4, 8, 16, 32, 64]:
             H = _generate_hadamard_matrix(n)
             product = H @ H.T
@@ -95,6 +107,7 @@ class TestOrthogonality:
 
     def test_orthogonality_normalized(self):
         """(H/√n) @ (H/√n)^T should equal I."""
+        logger.info("running test_orthogonality_normalized")
         for n in [4, 8, 16, 32, 64]:
             H = _generate_hadamard_matrix(n) / np.sqrt(n)
             product = H @ H.T
@@ -109,6 +122,7 @@ class TestHadamardTransformMetal:
 
     def test_transform_shape_32(self):
         """Transform should preserve shape with block_size=32."""
+        logger.info("running test_transform_shape_32")
         batch = 16
         x = torch.randn(batch, 32, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=32, normalize=True)
@@ -116,6 +130,7 @@ class TestHadamardTransformMetal:
 
     def test_transform_shape_64(self):
         """Transform should preserve shape with block_size=64."""
+        logger.info("running test_transform_shape_64")
         batch = 16
         x = torch.randn(batch, 64, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=64, normalize=True)
@@ -123,6 +138,7 @@ class TestHadamardTransformMetal:
 
     def test_transform_shape_128(self):
         """Transform should preserve shape with block_size=128."""
+        logger.info("running test_transform_shape_128")
         batch = 16
         x = torch.randn(batch, 128, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=128, normalize=True)
@@ -131,6 +147,7 @@ class TestHadamardTransformMetal:
     # Non-power-of-2 sizes
     def test_transform_shape_96(self):
         """Transform should preserve shape with block_size=96 (non-power-of-2)."""
+        logger.info("running test_transform_shape_96")
         batch = 16
         x = torch.randn(batch, 96, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=96, normalize=True)
@@ -138,6 +155,7 @@ class TestHadamardTransformMetal:
 
     def test_transform_shape_160(self):
         """Transform should preserve shape with block_size=160 (non-power-of-2)."""
+        logger.info("running test_transform_shape_160")
         batch = 16
         x = torch.randn(batch, 160, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=160, normalize=True)
@@ -145,6 +163,7 @@ class TestHadamardTransformMetal:
 
     def test_transform_shape_192(self):
         """Transform should preserve shape with block_size=192 (non-power-of-2)."""
+        logger.info("running test_transform_shape_192")
         batch = 16
         x = torch.randn(batch, 192, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=192, normalize=True)
@@ -152,30 +171,35 @@ class TestHadamardTransformMetal:
 
     def test_transform_3d(self):
         """Should handle 3D input."""
+        logger.info("running test_transform_3d")
         x = torch.randn(2, 5, 64, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=64, normalize=True)
         assert y.shape == x.shape
 
     def test_invalid_block_size(self):
         """Should raise error for invalid block_size."""
+        logger.info("running test_invalid_block_size")
         x = torch.randn(4, 64, device="mps", dtype=torch.float16)
         with pytest.raises(ValueError, match="block_size must be"):
             hadamard_transform_metal(x, block_size=48)
 
     def test_mismatched_dimension(self):
         """Should raise error when dimension doesn't match block_size."""
+        logger.info("running test_mismatched_dimension")
         x = torch.randn(4, 100, device="mps", dtype=torch.float16)
         with pytest.raises(ValueError, match="must equal block_size"):
             hadamard_transform_metal(x, block_size=64)
 
     def test_dtype_float16(self):
         """Should handle float16 input."""
+        logger.info("running test_dtype_float16")
         x = torch.randn(4, 64, device="mps", dtype=torch.float16)
         y = hadamard_transform_metal(x, block_size=64)
         assert y.dtype == torch.float16
 
     def test_dtype_float32(self):
         """Should handle float32 input (convert internally)."""
+        logger.info("running test_dtype_float32")
         x = torch.randn(4, 64, device="mps", dtype=torch.float32)
         y = hadamard_transform_metal(x, block_size=64)
         # Kernel internally works in half
@@ -188,6 +212,7 @@ class TestSelfInverse:
 
     def test_inverse_normalized_32(self):
         """Normalized transform applied twice should equal identity (block_size=32)."""
+        logger.info("running test_inverse_normalized_32")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 32, device="mps", dtype=torch.float32)
@@ -204,6 +229,7 @@ class TestSelfInverse:
 
     def test_inverse_normalized_64(self):
         """Normalized transform applied twice should equal identity (block_size=64)."""
+        logger.info("running test_inverse_normalized_64")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 64, device="mps", dtype=torch.float32)
@@ -217,6 +243,7 @@ class TestSelfInverse:
 
     def test_inverse_normalized_128(self):
         """Normalized transform applied twice should equal identity (block_size=128)."""
+        logger.info("running test_inverse_normalized_128")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 128, device="mps", dtype=torch.float32)
@@ -230,6 +257,7 @@ class TestSelfInverse:
 
     def test_unnormalized_scale(self):
         """Unnormalized result should be sqrt(n) times normalized result."""
+        logger.info("running test_unnormalized_scale")
         torch.manual_seed(42)
         batch = 4
         x = torch.randn(batch, 64, device="mps", dtype=torch.float32)
@@ -247,6 +275,7 @@ class TestSelfInverse:
     # Non-power-of-2 self-inverse tests
     def test_inverse_normalized_96(self):
         """Normalized transform applied twice should equal identity (block_size=96)."""
+        logger.info("running test_inverse_normalized_96")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 96, device="mps", dtype=torch.float32)
@@ -260,6 +289,7 @@ class TestSelfInverse:
 
     def test_inverse_normalized_160(self):
         """Normalized transform applied twice should equal identity (block_size=160)."""
+        logger.info("running test_inverse_normalized_160")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 160, device="mps", dtype=torch.float32)
@@ -273,6 +303,7 @@ class TestSelfInverse:
 
     def test_inverse_normalized_192(self):
         """Normalized transform applied twice should equal identity (block_size=192)."""
+        logger.info("running test_inverse_normalized_192")
         torch.manual_seed(42)
         batch = 8
         x = torch.randn(batch, 192, device="mps", dtype=torch.float32)
@@ -291,16 +322,19 @@ class TestHadamardMetalClass:
 
     @pytest.fixture
     def handler(self):
+        logger.debug("handler called")
         return HadamardMetal()
 
     def test_class_transform(self, handler):
         """HadamardMetal.transform should work."""
+        logger.info("running test_class_transform")
         x = torch.randn(16, 64, device="mps", dtype=torch.float16)
         y = handler.transform(x, block_size=64, normalize=True)
         assert y.shape == x.shape
 
     def test_class_transform_numpy(self, handler):
         """HadamardMetal.transform_numpy should work with numpy arrays."""
+        logger.info("running test_class_transform_numpy")
         x = np.random.randn(16, 64).astype(np.float32)
         y = handler.transform_numpy(x, block_size=64, normalize=True)
         assert y.shape == x.shape
@@ -308,6 +342,7 @@ class TestHadamardMetalClass:
 
     def test_class_roundtrip_numpy(self, handler):
         """Double transform should recover original (numpy path)."""
+        logger.info("running test_class_roundtrip_numpy")
         np.random.seed(42)
         x = np.random.randn(8, 64).astype(np.float32)
 
@@ -323,6 +358,7 @@ class TestEnergyPreservation:
 
     def test_energy_preserved_normalized(self):
         """Normalized transform preserves energy (orthogonal)."""
+        logger.info("running test_energy_preserved_normalized")
         torch.manual_seed(42)
         batch = 16
         x = torch.randn(batch, 64, device="mps", dtype=torch.float32)
@@ -340,6 +376,7 @@ class TestEnergyPreservation:
 
     def test_energy_scaled_unnormalized(self):
         """Unnormalized transform scales energy by n."""
+        logger.info("running test_energy_scaled_unnormalized")
         torch.manual_seed(42)
         batch = 16
         x = torch.randn(batch, 64, device="mps", dtype=torch.float32)
@@ -358,6 +395,7 @@ class TestEnergyPreservation:
     # Non-power-of-2 energy preservation tests
     def test_energy_preserved_normalized_96(self):
         """Normalized transform preserves energy for block_size=96."""
+        logger.info("running test_energy_preserved_normalized_96")
         torch.manual_seed(42)
         batch = 16
         x = torch.randn(batch, 96, device="mps", dtype=torch.float32)
@@ -374,6 +412,7 @@ class TestEnergyPreservation:
 
     def test_energy_preserved_normalized_160(self):
         """Normalized transform preserves energy for block_size=160."""
+        logger.info("running test_energy_preserved_normalized_160")
         torch.manual_seed(42)
         batch = 16
         x = torch.randn(batch, 160, device="mps", dtype=torch.float32)
@@ -390,6 +429,7 @@ class TestEnergyPreservation:
 
     def test_energy_preserved_normalized_192(self):
         """Normalized transform preserves energy for block_size=192."""
+        logger.info("running test_energy_preserved_normalized_192")
         torch.manual_seed(42)
         batch = 16
         x = torch.randn(batch, 192, device="mps", dtype=torch.float32)
@@ -415,6 +455,7 @@ class TestNumpyReference:
         normalize: bool = True
     ) -> np.ndarray:
         """Reference implementation using numpy."""
+        logger.debug("_reference_hadamard_transform called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
         H = _generate_hadamard_matrix(block_size)
         if normalize:
             H = H / np.sqrt(block_size)
@@ -437,6 +478,7 @@ class TestNumpyReference:
             - 160 = 128 + 32
             - 192 = 128 + 64
         """
+        logger.debug("_reference_hadamard_transform_npow2 called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
         orig_shape = x.shape
         x_2d = x.reshape(-1, block_size)
         
@@ -487,6 +529,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_32(self):
         """Metal result should match numpy reference (block_size=32)."""
+        logger.info("running test_accuracy_block_32")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -506,6 +549,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_64(self):
         """Metal result should match numpy reference (block_size=64)."""
+        logger.info("running test_accuracy_block_64")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -522,6 +566,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_128(self):
         """Metal result should match numpy reference (block_size=128)."""
+        logger.info("running test_accuracy_block_128")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -539,6 +584,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_96(self):
         """Metal result should match numpy reference (block_size=96, non-power-of-2)."""
+        logger.info("running test_accuracy_block_96")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -555,6 +601,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_160(self):
         """Metal result should match numpy reference (block_size=160, non-power-of-2)."""
+        logger.info("running test_accuracy_block_160")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -571,6 +618,7 @@ class TestNumpyReference:
     @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
     def test_accuracy_block_192(self):
         """Metal result should match numpy reference (block_size=192, non-power-of-2)."""
+        logger.info("running test_accuracy_block_192")
         torch.manual_seed(42)
         np.random.seed(42)
         batch = 8
@@ -591,6 +639,7 @@ class TestLargeBatch:
 
     def test_large_batch_64(self):
         """Test with large batch size."""
+        logger.info("running test_large_batch_64")
         batch = 1024
         x = torch.randn(batch, 64, device="mps", dtype=torch.float16)
 
@@ -600,6 +649,7 @@ class TestLargeBatch:
 
     def test_large_batch_128(self):
         """Test with large batch size and block_size=128."""
+        logger.info("running test_large_batch_128")
         batch = 512
         x = torch.randn(batch, 128, device="mps", dtype=torch.float16)
 

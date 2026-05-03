@@ -31,6 +31,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -44,6 +45,9 @@ from .metal_dispatch import (
     require_mps,
 )
 
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     pass
 
@@ -54,6 +58,7 @@ _KERNEL_SOURCE: str | None = None
 
 def _get_kernel_source() -> str:
     """Get the Metal kernel source for Hadamard transform."""
+    logger.debug("_get_kernel_source called")
     global _KERNEL_SOURCE
     if _KERNEL_SOURCE is None:
         _KERNEL_SOURCE = """
@@ -472,6 +477,7 @@ _kernel_compiled: bool = False
 
 def _ensure_kernel_compiled(lib) -> None:
     """Compile the Hadamard kernel if not already compiled."""
+    logger.info("_ensure_kernel_compiled starting")
     global _kernel_compiled
     if not _kernel_compiled:
         lib.compile_source("hadamard", _get_kernel_source())
@@ -517,6 +523,7 @@ def hadamard_transform_metal(
         >>> x96 = torch.randn(16, 96, device="mps", dtype=torch.float16)
         >>> y96 = hadamard_transform_metal(x96, block_size=96, normalize=True)
     """
+    logger.debug("hadamard_transform_metal called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
     import torch
 
     require_metal()
@@ -594,6 +601,7 @@ class HadamardMetal:
         Raises:
             ImportError: If Metal/MPS is not available.
         """
+        logger.debug("initializing %s", type(self).__name__)
         require_metal()
         require_mps()
         self._lib = get_default_library()
@@ -615,6 +623,7 @@ class HadamardMetal:
         Returns:
             Transformed tensor with same shape as input.
         """
+        logger.debug("transform called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
         return hadamard_transform_metal(x, block_size, normalize)
 
     def transform_numpy(
@@ -635,6 +644,7 @@ class HadamardMetal:
         Returns:
             Transformed array as numpy float32.
         """
+        logger.debug("transform_numpy called with x=%s, block_size=%s, normalize=%s", x, block_size, normalize)
         import torch
 
         x_torch = torch.from_numpy(x).to("mps", dtype=torch.float16)

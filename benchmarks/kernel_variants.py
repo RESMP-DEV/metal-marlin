@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import logging
 
+
+
+logger = logging.getLogger(__name__)
 
 class KernelType(Enum):
     """Types of kernels that can be tested."""
@@ -244,6 +248,7 @@ ATTENTION_PROBLEM_SIZES: list[ProblemSize] = [
 
 def get_variants_for_kernel(kernel_type: KernelType) -> dict[str, KernelConfig]:
     """Get all variants for a specific kernel type."""
+    logger.debug("get_variants_for_kernel called with kernel_type=%s", kernel_type)
     if kernel_type == KernelType.GEMM_TRELLIS:
         return GEMM_TRELLIS_VARIANTS
     elif kernel_type == KernelType.MOE_DISPATCH:
@@ -260,6 +265,7 @@ def get_recommended_pairs(kernel_type: KernelType) -> list[tuple[str, str, str]]
 
     Returns list of (test_name, variant_a, variant_b) tuples.
     """
+    logger.debug("get_recommended_pairs called with kernel_type=%s", kernel_type)
     if kernel_type == KernelType.GEMM_TRELLIS:
         return [
             ("precision", "baseline_64x64x32", "fp32_acc_64x64x32"),
@@ -279,6 +285,7 @@ def get_recommended_pairs(kernel_type: KernelType) -> list[tuple[str, str, str]]
 
 def print_available_variants() -> None:
     """Print all available kernel variants."""
+    logger.debug("print_available_variants called")
     print("Available Kernel Variants")
     print("=" * 60)
 

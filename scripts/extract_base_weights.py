@@ -1,13 +1,18 @@
 """Extract non-quantized weights from base model for trellis inference."""
 
 import argparse
+import logging
 from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
 
 
+
+logger = logging.getLogger(__name__)
+
 def extract_base_weights(model_name: str, output_path: Path):
+    logger.debug("extract_base_weights called with model_name=%s, output_path=%s", model_name, output_path)
     from transformers import AutoModelForCausalLM
 
     print(f"Loading {model_name}...")

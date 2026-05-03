@@ -13,6 +13,7 @@ class KernelTimer:
     """Tracks kernel execution times."""
     
     def __init__(self, enabled: bool = True):
+        logger.debug("initializing %s with enabled=%s", type(self).__name__, enabled)
         self.enabled = enabled
         self.timings: dict[str, list[float]] = defaultdict(list)
         self._depth = 0
@@ -20,6 +21,7 @@ class KernelTimer:
     @contextmanager
     def time(self, name: str):
         """Context manager to time a kernel/operation."""
+        logger.debug("time called with name=%s", name)
         if not self.enabled:
             yield
             return
@@ -32,6 +34,7 @@ class KernelTimer:
     
     def report(self, top_n: int = 20) -> str:
         """Generate timing report."""
+        logger.debug("report called with top_n=%s", top_n)
         if not self.timings:
             return "No timings recorded"
         
@@ -52,9 +55,11 @@ class KernelTimer:
         return "\n".join(lines)
     
     def reset(self):
+        logger.debug("reset called")
         self.timings.clear()
 
 def get_timer() -> KernelTimer:
+    logger.debug("get_timer called")
     global _global_timer
     if _global_timer is None:
         _global_timer = KernelTimer()

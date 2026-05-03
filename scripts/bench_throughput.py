@@ -2,6 +2,7 @@
 """Benchmark Metal Hessian kernel throughput at various context lengths."""
 
 import gc
+import logging
 import sys
 import time
 from pathlib import Path
@@ -14,7 +15,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from metal_marlin.metal_dispatch import MetalKernelLibrary, dispatch_hessian_compute
 
 
+
+logger = logging.getLogger(__name__)
+
 def main():
+    logger.info("main starting")
     print("Initializing Metal kernel library...")
     metal_lib = MetalKernelLibrary.from_source_dir()
     print(f"  Loaded {len(metal_lib._pipelines)} cached pipelines")

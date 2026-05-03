@@ -1,6 +1,7 @@
 """MoE helper ops for fused gate/up expert projections."""
 
 from __future__ import annotations
+import logging
 
 from ._compat import HAS_TORCH, torch
 from .kernels import moe_expert_gemm_fp4
@@ -11,7 +12,11 @@ if not HAS_TORCH or torch is None:  # pragma: no cover - torch-only module
 import torch.nn.functional as F
 
 
+
+logger = logging.getLogger(__name__)
+
 def _infer_group_size(k_dim: int, scales: torch.Tensor, *, name: str) -> int:
+    logger.debug("_infer_group_size called with k_dim=%s, scales=%s", k_dim, scales)
     if scales.ndim < 2:
         raise ValueError(f"{name} scales must have at least 2 dims, got {scales.shape}")
     groups = int(scales.shape[1])
@@ -23,6 +28,7 @@ def _infer_group_size(k_dim: int, scales: torch.Tensor, *, name: str) -> int:
 
 
 def _flatten_hidden(hidden: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...]]:
+    logger.debug("_flatten_hidden called with hidden=%s", hidden)
     if hidden.dim() == 2:
         return hidden, hidden.shape
     if hidden.dim() == 3:
@@ -54,6 +60,7 @@ def fused_moe_forward(
     Returns:
         Output tensor with same leading shape as hidden and last dim = hidden.
     """
+    logger.debug("fused_moe_forward called with hidden=%s, gate_up_packed=%s, gate_up_scales=%s", hidden, gate_up_packed, gate_up_scales)
     hidden_flat, orig_shape = _flatten_hidden(hidden)
 
     if expert_ids.shape[0] != hidden_flat.shape[0]:

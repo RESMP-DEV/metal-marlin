@@ -1,3 +1,4 @@
+import logging
 
 import pytest
 import torch
@@ -5,12 +6,16 @@ import torch
 from metal_marlin.layers.mmfp4_mtp_head import verify_kernel
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 class TestVerifyKernelMPS:
     """Test verify_kernel from mmfp4_mtp_head.py on MPS."""
 
     def test_perfect_match_accepts_all(self):
         """When draft == target distributions, all tokens should be accepted."""
+        logger.info("running test_perfect_match_accepts_all")
         torch.manual_seed(42)
         batch, num_spec, vocab = 2, 4, 50
         device = torch.device("mps")
@@ -47,6 +52,7 @@ class TestVerifyKernelMPS:
 
     def test_complete_mismatch_rejects_first(self):
         """When target mismatches draft, should reject."""
+        logger.info("running test_complete_mismatch_rejects_first")
         torch.manual_seed(123)
         batch, num_spec, vocab = 1, 4, 50
         device = torch.device("mps")
@@ -68,6 +74,7 @@ class TestVerifyKernelMPS:
 
     def test_verify_speed(self):
         """Simple check to ensure it doesn't crash and is reasonable."""
+        logger.info("running test_verify_speed")
         batch, num_spec, vocab = 1, 4, 32000
         device = torch.device("mps")
         draft_tokens = torch.randint(0, vocab, (batch, num_spec), device=device)

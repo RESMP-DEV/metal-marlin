@@ -6,6 +6,7 @@ which uses LUT-based dequantization and optimized GEMV kernels.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import pytest
@@ -22,6 +23,9 @@ except ImportError:
     HAS_FP4_DECODE = False
     torch = None
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = [
     pytest.mark.skipif(not HAS_FP4_DECODE, reason="FP4 decode requires Metal/MPS"),
 ]
@@ -32,6 +36,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_basic(self):
         """Basic decode GEMV test with small dimensions."""
+        logger.info("running test_decode_basic")
         K, N = 128, 256
         group_size = 32
 
@@ -58,6 +63,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_matches_reference(self):
         """Verify decode kernel matches CPU reference implementation."""
+        logger.info("running test_decode_matches_reference")
         K, N = 64, 128
         group_size = 32
 
@@ -103,6 +109,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_various_dimensions(self):
         """Test decode with various K and N dimensions."""
+        logger.info("running test_decode_various_dimensions")
         test_cases = [
             (64, 64, 32),
             (128, 256, 32),
@@ -125,6 +132,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_non_divisible_n(self):
         """Test decode where N is not a multiple of tile size (512)."""
+        logger.info("running test_decode_non_divisible_n")
         K, N = 128, 300  # 300 < 512, only one threadgroup needed
         group_size = 32
 
@@ -142,6 +150,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_large_n(self):
         """Test decode with large N requiring multiple threadgroups."""
+        logger.info("running test_decode_large_n")
         K, N = 128, 2048  # Requires ceil(2048/512) = 4 threadgroups
         group_size = 32
 
@@ -159,6 +168,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_all_zeros(self):
         """Test decode with all-zero weights (FP4 code 0)."""
+        logger.info("running test_decode_all_zeros")
         K, N = 128, 256
         group_size = 32
 
@@ -174,6 +184,7 @@ class TestFP4DecodeGEMV:
 
     def test_decode_max_values(self):
         """Test decode with maximum FP4 weights (code 7 = +6.0, code 15 = -6.0)."""
+        logger.info("running test_decode_max_values")
         K, N = 64, 64
         group_size = 32
 
@@ -197,6 +208,7 @@ class TestFP4DecodeKernelAvailability:
 
     def test_kernel_compiles(self):
         """Verify the kernel can be loaded from source."""
+        logger.info("running test_kernel_compiles")
         from metal_marlin.metal_dispatch import MetalKernelLibrary, get_shader_source
 
         lib = MetalKernelLibrary.from_source_dir()

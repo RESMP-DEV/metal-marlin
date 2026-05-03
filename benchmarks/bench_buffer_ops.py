@@ -1,4 +1,5 @@
 
+import logging
 import time
 
 import Metal
@@ -7,7 +8,11 @@ import torch
 from metal_marlin._buffer_pool import MetalBufferPool
 
 
+
+logger = logging.getLogger(__name__)
+
 def benchmark_buffer_ops():
+    logger.info("benchmark_buffer_ops starting")
     print("Benchmarking Buffer Operations...")
 
     # Setup

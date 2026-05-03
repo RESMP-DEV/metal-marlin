@@ -1,4 +1,5 @@
 """Tests for PagedKVCache tracker."""
+import logging
 
 import numpy as np
 import pytest
@@ -6,14 +7,19 @@ import pytest
 from metal_marlin.paged import CacheStats, KVBlockConfig, PagedKVCache
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestPagedKVCacheBasics:
     def test_init_default(self):
+        logger.info("running test_init_default")
         cache = PagedKVCache(num_blocks=100)
         assert cache.num_blocks == 100
         assert cache.num_sequences == 0
         assert not cache.use_multimodal
 
     def test_init_with_config(self):
+        logger.info("running test_init_with_config")
         config = KVBlockConfig(block_size=8, num_heads=16, head_dim=64)
         cache = PagedKVCache(config=config, num_blocks=50)
         assert cache.config.block_size == 8
@@ -22,6 +28,7 @@ class TestPagedKVCacheBasics:
         assert cache.num_blocks == 50
 
     def test_add_sequence(self):
+        logger.info("running test_add_sequence")
         cache = PagedKVCache(num_blocks=10)
         success = cache.add_sequence(seq_id=0)
         assert success
@@ -29,6 +36,7 @@ class TestPagedKVCacheBasics:
         assert cache.has_sequence(0)
 
     def test_add_multiple_sequences(self):
+        logger.info("running test_add_multiple_sequences")
         cache = PagedKVCache(num_blocks=10)
         for i in range(5):
             assert cache.add_sequence(seq_id=i)
@@ -37,6 +45,7 @@ class TestPagedKVCacheBasics:
 
     def test_add_sequence_oom(self):
         # Only 2 blocks, each sequence needs 1 initial block
+        logger.info("running test_add_sequence_oom")
         cache = PagedKVCache(num_blocks=2)
         assert cache.add_sequence(0)
         assert cache.add_sequence(1)
@@ -48,6 +57,7 @@ class TestPagedKVCacheBasics:
         assert cache.has_sequence(2)
 
     def test_remove_sequence(self):
+        logger.info("running test_remove_sequence")
         cache = PagedKVCache(num_blocks=10)
         cache.add_sequence(0)
         cache.add_sequence(1)
@@ -61,6 +71,7 @@ class TestPagedKVCacheBasics:
 
 class TestPagedKVCacheAppend:
     def test_append_single_kv(self):
+        logger.info("running test_append_single_kv")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=10)
         cache.add_sequence(0)
@@ -79,6 +90,7 @@ class TestPagedKVCacheAppend:
         np.testing.assert_allclose(values[0], v, rtol=1e-3)
 
     def test_append_multiple_kv(self):
+        logger.info("running test_append_multiple_kv")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=10)
         cache.add_sequence(0)
@@ -99,6 +111,7 @@ class TestPagedKVCacheAppend:
             assert np.allclose(values[i], float(i + 10), rtol=1e-3)
 
     def test_append_kv_batch(self):
+        logger.info("running test_append_kv_batch")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=10)
         cache.add_sequence(0)
@@ -118,6 +131,7 @@ class TestPagedKVCacheAppend:
         np.testing.assert_allclose(v_out, values, rtol=1e-3)
 
     def test_append_across_block_boundary(self):
+        logger.info("running test_append_across_block_boundary")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=10)
         cache.add_sequence(0)
@@ -143,6 +157,7 @@ class TestPagedKVCacheAppend:
 
 class TestPagedKVCacheFork:
     def test_fork_sequence(self):
+        logger.info("running test_fork_sequence")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=10)
         cache.add_sequence(0)
@@ -170,6 +185,7 @@ class TestPagedKVCacheFork:
         assert table0 == table1
 
     def test_fork_sequence_nonexistent(self):
+        logger.info("running test_fork_sequence_nonexistent")
         cache = PagedKVCache(num_blocks=10)
         success = cache.fork_sequence(src_id=99, dst_id=1)
         assert not success
@@ -177,6 +193,7 @@ class TestPagedKVCacheFork:
 
 class TestPagedKVCacheStats:
     def test_stats_empty(self):
+        logger.info("running test_stats_empty")
         cache = PagedKVCache(num_blocks=100)
         stats = cache.get_stats()
 
@@ -187,6 +204,7 @@ class TestPagedKVCacheStats:
         assert stats.total_tokens == 0
 
     def test_stats_with_sequences(self):
+        logger.info("running test_stats_with_sequences")
         config = KVBlockConfig(block_size=4, num_heads=2, head_dim=8)
         cache = PagedKVCache(config=config, num_blocks=100)
 
@@ -213,6 +231,7 @@ class TestPagedKVCacheStats:
         assert stats.num_blocks_free == 97
 
     def test_memory_accounting(self):
+        logger.info("running test_memory_accounting")
         config = KVBlockConfig(block_size=16, num_heads=32, head_dim=128)
         cache = PagedKVCache(config=config, num_blocks=100)
 
@@ -230,6 +249,7 @@ class TestPagedKVCacheStats:
 
 class TestPagedKVCacheEdgeCases:
     def test_get_kv_empty_sequence(self):
+        logger.info("running test_get_kv_empty_sequence")
         cache = PagedKVCache(num_blocks=10)
         cache.add_sequence(0)
 
@@ -238,11 +258,13 @@ class TestPagedKVCacheEdgeCases:
         assert values.shape == (0, 32, 128)
 
     def test_get_kv_nonexistent_sequence(self):
+        logger.info("running test_get_kv_nonexistent_sequence")
         cache = PagedKVCache(num_blocks=10)
         with pytest.raises(ValueError, match="not registered"):
             cache.get_kv(99)
 
     def test_append_kv_nonexistent_sequence(self):
+        logger.info("running test_append_kv_nonexistent_sequence")
         cache = PagedKVCache(num_blocks=10)
         k = np.random.randn(32, 128).astype(np.float16)
         v = np.random.randn(32, 128).astype(np.float16)
@@ -251,6 +273,7 @@ class TestPagedKVCacheEdgeCases:
             cache.append_kv(99, k, v)
 
     def test_repr(self):
+        logger.info("running test_repr")
         cache = PagedKVCache(num_blocks=100)
         repr_str = repr(cache)
         assert "PagedKVCache" in repr_str
@@ -260,6 +283,7 @@ class TestPagedKVCacheEdgeCases:
 
 class TestPagedKVCacheMultimodal:
     def test_init_multimodal(self):
+        logger.info("running test_init_multimodal")
         cache = PagedKVCache(num_blocks=100, use_multimodal=True)
         assert cache.use_multimodal
         from metal_marlin.paged.allocator import MultimodalBlockAllocator
@@ -267,6 +291,7 @@ class TestPagedKVCacheMultimodal:
         assert isinstance(cache.allocator, MultimodalBlockAllocator)
 
     def test_add_sequence_multimodal(self):
+        logger.info("running test_add_sequence_multimodal")
         cache = PagedKVCache(num_blocks=10, use_multimodal=True)
         success = cache.add_sequence(0)
         assert success

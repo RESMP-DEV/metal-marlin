@@ -1,9 +1,13 @@
+import logging
 import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from statistics import median
 from time import time
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class RequestMetrics:
@@ -16,6 +20,7 @@ class RequestMetrics:
 
 class MetricsCollector:
     def __init__(self):
+        logger.debug("initializing %s", type(self).__name__)
         self._lock = threading.Lock()
         self._requests: list[RequestMetrics] = []
         self._active_count = 0
@@ -23,15 +28,18 @@ class MetricsCollector:
         self._queue_depth_callback = None
 
     def set_queue_depth_callback(self, callback):
+        logger.debug("set_queue_depth_callback called with callback=%s", callback)
         self._queue_depth_callback = callback
 
     def start_request(self, endpoint: str = "unknown") -> RequestMetrics:
+        logger.debug("start_request called with endpoint=%s", endpoint)
         with self._lock:
             self._active_count += 1
             self._endpoint_counts[endpoint] += 1
         return RequestMetrics(endpoint=endpoint)
 
     def end_request(self, metrics: RequestMetrics):
+        logger.debug("end_request called with metrics=%s", metrics)
         metrics.end_time = time()
         with self._lock:
             self._active_count -= 1
@@ -42,12 +50,14 @@ class MetricsCollector:
     def end_request_by_endpoint(
         self, endpoint: str, prompt_tokens: int = 0, completion_tokens: int = 0
     ):
+        logger.debug("end_request_by_endpoint called with endpoint=%s, prompt_tokens=%s, completion_tokens=%s", endpoint, prompt_tokens, completion_tokens)
         req_metrics = RequestMetrics(
             endpoint=endpoint, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens
         )
         self.end_request(req_metrics)
 
     def get_stats(self) -> dict:
+        logger.debug("get_stats called")
         queue_depth = 0
         if self._queue_depth_callback:
             try:
@@ -98,6 +108,7 @@ class MetricsCollector:
             }
 
     def to_prometheus(self) -> str:
+        logger.debug("to_prometheus called")
         stats = self.get_stats()
         lines = [
             "# HELP metal_marlin_requests_total Total number of requests",
@@ -170,6 +181,7 @@ class MetricsCollector:
         return "\n".join(lines)
 
     def _get_gpu_memory_mb(self) -> int | None:
+        logger.debug("_get_gpu_memory_mb called")
         try:
             import torch
 

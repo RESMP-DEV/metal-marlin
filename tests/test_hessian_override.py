@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -19,6 +20,9 @@ except ImportError:
     HAS_GPTQ_METAL = False
 
 
+
+logger = logging.getLogger(__name__)
+
 pytestmark = pytest.mark.skipif(
     not HAS_GPTQ_METAL or not HAS_MPS,
     reason="GPTQMetal not available or MPS not available",
@@ -32,11 +36,13 @@ def _make_activations(
     in_features: int,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
+    logger.debug("_make_activations called")
     torch.manual_seed(seed)
     return torch.randn(n_samples, in_features, dtype=dtype, device="mps")
 
 
 def _reference_hessian(X: torch.Tensor, *, normalize: bool) -> torch.Tensor:
+    logger.debug("_reference_hessian called with X=%s", X)
     x_fp32 = X.to(device="mps", dtype=torch.float32)
     hessian = (2.0 * (x_fp32.T @ x_fp32)).to(device="mps", dtype=torch.float32).contiguous()
     if normalize:
@@ -46,11 +52,13 @@ def _reference_hessian(X: torch.Tensor, *, normalize: bool) -> torch.Tensor:
 
 @pytest.fixture
 def gptq() -> GPTQMetal:
+    logger.debug("gptq called")
     return GPTQMetal()
 
 
 def test_default_path_is_deterministic_and_safe(gptq: GPTQMetal) -> None:
     """Default path should be deterministic across repeated invocations."""
+    logger.info("running test_default_path_is_deterministic_and_safe")
     x = _make_activations(seed=17, n_samples=64, in_features=64, dtype=torch.float16)
 
     with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "0"}, clear=False):
@@ -86,6 +94,7 @@ def test_default_path_shape_regressions_are_stable(
     expect_fallback: bool,
 ) -> None:
     """Known-regression shapes must remain stable and finite."""
+    logger.info("running test_default_path_shape_regressions_are_stable")
     x = _make_activations(
         seed=1000 + (n_samples * 10) + in_features,
         n_samples=n_samples,
@@ -111,6 +120,7 @@ def test_default_path_shape_regressions_are_stable(
 
 def test_env_override_forces_torch_matmul_path(gptq: GPTQMetal) -> None:
     """Env override should bypass Metal dispatch and force torch matmul."""
+    logger.info("running test_env_override_forces_torch_matmul_path")
     x = _make_activations(seed=23, n_samples=32, in_features=64)
 
     with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "1"}, clear=False):
@@ -153,6 +163,7 @@ def test_default_and_forced_fallback_are_numerically_close(
     rtol: float,
 ) -> None:
     """Default path should stay numerically close to forced torch fallback."""
+    logger.info("running test_default_and_forced_fallback_are_numerically_close")
     x = _make_activations(
         seed=2000 + (n_samples * 10) + in_features,
         n_samples=n_samples,
@@ -174,6 +185,7 @@ def test_default_and_forced_fallback_are_numerically_close(
 
 def test_storage_offset_view_forces_safe_fallback(gptq: GPTQMetal) -> None:
     """Non-zero storage offset view should avoid custom Metal dispatch."""
+    logger.info("running test_storage_offset_view_forces_safe_fallback")
     base = _make_activations(seed=3100, n_samples=20, in_features=128)
     x_view = base[:, 32:96]  # [20, 64], non-zero storage offset
     assert x_view.storage_offset() > 0
@@ -192,6 +204,7 @@ def test_storage_offset_view_forces_safe_fallback(gptq: GPTQMetal) -> None:
 
 def test_non_unit_inner_stride_forces_safe_fallback(gptq: GPTQMetal) -> None:
     """Non-unit innermost stride should avoid custom Metal dispatch."""
+    logger.info("running test_non_unit_inner_stride_forces_safe_fallback")
     base = _make_activations(seed=3200, n_samples=24, in_features=128)
     x_strided = torch.as_strided(base, size=(24, 32), stride=(128, 2))
     assert x_strided.stride(-1) == 2
@@ -215,6 +228,7 @@ def test_non_unit_inner_stride_forces_safe_fallback(gptq: GPTQMetal) -> None:
 
 def test_small_shape_policy_boundary_without_route_assumptions(gptq: GPTQMetal) -> None:
     """Respect the small-shape fallback policy without assuming the >=32 route."""
+    logger.info("running test_small_shape_policy_boundary_without_route_assumptions")
     x_small = _make_activations(seed=4100, n_samples=8, in_features=31)
     with patch.dict(os.environ, {_FORCE_TORCH_MATMUL_ENV: "0"}, clear=False):
         with patch.object(

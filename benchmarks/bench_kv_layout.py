@@ -14,6 +14,7 @@ Outputs JSON with results.
 """
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from typing import Literal
@@ -23,6 +24,9 @@ import torch
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
@@ -44,6 +48,7 @@ class LayoutConfig:
 
 
 def create_cache(config: LayoutConfig, device: torch.device):
+    logger.debug("create_cache called with config=%s, device=%s", config, device)
     if config.layout == "BHSD":
         shape = (config.batch_size, config.num_kv_heads, config.max_seq_len, config.head_dim)
     elif config.layout == "BSHD":
@@ -56,23 +61,27 @@ def create_cache(config: LayoutConfig, device: torch.device):
 
 
 def write_single_token_bhsd(cache: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pos: int):
+    logger.info("write_single_token_bhsd called with cache=%s, k=%s, v=%s", cache, k, v)
     cache[:, :, pos : pos + 1, :] = k
     return cache[:, :, : pos + 1, :]
 
 
 def write_single_token_bshd(cache: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pos: int):
+    logger.info("write_single_token_bshd called with cache=%s, k=%s, v=%s", cache, k, v)
     k_t = k.permute(0, 2, 1, 3)
     cache[:, pos : pos + 1, :, :] = k_t
     return cache[:, : pos + 1, :, :].permute(0, 2, 1, 3)
 
 
 def write_single_token_hbsd(cache: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pos: int):
+    logger.info("write_single_token_hbsd called with cache=%s, k=%s, v=%s", cache, k, v)
     k_t = k.permute(1, 0, 2, 3)
     cache[:, :, pos : pos + 1, :] = k_t
     return cache[:, :, : pos + 1, :].permute(1, 0, 2, 3)
 
 
 def benchmark_single_token_write(config: LayoutConfig, device: torch.device) -> dict:
+    logger.info("benchmark_single_token_write starting with config=%s, device=%s", config, device)
     k_cache, v_cache = create_cache(config, device), create_cache(config, device)
 
     B, H, D = config.batch_size, config.num_kv_heads, config.head_dim
@@ -108,6 +117,7 @@ def benchmark_single_token_write(config: LayoutConfig, device: torch.device) -> 
 
 
 def benchmark_full_sequence_read(config: LayoutConfig, device: torch.device, seq_len: int) -> dict:
+    logger.info("benchmark_full_sequence_read starting with config=%s, device=%s, seq_len=%s", config, device, seq_len)
     k_cache, v_cache = create_cache(config, device), create_cache(config, device)
 
     B, H, S, D = config.batch_size, config.num_kv_heads, seq_len, config.head_dim
@@ -154,6 +164,7 @@ def benchmark_full_sequence_read(config: LayoutConfig, device: torch.device, seq
 
 
 def main():
+    logger.info("main starting")
     device = torch.device(
         "cuda"
         if torch.cuda.is_available()

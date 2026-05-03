@@ -1,4 +1,5 @@
 
+import logging
 import threading
 import time
 from unittest.mock import MagicMock
@@ -9,13 +10,18 @@ from metal_marlin.memory.mmfp4_memory import MMFP4MemoryManager
 from metal_marlin.mmfp4_loader import MMFP4ModelLoader
 
 
+
+logger = logging.getLogger(__name__)
+
 class MockLoader:
     def load_layer(self, layer_idx, device):
+        logger.info("load_layer called with layer_idx=%s, device=%s", layer_idx, device)
         time.sleep(0.1)  # Simulate slow load
         return {"weight": MagicMock(numel=lambda: 1000, element_size=lambda: 4)}
 
 def test_concurrent_layer_loading():
     # Setup
+    logger.info("running test_concurrent_layer_loading")
     manager = MMFP4MemoryManager(
         model_path="dummy",
         num_layers=10,

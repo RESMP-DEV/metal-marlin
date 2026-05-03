@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Quick GLM-4.7-Flash throughput benchmark."""
 
+import logging
 import sys
 import time
 
@@ -8,6 +9,9 @@ import torch
 from transformers import AutoTokenizer
 
 from metal_marlin.trellis.lm import TrellisForCausalLM
+
+
+logger = logging.getLogger(__name__)
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True)

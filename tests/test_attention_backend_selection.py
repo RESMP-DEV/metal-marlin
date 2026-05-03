@@ -1,11 +1,16 @@
+import logging
 import pytest
 import torch
 
 import metal_marlin.fused_attention_mps as fused_attention_mps
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def attention_inputs():
+    logger.debug("attention_inputs called")
     batch = 1
     num_heads_q = 8
     num_heads_kv = 2
@@ -21,10 +26,12 @@ def attention_inputs():
 
 
 def _shape_result(q: torch.Tensor) -> torch.Tensor:
+    logger.debug("_shape_result called with q=%s", q)
     return torch.zeros_like(q)
 
 
 def test_default_attention_prefers_v3(attention_inputs, monkeypatch):
+    logger.info("running test_default_attention_prefers_v3")
     q, k, v = attention_inputs
     calls: list[str] = []
 
@@ -52,6 +59,7 @@ def test_default_attention_prefers_v3(attention_inputs, monkeypatch):
 
 
 def test_attention_backend_override_v2_skips_v3(attention_inputs, monkeypatch):
+    logger.info("running test_attention_backend_override_v2_skips_v3")
     q, k, v = attention_inputs
     calls: list[str] = []
 
@@ -79,6 +87,7 @@ def test_attention_backend_override_v2_skips_v3(attention_inputs, monkeypatch):
 
 
 def test_attention_backend_override_plain_uses_plain_only(attention_inputs, monkeypatch):
+    logger.info("running test_attention_backend_override_plain_uses_plain_only")
     q, k, v = attention_inputs
     calls: list[str] = []
 
@@ -106,20 +115,24 @@ def test_attention_backend_override_plain_uses_plain_only(attention_inputs, monk
 
 
 def test_default_attention_falls_back_v3_to_v2_to_plain(attention_inputs, monkeypatch):
+    logger.info("running test_default_attention_falls_back_v3_to_v2_to_plain")
     q, k, v = attention_inputs
     calls: list[str] = []
 
     monkeypatch.delenv("METAL_MARLIN_ATTENTION_BACKEND", raising=False)
 
     def fail_v3(*args, **kwargs):
+        logger.debug("fail_v3 called")
         calls.append("v3")
         raise RuntimeError("v3 unavailable")
 
     def fail_v2(*args, **kwargs):
+        logger.debug("fail_v2 called")
         calls.append("v2")
         raise RuntimeError("v2 unavailable")
 
     def run_plain(*args, **kwargs):
+        logger.debug("run_plain called")
         calls.append("plain")
         return _shape_result(q)
 
@@ -135,6 +148,7 @@ def test_default_attention_falls_back_v3_to_v2_to_plain(attention_inputs, monkey
 
 def test_all_backends_produce_compatible_output_shapes(attention_inputs, monkeypatch):
     """Verify that v3, v2, and plain backends return outputs matching the query shape."""
+    logger.info("running test_all_backends_produce_compatible_output_shapes")
     q, k, v = attention_inputs
 
     for backend in ("v3", "v2", "plain"):

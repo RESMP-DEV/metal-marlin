@@ -10,10 +10,14 @@ Format notes:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 
+
+
+logger = logging.getLogger(__name__)
 
 def export_for_pytorch(
     packed_weights: np.ndarray,
@@ -40,6 +44,7 @@ def export_for_pytorch(
     Returns:
         Dict of numpy arrays in GPTQ state_dict format.
     """
+    logger.info("export_for_pytorch called with packed_weights=%s, scales=%s, metadata=%s", packed_weights, scales, metadata)
     K = metadata["in_features"]
     N = metadata["out_features"]
     group_size = metadata["group_size"]
@@ -76,6 +81,7 @@ def import_from_pytorch(
     Returns:
         Tuple of (packed_marlin [K, N//8], scales [G, N], group_size).
     """
+    logger.debug("import_from_pytorch called with state_dict=%s", state_dict)
     qweight = state_dict["qweight"]
     scales = state_dict["scales"]
     group_size = int(state_dict.get("group_size", np.array([128]))[0])
@@ -94,6 +100,7 @@ def _unpack_marlin(packed: np.ndarray, N: int) -> np.ndarray:
 
     packed[K, N//8] uint32 -> unpacked[K, N] uint8
     """
+    logger.info("_unpack_marlin called with packed=%s, N=%s", packed, N)
     K = packed.shape[0]
     packed_u32 = packed.astype(np.uint32)
     unpacked = np.zeros((K, N), dtype=np.uint8)
@@ -109,6 +116,7 @@ def _pack_marlin(nibbles: np.ndarray) -> np.ndarray:
 
     nibbles[K, N] uint8 -> packed[K, N//8] uint32
     """
+    logger.info("_pack_marlin called with nibbles=%s", nibbles)
     K, N = nibbles.shape
     assert N % 8 == 0, f"N={N} must be divisible by 8"
 
@@ -124,6 +132,7 @@ def _unpack_gptq(qweight: np.ndarray) -> np.ndarray:
 
     qweight[K//8, N] int32 -> unpacked[K, N] uint8
     """
+    logger.info("_unpack_gptq called with qweight=%s", getattr(qweight, "shape", qweight))
     K8, N = qweight.shape
     K = K8 * 8
     q_u32 = qweight.view(np.uint32)
@@ -140,6 +149,7 @@ def _pack_gptq(nibbles: np.ndarray) -> np.ndarray:
 
     nibbles[K, N] uint8 -> qweight[K//8, N] int32
     """
+    logger.info("_pack_gptq called with nibbles=%s", nibbles)
     K, N = nibbles.shape
     assert K % 8 == 0, f"K={K} must be divisible by 8"
 

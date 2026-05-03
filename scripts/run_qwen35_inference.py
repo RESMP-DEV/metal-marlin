@@ -20,6 +20,7 @@ Environment:
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -36,6 +37,9 @@ from qwen_delta_inference_common import (  # noqa: E402
     run_inference_main,
 )
 
+
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Expose defaults for external introspection / testing
 # ---------------------------------------------------------------------------
@@ -51,6 +55,7 @@ _parse_args = build_inference_argparser(QWEN35_35B_A3B_CONFIG, "QWEN35").parse_a
 
 
 def main(argv: list[str] | None = None) -> int:
+    logger.info("main starting")
     return run_inference_main(argv, QWEN35_35B_A3B_CONFIG, "QWEN35")
 
 

@@ -5,6 +5,7 @@ Uses PyTorch MPS for tensor operations with Metal kernel acceleration.
 """
 
 from __future__ import annotations
+import logging
 
 import numpy as np
 import torch
@@ -18,6 +19,9 @@ from .metal_dispatch import (
     require_mps,
 )
 
+
+
+logger = logging.getLogger(__name__)
 
 def rmsnorm_metal(
     x: torch.Tensor,
@@ -41,6 +45,7 @@ def rmsnorm_metal(
         >>> weight = torch.randn(4096, device="mps", dtype=torch.float16)
         >>> out = rmsnorm_metal(x, weight, eps=1e-6)
     """
+    logger.debug("rmsnorm_metal called with x=%s, weight=%s, eps=%s", x, weight, eps)
     require_metal()
     require_mps()
 
@@ -135,6 +140,7 @@ def layernorm_metal(
         >>> bias = torch.randn(4096, device="mps", dtype=torch.float16)
         >>> out = layernorm_metal(x, weight, bias, eps=1e-5)
     """
+    logger.debug("layernorm_metal called with x=%s, weight=%s, bias=%s", x, weight, bias)
     require_metal()
     require_mps()
 
@@ -241,6 +247,7 @@ def rmsnorm_fused_residual_metal(
         >>> weight = torch.randn(4096, device="mps", dtype=torch.float16)
         >>> out, res = rmsnorm_fused_residual_metal(x, residual, weight, eps=1e-6)
     """
+    logger.debug("rmsnorm_fused_residual_metal called with x=%s, residual=%s, weight=%s", x, residual, weight)
     require_metal()
     require_mps()
 

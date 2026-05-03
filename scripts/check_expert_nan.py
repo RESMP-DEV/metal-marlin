@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Check if individual experts produce NaN."""
 
+import logging
 import torch
 import torch.nn.functional as F
 
 from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+
+logger = logging.getLogger(__name__)
 
 # Check individual experts for NaN
 torch.manual_seed(0)

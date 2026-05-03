@@ -22,6 +22,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import Foundation
@@ -56,6 +57,9 @@ except ImportError:
     _native_get_batch = None
 
 
+
+logger = logging.getLogger(__name__)
+
 class _PyObjCBufferView:
     """Fallback buffer view using PyObjC.
 
@@ -66,6 +70,7 @@ class _PyObjCBufferView:
     __slots__ = ("_buffer", "_contents", "_length", "_view")
 
     def __init__(self, buffer: Any):
+        logger.debug("initializing %s with buffer=%s", type(self).__name__, buffer)
         self._buffer = buffer
         self._contents = buffer.contents()
         self._length = buffer.length()
@@ -78,32 +83,38 @@ class _PyObjCBufferView:
     def ptr(self) -> int:
         """Raw pointer as integer."""
         # PyObjC doesn't expose raw pointer directly
+        logger.debug("ptr called")
         return id(self._contents)
 
     @property
     def length(self) -> int:
         """Buffer length in bytes."""
+        logger.debug("length called")
         return self._length
 
     def as_memoryview(self) -> memoryview:
         """Get memoryview of buffer contents."""
+        logger.debug("as_memoryview called")
         if self._view is None:
             self._view = memoryview(self._contents.as_buffer(self._length))
         return self._view
 
     def write(self, offset: int, data: bytes) -> None:
         """Write bytes to buffer at offset."""
+        logger.info("write called with offset=%s, data=%s", offset, data)
         mv = self.as_memoryview()
         mv[offset:offset + len(data)] = data
         self._buffer.didModifyRange_(Foundation.NSMakeRange(offset, len(data)))
 
     def read(self, offset: int, size: int) -> bytes:
         """Read bytes from buffer at offset."""
+        logger.debug("read called with offset=%s, size=%s", offset, size)
         mv = self.as_memoryview()
         return bytes(mv[offset:offset + size])
 
     def zero(self, offset: int, size: int) -> None:
         """Zero a region of the buffer."""
+        logger.debug("zero called with offset=%s, size=%s", offset, size)
         mv = self.as_memoryview()
         mv[offset:offset + size] = b"\x00" * size
         self._buffer.didModifyRange_(Foundation.NSMakeRange(offset, size))
@@ -124,6 +135,7 @@ def get_buffer_view(buffer: Any) -> Any:
     Returns:
         Buffer view object with read/write methods
     """
+    logger.debug("get_buffer_view called with buffer=%s", buffer)
     if _HAS_NATIVE_BRIDGE and _NativeBufferView is not None:
         return _NativeBufferView(buffer)
     return _PyObjCBufferView(buffer)
@@ -140,6 +152,7 @@ def get_buffer_memoryview(buffer: Any) -> memoryview:
     Returns:
         memoryview of buffer contents
     """
+    logger.debug("get_buffer_memoryview called with buffer=%s", buffer)
     if _HAS_NATIVE_BRIDGE and _native_get_memoryview is not None:
         return _native_get_memoryview(buffer)
     return _PyObjCBufferView(buffer).as_memoryview()
@@ -156,6 +169,7 @@ def get_buffer_ptr(buffer: Any) -> tuple[int, int]:
     Returns:
         Tuple of (pointer_as_int, length_in_bytes)
     """
+    logger.debug("get_buffer_ptr called with buffer=%s", buffer)
     if _HAS_NATIVE_BRIDGE and _native_get_ptr is not None:
         return _native_get_ptr(buffer)
     # Fallback: can't get actual pointer, return id as approximation
@@ -174,6 +188,7 @@ def get_buffer_pointers_batch(buffers: list[Any]) -> list[tuple[int, int]]:
     Returns:
         List of (pointer, length) tuples
     """
+    logger.debug("get_buffer_pointers_batch called with buffers=%s", buffers)
     if _HAS_NATIVE_BRIDGE and _native_get_batch is not None:
         return _native_get_batch(buffers)
     return [get_buffer_ptr(buf) for buf in buffers]
@@ -197,6 +212,7 @@ def aligned_copy(
         dst_offset: Offset into destination
         src_offset: Offset into source
     """
+    logger.debug("aligned_copy called with dst_ptr=%s, src_ptr=%s, size=%s", dst_ptr, src_ptr, size)
     if _HAS_NATIVE_BRIDGE and _native_aligned_copy is not None:
         _native_aligned_copy(dst_ptr, src_ptr, size, dst_offset, src_offset)
     else:
@@ -208,6 +224,7 @@ def aligned_copy(
 
 def is_native_bridge_available() -> bool:
     """Check if native Cython extension is available."""
+    logger.debug("is_native_bridge_available called")
     return _HAS_NATIVE_BRIDGE
 
 

@@ -49,6 +49,7 @@ Usage (prefix caching):
         # Reuse cached KV
         kv_blocks = cache.get_blocks(match.block_hashes)
 """
+import logging
 
 from .prompt_cache import (
     CachedBlock,
@@ -63,6 +64,9 @@ from .prompt_cache import (
 )
 from .quantized_cache import QuantizedKVCache as QuantizedKVCacheFP4Int8
 from .quantized_kv import CacheStats, QuantizedKVCache, ScalingStrategy, compress_kv, decompress_kv
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Quantized KV cache

@@ -25,6 +25,7 @@ Note:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import warnings
 from pathlib import Path
@@ -34,6 +35,9 @@ import numpy as np
 import torch
 
 from metal_marlin.inference import ModelConfig
+
+
+logger = logging.getLogger(__name__)
 
 # Activation function aliases found across different model configs.
 _ACT_ALIASES: dict[str, str] = {
@@ -49,11 +53,13 @@ _ACT_ALIASES: dict[str, str] = {
 
 def _resolve_act(raw: str) -> str:
     """Normalize activation function name to canonical form."""
+    logger.debug("_resolve_act called with raw=%s", raw)
     return _ACT_ALIASES.get(raw.lower(), raw.lower())
 
 
 def _resolve_intermediate_size(cfg: dict[str, Any]) -> int:
     """Determine intermediate (FFN) size from various config keys."""
+    logger.debug("_resolve_intermediate_size called with cfg=%s", cfg)
     if "intermediate_size" in cfg:
         return cfg["intermediate_size"]
     # Phi-style: uses inner_dim or n_inner
@@ -73,6 +79,7 @@ def _resolve_intermediate_size(cfg: dict[str, Any]) -> int:
 
 def _resolve_num_kv_heads(cfg: dict[str, Any]) -> int:
     """Extract num_key_value_heads, handling GQA and MQA configs."""
+    logger.debug("_resolve_num_kv_heads called with cfg=%s", cfg)
     if "num_key_value_heads" in cfg:
         return cfg["num_key_value_heads"]
     # Falcon uses multi_query flag
@@ -87,6 +94,7 @@ def _resolve_num_kv_heads(cfg: dict[str, Any]) -> int:
 
 def _resolve_head_dim(cfg: dict[str, Any]) -> int | None:
     """Extract explicit head_dim if specified (e.g., Phi-3)."""
+    logger.debug("_resolve_head_dim called with cfg=%s", cfg)
     if "head_dim" in cfg:
         return cfg["head_dim"]
     # Qwen uses kv_channels
@@ -97,6 +105,7 @@ def _resolve_head_dim(cfg: dict[str, Any]) -> int | None:
 
 def _resolve_rope_theta(cfg: dict[str, Any]) -> float:
     """Extract RoPE base frequency from config."""
+    logger.debug("_resolve_rope_theta called with cfg=%s", cfg)
     if "rope_theta" in cfg:
         return float(cfg["rope_theta"])
     # Some models nest it under rope_scaling
@@ -108,6 +117,7 @@ def _resolve_rope_theta(cfg: dict[str, Any]) -> float:
 
 def _resolve_norm_eps(cfg: dict[str, Any]) -> float:
     """Extract layer norm epsilon from various config keys."""
+    logger.debug("_resolve_norm_eps called with cfg=%s", cfg)
     if "rms_norm_eps" in cfg:
         return float(cfg["rms_norm_eps"])
     if "layer_norm_eps" in cfg:
@@ -141,6 +151,7 @@ def load_config(config_path: Path) -> ModelConfig:
         KeyError: If required fields (vocab_size, hidden_size,
                   num_hidden_layers, num_attention_heads) are missing.
     """
+    logger.info("load_config called with config_path=%s", config_path)
     with open(config_path) as f:
         cfg = json.load(f)
 
@@ -183,6 +194,7 @@ def estimate_memory(
     Returns:
         Dict with fp16_gb, quantized_gb, savings_ratio, and element counts.
     """
+    logger.debug("estimate_memory called with model_path=%s, group_size=%s", model_path, group_size)
     from safetensors import safe_open
 
     if model_path.is_dir():
@@ -254,6 +266,7 @@ def load_and_quantize(
         (state_dict, config) where state_dict has "{name}.packed" and
         "{name}.scales" for quantized layers, original names for passthrough.
     """
+    logger.info("load_and_quantize called with model_path=%s, quant_type=%s, group_size=%s", model_path, quant_type, group_size)
     from safetensors import safe_open
     from tqdm import tqdm
 
@@ -342,6 +355,7 @@ def load_and_quantize(
 
 def _to_torch(arr: Any) -> torch.Tensor:
     """Convert array to torch.Tensor."""
+    logger.debug("_to_torch called with arr=%s", arr)
     if isinstance(arr, torch.Tensor):
         return arr
     return torch.from_numpy(np.asarray(arr).copy())
@@ -387,6 +401,7 @@ def _split_fused_qkv(
     Returns:
         (q_weight, k_weight, v_weight)
     """
+    logger.debug("_split_fused_qkv called with fused=%s, num_heads=%s, num_kv_heads=%s", fused, num_heads, num_kv_heads)
     q_size = num_heads * head_dim
     k_size = num_kv_heads * head_dim
     total = q_size + k_size + k_size  # v_size == k_size
@@ -418,6 +433,7 @@ def _split_fused_gate_up(
     Returns:
         (gate_weight, up_weight)
     """
+    logger.debug("_split_fused_gate_up called with fused=%s, intermediate_size=%s", fused, intermediate_size)
     if fused.shape[0] == 2 * intermediate_size:
         return fused[:intermediate_size], fused[intermediate_size:]
     elif fused.shape[1] == 2 * intermediate_size:
@@ -562,6 +578,7 @@ _ARCHITECTURE_RULES: dict[str, list[tuple[str, str]]] = {
 
 def _pattern_to_regex(pattern: str) -> re.Pattern[str]:
     """Convert a rule pattern with {layer} placeholder to a compiled regex."""
+    logger.debug("_pattern_to_regex called with pattern=%s", pattern)
     escaped = re.escape(pattern).replace(r"\{layer\}", r"(?P<layer>\d+)")
     return re.compile(f"^{escaped}$")
 
@@ -570,6 +587,7 @@ def _build_mapper(
     rules: list[tuple[str, str]],
 ) -> list[tuple[re.Pattern[str], str]]:
     """Compile mapping rules into (regex, target_template) pairs."""
+    logger.info("_build_mapper starting")
     return [(_pattern_to_regex(src), dst) for src, dst in rules]
 
 
@@ -585,6 +603,7 @@ def detect_model_type(state_dict_keys: set[str]) -> str:
         Architecture identifier matching _ARCHITECTURE_RULES keys.
     """
     # Phi-2: transformer.h.* prefix
+    logger.debug("detect_model_type called with state_dict_keys=%s", state_dict_keys)
     if any(k.startswith("transformer.h.") for k in state_dict_keys):
         return "phi2"
 
@@ -641,6 +660,7 @@ def map_weight_names(
     Returns:
         New state dict with generic weight names.
     """
+    logger.debug("map_weight_names called with hf_state_dict=%s, model_type=%s", hf_state_dict, model_type)
     if model_type == "auto":
         model_type = detect_model_type(set(hf_state_dict.keys()))
 
@@ -766,6 +786,7 @@ def load_mapped_safetensors(
     Returns:
         (mapped_state_dict, model_config) tuple.
     """
+    logger.info("load_mapped_safetensors called with path=%s, model_type=%s", path, model_type)
     from safetensors import safe_open
 
     path = Path(path)
@@ -814,6 +835,7 @@ def load_mapped_safetensors(
 
 def get_supported_architectures() -> list[str]:
     """Return list of supported architecture identifiers."""
+    logger.debug("get_supported_architectures called")
     return list(_ARCHITECTURE_RULES.keys())
 
 
@@ -833,6 +855,7 @@ def register_architecture(
             Use __fused_gate_up__ prefix for fused gate/up weights.
         overwrite: If True, allow replacing existing rules.
     """
+    logger.debug("register_architecture called with name=%s, rules=%s", name, rules)
     if name in _ARCHITECTURE_RULES and not overwrite:
         raise ValueError(
             f"Architecture {name!r} already registered. "

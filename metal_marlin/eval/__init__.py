@@ -14,6 +14,7 @@ Example usage:
     # KL divergence (accuracy) evaluation
     kl_result = evaluate_kl_divergence(original_fn, quantized_fn, tokenizer, texts)
 """
+import logging
 
 # Re-export all public functions from submodules
 from .accuracy import (
@@ -32,6 +33,9 @@ from .perplexity import (
     log_softmax,
     softmax,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Tokenizer and data loading

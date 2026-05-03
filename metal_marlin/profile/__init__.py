@@ -26,6 +26,7 @@ Example:
 """
 
 from __future__ import annotations
+import logging
 
 # Re-export core FLOPs calculation utilities from utils.profile_ops
 from metal_marlin.utils.profile_ops import (
@@ -47,6 +48,9 @@ from .calculator import (
     estimate_marlin_linear_flops,
     profile_model_layers,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Core dataclasses

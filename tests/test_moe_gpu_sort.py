@@ -1,4 +1,5 @@
 """Tests for GPU-accelerated token sorting in MoE dispatch."""
+import logging
 
 import pytest
 import torch
@@ -11,12 +12,16 @@ from metal_marlin.moe_dispatch import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 class TestMoEGPUSort:
     """Test GPU-based token sorting for MoE dispatch."""
 
     def test_gpu_sort_matches_cpu_small(self):
         """GPU sort should match CPU sort for small batch."""
+        logger.info("running test_gpu_sort_matches_cpu_small")
         batch_size = 8
         top_k = 2
         num_experts = 4
@@ -44,6 +49,7 @@ class TestMoEGPUSort:
 
     def test_gpu_sort_matches_cpu_large(self):
         """GPU sort should match CPU sort for realistic batch size."""
+        logger.info("running test_gpu_sort_matches_cpu_large")
         batch_size = 128
         top_k = 8
         num_experts = 64
@@ -68,6 +74,7 @@ class TestMoEGPUSort:
 
     def test_gpu_sort_full_dispatch_info(self):
         """Full dispatch info should be consistent."""
+        logger.info("running test_gpu_sort_full_dispatch_info")
         batch_size = 32
         top_k = 4
         num_experts = 16
@@ -90,6 +97,7 @@ class TestMoEGPUSort:
 
     def test_gpu_sort_expert_grouping(self):
         """Verify tokens are correctly grouped by expert."""
+        logger.info("running test_gpu_sort_expert_grouping")
         batch_size = 16
         top_k = 2
         num_experts = 4
@@ -117,6 +125,7 @@ class TestMoEGPUSort:
 
     def test_gpu_sort_empty_experts(self):
         """Handle case where some experts have no assignments."""
+        logger.info("running test_gpu_sort_empty_experts")
         batch_size = 8
         top_k = 2
         num_experts = 16  # More experts than assignments
@@ -137,6 +146,7 @@ class TestMoEGPUSort:
 
     def test_gpu_sort_single_expert(self):
         """Edge case: all tokens go to same expert."""
+        logger.info("running test_gpu_sort_single_expert")
         batch_size = 16
         top_k = 4
         num_experts = 8
@@ -172,6 +182,7 @@ class TestMoEGPUSortPerformance:
 
     def test_gpu_sort_speedup(self, benchmark):
         """GPU sort should be faster than CPU for large batches."""
+        logger.info("running test_gpu_sort_speedup")
         batch_size = 512
         top_k = 8
         num_experts = 64
@@ -181,6 +192,7 @@ class TestMoEGPUSortPerformance:
         expert_probs = torch.rand(batch_size, top_k, device=device)
 
         def run_gpu():
+            logger.debug("run_gpu called")
             return group_tokens_by_expert_gpu(expert_ids, expert_probs, num_experts)
 
         result = benchmark(run_gpu)

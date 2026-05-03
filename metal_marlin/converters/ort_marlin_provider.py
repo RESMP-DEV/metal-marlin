@@ -43,6 +43,7 @@ C++ shared library interface (approach 2):
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -67,6 +68,9 @@ except ImportError:
     torch = None
 
 
+
+logger = logging.getLogger(__name__)
+
 def _to_mps_tensor(arr: NDArray[Any], dtype: torch.dtype | None = None) -> torch.Tensor:
     """Convert numpy array to PyTorch MPS tensor.
 
@@ -77,6 +81,7 @@ def _to_mps_tensor(arr: NDArray[Any], dtype: torch.dtype | None = None) -> torch
     Returns:
         PyTorch tensor on MPS device.
     """
+    logger.debug("_to_mps_tensor called with arr=%s, dtype=%s", arr, dtype)
     if not HAS_MPS or torch is None:
         raise RuntimeError("PyTorch MPS is required for Metal kernel dispatch")
 
@@ -112,6 +117,7 @@ def _from_mps_tensor(tensor: torch.Tensor, dtype: np.dtype = np.float16) -> NDAr
     Returns:
         numpy array with specified dtype.
     """
+    logger.debug("_from_mps_tensor called with tensor=%s, dtype=%s", tensor, dtype)
     if torch is None:
         raise RuntimeError("PyTorch is required")
 
@@ -140,6 +146,7 @@ class MarlinQuantizedMatMulOp:
     @staticmethod
     def get_inputs() -> list[tuple[str, str]]:
         """Return input tensor specifications."""
+        logger.debug("get_inputs called")
         return [
             ("A", "tensor(float16)"),
             ("B_packed", "tensor(uint32)"),
@@ -149,11 +156,13 @@ class MarlinQuantizedMatMulOp:
     @staticmethod
     def get_outputs() -> list[tuple[str, str]]:
         """Return output tensor specifications."""
+        logger.debug("get_outputs called")
         return [("Y", "tensor(float16)")]
 
     @staticmethod
     def get_attrs() -> dict[str, tuple[str, Any]]:
         """Return attribute specifications: name -> (type, default)."""
+        logger.debug("get_attrs called")
         return {"group_size": ("int", 32)}
 
     @staticmethod
@@ -169,6 +178,7 @@ class MarlinQuantizedMatMulOp:
         This crosses the Python/Metal boundary. For production use, the C++
         custom op path eliminates this overhead entirely.
         """
+        logger.debug("compute called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         if not HAS_MPS:
             raise RuntimeError(
                 "PyTorch MPS is required for Metal kernel dispatch. "
@@ -216,6 +226,7 @@ class MarlinQuantizedLinearOp:
 
     @staticmethod
     def get_inputs() -> list[tuple[str, str]]:
+        logger.debug("get_inputs called")
         return [
             ("X", "tensor(float16)"),
             ("W_packed", "tensor(uint32)"),
@@ -225,6 +236,7 @@ class MarlinQuantizedLinearOp:
 
     @staticmethod
     def get_outputs() -> list[tuple[str, str]]:
+        logger.debug("get_outputs called")
         return [("Y", "tensor(float16)")]
 
     @staticmethod
@@ -237,6 +249,7 @@ class MarlinQuantizedLinearOp:
         group_size: int = 32,
     ) -> NDArray[np.float16]:
         """Execute quantized linear via Metal Marlin."""
+        logger.debug("compute called with X=%s, W_packed=%s, scales=%s", X, W_packed, scales)
         if not HAS_MPS:
             raise RuntimeError(
                 "PyTorch MPS is required for Metal kernel dispatch. "
@@ -285,6 +298,7 @@ class MarlinFlashAttentionOp:
 
     @staticmethod
     def get_inputs() -> list[tuple[str, str]]:
+        logger.debug("get_inputs called")
         return [
             ("Q", "tensor(float16)"),
             ("K", "tensor(float16)"),
@@ -293,6 +307,7 @@ class MarlinFlashAttentionOp:
 
     @staticmethod
     def get_outputs() -> list[tuple[str, str]]:
+        logger.debug("get_outputs called")
         return [("Y", "tensor(float16)")]
 
     @staticmethod
@@ -311,6 +326,7 @@ class MarlinFlashAttentionOp:
         kernel is still using MLX internally. For full Metal performance, the
         flash_attention_v2.metal kernel needs to be integrated with PyTorch MPS.
         """
+        logger.debug("compute called with Q=%s, K=%s, V=%s", Q, K, V)
         if not HAS_MPS:
             raise RuntimeError(
                 "PyTorch MPS is required for Metal kernel dispatch. "
@@ -367,6 +383,7 @@ def register_marlin_ops_ortextensions() -> None:
     Raises:
         ImportError: If onnxruntime-extensions is not installed.
     """
+    logger.debug("register_marlin_ops_ortextensions called")
     from onnxruntime_extensions import PyCustomOpDef, onnx_op
 
     @onnx_op(
@@ -376,6 +393,7 @@ def register_marlin_ops_ortextensions() -> None:
         attrs={"group_size": PyCustomOpDef.dt_int64},
     )
     def marlin_quantized_matmul(A, B_packed, scales, **kwargs):
+        logger.info("marlin_quantized_matmul called with A=%s, B_packed=%s, scales=%s", A, B_packed, scales)
         group_size = int(kwargs.get("group_size", 32))
         return MarlinQuantizedMatMulOp.compute(A, B_packed, scales, group_size=group_size)
 
@@ -391,6 +409,7 @@ def register_marlin_ops_ortextensions() -> None:
         attrs={"group_size": PyCustomOpDef.dt_int64},
     )
     def marlin_quantized_linear(X, W_packed, scales, bias, **kwargs):
+        logger.info("marlin_quantized_linear called with X=%s, W_packed=%s, scales=%s, bias=%s", X, W_packed, scales, bias)
         group_size = int(kwargs.get("group_size", 32))
         bias_arr = bias if bias.size > 0 else None
         return MarlinQuantizedLinearOp.compute(X, W_packed, scales, bias_arr, group_size=group_size)
@@ -406,6 +425,7 @@ def register_marlin_ops_ortextensions() -> None:
         },
     )
     def marlin_flash_attention(Q, K, V, **kwargs):
+        logger.debug("marlin_flash_attention called with Q=%s, K=%s, V=%s", Q, K, V)
         scale = float(kwargs.get("scale", -1.0))
         causal = int(kwargs.get("causal", 1))
         num_kv_heads = int(kwargs.get("num_kv_heads", 0))
@@ -438,6 +458,7 @@ def create_session(
         ImportError: If required packages are not installed.
         FileNotFoundError: If custom_lib_path does not exist.
     """
+    logger.debug("create_session called with model_path=%s", model_path)
     import onnxruntime as ort
 
     session_options = ort.SessionOptions()
@@ -487,6 +508,7 @@ def export_with_marlin_ops(
             (packed_uint32, scales_fp16) tuples from pack_fp4_weights.
         group_size: Quantization group size.
     """
+    logger.info("export_with_marlin_ops called with onnx_model_path=%s, output_path=%s, weights=%s", onnx_model_path, output_path, weights)
     import onnx
     from onnx import TensorProto, helper
 

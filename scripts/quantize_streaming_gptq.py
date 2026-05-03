@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import shutil
 import sys
 import tempfile
@@ -47,6 +48,9 @@ import numpy as np
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
+
+
+logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
@@ -82,12 +86,14 @@ class StreamingWeightLoader:
     """Load model weights one layer at a time from safetensors."""
 
     def __init__(self, model_path: Path):
+        logger.debug("initializing %s with model_path=%s", type(self).__name__, model_path)
         self.model_path = Path(model_path)
         self.weight_map = self._load_weight_map()
         self.config = self._load_config()
 
     def _load_weight_map(self) -> dict[str, str]:
         """Load weight map from index or scan files."""
+        logger.info("_load_weight_map called")
         index_file = self.model_path / "model.safetensors.index.json"
         if index_file.exists():
             with open(index_file) as f:
@@ -103,6 +109,7 @@ class StreamingWeightLoader:
 
     def _load_config(self) -> dict[str, Any]:
         """Load model config."""
+        logger.info("_load_config called")
         config_file = self.model_path / "config.json"
         if config_file.exists():
             with open(config_file) as f:
@@ -111,6 +118,7 @@ class StreamingWeightLoader:
 
     def get_tensor(self, name: str) -> torch.Tensor:
         """Load a single tensor."""
+        logger.debug("get_tensor called with name=%s", name)
         if name not in self.weight_map:
             raise KeyError(f"Tensor {name} not found in model")
 
@@ -122,6 +130,7 @@ class StreamingWeightLoader:
 
     def get_layer_tensors(self, layer_idx: int) -> dict[str, torch.Tensor]:
         """Load all tensors for a specific layer."""
+        logger.debug("get_layer_tensors called with layer_idx=%s", layer_idx)
         prefix = f"model.layers.{layer_idx}."
         tensors = {}
 
@@ -133,22 +142,26 @@ class StreamingWeightLoader:
 
     def get_tensor_names_for_layer(self, layer_idx: int) -> list[str]:
         """Get all tensor names for a layer without loading."""
+        logger.debug("get_tensor_names_for_layer called with layer_idx=%s", layer_idx)
         prefix = f"model.layers.{layer_idx}."
         return [n for n in self.weight_map if n.startswith(prefix)]
 
     @property
     def num_layers(self) -> int:
         """Get number of transformer layers."""
+        logger.debug("num_layers called")
         return self.config.get("num_hidden_layers", 0)
 
     @property
     def hidden_size(self) -> int:
         """Get hidden size."""
+        logger.debug("hidden_size called")
         return self.config.get("hidden_size", 0)
 
     @property
     def num_experts(self) -> int:
         """Get number of experts for MoE."""
+        logger.debug("num_experts called")
         return self.config.get("n_routed_experts", 0)
 
 
@@ -170,6 +183,7 @@ def quantize_to_grid(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Quantize values to nearest grid point."""
     # Normalize by scale
+    logger.info("quantize_to_grid called with values=%s, grid=%s, scales=%s", values, grid, scales)
     scaled = values / (scales + 1e-10)
 
     # Find nearest grid point for each value
@@ -205,6 +219,7 @@ def gptq_quantize_layer_cuda(
         indices: Grid indices [out, in] int32
     """
     # Move to GPU
+    logger.info("gptq_quantize_layer_cuda called with weights=%s, hessian=%s, grid=%s, group_size=%s", weights, hessian, grid, group_size)
     W = weights.to(device=device, dtype=torch.float32).clone()
     H = hessian.to(device=device, dtype=torch.float32).clone()
     grid_t = grid.to(device=device, dtype=torch.float32)
@@ -335,6 +350,7 @@ def gptq_quantize_layer(
         indices: Grid indices [out, in]
     """
     # Use CUDA if available
+    logger.info("gptq_quantize_layer called with weights=%s, hessian=%s, grid=%s, group_size=%s", weights, hessian, grid, group_size)
     if torch.cuda.is_available():
         W_t = torch.from_numpy(weights)
         H_t = torch.from_numpy(hessian)
@@ -445,6 +461,7 @@ def gptq_quantize_layer(
 
 def pack_fp4_weights(indices: np.ndarray) -> np.ndarray:
     """Pack FP4 indices into uint32."""
+    logger.info("pack_fp4_weights called with indices=%s", indices)
     out_features, in_features = indices.shape
 
     # Pad to multiple of 8 (8 nibbles per uint32)
@@ -476,6 +493,7 @@ def compute_hessian(activations: np.ndarray) -> np.ndarray:
         hessian: [in_features, in_features] float32
     """
     # Use float64 for accumulation precision
+    logger.debug("compute_hessian called with activations=%s", activations)
     X = activations.astype(np.float64)
     H = X.T @ X
     H /= X.shape[0]  # Normalize by token count
@@ -488,6 +506,7 @@ def compute_hessian(activations: np.ndarray) -> np.ndarray:
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """RMSNorm forward."""
+    logger.debug("rms_norm called with x=%s, weight=%s, eps=%s", x, weight, eps)
     variance = x.pow(2).mean(-1, keepdim=True)
     x = x * torch.rsqrt(variance + eps)
     return x * weight
@@ -495,11 +514,13 @@ def rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.
 
 def gelu_approx(x: torch.Tensor) -> torch.Tensor:
     """Approximate GELU activation."""
+    logger.debug("gelu_approx called with x=%s", x)
     return 0.5 * x * (1.0 + torch.tanh(0.7978845608 * (x + 0.044715 * x.pow(3))))
 
 
 def silu(x: torch.Tensor) -> torch.Tensor:
     """SiLU/Swish activation."""
+    logger.debug("silu called with x=%s", x)
     return x * torch.sigmoid(x)
 
 
@@ -507,6 +528,7 @@ class MinimalTransformerLayer:
     """Minimal transformer layer implementation for streaming forward pass."""
 
     def __init__(self, config: dict[str, Any], device: str = "cuda"):
+        logger.debug("initializing %s with config=%s, device=%s", type(self).__name__, config, device)
         self.config = config
         self.device = device
         self.hidden_size = config.get("hidden_size", 4096)
@@ -548,6 +570,7 @@ class MinimalTransformerLayer:
             normed: Normalized hidden states (input to Q/K/V projections)
             residual: Original hidden states for residual connection
         """
+        logger.debug("forward_attention_input called with hidden_states=%s", hidden_states)
         residual = hidden_states
         normed = rms_norm(
             hidden_states, self.input_layernorm_weight, self.rms_norm_eps)
@@ -563,6 +586,7 @@ class MinimalTransformerLayer:
             normed: Normalized hidden states (input to gate/up projections)
             residual: Original hidden states for residual connection
         """
+        logger.debug("forward_mlp_input called with hidden_states=%s", hidden_states)
         residual = hidden_states
         normed = rms_norm(
             hidden_states, self.post_attention_layernorm_weight, self.rms_norm_eps)
@@ -581,6 +605,7 @@ class StreamingGPTQQuantizer:
         config: StreamingGPTQConfig,
         verbose: bool = True,
     ):
+        logger.debug("initializing %s with config=%s, verbose=%s", type(self).__name__, config, verbose)
         self.config = config
         self.verbose = verbose
 
@@ -594,17 +619,20 @@ class StreamingGPTQQuantizer:
         self.grid = FP4_GRID
 
     def log(self, msg: str) -> None:
+        logger.debug("log called with msg=%s", msg)
         if self.verbose:
             print(msg)
 
     def save_activations(self, layer_idx: int, name: str, activations: np.ndarray) -> Path:
         """Save activations to disk cache."""
+        logger.info("save_activations called with layer_idx=%s, name=%s, activations=%s", layer_idx, name, activations)
         path = self.cache_dir / f"layer_{layer_idx:03d}_{name}.npy"
         np.save(path, activations)
         return path
 
     def load_activations(self, layer_idx: int, name: str) -> np.ndarray:
         """Load activations from disk cache."""
+        logger.info("load_activations called with layer_idx=%s, name=%s", layer_idx, name)
         path = self.cache_dir / f"layer_{layer_idx:03d}_{name}.npy"
         return np.load(path)
 
@@ -621,6 +649,7 @@ class StreamingGPTQQuantizer:
             scales: Per-group scales
             stats: Quantization statistics
         """
+        logger.info("quantize_linear called with name=%s, weight=%s, hessian=%s", name, weight, hessian)
         W = weight.float().cpu().numpy()
 
         # Apply GPTQ
@@ -668,6 +697,7 @@ class StreamingGPTQQuantizer:
         Returns:
             List of per-layer stats
         """
+        logger.info("quantize_layer_with_hessians called with loader=%s, layer_idx=%s, hessians=%s, output_tensors=%s", loader, layer_idx, hessians, output_tensors)
         stats_list = []
         prefix = f"model.layers.{layer_idx}."
 
@@ -731,6 +761,7 @@ class StreamingGPTQQuantizer:
 
     def cleanup(self) -> None:
         """Clean up temporary files."""
+        logger.debug("cleanup called")
         if self.cache_dir.exists():
             shutil.rmtree(self.cache_dir, ignore_errors=True)
 
@@ -740,6 +771,7 @@ class StreamingGPTQQuantizer:
 # =============================================================================
 
 def parse_args() -> argparse.Namespace:
+    logger.debug("parse_args called")
     parser = argparse.ArgumentParser(
         description="Streaming GPTQ Quantization (memory-efficient)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -799,7 +831,9 @@ def finish_incomplete_quantization(
     what's actually missing by scanning the output safetensors files directly.
     """
 
+    logger.info("finish_incomplete_quantization called with output_dir=%s, config=%s, verbose=%s", output_dir, config, verbose)
     def log(msg: str):
+        logger.debug("log called with msg=%s", msg)
         if verbose:
             print(msg)
 
@@ -1008,6 +1042,7 @@ def finish_incomplete_quantization(
 
 
 def main() -> int:
+    logger.info("main starting")
     args = parse_args()
 
     config = StreamingGPTQConfig(

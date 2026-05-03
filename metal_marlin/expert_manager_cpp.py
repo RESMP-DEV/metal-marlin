@@ -24,6 +24,7 @@ Example:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -64,12 +65,16 @@ if HAS_CPP_EXT:
         ExpertBufferPool = None
 
 
+
+logger = logging.getLogger(__name__)
+
 def is_available() -> bool:
     """Check if C++ expert manager is available.
     
     Returns:
         True if the C++ extension is built and available.
     """
+    logger.debug("is_available called")
     return TokenGroupManager is not None
 
 
@@ -79,6 +84,7 @@ def is_expert_buffer_pool_available() -> bool:
     Returns:
         True if the ExpertBufferPool is available in the C++ extension.
     """
+    logger.debug("is_expert_buffer_pool_available called")
     return ExpertBufferPool is not None
 
 
@@ -103,6 +109,7 @@ def initialize_expert_buffer_pool(device_ptr: int, heap_size: int = 1024 * 1024 
         >>> initialize_expert_buffer_pool(device.raw())
         True
     """
+    logger.debug("initialize_expert_buffer_pool called with device_ptr=%s, heap_size=%s", device_ptr, heap_size)
     if ExpertBufferPool is None:
         return False
     
@@ -124,6 +131,7 @@ def get_expert_buffer_pool() -> Any:
     Raises:
         RuntimeError: If the pool is not initialized.
     """
+    logger.debug("get_expert_buffer_pool called")
     if ExpertBufferPool is None:
         raise RuntimeError("ExpertBufferPool not available. Build C++ extension with: uv pip install -e .")
     
@@ -149,6 +157,7 @@ def allocate_expert_weight_buffer(size: int) -> Any:
         ...     # Use handle.buffer() to get MTLBuffer
         ...     pass
     """
+    logger.debug("allocate_expert_weight_buffer called with size=%s", size)
     pool = get_expert_buffer_pool()
     return pool.allocate_weight(size)
 
@@ -158,6 +167,7 @@ def clear_expert_buffer_pool() -> None:
     
     This releases all pooled memory back to the system.
     """
+    logger.debug("clear_expert_buffer_pool called")
     if ExpertBufferPool is not None:
         pool = ExpertBufferPool.instance()
         if pool.is_initialized():
@@ -200,6 +210,7 @@ class ExpertManagerCpp:
         max_tokens: int = 8192,
         max_top_k: int = 8,
     ) -> None:
+        logger.debug("initializing %s with num_experts=%s, max_tokens=%s, max_top_k=%s", type(self).__name__, num_experts, max_tokens, max_top_k)
         if TokenGroupManager is None:
             raise RuntimeError(
                 "C++ extension not available. "
@@ -219,16 +230,19 @@ class ExpertManagerCpp:
     @property
     def num_experts(self) -> int:
         """Number of experts."""
+        logger.debug("num_experts called")
         return self._num_experts
     
     @property
     def max_tokens(self) -> int:
         """Maximum number of tokens supported."""
+        logger.debug("max_tokens called")
         return self._max_tokens
     
     @property
     def max_top_k(self) -> int:
         """Maximum top-k value supported."""
+        logger.debug("max_top_k called")
         return self._max_top_k
     
     def group_tokens(
@@ -259,6 +273,7 @@ class ExpertManagerCpp:
             >>> info = manager.group_tokens(expert_ids, batch_size=3, top_k=2)
             >>> print(f"Total assignments: {info.total_assignments()}")
         """
+        logger.debug("group_tokens called with expert_ids=%s, batch_size=%s, top_k=%s", expert_ids, batch_size, top_k)
         if expert_ids.dtype != np.int32:
             expert_ids = expert_ids.astype(np.int32)
         
@@ -285,6 +300,7 @@ class ExpertManagerCpp:
         Returns:
             DispatchInfo object with grouping information
         """
+        logger.debug("group_tokens_2d called with expert_ids=%s, batch_size=%s, top_k=%s", expert_ids, batch_size, top_k)
         if expert_ids.dtype != np.int32:
             expert_ids = expert_ids.astype(np.int32)
         
@@ -302,6 +318,7 @@ class ExpertManagerCpp:
         Returns:
             List of token counts per expert
         """
+        logger.info("compute_expert_loads called with info=%s", info)
         return self._manager.compute_expert_loads(info)
     
     def compute_load_imbalance(self, info: Any) -> float:
@@ -316,6 +333,7 @@ class ExpertManagerCpp:
         Returns:
             Load imbalance ratio (0.0 = perfectly balanced)
         """
+        logger.info("compute_load_imbalance called with info=%s", info)
         return self._manager.compute_load_imbalance(info)
     
     def is_load_balanced(self, info: Any, threshold: float = 2.0) -> bool:
@@ -328,6 +346,7 @@ class ExpertManagerCpp:
         Returns:
             True if load is balanced within threshold
         """
+        logger.info("is_load_balanced called with info=%s, threshold=%s", info, threshold)
         return self._manager.is_load_balanced(info, threshold)
     
     def get_token_group(self, info: Any, expert_id: int) -> Any:
@@ -340,6 +359,7 @@ class ExpertManagerCpp:
         Returns:
             TokenGroup view into the dispatch info
         """
+        logger.debug("get_token_group called with info=%s, expert_id=%s", info, expert_id)
         return self._manager.get_token_group(expert_id, info)
 
 
@@ -356,57 +376,69 @@ class CppDispatchInfo:
         Args:
             info: C++ DispatchInfo object
         """
+        logger.debug("initializing %s with info=%s", type(self).__name__, info)
         self._info = info
     
     @property
     def sorted_token_indices(self) -> NDArray[np.int32]:
         """[total_assignments] indices into original batch."""
+        logger.debug("sorted_token_indices called")
         return np.array(self._info.sorted_token_indices, dtype=np.int32)
     
     @property
     def sorted_expert_indices(self) -> NDArray[np.int32]:
         """[total_assignments] which expert slot (0 to top_k-1)."""
+        logger.debug("sorted_expert_indices called")
         return np.array(self._info.sorted_expert_indices, dtype=np.int32)
     
     @property
     def expert_offsets(self) -> NDArray[np.int32]:
         """[num_experts + 1] start index for each expert's assignments."""
+        logger.debug("expert_offsets called")
         return np.array(self._info.expert_offsets, dtype=np.int32)
     
     @property
     def inverse_indices(self) -> NDArray[np.int32]:
         """[total_assignments] indices to scatter expert outputs back."""
+        logger.debug("inverse_indices called")
         return np.array(self._info.inverse_indices, dtype=np.int32)
     
     @property
     def num_tokens(self) -> int:
         """Number of tokens."""
+        logger.debug("num_tokens called")
         return self._info.num_tokens
     
     @property
     def top_k(self) -> int:
         """Top-k value."""
+        logger.debug("top_k called")
         return self._info.top_k
     
     @property
     def num_experts(self) -> int:
         """Number of experts."""
+        logger.debug("num_experts called")
         return self._info.num_experts
     
     def total_assignments(self) -> int:
         """Total number of token-expert assignments."""
+        logger.debug("total_assignments called")
         return self._info.total_assignments()
     
     def expert_batch_size(self, expert_id: int) -> int:
         """Get number of tokens assigned to a specific expert."""
+        logger.debug("expert_batch_size called with expert_id=%s", expert_id)
         return self._info.expert_batch_size(expert_id)
     
     def is_expert_active(self, expert_id: int) -> bool:
         """Check if an expert has any assigned tokens."""
+        logger.debug("is_expert_active called with expert_id=%s", expert_id)
         return self._info.is_expert_active(expert_id)
     
     def active_expert_count(self) -> int:
         """Get number of active experts."""
+        logger.debug("active_expert_count called")
         return self._info.active_expert_count()
 
 
@@ -431,6 +463,7 @@ def create_expert_manager(
     Raises:
         RuntimeError: If C++ extension is not available.
     """
+    logger.debug("create_expert_manager called with num_experts=%s, max_tokens=%s, max_top_k=%s", num_experts, max_tokens, max_top_k)
     if not is_available():
         raise RuntimeError(
             "C++ expert manager not available. "

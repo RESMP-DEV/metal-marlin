@@ -8,6 +8,7 @@ These weights serve as a starting point for fine-tuning or testing
 speculative decoding.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -28,7 +29,11 @@ except ImportError:
     sys.path.append(str(REPO_ROOT))
     from contrib.metal_marlin.metal_marlin.layers.mmfp4_mtp_head import MMFP4MTPHead
 
+
+logger = logging.getLogger(__name__)
+
 def main():
+    logger.info("main starting")
     print("Creating draft model weights for MMFP4...")
     
     # Configuration matches typical MMFP4 models (e.g. Llama-3-8B-Instruct)

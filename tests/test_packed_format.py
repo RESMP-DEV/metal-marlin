@@ -1,9 +1,13 @@
 """Test that packed format is preserved through the entire pipeline."""
 
+import logging
 from pathlib import Path
 
 import pytest
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 # Skip if model not available
 MODEL_PATH = Path(__file__).parents[1] / "models" / "GLM-4.7-Flash-Trellis-3bpw"
@@ -12,6 +16,7 @@ pytestmark = pytest.mark.skipif(not MODEL_PATH.exists(), reason="Model not found
 
 def test_weight_stays_packed():
     """Verify weights stay in packed format after loading."""
+    logger.info("running test_weight_stays_packed")
     from metal_marlin.trellis.loader import TrellisModelLoader
 
     loader = TrellisModelLoader(str(MODEL_PATH))
@@ -31,6 +36,7 @@ def test_weight_stays_packed():
 
 def test_model_memory_efficiency():
     """Verify model uses ~disk size memory, not 5x more."""
+    logger.info("running test_model_memory_efficiency")
     import gc
     gc.collect()
     if torch.backends.mps.is_available():
@@ -53,6 +59,7 @@ def test_model_memory_efficiency():
 
 def test_forward_pass_no_memory_explosion():
     """Verify forward pass doesn't cache FP16 weights."""
+    logger.info("running test_forward_pass_no_memory_explosion")
     from metal_marlin.trellis.lm import TrellisForCausalLM
     model = TrellisForCausalLM.from_pretrained(str(MODEL_PATH), device="mps")
 

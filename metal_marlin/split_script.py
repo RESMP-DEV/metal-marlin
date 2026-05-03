@@ -1,5 +1,10 @@
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 def split_kernels():
+    logger.debug("split_kernels called")
     with open('contrib/metal_marlin/metal_marlin/kernels.py') as f:
         content = f.read()
     

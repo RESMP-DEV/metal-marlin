@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from unittest.mock import MagicMock
@@ -29,7 +30,11 @@ sys.modules["transformers.models.glm4_moe.modeling_glm4_moe"] = MagicMock()
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_caching():
+    logger.info("running test_caching")
     mock_model = MagicMock()
     mock_model.device = "cpu"
     mock_tokenizer = MagicMock()

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import statistics
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -28,12 +29,16 @@ from typing import Any, ParamSpec, TypeVar
 
 from .._compat import HAS_MPS, HAS_PYOBJC_METAL, torch
 
+
+logger = logging.getLogger(__name__)
+
 P = ParamSpec("P")
 T = TypeVar("T")
 
 
 def _gpu_sync() -> None:
     """Synchronize MPS device to ensure kernel completion."""
+    logger.debug("_gpu_sync called")
     if HAS_MPS and torch is not None:
         torch.mps.synchronize()
 
@@ -68,6 +73,7 @@ class ProfileStats:
     @classmethod
     def from_records(cls, name: str, records: list[ProfileRecord]) -> ProfileStats:
         """Compute statistics from a list of profile records."""
+        logger.debug("from_records called with name=%s, records=%s", name, records)
         if not records:
             raise ValueError("Cannot compute stats from empty record list")
 
@@ -103,6 +109,7 @@ class _ProfileRegistry:
     """
 
     def __init__(self) -> None:
+        logger.debug("initializing %s", type(self).__name__)
         self._lock = threading.Lock()
         self._records: dict[str, list[ProfileRecord]] = defaultdict(list)
         self._enabled = True
@@ -110,15 +117,18 @@ class _ProfileRegistry:
     @property
     def enabled(self) -> bool:
         """Check if profiling is enabled."""
+        logger.debug("enabled called")
         return self._enabled
 
     @enabled.setter
     def enabled(self, value: bool) -> None:
         """Enable or disable profiling globally."""
+        logger.debug("enabled called with value=%s", value)
         self._enabled = value
 
     def add(self, name: str, record: ProfileRecord) -> None:
         """Add a profile record."""
+        logger.debug("add called with name=%s, record=%s", name, record)
         if not self._enabled:
             return
         with self._lock:
@@ -126,11 +136,13 @@ class _ProfileRegistry:
 
     def get_records(self, name: str) -> list[ProfileRecord]:
         """Get all records for a kernel."""
+        logger.debug("get_records called with name=%s", name)
         with self._lock:
             return list(self._records.get(name, []))
 
     def get_stats(self, name: str) -> ProfileStats | None:
         """Get aggregated stats for a kernel."""
+        logger.debug("get_stats called with name=%s", name)
         records = self.get_records(name)
         if not records:
             return None
@@ -138,6 +150,7 @@ class _ProfileRegistry:
 
     def get_all_stats(self) -> dict[str, ProfileStats]:
         """Get stats for all profiled kernels."""
+        logger.debug("get_all_stats called")
         with self._lock:
             names = list(self._records.keys())
         return {
@@ -152,6 +165,7 @@ class _ProfileRegistry:
         Args:
             name: If specified, clear only this kernel. Otherwise clear all.
         """
+        logger.debug("clear called with name=%s", name)
         with self._lock:
             if name is not None:
                 self._records.pop(name, None)
@@ -160,6 +174,7 @@ class _ProfileRegistry:
 
     def print_summary(self) -> None:
         """Print formatted summary table to stdout."""
+        logger.debug("print_summary called")
         all_stats = self.get_all_stats()
         if not all_stats:
             print("No profiles collected")
@@ -245,12 +260,15 @@ def profile_kernel(
             return cmd_buf
     """
 
+    logger.debug("profile_kernel called with name=%s", name)
     def decorator(fn: Any) -> Any:
+        logger.debug("decorator called with fn=%s", fn)
         kernel_name = name if name is not None else fn.__name__
         static_metadata = metadata or {}
 
         @functools.wraps(fn)
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            logger.debug("wrapper called")
             if not _registry.enabled:
                 return fn(*args, **kwargs)
 
@@ -301,6 +319,7 @@ def get_profile_stats(name: str) -> ProfileStats | None:
     Returns:
         ProfileStats with timing statistics, or None if no records exist.
     """
+    logger.debug("get_profile_stats called with name=%s", name)
     return _registry.get_stats(name)
 
 
@@ -310,6 +329,7 @@ def get_all_profile_stats() -> dict[str, ProfileStats]:
     Returns:
         Dictionary mapping kernel names to their ProfileStats.
     """
+    logger.debug("get_all_profile_stats called")
     return _registry.get_all_stats()
 
 
@@ -322,6 +342,7 @@ def get_profile_records(name: str) -> list[ProfileRecord]:
     Returns:
         List of ProfileRecord objects.
     """
+    logger.debug("get_profile_records called with name=%s", name)
     return _registry.get_records(name)
 
 
@@ -331,16 +352,19 @@ def clear_profiles(name: str | None = None) -> None:
     Args:
         name: If specified, clear only this kernel. Otherwise clear all.
     """
+    logger.debug("clear_profiles called with name=%s", name)
     _registry.clear(name)
 
 
 def print_profile_summary() -> None:
     """Print a formatted summary of all profile statistics."""
+    logger.debug("print_profile_summary called")
     _registry.print_summary()
 
 
 def enable_profiling() -> None:
     """Enable profiling globally."""
+    logger.debug("enable_profiling called")
     _registry.enabled = True
 
 
@@ -350,15 +374,18 @@ def disable_profiling() -> None:
     When disabled, @profile_kernel decorated functions run without
     any timing overhead.
     """
+    logger.debug("disable_profiling called")
     _registry.enabled = False
 
 
 def is_profiling_enabled() -> bool:
     """Check if profiling is enabled."""
+    logger.debug("is_profiling_enabled called")
     return _registry.enabled
 
 
 # Convenience alias for the registry (for advanced use)
 def get_profile_registry() -> _ProfileRegistry:
     """Get the global profile registry for advanced operations."""
+    logger.debug("get_profile_registry called")
     return _registry

@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ from metal_marlin._compat import HAS_MPS, HAS_TORCH, torch
 
 if TYPE_CHECKING:
     import torch as torch_types
+
+
+logger = logging.getLogger(__name__)
 
 # Configuration
 REGRESSION_THRESHOLD_PCT = float(os.environ.get("PERF_REGRESSION_THRESHOLD_PCT", "5.0"))
@@ -52,6 +56,7 @@ class LatencyBaseline:
     last_updated: str
 
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "baseline_ms": self.baseline_ms,
             "last_updated": self.last_updated,
@@ -59,6 +64,7 @@ class LatencyBaseline:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LatencyBaseline:
+        logger.debug("from_dict called with data=%s", data)
         return cls(baseline_ms=data["baseline_ms"], last_updated=data["last_updated"])
 
 
@@ -66,12 +72,14 @@ class BaselineManager:
     """Manages performance baseline storage and retrieval."""
 
     def __init__(self, path: Path = BASELINE_PATH) -> None:
+        logger.debug("initializing %s with path=%s", type(self).__name__, path)
         self.path = path
         self._baselines: dict[str, LatencyBaseline] = {}
         self._load()
 
     def _load(self) -> None:
         """Load baselines from file."""
+        logger.info("_load called")
         if self.path.exists():
             try:
                 with open(self.path) as f:
@@ -83,16 +91,19 @@ class BaselineManager:
 
     def _save(self) -> None:
         """Save baselines to file."""
+        logger.info("_save called")
         data = {key: value.to_dict() for key, value in self._baselines.items()}
         with open(self.path, "w") as f:
             json.dump(data, f, indent=2)
 
     def get(self, test_name: str) -> LatencyBaseline | None:
         """Get baseline for a test."""
+        logger.debug("get called with test_name=%s", test_name)
         return self._baselines.get(test_name)
 
     def set(self, test_name: str, latency_ms: float) -> None:
         """Set baseline for a test."""
+        logger.debug("set called with test_name=%s, latency_ms=%s", test_name, latency_ms)
         from datetime import datetime
 
         self._baselines[test_name] = LatencyBaseline(
@@ -109,6 +120,7 @@ class BaselineManager:
         Returns:
             (is_regression, increase_pct, message)
         """
+        logger.debug("check_regression called with test_name=%s, current_ms=%s", test_name, current_ms)
         baseline = self.get(test_name)
 
         if baseline is None:
@@ -151,6 +163,7 @@ class LatencyTimer:
     """Simple timer for measuring operation latency."""
 
     def __init__(self, sync_gpu: bool = False) -> None:
+        logger.debug("initializing %s with sync_gpu=%s", type(self).__name__, sync_gpu)
         self.sync_gpu = sync_gpu
         self.start_time: float = 0.0
         self.end_time: float = 0.0
@@ -168,12 +181,14 @@ class LatencyTimer:
 
     @property
     def elapsed_ms(self) -> float:
+        logger.debug("elapsed_ms called")
         return (self.end_time - self.start_time) * 1000
 
 
 @pytest.fixture
 def baseline_manager() -> BaselineManager:
     """Provide baseline manager for tests."""
+    logger.debug("baseline_manager called")
     return BaselineManager()
 
 
@@ -186,6 +201,7 @@ class TestLatencyRegression:
     @pytest.fixture(autouse=True)
     def setup(self, baseline_manager: BaselineManager) -> None:
         """Auto-use fixture to provide baseline manager."""
+        logger.info("setup starting")
         self.manager = baseline_manager
 
     def test_fp4_gemm_latency_regression(self) -> None:
@@ -194,6 +210,7 @@ class TestLatencyRegression:
         Measures FP4 quantized GEMM performance and compares to baseline.
         Fails if latency increases >5%.
         """
+        logger.info("running test_fp4_gemm_latency_regression")
         if torch is None:
             pytest.skip("PyTorch not available")
 
@@ -255,6 +272,7 @@ class TestLatencyRegression:
         Measures INT4 quantized GEMM performance and compares to baseline.
         Fails if latency increases >5%.
         """
+        logger.info("running test_int4_gemm_latency_regression")
         if torch is None:
             pytest.skip("PyTorch not available")
 
@@ -316,6 +334,7 @@ class TestLatencyRegression:
         Tests a larger matrix size (8192x8192) typical of attention projections
         in 30B+ parameter models. Fails if latency increases >5%.
         """
+        logger.info("running test_large_matrix_gemm_latency_regression")
         if torch is None:
             pytest.skip("PyTorch not available")
 
@@ -379,6 +398,7 @@ class TestRegressionConfiguration:
     @pytest.mark.smoke
     def test_threshold_configuration(self) -> None:
         """Verify threshold is correctly configured."""
+        logger.info("running test_threshold_configuration")
         print(f"\nRegression threshold: {REGRESSION_THRESHOLD_PCT}%")
         assert 0 < REGRESSION_THRESHOLD_PCT < 100, (
             f"Invalid threshold: {REGRESSION_THRESHOLD_PCT}%. "
@@ -388,6 +408,7 @@ class TestRegressionConfiguration:
     @pytest.mark.smoke
     def test_baseline_manager(self, tmp_path: Path) -> None:
         """Test baseline manager functionality."""
+        logger.info("running test_baseline_manager")
         baseline_file = tmp_path / "test_baseline.json"
         manager = BaselineManager(baseline_file)
 
@@ -421,6 +442,7 @@ class TestRegressionConfiguration:
     @pytest.mark.smoke
     def test_latency_timer(self) -> None:
         """Test latency timer accuracy."""
+        logger.info("running test_latency_timer")
         with LatencyTimer(sync_gpu=False) as timer:
             time.sleep(0.01)
 

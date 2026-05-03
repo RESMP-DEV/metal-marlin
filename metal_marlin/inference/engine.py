@@ -6,9 +6,13 @@ Automatically selects optimal decode strategy:
 '''
 
 from dataclasses import dataclass
+import logging
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class GenerationConfig:
@@ -45,6 +49,7 @@ class InferenceEngine:
         model,
         tokenizer=None,
     ):
+        logger.debug("initializing %s with model=%s, tokenizer=%s", type(self).__name__, model, tokenizer)
         self.model = model
         self.tokenizer = tokenizer
         self._has_mtp = hasattr(model, 'mtp_head') and model.mtp_head is not None
@@ -52,6 +57,7 @@ class InferenceEngine:
     @property
     def can_speculate(self) -> bool:
         '''Whether speculative decoding is available.'''
+        logger.debug("can_speculate called")
         return self._has_mtp
     
     @torch.no_grad()
@@ -69,6 +75,7 @@ class InferenceEngine:
         Returns:
             GenerationOutput with generated sequences and metadata
         '''
+        logger.debug("generate called with input_ids=%s, config=%s", input_ids, config)
         import time
         
         if config is None:
@@ -116,6 +123,7 @@ class InferenceEngine:
         config: GenerationConfig,
     ) -> torch.Tensor:
         '''Standard autoregressive generation.'''
+        logger.debug("_standard_generate called with input_ids=%s, config=%s", input_ids, config)
         generated = input_ids.clone()
         
         for _ in range(config.max_new_tokens):
@@ -152,6 +160,7 @@ class InferenceEngine:
         Returns:
             Assistant response text
         '''
+        logger.debug("chat called with messages=%s, config=%s", messages, config)
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer required for chat interface")
         

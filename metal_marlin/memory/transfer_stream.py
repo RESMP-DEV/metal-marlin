@@ -5,9 +5,13 @@ enabling overlapping of weight loading with inference compute on NVIDIA GPUs.
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 class TransferStream:
     """Manages a dedicated CUDA stream for host-to-device weight transfers.
@@ -26,6 +30,7 @@ class TransferStream:
     """
 
     def __init__(self, device: str = "cuda:0"):
+        logger.debug("initializing %s with device=%s", type(self).__name__, device)
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available")
         self._stream = torch.cuda.Stream(device=device)
@@ -34,6 +39,7 @@ class TransferStream:
     def transfer_async(self, tensors: dict[str, torch.Tensor],
                      device: str | None = None) -> torch.cuda.Event:
         """Transfer tensors on dedicated stream, return sync event."""
+        logger.debug("transfer_async called with tensors=%s, device=%s", tensors, device)
         target_device = device if device is not None else self._device
 
         with torch.cuda.stream(self._stream):
@@ -46,4 +52,5 @@ class TransferStream:
 
     def synchronize(self):
         """Wait for all pending transfers."""
+        logger.debug("synchronize called")
         self._stream.synchronize()

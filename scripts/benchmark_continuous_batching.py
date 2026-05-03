@@ -42,9 +42,13 @@ Usage Examples:
 from __future__ import annotations
 
 import argparse
+import logging
 import time
 from dataclasses import dataclass
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class BenchmarkResult:
@@ -68,6 +72,7 @@ def benchmark_single_request(
     max_new_tokens: int,
 ) -> BenchmarkResult:
     """Benchmark single-request processing (batch=1)."""
+    logger.info("benchmark_single_request starting with model=%s, tokenizer=%s, prompts=%s, max_new_tokens=%s", model, tokenizer, prompts, max_new_tokens)
     import torch
 
     from metal_marlin.kv_cache import TrellisKVCache
@@ -132,6 +137,7 @@ def benchmark_continuous_batching(
     batch_size: int,
 ) -> BenchmarkResult:
     """Benchmark continuous batching with given batch size."""
+    logger.info("benchmark_continuous_batching starting with model=%s, tokenizer=%s, prompts=%s, max_new_tokens=%s", model, tokenizer, prompts, max_new_tokens)
     from metal_marlin.serving.continuous_engine import (
         ContinuousBatchingEngine,
         EngineConfig,
@@ -188,6 +194,7 @@ def create_mock_model():
     - Actual compute scales sublinearly with batch size (parallelism)
     - This makes batching beneficial: 16 requests at once is faster than 16x1
     """
+    logger.debug("create_mock_model called")
     import torch
     import torch.nn as nn
 
@@ -199,11 +206,13 @@ def create_mock_model():
 
     class MockModel(nn.Module):
         def __init__(self):
+            logger.debug("initializing %s", type(self).__name__)
             super().__init__()
             self.config = MockConfig()
             self._dummy = nn.Linear(1, 1)  # Just for parameters()
 
         def forward(self, input_ids, attention_mask=None, kv_cache=None, position_ids=None):
+            logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
             batch_size, seq_len = input_ids.shape
 
             # Simulate GPU behavior:
@@ -261,6 +270,7 @@ def benchmark_context_lengths(
     Returns:
         List of BenchmarkResult with context_length set.
     """
+    logger.info("benchmark_context_lengths starting with model=%s, tokenizer=%s, max_new_tokens=%s, context_lengths=%s", model, tokenizer, max_new_tokens, context_lengths)
     import torch
 
     from metal_marlin.kv_cache import TrellisKVCache
@@ -438,13 +448,16 @@ class MockTokenizer:
 
     def encode(self, text: str) -> list[int]:
         # Simple word-based tokenization
+        logger.debug("encode called with text=%s", text)
         return [hash(w) % 1000 for w in text.split()]
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = False) -> str:
+        logger.debug("decode called with token_ids=%s, skip_special_tokens=%s", token_ids, skip_special_tokens)
         return " ".join(f"tok{t}" for t in token_ids)
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Benchmark continuous batching throughput"
     )

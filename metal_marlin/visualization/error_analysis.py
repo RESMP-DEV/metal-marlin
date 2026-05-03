@@ -7,6 +7,7 @@ quantized weight tensors.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,6 +15,9 @@ import numpy as np
 if TYPE_CHECKING:
     import numpy.typing as npt
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ErrorMetrics:
@@ -54,6 +58,7 @@ class ErrorMetrics:
     
     def to_dict(self) -> dict[str, float]:
         """Convert metrics to dictionary."""
+        logger.debug("to_dict called")
         return {
             "mse": self.mse,
             "rmse": self.rmse,
@@ -89,6 +94,7 @@ class ErrorMetrics:
         Returns:
             ErrorMetrics instance with computed values
         """
+        logger.debug("from_tensors called with original=%s, quantized=%s, bits_per_weight=%s", original, quantized, bits_per_weight)
         orig_f = original.astype(np.float32).flatten()
         quant_f = quantized.astype(np.float32).flatten()
         
@@ -163,6 +169,7 @@ class ErrorAnalyzer:
     
     def __init__(self) -> None:
         """Initialize the error analyzer."""
+        logger.debug("initializing %s", type(self).__name__)
         self.layer_metrics: dict[str, dict[str, ErrorMetrics]] = {}
         self.format_summaries: dict[str, dict[str, float]] = {}
     
@@ -179,6 +186,7 @@ class ErrorAnalyzer:
             format_name: Quantization format (e.g., "fp4", "int8")
             metrics: ErrorMetrics instance
         """
+        logger.debug("add_layer_metrics called with layer_name=%s, format_name=%s, metrics=%s", layer_name, format_name, metrics)
         if layer_name not in self.layer_metrics:
             self.layer_metrics[layer_name] = {}
         self.layer_metrics[layer_name][format_name] = metrics
@@ -195,6 +203,7 @@ class ErrorAnalyzer:
         Returns:
             Dict mapping format names to metrics, or None if layer not found
         """
+        logger.debug("get_layer_comparison called with layer_name=%s", layer_name)
         return self.layer_metrics.get(layer_name)
     
     def get_format_summary(self, format_name: str) -> dict[str, float]:
@@ -206,6 +215,7 @@ class ErrorAnalyzer:
         Returns:
             Dict with aggregate statistics across all layers
         """
+        logger.debug("get_format_summary called with format_name=%s", format_name)
         metrics_list = [
             layer_metrics[format_name]
             for layer_metrics in self.layer_metrics.values()
@@ -235,6 +245,7 @@ class ErrorAnalyzer:
         Returns:
             Dict mapping layer names to (best_format, metric_value)
         """
+        logger.debug("get_best_format_per_layer called with metric=%s", metric)
         best_formats = {}
         
         for layer_name, formats in self.layer_metrics.items():
@@ -276,6 +287,7 @@ class ErrorAnalyzer:
         Returns:
             List of (layer_name, rmse) tuples sorted by RMSE descending
         """
+        logger.debug("identify_problematic_layers called with format_name=%s, threshold_rmse=%s, top_k=%s", format_name, threshold_rmse, top_k)
         layer_rmse = []
         
         for layer_name, formats in self.layer_metrics.items():

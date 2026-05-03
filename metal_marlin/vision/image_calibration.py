@@ -37,6 +37,7 @@ from __future__ import annotations
 import random
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -51,13 +52,21 @@ if TYPE_CHECKING:
         shape: tuple[int, ...]
         ndim: int
         device: Any
+        logger.debug("contiguous called")
         def contiguous(self) -> Tensor: ...
+        logger.debug("detach called")
         def detach(self) -> Tensor: ...
+        logger.debug("cpu called")
         def cpu(self) -> Tensor: ...
+        logger.debug("numpy called")
         def numpy(self) -> Any: ...
+        logger.debug("to called with dtype=%s", dtype)
         def to(self, dtype: Any) -> Tensor: ...
+        logger.debug("permute called")
         def permute(self, *dims: int) -> Tensor: ...
+        logger.debug("squeeze called")
         def squeeze(self) -> Tensor: ...
+        logger.debug("unsqueeze called with dim=%s", dim)
         def unsqueeze(self, dim: int) -> Tensor: ...
 
 from metal_marlin._compat import torch
@@ -71,6 +80,9 @@ except Exception:
     _vision_metal = None
     _has_vision_metal = False
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ImageInfo:
@@ -127,6 +139,7 @@ class ImageCalibrationDataset:
         Yields:
             Batches of shape [batch_size, 3, H, W] as float32.
         """
+        logger.debug("get_batches called with batch_size=%s, shuffle=%s", batch_size, shuffle)
         indices = list(range(len(self.images)))
         if shuffle:
             random.shuffle(indices)
@@ -142,16 +155,19 @@ class ImageCalibrationDataset:
         Returns:
             Array of shape [N, 3, H, W].
         """
+        logger.debug("get_all called")
         return np.stack(self.images).astype(np.float32)
 
     @property
     def num_images(self) -> int:
         """Number of images in dataset."""
+        logger.debug("num_images called")
         return len(self.images)
 
     @property
     def memory_mb(self) -> float:
         """Approximate memory usage in MB."""
+        logger.debug("memory_mb called")
         if not self.images:
             return 0.0
         # Assuming float32 storage
@@ -191,6 +207,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Returns:
             VisionCalibrationDataset with preprocessed images.
         """
+        logger.debug("coco_subset called with num_images=%s, image_size=%s, cache_dir=%s", num_images, image_size, cache_dir)
         if cache_dir is None:
             cache_dir = Path.home() / ".cache" / "metal_marlin" / "calibration" / "coco"
         cache_dir = Path(cache_dir)
@@ -273,6 +290,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Returns:
             VisionCalibrationDataset with preprocessed images.
         """
+        logger.debug("imagenet_subset called with num_images=%s, image_size=%s, cache_dir=%s", num_images, image_size, cache_dir)
         if cache_dir is None:
             cache_dir = Path.home() / ".cache" / "metal_marlin" / "calibration" / "imagenet"
         cache_dir = Path(cache_dir)
@@ -354,6 +372,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Returns:
             VisionCalibrationDataset with preprocessed images.
         """
+        logger.debug("from_directory called with path=%s, num_images=%s, image_size=%s", path, num_images, image_size)
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Directory not found: {path}")
@@ -443,6 +462,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Raises:
             ImportError: If datasets library not installed.
         """
+        logger.debug("from_huggingface called with dataset_name=%s, split=%s, num_images=%s", dataset_name, split, num_images)
         try:
             from datasets import load_dataset  # type: ignore
         except ImportError:
@@ -526,6 +546,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Returns:
             Image array [3, H, W] in normalized format.
         """
+        logger.debug("_generate_calibration_image called with rng=%s, image_size=%s, mean=%s", rng, image_size, mean)
         H, W = image_size
 
         # Generate base noise with spatial correlation
@@ -581,6 +602,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
             Preprocessed image [3, H, W].
         """
         # Try PIL first, fall back to imageio
+        logger.info("_load_and_preprocess called with path=%s, image_size=%s, mean=%s, std=%s", path, image_size, mean, std)
         try:
             from PIL import Image
 
@@ -626,6 +648,7 @@ class VisionCalibrationDataset(ImageCalibrationDataset):
         Returns:
             Preprocessed image [3, H, W] as float32.
         """
+        logger.debug("_preprocess_array called with img=%s, image_size=%s, mean=%s", img, image_size, mean)
         H, W = image_size
         orig_h, orig_w = img.shape[:2]
 
@@ -689,6 +712,7 @@ def get_clip_normalization() -> tuple[tuple[float, float, float], tuple[float, f
     Returns:
         (mean, std) tuples for CLIP preprocessing.
     """
+    logger.debug("get_clip_normalization called")
     return (0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)
 
 
@@ -698,6 +722,7 @@ def get_imagenet_normalization() -> tuple[tuple[float, float, float], tuple[floa
     Returns:
         (mean, std) tuples for ImageNet preprocessing.
     """
+    logger.debug("get_imagenet_normalization called")
     return (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 
 
@@ -709,4 +734,5 @@ def get_siglip_normalization() -> tuple[tuple[float, float, float], tuple[float,
     Returns:
         (mean, std) tuples for SigLIP preprocessing.
     """
+    logger.debug("get_siglip_normalization called")
     return (0.5, 0.5, 0.5), (0.5, 0.5, 0.5)

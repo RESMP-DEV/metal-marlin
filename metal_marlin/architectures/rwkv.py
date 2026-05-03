@@ -17,6 +17,7 @@ Notes on quantization:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,6 +30,9 @@ from .base import HybridLayerType, LayerState, StateType
 
 if TYPE_CHECKING:
     import torch
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Metal kernel dispatch for WKV
@@ -51,6 +55,7 @@ THREADS_PER_TG = 128
 
 def _get_metal_library() -> Any:
     """Get or create the Metal kernel library with RWKV kernels compiled."""
+    logger.debug("_get_metal_library called")
     global _metal_lib
     if _metal_lib is None:
         from ..metal_dispatch import MetalKernelLibrary
@@ -64,6 +69,7 @@ def _get_metal_library() -> Any:
 
 def _get_metal_library_v6() -> Any:
     """Get or create the Metal kernel library with RWKV v6 kernels compiled."""
+    logger.debug("_get_metal_library_v6 called")
     global _metal_lib_v6
     if _metal_lib_v6 is None:
         from ..metal_dispatch import MetalKernelLibrary
@@ -88,6 +94,7 @@ def _dispatch_wkv_single_token(
     head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Dispatch single-token WKV kernel via Metal."""
+    logger.debug("_dispatch_wkv_single_token called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -164,6 +171,7 @@ def _dispatch_wkv_batched(
     head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Dispatch batched WKV kernel for prefill via Metal."""
+    logger.debug("_dispatch_wkv_batched called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -251,6 +259,7 @@ def _dispatch_wkv_single_token_v6(
     - State is matrix-valued [batch, heads, head_dim, head_dim]
     - No state_denom (different formulation)
     """
+    logger.debug("_dispatch_wkv_single_token_v6 called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -324,6 +333,7 @@ def _dispatch_wkv_batched_v6(
     head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Dispatch batched WKV v6 kernel for prefill via Metal."""
+    logger.debug("_dispatch_wkv_batched_v6 called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -410,6 +420,7 @@ def rwkv_wkv_single_token_v6(
     Returns:
         (output, new_state)
     """
+    logger.debug("rwkv_wkv_single_token_v6 called with r=%s, k=%s, v=%s", r, k, v)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(r, torch.Tensor):
@@ -478,6 +489,7 @@ def rwkv_wkv_single_token(
     Returns:
         (output, new_state, new_state_denom)
     """
+    logger.debug("rwkv_wkv_single_token called with r=%s, k=%s, v=%s", r, k, v)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(r, torch.Tensor):
@@ -552,6 +564,7 @@ def rwkv_wkv_batched(
     Returns:
         (output, final_state, final_denom)
     """
+    logger.debug("rwkv_wkv_batched called with r=%s, k=%s, v=%s", r, k, v)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(r, torch.Tensor):
@@ -626,6 +639,7 @@ def _dispatch_wkv_v6_single_token(
     RWKV v6 uses matrix-valued state with gate mechanism.
     State format: [batch, heads, head_dim, head_dim]
     """
+    logger.debug("_dispatch_wkv_v6_single_token called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -702,6 +716,7 @@ def _dispatch_wkv_v6_batched(
 
     RWKV v6 processes sequences with matrix-valued state.
     """
+    logger.debug("_dispatch_wkv_v6_batched called with r=%s, k=%s, v=%s", r, k, v)
     import Metal
 
     from ..metal_dispatch import dispatch_kernel, mps_tensor_to_metal_buffer
@@ -789,6 +804,7 @@ def rwkv_wkv_v6_single_token(
     Returns:
         (output, new_state) - v6 doesn't use state_denom
     """
+    logger.debug("rwkv_wkv_v6_single_token called with r=%s, k=%s, v=%s", r, k, v)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(r, torch.Tensor):
@@ -863,6 +879,7 @@ def rwkv_wkv_v6_batched(
     Returns:
         (output, final_state) - v6 doesn't use state_denom
     """
+    logger.debug("rwkv_wkv_v6_batched called with r=%s, k=%s, v=%s", r, k, v)
     if HAS_METAL_DISPATCH and torch is not None:
         # Ensure inputs are on MPS
         if not isinstance(r, torch.Tensor):
@@ -939,6 +956,7 @@ class RWKVLayerState:
         dtype_config: DTypeConfig,
         state_precision: Literal["full", "fp32"] = "fp32",
     ) -> RWKVLayerState:
+        logger.debug("zeros called with batch_size=%s, hidden_size=%s, num_heads=%s", batch_size, hidden_size, num_heads)
         if HAS_TORCH and torch is not None:
             state_dtype = torch.float32 if state_precision == "fp32" else torch.float16
             act_dtype = torch.float16
@@ -967,6 +985,7 @@ class RWKVLayerState:
         )
 
     def with_time(self, wkv_state: Any, wkv_denom: Any, time_shift: Any) -> RWKVLayerState:
+        logger.debug("with_time called with wkv_state=%s, wkv_denom=%s, time_shift=%s", wkv_state, wkv_denom, time_shift)
         return RWKVLayerState(
             wkv_state=wkv_state,
             wkv_denom=wkv_denom,
@@ -975,6 +994,7 @@ class RWKVLayerState:
         )
 
     def with_channel(self, channel_shift: Any) -> RWKVLayerState:
+        logger.debug("with_channel called with channel_shift=%s", channel_shift)
         return RWKVLayerState(
             wkv_state=self.wkv_state,
             wkv_denom=self.wkv_denom,
@@ -1005,6 +1025,7 @@ class RWKVTimeMixing:
         state_precision: Literal["full", "fp32"] = "fp32",
         use_wkv_kernel: bool = True,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, head_dim=%s, quant_type=%s, group_size=%s", type(self).__name__, hidden_size, num_heads, head_dim, quant_type, group_size)
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim or (hidden_size // num_heads)
@@ -1095,6 +1116,7 @@ class RWKVTimeMixing:
             self.gate = None
 
     def _token_shift(self, x: Any, x_prev: Any, mix_ratio: Any) -> Any:
+        logger.debug("_token_shift called with x=%s, x_prev=%s, mix_ratio=%s", x, x_prev, mix_ratio)
         if HAS_TORCH and torch is not None and isinstance(x, torch.Tensor):
             batch_size, seq_len, _ = x.shape
             if seq_len == 1:
@@ -1120,6 +1142,7 @@ class RWKVTimeMixing:
         state_denom: Any,
     ) -> tuple[Any, Any, Any]:
         """Compute WKV. Expects r/k/v as [batch, seq, heads, head_dim]."""
+        logger.debug("_wkv_forward called with r=%s, k=%s, v=%s", r, k, v)
         if HAS_METAL_DISPATCH and torch is not None and self.use_wkv_kernel:
             batch_size, seq_len, num_heads, head_dim = k.shape
             if head_dim <= MAX_HEAD_DIM:
@@ -1312,6 +1335,7 @@ class RWKVChannelMixing:
         group_size: int = 128,
         dtype_config: DTypeConfig | None = None,
     ):
+        logger.debug("initializing %s with hidden_size=%s, intermediate_size=%s, quant_type=%s, group_size=%s, dtype_config=%s", type(self).__name__, hidden_size, intermediate_size, quant_type, group_size, dtype_config)
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.dtype_config = dtype_config if dtype_config is not None else get_default_config()
@@ -1351,6 +1375,7 @@ class RWKVChannelMixing:
         )
 
     def _token_shift(self, x: Any, x_prev: Any, mix_ratio: Any) -> Any:
+        logger.debug("_token_shift called with x=%s, x_prev=%s, mix_ratio=%s", x, x_prev, mix_ratio)
         if HAS_TORCH and torch is not None and isinstance(x, torch.Tensor):
             batch_size, seq_len, _ = x.shape
             if seq_len == 1:
@@ -1423,6 +1448,7 @@ class LayerNorm:
     """Standard LayerNorm for RWKV blocks."""
 
     def __init__(self, hidden_size: int, eps: float = 1e-5):
+        logger.debug("initializing %s with hidden_size=%s, eps=%s", type(self).__name__, hidden_size, eps)
         if HAS_TORCH and torch is not None:
             device = "mps" if HAS_MPS else "cpu"
             self.weight = torch.ones((hidden_size,), device=device)
@@ -1469,6 +1495,7 @@ class RWKVBlock:
         state_precision: Literal["full", "fp32"] = "fp32",
         use_wkv_kernel: bool = True,
     ):
+        logger.debug("initializing %s with hidden_size=%s, num_heads=%s, intermediate_size=%s, head_dim=%s, quant_type=%s", type(self).__name__, hidden_size, num_heads, intermediate_size, head_dim, quant_type)
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.head_dim = head_dim or (hidden_size // num_heads)
@@ -1547,6 +1574,7 @@ class RWKVBlock:
         return hidden_states, new_state
 
     def init_state(self, batch_size: int, layer_idx: int) -> LayerState:
+        logger.debug("init_state called with batch_size=%s, layer_idx=%s", batch_size, layer_idx)
         rwkv_state = RWKVLayerState.zeros(
             batch_size=batch_size,
             hidden_size=self.hidden_size,

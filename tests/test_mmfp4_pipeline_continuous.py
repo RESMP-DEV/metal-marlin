@@ -1,3 +1,4 @@
+import logging
 from unittest.mock import ANY, MagicMock
 
 import pytest
@@ -6,8 +7,12 @@ import torch
 from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
 
 
+
+logger = logging.getLogger(__name__)
+
 def test_continuous_batching_method():
     # Mock model
+    logger.info("running test_continuous_batching_method")
     mock_model = MagicMock()
     mock_model.device = "cpu"
     mock_model.config.hidden_size = 32
@@ -17,6 +22,7 @@ def test_continuous_batching_method():
     
     # Mock forward to return logits and past_key_values
     def forward(input_ids, past_key_values=None, **kwargs):
+        logger.debug("forward: input shape=%s dtype=%s", input_ids.shape if hasattr(input_ids, "shape") else type(input_ids).__name__, input_ids.dtype if hasattr(input_ids, "dtype") else "N/A")
         batch_size, seq_len = input_ids.shape
         logits = torch.randn(batch_size, seq_len, 100) # vocab 100
         

@@ -11,6 +11,7 @@ Validates:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 import pytest
@@ -21,22 +22,29 @@ from metal_marlin.eval import compute_perplexity_from_logits, load_wikitext2
 from .conftest import requires_torch
 
 
+
+logger = logging.getLogger(__name__)
+
 def _float32_to_bits(values: np.ndarray) -> np.ndarray:
+    logger.debug("_float32_to_bits called with values=%s", values)
     return values.astype(np.float32).view(np.uint32)
 
 
 def _bits_to_float32(bits: np.ndarray) -> np.ndarray:
+    logger.debug("_bits_to_float32 called with bits=%s", bits)
     return bits.astype(np.uint32).view(np.float32)
 
 
 def bf16_rtz_bits(values: np.ndarray) -> np.ndarray:
     """Convert fp32 -> bf16 bits using round-toward-zero (truncation)."""
+    logger.debug("bf16_rtz_bits called with values=%s", values)
     bits = _float32_to_bits(values)
     return (bits >> np.uint32(16)).astype(np.uint16)
 
 
 def bf16_rne_bits(values: np.ndarray) -> np.ndarray:
     """Convert fp32 -> bf16 bits using round-to-nearest-even."""
+    logger.debug("bf16_rne_bits called with values=%s", values)
     bits = _float32_to_bits(values)
     upper = bits >> np.uint32(16)
     lower = bits & np.uint32(0xFFFF)
@@ -53,18 +61,22 @@ def bf16_rne_bits(values: np.ndarray) -> np.ndarray:
 
 
 def bf16_bits_to_float32(bits: np.ndarray) -> np.ndarray:
+    logger.debug("bf16_bits_to_float32 called with bits=%s", bits)
     return _bits_to_float32(bits.astype(np.uint32) << np.uint32(16))
 
 
 def bf16_rtz(values: np.ndarray) -> np.ndarray:
+    logger.debug("bf16_rtz called with values=%s", values)
     return bf16_bits_to_float32(bf16_rtz_bits(values))
 
 
 def bf16_rne(values: np.ndarray) -> np.ndarray:
+    logger.debug("bf16_rne called with values=%s", values)
     return bf16_bits_to_float32(bf16_rne_bits(values))
 
 
 def _ordered_int_bf16(bits: np.ndarray) -> np.ndarray:
+    logger.debug("_ordered_int_bf16 called with bits=%s", bits)
     signed = bits.astype(np.int16).astype(np.int32)
     ordered = signed.copy()
     neg_mask = signed < 0
@@ -73,12 +85,14 @@ def _ordered_int_bf16(bits: np.ndarray) -> np.ndarray:
 
 
 def ulp_distance_bf16(a_bits: np.ndarray, b_bits: np.ndarray) -> np.ndarray:
+    logger.debug("ulp_distance_bf16 called with a_bits=%s, b_bits=%s", a_bits, b_bits)
     ordered_a = _ordered_int_bf16(a_bits)
     ordered_b = _ordered_int_bf16(b_bits)
     return np.abs(ordered_a - ordered_b).astype(np.int32)
 
 
 def _ordered_int_fp32(values: np.ndarray) -> np.ndarray:
+    logger.debug("_ordered_int_fp32 called with values=%s", values)
     bits = values.astype(np.float32).view(np.int32)
     ordered = bits.copy()
     neg_mask = bits < 0
@@ -87,6 +101,7 @@ def _ordered_int_fp32(values: np.ndarray) -> np.ndarray:
 
 
 def ulp_distance_fp32(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    logger.debug("ulp_distance_fp32 called with a=%s, b=%s", a, b)
     ordered_a = _ordered_int_fp32(a)
     ordered_b = _ordered_int_fp32(b)
     return np.abs(ordered_a - ordered_b).astype(np.int64)
@@ -96,6 +111,7 @@ def gemm_accumulate(
     a: np.ndarray, b: np.ndarray, *, acc_dtype: np.dtype, tile_k: int = 32
 ) -> np.ndarray:
     """GEMM with explicit accumulation dtype to simulate old/new paths."""
+    logger.debug("gemm_accumulate called with a=%s, b=%s", a, b)
     m, k = a.shape
     k2, n = b.shape
     assert k == k2
@@ -117,6 +133,7 @@ def gemm_accumulate(
 
 
 def stable_softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    logger.debug("stable_softmax called with x=%s, axis=%s", x, axis)
     x = x - np.max(x, axis=axis, keepdims=True)
     exp_x = np.exp(x)
     return exp_x / np.sum(exp_x, axis=axis, keepdims=True)
@@ -130,6 +147,7 @@ def attention_output(
     use_fp32_acc: bool,
     is_causal: bool = False,
 ) -> np.ndarray:
+    logger.debug("attention_output called with q=%s, k=%s, v=%s", q, k, v)
     batch, heads, seq_q, head_dim = q.shape
     _, _, seq_k, _ = k.shape
     scale = 1.0 / np.sqrt(head_dim)
@@ -152,6 +170,7 @@ def attention_output(
 
 
 def compute_error_metrics(ref: np.ndarray, out: np.ndarray) -> dict[str, float]:
+    logger.debug("compute_error_metrics called with ref=%s, out=%s", ref, out)
     diff = out.astype(np.float64) - ref.astype(np.float64)
     max_abs = float(np.max(np.abs(diff)))
     mse = float(np.mean(diff**2))
@@ -161,6 +180,7 @@ def compute_error_metrics(ref: np.ndarray, out: np.ndarray) -> dict[str, float]:
 
 class TestBF16Conversion:
     def test_roundtrip_and_rtz_vs_rne(self, rng: np.random.Generator) -> None:
+        logger.info("running test_roundtrip_and_rtz_vs_rne")
         values = rng.standard_normal(20000).astype(np.float32) * np.float32(10.0)
 
         rtz_bits = bf16_rtz_bits(values)
@@ -191,6 +211,7 @@ class TestBF16Conversion:
         )
 
     def test_edge_cases(self) -> None:
+        logger.info("running test_edge_cases")
         smallest = np.nextafter(np.float32(0.0), np.float32(1.0))
         values = np.array(
             [
@@ -221,6 +242,7 @@ class TestBF16Conversion:
 class TestBF16GEMMAccuracy:
     @pytest.mark.parametrize("k_dim", [128, 512, 1024])
     def test_fp32_accumulator_improves_gemm(self, rng: np.random.Generator, k_dim: int) -> None:
+        logger.info("running test_fp32_accumulator_improves_gemm")
         m, n = 16, 32
         a = rng.standard_normal((m, k_dim)).astype(np.float32)
         b = rng.standard_normal((k_dim, n)).astype(np.float32)
@@ -251,6 +273,7 @@ class TestBF16GEMMAccuracy:
 
 class TestBF16AttentionAccuracy:
     def test_softmax_accuracy(self, rng: np.random.Generator) -> None:
+        logger.info("running test_softmax_accuracy")
         batch, heads, seq, head_dim = 1, 2, 64, 32
 
         q = rng.standard_normal((batch, heads, seq, head_dim)).astype(np.float32)
@@ -274,6 +297,7 @@ class TestBF16AttentionAccuracy:
 
     @pytest.mark.slow
     def test_softmax_long_sequence_stability(self, rng: np.random.Generator) -> None:
+        logger.info("running test_softmax_long_sequence_stability")
         batch, heads, seq, head_dim = 1, 2, 512, 32
 
         q = rng.standard_normal((batch, heads, seq, head_dim)).astype(np.float32)
@@ -298,12 +322,14 @@ class ToyBf16LM:
 
     @classmethod
     def create(cls, vocab_size: int = 256, hidden_size: int = 64, seed: int = 123) -> ToyBf16LM:
+        logger.debug("create called with vocab_size=%s, hidden_size=%s, seed=%s", vocab_size, hidden_size, seed)
         rng = np.random.default_rng(seed)
         embed = rng.standard_normal((vocab_size, hidden_size)).astype(np.float32) * np.float32(0.02)
         proj = rng.standard_normal((hidden_size, vocab_size)).astype(np.float32) * np.float32(0.02)
         return cls(vocab_size=vocab_size, hidden_size=hidden_size, embed=embed, proj=proj)
 
     def logits(self, input_ids: np.ndarray, *, acc_dtype: np.dtype) -> np.ndarray:
+        logger.debug("logits called with input_ids=%s", input_ids)
         seq_len = input_ids.shape[1]
         tokens = input_ids.reshape(-1)
         embed = bf16_rtz(self.embed)[tokens].reshape(seq_len, self.hidden_size)
@@ -313,6 +339,7 @@ class ToyBf16LM:
 
 
 def _tokenize_bytes(text: str, vocab_size: int) -> list[int]:
+    logger.debug("_tokenize_bytes called with text=%s, vocab_size=%s", text, vocab_size)
     return [b % vocab_size for b in text.encode("utf-8", errors="ignore")]
 
 
@@ -321,12 +348,14 @@ class ByteTokenizer:
     vocab_size: int
 
     def encode(self, text: str) -> list[int]:
+        logger.debug("encode called with text=%s", text)
         return _tokenize_bytes(text, self.vocab_size)
 
 
 class TestBF16Perplexity:
     @pytest.mark.slow
     def test_perplexity_old_vs_new(self) -> None:
+        logger.info("running test_perplexity_old_vs_new")
         try:
             texts = load_wikitext2(max_samples=10)
         except Exception as exc:
@@ -336,9 +365,11 @@ class TestBF16Perplexity:
         vocab_size = model.vocab_size
 
         def logits_old(input_ids: np.ndarray) -> np.ndarray:
+            logger.debug("logits_old called with input_ids=%s", input_ids)
             return model.logits(input_ids, acc_dtype=np.float16)
 
         def logits_new(input_ids: np.ndarray) -> np.ndarray:
+            logger.debug("logits_new called with input_ids=%s", input_ids)
             return model.logits(input_ids, acc_dtype=np.float32)
 
         tokenizer = ByteTokenizer(vocab_size=vocab_size)
@@ -360,6 +391,7 @@ class TestBF16Perplexity:
 class TestBF16Gradients:
     @requires_torch
     def test_gradient_matches_fp32_reference(self) -> None:
+        logger.info("running test_gradient_matches_fp32_reference")
         if not HAS_TORCH or torch is None:
             pytest.skip("torch not available")
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import os
 import statistics
 import sys
@@ -45,6 +46,9 @@ if os.environ.get("ALPHAHENG_TASK_MODE") == "1":
 import torch
 import torch.nn as nn
 
+
+logger = logging.getLogger(__name__)
+
 # Ensure project is importable
 _ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -62,14 +66,17 @@ class LayerTiming:
 
     @property
     def attention_pct(self) -> float:
+        logger.debug("attention_pct called")
         return (self.attention_ms / self.total_ms * 100) if self.total_ms > 0 else 0.0
 
     @property
     def mlp_pct(self) -> float:
+        logger.debug("mlp_pct called")
         return (self.mlp_ms / self.total_ms * 100) if self.total_ms > 0 else 0.0
 
     @property
     def other_pct(self) -> float:
+        logger.debug("other_pct called")
         return 100.0 - self.attention_pct - self.mlp_pct
 
 
@@ -93,6 +100,7 @@ class PrefillMetrics:
 
     @property
     def time_std_ms(self) -> float:
+        logger.debug("time_std_ms called")
         return statistics.stdev(self.times) * 1000 if len(self.times) > 1 else 0.0
 
 
@@ -120,18 +128,22 @@ class LayerBreakdown:
 
     @property
     def total_ms(self) -> float:
+        logger.debug("total_ms called")
         return self.attention_total_ms + self.mlp_total_ms + self.other_total_ms
 
     @property
     def attention_pct(self) -> float:
+        logger.debug("attention_pct called")
         return (self.attention_total_ms / self.total_ms * 100) if self.total_ms > 0 else 0.0
 
     @property
     def mlp_pct(self) -> float:
+        logger.debug("mlp_pct called")
         return (self.mlp_total_ms / self.total_ms * 100) if self.total_ms > 0 else 0.0
 
     @property
     def other_pct(self) -> float:
+        logger.debug("other_pct called")
         return (self.other_total_ms / self.total_ms * 100) if self.total_ms > 0 else 0.0
 
 
@@ -150,12 +162,14 @@ class BenchmarkResult:
 
 def _mps_sync() -> None:
     """Synchronize MPS device."""
+    logger.debug("_mps_sync called")
     if torch.backends.mps.is_available():
         torch.mps.synchronize()
 
 
 def _percentile(values: list[float], quantile: float) -> float:
     """Compute percentile of values."""
+    logger.debug("_percentile called with values=%s, quantile=%s", values, quantile)
     if not values:
         return 0.0
     sorted_vals = sorted(values)
@@ -165,6 +179,7 @@ def _percentile(values: list[float], quantile: float) -> float:
 
 def _get_memory_gb() -> float:
     """Get current MPS memory allocation in GB."""
+    logger.debug("_get_memory_gb called")
     if hasattr(torch.mps, "current_allocated_memory"):
         return torch.mps.current_allocated_memory() / 1e9
     return 0.0
@@ -172,6 +187,7 @@ def _get_memory_gb() -> float:
 
 def _get_hardware_info() -> dict[str, Any]:
     """Get hardware information."""
+    logger.debug("_get_hardware_info called")
     info: dict[str, Any] = {
         "platform": sys.platform,
         "torch_version": torch.__version__,
@@ -197,6 +213,7 @@ class LayerTimingHooks:
     """Context manager for layer timing hooks."""
 
     def __init__(self, model: nn.Module):
+        logger.debug("initializing %s with model=%s", type(self).__name__, model)
         self.model = model
         self.timings: dict[int, dict[str, float]] = {}
         self._hooks: list[Any] = []
@@ -224,14 +241,18 @@ class LayerTimingHooks:
             if hasattr(layer, "self_attn") and layer.self_attn is not None:
 
                 def make_attn_pre_hook(idx: int):
+                    logger.debug("make_attn_pre_hook called with idx=%s", idx)
                     def hook(module: nn.Module, inputs: Any) -> None:
+                        logger.debug("hook called with module=%s, inputs=%s", module, inputs)
                         _mps_sync()
                         self._attn_times[idx] = time.perf_counter()
 
                     return hook
 
                 def make_attn_post_hook(idx: int):
+                    logger.debug("make_attn_post_hook called with idx=%s", idx)
                     def hook(module: nn.Module, inputs: Any, outputs: Any) -> None:
+                        logger.debug("hook called with module=%s, inputs=%s, outputs=%s", module, inputs, outputs)
                         _mps_sync()
                         elapsed = (time.perf_counter() -
                                    self._attn_times[idx]) * 1000
@@ -252,14 +273,18 @@ class LayerTimingHooks:
             if hasattr(layer, "mlp") and layer.mlp is not None:
 
                 def make_mlp_pre_hook(idx: int):
+                    logger.debug("make_mlp_pre_hook called with idx=%s", idx)
                     def hook(module: nn.Module, inputs: Any) -> None:
+                        logger.debug("hook called with module=%s, inputs=%s", module, inputs)
                         _mps_sync()
                         self._mlp_times[idx] = time.perf_counter()
 
                     return hook
 
                 def make_mlp_post_hook(idx: int):
+                    logger.debug("make_mlp_post_hook called with idx=%s", idx)
                     def hook(module: nn.Module, inputs: Any, outputs: Any) -> None:
+                        logger.debug("hook called with module=%s, inputs=%s, outputs=%s", module, inputs, outputs)
                         _mps_sync()
                         elapsed = (time.perf_counter() -
                                    self._mlp_times[idx]) * 1000
@@ -276,14 +301,18 @@ class LayerTimingHooks:
 
             # Hook for entire layer
             def make_layer_pre_hook(idx: int):
+                logger.debug("make_layer_pre_hook called with idx=%s", idx)
                 def hook(module: nn.Module, inputs: Any) -> None:
+                    logger.debug("hook called with module=%s, inputs=%s", module, inputs)
                     _mps_sync()
                     self._layer_start_times[idx] = time.perf_counter()
 
                 return hook
 
             def make_layer_post_hook(idx: int):
+                logger.debug("make_layer_post_hook called with idx=%s", idx)
                 def hook(module: nn.Module, inputs: Any, outputs: Any) -> None:
+                    logger.debug("hook called with module=%s, inputs=%s, outputs=%s", module, inputs, outputs)
                     _mps_sync()
                     elapsed = (time.perf_counter() -
                                self._layer_start_times[idx]) * 1000
@@ -306,6 +335,7 @@ class LayerTimingHooks:
 
     def get_breakdown(self) -> LayerBreakdown:
         """Get layer breakdown from collected timings."""
+        logger.debug("get_breakdown called")
         layer_timings = []
         attention_total = 0.0
         mlp_total = 0.0
@@ -340,6 +370,7 @@ class LayerTimingHooks:
 
     def reset(self) -> None:
         """Reset all timing counters."""
+        logger.debug("reset called")
         for layer_idx in self.timings:
             self.timings[layer_idx] = {
                 "attention_ms": 0.0, "mlp_ms": 0.0, "total_ms": 0.0}
@@ -347,6 +378,7 @@ class LayerTimingHooks:
 
 def benchmark_model_load(model_path: str) -> tuple[TransformersMarlinPipeline, float, MemoryMetrics]:
     """Benchmark model loading time and memory."""
+    logger.info("benchmark_model_load starting with model_path=%s", model_path)
     gc.collect()
     torch.mps.empty_cache()
 
@@ -385,6 +417,7 @@ def benchmark_prefill(
     iterations: int = 5,
 ) -> list[PrefillMetrics]:
     """Benchmark prefill throughput for various sequence lengths."""
+    logger.info("benchmark_prefill starting with pipeline=%s, seq_lengths=%s, warmup=%s, iterations=%s", pipeline, seq_lengths, warmup, iterations)
     results = []
     model = pipeline.model
 
@@ -432,6 +465,7 @@ def benchmark_decode(
     num_runs: int = 3,
 ) -> DecodeMetrics:
     """Benchmark decode throughput (single token generation)."""
+    logger.info("benchmark_decode starting with pipeline=%s, num_tokens=%s, warmup=%s, num_runs=%s", pipeline, num_tokens, warmup, num_runs)
     print(f"  Benchmarking decode ({num_tokens} tokens x {num_runs} runs)...")
     model = pipeline.model
 
@@ -492,6 +526,7 @@ def benchmark_layer_breakdown(
     iterations: int = 3,
 ) -> LayerBreakdown | None:
     """Benchmark per-layer timing breakdown."""
+    logger.info("benchmark_layer_breakdown starting with pipeline=%s, seq_len=%s, iterations=%s", pipeline, seq_len, iterations)
     print(
         f"  Profiling layer breakdown ({seq_len} tokens, {iterations} iterations)...")
     model = pipeline.model
@@ -531,6 +566,7 @@ def benchmark_layer_breakdown(
 
 def load_baseline(baseline_path: Path | None) -> dict[str, Any] | None:
     """Load baseline results for comparison."""
+    logger.info("load_baseline called with baseline_path=%s", baseline_path)
     if baseline_path is None:
         default_baseline = Path(__file__).parent / \
             "results" / "glm_flash_baseline.json"
@@ -549,6 +585,7 @@ def load_baseline(baseline_path: Path | None) -> dict[str, Any] | None:
 
 def print_comparison(current: float, baseline: float, label: str, higher_is_better: bool = True) -> str:
     """Print comparison with baseline."""
+    logger.debug("print_comparison called with current=%s, baseline=%s, label=%s", current, baseline, label)
     if baseline <= 0:
         return ""
 
@@ -567,6 +604,7 @@ def print_comparison(current: float, baseline: float, label: str, higher_is_bett
 
 def print_results(result: BenchmarkResult, baseline: dict[str, Any] | None = None) -> None:
     """Print benchmark results."""
+    logger.debug("print_results called with result=%s, baseline=%s", result, baseline)
     print("\n" + "=" * 70)
     print("GLM-4.7-Flash Benchmark Results")
     print("=" * 70)
@@ -646,6 +684,7 @@ def print_results(result: BenchmarkResult, baseline: dict[str, Any] | None = Non
 
 def save_results(result: BenchmarkResult, output_path: Path) -> None:
     """Save results to JSON file."""
+    logger.info("save_results called with result=%s, output_path=%s", result, output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     data = {
@@ -690,6 +729,7 @@ def save_results(result: BenchmarkResult, output_path: Path) -> None:
 
 
 def main() -> None:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Comprehensive GLM-4.7-Flash benchmark")
     parser.add_argument(

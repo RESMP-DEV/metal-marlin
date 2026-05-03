@@ -8,6 +8,7 @@ For advanced usage (adaptive depths, EAGLE, n-gram), use the classes in
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 from typing import TYPE_CHECKING, Any
 
 from ._compat import require_torch, torch
@@ -42,6 +43,9 @@ def generate_speculative(
     Accepted tokens skip target decode steps; rejected tokens are resampled
     from the target's residual distribution.
 
+
+logger = logging.getLogger(__name__)
+
     Args:
         target_model: Main (expensive) language model to sample from.
         draft_model: Small (cheap) draft model for proposing tokens.
@@ -56,6 +60,7 @@ def generate_speculative(
             output_ids: Full sequence [1, total_len] (prompt + generated)
             stats: Generation statistics (acceptance rate, speedup metrics)
     """
+    logger.debug("generate_speculative called with target_model=%s, draft_model=%s, input_ids=%s", target_model, draft_model, input_ids)
     require_torch()
 
     if config is None:

@@ -9,6 +9,7 @@ This module focuses on the current live surface:
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import threading
 import time
@@ -52,6 +53,9 @@ from metal_marlin.moe_dispatch import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # PyTorch/Device Setup
 # ============================================================================
@@ -73,6 +77,7 @@ class TestGroupTokensByExpertTorch:
 
     def test_basic_grouping(self):
         """Test basic token grouping with simple input."""
+        logger.info("running test_basic_grouping")
         expert_ids = torch.tensor([[0, 2], [1, 2], [0, 1]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 3
 
@@ -95,6 +100,7 @@ class TestGroupTokensByExpertTorch:
 
     def test_single_expert_per_token(self):
         """Test with top_k=1 (single expert per token)."""
+        logger.info("running test_single_expert_per_token")
         expert_ids = torch.tensor([[0], [1], [0], [1]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 2
 
@@ -106,6 +112,7 @@ class TestGroupTokensByExpertTorch:
 
     def test_uneven_expert_distribution(self):
         """Test when experts have unequal load."""
+        logger.info("running test_uneven_expert_distribution")
         expert_ids = torch.tensor(
             [[0, 1], [0, 2], [0, 1], [0, 2]], dtype=torch.int32, device=TORCH_DEVICE
         )
@@ -120,6 +127,7 @@ class TestGroupTokensByExpertTorch:
 
     def test_empty_experts(self):
         """Test when some experts receive no tokens."""
+        logger.info("running test_empty_experts")
         expert_ids = torch.tensor([[0], [2]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 4
 
@@ -133,6 +141,7 @@ class TestGroupTokensByExpertTorch:
 
     def test_large_batch(self):
         """Test with larger batch size."""
+        logger.info("running test_large_batch")
         batch_size = 128
         top_k = 4
         num_experts = 16
@@ -161,6 +170,7 @@ class TestMoEDispatchInfoTorch:
 
     def test_dispatch_info_structure(self):
         """Test MoEDispatchInfo fields are correct."""
+        logger.info("running test_dispatch_info_structure")
         expert_ids = torch.tensor([[0, 2], [1, 0], [2, 1]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 3
 
@@ -178,6 +188,7 @@ class TestMoEDispatchInfoTorch:
 
     def test_token_and_expert_indices_consistency(self):
         """Verify sorted_token_indices and sorted_expert_indices are consistent."""
+        logger.info("running test_token_and_expert_indices_consistency")
         expert_ids = torch.tensor([[1, 0], [0, 2], [2, 1]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 3
 
@@ -205,6 +216,7 @@ class TestGatherAndScatterTorch:
 
     def test_gather_for_experts(self):
         """Test activation gathering in expert-sorted order."""
+        logger.info("running test_gather_for_experts")
         batch_size = 4
         hidden_dim = 8
         top_k = 2
@@ -232,6 +244,7 @@ class TestGatherAndScatterTorch:
 
     def test_scatter_expert_outputs(self):
         """Test output scattering and weighted combination."""
+        logger.info("running test_scatter_expert_outputs")
         batch_size = 3
         out_dim = 4
         top_k = 2
@@ -254,6 +267,7 @@ class TestGatherAndScatterTorch:
 
     def test_scatter_with_varying_outputs(self):
         """Test scatter with different expert outputs."""
+        logger.info("running test_scatter_with_varying_outputs")
         batch_size = 2
         top_k = 2
         num_experts = 2
@@ -289,6 +303,7 @@ class TestExpertLoadTorch:
 
     def test_compute_expert_load(self):
         """Test expert load counting."""
+        logger.info("running test_compute_expert_load")
         expert_ids = torch.tensor([[0, 1], [0, 2], [1, 2]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 3
 
@@ -299,6 +314,7 @@ class TestExpertLoadTorch:
 
     def test_compute_expert_load_uneven(self):
         """Test with uneven expert distribution."""
+        logger.info("running test_compute_expert_load_uneven")
         expert_ids = torch.tensor([[0, 0], [0, 1], [0, 0]], dtype=torch.int32, device=TORCH_DEVICE)
         num_experts = 3
 
@@ -313,6 +329,7 @@ class TestLoadBalancingLossTorch:
 
     def test_perfect_balance(self):
         """Test loss when load is perfectly balanced."""
+        logger.info("running test_perfect_balance")
         batch_size = 4
         num_experts = 2
 
@@ -328,6 +345,7 @@ class TestLoadBalancingLossTorch:
 
     def test_loss_with_skewed_probs(self):
         """Test loss is higher when probs match skewed routing."""
+        logger.info("running test_loss_with_skewed_probs")
         num_experts = 2
 
         expert_ids = torch.tensor([[0], [0], [0], [0]], dtype=torch.int32, device=TORCH_DEVICE)
@@ -348,6 +366,7 @@ class TestEndToEndTorch:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_moe_router_topk_function(self):
         """Test moe_router_topk kernel function directly."""
+        logger.info("running test_moe_router_topk_function")
         batch, hidden_dim, num_experts = 4, 128, 8
         hidden = torch.randn(batch, hidden_dim, device="mps")
         router_weights = torch.randn(hidden_dim, num_experts, device="mps")
@@ -360,6 +379,7 @@ class TestEndToEndTorch:
     @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS required")
     def test_moe_router_expert_gemm_pipeline(self):
         """Test full router -> expert GEMM pipeline."""
+        logger.info("running test_moe_router_expert_gemm_pipeline")
         batch, hidden_dim, out_dim = 8, 256, 512
         num_experts, top_k = 8, 2
 
@@ -405,6 +425,7 @@ class TestEndToEndTorch:
 
     def test_full_moe_dispatch_flow(self):
         """Test complete dispatch -> gather -> compute -> scatter flow."""
+        logger.info("running test_full_moe_dispatch_flow")
         batch_size = 8
         hidden_dim = 16
         out_dim = 16
@@ -444,6 +465,7 @@ class TestExpertLoadStatsAnalysis:
     """Tests for ExpertLoadStats dataclass."""
 
     def test_default_values(self) -> None:
+        logger.info("running test_default_values")
         stats = ExpertLoadStats(expert_id=0)
         assert stats.expert_id == 0
         assert stats.total_activations == 0
@@ -453,10 +475,12 @@ class TestExpertLoadStatsAnalysis:
         assert stats.is_dead is False
 
     def test_primary_selection_rate_zero_activations(self) -> None:
+        logger.info("running test_primary_selection_rate_zero_activations")
         stats = ExpertLoadStats(expert_id=0)
         assert stats.primary_selection_rate == 0.0
 
     def test_primary_selection_rate_with_data(self) -> None:
+        logger.info("running test_primary_selection_rate_with_data")
         stats = ExpertLoadStats(
             expert_id=0,
             total_activations=100,
@@ -469,6 +493,7 @@ class TestExpertCooccurrence:
     """Tests for ExpertCooccurrence dataclass."""
 
     def test_initialization(self) -> None:
+        logger.info("running test_initialization")
         cooc = ExpertCooccurrence(num_experts=8)
         assert cooc.num_experts == 8
         assert cooc.cooccurrence_matrix.shape == (8, 8)
@@ -480,6 +505,7 @@ class TestLayerRoutingProfile:
     """Tests for LayerRoutingProfile dataclass."""
 
     def test_empty_profile(self) -> None:
+        logger.info("running test_empty_profile")
         profile = LayerRoutingProfile(layer_idx=0)
         assert profile.layer_idx == 0
         assert profile.total_tokens == 0
@@ -492,6 +518,7 @@ class TestMoERoutingProfiler:
     """Tests for the main MoERoutingProfiler class."""
 
     def test_initialization(self) -> None:
+        logger.info("running test_initialization")
         profiler = MoERoutingProfiler(
             num_experts=8,
             num_layers=4,
@@ -502,6 +529,7 @@ class TestMoERoutingProfiler:
         assert profiler.top_k == 2
 
     def test_record_routing_basic(self) -> None:
+        logger.info("running test_record_routing_basic")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=4, top_k=2)
 
         expert_ids = np.array([[0, 1], [2, 3], [4, 5], [6, 7]])
@@ -513,6 +541,7 @@ class TestMoERoutingProfiler:
         assert len(profiler._expert_probs[0]) == 1
 
     def test_record_routing_invalid_layer(self) -> None:
+        logger.info("running test_record_routing_invalid_layer")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=4, top_k=2)
 
         expert_ids = np.array([[0, 1], [2, 3]])
@@ -524,6 +553,7 @@ class TestMoERoutingProfiler:
             profiler.record_routing(4, expert_ids)
 
     def test_layer_profiles_computation(self) -> None:
+        logger.info("running test_layer_profiles_computation")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=2, top_k=2)
 
         rng = np.random.default_rng(42)
@@ -546,6 +576,7 @@ class TestMoERoutingProfiler:
         assert profiles[0].active_experts > 0
 
     def test_cooccurrence_computation(self) -> None:
+        logger.info("running test_cooccurrence_computation")
         profiler = MoERoutingProfiler(num_experts=4, num_layers=1, top_k=2)
 
         expert_ids = np.array(
@@ -568,6 +599,7 @@ class TestMoERoutingProfiler:
         assert cooc.conditional_probs is not None
 
     def test_hot_cold_dead_experts(self) -> None:
+        logger.info("running test_hot_cold_dead_experts")
         profiler = MoERoutingProfiler(
             num_experts=8, num_layers=1, top_k=2, hot_threshold=1.5, cold_threshold=0.5
         )
@@ -587,6 +619,7 @@ class TestMoERoutingProfiler:
         assert 7 in dead
 
     def test_prefetch_recommendations(self) -> None:
+        logger.info("running test_prefetch_recommendations")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=1, top_k=2)
 
         expert_ids = []
@@ -607,6 +640,7 @@ class TestMoERoutingProfiler:
         assert 0 in recs or 1 in recs
 
     def test_generate_report(self) -> None:
+        logger.info("running test_generate_report")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=2, top_k=2)
 
         rng = np.random.default_rng(42)
@@ -628,6 +662,7 @@ class TestMoERoutingProfiler:
 
     def test_save_report_json_serializable(self) -> None:
         """Ensure report can be serialized to JSON without numpy type issues."""
+        logger.info("running test_save_report_json_serializable")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=2, top_k=2)
 
         rng = np.random.default_rng(42)
@@ -652,6 +687,7 @@ class TestRoutingPredictability:
 
     def test_correlated_layers(self) -> None:
         """Test that correlated routing is detected."""
+        logger.info("running test_correlated_layers")
         profiler = MoERoutingProfiler(num_experts=8, num_layers=4, top_k=2)
 
         rng = np.random.default_rng(42)
@@ -684,6 +720,7 @@ class TestSimulateRouting:
         expected_layers: int,
         expected_top_k: int,
     ) -> None:
+        logger.info("running test_simulate_known_models")
         profiler = simulate_routing_for_model(model_name, num_samples=100)
 
         assert profiler.num_experts == expected_experts
@@ -695,6 +732,7 @@ class TestSimulateRouting:
 
     def test_simulate_deterministic_with_seed(self) -> None:
         """Same seed should produce same results."""
+        logger.info("running test_simulate_deterministic_with_seed")
         profiler1 = simulate_routing_for_model("mixtral", num_samples=50, seed=123)
         profiler2 = simulate_routing_for_model("mixtral", num_samples=50, seed=123)
 
@@ -704,6 +742,7 @@ class TestSimulateRouting:
         assert report1["summary"] == report2["summary"]
 
     def test_simulate_unknown_model_raises(self) -> None:
+        logger.info("running test_simulate_unknown_model_raises")
         with pytest.raises(ValueError, match="Unknown model"):
             simulate_routing_for_model("nonexistent_model")
 
@@ -716,12 +755,14 @@ class TestTileKey:
     """Tests for TileKey dataclass."""
 
     def test_creation(self):
+        logger.info("running test_creation")
         key = TileKey(layer_idx=0, expert_id=5, tile_idx=10)
         assert key.layer_idx == 0
         assert key.expert_id == 5
         assert key.tile_idx == 10
 
     def test_equality(self):
+        logger.info("running test_equality")
         key1 = TileKey(0, 5, 10)
         key2 = TileKey(0, 5, 10)
         key3 = TileKey(0, 5, 11)
@@ -730,6 +771,7 @@ class TestTileKey:
         assert key1 != key3
 
     def test_hash(self):
+        logger.info("running test_hash")
         key1 = TileKey(0, 5, 10)
         key2 = TileKey(0, 5, 10)
 
@@ -743,6 +785,7 @@ class TestCacheEntryClass:
     """Tests for CacheEntry dataclass."""
 
     def test_creation(self):
+        logger.info("running test_creation")
         key = TileKey(0, 0, 0)
         data = torch.zeros((64, 64), device=TORCH_DEVICE)
 
@@ -753,6 +796,7 @@ class TestCacheEntryClass:
         assert entry.size_bytes == data.numel() * data.element_size()
 
     def test_touch(self):
+        logger.info("running test_touch")
         key = TileKey(0, 0, 0)
         data = torch.zeros((64, 64), device=TORCH_DEVICE)
         entry = CacheEntry(key=key, data=data, size_bytes=data.numel() * data.element_size())
@@ -771,6 +815,7 @@ class TestExpertStatsCache:
     """Tests for ExpertStats dataclass (cache module)."""
 
     def test_activation_rate(self):
+        logger.info("running test_activation_rate")
         stats = ExpertStats(expert_id=0)
 
         assert stats.activation_rate == 0.0
@@ -781,6 +826,7 @@ class TestExpertStatsCache:
         assert stats.activation_rate == pytest.approx(0.1, rel=1e-3)
 
     def test_recent_rate(self):
+        logger.info("running test_recent_rate")
         stats = ExpertStats(expert_id=0)
 
         assert stats.recent_rate == 0.0
@@ -791,6 +837,7 @@ class TestExpertStatsCache:
         assert stats.recent_rate == pytest.approx(5.0, rel=1e-3)
 
     def test_recent_window_limit(self):
+        logger.info("running test_recent_window_limit")
         stats = ExpertStats(expert_id=0)
 
         for i in range(150):
@@ -803,6 +850,7 @@ class TestLayerStatsCache:
     """Tests for LayerStats dataclass (cache module)."""
 
     def test_hit_rate(self):
+        logger.info("running test_hit_rate")
         stats = LayerStats(layer_idx=0)
 
         assert stats.hit_rate == 0.0
@@ -813,6 +861,7 @@ class TestLayerStatsCache:
         assert stats.hit_rate == pytest.approx(0.7, rel=1e-3)
 
     def test_get_expert_stats(self):
+        logger.info("running test_get_expert_stats")
         stats = LayerStats(layer_idx=0)
 
         expert_stats = stats.get_expert_stats(5)
@@ -822,6 +871,7 @@ class TestLayerStatsCache:
         assert expert_stats2 is expert_stats
 
     def test_get_hot_experts(self):
+        logger.info("running test_get_hot_experts")
         stats = LayerStats(layer_idx=0)
 
         for eid in range(10):
@@ -838,11 +888,13 @@ class TestExpertCacheModule:
     """Tests for ExpertCache class."""
 
     def test_basic_get_and_cache(self):
+        logger.info("running test_basic_get_and_cache")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         call_count = 0
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             nonlocal call_count
             call_count += 1
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
@@ -857,6 +909,7 @@ class TestExpertCacheModule:
 
     def test_lru_eviction(self):
         """Test LRU eviction."""
+        logger.info("running test_lru_eviction")
         tile_size = 64 * 64 * 2
         cache_size_mb = (tile_size * 2.5) / (1024 * 1024)
         cache = ExpertCache(
@@ -864,6 +917,7 @@ class TestExpertCacheModule:
         )
 
         def make_tile(expert_id):
+            logger.debug("make_tile called with expert_id=%s", expert_id)
             return torch.full((64, 64), expert_id, dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, lambda: make_tile(0))
@@ -873,9 +927,11 @@ class TestExpertCacheModule:
         assert cache._total_evictions > 0
 
     def test_hit_rate(self):
+        logger.info("running test_hit_rate")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, dequant_fn)
@@ -887,9 +943,11 @@ class TestExpertCacheModule:
         assert cache.hit_rate == pytest.approx(0.6, rel=1e-3)
 
     def test_invalidate_expert(self):
+        logger.info("running test_invalidate_expert")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, dequant_fn)
@@ -903,9 +961,11 @@ class TestExpertCacheModule:
         assert cache.num_entries == 1
 
     def test_invalidate_layer(self):
+        logger.info("running test_invalidate_layer")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, dequant_fn)
@@ -919,9 +979,11 @@ class TestExpertCacheModule:
         assert cache.num_entries == 1
 
     def test_clear(self):
+        logger.info("running test_clear")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, dequant_fn)
@@ -935,9 +997,11 @@ class TestExpertCacheModule:
         assert cache.size_mb == 0.0
 
     def test_resize(self):
+        logger.info("running test_resize")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         for i in range(10):
@@ -950,6 +1014,7 @@ class TestExpertCacheModule:
         assert cache.num_entries == 0
 
     def test_record_expert_activation(self):
+        logger.info("running test_record_expert_activation")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         expert_ids = torch.tensor([[0, 1], [0, 2], [1, 3]], dtype=torch.int32, device=TORCH_DEVICE)
@@ -962,6 +1027,7 @@ class TestExpertCacheModule:
         assert stats.get_expert_stats(3).activation_count == 1
 
     def test_get_prefetch_candidates(self):
+        logger.info("running test_get_prefetch_candidates")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1, prefetch_k=3)
 
         for _ in range(10):
@@ -972,9 +1038,11 @@ class TestExpertCacheModule:
         assert 0 in candidates
 
     def test_get_stats(self):
+        logger.info("running test_get_stats")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         def dequant_fn():
+            logger.info("dequant_fn called")
             return torch.ones((64, 64), dtype=torch.float16, device=TORCH_DEVICE)
 
         cache.get_expert_tile(0, 0, 0, dequant_fn)
@@ -993,6 +1061,7 @@ class TestExpertCacheModule:
 
     def test_thread_safety_cache_operations(self):
         """Test that cache internal operations are thread-safe."""
+        logger.info("running test_thread_safety_cache_operations")
         cache = ExpertCache(num_experts=8, num_layers=2, cache_size_mb=1)
 
         # Use CPU for thread safety test - MPS doesn't handle concurrent
@@ -1005,9 +1074,11 @@ class TestExpertCacheModule:
         lock = threading.Lock()
 
         def worker(expert_id):
+            logger.debug("worker called with expert_id=%s", expert_id)
             tile = precomputed_tiles[expert_id]
 
             def dequant_fn():
+                logger.info("dequant_fn called")
                 return tile
 
             for _ in range(10):
@@ -1024,6 +1095,7 @@ class TestExpertCacheModule:
             assert value == expert_id
 
     def test_repr(self):
+        logger.info("running test_repr")
         cache = ExpertCache(num_experts=64, num_layers=28, cache_size_mb=512)
         repr_str = repr(cache)
 
@@ -1036,6 +1108,7 @@ class TestTileCoordinator:
     """Tests for TileCoordinator class."""
 
     def test_basic_properties(self):
+        logger.info("running test_basic_properties")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1046,6 +1119,7 @@ class TestTileCoordinator:
         assert coord.num_tiles == 8
 
     def test_tile_to_coords(self):
+        logger.info("running test_tile_to_coords")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1057,6 +1131,7 @@ class TestTileCoordinator:
         assert coord.tile_to_coords(3) == (1, 1)
 
     def test_coords_to_tile(self):
+        logger.info("running test_coords_to_tile")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1068,6 +1143,7 @@ class TestTileCoordinator:
         assert coord.coords_to_tile(1, 1) == 3
 
     def test_roundtrip(self):
+        logger.info("running test_roundtrip")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1078,6 +1154,7 @@ class TestTileCoordinator:
             assert coord.coords_to_tile(row, col) == tile_idx
 
     def test_tile_bounds(self):
+        logger.info("running test_tile_bounds")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1091,6 +1168,7 @@ class TestTileCoordinator:
 
     def test_tile_bounds_with_padding(self):
         """Test non-aligned dimensions."""
+        logger.info("running test_tile_bounds_with_padding")
         coord = TileCoordinator(
             weight_shape=(100, 100),
             tile_shape=(64, 64),
@@ -1102,6 +1180,7 @@ class TestTileCoordinator:
         assert c_end == 100
 
     def test_all_tile_indices(self):
+        logger.info("running test_all_tile_indices")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1111,6 +1190,7 @@ class TestTileCoordinator:
         assert indices == list(range(8))
 
     def test_tiles_for_output_range(self):
+        logger.info("running test_tiles_for_output_range")
         coord = TileCoordinator(
             weight_shape=(256, 128),
             tile_shape=(64, 64),
@@ -1127,6 +1207,7 @@ class TestCreateMoeCache:
     """Tests for create_moe_cache helper function."""
 
     def test_glm4_config(self):
+        logger.info("running test_glm4_config")
         config = {
             "num_hidden_layers": 28,
             "num_experts": 64,
@@ -1139,6 +1220,7 @@ class TestCreateMoeCache:
         assert cache.cache_size_bytes == 256 * 1024 * 1024
 
     def test_mixtral_config(self):
+        logger.info("running test_mixtral_config")
         config = {
             "n_layer": 32,
             "num_local_experts": 8,
@@ -1150,6 +1232,7 @@ class TestCreateMoeCache:
         assert cache.num_experts == 8
 
     def test_default_values(self):
+        logger.info("running test_default_values")
         config = {}
 
         cache = create_moe_cache(config)

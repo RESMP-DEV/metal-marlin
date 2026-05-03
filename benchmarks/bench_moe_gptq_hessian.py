@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import logging
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -68,11 +69,13 @@ class BenchmarkResults:
     ppl_tokens: int | None
 
     def to_json(self) -> dict:
+        logger.debug("to_json called")
         return asdict(self)
 
 
 def compute_rmse(original: torch.Tensor, quantized: torch.Tensor) -> tuple[float, float]:
     """Compute RMSE and max absolute error between tensors."""
+    logger.debug("compute_rmse called with original=%s, quantized=%s", original, quantized)
     with torch.no_grad():
         diff = original.float() - quantized.float()
         rmse = torch.sqrt(torch.mean(diff * diff)).item()
@@ -92,6 +95,7 @@ def measure_throughput(
 ) -> ThroughputMetrics:
     """Measure prefill and decode throughput."""
     # Extend prompt to prefill length
+    logger.debug("measure_throughput called with model=%s, tokenizer=%s, device=%s", model, tokenizer, device)
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
     while input_ids.shape[1] < prefill_tokens:
         input_ids = torch.cat(
@@ -106,6 +110,7 @@ def measure_throughput(
     memory_peak = 0
 
     def sync():
+        logger.debug("sync called")
         if device == "mps":
             torch.mps.synchronize()
         elif device == "cuda":
@@ -169,6 +174,7 @@ def compute_perplexity(
     max_length: int = 256,
 ) -> tuple[float, int]:
     """Compute perplexity on WikiText-2."""
+    logger.debug("compute_perplexity called with model=%s, tokenizer=%s, device=%s", model, tokenizer, device)
     from metal_marlin.eval import compute_perplexity_from_logits, load_wikitext2
 
     texts = load_wikitext2(max_samples=max_samples)
@@ -176,6 +182,7 @@ def compute_perplexity(
         return float("nan"), 0
 
     def logits_fn(input_ids_np: np.ndarray) -> np.ndarray:
+        logger.debug("logits_fn called with input_ids_np=%s", input_ids_np)
         gc.collect()
         if device == "mps":
             torch.mps.empty_cache()
@@ -215,6 +222,7 @@ def benchmark_quantization_quality(
     Uses Bartowski v3 calibration data for best quality.
     Uses STREAMING mode by default for memory efficiency.
     """
+    logger.info("benchmark_quantization_quality starting with model=%s, tokenizer=%s, device=%s, num_layers=%s", model, tokenizer, device, num_layers)
     from metal_marlin.calibration import CalibrationDataset
     from metal_marlin.layer_replacement import replace_moe_layers, replace_moe_layers_streaming
 
@@ -242,6 +250,7 @@ def benchmark_quantization_quality(
     params_completed = [0]
 
     def on_layer_complete(layer_name: str, params: int, quant_method: str) -> None:
+        logger.debug("on_layer_complete called with layer_name=%s, params=%s, quant_method=%s", layer_name, params, quant_method)
         layers_completed[0] += 1
         params_completed[0] += params
         gc.collect()
@@ -287,6 +296,7 @@ def benchmark_quantization_quality(
 
 
 def main() -> int:
+    logger.info("main starting")
     parser = argparse.ArgumentParser(description="MoE GPTQ+Hessian vs RTN benchmark")
     parser.add_argument("--model-id", default="zai-org/GLM-4.7-Flash")
     parser.add_argument(
@@ -347,6 +357,9 @@ def main() -> int:
 
 import os
 import sys
+
+
+logger = logging.getLogger(__name__)
 
 # Check if running inside AlphaHENG task mode - skip to avoid memory bloat
 if os.environ.get("ALPHAHENG_TASK_MODE") == "1":

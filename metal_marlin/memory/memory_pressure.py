@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections.abc import Callable
@@ -7,6 +8,9 @@ from typing import Any
 import psutil
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class MemoryPressureConfig:
@@ -38,6 +42,7 @@ class MemoryPressureStats:
     last_check_time: float = 0.0
     
     def to_dict(self) -> dict[str, Any]:
+        logger.debug("to_dict called")
         return {
             "total_memory_mb": self.total_memory_mb,
             "available_memory_mb": self.available_memory_mb,
@@ -63,6 +68,7 @@ class MemoryPressureMonitor:
     """
     
     def __init__(self, config: MemoryPressureConfig | None = None) -> None:
+        logger.debug("initializing %s with config=%s", type(self).__name__, config)
         self.config = config or MemoryPressureConfig()
         self._stats = MemoryPressureStats()
         self._lock = threading.RLock()
@@ -79,24 +85,28 @@ class MemoryPressureMonitor:
         Returns:
             Tuple of (is_warning, is_critical)
         """
+        logger.debug("check_pressure called")
         self._update_stats_if_needed()
         with self._lock:
             return self._stats.is_warning, self._stats.is_critical
             
     def get_stats(self) -> dict[str, Any]:
         """Get current memory pressure statistics."""
+        logger.debug("get_stats called")
         self._update_stats_if_needed()
         with self._lock:
             return self._stats.to_dict()
             
     def _update_stats_if_needed(self) -> None:
         """Update stats if check interval has passed."""
+        logger.debug("_update_stats_if_needed called")
         now = time.time()
         if now - self._last_check_time >= self.config.check_interval_seconds:
             self._update_stats()
             
     def _update_stats(self) -> None:
         """Perform memory check and update statistics."""
+        logger.debug("_update_stats called")
         if not self.config.enable_monitoring:
             return
 
@@ -154,6 +164,7 @@ class MemoryPressureMonitor:
             - CUDA: Uses GPU free memory
             - CPU: Uses system available memory
         """
+        logger.debug("_get_available_memory called")
         if torch.backends.mps.is_available():
             # MPS: use system available memory (unified)
             return psutil.virtual_memory().available
@@ -167,6 +178,7 @@ class MemoryPressureMonitor:
     @property
     def critical_threshold_bytes(self) -> int:
         """Get critical threshold in bytes."""
+        logger.debug("critical_threshold_bytes called")
         return self.config.critical_threshold_mb * 1024 * 1024
 
     def check_headroom(self, required_bytes: int) -> bool:
@@ -179,6 +191,7 @@ class MemoryPressureMonitor:
             True if the allocation can proceed without hitting critical threshold,
             False otherwise.
         """
+        logger.debug("check_headroom called with required_bytes=%s", required_bytes)
         available = self._get_available_memory()
         return (available - required_bytes) > self.critical_threshold_bytes
 
@@ -204,6 +217,7 @@ class MemoryPressureMonitor:
             eviction), False if eviction was insufficient.
         """
         # First, check if we already have enough headroom
+        logger.debug("ensure_headroom called with required_bytes=%s, eviction_callback=%s", required_bytes, eviction_callback)
         if self.check_headroom(required_bytes):
             return True
 
@@ -240,6 +254,7 @@ def get_global_memory_pressure_monitor(
     Returns:
         Global MemoryPressureMonitor instance
     """
+    logger.debug("get_global_memory_pressure_monitor called with config=%s", config)
     global _global_pressure_monitor
     with _global_monitor_lock:
         if _global_pressure_monitor is None:

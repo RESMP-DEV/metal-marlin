@@ -27,12 +27,17 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 
 
+
+logger = logging.getLogger(__name__)
+
 def _env_int(name: str, default: int) -> int:
+    logger.debug("_env_int called with name=%s, default=%s", name, default)
     value = os.getenv(name)
     if value is None or value == "":
         return default
@@ -57,6 +62,7 @@ class GLM47ServeConfig:
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    logger.info("_build_parser starting")
     parser = argparse.ArgumentParser(
         description="Launch GLM-4.7-Flash OpenAI server with MMFP4 + PagedAttention defaults.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -108,6 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _install_mmfp4_adapter(use_paged_attention: bool) -> None:
     """Make serving load MMFP4Pipeline while keeping serving's call contract."""
+    logger.debug("_install_mmfp4_adapter called with use_paged_attention=%s", use_paged_attention)
     import metal_marlin.serving.engine as serving_engine
     from metal_marlin.inference.mmfp4_pipeline import MMFP4Pipeline
     from metal_marlin.kv_cache import MLAKVCache
@@ -116,6 +123,7 @@ def _install_mmfp4_adapter(use_paged_attention: bool) -> None:
 
     class MMFP4ServingPipeline:
         def __init__(self, pipeline: MMFP4Pipeline) -> None:
+            logger.debug("initializing %s with pipeline=%s", type(self).__name__, pipeline)
             self._pipeline = pipeline
             self.tokenizer = pipeline.tokenizer
             self.model = pipeline.model
@@ -127,12 +135,14 @@ def _install_mmfp4_adapter(use_paged_attention: bool) -> None:
         def from_pretrained(
             cls, model_path: str, device: str = "mps"
         ) -> MMFP4ServingPipeline:
+            logger.debug("from_pretrained called with model_path=%s, device=%s", model_path, device)
             pipeline = MMFP4Pipeline.from_pretrained(model_path, device=device)
             return cls(pipeline)
 
         def _enable_paged_attention(self) -> None:
             # MMFP4 attention layers expose `use_paged_attention`; enable it
             # where present while keeping compatibility with other layer types.
+            logger.debug("_enable_paged_attention called")
             model = getattr(self._pipeline, "model", None)
             model_stack = getattr(model, "model", model)
             layers = getattr(model_stack, "layers", [])
@@ -161,6 +171,7 @@ def _install_mmfp4_adapter(use_paged_attention: bool) -> None:
 
 
 def _parse_config(argv: list[str] | None = None) -> GLM47ServeConfig:
+    logger.debug("_parse_config called with argv=%s", argv)
     parser = _build_parser()
     args = parser.parse_args(argv)
 
@@ -190,6 +201,7 @@ def _parse_config(argv: list[str] | None = None) -> GLM47ServeConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
+    logger.info("main starting")
     config = _parse_config(argv)
     _install_mmfp4_adapter(use_paged_attention=config.use_paged_attention)
 

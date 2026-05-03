@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import torch
@@ -27,6 +28,9 @@ from .dispatch import dispatch_fused_qkv_trellis
 if TYPE_CHECKING:
     from .linear import TrellisLinear
 
+
+
+logger = logging.getLogger(__name__)
 
 class FusedQKVLinear(nn.Module):
     """Fused Q/K/V projection using single kernel launch.
@@ -59,6 +63,7 @@ class FusedQKVLinear(nn.Module):
             k_proj: TrellisLinear for K projection
             v_proj: TrellisLinear for V projection
         """
+        logger.debug("initializing %s with q_proj=%s, k_proj=%s, v_proj=%s", type(self).__name__, q_proj, k_proj, v_proj)
         super().__init__()
         self.q_proj = q_proj
         self.k_proj = k_proj
@@ -73,6 +78,7 @@ class FusedQKVLinear(nn.Module):
         self._lib: MetalKernelLibrary | None = None
 
     def _get_lib(self) -> MetalKernelLibrary:
+        logger.debug("_get_lib called")
         if self._lib is None:
             self._lib = MetalKernelLibrary.from_source_dir()
         return self._lib
@@ -90,6 +96,7 @@ class FusedQKVLinear(nn.Module):
                 - k: [..., k_proj.out_features]
                 - v: [..., v_proj.out_features]
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         batch_shape = x.shape[:-1]
         x_flat = x.view(-1, self.q_proj.in_features)
 
@@ -114,6 +121,7 @@ class FusedQKVLinear(nn.Module):
         return q, k, v
 
     def extra_repr(self) -> str:
+        logger.debug("extra_repr called")
         return (
             f"Q: {self.q_proj.in_features}->{self.q_proj.out_features}, "
             f"K: {self.k_proj.in_features}->{self.k_proj.out_features}, "

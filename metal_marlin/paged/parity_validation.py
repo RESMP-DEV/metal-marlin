@@ -7,6 +7,7 @@ attention implementations.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -50,6 +51,7 @@ class ParityConfig:
         Returns:
             Tuple of (atol, rtol)
         """
+        logger.debug("get_tolerances called with dtype=%s", dtype)
         dtype_str = str(dtype)
         
         # Use explicit tolerances if provided
@@ -108,6 +110,7 @@ def validate_parity(
     Returns:
         ParityResult with detailed comparison
     """
+    logger.debug("validate_parity called with paged_output=%s, linear_output=%s, config=%s", paged_output, linear_output, config)
     if config is None:
         config = ParityConfig()
     
@@ -211,6 +214,7 @@ def run_paged_v1_parity_test(
     Returns:
         ParityResult from the validation
     """
+    logger.info("running run_paged_v1_parity_test")
     from metal_marlin.paged.attention import paged_attention_v1
     from metal_marlin.paged.validation import compute_linear_attention
     
@@ -304,6 +308,7 @@ def run_comprehensive_parity_suite(
     Returns:
         Dictionary with test results and statistics
     """
+    logger.debug("run_comprehensive_parity_suite called with configs=%s", configs)
     if configs is None:
         # Default test configurations
         configs = [
@@ -374,3 +379,6 @@ if __name__ == "__main__":
     # Exit with appropriate code
     import sys
     sys.exit(0 if results["failed"] == 0 else 1)
+
+
+logger = logging.getLogger(__name__)

@@ -13,6 +13,7 @@ Optimized version includes:
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 import torch.nn as nn
@@ -36,6 +37,9 @@ except ImportError:
     HAS_OPTIMIZED = False
     HAS_ULTRAFAST = False
 
+
+
+logger = logging.getLogger(__name__)
 
 class MMFP4DraftModel(DraftModel):
     """Draft model for MMFP4 using Multi-Token Prediction head.
@@ -86,6 +90,7 @@ class MMFP4DraftModel(DraftModel):
         use_optimized: bool = True,
         use_ultrafast: bool = True,
     ):
+        logger.debug("initializing %s with hidden_size=%s, vocab_size=%s, num_predictions=%s, group_size=%s, device=%s", type(self).__name__, hidden_size, vocab_size, num_predictions, group_size, device)
         self.hidden_size = hidden_size
         self.vocab_size = vocab_size
         self.num_predictions = num_predictions
@@ -163,6 +168,7 @@ class MMFP4DraftModel(DraftModel):
         Returns:
             Configured MMFP4DraftModel instance
         """
+        logger.debug("from_target_model called with target_model=%s, num_predictions=%s, group_size=%s", target_model, num_predictions, group_size)
         config = getattr(target_model, "config", None)
         if config is not None:
             hidden_size = getattr(config, "hidden_size", 4096)
@@ -223,6 +229,7 @@ class MMFP4DraftModel(DraftModel):
             >>> print(f"Memory savings: {draft.get_memory_savings()['savings_bytes'] / 1e6:.1f} MB")
         """
         # Create instance with weight sharing enabled
+        logger.debug("from_target_model_with_weight_sharing called with target_model=%s, num_predictions=%s, group_size=%s", target_model, num_predictions, group_size)
         instance = cls.from_target_model(
             target_model=target_model,
             num_predictions=num_predictions,
@@ -249,6 +256,7 @@ class MMFP4DraftModel(DraftModel):
         Returns:
             Dict with memory statistics in bytes and percentages
         """
+        logger.debug("get_memory_savings called")
         if not self.weight_sharing or not hasattr(self.mtp_head, 'get_memory_savings'):
             return {
                 "total_params": sum(p.numel() for p in self.mtp_head.parameters()),
@@ -271,6 +279,7 @@ class MMFP4DraftModel(DraftModel):
     
     def is_weight_sharing_enabled(self) -> bool:
         """Check if weight sharing is enabled for this draft model."""
+        logger.debug("is_weight_sharing_enabled called")
         return self.weight_sharing
     
     def set_hidden_states(self, hidden_states: Tensor) -> None:
@@ -283,6 +292,7 @@ class MMFP4DraftModel(DraftModel):
             hidden_states: Hidden states from target model, [batch, seq, hidden].
                 Typically the last layer's output.
         """
+        logger.debug("set_hidden_states called with hidden_states=%s", hidden_states)
         self._cached_hidden = hidden_states.detach()
         self._cache_seq_len = hidden_states.shape[1]
     
@@ -312,6 +322,7 @@ class MMFP4DraftModel(DraftModel):
         Returns:
             DraftOutput with proposed tokens and probability distributions
         """
+        logger.debug("speculate_from_hidden called with hidden_states=%s, num_tokens=%s, temperature=%s", hidden_states, num_tokens, temperature)
         num_tokens = min(num_tokens, self.num_predictions)
         batch_size = hidden_states.shape[0]
         device = hidden_states.device
@@ -402,6 +413,7 @@ class MMFP4DraftModel(DraftModel):
         Raises:
             RuntimeError: If hidden states haven't been cached.
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         if self._cached_hidden is None:
             # Fallback: return uniform distribution
             return self._fallback_output(input_ids.shape[0], num_tokens)
@@ -410,11 +422,13 @@ class MMFP4DraftModel(DraftModel):
     
     def reset(self) -> None:
         """Reset cached hidden states for a new sequence."""
+        logger.debug("reset called")
         self._cached_hidden = None
         self._cache_seq_len = 0
     
     def _fallback_output(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Generate fallback output when hidden states aren't available."""
+        logger.debug("_fallback_output called with batch_size=%s, num_tokens=%s", batch_size, num_tokens)
         tokens = torch.zeros(
             batch_size,
             num_tokens,
@@ -440,6 +454,7 @@ class MMFP4DraftModel(DraftModel):
         """
         # Cost model: draft is ~1/10th the cost of target per token
         # But we generate num_predictions tokens in parallel
+        logger.debug("get_speedup_estimate called with acceptance_rate=%s", acceptance_rate)
         draft_cost = 0.1
         target_cost = 1.0
         
@@ -480,6 +495,7 @@ class MMFP4DraftModelWithTarget(DraftModel):
         num_predictions: int = 4,
         device: torch.device | None = None,
     ):
+        logger.debug("initializing %s with target_model=%s, mtp_head=%s, num_predictions=%s, device=%s", type(self).__name__, target_model, mtp_head, num_predictions, device)
         self.target_model = target_model
         self.device = device or torch.device("cpu")
         
@@ -527,6 +543,7 @@ class MMFP4DraftModelWithTarget(DraftModel):
         Returns:
             DraftOutput with tokens and probabilities
         """
+        logger.debug("speculate called with input_ids=%s, kv_cache=%s, num_tokens=%s", input_ids, kv_cache, num_tokens)
         num_tokens = min(num_tokens, self.num_predictions)
         
         with torch.no_grad():
@@ -557,10 +574,12 @@ class MMFP4DraftModelWithTarget(DraftModel):
     
     def reset(self) -> None:
         """Reset cached state."""
+        logger.debug("reset called")
         self._last_hidden = None
     
     def _fallback_output(self, batch_size: int, num_tokens: int) -> DraftOutput:
         """Generate fallback output."""
+        logger.debug("_fallback_output called with batch_size=%s, num_tokens=%s", batch_size, num_tokens)
         tokens = torch.zeros(
             batch_size, num_tokens, dtype=torch.long, device=self.device
         )

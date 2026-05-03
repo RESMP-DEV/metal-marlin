@@ -21,6 +21,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -35,6 +36,9 @@ if TYPE_CHECKING:
     from ..kv_cache import KVCache as KVCacheTorch
 
 
+
+logger = logging.getLogger(__name__)
+
 def get_device() -> str:
     """Return the best available device for inference.
 
@@ -46,6 +50,7 @@ def get_device() -> str:
     Returns:
         Device string: 'mps', 'cuda', or 'cpu'
     """
+    logger.debug("get_device called")
     require_torch()
     assert torch is not None
 
@@ -84,6 +89,7 @@ class MarlinModel(Protocol):
 
     def create_kv_cache(self, batch_size: int = 1) -> KVCacheTorch:
         """Create KV cache for incremental decoding."""
+        logger.debug("create_kv_cache called with batch_size=%s", batch_size)
         ...
 
 
@@ -118,6 +124,7 @@ class ModelConfig:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ModelConfig:
         """Create config from dictionary."""
+        logger.debug("from_dict called with d=%s", d)
         return cls(
             vocab_size=d.get("vocab_size", 32000),
             hidden_size=d.get("hidden_size", 4096),
@@ -150,6 +157,7 @@ def load_safetensors_torch(
     Returns:
         Dict mapping tensor names to torch tensors on device
     """
+    logger.info("load_safetensors_torch called with path=%s, device=%s", path, device)
     require_torch()
     assert torch is not None
 
@@ -161,6 +169,7 @@ def load_safetensors_torch(
 
 def load_config(model_path: str | Path) -> dict[str, Any]:
     """Load config.json from a model directory."""
+    logger.info("load_config called with model_path=%s", model_path)
     model_path = Path(model_path)
     config_path = model_path / "config.json"
     if not config_path.exists():
@@ -171,6 +180,7 @@ def load_config(model_path: str | Path) -> dict[str, Any]:
 
 def _tensor_scalar_to_int_cpu(tensor: torch_typing.Tensor) -> int:
     """Convert a scalar tensor to int via explicit CPU transfer."""
+    logger.debug("_tensor_scalar_to_int_cpu called with tensor=%s", tensor)
     require_torch()
     assert torch is not None
     cpu_view = tensor.detach().to(device="cpu", dtype=torch.long).reshape(-1).numpy()
@@ -192,6 +202,7 @@ def dequantize_fp4_torch(
     Returns:
         Dequantized float16 weights [out_feat, in_feat]
     """
+    logger.info("dequantize_fp4_torch called with packed=%s, scales=%s, group_size=%s", packed, scales, group_size)
     require_torch()
     assert torch is not None
 
@@ -284,6 +295,7 @@ class MetalMarlinModel:
         weights: dict[str, torch_typing.Tensor],
         device: str = "mps",
     ):
+        logger.debug("initializing %s with config=%s, weights=%s, device=%s", type(self).__name__, config, weights, device)
         require_torch()
         assert torch is not None
 
@@ -342,6 +354,7 @@ class MetalMarlinModel:
         Raises:
             FileNotFoundError: If model files not found
         """
+        logger.info("from_quantized called with model_path=%s, device=%s", model_path, device)
         require_torch()
 
         model_path = Path(model_path)
@@ -369,6 +382,7 @@ class MetalMarlinModel:
 
     def _preload_group_sizes(self) -> None:
         """Load all quantized group sizes to Python ints once at initialization."""
+        logger.info("_preload_group_sizes called")
         for name, tensor in self.weights.items():
             if name.endswith(".group_size"):
                 self._group_size_cache[name] = _tensor_scalar_to_int_cpu(tensor)
@@ -379,6 +393,7 @@ class MetalMarlinModel:
         Caches dequantized weights for reuse.
         """
         # Check cache first
+        logger.debug("_get_weight called with name=%s", name)
         if name in self._dequant_cache:
             return self._dequant_cache[name]
 
@@ -413,6 +428,7 @@ class MetalMarlinModel:
         layer_name: str,
     ) -> torch_typing.Tensor:
         """Linear layer with optional fused kernel."""
+        logger.debug("_forward_linear called with x=%s, layer_name=%s", x, layer_name)
         assert torch is not None
 
         if self._use_fused_kernels and self.config.get("quant_type", "fp4") == "fp4":
@@ -446,6 +462,7 @@ class MetalMarlinModel:
 
     def _get_group_size(self, name: str) -> int:
         """Return cached group_size for a quantized weight tensor."""
+        logger.debug("_get_group_size called with name=%s", name)
         gs_name = f"{name}.group_size"
         if gs_name in self._group_size_cache:
             return self._group_size_cache[gs_name]
@@ -465,6 +482,7 @@ class MetalMarlinModel:
         weight_name: str,
     ) -> torch_typing.Tensor:
         """Backward-compatible alias for _forward_linear."""
+        logger.info("_quantized_linear called with x=%s, weight_name=%s", x, weight_name)
         return self._forward_linear(x, weight_name)
 
     def __call__(
@@ -518,6 +536,7 @@ class MetalMarlinModel:
         kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Forward pass through a single transformer layer."""
+        logger.debug("_forward_layer called with hidden=%s, layer_idx=%s, kv_cache=%s", hidden, layer_idx, kv_cache)
         assert torch is not None
 
         prefix = f"model.layers.{layer_idx}"
@@ -548,6 +567,7 @@ class MetalMarlinModel:
         weight_name: str,
     ) -> torch_typing.Tensor:
         """Apply RMSNorm."""
+        logger.debug("_rms_norm called with x=%s, weight_name=%s", x, weight_name)
         assert torch is not None
 
         weight = self._get_weight(weight_name)
@@ -580,6 +600,7 @@ class MetalMarlinModel:
             x: Input tensor [batch, heads, seq_len, head_dim]
             weight: Norm weight [head_dim]
         """
+        logger.debug("_per_head_rms_norm called with x=%s, weight=%s", x, weight)
         assert torch is not None
 
         # Try Metal implementation if available
@@ -613,6 +634,7 @@ class MetalMarlinModel:
         kv_cache: KVCacheTorch | None = None,
     ) -> torch_typing.Tensor:
         """Compute self-attention with RoPE."""
+        logger.debug("_attention called with hidden=%s, layer_idx=%s, kv_cache=%s", hidden, layer_idx, kv_cache)
         assert torch is not None
 
         batch_size, seq_len, _ = hidden.shape
@@ -680,6 +702,7 @@ class MetalMarlinModel:
         self, seq_len: int, position_offset: int = 0
     ) -> tuple[torch_typing.Tensor, torch_typing.Tensor]:
         """Get RoPE sin/cos embeddings for given sequence length and offset."""
+        logger.debug("_get_rope_embeddings called with seq_len=%s, position_offset=%s", seq_len, position_offset)
         assert torch is not None
 
         total_len = seq_len + position_offset
@@ -716,6 +739,7 @@ class MetalMarlinModel:
             cos: Cosine frequencies [seq_len, half_dim]
             sin: Sine frequencies [seq_len, half_dim]
         """
+        logger.debug("_apply_rotary_emb called with x=%s, cos=%s, sin=%s", x, cos, sin)
         assert torch is not None
 
         # Split x into first and second halves
@@ -762,6 +786,7 @@ class MetalMarlinModel:
 
     def create_kv_cache(self, batch_size: int = 1) -> KVCacheTorch:
         """Create empty KV cache structure."""
+        logger.debug("create_kv_cache called with batch_size=%s", batch_size)
         require_torch()
 
         from ..kv_cache import CacheConfig as CacheConfigTorch
@@ -779,6 +804,7 @@ class MetalMarlinModel:
 
     def info(self) -> dict[str, Any]:
         """Return model information."""
+        logger.debug("info called")
         return {
             "model_type": self.config.get("model_type", "unknown"),
             "hidden_size": self.hidden_size,
@@ -795,6 +821,7 @@ def _load_new_checkpoint(
     device: str,
     **kwargs: Any,
 ) -> tuple[Any, Any]:
+    logger.info("_load_new_checkpoint called with path=%s, device=%s", path, device)
     from .pipeline_v2 import TransformersMarlinPipeline
 
     pipeline = TransformersMarlinPipeline.from_pretrained(
@@ -819,6 +846,7 @@ class MarlinPipeline:
         tokenizer: Any | None = None,
         device: str | None = "mps",
     ) -> None:
+        logger.debug("initializing %s with model=%s, tokenizer=%s, device=%s", type(self).__name__, model, tokenizer, device)
         warnings.warn(
             "MarlinPipeline is deprecated. Use TransformersMarlinPipeline instead.",
             DeprecationWarning,
@@ -844,6 +872,7 @@ class MarlinPipeline:
     @property
     def device(self) -> str:
         """Return the active device for this pipeline."""
+        logger.debug("device called")
         return getattr(self._pipeline, "device", get_device())
 
     @classmethod
@@ -855,6 +884,7 @@ class MarlinPipeline:
         **kwargs: Any,
     ) -> MarlinPipeline:
         """Load from quantized checkpoint directory or HF model id."""
+        logger.debug("from_pretrained called with path=%s, quant_type=%s, device=%s", path, quant_type, device)
         if device is None:
             device = get_device()
         if quant_type not in {"fp4", "int4"}:
@@ -893,6 +923,7 @@ class MarlinPipeline:
         top_p: float = 1.0,
     ) -> Iterator[str]:
         """Yield tokens for streaming responses."""
+        logger.debug("stream_generate called with prompt=%s, max_tokens=%s, temperature=%s", prompt, max_tokens, temperature)
         result = self(
             prompt, max_tokens=max_tokens, temperature=temperature, top_p=top_p, stream=True
         )
@@ -900,6 +931,7 @@ class MarlinPipeline:
 
     def info(self) -> ModelInfo:
         """Get model information."""
+        logger.debug("info called")
         config = getattr(self.model, "config", None)
         if config is None:
             return ModelInfo(
@@ -964,6 +996,7 @@ def load_quantized_model(
     Returns:
         (model, tokenizer) tuple
     """
+    logger.info("load_quantized_model called with model_path=%s, device=%s", model_path, device)
     from transformers import AutoTokenizer
 
     model = MetalMarlinModel.from_quantized(model_path, device=device)
@@ -977,6 +1010,7 @@ def chat(
     system_prompt: str = "You are a helpful assistant.",
 ) -> None:
     """Interactive chat interface."""
+    logger.debug("chat called with model_path=%s, system_prompt=%s", model_path, system_prompt)
     require_torch()
 
     pipe = MarlinPipeline.from_pretrained(model_path)

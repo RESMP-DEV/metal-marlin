@@ -6,6 +6,7 @@ used by both KVCacheTorch and MLAKVCache to avoid code duplication.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from ._compat import require_torch, torch
@@ -14,12 +15,16 @@ if TYPE_CHECKING:
     import torch as torch_typing
 
 
+
+logger = logging.getLogger(__name__)
+
 # FP8 E4M3 format constant
 FP8_E4M3_MAX: float = 448.0
 
 
 def _get_torch_dtype(dtype_str: str) -> torch.dtype:
     """Convert dtype string to PyTorch dtype."""
+    logger.debug("_get_torch_dtype called with dtype_str=%s", dtype_str)
     require_torch("dtype conversion")
     
     # Use a module-level cache to avoid recreating the mapping
@@ -55,6 +60,7 @@ def vectorized_pack(quantized_reshaped: torch_typing.Tensor) -> torch_typing.Ten
     Returns:
         Packed uint32 tensor [...]
     """
+    logger.info("vectorized_pack called with quantized_reshaped=%s", quantized_reshaped)
     require_torch("vectorized_pack")
     device = quantized_reshaped.device
     
@@ -77,6 +83,7 @@ def vectorized_unpack(packed: torch_typing.Tensor, scale: torch_typing.Tensor) -
     Returns:
         Unpacked float16 tensor [..., dim * 8]
     """
+    logger.info("vectorized_unpack called with packed=%s, scale=%s", packed, scale)
     require_torch("vectorized_unpack")
     device = packed.device
     shifts = torch.arange(0, 32, 4, device=device, dtype=torch.int32)  # [8]
@@ -110,6 +117,7 @@ def quantize_fp4(
         packed_uint32: Packed uint32 tensor [..., dim // 8]
         scales_fp16: Scale factors [..., 1]
     """
+    logger.info("quantize_fp4 called with tensor=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_dtype)
     require_torch("quantize_fp4")
     
     # Compute scale based on max absolute value
@@ -152,6 +160,7 @@ def dequantize_fp4(
     Returns:
         Dequantized float16 tensor [..., dim]
     """
+    logger.info("dequantize_fp4 called with packed=%s, scale=%s", packed, scale)
     require_torch("dequantize_fp4")
     return vectorized_unpack(packed, scale)
 
@@ -172,6 +181,7 @@ def quantize_fp8(
         quantized: uint8 tensor with FP8 values
         scale: Scale factors
     """
+    logger.info("quantize_fp8 called with tensor=%s, scale_method=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_method, scale_dtype)
     require_torch("quantize_fp8")
     
     if scale_method == "channel":
@@ -214,6 +224,7 @@ def dequantize_fp8(
     Returns:
         Dequantized tensor
     """
+    logger.info("dequantize_fp8 called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     require_torch("dequantize_fp8")
     signed = quantized.float() - 128.0
     return (signed / 127.0 * FP8_E4M3_MAX * scale.float()).to(output_dtype)
@@ -235,6 +246,7 @@ def quantize_int8(
         quantized: int8 tensor
         scale: Scale factors
     """
+    logger.info("quantize_int8 called with tensor=%s, scale_method=%s, scale_dtype=%s", getattr(tensor, "shape", tensor), scale_method, scale_dtype)
     require_torch("quantize_int8")
     
     INT8_MAX = 127.0
@@ -277,6 +289,7 @@ def dequantize_int8(
     Returns:
         Dequantized tensor
     """
+    logger.info("dequantize_int8 called with quantized=%s, scale=%s, output_dtype=%s", quantized, scale, output_dtype)
     require_torch("dequantize_int8")
     return (quantized.float() * scale.float()).to(output_dtype)
 

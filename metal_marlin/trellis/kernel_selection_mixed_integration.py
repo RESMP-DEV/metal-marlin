@@ -62,9 +62,13 @@ Usage Example:
 """
 
 from __future__ import annotations
+import logging
 
 import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 def get_expert_bits(
     expert_ids: torch.Tensor,

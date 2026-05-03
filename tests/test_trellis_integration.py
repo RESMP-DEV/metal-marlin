@@ -15,6 +15,7 @@ Verify: cd contrib/metal_marlin && uv run pytest tests/test_trellis_integration.
 from __future__ import annotations
 
 import gc
+import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,6 +27,9 @@ from metal_marlin._compat import HAS_MPS
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 # Model path for integration tests
 MODEL_PATH = "models/GLM-4.7-Flash-Trellis-3bpw"
@@ -44,6 +48,7 @@ TEST_PROMPT = "The capital of France is"
 
 def get_mps_memory_gb() -> float:
     """Get current MPS allocated memory in GB."""
+    logger.debug("get_mps_memory_gb called")
     if not HAS_MPS:
         return 0.0
     return torch.mps.current_allocated_memory() / (1024**3)
@@ -51,6 +56,7 @@ def get_mps_memory_gb() -> float:
 
 def get_mps_driver_memory_gb() -> float:
     """Get MPS driver allocated memory in GB."""
+    logger.debug("get_mps_driver_memory_gb called")
     if not HAS_MPS:
         return 0.0
     return torch.mps.driver_allocated_memory() / (1024**3)
@@ -58,6 +64,7 @@ def get_mps_driver_memory_gb() -> float:
 
 def clear_mps_memory() -> None:
     """Clear MPS memory cache and run garbage collection."""
+    logger.debug("clear_mps_memory called")
     gc.collect()
     if HAS_MPS:
         torch.mps.empty_cache()
@@ -67,6 +74,7 @@ def clear_mps_memory() -> None:
 @pytest.fixture(scope="module")
 def model_available() -> bool:
     """Check if test model is available."""
+    logger.debug("model_available called")
     if not Path(MODEL_PATH).exists():
         pytest.skip(f"Model not found: {MODEL_PATH}")
     return True
@@ -75,6 +83,7 @@ def model_available() -> bool:
 @pytest.fixture(scope="module")
 def mps_available() -> bool:
     """Check if MPS is available."""
+    logger.debug("mps_available called")
     if not HAS_MPS:
         pytest.skip("MPS not available (requires Apple Silicon)")
     return True
@@ -86,6 +95,7 @@ def trellis_model(model_available: bool, mps_available: bool):
 
     This fixture is module-scoped to avoid reloading for each test.
     """
+    logger.debug("trellis_model called with model_available=%s, mps_available=%s", model_available, mps_available)
     try:
         from metal_marlin.trellis.lm import TrellisForCausalLM
     except ImportError:
@@ -106,6 +116,7 @@ def trellis_model(model_available: bool, mps_available: bool):
 @pytest.fixture(scope="module")
 def tokenizer(model_available: bool):
     """Load tokenizer for the model."""
+    logger.debug("tokenizer called with model_available=%s", model_available)
     try:
         from transformers import AutoTokenizer
     except ImportError:
@@ -130,6 +141,7 @@ def tokenizer(model_available: bool):
 @pytest.fixture(scope="module")
 def generator(trellis_model, tokenizer):
     """Create TrellisGenerator instance."""
+    logger.debug("generator called with trellis_model=%s, tokenizer=%s", trellis_model, tokenizer)
     try:
         from metal_marlin.trellis.generate import TrellisGenerator
     except ImportError:
@@ -149,6 +161,7 @@ class TestTrellisIntegration:
         mps_available: bool,
     ):
         """Test 1: Model loads from GLM-4.7-Flash-Trellis-3bpw successfully."""
+        logger.info("running test_model_loads_successfully")
         try:
             from metal_marlin.trellis.lm import TrellisForCausalLM
         except ImportError:
@@ -183,6 +196,7 @@ class TestTrellisIntegration:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test 2: Memory stays under 8GB (4GB model + 4GB KV cache)."""
+        logger.info("running test_memory_under_8gb")
         try:
             from metal_marlin.trellis.generate import GenerationConfig, TrellisGenerator
         except ImportError:
@@ -233,6 +247,7 @@ class TestTrellisIntegration:
     ):
         """Test 3: Verify no NaN in logits during forward pass."""
         # Tokenize test prompt
+        logger.info("running test_no_nan_in_logits")
         inputs = tokenizer(TEST_PROMPT, return_tensors="pt").to("mps")
         input_ids = inputs["input_ids"]
 
@@ -262,6 +277,7 @@ class TestTrellisIntegration:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test 4: Verify tokens decode to readable text."""
+        logger.info("running test_tokens_decode_to_readable_text")
         try:
             from metal_marlin.trellis.generate import GenerationConfig
         except ImportError:
@@ -314,6 +330,7 @@ class TestTrellisIntegration:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test 5: Verify TPS > 10 for decode phase."""
+        logger.info("running test_decode_tps_above_threshold")
         try:
             from metal_marlin.trellis.generate import GenerationConfig
         except ImportError:
@@ -370,6 +387,7 @@ class TestTrellisIntegrationEdgeCases:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test that multiple generations don't leak memory."""
+        logger.info("running test_multiple_generations_stable_memory")
         try:
             from metal_marlin.trellis.generate import GenerationConfig
         except ImportError:
@@ -409,6 +427,7 @@ class TestTrellisIntegrationEdgeCases:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test longer generation (50 tokens) for stability."""
+        logger.info("running test_longer_generation_stable")
         try:
             from metal_marlin.trellis.generate import GenerationConfig
         except ImportError:
@@ -440,6 +459,7 @@ class TestTrellisIntegrationEdgeCases:
         tokenizer: PreTrainedTokenizer,
     ):
         """Test greedy decoding produces deterministic output."""
+        logger.info("running test_greedy_deterministic")
         try:
             from metal_marlin.trellis.generate import GenerationConfig
         except ImportError:
@@ -472,6 +492,7 @@ class TestTrellisModelConfig:
         mps_available: bool,
     ):
         """Verify model config matches GLM-4.7-Flash specifications."""
+        logger.info("running test_config_matches_expected")
         try:
             from metal_marlin.trellis.config import TrellisModelConfig
         except ImportError:
@@ -502,6 +523,7 @@ class TestTrellisModelConfig:
         mps_available: bool,
     ):
         """Verify MoE layer detection is correct."""
+        logger.info("running test_moe_layer_detection")
         try:
             from metal_marlin.trellis.config import TrellisModelConfig
         except ImportError:

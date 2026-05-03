@@ -34,6 +34,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -48,6 +49,9 @@ if HAS_TORCH:
 elif TYPE_CHECKING:
     import torch
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TileKey:
@@ -91,6 +95,7 @@ class CacheEntry:
 
     def touch(self) -> None:
         """Update access statistics."""
+        logger.debug("touch called")
         self.access_count += 1
         self.last_access = time.time()
 
@@ -107,12 +112,14 @@ class ExpertStats:
     @property
     def activation_rate(self) -> float:
         """Fraction of tokens that activated this expert."""
+        logger.debug("activation_rate called")
         if self.total_tokens == 0:
             return 0.0
         return self.activation_count / self.total_tokens
 
     def record_activation(self, count: int = 1) -> None:
         """Record expert activation(s)."""
+        logger.debug("record_activation called with count=%s", count)
         self.activation_count += count
         self.recent_window.append(count)
         # Keep only last 100 windows
@@ -121,11 +128,13 @@ class ExpertStats:
 
     def record_batch(self, batch_size: int) -> None:
         """Record a batch of tokens for rate calculation."""
+        logger.debug("record_batch called with batch_size=%s", batch_size)
         self.total_tokens += batch_size
 
     @property
     def recent_rate(self) -> float:
         """Recent activation rate (last 100 windows)."""
+        logger.debug("recent_rate called")
         if not self.recent_window:
             return 0.0
         return sum(self.recent_window) / len(self.recent_window)
@@ -144,11 +153,13 @@ class LayerStats:
     @property
     def hit_rate(self) -> float:
         """Cache hit rate for this layer."""
+        logger.debug("hit_rate called")
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / total if total > 0 else 0.0
 
     def get_expert_stats(self, expert_id: int) -> ExpertStats:
         """Get or create stats for an expert."""
+        logger.debug("get_expert_stats called with expert_id=%s", expert_id)
         if expert_id not in self.expert_stats:
             self.expert_stats[expert_id] = ExpertStats(expert_id=expert_id)
         return self.expert_stats[expert_id]
@@ -163,6 +174,7 @@ class LayerStats:
         Returns:
             List of expert IDs sorted by activation rate (descending)
         """
+        logger.debug("get_hot_experts called with threshold=%s, top_k=%s", threshold, top_k)
         hot = [
             (eid, stats.recent_rate)
             for eid, stats in self.expert_stats.items()
@@ -178,6 +190,7 @@ class LayerStats:
 
 def _tensor_nbytes(tensor: torch.Tensor) -> int:
     """Get the size of a tensor in bytes."""
+    logger.debug("_tensor_nbytes called with tensor=%s", tensor)
     return tensor.numel() * tensor.element_size()
 
 
@@ -211,6 +224,7 @@ class ExpertCache:
         enable_prefetch: bool = True,
         prefetch_k: int = 4,
     ):
+        logger.debug("initializing %s with num_experts=%s, num_layers=%s, cache_size_mb=%s, tile_shape=%s, enable_prefetch=%s", type(self).__name__, num_experts, num_layers, cache_size_mb, tile_shape, enable_prefetch)
         require_torch("ExpertCache")
 
         self.num_experts = num_experts
@@ -261,6 +275,7 @@ class ExpertCache:
         Returns:
             Dequantized tile as torch.Tensor
         """
+        logger.debug("get_expert_tile called with layer_idx=%s, expert_id=%s, tile_idx=%s", layer_idx, expert_id, tile_idx)
         key = TileKey(layer_idx, expert_id, tile_idx)
 
         with self._lock:
@@ -325,6 +340,7 @@ class ExpertCache:
 
         Must be called with lock held.
         """
+        logger.debug("_evict_one called")
         if not self._cache:
             return
 
@@ -349,6 +365,7 @@ class ExpertCache:
             layer_idx: Transformer layer index
             expert_ids: Tensor of activated expert IDs, shape [batch, top_k]
         """
+        logger.debug("record_expert_activation called with layer_idx=%s, expert_ids=%s", layer_idx, expert_ids)
         with self._lock:
             layer_stats = self._layer_stats[layer_idx]
             batch_size = expert_ids.shape[0]
@@ -382,6 +399,7 @@ class ExpertCache:
         Returns:
             List of expert IDs to prefetch, sorted by likelihood
         """
+        logger.debug("get_prefetch_candidates called with layer_idx=%s", layer_idx)
         with self._lock:
             layer_stats = self._layer_stats[layer_idx]
             return layer_stats.get_hot_experts(
@@ -407,6 +425,7 @@ class ExpertCache:
             tile_indices: List of tile indices to prefetch
             dequant_fn: Function that takes tile_idx and returns dequantized data
         """
+        logger.debug("prefetch_expert_tiles called with layer_idx=%s, expert_id=%s, tile_indices=%s", layer_idx, expert_id, tile_indices)
         if not self.enable_prefetch:
             return
 
@@ -429,6 +448,7 @@ class ExpertCache:
 
         Processes up to max_items from the queue to avoid blocking too long.
         """
+        logger.debug("_process_prefetch_queue called with max_items=%s", max_items)
         items_to_process = []
 
         with self._lock:
@@ -463,6 +483,7 @@ class ExpertCache:
         Returns:
             Number of tiles evicted
         """
+        logger.debug("invalidate_expert called with layer_idx=%s, expert_id=%s", layer_idx, expert_id)
         with self._lock:
             keys_to_remove = [
                 key
@@ -485,6 +506,7 @@ class ExpertCache:
         Returns:
             Number of tiles evicted
         """
+        logger.debug("invalidate_layer called with layer_idx=%s", layer_idx)
         with self._lock:
             keys_to_remove = [key for key in self._cache if key.layer_idx == layer_idx]
 
@@ -496,6 +518,7 @@ class ExpertCache:
 
     def clear(self) -> None:
         """Clear all cached entries."""
+        logger.debug("clear called")
         with self._lock:
             self._cache.clear()
             self._current_size = 0
@@ -510,6 +533,7 @@ class ExpertCache:
         Returns:
             Number of entries evicted
         """
+        logger.debug("resize called with new_size_mb=%s", new_size_mb)
         new_size_bytes = new_size_mb * 1024 * 1024
         evicted = 0
 
@@ -525,17 +549,20 @@ class ExpertCache:
     @property
     def hit_rate(self) -> float:
         """Overall cache hit rate."""
+        logger.debug("hit_rate called")
         total = self._total_hits + self._total_misses
         return self._total_hits / total if total > 0 else 0.0
 
     @property
     def size_mb(self) -> float:
         """Current cache size in megabytes."""
+        logger.debug("size_mb called")
         return self._current_size / (1024 * 1024)
 
     @property
     def num_entries(self) -> int:
         """Number of cached entries."""
+        logger.debug("num_entries called")
         return len(self._cache)
 
     def get_stats(self) -> dict:
@@ -548,6 +575,7 @@ class ExpertCache:
             - Memory usage
             - Expert activation patterns
         """
+        logger.debug("get_stats called")
         with self._lock:
             layer_stats = {}
             for layer_idx, stats in self._layer_stats.items():
@@ -613,6 +641,7 @@ class TileCoordinator:
         weight_shape: tuple[int, int],
         tile_shape: tuple[int, int] = (64, 64),
     ):
+        logger.debug("initializing %s with weight_shape=%s, tile_shape=%s", type(self).__name__, weight_shape, tile_shape)
         self.weight_shape = weight_shape
         self.tile_shape = tile_shape
 
@@ -622,12 +651,14 @@ class TileCoordinator:
 
     def tile_to_coords(self, tile_idx: int) -> tuple[int, int]:
         """Convert linear tile index to (row_tile, col_tile) coordinates."""
+        logger.debug("tile_to_coords called with tile_idx=%s", tile_idx)
         row_tile = tile_idx // self.num_col_tiles
         col_tile = tile_idx % self.num_col_tiles
         return row_tile, col_tile
 
     def coords_to_tile(self, row_tile: int, col_tile: int) -> int:
         """Convert (row_tile, col_tile) coordinates to linear tile index."""
+        logger.debug("coords_to_tile called with row_tile=%s, col_tile=%s", row_tile, col_tile)
         return row_tile * self.num_col_tiles + col_tile
 
     def tile_bounds(self, tile_idx: int) -> tuple[int, int, int, int]:
@@ -636,6 +667,7 @@ class TileCoordinator:
         Returns:
             (row_start, row_end, col_start, col_end) - half-open intervals
         """
+        logger.debug("tile_bounds called with tile_idx=%s", tile_idx)
         row_tile, col_tile = self.tile_to_coords(tile_idx)
 
         row_start = row_tile * self.tile_shape[0]
@@ -648,6 +680,7 @@ class TileCoordinator:
 
     def all_tile_indices(self) -> list[int]:
         """Get list of all tile indices."""
+        logger.debug("all_tile_indices called")
         return list(range(self.num_tiles))
 
     def tiles_for_output_range(
@@ -666,6 +699,7 @@ class TileCoordinator:
         Returns:
             List of tile indices that cover the output range
         """
+        logger.debug("tiles_for_output_range called with out_start=%s, out_end=%s", out_start, out_end)
         start_tile_row = out_start // self.tile_shape[0]
         end_tile_row = (out_end - 1) // self.tile_shape[0] + 1
 
@@ -696,6 +730,7 @@ def create_moe_cache(
         Configured ExpertCache instance
     """
     # Extract num_layers
+    logger.debug("create_moe_cache called with config=%s, cache_size_mb=%s", config, cache_size_mb)
     num_layers = (
         config.get("num_hidden_layers")
         or config.get("n_layer")

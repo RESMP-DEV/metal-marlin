@@ -7,6 +7,7 @@ Standalone script - no AlphaHENG dependencies.
 """
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -18,6 +19,9 @@ except ImportError:
     print("  pip install huggingface_hub")
     sys.exit(1)
 
+
+
+logger = logging.getLogger(__name__)
 
 # Common Trellis model mappings
 TRELLIS_MODELS = {
@@ -49,6 +53,7 @@ ALL_PRESETS = {**TRELLIS_MODELS, **MODEL_PRESETS}
 def get_cache_dir():
     """Get default cache directory."""
     # Use HF_HOME if set, otherwise ~/.cache/huggingface
+    logger.debug("get_cache_dir called")
     cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
     return cache_dir
 
@@ -75,6 +80,7 @@ def download_model(
     Returns:
         Path to downloaded model directory
     """
+    logger.info("download_model called with model_id=%s, cache_dir=%s, token=%s, allow_patterns=%s", model_id, cache_dir, token, allow_patterns)
     if cache_dir is None:
         cache_dir = get_cache_dir()
 
@@ -130,6 +136,7 @@ def download_model(
 
 def list_presets():
     """List available model presets."""
+    logger.debug("list_presets called")
     print("📋 Available model presets:")
     print("\nTrellis models:")
     for name, repo in TRELLIS_MODELS.items():
@@ -149,6 +156,7 @@ def download_file(
     token: str | None = None,
 ) -> Path:
     """Download a single file from a repository."""
+    logger.info("download_file called with repo_id=%s, filename=%s, cache_dir=%s, token=%s", repo_id, filename, cache_dir, token)
     if cache_dir is None:
         cache_dir = get_cache_dir()
 
@@ -170,6 +178,7 @@ def download_file(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Download HuggingFace models for Metal Marlin",
         formatter_class=argparse.RawDescriptionHelpFormatter,

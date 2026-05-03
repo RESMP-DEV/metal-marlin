@@ -14,6 +14,7 @@ Example:
 """
 
 from __future__ import annotations
+import logging
 
 from ..kv_cache import CompressedKVCache, TrellisKVCache
 
@@ -81,6 +82,9 @@ from .packing import (
     unpack_indices_vectorized,
     unpack_trellis_indices,
 )
+
+
+logger = logging.getLogger(__name__)
 
 # Public compatibility aliases.
 CausalLMOutput = _CausalLMOutput

@@ -1,5 +1,6 @@
 """Benchmark FP4 quantization: NumPy vs Metal."""
 
+import logging
 import time
 
 import numpy as np
@@ -7,6 +8,7 @@ import numpy as np
 
 def bench_quantize(shape, group_size, backend, iterations=10):
     """Benchmark a quantization backend."""
+    logger.info("bench_quantize starting with shape=%s, group_size=%s, backend=%s, iterations=%s", shape, group_size, backend, iterations)
     weight = np.random.randn(*shape).astype(np.float32) * 0.1
 
     # Warmup
@@ -47,3 +49,6 @@ if __name__ == "__main__":
 
         speedup = time_numpy / time_metal
         print(f"{shape}: NumPy={time_numpy*1000:.2f}ms, Metal={time_metal*1000:.2f}ms, {speedup:.1f}x speedup")
+
+
+logger = logging.getLogger(__name__)

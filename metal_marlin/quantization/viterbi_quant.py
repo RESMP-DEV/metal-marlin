@@ -9,6 +9,7 @@ Uses Metal GPU acceleration when available (Apple Silicon), falls back to CPU.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 import numpy as np
 import torch
@@ -35,8 +36,12 @@ except ImportError:
     pass
 
 
+
+logger = logging.getLogger(__name__)
+
 def _get_metal_lib():
     """Get or create Metal library singleton."""
+    logger.debug("_get_metal_lib called")
     global _metal_lib
     if _metal_lib is None and _HAS_METAL:
         _metal_lib = get_default_library()
@@ -77,6 +82,7 @@ class TrellisCodebook:
         Returns:
             Array of quantization levels
         """
+        logger.debug("get_grid called")
         if self.grid is None:
             raise ValueError("Grid not initialized")
         return self.grid
@@ -101,6 +107,7 @@ def quantize_tile_viterbi(
         indices: [256] quantized indices (uint8 for packed storage)
         dequantized: [16, 16] reconstructed tile
     """
+    logger.info("quantize_tile_viterbi called with tile=%s, codebook=%s, scale=%s", tile, codebook, scale)
     grid = codebook.get_grid()
     n_states = len(grid)
 
@@ -159,6 +166,7 @@ def quantize_tiles_parallel(
         all_dequant: [n_tiles, 16, 16] reconstructed tiles
     """
     # Extract data from tiles (allows object list or raw array)
+    logger.info("quantize_tiles_parallel called with tiles=%s, codebook=%s, scales=%s, max_workers=%s", tiles, codebook, scales, max_workers)
     tiles_np = np.stack([t.data.reshape(256) for t in tiles], axis=0)
     return quantize_tiles_fast(tiles_np, codebook, scales, max_workers, use_metal)
 
@@ -187,6 +195,7 @@ def quantize_tiles_fast(
         all_dequant: [n_tiles, 16, 16] reconstructed tiles
     """
     # Reshape to [n_tiles, 256] if needed
+    logger.info("quantize_tiles_fast called with tiles_data=%s, codebook=%s, scales=%s, max_workers=%s", tiles_data, codebook, scales, max_workers)
     if tiles_data.ndim == 3:
         n_tiles = tiles_data.shape[0]
         tiles_flat = tiles_data.reshape(n_tiles, 256)
@@ -265,6 +274,7 @@ def quantize_tile_greedy(
         indices: [256] quantized indices
         dequantized: [16, 16] reconstructed tile
     """
+    logger.info("quantize_tile_greedy called with tile=%s, codebook=%s, scale=%s", tile, codebook, scale)
     grid = codebook.get_grid()
 
     # Flatten and normalize
@@ -295,4 +305,5 @@ def compute_quantization_error(
     Returns:
         Mean squared error
     """
+    logger.info("compute_quantization_error called with original=%s, dequantized=%s", original, dequantized)
     return float(np.mean((original - dequantized) ** 2))

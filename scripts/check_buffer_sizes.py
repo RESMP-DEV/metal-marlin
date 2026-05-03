@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Check weight buffer sizes and indexing."""
 
+import logging
 import torch
 
 from metal_marlin.trellis.testing import create_mock_moe_mlp
+
+
+logger = logging.getLogger(__name__)
 
 torch.manual_seed(0)
 moe = create_mock_moe_mlp(

@@ -27,9 +27,11 @@ def build_moe_exports(
 ) -> dict[str, Callable[..., Any]]:
     """Build extracted MoE exports using helpers provided by the kernel facades."""
 
+    logger.info("build_moe_exports starting")
     def _flatten_moe_hidden(
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, int, int, tuple[int, ...]]:
+        logger.debug("_flatten_moe_hidden called with hidden_states=%s", hidden_states)
         if hidden_states.dim() < 2:
             raise ValueError("hidden_states must be at least 2D [tokens, hidden]")
         orig_shape = hidden_states.shape
@@ -51,6 +53,7 @@ def build_moe_exports(
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused shared+routed expert aggregation with FP16 weights."""
+        logger.debug("moe_shared_expert_fused called with hidden_states=%s, shared_expert_w=%s, routed_expert_w=%s", hidden_states, shared_expert_w, routed_expert_w)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
@@ -173,6 +176,7 @@ def build_moe_exports(
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused shared+routed expert aggregation with FP4 weights."""
+        logger.debug("moe_shared_expert_fused_fp4 called with hidden_states=%s, shared_expert_packed=%s, shared_expert_scales=%s", hidden_states, shared_expert_packed, shared_expert_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
@@ -329,6 +333,7 @@ def build_moe_exports(
         router_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Scatter-style shared expert aggregation for small token counts."""
+        logger.debug("moe_shared_expert_scatter called with hidden_states=%s, shared_expert_w=%s, routed_expert_w=%s", hidden_states, shared_expert_w, routed_expert_w)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
@@ -442,6 +447,7 @@ def build_moe_exports(
         shared_prob: float = 1.0,
     ) -> torch.Tensor:
         """Shared expert forward pass with FP4 quantized weights."""
+        logger.debug("moe_shared_expert_fp4 called with hidden_states=%s, gate_up_packed=%s, gate_up_scales=%s", hidden_states, gate_up_packed, gate_up_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
@@ -499,6 +505,7 @@ def build_moe_exports(
             out_dim: int,
             prob: float,
         ) -> torch.Tensor:
+            logger.debug("_dispatch_shared_gemm called with activations=%s, weights=%s, scales=%s", activations, weights, scales)
             out = torch.zeros(
                 (num_tokens, out_dim), dtype=torch.float16, device="mps"
             )
@@ -579,6 +586,7 @@ def build_moe_exports(
         group_size: int = 128,
     ) -> torch.Tensor:
         """MoE expert GEMM with FP4-quantized expert weights."""
+        logger.debug("moe_expert_gemm_fp4 called with activations=%s, expert_weights=%s, scales=%s", activations, expert_weights, scales)
         require_mps()
 
         orig_dtype = activations.dtype
@@ -721,6 +729,7 @@ def build_moe_exports(
         top_k: int = 2,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """MoE router with top-k expert selection."""
+        logger.debug("moe_router_topk called with hidden=%s, router_weights=%s, top_k=%s", hidden, router_weights, top_k)
         logits = torch.matmul(hidden, router_weights)
         probs = torch.softmax(logits, dim=-1)
         topk_probs, topk_ids = torch.topk(probs, k=top_k, dim=-1)
@@ -742,6 +751,7 @@ def build_moe_exports(
         group_size: int = 128,
     ) -> torch.Tensor:
         """Fused routed+shared expert decode with FP4 weights."""
+        logger.debug("moe_fused_dispatch_shared_fp4 called with hidden_states=%s, shared_gate_up_packed=%s, shared_gate_up_scales=%s", hidden_states, shared_gate_up_packed, shared_gate_up_scales)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(
@@ -767,6 +777,7 @@ def build_moe_exports(
         top_k = expert_ids.shape[1]
 
         def _prepare_tensor(t: torch.Tensor, dtype: torch.dtype = torch.float16) -> torch.Tensor:
+            logger.debug("_prepare_tensor called with t=%s, dtype=%s", t, dtype)
             tensor = t.contiguous()
             if tensor.dtype != dtype:
                 tensor = tensor.to(dtype)
@@ -851,6 +862,7 @@ def build_moe_exports(
         group_size: int = 128,
     ) -> torch.Tensor:
         """Add the shared expert contribution to an existing MoE output tensor."""
+        logger.debug("moe_add_shared_expert_fp4 called with hidden_states=%s, moe_output=%s, shared_gate_up_packed=%s", hidden_states, moe_output, shared_gate_up_packed)
         require_mps()
 
         hidden_2d, num_tokens, hidden_dim, orig_shape = _flatten_moe_hidden(

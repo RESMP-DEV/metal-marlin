@@ -27,6 +27,7 @@ Usage:
     # Forward pass
     llm_embeddings = projector(vision_features)  # [batch, num_patches, llm_hidden]
 """
+import logging
 
 from .encoder_quant import (
     VisionCalibrationConfig,
@@ -49,6 +50,9 @@ from .vision_metal import (
     VisionMetal,
     preprocess_for_vit,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "VisionProjector",

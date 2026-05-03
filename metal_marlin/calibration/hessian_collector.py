@@ -38,6 +38,7 @@ Reference:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -45,6 +46,9 @@ import numpy as np
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
+
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class HessianCollector:
@@ -101,6 +105,7 @@ class HessianCollector:
         Raises:
             ValueError: If x.shape[-1] != in_features.
         """
+        logger.debug("accumulate called with x=%s", x)
         x = np.asarray(x)
 
         # Validate feature dimension
@@ -139,6 +144,7 @@ class HessianCollector:
         Raises:
             ValueError: If no samples have been accumulated.
         """
+        logger.debug("get_hessian called with damp=%s", damp)
         if self.n_samples == 0:
             raise ValueError(
                 "No samples accumulated. Call accumulate() with calibration data first."
@@ -165,6 +171,7 @@ class HessianCollector:
         Returns:
             Raw Hessian accumulator as float64.
         """
+        logger.debug("get_raw_hessian called")
         return self.H.copy()
 
     def merge(self, other: HessianCollector) -> None:
@@ -179,6 +186,7 @@ class HessianCollector:
         Raises:
             ValueError: If in_features don't match.
         """
+        logger.debug("merge called with other=%s", other)
         if other.in_features != self.in_features:
             raise ValueError(
                 f"Cannot merge collectors with different in_features: "
@@ -190,17 +198,20 @@ class HessianCollector:
 
     def reset(self) -> None:
         """Clear accumulated Hessian and sample count."""
+        logger.debug("reset called")
         self.H.fill(0)
         self.n_samples = 0
 
     @property
     def memory_bytes(self) -> int:
         """Memory used by Hessian accumulator in bytes."""
+        logger.debug("memory_bytes called")
         return self.H.nbytes
 
     @property
     def memory_mb(self) -> float:
         """Memory used by Hessian accumulator in megabytes."""
+        logger.debug("memory_mb called")
         return self.memory_bytes / (1024 * 1024)
 
 
@@ -251,6 +262,7 @@ class HessianManager:
         Args:
             default_damp: Default damping factor for Hessian retrieval.
         """
+        logger.debug("initializing %s with default_damp=%s", type(self).__name__, default_damp)
         self.collectors: dict[str, HessianCollector] = {}
         self.default_damp = default_damp
         self._hooks: list[tuple[Any, Any]] = []  # (module, hook_handle)
@@ -265,6 +277,7 @@ class HessianManager:
         Raises:
             ValueError: If layer with this name already registered.
         """
+        logger.debug("register_layer called with name=%s, in_features=%s", name, in_features)
         if name in self.collectors:
             raise ValueError(
                 f"Layer {name!r} already registered. "
@@ -279,6 +292,7 @@ class HessianManager:
         Args:
             name: Layer name to remove.
         """
+        logger.debug("unregister_layer called with name=%s", name)
         self.collectors.pop(name, None)
 
     def accumulate_layer(self, name: str, x: NDArray[np.floating]) -> None:
@@ -291,6 +305,7 @@ class HessianManager:
         Raises:
             KeyError: If layer not registered.
         """
+        logger.debug("accumulate_layer called with name=%s, x=%s", name, x)
         if name not in self.collectors:
             raise KeyError(
                 f"Layer {name!r} not registered. "
@@ -313,6 +328,7 @@ class HessianManager:
         Raises:
             KeyError: If layer not registered.
         """
+        logger.debug("get_hessian called with name=%s, damp=%s", name, damp)
         if name not in self.collectors:
             raise KeyError(f"Layer {name!r} not registered.")
 
@@ -328,6 +344,7 @@ class HessianManager:
         Returns:
             Dict mapping layer names to damped Hessians.
         """
+        logger.debug("get_all_hessians called with damp=%s", damp)
         damp = damp if damp is not None else self.default_damp
         return {
             name: collector.get_hessian(damp=damp) for name, collector in self.collectors.items()
@@ -339,6 +356,7 @@ class HessianManager:
         Returns:
             Dict mapping layer names to sample counts.
         """
+        logger.debug("get_sample_counts called")
         return {name: c.n_samples for name, c in self.collectors.items()}
 
     def reset_layer(self, name: str) -> None:
@@ -347,11 +365,13 @@ class HessianManager:
         Args:
             name: Layer name to reset.
         """
+        logger.debug("reset_layer called with name=%s", name)
         if name in self.collectors:
             self.collectors[name].reset()
 
     def reset_all(self) -> None:
         """Reset all Hessian accumulators."""
+        logger.debug("reset_all called")
         for collector in self.collectors.values():
             collector.reset()
 
@@ -361,6 +381,7 @@ class HessianManager:
         Call this after calibration is complete to restore original
         model behavior.
         """
+        logger.debug("remove_hooks called")
         for module, hook_handle in self._hooks:
             try:
                 hook_handle.remove()
@@ -371,20 +392,24 @@ class HessianManager:
     @property
     def layer_names(self) -> list[str]:
         """List of registered layer names."""
+        logger.debug("layer_names called")
         return list(self.collectors.keys())
 
     @property
     def num_layers(self) -> int:
         """Number of registered layers."""
+        logger.debug("num_layers called")
         return len(self.collectors)
 
     @property
     def total_memory_mb(self) -> float:
         """Total memory used by all Hessian accumulators in MB."""
+        logger.debug("total_memory_mb called")
         return sum(c.memory_mb for c in self.collectors.values())
 
     def summary(self) -> str:
         """Return summary string of collection state."""
+        logger.debug("summary called")
         lines = [
             f"HessianManager: {self.num_layers} layers, {self.total_memory_mb:.1f} MB",
             "-" * 60,
@@ -417,6 +442,7 @@ def compute_hessian_from_activations(
         Damped Hessian as float32.
     """
     # Handle single array vs list
+    logger.debug("compute_hessian_from_activations called with activations=%s, damp=%s", activations, damp)
     if isinstance(activations, np.ndarray):
         activations = [activations]
 
@@ -448,6 +474,7 @@ def validate_hessian(H: NDArray[np.floating], rtol: float = 1e-5) -> dict[str, A
     Returns:
         Dict with validation results and diagnostics.
     """
+    logger.debug("validate_hessian called with H=%s, rtol=%s", H, rtol)
     H = np.asarray(H)
     n = H.shape[0]
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Profile forward pass to find bottlenecks."""
+import logging
 import sys
 import time
 import warnings
@@ -11,6 +12,9 @@ warnings.filterwarnings('ignore')
 print('Loading model...')
 from metal_marlin.trellis.model import TrellisForCausalLM
 from transformers import AutoTokenizer
+
+
+logger = logging.getLogger(__name__)
 
 model = TrellisForCausalLM.from_pretrained(
     'models/GLM-4.7-Flash-Marlin-MMFP4', device='mps')
@@ -27,7 +31,9 @@ for i, layer in enumerate(model.model.layers):
     if hasattr(layer.mlp, '_forward_grouped_fallback'):
         orig = layer.mlp._forward_grouped_fallback
         def make_wrapper(layer_idx, fn):
+            logger.debug("make_wrapper called with layer_idx=%s, fn=%s", layer_idx, fn)
             def wrapper(*args, **kwargs):
+                logger.debug("wrapper called")
                 start = time.perf_counter()
                 result = fn(*args, **kwargs)
                 torch.mps.synchronize()

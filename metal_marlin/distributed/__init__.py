@@ -30,6 +30,7 @@ Note:
     or external GPU configurations. For verification, a CPU+GPU split
     mode is available via `DeviceMesh.cpu_gpu_split()`.
 """
+import logging
 
 from .device_mesh import (
     Device,
@@ -51,6 +52,9 @@ from .tensor_parallel import (
     scatter,
     shard_tensor,
 )
+
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     # Device mesh

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -38,9 +39,13 @@ except Exception as exc:  # pragma: no cover - surfaces missing integration modu
     ) from exc
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture(scope="session")
 def glm47_model():
     """Load GLM-4.7-Flash via Transformers."""
+    logger.debug("glm47_model called")
     return AutoModelForCausalLM.from_pretrained(
         "zai-org/GLM-4.7-Flash",
         torch_dtype=torch.bfloat16,
@@ -51,6 +56,7 @@ def glm47_model():
 
 @pytest.fixture(scope="session")
 def glm47_tokenizer():
+    logger.debug("glm47_tokenizer called")
     return AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
 
 
@@ -58,6 +64,7 @@ class TestGLM47TransformersIntegration:
     @pytest.mark.slow
     def test_model_loads_via_transformers(self):
         """Verify GLM-4.7-Flash loads with transformers 5.0+."""
+        logger.info("running test_model_loads_via_transformers")
         try:
             from transformers import Glm4MoeLiteForCausalLM  # noqa: F401
         except Exception as exc:
@@ -71,6 +78,7 @@ class TestGLM47TransformersIntegration:
     @pytest.mark.slow
     def test_layer_replacement_preserves_structure(self, glm47_model):
         """Verify layer replacement doesn't break model structure."""
+        logger.info("running test_layer_replacement_preserves_structure")
         linear_count_before = sum(
             1 for m in glm47_model.modules() if isinstance(m, torch.nn.Linear)
         )
@@ -85,6 +93,7 @@ class TestGLM47TransformersIntegration:
     @pytest.mark.slow
     def test_moe_routing_still_works(self, glm47_model, glm47_tokenizer):
         """Verify MoE routing works after quantization."""
+        logger.info("running test_moe_routing_still_works")
         replace_linear_layers(glm47_model, bits=4)
 
         input_ids = glm47_tokenizer("Hello", return_tensors="pt").input_ids.to("mps")
@@ -98,6 +107,7 @@ class TestGLM47TransformersIntegration:
     @pytest.mark.slow
     def test_generation_produces_coherent_text(self, glm47_model, glm47_tokenizer):
         """Verify generation works end-to-end."""
+        logger.info("running test_generation_produces_coherent_text")
         replace_linear_layers(glm47_model, bits=4)
 
         prompt = "The capital of France is"

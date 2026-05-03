@@ -9,6 +9,7 @@ Tests cover:
 - Cache validity across multiple get_kv calls
 - All quantization modes (FP4, FP8, INT8)
 """
+import logging
 
 import pytest
 
@@ -19,6 +20,9 @@ from metal_marlin.kv_cache import (
     clear_pool,
     reset_pool_metrics,
 )
+
+
+logger = logging.getLogger(__name__)
 
 requires_torch = pytest.mark.skipif(not HAS_TORCH, reason="Requires PyTorch")
 requires_mps = pytest.mark.skipif(
@@ -33,11 +37,13 @@ class TestPreDequantCache:
 
     def setup_method(self):
         """Reset pool before each test."""
+        logger.info("setup_method starting")
         clear_pool()
         reset_pool_metrics()
 
     def test_pre_dequant_cache_fp8(self):
         """Test pre-dequantization cache with FP8 quantization."""
+        logger.info("running test_pre_dequant_cache_fp8")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -68,6 +74,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_int8(self):
         """Test pre-dequantization cache with INT8 quantization."""
+        logger.info("running test_pre_dequant_cache_int8")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -98,6 +105,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_fp4(self):
         """Test pre-dequantization cache with FP4 quantization."""
+        logger.info("running test_pre_dequant_cache_fp4")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -128,6 +136,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_invalidation_on_update(self):
         """Test that cache is invalidated when underlying data changes."""
+        logger.info("running test_pre_dequant_cache_invalidation_on_update")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -166,6 +175,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_per_layer(self):
         """Test that cache is maintained per-layer."""
+        logger.info("running test_pre_dequant_cache_per_layer")
         config = CacheConfigTorch(
             num_layers=3,
             num_heads=4,
@@ -198,6 +208,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_cleared_on_reset(self):
         """Test that cache is cleared on reset."""
+        logger.info("running test_pre_dequant_cache_cleared_on_reset")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -224,6 +235,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_update_returns_cached(self):
         """Test that update() also uses and returns cached dequantized values."""
+        logger.info("running test_pre_dequant_cache_update_returns_cached")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,
@@ -251,6 +263,7 @@ class TestPreDequantCache:
 
     def test_pre_dequant_cache_fp4_update_uses_cache(self):
         """Test that FP4 update() also populates and uses the cache."""
+        logger.info("running test_pre_dequant_cache_fp4_update_uses_cache")
         config = CacheConfigTorch(
             num_layers=2,
             num_heads=4,

@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 # Add parent to path for metal_marlin imports
 _ROOT = Path(__file__).parent.parent
@@ -27,6 +31,7 @@ sys.path.insert(0, str(_ROOT))
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Quantize Parakeet models to Metal Marlin FP4/INT4 format"
     )

@@ -26,12 +26,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Architecture configurations
@@ -110,6 +114,7 @@ def get_arch_config(model_path: Path, tokenizer: str) -> QwenInferenceConfig:
     Returns:
         Matching QwenInferenceConfig.
     """
+    logger.debug("get_arch_config called with model_path=%s, tokenizer=%s", model_path, tokenizer)
     path_str = str(model_path).lower()
     tokenizer_str = tokenizer.lower()
 
@@ -136,6 +141,7 @@ def peak_memory_mb(torch_backend: Any) -> float:
     Returns:
         Peak memory in MB.
     """
+    logger.debug("peak_memory_mb called with torch_backend=%s", torch_backend)
     if torch_backend.backends.mps.is_available():
         try:
             return torch_backend.mps.current_allocated_memory() / (1024 * 1024)
@@ -155,6 +161,7 @@ def reset_peak_memory(torch_backend: Any) -> None:
     Args:
         torch_backend: The torch module (needed for backend checks).
     """
+    logger.debug("reset_peak_memory called with torch_backend=%s", torch_backend)
     if torch_backend.cuda.is_available():
         try:
             torch_backend.cuda.reset_peak_memory_stats()
@@ -183,6 +190,7 @@ def active_params_per_token(model: Any, config: QwenInferenceConfig | None = Non
     Returns:
         Estimated active parameters per token, or None if estimation fails.
     """
+    logger.debug("active_params_per_token called with model=%s, config=%s", model, config)
     model_config = getattr(model, "config", None)
     if model_config is None:
         if config is not None:
@@ -240,11 +248,13 @@ class InferenceMetrics:
     @property
     def prefill_speed(self) -> float:
         """Prefill speed in tokens per second."""
+        logger.debug("prefill_speed called")
         return 1.0 / (self.prefill_time_ms / 1000.0 + 1e-9)
 
     @property
     def decode_speed(self) -> float:
         """Decode speed in tokens per second."""
+        logger.debug("decode_speed called")
         if self.decode_time_s <= 0:
             return 0.0
         return self.total_new_tokens / self.decode_time_s
@@ -257,6 +267,7 @@ def print_report(metrics: InferenceMetrics, model_name: str) -> None:
         metrics: Collected inference metrics.
         model_name: Human-readable model name for the report header.
     """
+    logger.debug("print_report called with metrics=%s, model_name=%s", metrics, model_name)
     print()
     print("=" * 60)
     print(f"{model_name} MMFP4 Inference Report")
@@ -290,6 +301,7 @@ def check_sanity_gate(metrics: InferenceMetrics, min_decode_speed: float) -> boo
     Returns:
         True if the sanity gate passed, False otherwise.
     """
+    logger.debug("check_sanity_gate called with metrics=%s, min_decode_speed=%s", metrics, min_decode_speed)
     if metrics.decode_speed < min_decode_speed:
         print(
             f"\nERROR: Decode speed {metrics.decode_speed:.2f} tok/s is below the "
@@ -337,6 +349,7 @@ def run_inference_benchmark(
         InferenceMetrics with all collected measurements.
     """
     # Tokenize prompt
+    logger.info("run_inference_benchmark starting with pipeline=%s, prompt=%s, max_new_tokens=%s, temperature=%s", pipeline, prompt, max_new_tokens, temperature)
     inputs = pipeline.tokenizer(prompt, return_tensors="pt")
     input_ids = inputs["input_ids"].to(pipeline.device)
     prompt_tokens = input_ids.shape[1]
@@ -455,6 +468,7 @@ def build_inference_argparser(
         An ``ArgumentParser`` with all standard inference flags populated.
     """
     # Resolve repo root relative to the scripts/ directory
+    logger.info("build_inference_argparser starting")
     repo_root = Path(__file__).resolve().parent.parent
     default_model = repo_root / config.default_model_path
 
@@ -518,6 +532,31 @@ def build_inference_argparser(
         default=config.min_decode_speed,
         help="Minimum acceptable decode speed in tok/s (hard gate).",
     )
+    # Optional W&B tracking (non-secret controls only)
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=os.getenv("WANDB_PROJECT", ""),
+        help="W&B project name. If set and API key is present, tracking is enabled.",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        type=str,
+        default=os.getenv("WANDB_RUN_NAME", ""),
+        help="W&B run name.",
+    )
+    parser.add_argument(
+        "--wandb-tags",
+        type=str,
+        default=os.getenv("WANDB_TAGS", ""),
+        help="Comma-separated W&B tags.",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=os.getenv("WANDB_ENTITY", ""),
+        help="W&B entity (team/user) name.",
+    )
     return parser
 
 
@@ -549,6 +588,7 @@ def run_inference_main(
         Exit code (0 on success, 1 on failure).
     """
     # -- path setup for metal_marlin package ------------------------------
+    logger.debug("run_inference_main called with argv=%s, config=%s, env_prefix=%s", argv, config, env_prefix)
     repo_root = Path(__file__).resolve().parent.parent
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
@@ -605,6 +645,30 @@ def run_inference_main(
     # -- get architecture config for reports ------------------------------
     arch_config = get_arch_config(args.model_path, args.tokenizer)
 
+    # -- setup W&B tracking -----------------------------------------------
+    from metal_marlin.wandb_helper import wandb_tracker  # noqa: E402
+
+    if args.wandb_project:
+        tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
+        wandb_config = {
+            "model_name": arch_config.model_name,
+            "model_path": str(args.model_path),
+            "tokenizer": str(tokenizer_path),
+            "max_new_tokens": args.max_new_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": args.top_k,
+            "device": args.device,
+            "min_decode_speed": args.min_decode_speed,
+        }
+        wandb_tracker.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name if args.wandb_run_name else None,
+            entity=args.wandb_entity if args.wandb_entity else None,
+            tags=tags,
+            config=wandb_config,
+        )
+
     # -- run inference benchmark ------------------------------------------
     metrics: InferenceMetrics = run_inference_benchmark(
         pipeline=pipeline,
@@ -622,7 +686,26 @@ def run_inference_main(
 
     # -- sanity gate ------------------------------------------------------
     min_speed = args.min_decode_speed
-    if not check_sanity_gate(metrics, min_speed):
+    gate_passed = check_sanity_gate(metrics, min_speed)
+
+    # -- W&B logging ------------------------------------------------------
+    wandb_tracker.log({
+        "model_name": arch_config.model_name,
+        "model_path": str(args.model_path),
+        "tokenizer": str(tokenizer_path),
+        "prompt_length": metrics.prompt_tokens,
+        "max_new_tokens": args.max_new_tokens,
+        "prefill_ms": metrics.prefill_time_ms,
+        "decode_tok_s": metrics.decode_speed,
+        "peak_memory_mb": metrics.peak_memory_mb,
+        "active_params": metrics.active_params,
+        "sanity_gate_passed": gate_passed,
+    })
+    wandb_tracker.finish()
+
+    if not gate_passed:
+        # Note: the error string was already printed by check_sanity_gate, but
+        # we repeat it to stderr for the calling scripts.
         print(
             f"ERROR: Decode speed {metrics.decode_speed:.2f} tok/s is below the "
             f"minimum threshold of {min_speed:.2f} tok/s on M4.",

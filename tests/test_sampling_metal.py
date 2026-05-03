@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 import pytest
 import torch
@@ -5,13 +6,18 @@ import torch
 from metal_marlin.sampler import MetalSampler
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.fixture
 def sampler():
+    logger.debug("sampler called")
     return MetalSampler(vocab_size=32000)
 
 
 def test_argmax_correctness(sampler):
     """Metal argmax should match torch.argmax."""
+    logger.info("running test_argmax_correctness")
     logits = torch.randn(1, 32000, device="mps")
 
     metal_result = sampler.argmax(logits)
@@ -22,6 +28,7 @@ def test_argmax_correctness(sampler):
 
 def test_top_p_distribution(sampler):
     """Top-p sampling should produce valid distribution."""
+    logger.info("running test_top_p_distribution")
     torch.manual_seed(42)
     logits = torch.randn(1, 32000, device="mps")
 
@@ -38,6 +45,7 @@ def test_top_p_distribution(sampler):
 def test_top_k_restricts_to_k(sampler):
     """Top-k should only sample from top k tokens."""
     # Create logits where top-5 are clearly dominant
+    logger.info("running test_top_k_restricts_to_k")
     logits = torch.full((1, 32000), -100.0, device="mps")
     logits[0, :5] = torch.tensor([10.0, 9.0, 8.0, 7.0, 6.0])
 
@@ -49,6 +57,7 @@ def test_top_k_restricts_to_k(sampler):
 
 def test_temperature_effect(sampler):
     """Higher temperature should increase entropy."""
+    logger.info("running test_temperature_effect")
     logits = torch.randn(1, 32000, device="mps")
 
     # Low temperature = peaky distribution (low entropy)

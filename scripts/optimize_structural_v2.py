@@ -28,7 +28,11 @@ import argparse
 import hashlib
 import json
 from datetime import datetime
+import logging
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = Path(__file__).parent
 METAL_MARLIN_ROOT = _SCRIPT_DIR.parent
@@ -113,6 +117,7 @@ MIXED_BPW_FAIRWAY_PROBLEM_SIZES: list[tuple[int, int, int]] = [
 
 def _find_kernel_block_span(source: str, kernel_name: str) -> tuple[int, int] | None:
     """Find [start, end) span for a `kernel void <kernel_name>(...) { ... }` block."""
+    logger.debug("_find_kernel_block_span called with source=%s, kernel_name=%s", source, kernel_name)
     import re as re_module
 
     match = re_module.search(rf"kernel\s+void\s+{re_module.escape(kernel_name)}\s*\(", source)
@@ -138,6 +143,7 @@ def _find_kernel_block_span(source: str, kernel_name: str) -> tuple[int, int] | 
 
 def _collect_kernel_scoped_content(source: str, kernel_names: list[str]) -> str:
     """Collect and concatenate kernel blocks by name."""
+    logger.debug("_collect_kernel_scoped_content called with source=%s, kernel_names=%s", source, kernel_names)
     blocks: list[str] = []
     for kernel_name in kernel_names:
         span = _find_kernel_block_span(source, kernel_name)
@@ -156,6 +162,7 @@ def _apply_transform(
     scope_kernel_names: list[str] | None = None,
 ) -> tuple[str, int]:
     """Apply regex replacement globally or only inside selected kernel blocks."""
+    logger.debug("_apply_transform called with source=%s, pattern=%s, replacement=%s", source, pattern, replacement)
     import re as re_module
 
     flags = re_module.MULTILINE if pattern.startswith("^") else 0
@@ -194,6 +201,7 @@ def _apply_transform(
 
 def get_mode_scope_kernel_names(mode: str, kernel_path: Path) -> list[str] | None:
     """Return kernel names to scope transforms to, if mode requires it."""
+    logger.debug("get_mode_scope_kernel_names called with mode=%s, kernel_path=%s", mode, kernel_path)
     if (
         mode == MIXED_BPW_FAIRWAY_MODE
         and kernel_path.resolve() == MIXED_BPW_FAIRWAY_TARGET_KERNEL.resolve()
@@ -204,6 +212,7 @@ def get_mode_scope_kernel_names(mode: str, kernel_path: Path) -> list[str] | Non
 
 def get_problem_sizes_for_kernel(kernel_path: Path, mode: str = DEFAULT_MODE) -> list[tuple[int, int, int]]:
     """Get benchmark sizes for kernel path, with optional mode-specific override."""
+    logger.debug("get_problem_sizes_for_kernel called with kernel_path=%s, mode=%s", kernel_path, mode)
     if (
         mode == MIXED_BPW_FAIRWAY_MODE
         and kernel_path.resolve() == MIXED_BPW_FAIRWAY_TARGET_KERNEL.resolve()
@@ -214,6 +223,7 @@ def get_problem_sizes_for_kernel(kernel_path: Path, mode: str = DEFAULT_MODE) ->
 
 def categorize_kernel(kernel_path: Path) -> str:
     """Categorize a kernel by its type."""
+    logger.debug("categorize_kernel called with kernel_path=%s", kernel_path)
     name = kernel_path.stem.lower()
 
     if "attention" in name or "flash" in name or "mla" in name:
@@ -233,6 +243,7 @@ def categorize_kernel(kernel_path: Path) -> str:
 
 def get_problem_sizes_for_category(category: str) -> list[tuple[int, int, int]]:
     """Get representative problem sizes for benchmarking."""
+    logger.debug("get_problem_sizes_for_category called with category=%s", category)
     if category == "attention":
         return [(1, 4096, 128), (32, 4096, 128), (512, 4096, 128)]
     elif category == "moe":
@@ -247,6 +258,7 @@ def get_problem_sizes_for_category(category: str) -> list[tuple[int, int, int]]:
 
 def get_applicable_transforms(kernel_path: Path, mode: str = DEFAULT_MODE) -> list[tuple[str, dict]]:
     """Get transforms applicable to this kernel."""
+    logger.debug("get_applicable_transforms called with kernel_path=%s, mode=%s", kernel_path, mode)
     import re as re_module
 
     category = categorize_kernel(kernel_path)
@@ -291,6 +303,7 @@ def generate_benchmark_code(
     problem_sizes: list[tuple[int, int, int]],
 ) -> str:
     """Generate Python benchmark code that ALWAYS runs and saves results."""
+    logger.info("generate_benchmark_code starting with kernel_path=%s, transform_name=%s, transform=%s, session_id=%s", kernel_path, transform_name, transform, session_id)
     problem_str = ", ".join(f"[{m},{n},{k}]" for m, n, k in problem_sizes)
     variant_hash = hashlib.md5(f"{transform_name}:{kernel_path.name}".encode()).hexdigest()[:8]
     scope_kernel_names = transform.get("scope_kernel_names", [])
@@ -489,6 +502,7 @@ def generate_task(
 ) -> dict:
     """Generate a task with embedded benchmark code."""
 
+    logger.debug("generate_task called with kernel_path=%s, transform_name=%s, transform=%s", kernel_path, transform_name, transform)
     problem_sizes = get_problem_sizes_for_kernel(kernel_path, mode)
 
     benchmark_code = generate_benchmark_code(
@@ -526,6 +540,7 @@ def generate_collect_task(
 ) -> dict:
     """Generate a task to collect all results and find the best."""
 
+    logger.debug("generate_collect_task called with session_id=%s, tasks=%s", session_id, tasks)
     task_names = [t["name"] for t in tasks]
 
     return {
@@ -587,6 +602,7 @@ Report which optimizations showed improvement.
 def generate_apply_task(session_id: str) -> dict:
     """Generate a task to apply winning optimizations."""
 
+    logger.debug("generate_apply_task called with session_id=%s", session_id)
     return {
         "name": f"struct-{session_id}-apply",
         "prompt": f"""Apply winning structural optimizations from session {session_id}.
@@ -624,6 +640,7 @@ For significant winners, apply the transformation manually by:
 
 def find_all_metal_kernels() -> list[Path]:
     """Find all Metal shader files."""
+    logger.debug("find_all_metal_kernels called")
     kernels = list(SRC_DIR.glob("*.metal"))
     if FUSION_DIR.exists():
         kernels.extend(FUSION_DIR.glob("*.metal"))
@@ -632,6 +649,7 @@ def find_all_metal_kernels() -> list[Path]:
 
 def get_mode_target_kernels(mode: str) -> list[Path]:
     """Get the list of kernel files targeted by mode."""
+    logger.debug("get_mode_target_kernels called with mode=%s", mode)
     if mode == MIXED_BPW_FAIRWAY_MODE:
         return [MIXED_BPW_FAIRWAY_TARGET_KERNEL]
     return find_all_metal_kernels()
@@ -644,6 +662,7 @@ def generate_task_yaml(
 ) -> Path:
     """Generate AlphaHENG task YAML."""
 
+    logger.debug("generate_task_yaml called with tasks=%s, session_id=%s, output_dir=%s", tasks, session_id, output_dir)
     yaml_content = f"""# yaml-language-server: $schema=
 # Structural Metal Kernel Optimization v2
 # Session: {session_id}
@@ -683,6 +702,7 @@ def run_benchmark_directly(
     mode: str = DEFAULT_MODE,
 ) -> dict:
     """Run benchmark directly without going through task queue."""
+    logger.info("run_benchmark_directly starting with kernel_path=%s, transform_name=%s, transform=%s, session_id=%s", kernel_path, transform_name, transform, session_id)
     import time
 
     try:
@@ -807,6 +827,7 @@ def run_benchmark_directly(
 
 
 def main():
+    logger.info("main starting")
     parser = argparse.ArgumentParser(
         description="Generate structural optimization tasks with embedded benchmarks",
     )

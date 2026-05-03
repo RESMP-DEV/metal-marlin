@@ -1,3 +1,4 @@
+import logging
 import pytest
 import torch
 import torch.nn as nn
@@ -7,17 +8,23 @@ from metal_marlin.trellis.config import TrellisModelConfig
 from metal_marlin.trellis.model import TrellisDecoderLayer
 
 
+
+logger = logging.getLogger(__name__)
+
 class MockAttention(nn.Module):
     def forward(self, hidden_states, **kwargs):
         # Return zeros so residual connection preserves input
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         return torch.zeros_like(hidden_states)
 
 class MockMLP(nn.Module):
     def forward(self, hidden_states, **kwargs):
         # Return zeros so residual connection preserves input
+        logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
         return torch.zeros_like(hidden_states)
 
 def create_model(exit_threshold=0.5):
+    logger.debug("create_model called with exit_threshold=%s", exit_threshold)
     config = TrellisModelConfig(
         hidden_size=64,
         num_hidden_layers=4,
@@ -37,11 +44,13 @@ def create_model(exit_threshold=0.5):
     return model
 
 def test_early_exit_initialization():
+    logger.info("running test_early_exit_initialization")
     model = create_model()
     assert len(model.exit_heads) == 4
     assert isinstance(model.exit_heads[0], nn.Linear)
 
 def test_early_exit_forward_no_exit():
+    logger.info("running test_early_exit_forward_no_exit")
     model = create_model(exit_threshold=0.99) # Very high threshold
     input_ids = torch.randint(0, 100, (1, 10))
     output = model(input_ids)
@@ -51,6 +60,7 @@ def test_early_exit_forward_no_exit():
     assert output.exit_layer_idx == 3
 
 def test_early_exit_trigger():
+    logger.info("running test_early_exit_trigger")
     model = create_model(exit_threshold=0.1) # Low threshold
 
     # Force high confidence in layer 0 head
@@ -68,6 +78,7 @@ def test_early_exit_trigger():
     assert output.logits.shape == (1, 10, 100)
 
 def test_early_exit_trigger_layer_1():
+    logger.info("running test_early_exit_trigger_layer_1")
     model = create_model(exit_threshold=0.1)
 
     # Layer 0: low confidence

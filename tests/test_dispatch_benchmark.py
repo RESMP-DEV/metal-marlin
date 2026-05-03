@@ -1,4 +1,5 @@
 """Benchmark C++ vs PyObjC dispatch overhead."""
+import logging
 import time
 
 import pytest
@@ -8,12 +9,16 @@ from metal_marlin._compat import HAS_CPP_EXT, HAS_MPS
 from metal_marlin.fast_inference import fast_dispatch_available, get_fast_context
 
 
+
+logger = logging.getLogger(__name__)
+
 @pytest.mark.skipif(not HAS_MPS, reason="MPS not available")
 class TestDispatchBenchmark:
     """Benchmark tests for dispatch overhead."""
 
     def test_cpp_dispatch_overhead(self):
         """Measure C++ dispatch overhead."""
+        logger.info("running test_cpp_dispatch_overhead")
         if not fast_dispatch_available():
             pytest.skip("C++ extension not available")
 
@@ -51,6 +56,7 @@ class TestDispatchBenchmark:
 
     def test_pyobjc_dispatch_overhead(self):
         """Measure PyObjC dispatch overhead for comparison."""
+        logger.info("running test_pyobjc_dispatch_overhead")
         from metal_marlin.metal_context import get_metal_kernel_library
 
         from metal_marlin.trellis.dispatch import dispatch_gemm_trellis_packed

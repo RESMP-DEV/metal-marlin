@@ -1,6 +1,7 @@
 """HuggingFace integration tests for EXL3 loader."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -15,18 +16,23 @@ from metal_marlin.hf_exl3_loader import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestFormatDetection:
     """Test EXL3 format detection functionality."""
 
     @pytest.fixture
     def mock_model_dir(self, tmp_path):
         """Create a mock model directory with config.json."""
+        logger.debug("mock_model_dir called with tmp_path=%s", tmp_path)
         config = {"hidden_size": 2048, "num_hidden_layers": 32}
         (tmp_path / "config.json").write_text(json.dumps(config))
         return tmp_path
 
     def test_detect_single_file(self, mock_model_dir):
         """Test detection of single-file EXL3 models."""
+        logger.info("running test_detect_single_file")
         (mock_model_dir / "model.safetensors").touch()
 
         result = detect_exl3_format(mock_model_dir)
@@ -39,6 +45,7 @@ class TestFormatDetection:
 
     def test_detect_sharded(self, mock_model_dir):
         """Test detection of sharded EXL3 models."""
+        logger.info("running test_detect_sharded")
         for i in range(4):
             (mock_model_dir / f"model-{i + 1:05d}-of-00004.safetensors").touch()
 
@@ -51,6 +58,7 @@ class TestFormatDetection:
 
     def test_detect_layerwise(self, mock_model_dir):
         """Test detection of layerwise EXL3 models."""
+        logger.info("running test_detect_layerwise")
         for i in range(10):
             layer_dir = mock_model_dir / f"layer_{i:04d}"
             layer_dir.mkdir()
@@ -65,11 +73,13 @@ class TestFormatDetection:
 
     def test_missing_config(self, tmp_path):
         """Test error handling when config.json is missing."""
+        logger.info("running test_missing_config")
         with pytest.raises(FileNotFoundError, match="config.json not found"):
             detect_exl3_format(tmp_path)
 
     def test_empty_directory(self, mock_model_dir):
         """Test detection in directory with only config."""
+        logger.info("running test_empty_directory")
         result = detect_exl3_format(mock_model_dir)
 
         # Should not crash, but format detection might be ambiguous
@@ -83,6 +93,7 @@ class TestDownloadFunctionality:
     @patch("huggingface_hub.snapshot_download")
     def test_download_exl3_model(self, mock_snapshot, tmp_path):
         """Test downloading EXL3 model from HuggingFace."""
+        logger.info("running test_download_exl3_model")
         mock_snapshot.return_value = str(tmp_path / "downloaded_model")
 
         result = download_exl3_model(
@@ -109,6 +120,7 @@ class TestModelListing:
     def test_list_exl3_models(self, mock_list_models):
         """Test listing EXL3 models from HuggingFace."""
         # Mock the HuggingFace model list response
+        logger.info("running test_list_exl3_models")
         mock_model = Mock()
         mock_model.id = "test/Llama-3.1-8B-EXL3"
         mock_model.author = "test"
@@ -138,6 +150,7 @@ class TestModelCardParsing:
     @patch("huggingface_hub.model_info")
     def test_parse_model_card(self, mock_info):
         """Test parsing model card to extract base model."""
+        logger.info("running test_parse_model_card")
         from metal_marlin.hf_exl3_loader import parse_model_card
 
         mock_model = Mock()
@@ -153,6 +166,7 @@ class TestModelCardParsing:
     @patch("huggingface_hub.model_info")
     def test_parse_model_card_no_base_model(self, mock_info):
         """Test parsing model card when no base model is specified."""
+        logger.info("running test_parse_model_card_no_base_model")
         from metal_marlin.hf_exl3_loader import parse_model_card
 
         mock_model = Mock()
@@ -167,6 +181,7 @@ class TestModelCardParsing:
     @patch("huggingface_hub.model_info")
     def test_parse_model_card_no_card_data(self, mock_info):
         """Test parsing model card when no card data exists."""
+        logger.info("running test_parse_model_card_no_card_data")
         from metal_marlin.hf_exl3_loader import parse_model_card
 
         mock_model = Mock()
@@ -188,6 +203,7 @@ class TestHuggingFaceIntegration:
     )
     def test_find_exl3_models(self):
         """Test finding EXL3 models on HuggingFace Hub."""
+        logger.info("running test_find_exl3_models")
         from metal_marlin.hf_exl3_loader import find_exl3_models
 
         models = find_exl3_models(limit=5)
@@ -205,6 +221,7 @@ class TestHuggingFaceIntegration:
     def test_load_exl3_from_hub(self, mock_loader_class, mock_download, tmp_path):
         """Test loading EXL3 model directly from HuggingFace."""
         # Setup mocks
+        logger.info("running test_load_exl3_from_hub")
         mock_download.return_value = str(tmp_path / "test_model")
 
         # Create a mock model directory
@@ -233,6 +250,7 @@ class TestHuggingFaceIntegration:
     )
     def test_list_exl3_models_integration(self):
         """Test actual listing of EXL3 models from HuggingFace."""
+        logger.info("running test_list_exl3_models_integration")
         models = list_exl3_models(limit=3)
 
         assert isinstance(models, list)

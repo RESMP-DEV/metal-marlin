@@ -17,6 +17,7 @@ IMPACT: Single-token MoE optimized path with fused kernel dispatch
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -31,6 +32,9 @@ from ..moe_dispatch import (
 )
 from .mmfp4_moe import MMFP4Expert, MMFP4FusedExpert, MMFP4MoE
 
+
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     pass
 
@@ -39,6 +43,7 @@ _moe_dispatch_module: Any = None
 
 
 def _get_dispatch_module() -> Any:
+    logger.debug("_get_dispatch_module called")
     global _moe_dispatch_module
     if _moe_dispatch_module is None:
         from .. import moe_dispatch as md
@@ -74,6 +79,7 @@ def _expert_cache_lru(
     Returns:
         True if the expert was moved to GPU (or already resident).
     """
+    logger.debug("_expert_cache_lru called with expert_idx=%s, experts=%s, active_experts=%s", expert_idx, experts, active_experts)
     n_experts = len(experts)
     
     if cache_size is None:
@@ -177,6 +183,7 @@ class MMFP4FusedMoE(nn.Module):
         prefetch_k: int = 4,
         prefetch_strategy: PrefetchStrategy = PrefetchStrategy.TOP_K_RECENCY,
     ) -> None:
+        logger.debug("initializing %s with n_experts=%s, n_experts_per_tok=%s, hidden_size=%s, moe_intermediate_size=%s, group_size=%s", type(self).__name__, n_experts, n_experts_per_tok, hidden_size, moe_intermediate_size, group_size)
         super().__init__()
         if n_experts <= 0:
             raise ValueError("n_experts must be > 0")
@@ -248,6 +255,7 @@ class MMFP4FusedMoE(nn.Module):
 
         Returns True if stacking succeeded, False otherwise.
         """
+        logger.debug("_stack_weights called")
         if self._stacked_gate_up_packed is not None:
             return True  # Already stacked
 
@@ -293,6 +301,7 @@ class MMFP4FusedMoE(nn.Module):
         
         This avoids repeated torch.cat operations in the decode hot path.
         """
+        logger.debug("_cache_shared_expert_weights called with device=%s", device)
         if not self.has_shared_expert or not hasattr(self, 'shared_experts'):
             # Create dummy zero weights
             self._cached_shared_gate_up_packed = torch.zeros(
@@ -355,6 +364,7 @@ class MMFP4FusedMoE(nn.Module):
         # topk_weights: [1, n_experts_per_tok]
         
         # Offloading fallback for decode: Use iterative execution with load/unload
+        logger.debug("_forward_decode_optimized called with hidden_flat=%s, topk_indices=%s, topk_weights=%s", hidden_flat, topk_indices, topk_weights)
         if self.expert_offload:
             input_f16 = hidden_flat.to(torch.float16)
 
@@ -453,6 +463,7 @@ class MMFP4FusedMoE(nn.Module):
         expert_prefetch: Creates ExpertPrefetcher for predictive expert loading
         based on routing history and activation patterns.
         """
+        logger.debug("_init_prefetcher called")
         if not self.enable_prefetch or self._prefetcher is not None:
             return
         
@@ -505,6 +516,7 @@ class MMFP4FusedMoE(nn.Module):
             Dictionary with dequantized expert weights
         """
         # Get the expert
+        logger.info("_load_expert_for_prefetch called with layer_idx=%s, expert_id=%s", layer_idx, expert_id)
         if expert_id < 0 or expert_id >= self.n_experts:
             return {}
         
@@ -539,6 +551,7 @@ class MMFP4FusedMoE(nn.Module):
             attention_pattern: Optional attention weights for guided prediction
             layer_idx: Layer index for multi-layer models
         """
+        logger.debug("_prefetch_experts_for_next_token called with current_indices=%s, attention_pattern=%s, layer_idx=%s", current_indices, attention_pattern, layer_idx)
         if not self.enable_prefetch:
             return
         
@@ -564,6 +577,7 @@ class MMFP4FusedMoE(nn.Module):
             attention_pattern: Optional attention weights for attention-guided
                 prefetch prediction. Shape: [num_heads, seq_len]
         """
+        logger.debug("forward: input shape=%s dtype=%s", x.shape if hasattr(x, "shape") else type(x).__name__, x.dtype if hasattr(x, "dtype") else "N/A")
         dispatch = _get_dispatch_module()
 
         if x.shape[-1] != self.hidden_size:
@@ -716,12 +730,14 @@ class MMFP4FusedMoE(nn.Module):
             Dictionary with prefetch hit rates, prediction accuracy,
             and other expert_prefetch metrics.
         """
+        logger.debug("get_prefetch_stats called")
         if self._prefetcher is None:
             return {"enabled": False, "message": "Prefetcher not initialized"}
         return self._prefetcher.get_stats()
     
     def reset_prefetch(self) -> None:
         """Reset prefetcher state and clear history."""
+        logger.debug("reset_prefetch called")
         if self._prefetcher is not None:
             self._prefetcher.clear_history()
     
@@ -732,6 +748,7 @@ class MMFP4FusedMoE(nn.Module):
             strategy: New prefetch strategy to use (e.g., TOP_K_RECENCY,
                 ATTENTION_GUIDED, HISTORY, REPEAT)
         """
+        logger.debug("set_prefetch_strategy called with strategy=%s", strategy)
         self._prefetch_strategy = strategy
         if self._prefetcher is not None:
             self._prefetcher.config.strategy = strategy
@@ -754,6 +771,7 @@ class MMFP4FusedMoE(nn.Module):
         Returns:
             Number of experts cached
         """
+        logger.debug("populate_expert_cache called with expert_ids=%s, layer_idx=%s", expert_ids, layer_idx)
         if self._expert_cache is None:
             self._init_prefetcher()
         
@@ -805,6 +823,7 @@ class MMFP4FusedMoE(nn.Module):
         Returns:
             Number of experts cached
         """
+        logger.debug("warm_prefetch_cache called with top_k=%s", top_k)
         return self.populate_expert_cache(expert_ids=list(range(min(top_k, self.n_experts))))
 
     def _create_fused_experts(self) -> bool:
@@ -816,6 +835,7 @@ class MMFP4FusedMoE(nn.Module):
         Returns:
             True if conversion succeeded, False otherwise.
         """
+        logger.debug("_create_fused_experts called")
         try:
             # Create fused versions of all routed experts
             fused_experts_list = []
@@ -860,6 +880,7 @@ class MMFP4FusedMoE(nn.Module):
             Output tensor or None if fused path not available
         """
         # Create fused experts on first call
+        logger.debug("_forward_fused_expert_path called with hidden_flat=%s, topk_indices=%s, topk_weights=%s", hidden_flat, topk_indices, topk_weights)
         if not hasattr(self, '_fused_experts'):
             if not self._create_fused_experts():
                 return None
@@ -955,6 +976,7 @@ class MMFP4FusedMoE(nn.Module):
         Returns:
             [batch, hidden] combined expert output.
         """
+        logger.debug("_parallel_expert_dispatch called with hidden_flat=%s, topk_indices=%s, topk_weights=%s", hidden_flat, topk_indices, topk_weights)
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         dispatch = _get_dispatch_module()
@@ -969,6 +991,7 @@ class MMFP4FusedMoE(nn.Module):
         
         def _compute_expert_range(start_idx: int, end_idx: int) -> tuple[int, int, torch.Tensor]:
             """Compute outputs for a range of experts."""
+            logger.debug("_compute_expert_range called with start_idx=%s, end_idx=%s", start_idx, end_idx)
             batch_start_idx = expert_offsets_list[start_idx]
             batch_end_idx = expert_offsets_list[end_idx]
             
@@ -1044,6 +1067,7 @@ class MMFP4FusedMoE(nn.Module):
             A new MMFP4FusedMoE instance with copied weights.
         """
         # Create new fused MoE with same config
+        logger.debug("from_mmfp4_moe called with sequential_moe=%s, use_fused_dispatch=%s", sequential_moe, use_fused_dispatch)
         fused = cls(
             n_experts=sequential_moe.n_experts,
             n_experts_per_tok=sequential_moe.n_experts_per_tok,
@@ -1139,6 +1163,7 @@ class MMFP4FusedMoE(nn.Module):
             A new MMFP4FusedMoE instance with copied weights and prefetch enabled.
         """
         # Create new fused MoE with prefetch configuration
+        logger.debug("from_mmfp4_moe_with_prefetch called with sequential_moe=%s, use_fused_dispatch=%s, enable_prefetch=%s", sequential_moe, use_fused_dispatch, enable_prefetch)
         fused = cls(
             n_experts=sequential_moe.n_experts,
             n_experts_per_tok=sequential_moe.n_experts_per_tok,

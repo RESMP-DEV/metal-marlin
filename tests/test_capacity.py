@@ -1,4 +1,5 @@
 """Tests for MoE capacity factor adjustment."""
+import logging
 
 import numpy as np
 import pytest
@@ -16,6 +17,9 @@ from metal_marlin.capacity import (
 )
 
 
+
+logger = logging.getLogger(__name__)
+
 class TestComputeExpertCapacity:
     """Tests for compute_expert_capacity function."""
 
@@ -23,6 +27,7 @@ class TestComputeExpertCapacity:
         """Test basic capacity calculation."""
         # 64 tokens, 8 experts, factor 1.0, top_k=1
         # Expected: ceil(64 * 1 * 1.0 / 8) = 8
+        logger.info("running test_basic_capacity")
         capacity = compute_expert_capacity(64, 8, 1.0, top_k=1)
         assert capacity == 8
 
@@ -30,6 +35,7 @@ class TestComputeExpertCapacity:
         """Test capacity with top_k > 1."""
         # 64 tokens, 8 experts, factor 1.0, top_k=2
         # Expected: ceil(64 * 2 * 1.0 / 8) = 16
+        logger.info("running test_capacity_with_top_k")
         capacity = compute_expert_capacity(64, 8, 1.0, top_k=2)
         assert capacity == 16
 
@@ -37,6 +43,7 @@ class TestComputeExpertCapacity:
         """Test capacity with non-unity factor."""
         # 64 tokens, 8 experts, factor 1.5, top_k=1
         # Expected: ceil(64 * 1 * 1.5 / 8) = ceil(12) = 12
+        logger.info("running test_capacity_with_factor")
         capacity = compute_expert_capacity(64, 8, 1.5, top_k=1)
         assert capacity == 12
 
@@ -44,17 +51,20 @@ class TestComputeExpertCapacity:
         """Test that capacity rounds up."""
         # 10 tokens, 8 experts, factor 1.0, top_k=1
         # Expected: ceil(10 * 1 * 1.0 / 8) = ceil(1.25) = 2
+        logger.info("running test_capacity_rounds_up")
         capacity = compute_expert_capacity(10, 8, 1.0, top_k=1)
         assert capacity == 2
 
     def test_minimum_capacity(self):
         """Test minimum capacity is 1."""
         # Very small batch
+        logger.info("running test_minimum_capacity")
         capacity = compute_expert_capacity(1, 64, 1.0, top_k=1)
         assert capacity >= 1
 
     def test_invalid_factor_raises(self):
         """Test that invalid capacity factor raises."""
+        logger.info("running test_invalid_factor_raises")
         with pytest.raises(ValueError):
             compute_expert_capacity(64, 8, 0.0, top_k=1)
         with pytest.raises(ValueError):
@@ -67,6 +77,7 @@ class TestCountExpertAssignments:
     def test_uniform_distribution(self):
         """Test counting with uniform distribution."""
         # Each expert gets exactly 2 assignments
+        logger.info("running test_uniform_distribution")
         expert_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32)
         counts = count_expert_assignments(expert_ids.numpy(), num_experts=4)
 
@@ -76,6 +87,7 @@ class TestCountExpertAssignments:
     def test_skewed_distribution(self):
         """Test counting with skewed distribution."""
         # Expert 0 gets most assignments
+        logger.info("running test_skewed_distribution")
         expert_ids = torch.tensor([[0, 0], [0, 1], [0, 0]], dtype=torch.int32)
         counts = count_expert_assignments(expert_ids.numpy(), num_experts=4)
 
@@ -88,6 +100,7 @@ class TestCapacityAnalyzer:
 
     def test_no_overflow(self):
         """Test analyzer with no overflow."""
+        logger.info("running test_no_overflow")
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=2.0, top_k=2)
 
         # Uniform distribution, well under capacity
@@ -104,6 +117,7 @@ class TestCapacityAnalyzer:
 
     def test_with_overflow(self):
         """Test analyzer detecting overflow."""
+        logger.info("running test_with_overflow")
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=2)
 
         # Expert 0 gets 6 assignments, capacity is ceil(4*2*1.0/4)=2
@@ -121,6 +135,7 @@ class TestCapacityAnalyzer:
 
     def test_multiple_batches(self):
         """Test analyzer across multiple batches."""
+        logger.info("running test_multiple_batches")
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
         # Batch 1: no overflow
@@ -139,6 +154,7 @@ class TestCapacityAnalyzer:
 
     def test_reset(self):
         """Test analyzer reset."""
+        logger.info("running test_reset")
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
         expert_ids = torch.tensor([[0], [0], [0], [0]], dtype=torch.int32)
@@ -157,6 +173,7 @@ class TestAnalyzeOverflowRate:
 
     def test_single_batch(self):
         """Test analysis of single batch."""
+        logger.info("running test_single_batch")
         expert_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32)
         stats = analyze_overflow_rate(expert_ids.numpy(), num_experts=4, capacity_factor=2.0)
 
@@ -165,6 +182,7 @@ class TestAnalyzeOverflowRate:
 
     def test_batch_list(self):
         """Test analysis of batch list."""
+        logger.info("running test_batch_list")
         batches = [
             torch.tensor([[0, 1], [2, 3]], dtype=torch.int32).numpy(),
             torch.tensor([[0, 0], [0, 0]], dtype=torch.int32).numpy(),
@@ -180,6 +198,7 @@ class TestAutoTuneCapacity:
     def test_finds_sufficient_factor(self):
         """Test that auto-tune finds a factor with acceptable drop rate."""
         # Create history with varying load
+        logger.info("running test_finds_sufficient_factor")
         np.random.seed(42)
         batches = []
         for _ in range(20):
@@ -199,12 +218,14 @@ class TestAutoTuneCapacity:
 
     def test_empty_history(self):
         """Test with empty history returns min_factor."""
+        logger.info("running test_empty_history")
         factor = auto_tune_capacity([], num_experts=8, target_drop_rate=0.01, min_factor=1.5)
         assert factor == 1.5
 
     def test_already_satisfies_target(self):
         """Test when min_factor already satisfies target."""
         # Uniform distribution - low factor should work
+        logger.info("running test_already_satisfies_target")
         batches = [
             np.array([[i % 8, (i + 1) % 8] for i in range(8)], dtype=np.int32) for _ in range(10)
         ]
@@ -222,6 +243,7 @@ class TestDynamicCapacity:
 
     def test_initial_capacity(self):
         """Test initial capacity uses base factor."""
+        logger.info("running test_initial_capacity")
         config = DynamicCapacityConfig(base_factor=1.5)
         dyn = DynamicCapacity(num_experts=8, top_k=2, config=config)
 
@@ -231,6 +253,7 @@ class TestDynamicCapacity:
 
     def test_capacity_increases_on_overflow(self):
         """Test factor increases when drops exceed target."""
+        logger.info("running test_capacity_increases_on_overflow")
         config = DynamicCapacityConfig(
             base_factor=1.0,
             target_drop_rate=0.01,
@@ -254,6 +277,7 @@ class TestDynamicCapacity:
 
     def test_capacity_decreases_when_low_drops(self):
         """Test factor decreases when drops are very low."""
+        logger.info("running test_capacity_decreases_when_low_drops")
         config = DynamicCapacityConfig(
             base_factor=2.0,
             target_drop_rate=0.01,
@@ -278,6 +302,7 @@ class TestDynamicCapacity:
 
     def test_get_stats(self):
         """Test get_stats returns expected fields."""
+        logger.info("running test_get_stats")
         dyn = DynamicCapacity(num_experts=8, top_k=2)
 
         expert_ids = torch.tensor([[0, 1], [2, 3], [4, 5], [6, 7]], dtype=torch.int32).numpy()
@@ -291,6 +316,7 @@ class TestDynamicCapacity:
 
     def test_reset(self):
         """Test reset restores initial state."""
+        logger.info("running test_reset")
         config = DynamicCapacityConfig(base_factor=1.5)
         dyn = DynamicCapacity(num_experts=8, top_k=2, config=config)
 
@@ -313,6 +339,7 @@ class TestDynamicCapacityFunction:
         """Test that capacity adapts to actual load."""
         # Uniform load - same batch size for fair comparison
         # 4 tokens, each routes to 2 different experts -> each expert gets 2 assignments
+        logger.info("running test_adapts_to_load")
         uniform_ids = torch.tensor([[0, 1], [2, 3], [0, 1], [2, 3]], dtype=torch.int32).numpy()
         capacity_uniform = dynamic_capacity(uniform_ids, num_experts=4)
 
@@ -329,6 +356,7 @@ class TestDynamicCapacityFunction:
     def test_respects_bounds(self):
         """Test that capacity respects min/max bounds."""
         # Very skewed load
+        logger.info("running test_respects_bounds")
         expert_ids = torch.tensor([[0, 0] for _ in range(64)], dtype=torch.int32).numpy()
 
         capacity = dynamic_capacity(expert_ids, num_experts=8, min_factor=1.0, max_factor=2.0)
@@ -340,6 +368,7 @@ class TestDynamicCapacityFunction:
 
     def test_target_utilization(self):
         """Test that target utilization adds headroom."""
+        logger.info("running test_target_utilization")
         expert_ids = torch.tensor(
             [[i % 4, (i + 1) % 4] for i in range(8)], dtype=torch.int32
         ).numpy()
@@ -357,6 +386,7 @@ class TestCapacityStatsProperties:
 
     def test_overflow_rate(self):
         """Test overflow_rate computation."""
+        logger.info("running test_overflow_rate")
         analyzer = CapacityAnalyzer(num_experts=4, capacity_factor=1.0, top_k=1)
 
         # First batch: no overflow
@@ -372,6 +402,7 @@ class TestCapacityStatsProperties:
 
     def test_top_overflow_experts(self):
         """Test top_overflow_experts method."""
+        logger.info("running test_top_overflow_experts")
         analyzer = CapacityAnalyzer(num_experts=8, capacity_factor=1.0, top_k=1)
 
         # Expert 0 overflows 3 times, expert 1 overflows 2 times
