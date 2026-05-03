@@ -11,6 +11,12 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 ## [Unreleased] - 2026-02-10
 
 ### Fixed
+- Defined the `_compat` module logger before feature-flag initialization so
+  Linux validation can import the package.
+- Kept MMFP4 layer iteration on CPU when the default MPS target is unavailable
+  so Linux validation does not attempt unsupported tensor transfers.
+- Scoped PyObjC runtime dependencies to macOS so Linux validation can install
+  Metal Marlin without trying to build `pyobjc-framework-metal`.
 - MLA GQA shape bug: attn_output.view() shape mismatch with 8192 vs 4096 elements
 - MoE dispatch logging: now correctly reports "fused" vs "sequential"
 - MoE fallback: sequential dispatch works on CPU when fused unavailable

@@ -7,11 +7,14 @@ This package keeps that API stable while allowing submodules like
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import importlib.util
 import logging
 import sys
 from pathlib import Path
 from types import ModuleType
+
+logger = logging.getLogger(__name__)
 
 
 def _load_legacy_layers_module() -> ModuleType:
@@ -29,15 +32,14 @@ def _load_legacy_layers_module() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    print(f"DEBUG: Loaded module {module_name} from {legacy_path}")
-    print(f"DEBUG: dir(module): {dir(module)}")
+    logger.debug("Loaded module %s from %s", module_name, legacy_path)
+    logger.debug("Legacy layers symbols: %s", dir(module))
     return module
 
 
 _legacy_layers = _load_legacy_layers_module()
 
 MarlinLinear = _legacy_layers.MarlinLinear
-MixedPrecisionLinear = _legacy_layers.MixedPrecisionLinear
 
 from .mixed_precision_linear import MixedPrecisionLinear
 from .mmfp4_linear import MMFP4Linear
@@ -59,8 +61,6 @@ try:
 except ImportError:
     MMFP4FusedMoE = None
 
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "MarlinLinear",

@@ -26,6 +26,7 @@ from .metal_dispatch import mps_tensor_to_metal_buffer
 
 # Module-level logger
 _logger = logging.getLogger(__name__)
+logger = _logger
 
 # Singleton to track which backend was selected at init time (once, not per-call)
 _SELECTED_ATTENTION_BACKEND: str | None = None
@@ -213,11 +214,9 @@ _log_attention_backend_once()
 def _require_mpsgraph_attention() -> None:
     logger.debug("_require_mpsgraph_attention called")
     if not HAS_TORCH or torch is None:
-        raise RuntimeError(
-            "MPSGraph attention requires PyTorch. Install with: pip install torch")
+        raise RuntimeError("MPSGraph attention requires PyTorch. Install with: pip install torch")
     if not HAS_MPS:
-        raise RuntimeError(
-            "MPSGraph attention requires PyTorch MPS backend (Apple Silicon).")
+        raise RuntimeError("MPSGraph attention requires PyTorch MPS backend (Apple Silicon).")
     if not HAS_PYOBJC_METAL:
         raise RuntimeError(
             "MPSGraph attention requires PyObjC Metal. Install with:\n"
@@ -256,16 +255,25 @@ def _scaled_dot_product_attention_op(
     mask: Any | None,
     scale: float,
 ) -> Any:
-    logger.debug("_scaled_dot_product_attention_op called with graph=%s, query=%s, key=%s", graph, query, key)
-    if hasattr(graph, "scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_"):
-        return graph.scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_(
-            query,
-            key,
-            value,
-            mask,
-            scale,
+    logger.debug(
+        "_scaled_dot_product_attention_op called with graph=%s, query=%s, key=%s", graph, query, key
+    )
+    if hasattr(
+        graph, "scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_"
+    ):
+        return (
+            graph.scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_(
+                query,
+                key,
+                value,
+                mask,
+                scale,
+            )
         )
-    if hasattr(graph, "scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_name_"):
+    if hasattr(
+        graph,
+        "scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_name_",
+    ):
         return graph.scaledDotProductAttentionWithQueryTensor_keyTensor_valueTensor_maskTensor_scale_name_(
             query,
             key,
@@ -274,8 +282,7 @@ def _scaled_dot_product_attention_op(
             scale,
             None,
         )
-    raise RuntimeError(
-        "MPSGraph scaledDotProductAttention selector not found in PyObjC bindings.")
+    raise RuntimeError("MPSGraph scaledDotProductAttention selector not found in PyObjC bindings.")
 
 
 @dataclass(frozen=True)
@@ -326,16 +333,14 @@ def _get_graph_entry(
     graph = MPSG.MPSGraph.alloc().init()
     mps_dtype = _torch_dtype_to_mps(q.dtype)
 
-    q_placeholder = graph.placeholderWithShape_dataType_name_(
-        list(q.shape), mps_dtype, None)
-    k_placeholder = graph.placeholderWithShape_dataType_name_(
-        list(k.shape), mps_dtype, None)
-    v_placeholder = graph.placeholderWithShape_dataType_name_(
-        list(v.shape), mps_dtype, None)
+    q_placeholder = graph.placeholderWithShape_dataType_name_(list(q.shape), mps_dtype, None)
+    k_placeholder = graph.placeholderWithShape_dataType_name_(list(k.shape), mps_dtype, None)
+    v_placeholder = graph.placeholderWithShape_dataType_name_(list(v.shape), mps_dtype, None)
     mask_placeholder = None
     if mask is not None:
         mask_placeholder = graph.placeholderWithShape_dataType_name_(
-            list(mask.shape), mps_dtype, None)
+            list(mask.shape), mps_dtype, None
+        )
 
     output_tensor = _scaled_dot_product_attention_op(
         graph,
@@ -347,15 +352,13 @@ def _get_graph_entry(
     )
 
     if Metal is None:
-        raise RuntimeError(
-            "Metal framework not available for MPSGraph attention.")
+        raise RuntimeError("Metal framework not available for MPSGraph attention.")
     device = Metal.MTLCreateSystemDefaultDevice()
     if device is None:
         raise RuntimeError("No Metal device available for MPSGraph attention.")
     command_queue = device.newCommandQueue()
     if command_queue is None:
-        raise RuntimeError(
-            "Failed to create Metal command queue for MPSGraph attention.")
+        raise RuntimeError("Failed to create Metal command queue for MPSGraph attention.")
 
     entry = _GraphCacheEntry(
         graph=graph,
@@ -454,10 +457,12 @@ def fused_scaled_dot_product_attention(
         ),
     }
     if mask is not None and entry.mask_placeholder is not None:
-        feeds[entry.mask_placeholder] = MPSG.MPSGraphTensorData.alloc().initWithMTLBuffer_shape_dataType_(
-            mps_tensor_to_metal_buffer(mask, entry.device),
-            list(mask.shape),
-            mps_dtype,
+        feeds[entry.mask_placeholder] = (
+            MPSG.MPSGraphTensorData.alloc().initWithMTLBuffer_shape_dataType_(
+                mps_tensor_to_metal_buffer(mask, entry.device),
+                list(mask.shape),
+                mps_dtype,
+            )
         )
 
     result = entry.graph.runWithMTLCommandQueue_feeds_targetTensors_targetOperations_(
@@ -526,9 +531,7 @@ def fused_attention(
     for backend in _attention_backend_candidates():
         if backend in {"v3", "v2"} and mask is not None:
             if debug:
-                print(
-                    f"[FUSED_ATTN] Skipping flash_attention_{backend} because attn_mask is set"
-                )
+                print(f"[FUSED_ATTN] Skipping flash_attention_{backend} because attn_mask is set")
             continue
 
         label = (
@@ -545,9 +548,7 @@ def fused_attention(
             elif backend == "v2":
                 result = _run_v2_attention(q, k, v, scale=scale, causal=causal)
             else:
-                result = _run_plain_attention(
-                    q, k, v, mask=mask, scale=scale, causal=causal
-                )
+                result = _run_plain_attention(q, k, v, mask=mask, scale=scale, causal=causal)
 
             if debug:
                 print(f"[FUSED_ATTN] Using {label}")

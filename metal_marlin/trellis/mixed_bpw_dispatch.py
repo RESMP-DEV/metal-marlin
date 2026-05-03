@@ -24,6 +24,7 @@ Usage:
 
 from __future__ import annotations
 
+# ruff: noqa: E402
 import logging
 import os
 from collections import defaultdict
@@ -33,33 +34,37 @@ from typing import Any
 import numpy as np
 import torch
 
+logger = logging.getLogger(__name__)
+
 
 class _BufferPool:
     """LRU buffer pool for reusing intermediate tensors.
-    
+
     Reduces memory allocation overhead by caching and reusing tensors
     of the same shape, dtype, and device. Implements LRU eviction when
     total pool size exceeds 1GB.
-    
+
     Attributes:
         max_size_bytes: Maximum pool size in bytes (default 4GB).
         _pool: Dict mapping (shape, dtype, device) -> list of (tensor, last_access_time).
         _current_size: Current total size of pooled tensors in bytes.
         _access_counter: Monotonically increasing counter for LRU tracking.
     """
-    
+
     def __init__(self, max_size_bytes: int = 4 * 1024 * 1024 * 1024) -> None:
         """Initialize buffer pool.
-        
+
         Args:
             max_size_bytes: Maximum pool size in bytes (default 4GB).
         """
         logger.debug("initializing %s with max_size_bytes=%s", type(self).__name__, max_size_bytes)
         self.max_size_bytes = max_size_bytes
-        self._pool: dict[tuple[tuple[int, ...], torch.dtype, torch.device], list[tuple[torch.Tensor, int]]] = defaultdict(list)
+        self._pool: dict[
+            tuple[tuple[int, ...], torch.dtype, torch.device], list[tuple[torch.Tensor, int]]
+        ] = defaultdict(list)
         self._current_size = 0
         self._access_counter = 0
-    
+
     def _get_tensor_size(self, shape: tuple[int, ...], dtype: torch.dtype) -> int:
         """Calculate tensor size in bytes."""
         logger.debug("_get_tensor_size called with shape=%s, dtype=%s", shape, dtype)
@@ -68,53 +73,49 @@ class _BufferPool:
         for dim in shape:
             num_elements *= dim
         return num_elements * elem_size
-    
+
     def _evict_if_needed(self, required_bytes: int = 0) -> None:
         """Evict least recently used buffers until we have room.
-        
+
         Args:
             required_bytes: Additional bytes needed (evict until we have this much room).
         """
         logger.debug("_evict_if_needed called with required_bytes=%s", required_bytes)
-        while (self._current_size + required_bytes > self.max_size_bytes and
-               self._current_size > 0):
+        while self._current_size + required_bytes > self.max_size_bytes and self._current_size > 0:
             # Find the least recently used tensor across all pools
             lru_key = None
             lru_idx = -1
-            lru_time = float('inf')
-            
+            lru_time = float("inf")
+
             for key, tensor_list in self._pool.items():
                 for idx, (_, access_time) in enumerate(tensor_list):
                     if access_time < lru_time:
                         lru_time = access_time
                         lru_key = key
                         lru_idx = idx
-            
+
             if lru_key is None or lru_idx < 0:
                 break
-            
+
             # Remove the LRU tensor
             tensor, _ = self._pool[lru_key].pop(lru_idx)
             tensor_size = tensor.numel() * tensor.element_size()
             self._current_size -= tensor_size
-            
+
             # Clean up empty lists
             if not self._pool[lru_key]:
                 del self._pool[lru_key]
-    
+
     def get_buffer(
-        self,
-        shape: tuple[int, ...],
-        dtype: torch.dtype,
-        device: torch.device | str
+        self, shape: tuple[int, ...], dtype: torch.dtype, device: torch.device | str
     ) -> torch.Tensor:
         """Get a buffer from the pool or create a new one.
-        
+
         Args:
             shape: Desired tensor shape.
             dtype: Desired tensor dtype.
             device: Desired tensor device.
-        
+
         Returns:
             A tensor with the specified shape, dtype, and device.
             If available, returns a cached tensor; otherwise creates a new one.
@@ -122,9 +123,9 @@ class _BufferPool:
         logger.debug("get_buffer called with shape=%s, dtype=%s, device=%s", shape, dtype, device)
         if isinstance(device, str):
             device = torch.device(device)
-        
+
         key = (shape, dtype, device)
-        
+
         if key in self._pool and self._pool[key]:
             # Return the most recently used buffer from this pool (LIFO for cache locality)
             tensor, _ = self._pool[key].pop()
@@ -132,56 +133,53 @@ class _BufferPool:
             self._current_size -= tensor_size
             self._access_counter += 1
             return tensor
-        
+
         # No cached buffer available, create a new one
         self._access_counter += 1
         return torch.empty(shape, dtype=dtype, device=device)
-    
+
     def return_buffer(self, tensor: torch.Tensor) -> None:
         """Return a tensor to the pool for reuse.
-        
+
         Args:
             tensor: The tensor to return to the pool.
         """
         logger.debug("return_buffer called with tensor=%s", tensor)
         if tensor is None:
             return
-        
+
         tensor_size = tensor.numel() * tensor.element_size()
-        
+
         # Check if adding this tensor would exceed the limit
         if self._current_size + tensor_size > self.max_size_bytes:
             self._evict_if_needed(tensor_size)
-        
+
         key = (tuple(tensor.shape), tensor.dtype, tensor.device)
         self._access_counter += 1
         self._pool[key].append((tensor, self._access_counter))
         self._current_size += tensor_size
-    
+
     def clear(self) -> None:
         """Clear all buffers from the pool."""
         logger.debug("clear called")
         self._pool.clear()
         self._current_size = 0
-    
+
     def get_stats(self) -> dict[str, Any]:
         """Get pool statistics.
-        
+
         Returns:
             Dict with pool statistics (current_size_bytes, max_size_bytes, num_buffers).
         """
         logger.debug("get_stats called")
         total_buffers = sum(len(bufs) for bufs in self._pool.values())
         return {
-            'current_size_bytes': self._current_size,
-            'max_size_bytes': self.max_size_bytes,
-            'num_buffers': total_buffers,
-            'num_unique_shapes': len(self._pool),
+            "current_size_bytes": self._current_size,
+            "max_size_bytes": self.max_size_bytes,
+            "num_buffers": total_buffers,
+            "num_unique_shapes": len(self._pool),
         }
 
-
-# Global buffer pool instance for MixedBPWMoEDispatcher
-_global_buffer_pool = _BufferPool()
 
 from ..metal_dispatch import (
     HAS_METAL,
@@ -199,7 +197,8 @@ from .moe_dispatch import (
 if HAS_METAL:
     import Metal
 
-logger = logging.getLogger(__name__)
+# Global buffer pool instance for MixedBPWMoEDispatcher
+_global_buffer_pool = _BufferPool()
 
 
 @dataclass
@@ -287,6 +286,7 @@ class _BitWidthCache:
         expert_ids: List of expert IDs in this group (for cache validation)
         weight_shape: Original shape of packed weights (for validation)
     """
+
     gate_weights: torch.Tensor
     up_weights: torch.Tensor
     down_weights: torch.Tensor
@@ -314,6 +314,7 @@ class _MixedKernelCache:
         expert_ids: List of all expert IDs (for cache validation)
         weight_shapes: Mapping of expert_id to their packed weight shape
     """
+
     gate_weights_buf: Any
     up_weights_buf: Any
     down_weights_buf: Any
@@ -370,7 +371,14 @@ class MixedBPWMoEDispatcher:
                 If None, assumes uniform bit-width from config.
             lib: Optional pre-initialized Metal kernel library.
         """
-        logger.debug("initializing %s with config=%s, hidden_dim=%s, expert_bit_widths=%s, lib=%s", type(self).__name__, config, hidden_dim, expert_bit_widths, lib)
+        logger.debug(
+            "initializing %s with config=%s, hidden_dim=%s, expert_bit_widths=%s, lib=%s",
+            type(self).__name__,
+            config,
+            hidden_dim,
+            expert_bit_widths,
+            lib,
+        )
         self.config = config
         self.hidden_dim = hidden_dim
         self.lib = lib
@@ -379,8 +387,7 @@ class MixedBPWMoEDispatcher:
         if expert_bit_widths is None:
             # Assume uniform bit-width (use default from config or 4-bit)
             self.expert_bit_widths = {
-                i: getattr(config, "quantization_bits", 4)
-                for i in range(config.num_experts)
+                i: getattr(config, "quantization_bits", 4) for i in range(config.num_experts)
             }
         else:
             self.expert_bit_widths = expert_bit_widths
@@ -418,10 +425,7 @@ class MixedBPWMoEDispatcher:
         logger.debug(
             "Built %d bit-width groups: %s",
             len(self.unique_bit_widths),
-            {
-                bw: len(experts)
-                for bw, experts in self.bit_width_groups.items()
-            },
+            {bw: len(experts) for bw, experts in self.bit_width_groups.items()},
         )
 
     def get_lib(self) -> MetalKernelLibrary:
@@ -494,12 +498,12 @@ class MixedBPWMoEDispatcher:
         num_experts_in_group = len(expert_ids)
         ref_device = ref_weight.device
         ref_dtype = ref_weight.dtype
-        
+
         # Pre-allocate stacked tensors from buffer pool
         gate_shape = (num_experts_in_group, ref_weight.shape[0], gate_size)
         up_shape = (num_experts_in_group, ref_weight.shape[0], up_size)
         down_shape = (num_experts_in_group, ref_weight.shape[0], down_size)
-        
+
         gate_weights_stacked = self._buffer_pool.get_buffer(gate_shape, ref_dtype, ref_device)
         up_weights_stacked = self._buffer_pool.get_buffer(up_shape, ref_dtype, ref_device)
         down_weights_stacked = self._buffer_pool.get_buffer(down_shape, ref_dtype, ref_device)
@@ -507,7 +511,7 @@ class MixedBPWMoEDispatcher:
         # Track first scale to determine if we need scales
         first_scale = expert_scales.get(expert_ids[0])
         has_scales = first_scale is not None
-        
+
         if has_scales:
             scale_dtype = first_scale.dtype
             gate_scales_stacked = self._buffer_pool.get_buffer(gate_shape, scale_dtype, ref_device)
@@ -554,9 +558,7 @@ class MixedBPWMoEDispatcher:
         device_mps = ref_weight.device
         dummy_su = torch.ones(1, dtype=torch.float16, device=device_mps)
         dummy_sv = torch.ones(1, dtype=torch.float16, device=device_mps)
-        dummy_grid = torch.arange(
-            1 << bit_width, dtype=torch.float16, device=device_mps
-        )
+        dummy_grid = torch.arange(1 << bit_width, dtype=torch.float16, device=device_mps)
 
         # Create CachedWeightBuffers (only if MPS is available)
         cached_weight_buffers: CachedWeightBuffers | None = None
@@ -626,25 +628,22 @@ class MixedBPWMoEDispatcher:
         logger.info("_get_or_build_mixed_kernel_cache starting")
         cache = self._mixed_kernel_cache
         num_experts = self.config.num_experts
-        
+
         # Collect expert IDs and shapes for validation
         expert_ids = sorted(expert_weights.keys())
         weight_shapes = {eid: expert_weights[eid].shape for eid in expert_ids}
-        
+
         if cache is not None:
-            if (cache.expert_ids == expert_ids and
-                cache.weight_shapes == weight_shapes):
+            if cache.expert_ids == expert_ids and cache.weight_shapes == weight_shapes:
                 return cache
             logger.debug("Mixed kernel cache invalidated, rebuilding")
 
         require_mps()
         lib = self.get_lib()
         device = lib.device
-        
+
         # Prepare expert_bits buffer (uint8)
-        expert_bits_list = [
-            self.expert_bit_widths.get(i, 4) for i in range(num_experts)
-        ]
+        expert_bits_list = [self.expert_bit_widths.get(i, 4) for i in range(num_experts)]
         expert_bits_array = np.array(expert_bits_list, dtype=np.uint8)
         expert_bits_buf = device.newBufferWithBytes_length_options_(
             expert_bits_array.tobytes(),
@@ -655,7 +654,7 @@ class MixedBPWMoEDispatcher:
         # Prepare weight offsets and concatenate weights
         weight_offsets = [0] * num_experts
         current_offset = 0
-        
+
         gate_weights_list = []
         up_weights_list = []
         down_weights_list = []
@@ -674,10 +673,10 @@ class MixedBPWMoEDispatcher:
             if expert_id in expert_weights:
                 w = expert_weights[expert_id]
                 s = expert_scales.get(expert_id)
-                
+
                 # Update current_offset by the number of elements in packed weights
                 current_offset += w.numel()
-                
+
                 gate_weights_list.append(w[:, :gate_size].reshape(-1))
                 up_weights_list.append(w[:, gate_size : gate_size + up_size].reshape(-1))
                 down_weights_list.append(w[:, gate_size + up_size :].reshape(-1))
@@ -699,28 +698,34 @@ class MixedBPWMoEDispatcher:
         gate_total_size = sum(w.numel() for w in gate_weights_list)
         up_total_size = sum(w.numel() for w in up_weights_list)
         down_total_size = sum(w.numel() for w in down_weights_list)
-        
-        ref_device = hidden_states.device if 'hidden_states' in locals() else list(expert_weights.values())[0].device
-        
+
+        ref_device = list(expert_weights.values())[0].device
+
         # Get buffers from pool for concatenated weights
-        gate_weights_cat = self._buffer_pool.get_buffer((gate_total_size,), gate_weights_list[0].dtype, ref_device)
-        up_weights_cat = self._buffer_pool.get_buffer((up_total_size,), up_weights_list[0].dtype, ref_device)
-        down_weights_cat = self._buffer_pool.get_buffer((down_total_size,), down_weights_list[0].dtype, ref_device)
-        
+        gate_weights_cat = self._buffer_pool.get_buffer(
+            (gate_total_size,), gate_weights_list[0].dtype, ref_device
+        )
+        up_weights_cat = self._buffer_pool.get_buffer(
+            (up_total_size,), up_weights_list[0].dtype, ref_device
+        )
+        down_weights_cat = self._buffer_pool.get_buffer(
+            (down_total_size,), down_weights_list[0].dtype, ref_device
+        )
+
         # Fill concatenated buffers
         gate_offset = 0
         for w in gate_weights_list:
-            gate_weights_cat[gate_offset:gate_offset + w.numel()].copy_(w.reshape(-1))
+            gate_weights_cat[gate_offset : gate_offset + w.numel()].copy_(w.reshape(-1))
             gate_offset += w.numel()
-        
+
         up_offset = 0
         for w in up_weights_list:
-            up_weights_cat[up_offset:up_offset + w.numel()].copy_(w.reshape(-1))
+            up_weights_cat[up_offset : up_offset + w.numel()].copy_(w.reshape(-1))
             up_offset += w.numel()
-        
+
         down_offset = 0
         for w in down_weights_list:
-            down_weights_cat[down_offset:down_offset + w.numel()].copy_(w.reshape(-1))
+            down_weights_cat[down_offset : down_offset + w.numel()].copy_(w.reshape(-1))
             down_offset += w.numel()
 
         gate_weights_buf = mps_tensor_to_metal_buffer(gate_weights_cat, device)
@@ -731,32 +736,44 @@ class MixedBPWMoEDispatcher:
             gate_scales_total = sum(s.numel() for s in gate_scales_list)
             up_scales_total = sum(s.numel() for s in up_scales_list)
             down_scales_total = sum(s.numel() for s in down_scales_list)
-            
+
             # Get buffers from pool for concatenated scales
-            gate_scales_cat = self._buffer_pool.get_buffer((gate_scales_total,), torch.float16, ref_device)
-            up_scales_cat = self._buffer_pool.get_buffer((up_scales_total,), torch.float16, ref_device)
-            down_scales_cat = self._buffer_pool.get_buffer((down_scales_total,), torch.float16, ref_device)
-            
+            gate_scales_cat = self._buffer_pool.get_buffer(
+                (gate_scales_total,), torch.float16, ref_device
+            )
+            up_scales_cat = self._buffer_pool.get_buffer(
+                (up_scales_total,), torch.float16, ref_device
+            )
+            down_scales_cat = self._buffer_pool.get_buffer(
+                (down_scales_total,), torch.float16, ref_device
+            )
+
             # Fill concatenated scale buffers
             gate_scale_offset = 0
             for s in gate_scales_list:
-                gate_scales_cat[gate_scale_offset:gate_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                gate_scales_cat[gate_scale_offset : gate_scale_offset + s.numel()].copy_(
+                    s.reshape(-1).half()
+                )
                 gate_scale_offset += s.numel()
-            
+
             up_scale_offset = 0
             for s in up_scales_list:
-                up_scales_cat[up_scale_offset:up_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                up_scales_cat[up_scale_offset : up_scale_offset + s.numel()].copy_(
+                    s.reshape(-1).half()
+                )
                 up_scale_offset += s.numel()
-            
+
             down_scale_offset = 0
             for s in down_scales_list:
-                down_scales_cat[down_scale_offset:down_scale_offset + s.numel()].copy_(s.reshape(-1).half())
+                down_scales_cat[down_scale_offset : down_scale_offset + s.numel()].copy_(
+                    s.reshape(-1).half()
+                )
                 down_scale_offset += s.numel()
-            
+
             gate_scales_buf = mps_tensor_to_metal_buffer(gate_scales_cat, device)
             up_scales_buf = mps_tensor_to_metal_buffer(up_scales_cat, device)
             down_scales_buf = mps_tensor_to_metal_buffer(down_scales_cat, device)
-            
+
             # Return concatenated buffers to pool (they've been copied to Metal buffers)
             self._buffer_pool.return_buffer(gate_scales_cat)
             self._buffer_pool.return_buffer(up_scales_cat)
@@ -767,7 +784,7 @@ class MixedBPWMoEDispatcher:
             gate_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
             up_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
             down_scales_buf = mps_tensor_to_metal_buffer(dummy_scales, device)
-        
+
         # Return concatenated weight buffers to pool (they've been copied to Metal buffers)
         self._buffer_pool.return_buffer(gate_weights_cat)
         self._buffer_pool.return_buffer(up_weights_cat)
@@ -815,7 +832,12 @@ class MixedBPWMoEDispatcher:
         Raises:
             RuntimeError: If Metal kernel dispatch fails.
         """
-        logger.debug("_dispatch_mixed_bpw_kernel called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+        logger.debug(
+            "_dispatch_mixed_bpw_kernel called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+            hidden_states,
+            expert_weights,
+            expert_scales,
+        )
         require_mps()
         lib = self.get_lib()
         device = lib.device
@@ -853,28 +875,28 @@ class MixedBPWMoEDispatcher:
         activations_buf = mps_tensor_to_metal_buffer(activations_sorted.contiguous(), device)
 
         # Create expert_ids and expert_probs buffers
-        expert_ids_buf = mps_tensor_to_metal_buffer(
-            expert_ids_sorted.int().contiguous(), device
-        )
+        expert_ids_buf = mps_tensor_to_metal_buffer(expert_ids_sorted.int().contiguous(), device)
         expert_probs_buf = mps_tensor_to_metal_buffer(
             expert_probs_sorted.half().contiguous(), device
         )
 
         # Prepare output buffer (fp32 for accumulation, then convert to fp16)
         # Use buffer pool for output tensor to reduce memory allocations
-        output_tensor = self._buffer_pool.get_buffer((n, hidden_dim), torch.float32, hidden_states.device)
+        output_tensor = self._buffer_pool.get_buffer(
+            (n, hidden_dim), torch.float32, hidden_states.device
+        )
         output_tensor.zero_()
         output_buf = mps_tensor_to_metal_buffer(output_tensor, device, copy_back=True)
 
         # Create grid buffer (codebook) - dummy for now, should come from trellis config
         # Grid size depends on max bit-width (2^max_bits)
-        expert_bits_list = [
-            self.expert_bit_widths.get(i, 4) for i in range(num_experts)
-        ]
+        expert_bits_list = [self.expert_bit_widths.get(i, 4) for i in range(num_experts)]
         max_bits = max(expert_bits_list)
         grid_size = 1 << max_bits
         # Use buffer pool for grid tensor
-        grid_tensor = self._buffer_pool.get_buffer((grid_size,), torch.float16, hidden_states.device)
+        grid_tensor = self._buffer_pool.get_buffer(
+            (grid_size,), torch.float16, hidden_states.device
+        )
         torch.arange(grid_size, dtype=torch.float16, device=hidden_states.device, out=grid_tensor)
         grid_buf = mps_tensor_to_metal_buffer(grid_tensor, device)
 
@@ -916,29 +938,29 @@ class MixedBPWMoEDispatcher:
 
         # Rebuild buffer list with correct indices
         buffer_list = [
-            activations_buf,      # 0
-            gate_weights_buf,     # 1
-            gate_scales_buf,      # 2
-            up_weights_buf,       # 3
-            up_scales_buf,        # 4
-            down_weights_buf,     # 5
-            down_scales_buf,      # 6
-            gate_su_buf,          # 7
-            gate_sv_buf,          # 8
-            up_su_buf,            # 9
-            up_sv_buf,            # 10
-            down_su_buf,          # 11
-            down_sv_buf,          # 12
-            grid_buf,             # 13
-            expert_ids_buf,       # 14
-            expert_probs_buf,     # 15
-            output_buf,           # 16
-            params_buf,           # 17
+            activations_buf,  # 0
+            gate_weights_buf,  # 1
+            gate_scales_buf,  # 2
+            up_weights_buf,  # 3
+            up_scales_buf,  # 4
+            down_weights_buf,  # 5
+            down_scales_buf,  # 6
+            gate_su_buf,  # 7
+            gate_sv_buf,  # 8
+            up_su_buf,  # 9
+            up_sv_buf,  # 10
+            down_su_buf,  # 11
+            down_sv_buf,  # 12
+            grid_buf,  # 13
+            expert_ids_buf,  # 14
+            expert_probs_buf,  # 15
+            output_buf,  # 16
+            params_buf,  # 17
         ]
         # Add placeholders for buffers 18, 19, 20 to align to 21, 22
         buffer_list.extend([params_buf, params_buf, params_buf])  # 18, 19, 20
-        buffer_list.append(expert_bits_buf)      # 21
-        buffer_list.append(weight_offsets_buf)   # 22
+        buffer_list.append(expert_bits_buf)  # 21
+        buffer_list.append(weight_offsets_buf)  # 22
 
         # Compute grid dimensions for decode kernel
         tile_n = 64
@@ -964,7 +986,9 @@ class MixedBPWMoEDispatcher:
         self._buffer_pool.return_buffer(output_tensor)
 
         # Unsort: restore original token order - use buffer pool
-        output_unsorted = self._buffer_pool.get_buffer(output_fp16.shape, output_fp16.dtype, hidden_states.device)
+        output_unsorted = self._buffer_pool.get_buffer(
+            output_fp16.shape, output_fp16.dtype, hidden_states.device
+        )
         output_unsorted[token_indices] = output_fp16
 
         # Sum over top_k slots to get final output [batch, hidden_dim]
@@ -1010,7 +1034,11 @@ class MixedBPWMoEDispatcher:
                 - inverse_indices: Indices to unsort the output
                 - sorted_probs: Router probabilities in sorted order
         """
-        logger.debug("sort_tokens_by_expert called with expert_indices=%s, router_probs=%s", expert_indices, router_probs)
+        logger.debug(
+            "sort_tokens_by_expert called with expert_indices=%s, router_probs=%s",
+            expert_indices,
+            router_probs,
+        )
         if expert_indices.ndim == 2:
             batch_size, top_k = expert_indices.shape
             num_assignments = batch_size * top_k
@@ -1067,9 +1095,7 @@ class MixedBPWMoEDispatcher:
             # 2D input: [batch, top_k], flatten to list of expert IDs
             flat_experts = expert_indices.reshape(-1)
         else:
-            raise ValueError(
-                f"expert_indices must be 1D or 2D, got shape {expert_indices.shape}"
-            )
+            raise ValueError(f"expert_indices must be 1D or 2D, got shape {expert_indices.shape}")
 
         # Initialize groups
         bit_width_masks: dict[int, torch.Tensor] = {}
@@ -1125,13 +1151,16 @@ class MixedBPWMoEDispatcher:
             Expert outputs for this bit-width group.
         """
         # Gather tokens assigned to this bit-width group
-        logger.debug("dispatch_same_bit_width_batch called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+        logger.debug(
+            "dispatch_same_bit_width_batch called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+            hidden_states,
+            expert_weights,
+            expert_scales,
+        )
         if len(token_indices) == 0:
             # No tokens assigned to this bit-width
             return self._buffer_pool.get_buffer(
-                (0, self.hidden_dim),
-                torch.float16,
-                hidden_states.device
+                (0, self.hidden_dim), torch.float16, hidden_states.device
             )
 
         top_k = self.config.num_experts_per_tok
@@ -1148,9 +1177,7 @@ class MixedBPWMoEDispatcher:
 
         if num_experts_in_group == 0:
             return self._buffer_pool.get_buffer(
-                (len(token_indices), self.hidden_dim),
-                torch.float16,
-                hidden_states.device
+                (len(token_indices), self.hidden_dim), torch.float16, hidden_states.device
             )
 
         batch_size = gathered_states.shape[0]
@@ -1223,7 +1250,7 @@ class MixedBPWMoEDispatcher:
                 device=hidden_states.device,
                 dtype=torch.float16,
             ).reshape(batch_size, 1)
-            
+
             # Use cached pre-flattened weights (no torch.stack needed!)
             # Weights are already in [num_experts, flattened_size] format from cache
 
@@ -1253,33 +1280,32 @@ class MixedBPWMoEDispatcher:
                 bits=bit_width,
                 cached_buffers=cached_buffers,
             )
-            
+
             logger.debug(
                 "Successfully dispatched %d tokens to %d experts at %d-bit using batched Metal",
                 batch_size,
                 num_experts_in_group,
                 bit_width,
             )
-            
+
             return expert_outputs
-            
+
         except (ImportError, AttributeError, Exception) as e:
             logger.warning(
                 "Batched Metal dispatch not available for %d-bit group: %s. Using fallback.",
-                bit_width, e
+                bit_width,
+                e,
             )
             # Fallback: simple averaging - use buffer pool for output
             expert_outputs = self._buffer_pool.get_buffer(
-                (batch_size, self.hidden_dim),
-                torch.float16,
-                hidden_states.device
+                (batch_size, self.hidden_dim), torch.float16, hidden_states.device
             )
             expert_outputs.zero_()
-            
+
             for i, expert_id in enumerate(expert_ids):
                 # Simple average of input states as placeholder
                 expert_outputs.add_(gathered_states.float().mean(dim=0, keepdim=True).half())
-            
+
             if num_experts_in_group > 0:
                 expert_outputs.div_(num_experts_in_group)
 
@@ -1317,7 +1343,12 @@ class MixedBPWMoEDispatcher:
         Returns:
             Combined expert outputs [batch, hidden_dim].
         """
-        logger.debug("dispatch_mixed_bit_width_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+        logger.debug(
+            "dispatch_mixed_bit_width_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+            hidden_states,
+            expert_weights,
+            expert_scales,
+        )
         device = hidden_states.device
 
         # Handle both 1D and 2D expert_indices
@@ -1329,9 +1360,7 @@ class MixedBPWMoEDispatcher:
             # 2D input: [batch, top_k]
             batch_size, top_k = expert_indices.shape
         else:
-            raise ValueError(
-                f"expert_indices must be 1D or 2D, got shape {expert_indices.shape}"
-            )
+            raise ValueError(f"expert_indices must be 1D or 2D, got shape {expert_indices.shape}")
 
         # Sort tokens by expert ID
         sorted_indices, inverse_indices, sorted_probs = self.sort_tokens_by_expert(
@@ -1382,36 +1411,32 @@ class MixedBPWMoEDispatcher:
         else:
             # Pre-allocate combined tensor from pool
             combined = self._buffer_pool.get_buffer(
-                (total_tokens, self.hidden_dim),
-                all_outputs[0].dtype,
-                device
+                (total_tokens, self.hidden_dim), all_outputs[0].dtype, device
             )
             # Copy each group's output into combined
             offset = 0
             for group_output in all_outputs:
                 num_tokens = group_output.shape[0]
-                combined[offset:offset + num_tokens].copy_(group_output)
+                combined[offset : offset + num_tokens].copy_(group_output)
                 # Return group output buffer to pool if it's from the pool
                 self._buffer_pool.return_buffer(group_output)
                 offset += num_tokens
-        
+
         # Unsort to restore original token order - use buffer pool
         unsorted = self._buffer_pool.get_buffer(
-            (total_tokens, self.hidden_dim),
-            combined.dtype,
-            device
+            (total_tokens, self.hidden_dim), combined.dtype, device
         )
         unsorted[inverse_indices] = combined
-        
+
         # Return combined buffer to pool
         self._buffer_pool.return_buffer(combined)
 
         # Reshape and sum over top_k to get [batch, hidden_dim]
         result = unsorted.view(batch_size, top_k, self.hidden_dim).sum(dim=1)
-        
+
         # Return unsorted buffer to pool after view/sum
         self._buffer_pool.return_buffer(unsorted)
-        
+
         return result
 
     def dispatch(
@@ -1434,7 +1459,12 @@ class MixedBPWMoEDispatcher:
         Returns:
             Combined expert outputs [batch, hidden_dim].
         """
-        logger.debug("dispatch called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+        logger.debug(
+            "dispatch called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+            hidden_states,
+            expert_weights,
+            expert_scales,
+        )
         _global_mixed_bpw_stats.total_dispatches += 1
         _global_mixed_bpw_stats.tokens_processed += hidden_states.shape[0]
         _global_mixed_bpw_stats.experts_activated += expert_indices.numel()
@@ -1455,8 +1485,7 @@ class MixedBPWMoEDispatcher:
             try:
                 # Try to use a single Metal kernel dispatch for all bit-widths
                 mixed_output = self._dispatch_mixed_bpw_kernel(
-                    hidden_states, expert_weights, expert_scales,
-                    router_probs, expert_indices
+                    hidden_states, expert_weights, expert_scales, router_probs, expert_indices
                 )
                 _global_mixed_bpw_stats.mixed_kernel_success += 1
                 return mixed_output
@@ -1502,7 +1531,12 @@ def dispatch_mixed_bpw_moe(
     Raises:
         ValueError: If expert_ids in expert_indices are out of range.
     """
-    logger.debug("dispatch_mixed_bpw_moe called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+    logger.debug(
+        "dispatch_mixed_bpw_moe called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+        hidden_states,
+        expert_weights,
+        expert_scales,
+    )
     require_mps()
 
     batch_size, hidden_dim = hidden_states.shape
@@ -1565,7 +1599,12 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
     Returns:
         Combined expert outputs [batch, hidden_dim].
     """
-    logger.debug("dispatch_mixed_bpw_moe_with_cpp_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s", hidden_states, expert_weights, expert_scales)
+    logger.debug(
+        "dispatch_mixed_bpw_moe_with_cpp_fallback called with hidden_states=%s, expert_weights=%s, expert_scales=%s",
+        hidden_states,
+        expert_weights,
+        expert_scales,
+    )
     try:
         # Try Python/Metal dispatch first
         return dispatch_mixed_bpw_moe(
@@ -1589,7 +1628,7 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
             from .. import _cpp_ext
 
             # Check if C++ extension has mixed BPW dispatch function
-            if hasattr(_cpp_ext, 'dispatch_mixed_bpw_moe'):
+            if hasattr(_cpp_ext, "dispatch_mixed_bpw_moe"):
                 # C++ batch dispatch interface expects:
                 # - hidden_states: [batch, hidden_dim] ndarray (float32)
                 # - expert_weights_packed: list of uint8 arrays, one per expert
@@ -1600,12 +1639,12 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
                 # - config: C++ MoEConfig struct
 
                 num_experts = config.num_experts
-                
+
                 # Convert dictionaries to lists (expert_id -> index mapping)
                 expert_weights_list = [expert_weights[i] for i in range(num_experts)]
                 expert_scales_list = [expert_scales[i] for i in range(num_experts)]
                 expert_bits_list = [expert_bits[i] for i in range(num_experts)]
-                
+
                 # Convert tensors to numpy arrays for C++ interop
                 hidden_states_np = hidden_states.float().cpu().numpy()
                 expert_weights_np = [w.cpu().numpy().astype(np.uint8) for w in expert_weights_list]
@@ -1615,7 +1654,7 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
                 # Shape: [batch, top_k] instead of full [batch, num_experts]
                 top_k_probs = torch.gather(router_probs, 1, expert_indices)
                 expert_probs_np = top_k_probs.float().cpu().numpy()
-                
+
                 # Create C++ MoEConfig
                 cpp_config = _cpp_ext.MoEConfig()
                 cpp_config.hidden_dim = config.hidden_dim
@@ -1625,7 +1664,7 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
                 cpp_config.use_indirect_command_buffers = True
                 cpp_config.overlap_cpu_encoding = True
                 cpp_config.wait_for_completion = True
-                
+
                 # Call C++ dispatch (modifies hidden_states in place)
                 _cpp_ext.dispatch_mixed_bpw_moe(
                     hidden_states_np,
@@ -1636,17 +1675,19 @@ def dispatch_mixed_bpw_moe_with_cpp_fallback(
                     expert_probs_np,  # Now correctly uses top_k_probs
                     cpp_config,
                 )
-                
+
                 # Convert back to torch tensor (ensure float16 output)
                 output = torch.from_numpy(hidden_states_np).to(hidden_states.device).half()
                 return output
-            elif hasattr(_cpp_ext, 'dispatch_moe_trellis_swiglu_batched_cpp'):
+            elif hasattr(_cpp_ext, "dispatch_moe_trellis_swiglu_batched_cpp"):
                 # Alternative C++ dispatch function name
-                logger.warning("C++ dispatch uses alternative function dispatch_moe_trellis_swiglu_batched_cpp")
-                
+                logger.warning(
+                    "C++ dispatch uses alternative function dispatch_moe_trellis_swiglu_batched_cpp"
+                )
+
                 # Calculate top-k probs
                 top_k_probs = torch.gather(router_probs, 1, expert_indices)
-                
+
                 return _cpp_ext.dispatch_moe_trellis_swiglu_batched_cpp(
                     hidden_states,
                     expert_weights,

@@ -13,12 +13,14 @@ Usage:
 
 from __future__ import annotations
 
-from types import ModuleType
 import logging
+from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import matplotlib.pyplot as plt
@@ -32,25 +34,25 @@ if TYPE_CHECKING:
         shape: tuple[int, ...]
         ndim: int
         device: Any
-        logger.debug("contiguous called")
+
         def contiguous(self) -> Tensor: ...
-        logger.debug("detach called")
+
         def detach(self) -> Tensor: ...
-        logger.debug("cpu called")
+
         def cpu(self) -> Tensor: ...
-        logger.debug("numpy called")
+
         def numpy(self) -> Any: ...
-        logger.debug("to called with dtype=%s", dtype)
+
         def to(self, dtype: Any) -> Tensor: ...
-        logger.debug("permute called")
+
         def permute(self, *dims: int) -> Tensor: ...
-        logger.debug("squeeze called with dim=%s", dim)
+
         def squeeze(self, dim: int | None = None) -> Tensor: ...
-        logger.debug("unsqueeze called with dim=%s", dim)
+
         def unsqueeze(self, dim: int) -> Tensor: ...
-        logger.debug("numel called")
+
         def numel(self) -> int: ...
-        logger.debug("element_size called")
+
         def element_size(self) -> int: ...
 
 
@@ -280,14 +282,14 @@ def require_backend(backend: str, feature: str = "this operation") -> None:
 # Representable values: ±{0, 0.5, 1, 1.5, 2, 3, 4, 6}
 E2M1_VALUES: NDArray[np.float32] = np.array(
     [
-        0.0,   # 0000: +0
-        0.5,   # 0001: +0.5 (subnormal)
-        1.0,   # 0010: +1.0
-        1.5,   # 0011: +1.5
-        2.0,   # 0100: +2.0
-        3.0,   # 0101: +3.0
-        4.0,   # 0110: +4.0
-        6.0,   # 0111: +6.0
+        0.0,  # 0000: +0
+        0.5,  # 0001: +0.5 (subnormal)
+        1.0,  # 0010: +1.0
+        1.5,  # 0011: +1.5
+        2.0,  # 0100: +2.0
+        3.0,  # 0101: +3.0
+        4.0,  # 0110: +4.0
+        6.0,  # 0111: +6.0
         -0.0,  # 1000: -0 (treat as 0)
         -0.5,  # 1001: -0.5
         -1.0,  # 1010: -1.0
@@ -311,13 +313,13 @@ _E2M1_VALUES_TORCH: Any = None
 
 def get_e2m1_torch_table() -> Any:
     """Get E2M1 values as PyTorch tensor (lazy initialization).
-    
+
     This is the canonical way to access the E2M1 lookup table as a torch tensor.
     The table is created on first call and cached for subsequent accesses.
-    
+
     Returns:
         torch.Tensor of shape (16,) with dtype float32 containing E2M1 values.
-        
+
     Example:
         >>> from metal_marlin._compat import get_e2m1_torch_table
         >>> table = get_e2m1_torch_table()
@@ -340,8 +342,8 @@ if TYPE_CHECKING:
     import torch
 
 
-
 logger = logging.getLogger(__name__)
+
 
 def dequantize_e2m1(indices: torch.Tensor) -> torch.Tensor:
     """Dequantize 4-bit indices to E2M1 values (unscaled) using PyTorch.
