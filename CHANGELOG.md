@@ -8,6 +8,15 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 - Record kernel behavior, dispatch behavior, benchmark interpretation changes, and validation updates.
 - Summarize the effect of syncs or research sweeps instead of copying commit logs.
 
+## [Unreleased] - 2026-05-05
+
+### Added
+- Qwen 3.6 27B shape contract (`agent_workspace/qwen36_27b/shape_contract.json`):
+  canonical text-runtime dimensions fetched from HuggingFace `Qwen/Qwen3.6-27B`
+  config.json. Confirmed as a **dense** SwiGLU model (hidden_size=5120, 64 layers,
+  intermediate_size=17408, GQA 24Q/4KV), fundamentally different from the MoE-based
+  Qwen3.6-35B-A3B. No full model weights were loaded.
+
 ## [Unreleased] - 2026-02-10
 
 ### Fixed
