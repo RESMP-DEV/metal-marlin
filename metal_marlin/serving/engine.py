@@ -95,6 +95,8 @@ class RequestLatencyMetrics:
 
 # Model family detection constants
 QWEN_DELTANET_MODEL_TYPES = frozenset({
+    "qwen3_5",
+    "qwen3_5_text",
     "qwen3_5_moe",
     "qwen3_6_moe",
     "qwen3_next",
@@ -102,6 +104,9 @@ QWEN_DELTANET_MODEL_TYPES = frozenset({
 })
 
 QWEN_DELTANET_MODEL_NAME_PATTERNS = frozenset({
+    "qwen3.6-27b",
+    "qwen3_6-27b",
+    "qwen3_6_27b",
     "qwen3.5-35b-a3b",
     "qwen3.6-35b-a3b",
     "qwen3.5",
@@ -233,6 +238,17 @@ def _is_qwen_deltanet_family(config: dict, model_name: str = "") -> bool:
     # If config has both MoE markers and DeltaNet layer types, it's a Qwen hybrid
     if has_moe and has_deltanet:
         return True
+
+    # Dense Qwen3.6-27B uses the qwen3_5 text model type plus DeltaNet/full
+    # attention cadence.  Keep it distinct from the 35B-A3B MoE path above.
+    if model_type in {"qwen3_5", "qwen3_5_text"} and has_deltanet:
+        hidden_size = _get_config_value(config, "hidden_size")
+        num_layers = _get_config_value(config, "num_hidden_layers")
+        try:
+            if int(hidden_size) == 5120 and int(num_layers) == 64:
+                return True
+        except (TypeError, ValueError):
+            pass
 
     # 5. Shared expert intermediate size is distinctive for Qwen hybrid MoE
     shared_exp_size = _get_config_value(
@@ -372,6 +388,8 @@ def _normalize_model_name(model_path: str) -> str:
     # --- Qwen3.6 variants (check specific patterns before generic) ---
     if "qwen3.6" in model_name_lower or "qwen3_6" in model_name_lower:
         # Specific size variants first
+        if "27b" in model_name_lower:
+            return "Qwen/Qwen3.6-27B"
         if "35b" in model_name_lower and "a3b" in model_name_lower:
             return "Qwen/Qwen3.6-35B-A3B"
         # Generic Qwen3.6 for other variants

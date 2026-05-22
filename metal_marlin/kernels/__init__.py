@@ -1,6 +1,7 @@
 """Compatibility facade for the split kernel modules."""
 
 from __future__ import annotations
+
 import logging
 
 from .. import kernels_core as _core
@@ -15,8 +16,6 @@ try:
     from .moe import build_moe_exports as _build_moe_exports
 except ImportError:
     _build_moe_exports = None
-
-
 
 logger = logging.getLogger(__name__)
 

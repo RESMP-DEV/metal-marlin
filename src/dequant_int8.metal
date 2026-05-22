@@ -2,7 +2,7 @@
 using namespace metal;
 
 // ============================================================================
-// INT8 (S8) → FP16 Dequantization for Apple Metal (W8A16 Inference)
+// INT8 (S8) to FP16 Dequantization for Apple Metal (W8A16 Inference)
 // ============================================================================
 //
 // INT8 quantization packs 4 signed bytes per uint32. Unlike INT4 which
@@ -228,8 +228,10 @@ inline void dequant_s8x8_asym_fused(uint32_t packed_lo,
 }
 
 // ============================================================================
-// Compute kernel: Bulk INT8 → FP16 dequantization
+// Compute kernel: Bulk INT8 to FP16 dequantization
 // ============================================================================
+
+#ifndef METAL_MARLIN_DEQUANT_INT8_HELPERS_ONLY
 
 /// Kernel that dequantizes a buffer of packed INT8 weights to FP16.
 /// Each uint32 contains 4 INT8 values.
@@ -484,3 +486,5 @@ kernel void test_int8_all_values(
     // Only result.x has our value; others are zeros
     output[tid] = result.x;
 }
+
+#endif  // METAL_MARLIN_DEQUANT_INT8_HELPERS_ONLY

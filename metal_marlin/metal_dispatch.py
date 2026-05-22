@@ -45,6 +45,7 @@ from ._padding import pad_to_multiple, unpad
 from .metallib_loader import get_kernel_from_metallib
 
 # Logger for kernel loading diagnostics (metallib vs JIT)
+logger = logging.getLogger(__name__)
 _kernel_logger = logging.getLogger(__name__ + ".kernels")
 
 
@@ -627,7 +628,7 @@ if HAS_METAL:
     # Cache Metal buffers by tensor Python id.
     # Store (weakref, buffer) so we can verify the tensor is still alive.
     # This avoids PyTorch tensor __eq__ issues with WeakKeyDictionary.
-    _WEIGHT_BUFFER_CACHE: dict[int, tuple[weakref.ref, Any]] = {}
+    _WEIGHT_BUFFER_CACHE: dict[Any, tuple[weakref.ref, Any]] = {}
     # Threshold for using async blit (1MB)
     _ASYNC_TRANSFER_THRESHOLD = 1024 * 1024
 
@@ -3092,13 +3093,18 @@ def _create_zero_copy_buffer_from_iosurface(
 
 
 def mps_tensor_to_metal_buffer(
-    tensor: torch.Tensor, device: Any, *, copy_back: bool = False
+    tensor: torch.Tensor,
+    device: Any,
+    *,
+    copy_back: bool = False,
+    initialize_copy_back: bool = False,
 ) -> Any:
     """Get Metal buffer from PyTorch MPS tensor.
 
     Prefers zero-copy interop using IOSurface backing or _get_storage_offset API;
     falls back to a shared buffer copy when zero-copy is not possible.
-    Set copy_back=True for output tensors.
+    Set copy_back=True for output tensors. Set initialize_copy_back=True for
+    read/write tensors that need existing tensor contents and a final copy-back.
 
     Args:
         tensor: PyTorch tensor on MPS device
@@ -3118,9 +3124,12 @@ def mps_tensor_to_metal_buffer(
 
     size = tensor.numel() * tensor.element_size()
 
-    # For output buffers (copy_back=True), skip MPS sync and create fresh buffer
+    if initialize_copy_back and not copy_back:
+        raise ValueError("initialize_copy_back requires copy_back=True")
+
+    # For pure output buffers (copy_back=True), skip MPS sync and create fresh buffer
     # We don't need tensor data - just a buffer to write results to
-    if copy_back:
+    if copy_back and not initialize_copy_back:
         aligned_size = _align_buffer_size(size)
         buffer = device.newBufferWithLength_options_(
             aligned_size, Metal.MTLResourceStorageModeShared
@@ -3152,8 +3161,6 @@ def mps_tensor_to_metal_buffer(
     except Exception:
         pass
 
-    # copy_back case is handled at the top of this function, before MPS sync
-
     # Handle dtype conversion for numpy compatibility
     # BFloat16 is not supported by numpy, convert to float16
     cpu_tensor = tensor.detach().cpu()
@@ -3171,6 +3178,8 @@ def mps_tensor_to_metal_buffer(
     )
     if buffer is None:
         raise RuntimeError("Failed to create Metal buffer from tensor data")
+    if copy_back:
+        return _CopyBackBuffer(buffer, tensor)
     return buffer
 
 

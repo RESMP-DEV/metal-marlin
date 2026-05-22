@@ -25,7 +25,9 @@
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 #include "dequant_helpers.metal"
+#define METAL_MARLIN_DEQUANT_INT8_HELPERS_ONLY 1
 #include "dequant_int8.metal"
+#undef METAL_MARLIN_DEQUANT_INT8_HELPERS_ONLY
 #include "bf16_compat.metal"
 
 using namespace metal;
