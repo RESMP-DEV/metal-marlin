@@ -41,7 +41,6 @@ from metal_marlin.kernels.qwen36_27b import (  # noqa: E402
     KERNEL_LM_HEAD,
     KERNEL_QKVB,
     KERNEL_RMSNORM,
-    PackedInt4Matrix,
     dispatch_argmax,
     dispatch_attention_cache_write,
     dispatch_attention_decode,
@@ -60,15 +59,29 @@ from metal_marlin.kernels.qwen36_27b import (  # noqa: E402
 )
 from metal_marlin.metal_dispatch import Metal, dispatch_kernel  # noqa: E402
 from metal_marlin.qwen36_27b_artifact import (  # noqa: E402
-    REQUIRED_TENSOR_ROLES,
+    GLOBAL_TENSOR_ROLES,
+    LAYER_LOCAL_TENSOR_ROLES,
+    ManifestCoverageKind,
+    ManifestTensorKey,
+    Qwen36ArtifactManifest,
     TensorRole,
+    artifact_coverage,
+    manifest_tensor_index,
     read_manifest,
-    validate_required_roles,
 )
 from metal_marlin.qwen36_27b_profile import QWEN36_27B_PROFILE, Qwen36ModelProfile  # noqa: E402
 from metal_marlin.qwen36_27b_validation import default_block_layer0_manifest_path  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+TEMPLATE_WEIGHT_NOTES = (
+    "Template-weight block skeleton for launch/timing evidence only; "
+    "pack every layer and run generation/perplexity before quality claims."
+)
+FULL_LAYER_NOTES = (
+    "Full-layer block skeleton for launch/timing evidence only; "
+    "run generation/perplexity before quality claims."
+)
 
 
 @dataclass(frozen=True)
@@ -86,15 +99,83 @@ class Qwen36BlockSkeletonSummary:
     expected_dispatches_per_token: int
     kernel_counts: dict[str, int]
     expected_kernel_counts: dict[str, int]
+    coverage_kind: ManifestCoverageKind | None = None
+    coverage_layers: int | None = None
+    coverage_tensors: int | None = None
     template_weight_reuse: bool = True
     quality_claim: bool = False
-    notes: str = (
-        "Template-weight block skeleton for launch/timing evidence only; "
-        "pack every layer and run generation/perplexity before quality claims."
-    )
+    notes: str = TEMPLATE_WEIGHT_NOTES
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class ManifestTensorLookup:
+    coverage_kind: ManifestCoverageKind
+    coverage_layers: int
+    coverage_tensors: int
+    values: dict[ManifestTensorKey, Any]
+    template_keys: dict[TensorRole, ManifestTensorKey]
+    global_keys: dict[TensorRole, ManifestTensorKey]
+
+    @property
+    def template_weight_reuse(self) -> bool:
+        return self.coverage_kind == "template"
+
+    def tensor(self, role: TensorRole, *, layer_index: int | None = None) -> Any:
+        if role in GLOBAL_TENSOR_ROLES:
+            return self.values[self.global_keys[role]]
+
+        if role not in LAYER_LOCAL_TENSOR_ROLES:
+            raise ValueError(f"unsupported Qwen3.6-27B tensor role: {role}")
+
+        if self.template_weight_reuse:
+            return self.values[self.template_keys[role]]
+
+        if layer_index is None:
+            raise ValueError(f"layer_index is required for full-layer role {role}")
+
+        key = (layer_index, role)
+        if key not in self.values:
+            raise ValueError(f"role {role} is not available for layer {layer_index}")
+        return self.values[key]
+
+
+def manifest_tensor_lookup(manifest: Qwen36ArtifactManifest) -> ManifestTensorLookup:
+    coverage = artifact_coverage(manifest)
+    values = manifest_tensor_index(manifest)
+    template_keys: dict[TensorRole, ManifestTensorKey] = {}
+    global_keys: dict[TensorRole, ManifestTensorKey] = {}
+
+    for key, tensor in values.items():
+        if tensor.role in GLOBAL_TENSOR_ROLES:
+            global_keys[tensor.role] = key
+        elif coverage.kind == "template":
+            template_keys[tensor.role] = key
+
+    return ManifestTensorLookup(
+        coverage_kind=coverage.kind,
+        coverage_layers=coverage.layers,
+        coverage_tensors=coverage.tensors,
+        values=values,
+        template_keys=template_keys,
+        global_keys=global_keys,
+    )
+
+
+def _with_loaded_values(
+    lookup: ManifestTensorLookup,
+    values: dict[ManifestTensorKey, Any],
+) -> ManifestTensorLookup:
+    return ManifestTensorLookup(
+        coverage_kind=lookup.coverage_kind,
+        coverage_layers=lookup.coverage_layers,
+        coverage_tensors=lookup.coverage_tensors,
+        values=values,
+        template_keys=lookup.template_keys,
+        global_keys=lookup.global_keys,
+    )
 
 
 def expected_kernel_breakdown(
@@ -161,10 +242,14 @@ def make_summary(
     elapsed_ms: float,
     kernel_names: Sequence[str],
     command_buffers: int = 0,
+    coverage_kind: ManifestCoverageKind | None = None,
+    coverage_layers: int | None = None,
+    coverage_tensors: int | None = None,
 ) -> Qwen36BlockSkeletonSummary:
     dispatch_count = len(kernel_names)
     active_tokens = max(decode_tokens, 0)
     expected = expected_dispatches_per_token()
+    template_weight_reuse = coverage_kind != "full_layers"
     return Qwen36BlockSkeletonSummary(
         manifest_path=manifest_path,
         runner=runner,
@@ -181,6 +266,11 @@ def make_summary(
         expected_dispatches_per_token=expected,
         kernel_counts=kernel_counts_from_names(kernel_names),
         expected_kernel_counts=expected_kernel_breakdown(),
+        coverage_kind=coverage_kind,
+        coverage_layers=coverage_layers,
+        coverage_tensors=coverage_tensors,
+        template_weight_reuse=template_weight_reuse,
+        notes=FULL_LAYER_NOTES if coverage_kind == "full_layers" else TEMPLATE_WEIGHT_NOTES,
     )
 
 
@@ -215,20 +305,19 @@ def _role_artifacts(
     manifest_path: Path,
     *,
     device: str,
-) -> dict[TensorRole, PackedInt4Matrix]:
+) -> ManifestTensorLookup:
     manifest = read_manifest(manifest_path)
-    validate_required_roles(manifest)
-    tensors = {tensor.role: tensor for tensor in manifest.tensors}
-    return {
-        role: load_packed_int4_matrix(tensors[role], manifest_path.parent, device=device)
-        for role in REQUIRED_TENSOR_ROLES
+    lookup = manifest_tensor_lookup(manifest)
+    values = {
+        key: load_packed_int4_matrix(tensor, manifest_path.parent, device=device)
+        for key, tensor in lookup.values.items()
     }
+    return _with_loaded_values(lookup, values)
 
 
-def _manifest_tensor_map(manifest_path: Path):
+def _manifest_tensor_map(manifest_path: Path) -> ManifestTensorLookup:
     manifest = read_manifest(manifest_path)
-    validate_required_roles(manifest)
-    return {tensor.role: tensor for tensor in manifest.tensors}
+    return manifest_tensor_lookup(manifest)
 
 
 def _buffer_from_bytes(lib, data: bytes, label: str):
@@ -288,7 +377,7 @@ class _MetalInt4Matrix:
 
 @dataclass(frozen=True)
 class _DirectBuffers:
-    weights: dict[TensorRole, _MetalInt4Matrix]
+    weights: ManifestTensorLookup
     hidden_a: Any
     hidden_b: Any
     norm: Any
@@ -332,11 +421,10 @@ def _load_direct_buffers(
     profile = QWEN36_27B_PROFILE
     lib = get_qwen36_kernel_library()
     tensor_map = _manifest_tensor_map(manifest_path)
-    weights: dict[TensorRole, _MetalInt4Matrix] = {}
-    for role in REQUIRED_TENSOR_ROLES:
-        tensor = tensor_map[role]
+    weights: dict[ManifestTensorKey, _MetalInt4Matrix] = {}
+    for key, tensor in tensor_map.values.items():
         groups = (tensor.in_features + tensor.group_size - 1) // tensor.group_size
-        weights[role] = _MetalInt4Matrix(
+        weights[key] = _MetalInt4Matrix(
             qweight=_buffer_from_file(
                 lib,
                 manifest_path.parent / tensor.qweight,
@@ -370,7 +458,7 @@ def _load_direct_buffers(
     )
     cache_elements = max_context * profile.attention.kv_features
     return _DirectBuffers(
-        weights=weights,
+        weights=_with_loaded_values(tensor_map, weights),
         hidden_a=_filled_half_buffer(lib, profile.hidden_size, 1.0, "hidden_a"),
         hidden_b=_filled_half_buffer(lib, profile.hidden_size, 0.0, "hidden_b"),
         norm=_empty_buffer(lib, profile.hidden_size * half, "norm"),
@@ -441,7 +529,7 @@ def _zeros(size: int, *, device: str):
 
 def _run_one_token(
     hidden,
-    artifacts: dict[TensorRole, PackedInt4Matrix],
+    artifacts: ManifestTensorLookup,
     linear_states: list[Any],
     k_caches: list[Any],
     v_caches: list[Any],
@@ -459,37 +547,37 @@ def _run_one_token(
     linear_index = 0
     full_index = 0
 
-    for layer_type in profile.layer_types:
+    for layer_index, layer_type in enumerate(profile.layer_types):
         residual = hidden
         hidden = dispatch_rmsnorm_hidden(hidden, input_norm)
 
         if layer_type == "linear_attention":
             linear_out = dispatch_linear_attention(
                 hidden,
-                artifacts["linear_attn_q"],
-                artifacts["linear_attn_k"],
-                artifacts["linear_attn_v"],
-                artifacts["linear_attn_beta"],
+                artifacts.tensor("linear_attn_q", layer_index=layer_index),
+                artifacts.tensor("linear_attn_k", layer_index=layer_index),
+                artifacts.tensor("linear_attn_v", layer_index=layer_index),
+                artifacts.tensor("linear_attn_beta", layer_index=layer_index),
                 linear_states[linear_index],
             )
             az = dispatch_linear_az_projection(
                 hidden,
-                artifacts["linear_attn_a"],
-                artifacts["linear_attn_z"],
+                artifacts.tensor("linear_attn_a", layer_index=layer_index),
+                artifacts.tensor("linear_attn_z", layer_index=layer_index),
             )
             linear_out = dispatch_linear_rmsnorm_gated(linear_out, az.z, linear_norm)
             hidden = dispatch_linear_o_residual(
                 linear_out,
-                artifacts["linear_attn_out"],
+                artifacts.tensor("linear_attn_out", layer_index=layer_index),
                 residual,
             )
             linear_index += 1
         else:
             projected = dispatch_attention_qkv_projection(
                 hidden,
-                artifacts["full_attn_q"],
-                artifacts["full_attn_k"],
-                artifacts["full_attn_v"],
+                artifacts.tensor("full_attn_q", layer_index=layer_index),
+                artifacts.tensor("full_attn_k", layer_index=layer_index),
+                artifacts.tensor("full_attn_v", layer_index=layer_index),
             )
             dispatch_attention_cache_write(
                 projected.k,
@@ -510,7 +598,7 @@ def _run_one_token(
             )
             hidden = dispatch_attention_o_residual(
                 attn_out,
-                artifacts["full_attn_o"],
+                artifacts.tensor("full_attn_o", layer_index=layer_index),
                 residual,
             )
             full_index += 1
@@ -519,13 +607,17 @@ def _run_one_token(
         hidden = dispatch_rmsnorm_hidden(hidden, post_norm)
         intermediate = dispatch_dense_gate_up_silu(
             hidden,
-            artifacts["mlp_gate"],
-            artifacts["mlp_up"],
+            artifacts.tensor("mlp_gate", layer_index=layer_index),
+            artifacts.tensor("mlp_up", layer_index=layer_index),
         )
-        hidden = dispatch_dense_down_residual(intermediate, artifacts["mlp_down"], residual)
+        hidden = dispatch_dense_down_residual(
+            intermediate,
+            artifacts.tensor("mlp_down", layer_index=layer_index),
+            residual,
+        )
 
     hidden = dispatch_rmsnorm_hidden(hidden, final_norm)
-    logits = dispatch_lm_head_logits(hidden, artifacts["lm_head"])
+    logits = dispatch_lm_head_logits(hidden, artifacts.tensor("lm_head"))
     token = dispatch_argmax(logits)
     return hidden, int(token.cpu().item())
 
@@ -545,7 +637,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
     linear_index = 0
     full_index = 0
 
-    for layer_type in profile.layer_types:
+    for layer_index, layer_type in enumerate(profile.layer_types):
         residual = hidden
         _emit(
             KERNEL_RMSNORM,
@@ -557,6 +649,10 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
         next_hidden = _next_hidden_buffer(buffers, hidden)
         if layer_type == "linear_attention":
             weights = buffers.weights
+            q_weight = weights.tensor("linear_attn_q", layer_index=layer_index)
+            k_weight = weights.tensor("linear_attn_k", layer_index=layer_index)
+            v_weight = weights.tensor("linear_attn_v", layer_index=layer_index)
+            beta_weight = weights.tensor("linear_attn_beta", layer_index=layer_index)
             _emit(
                 KERNEL_QKVB,
                 (
@@ -574,18 +670,18 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                 (64, 1, 1),
                 [
                     buffers.norm,
-                    weights["linear_attn_q"].qweight,
-                    weights["linear_attn_q"].scales,
-                    weights["linear_attn_q"].zeros,
-                    weights["linear_attn_k"].qweight,
-                    weights["linear_attn_k"].scales,
-                    weights["linear_attn_k"].zeros,
-                    weights["linear_attn_v"].qweight,
-                    weights["linear_attn_v"].scales,
-                    weights["linear_attn_v"].zeros,
-                    weights["linear_attn_beta"].qweight,
-                    weights["linear_attn_beta"].scales,
-                    weights["linear_attn_beta"].zeros,
+                    q_weight.qweight,
+                    q_weight.scales,
+                    q_weight.zeros,
+                    k_weight.qweight,
+                    k_weight.scales,
+                    k_weight.zeros,
+                    v_weight.qweight,
+                    v_weight.scales,
+                    v_weight.zeros,
+                    beta_weight.qweight,
+                    beta_weight.scales,
+                    beta_weight.zeros,
                     buffers.q,
                     buffers.k,
                     buffers.v,
@@ -606,6 +702,8 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                     buffers.linear_out,
                 ],
             )
+            a_weight = weights.tensor("linear_attn_a", layer_index=layer_index)
+            z_weight = weights.tensor("linear_attn_z", layer_index=layer_index)
             _emit(
                 KERNEL_LINEAR_AZ,
                 (
@@ -616,12 +714,12 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                 (64, 1, 1),
                 [
                     buffers.norm,
-                    weights["linear_attn_a"].qweight,
-                    weights["linear_attn_a"].scales,
-                    weights["linear_attn_a"].zeros,
-                    weights["linear_attn_z"].qweight,
-                    weights["linear_attn_z"].scales,
-                    weights["linear_attn_z"].zeros,
+                    a_weight.qweight,
+                    a_weight.scales,
+                    a_weight.zeros,
+                    z_weight.qweight,
+                    z_weight.scales,
+                    z_weight.zeros,
                     buffers.a,
                     buffers.z,
                     buffers.linear_az_params,
@@ -633,15 +731,16 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                 (profile.delta.value_dim, 1, 1),
                 [buffers.linear_out, buffers.z, buffers.linear_norm, buffers.linear_gated],
             )
+            out_weight = weights.tensor("linear_attn_out", layer_index=layer_index)
             _emit(
                 KERNEL_LINEAR_OUT,
                 ((profile.hidden_size + 63) // 64, 1, 1),
                 (64, 1, 1),
                 [
                     buffers.linear_gated,
-                    weights["linear_attn_out"].qweight,
-                    weights["linear_attn_out"].scales,
-                    weights["linear_attn_out"].zeros,
+                    out_weight.qweight,
+                    out_weight.scales,
+                    out_weight.zeros,
                     residual,
                     next_hidden,
                     buffers.group_params,
@@ -650,6 +749,9 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             linear_index += 1
         else:
             weights = buffers.weights
+            q_weight = weights.tensor("full_attn_q", layer_index=layer_index)
+            k_weight = weights.tensor("full_attn_k", layer_index=layer_index)
+            v_weight = weights.tensor("full_attn_v", layer_index=layer_index)
             _emit(
                 KERNEL_ATTENTION_QKV,
                 (
@@ -666,15 +768,15 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                 (64, 1, 1),
                 [
                     buffers.norm,
-                    weights["full_attn_q"].qweight,
-                    weights["full_attn_q"].scales,
-                    weights["full_attn_q"].zeros,
-                    weights["full_attn_k"].qweight,
-                    weights["full_attn_k"].scales,
-                    weights["full_attn_k"].zeros,
-                    weights["full_attn_v"].qweight,
-                    weights["full_attn_v"].scales,
-                    weights["full_attn_v"].zeros,
+                    q_weight.qweight,
+                    q_weight.scales,
+                    q_weight.zeros,
+                    k_weight.qweight,
+                    k_weight.scales,
+                    k_weight.zeros,
+                    v_weight.qweight,
+                    v_weight.scales,
+                    v_weight.zeros,
                     buffers.attn_q,
                     buffers.attn_k,
                     buffers.attn_v,
@@ -710,15 +812,16 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
                     token_params,
                 ],
             )
+            out_weight = weights.tensor("full_attn_o", layer_index=layer_index)
             _emit(
                 KERNEL_ATTENTION_OUT,
                 ((profile.hidden_size + 63) // 64, 1, 1),
                 (64, 1, 1),
                 [
                     buffers.attn_out,
-                    weights["full_attn_o"].qweight,
-                    weights["full_attn_o"].scales,
-                    weights["full_attn_o"].zeros,
+                    out_weight.qweight,
+                    out_weight.scales,
+                    out_weight.zeros,
                     residual,
                     next_hidden,
                     buffers.group_params,
@@ -734,32 +837,35 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             (256, 1, 1),
             [hidden, buffers.post_norm, buffers.norm],
         )
+        gate_weight = buffers.weights.tensor("mlp_gate", layer_index=layer_index)
+        up_weight = buffers.weights.tensor("mlp_up", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_GATE_UP,
             ((profile.dense_mlp.intermediate_size + 63) // 64, 1, 1),
             (64, 1, 1),
             [
                 buffers.norm,
-                buffers.weights["mlp_gate"].qweight,
-                buffers.weights["mlp_gate"].scales,
-                buffers.weights["mlp_gate"].zeros,
-                buffers.weights["mlp_up"].qweight,
-                buffers.weights["mlp_up"].scales,
-                buffers.weights["mlp_up"].zeros,
+                gate_weight.qweight,
+                gate_weight.scales,
+                gate_weight.zeros,
+                up_weight.qweight,
+                up_weight.scales,
+                up_weight.zeros,
                 buffers.intermediate,
                 buffers.dense_gate_params,
             ],
         )
         next_hidden = _next_hidden_buffer(buffers, hidden)
+        down_weight = buffers.weights.tensor("mlp_down", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_DOWN,
             ((profile.hidden_size + 63) // 64, 1, 1),
             (64, 1, 1),
             [
                 buffers.intermediate,
-                buffers.weights["mlp_down"].qweight,
-                buffers.weights["mlp_down"].scales,
-                buffers.weights["mlp_down"].zeros,
+                down_weight.qweight,
+                down_weight.scales,
+                down_weight.zeros,
                 residual,
                 next_hidden,
                 buffers.group_params,
@@ -773,15 +879,16 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
         (256, 1, 1),
         [hidden, buffers.final_norm, buffers.norm],
     )
+    lm_head = buffers.weights.tensor("lm_head")
     _emit(
         KERNEL_LM_HEAD,
         ((profile.vocab_size + 63) // 64, 1, 1),
         (64, 1, 1),
         [
             buffers.norm,
-            buffers.weights["lm_head"].qweight,
-            buffers.weights["lm_head"].scales,
-            buffers.weights["lm_head"].zeros,
+            lm_head.qweight,
+            lm_head.scales,
+            lm_head.zeros,
             buffers.logits,
             buffers.group_params,
         ],
@@ -827,6 +934,9 @@ def run_direct_benchmark(
         elapsed_ms=elapsed_ms,
         kernel_names=launch_tracing.kernel_names(),
         command_buffers=decode_tokens,
+        coverage_kind=buffers.weights.coverage_kind,
+        coverage_layers=buffers.weights.coverage_layers,
+        coverage_tensors=buffers.weights.coverage_tensors,
     )
 
 
@@ -899,6 +1009,9 @@ def run_wrapper_benchmark(
         elapsed_ms=elapsed_ms,
         kernel_names=kernel_names,
         command_buffers=wrapper_command_buffers_from_kernel_names(kernel_names),
+        coverage_kind=artifacts.coverage_kind,
+        coverage_layers=artifacts.coverage_layers,
+        coverage_tensors=artifacts.coverage_tensors,
     )
 
 

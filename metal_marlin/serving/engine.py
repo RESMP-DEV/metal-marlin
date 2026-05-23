@@ -11,16 +11,18 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..inference.mmfp4_pipeline import MMFP4Pipeline
 from ..inference.pipeline import MarlinPipeline
 from ..kernels.qwen36_27b import decide_fused_artifact_path
 from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
 from .openai_schemas import (
+    ChatCompletionChoice,
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatMessage,
     CompletionRequest,
     CompletionResponse,
     Usage,
@@ -704,11 +706,11 @@ class ServingEngine:
             created=int(time.time()),
             model=self.model_name,
             choices=[
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": completion_text},
-                    "finish_reason": finish_reason,
-                }
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=completion_text),
+                    finish_reason=finish_reason,
+                )
             ],
             usage=Usage(
                 prompt_tokens=prompt_tokens,
@@ -983,19 +985,25 @@ class ServingEngine:
     ) -> str | Iterator[str]:
         logger.debug("_call_pipeline called with prompt=%s", prompt)
         if self._model_format == "mmfp4":
-            return self.pipeline(
+            return cast(
+                str | Iterator[str],
+                self.pipeline(
+                    prompt,
+                    max_new_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stream=stream,
+                ),
+            )
+        return cast(
+            str | Iterator[str],
+            self.pipeline(
                 prompt,
-                max_new_tokens=max_tokens,
+                max_tokens=max_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 stream=stream,
-            )
-        return self.pipeline(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stream=stream,
+            ),
         )
 
     def _strip_prompt(self, full_text: str, prompt: str) -> str:
@@ -1229,11 +1237,11 @@ class ServingEngine:
             created=int(time.time()),
             model=self.model_name,
             choices=[
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": completion_text},
-                    "finish_reason": finish_reason,
-                }
+                ChatCompletionChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=completion_text),
+                    finish_reason=finish_reason,
+                )
             ],
             usage=Usage(
                 prompt_tokens=prompt_tokens,

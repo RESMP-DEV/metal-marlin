@@ -116,11 +116,12 @@ uv run python benchmarks/bench_qwen36_27b_block_skeleton.py \
   --warmup-tokens 1
 ```
 
-The benchmark reports wrapper-level dispatch counts, kernel counts, and decode
-timing for the current fused skeleton.  It sets `quality_claim=false` and
-`template_weight_reuse=true` because the layer-0/layer-3 artifact reuses
-template tensors; full quality evidence still requires per-layer packed tensors
-plus generation or perplexity validation.
+The benchmark reports wrapper-level dispatch counts, kernel counts, decode
+timing, and manifest coverage fields (`coverage_kind`, `coverage_layers`, and
+`coverage_tensors`) for the current fused skeleton.  It keeps
+`quality_claim=false` until generation or perplexity validation exists.  Template
+manifests report `template_weight_reuse=true`; full-layer manifests resolve
+concrete per-layer tensors and report `template_weight_reuse=false`.
 
 `--runner direct` is the default path for launch evidence.  It loads the
 manifest into Metal buffers, keeps intermediate activations out of Python
