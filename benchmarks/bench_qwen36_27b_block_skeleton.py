@@ -41,6 +41,9 @@ from metal_marlin.kernels.qwen36_27b import (  # noqa: E402
     KERNEL_LM_HEAD,
     KERNEL_QKVB,
     KERNEL_RMSNORM,
+    QWEN36_DELTANET_THREADS_PER_GROUP,
+    QWEN36_INT4_GEMV_THREADS_PER_GROUP,
+    QWEN36_PROJECTION_THREADS_PER_GROUP,
     dispatch_argmax,
     dispatch_attention_cache_write,
     dispatch_attention_decode,
@@ -670,7 +673,7 @@ def _run_one_token_direct(
                     1,
                     1,
                 ),
-                (64, 1, 1),
+                (QWEN36_PROJECTION_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.norm,
                     q_weight.qweight,
@@ -699,7 +702,7 @@ def _run_one_token_direct(
                     1,
                     1,
                 ),
-                (128, 1, 1),
+                (QWEN36_DELTANET_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.q,
                     buffers.k,
@@ -718,7 +721,7 @@ def _run_one_token_direct(
                     1,
                     1,
                 ),
-                (64, 1, 1),
+                (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.norm,
                     a_weight.qweight,
@@ -742,7 +745,7 @@ def _run_one_token_direct(
             _emit(
                 KERNEL_LINEAR_OUT,
                 (profile.hidden_size, 1, 1),
-                (64, 1, 1),
+                (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.linear_gated,
                     out_weight.qweight,
@@ -768,7 +771,7 @@ def _run_one_token_direct(
                     1,
                     1,
                 ),
-                (64, 1, 1),
+                (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.norm,
                     q_weight.qweight,
@@ -819,7 +822,7 @@ def _run_one_token_direct(
             _emit(
                 KERNEL_ATTENTION_OUT,
                 (profile.hidden_size, 1, 1),
-                (64, 1, 1),
+                (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
                 [
                     buffers.attn_out,
                     out_weight.qweight,
@@ -848,7 +851,7 @@ def _run_one_token_direct(
         _emit(
             KERNEL_DENSE_GATE_UP,
             (profile.dense_mlp.intermediate_size, 1, 1),
-            (64, 1, 1),
+            (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
             [
                 buffers.norm,
                 gate_weight.qweight,
@@ -866,7 +869,7 @@ def _run_one_token_direct(
         _emit(
             KERNEL_DENSE_DOWN,
             (profile.hidden_size, 1, 1),
-            (64, 1, 1),
+            (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
             [
                 buffers.intermediate,
                 down_weight.qweight,
@@ -892,7 +895,7 @@ def _run_one_token_direct(
     _emit(
         KERNEL_LM_HEAD,
         (profile.vocab_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         [
             buffers.norm,
             lm_head.qweight,
