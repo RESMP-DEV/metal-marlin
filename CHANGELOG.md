@@ -17,6 +17,10 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
   intermediate_size=17408, GQA 24Q/4KV), fundamentally different from the MoE-based
   Qwen3.6-35B-A3B. No full model weights were loaded.
 
+### Changed
+- Parallelized the Qwen3.6-27B int4 projection and DeltaNet update kernels and
+  aligned the dispatch/test coverage with the new threadgroup launch shapes.
+
 ## [Unreleased] - 2026-02-10
 
 ### Fixed

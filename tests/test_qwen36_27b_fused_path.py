@@ -359,6 +359,17 @@ def test_qwen36_int4_kernels_use_lane_parallel_dot_products() -> None:
         assert "thread_position_in_grid" not in signature
 
 
+def test_qwen36_deltanet_update_uses_block_parallel_reductions() -> None:
+    source = SHADER_PATH.read_text(encoding="utf-8")
+    signature = source[source.index("kernel void qwen36_27b_deltanet_update") :]
+    signature = signature[: signature.index("{")]
+
+    assert "value_block_cols" in source
+    assert "key_lanes" in source
+    assert "threadgroup_position_in_grid" in signature
+    assert "thread_position_in_grid" not in signature
+
+
 def test_launch_budget_records_two_dispatches_for_linear_attention_block() -> None:
     _require_fresh_mps_metallib()
     profile = QWEN36_27B_PROFILE

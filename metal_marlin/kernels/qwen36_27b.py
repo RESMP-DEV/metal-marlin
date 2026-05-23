@@ -540,11 +540,13 @@ def dispatch_deltanet_update(
         _buffer(y, lib, copy_back=True),
     ]
     launch_tracing.record_dispatch(KERNEL_DELTANET_UPDATE, value_heads=profile.delta.value_heads)
+    value_block_cols = 16
+    deltanet_blocks = profile.delta.value_heads * (profile.delta.value_dim // value_block_cols)
     dispatch_kernel(
         lib,
         KERNEL_DELTANET_UPDATE,
-        ((profile.delta.v_features + 63) // 64, 1, 1),
-        (64, 1, 1),
+        (deltanet_blocks, 1, 1),
+        (128, 1, 1),
         buffers,
         wait=wait,
     )
@@ -676,11 +678,15 @@ def dispatch_linear_attention(
             KERNEL_DELTANET_UPDATE,
             value_heads=profile.delta.value_heads,
         )
+        value_block_cols = 16
+        deltanet_blocks = profile.delta.value_heads * (
+            profile.delta.value_dim // value_block_cols
+        )
         dispatch_kernel(
             lib,
             KERNEL_DELTANET_UPDATE,
-            ((profile.delta.v_features + 63) // 64, 1, 1),
-            (64, 1, 1),
+            (deltanet_blocks, 1, 1),
+            (128, 1, 1),
             deltanet_buffers,
             wait=False,
         )

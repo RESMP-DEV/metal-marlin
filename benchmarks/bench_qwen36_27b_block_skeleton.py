@@ -687,8 +687,12 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             )
             _emit(
                 KERNEL_DELTANET_UPDATE,
-                ((profile.delta.v_features + 63) // 64, 1, 1),
-                (64, 1, 1),
+                (
+                    profile.delta.value_heads * (profile.delta.value_dim // 16),
+                    1,
+                    1,
+                ),
+                (128, 1, 1),
                 [
                     buffers.q,
                     buffers.k,

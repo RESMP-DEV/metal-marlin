@@ -295,36 +295,68 @@ kernel void qwen36_27b_deltanet_update(device const half *q [[buffer(0)]],
                                        device const half *beta [[buffer(3)]],
                                        device half *state [[buffer(4)]],
                                        device half *y [[buffer(5)]],
-                                       uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_DELTA_V_FEATURES) {
+                                       uint token_block [[threadgroup_position_in_grid]],
+                                       uint lane [[thread_index_in_threadgroup]],
+                                       uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[128];
+
+  constexpr uint value_block_cols = 16u;
+  constexpr uint key_lanes = 8u;
+  const uint blocks_per_head = Q36_DELTA_VALUE_DIM / value_block_cols;
+  const uint total_blocks = Q36_DELTA_VALUE_HEADS * blocks_per_head;
+  if (token_block >= total_blocks || lane >= key_lanes * value_block_cols) {
     return;
   }
 
-  const uint value_head = gid / Q36_DELTA_VALUE_DIM;
-  const uint value_col = gid % Q36_DELTA_VALUE_DIM;
+  const uint key_lane = lane & (key_lanes - 1u);
+  const uint value_lane = lane >> 3u;
+  const uint value_head = token_block / blocks_per_head;
+  const uint value_block = token_block - value_head * blocks_per_head;
+  const uint value_col = value_block * value_block_cols + value_lane;
   const uint key_head = value_head / Q36_VALUE_HEADS_PER_KEY_HEAD;
   const uint qk_base = key_head * Q36_DELTA_KEY_DIM;
   const uint value_base = value_head * Q36_DELTA_VALUE_DIM;
   const uint state_base =
       value_head * Q36_DELTA_KEY_DIM * Q36_DELTA_VALUE_DIM + value_col;
+  const uint partial_base = value_lane * key_lanes;
 
   float prediction = 0.0f;
-  for (uint key_col = 0u; key_col < Q36_DELTA_KEY_DIM; ++key_col) {
+  for (uint key_col = key_lane; key_col < Q36_DELTA_KEY_DIM; key_col += key_lanes) {
     const uint state_index = state_base + key_col * Q36_DELTA_VALUE_DIM;
     prediction += float(k[qk_base + key_col]) * float(state[state_index]);
   }
+  partial[partial_base + key_lane] = prediction;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = key_lanes >> 1u; stride > 0u; stride >>= 1u) {
+    if (key_lane < stride) {
+      partial[partial_base + key_lane] += partial[partial_base + key_lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
 
   const float beta_value = float(beta[value_head]);
-  const float delta = float(v[value_base + value_col]) - prediction;
+  const float delta = float(v[value_base + value_col]) - partial[partial_base];
   float output = 0.0f;
-  for (uint key_col = 0u; key_col < Q36_DELTA_KEY_DIM; ++key_col) {
+  for (uint key_col = key_lane; key_col < Q36_DELTA_KEY_DIM; key_col += key_lanes) {
+    const float key_value = float(k[qk_base + key_col]);
     const uint state_index = state_base + key_col * Q36_DELTA_VALUE_DIM;
     const float next_state =
-        float(state[state_index]) + beta_value * float(k[qk_base + key_col]) * delta;
+        float(state[state_index]) + beta_value * key_value * delta;
     state[state_index] = half(next_state);
     output += float(q[qk_base + key_col]) * next_state;
   }
-  y[gid] = half(output);
+  partial[partial_base + key_lane] = output;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = key_lanes >> 1u; stride > 0u; stride >>= 1u) {
+    if (key_lane < stride) {
+      partial[partial_base + key_lane] += partial[partial_base + key_lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+
+  if (key_lane == 0u) {
+    y[value_base + value_col] = half(partial[partial_base]);
+  }
 }
 
 kernel void qwen36_27b_deltanet_interval4(device const half *q [[buffer(0)]],
