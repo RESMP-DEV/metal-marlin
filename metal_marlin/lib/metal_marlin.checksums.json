@@ -84,7 +84,7 @@
     "src/paged_attention.metal": "a17ba9dd4c2043db094f69b69dfa0c60fd0c53e6821b0162fd3d314bc08d37c5",
     "src/parallel_multihead_attention.metal": "24c4ae640b49706e2cee68e9cd5507b95d15c135c2e266a5621db667041cb94f",
     "src/psd_project.metal": "e5e107309047a06c509341ada807e62a7d9b502296bf74ead562dc1f831cbce9",
-    "src/qwen36_27b_decode.metal": "71938cad8138ac4ee3f0a9e4cf47d1c74813b493935f5f765ad155862016f12f",
+    "src/qwen36_27b_decode.metal": "183d71c3496806316b6aa3917d72d2ad463b4c18a6ddfc7ca09c6f7fd7989907",
     "src/reduction_helpers.metal": "e841cfb367b10c4c10fc9f722bc914ecd5f44097e5029e46dae3da542b3834b6",
     "src/rope.metal": "5d678ce00b49be01168ee1c4f0498610649ada1ebe7a6e92e161d6d718323603",
     "src/rope_optimized.metal": "bacb3e1bc7f638e9e8a31d3b90d109ab440dfb877f615d044fd6120dea4ff80e",

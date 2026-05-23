@@ -406,7 +406,7 @@ def dispatch_qkvb_projection(
     dispatch_kernel(
         lib,
         KERNEL_QKVB,
-        ((total_cols + 63) // 64, 1, 1),
+        (total_cols, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -460,7 +460,7 @@ def dispatch_attention_qkv_projection(
     dispatch_kernel(
         lib,
         KERNEL_ATTENTION_QKV,
-        ((total_cols + 63) // 64, 1, 1),
+        (total_cols, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -503,7 +503,7 @@ def dispatch_linear_az_projection(
     dispatch_kernel(
         lib,
         KERNEL_LINEAR_AZ,
-        ((total_cols + 63) // 64, 1, 1),
+        (total_cols, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -667,7 +667,7 @@ def dispatch_linear_attention(
         dispatch_kernel(
             lib,
             KERNEL_QKVB,
-            ((total_cols + 63) // 64, 1, 1),
+            (total_cols, 1, 1),
             (64, 1, 1),
             qkvb_buffers,
             wait=False,
@@ -716,7 +716,7 @@ def dispatch_linear_o_residual(
     dispatch_kernel(
         lib,
         KERNEL_LINEAR_OUT,
-        ((profile.hidden_size + 63) // 64, 1, 1),
+        (profile.hidden_size, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -762,7 +762,7 @@ def dispatch_dense_gate_up_silu(
     dispatch_kernel(
         lib,
         KERNEL_DENSE_GATE_UP,
-        ((profile.dense_mlp.intermediate_size + 63) // 64, 1, 1),
+        (profile.dense_mlp.intermediate_size, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -803,7 +803,7 @@ def dispatch_dense_down_residual(
     dispatch_kernel(
         lib,
         KERNEL_DENSE_DOWN,
-        ((profile.hidden_size + 63) // 64, 1, 1),
+        (profile.hidden_size, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -1029,7 +1029,7 @@ def dispatch_attention_o_residual(
     dispatch_kernel(
         lib,
         KERNEL_ATTENTION_OUT,
-        ((profile.hidden_size + 63) // 64, 1, 1),
+        (profile.hidden_size, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,
@@ -1063,7 +1063,7 @@ def dispatch_lm_head_logits(
     dispatch_kernel(
         lib,
         KERNEL_LM_HEAD,
-        ((profile.vocab_size + 63) // 64, 1, 1),
+        (profile.vocab_size, 1, 1),
         (64, 1, 1),
         buffers,
         wait=wait,

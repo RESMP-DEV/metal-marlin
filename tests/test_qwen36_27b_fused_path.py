@@ -338,6 +338,27 @@ def test_shader_contains_required_kernel_symbols() -> None:
     assert set(REQUIRED_KERNELS) <= found
 
 
+def test_qwen36_int4_kernels_use_lane_parallel_dot_products() -> None:
+    source = SHADER_PATH.read_text(encoding="utf-8")
+
+    assert "q36_int4_dot_g128_lane" in source
+    assert "q36_threadgroup_sum" in source
+    for kernel_name in (
+        "qwen36_27b_int4_qkvb",
+        "qwen36_27b_int4_attention_qkv",
+        "qwen36_27b_int4_linear_az",
+        "qwen36_27b_linear_o_residual",
+        "qwen36_27b_dense_gate_up_silu",
+        "qwen36_27b_dense_down_residual",
+        "qwen36_27b_attention_o_residual",
+        "qwen36_27b_lm_head_logits",
+    ):
+        signature = source[source.index(f"kernel void {kernel_name}") :]
+        signature = signature[: signature.index("{")]
+        assert "threadgroup_position_in_grid" in signature
+        assert "thread_position_in_grid" not in signature
+
+
 def test_launch_budget_records_two_dispatches_for_linear_attention_block() -> None:
     _require_fresh_mps_metallib()
     profile = QWEN36_27B_PROFILE

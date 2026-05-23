@@ -656,14 +656,10 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             _emit(
                 KERNEL_QKVB,
                 (
-                    (
-                        profile.delta.q_features
-                        + profile.delta.k_features
-                        + profile.delta.v_features
-                        + profile.delta.beta_features
-                        + 63
-                    )
-                    // 64,
+                    profile.delta.q_features
+                    + profile.delta.k_features
+                    + profile.delta.v_features
+                    + profile.delta.beta_features,
                     1,
                     1,
                 ),
@@ -707,7 +703,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             _emit(
                 KERNEL_LINEAR_AZ,
                 (
-                    (profile.delta.beta_features + profile.delta.v_features + 63) // 64,
+                    profile.delta.beta_features + profile.delta.v_features,
                     1,
                     1,
                 ),
@@ -734,7 +730,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             out_weight = weights.tensor("linear_attn_out", layer_index=layer_index)
             _emit(
                 KERNEL_LINEAR_OUT,
-                ((profile.hidden_size + 63) // 64, 1, 1),
+                (profile.hidden_size, 1, 1),
                 (64, 1, 1),
                 [
                     buffers.linear_gated,
@@ -755,13 +751,9 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             _emit(
                 KERNEL_ATTENTION_QKV,
                 (
-                    (
-                        profile.attention.q_features
-                        + profile.attention.kv_features
-                        + profile.attention.kv_features
-                        + 63
-                    )
-                    // 64,
+                    profile.attention.q_features
+                    + profile.attention.kv_features
+                    + profile.attention.kv_features,
                     1,
                     1,
                 ),
@@ -815,7 +807,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             out_weight = weights.tensor("full_attn_o", layer_index=layer_index)
             _emit(
                 KERNEL_ATTENTION_OUT,
-                ((profile.hidden_size + 63) // 64, 1, 1),
+                (profile.hidden_size, 1, 1),
                 (64, 1, 1),
                 [
                     buffers.attn_out,
@@ -841,7 +833,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
         up_weight = buffers.weights.tensor("mlp_up", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_GATE_UP,
-            ((profile.dense_mlp.intermediate_size + 63) // 64, 1, 1),
+            (profile.dense_mlp.intermediate_size, 1, 1),
             (64, 1, 1),
             [
                 buffers.norm,
@@ -859,7 +851,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
         down_weight = buffers.weights.tensor("mlp_down", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_DOWN,
-            ((profile.hidden_size + 63) // 64, 1, 1),
+            (profile.hidden_size, 1, 1),
             (64, 1, 1),
             [
                 buffers.intermediate,
@@ -882,7 +874,7 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
     lm_head = buffers.weights.tensor("lm_head")
     _emit(
         KERNEL_LM_HEAD,
-        ((profile.vocab_size + 63) // 64, 1, 1),
+        (profile.vocab_size, 1, 1),
         (64, 1, 1),
         [
             buffers.norm,

@@ -35,6 +35,60 @@ inline float q36_sigmoid(float x) {
   return 1.0f / (1.0f + exp(-x));
 }
 
+inline float q36_int4_dot_g128_lane(device const half *x,
+                                    device const uint *qweight,
+                                    device const half *scales,
+                                    device const half *zeros,
+                                    uint in_features,
+                                    uint out_features,
+                                    uint out_col,
+                                    uint lane,
+                                    uint lanes) {
+  float acc = 0.0f;
+  const uint packed_rows = in_features >> 3u;
+  for (uint packed_k = lane; packed_k < packed_rows; packed_k += lanes) {
+    const uint packed = qweight[packed_k * out_features + out_col];
+    const uint group = packed_k >> 4u;
+    const uint meta_index = group * out_features + out_col;
+    const float scale = float(scales[meta_index]);
+    const float zero = float(zeros[meta_index]);
+    const uint base_k = packed_k << 3u;
+
+    acc += float(x[base_k + 0u]) *
+           q36_dequant_u4((packed >> 0u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 1u]) *
+           q36_dequant_u4((packed >> 4u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 2u]) *
+           q36_dequant_u4((packed >> 8u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 3u]) *
+           q36_dequant_u4((packed >> 12u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 4u]) *
+           q36_dequant_u4((packed >> 16u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 5u]) *
+           q36_dequant_u4((packed >> 20u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 6u]) *
+           q36_dequant_u4((packed >> 24u) & 0xFu, scale, zero);
+    acc += float(x[base_k + 7u]) *
+           q36_dequant_u4((packed >> 28u) & 0xFu, scale, zero);
+  }
+  return acc;
+}
+
+inline float q36_threadgroup_sum(float value,
+                                 threadgroup float *partial,
+                                 uint lane,
+                                 uint lanes) {
+  partial[lane] = value;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = lanes >> 1u; stride > 0u; stride >>= 1u) {
+    if (lane < stride) {
+      partial[lane] += partial[lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  return partial[0];
+}
+
 inline float q36_int4_dot(device const half *x,
                           device const uint *qweight,
                           device const half *scales,
@@ -79,41 +133,57 @@ kernel void qwen36_27b_int4_qkvb(device const half *x [[buffer(0)]],
                                  device half *v_out [[buffer(15)]],
                                  device half *beta_out [[buffer(16)]],
                                  device const uint *params [[buffer(17)]],
-                                 uint gid [[thread_position_in_grid]]) {
-  const uint group_size = params[0];
+                                 uint global_col [[threadgroup_position_in_grid]],
+                                 uint lane [[thread_index_in_threadgroup]],
+                                 uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
   const uint total_cols = params[1];
-  if (gid >= total_cols) {
+  if (global_col >= total_cols) {
     return;
   }
 
-  if (gid < Q36_DELTA_Q_FEATURES) {
-    q_out[gid] = half(q36_int4_dot(x, q_qweight, q_scales, q_zeros,
-                                   Q36_HIDDEN, Q36_DELTA_Q_FEATURES, gid,
-                                   group_size));
-    return;
+  device const uint *qweight = q_qweight;
+  device const half *scales = q_scales;
+  device const half *zeros = q_zeros;
+  device half *output = q_out;
+  uint out_col = global_col;
+  uint out_features = Q36_DELTA_Q_FEATURES;
+
+  if (global_col >= Q36_DELTA_Q_FEATURES) {
+    uint shifted = global_col - Q36_DELTA_Q_FEATURES;
+    if (shifted < Q36_DELTA_K_FEATURES) {
+      qweight = k_qweight;
+      scales = k_scales;
+      zeros = k_zeros;
+      output = k_out;
+      out_col = shifted;
+      out_features = Q36_DELTA_K_FEATURES;
+    } else {
+      shifted -= Q36_DELTA_K_FEATURES;
+      if (shifted < Q36_DELTA_V_FEATURES) {
+        qweight = v_qweight;
+        scales = v_scales;
+        zeros = v_zeros;
+        output = v_out;
+        out_col = shifted;
+        out_features = Q36_DELTA_V_FEATURES;
+      } else {
+        shifted -= Q36_DELTA_V_FEATURES;
+        qweight = b_qweight;
+        scales = b_scales;
+        zeros = b_zeros;
+        output = beta_out;
+        out_col = shifted;
+        out_features = Q36_DELTA_BETA_FEATURES;
+      }
+    }
   }
 
-  uint col = gid - Q36_DELTA_Q_FEATURES;
-  if (col < Q36_DELTA_K_FEATURES) {
-    k_out[col] = half(q36_int4_dot(x, k_qweight, k_scales, k_zeros,
-                                   Q36_HIDDEN, Q36_DELTA_K_FEATURES, col,
-                                   group_size));
-    return;
-  }
-
-  col -= Q36_DELTA_K_FEATURES;
-  if (col < Q36_DELTA_V_FEATURES) {
-    v_out[col] = half(q36_int4_dot(x, v_qweight, v_scales, v_zeros,
-                                   Q36_HIDDEN, Q36_DELTA_V_FEATURES, col,
-                                   group_size));
-    return;
-  }
-
-  col -= Q36_DELTA_V_FEATURES;
-  if (col < Q36_DELTA_BETA_FEATURES) {
-    beta_out[col] = half(q36_int4_dot(x, b_qweight, b_scales, b_zeros,
-                                      Q36_HIDDEN, Q36_DELTA_BETA_FEATURES, col,
-                                      group_size));
+  const float acc = q36_int4_dot_g128_lane(
+      x, qweight, scales, zeros, Q36_HIDDEN, out_features, out_col, lane, lanes);
+  const float sum = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    output[out_col] = half(sum);
   }
 }
 
@@ -131,33 +201,47 @@ kernel void qwen36_27b_int4_attention_qkv(device const half *x [[buffer(0)]],
                                           device half *k_out [[buffer(11)]],
                                           device half *v_out [[buffer(12)]],
                                           device const uint *params [[buffer(13)]],
-                                          uint gid [[thread_position_in_grid]]) {
-  const uint group_size = params[0];
+                                          uint global_col [[threadgroup_position_in_grid]],
+                                          uint lane [[thread_index_in_threadgroup]],
+                                          uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
   const uint total_cols = params[1];
-  if (gid >= total_cols) {
+  if (global_col >= total_cols) {
     return;
   }
 
-  if (gid < Q36_ATTN_Q_FEATURES * 2u) {
-    q_out[gid] = half(q36_int4_dot(x, q_qweight, q_scales, q_zeros,
-                                   Q36_HIDDEN, Q36_ATTN_Q_FEATURES * 2u, gid,
-                                   group_size));
-    return;
+  device const uint *qweight = q_qweight;
+  device const half *scales = q_scales;
+  device const half *zeros = q_zeros;
+  device half *output = q_out;
+  uint out_col = global_col;
+  uint out_features = Q36_ATTN_Q_FEATURES * 2u;
+
+  if (global_col >= Q36_ATTN_Q_FEATURES * 2u) {
+    uint shifted = global_col - Q36_ATTN_Q_FEATURES * 2u;
+    if (shifted < Q36_ATTN_KV_FEATURES) {
+      qweight = k_qweight;
+      scales = k_scales;
+      zeros = k_zeros;
+      output = k_out;
+      out_col = shifted;
+      out_features = Q36_ATTN_KV_FEATURES;
+    } else {
+      shifted -= Q36_ATTN_KV_FEATURES;
+      qweight = v_qweight;
+      scales = v_scales;
+      zeros = v_zeros;
+      output = v_out;
+      out_col = shifted;
+      out_features = Q36_ATTN_KV_FEATURES;
+    }
   }
 
-  uint col = gid - Q36_ATTN_Q_FEATURES * 2u;
-  if (col < Q36_ATTN_KV_FEATURES) {
-    k_out[col] = half(q36_int4_dot(x, k_qweight, k_scales, k_zeros,
-                                   Q36_HIDDEN, Q36_ATTN_KV_FEATURES, col,
-                                   group_size));
-    return;
-  }
-
-  col -= Q36_ATTN_KV_FEATURES;
-  if (col < Q36_ATTN_KV_FEATURES) {
-    v_out[col] = half(q36_int4_dot(x, v_qweight, v_scales, v_zeros,
-                                   Q36_HIDDEN, Q36_ATTN_KV_FEATURES, col,
-                                   group_size));
+  const float acc = q36_int4_dot_g128_lane(
+      x, qweight, scales, zeros, Q36_HIDDEN, out_features, out_col, lane, lanes);
+  const float sum = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    output[out_col] = half(sum);
   }
 }
 
@@ -171,25 +255,37 @@ kernel void qwen36_27b_int4_linear_az(device const half *x [[buffer(0)]],
                                       device half *a_out [[buffer(7)]],
                                       device half *z_out [[buffer(8)]],
                                       device const uint *params [[buffer(9)]],
-                                      uint gid [[thread_position_in_grid]]) {
-  const uint group_size = params[0];
+                                      uint global_col [[threadgroup_position_in_grid]],
+                                      uint lane [[thread_index_in_threadgroup]],
+                                      uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
   const uint total_cols = params[1];
-  if (gid >= total_cols) {
+  if (global_col >= total_cols) {
     return;
   }
 
-  if (gid < Q36_DELTA_BETA_FEATURES) {
-    a_out[gid] = half(q36_int4_dot(x, a_qweight, a_scales, a_zeros,
-                                   Q36_HIDDEN, Q36_DELTA_BETA_FEATURES, gid,
-                                   group_size));
-    return;
+  device const uint *qweight = a_qweight;
+  device const half *scales = a_scales;
+  device const half *zeros = a_zeros;
+  device half *output = a_out;
+  uint out_col = global_col;
+  uint out_features = Q36_DELTA_BETA_FEATURES;
+
+  if (global_col >= Q36_DELTA_BETA_FEATURES) {
+    const uint shifted = global_col - Q36_DELTA_BETA_FEATURES;
+    qweight = z_qweight;
+    scales = z_scales;
+    zeros = z_zeros;
+    output = z_out;
+    out_col = shifted;
+    out_features = Q36_DELTA_V_FEATURES;
   }
 
-  const uint col = gid - Q36_DELTA_BETA_FEATURES;
-  if (col < Q36_DELTA_V_FEATURES) {
-    z_out[col] = half(q36_int4_dot(x, z_qweight, z_scales, z_zeros,
-                                   Q36_HIDDEN, Q36_DELTA_V_FEATURES, col,
-                                   group_size));
+  const float acc = q36_int4_dot_g128_lane(
+      x, qweight, scales, zeros, Q36_HIDDEN, out_features, out_col, lane, lanes);
+  const float sum = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    output[out_col] = half(sum);
   }
 }
 
@@ -280,15 +376,20 @@ kernel void qwen36_27b_linear_o_residual(device const half *linear_out [[buffer(
                                          device const half *residual [[buffer(4)]],
                                          device half *out [[buffer(5)]],
                                          device const uint *params [[buffer(6)]],
-                                         uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_HIDDEN) {
+                                         uint out_col [[threadgroup_position_in_grid]],
+                                         uint lane [[thread_index_in_threadgroup]],
+                                         uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
+  if (out_col >= Q36_HIDDEN) {
     return;
   }
-  const uint group_size = params[0];
-  const float projected = q36_int4_dot(linear_out, out_qweight, out_scales,
-                                       out_zeros, Q36_DELTA_V_FEATURES,
-                                       Q36_HIDDEN, gid, group_size);
-  out[gid] = half(float(residual[gid]) + projected);
+  const float acc = q36_int4_dot_g128_lane(
+      linear_out, out_qweight, out_scales, out_zeros, Q36_DELTA_V_FEATURES,
+      Q36_HIDDEN, out_col, lane, lanes);
+  const float projected = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    out[out_col] = half(float(residual[out_col]) + projected);
+  }
 }
 
 kernel void qwen36_27b_dense_gate_up_silu(device const half *x [[buffer(0)]],
@@ -300,18 +401,25 @@ kernel void qwen36_27b_dense_gate_up_silu(device const half *x [[buffer(0)]],
                                           device const half *up_zeros [[buffer(6)]],
                                           device half *intermediate [[buffer(7)]],
                                           device const uint *params [[buffer(8)]],
-                                          uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_MLP_INTERMEDIATE) {
+                                          uint out_col [[threadgroup_position_in_grid]],
+                                          uint lane [[thread_index_in_threadgroup]],
+                                          uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float gate_partial[256];
+  threadgroup float up_partial[256];
+  if (out_col >= Q36_MLP_INTERMEDIATE) {
     return;
   }
-  const uint group_size = params[0];
-  const float gate = q36_int4_dot(x, gate_qweight, gate_scales, gate_zeros,
-                                  Q36_HIDDEN, Q36_MLP_INTERMEDIATE, gid,
-                                  group_size);
-  const float up = q36_int4_dot(x, up_qweight, up_scales, up_zeros,
-                                Q36_HIDDEN, Q36_MLP_INTERMEDIATE, gid,
-                                group_size);
-  intermediate[gid] = half(q36_silu(gate) * up);
+  const float gate_acc = q36_int4_dot_g128_lane(
+      x, gate_qweight, gate_scales, gate_zeros, Q36_HIDDEN,
+      Q36_MLP_INTERMEDIATE, out_col, lane, lanes);
+  const float gate = q36_threadgroup_sum(gate_acc, gate_partial, lane, lanes);
+  const float up_acc = q36_int4_dot_g128_lane(
+      x, up_qweight, up_scales, up_zeros, Q36_HIDDEN,
+      Q36_MLP_INTERMEDIATE, out_col, lane, lanes);
+  const float up = q36_threadgroup_sum(up_acc, up_partial, lane, lanes);
+  if (lane == 0u) {
+    intermediate[out_col] = half(q36_silu(gate) * up);
+  }
 }
 
 kernel void qwen36_27b_dense_down_residual(device const half *intermediate [[buffer(0)]],
@@ -321,15 +429,20 @@ kernel void qwen36_27b_dense_down_residual(device const half *intermediate [[buf
                                            device const half *residual [[buffer(4)]],
                                            device half *out [[buffer(5)]],
                                            device const uint *params [[buffer(6)]],
-                                           uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_HIDDEN) {
+                                           uint out_col [[threadgroup_position_in_grid]],
+                                           uint lane [[thread_index_in_threadgroup]],
+                                           uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
+  if (out_col >= Q36_HIDDEN) {
     return;
   }
-  const uint group_size = params[0];
-  const float down = q36_int4_dot(intermediate, down_qweight, down_scales, down_zeros,
-                                  Q36_MLP_INTERMEDIATE, Q36_HIDDEN, gid,
-                                  group_size);
-  out[gid] = half(float(residual[gid]) + down);
+  const float acc = q36_int4_dot_g128_lane(
+      intermediate, down_qweight, down_scales, down_zeros,
+      Q36_MLP_INTERMEDIATE, Q36_HIDDEN, out_col, lane, lanes);
+  const float down = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    out[out_col] = half(float(residual[out_col]) + down);
+  }
 }
 
 kernel void qwen36_27b_rmsnorm_hidden(device const half *x [[buffer(0)]],
@@ -521,15 +634,20 @@ kernel void qwen36_27b_attention_o_residual(device const half *attn_out [[buffer
                                             device const half *residual [[buffer(4)]],
                                             device half *out [[buffer(5)]],
                                             device const uint *params [[buffer(6)]],
-                                            uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_HIDDEN) {
+                                            uint out_col [[threadgroup_position_in_grid]],
+                                            uint lane [[thread_index_in_threadgroup]],
+                                            uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
+  if (out_col >= Q36_HIDDEN) {
     return;
   }
-  const uint group_size = params[0];
-  const float projected = q36_int4_dot(attn_out, o_qweight, o_scales, o_zeros,
-                                       Q36_ATTN_O_FEATURES, Q36_HIDDEN, gid,
-                                       group_size);
-  out[gid] = half(float(residual[gid]) + projected);
+  const float acc = q36_int4_dot_g128_lane(
+      attn_out, o_qweight, o_scales, o_zeros, Q36_ATTN_O_FEATURES, Q36_HIDDEN,
+      out_col, lane, lanes);
+  const float projected = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    out[out_col] = half(float(residual[out_col]) + projected);
+  }
 }
 
 kernel void qwen36_27b_lm_head_logits(device const half *hidden [[buffer(0)]],
@@ -538,13 +656,20 @@ kernel void qwen36_27b_lm_head_logits(device const half *hidden [[buffer(0)]],
                                       device const half *lm_zeros [[buffer(3)]],
                                       device half *logits [[buffer(4)]],
                                       device const uint *params [[buffer(5)]],
-                                      uint gid [[thread_position_in_grid]]) {
-  if (gid >= Q36_VOCAB) {
+                                      uint out_col [[threadgroup_position_in_grid]],
+                                      uint lane [[thread_index_in_threadgroup]],
+                                      uint lanes [[threads_per_threadgroup]]) {
+  threadgroup float partial[256];
+  if (out_col >= Q36_VOCAB) {
     return;
   }
-  const uint group_size = params[0];
-  logits[gid] = half(q36_int4_dot(hidden, lm_qweight, lm_scales, lm_zeros,
-                                  Q36_HIDDEN, Q36_VOCAB, gid, group_size));
+  const float acc = q36_int4_dot_g128_lane(
+      hidden, lm_qweight, lm_scales, lm_zeros, Q36_HIDDEN, Q36_VOCAB, out_col,
+      lane, lanes);
+  const float projected = q36_threadgroup_sum(acc, partial, lane, lanes);
+  if (lane == 0u) {
+    logits[out_col] = half(projected);
+  }
 }
 
 kernel void qwen36_27b_argmax_f16(device const half *logits [[buffer(0)]],
