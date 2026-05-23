@@ -83,9 +83,15 @@ _INT4_DTYPES = {torch.int32}
 if hasattr(torch, "uint32"):
     _INT4_DTYPES.add(torch.uint32)
 
-QWEN36_PROJECTION_THREADS_PER_GROUP = 64
-QWEN36_INT4_GEMV_THREADS_PER_GROUP = 64
-QWEN36_DELTANET_THREADS_PER_GROUP = 128
+QWEN36_PROJECTION_THREADS_PER_GROUP = (
+    QWEN36_27B_PROFILE.apple_silicon.projection_threads_per_group
+)
+QWEN36_INT4_GEMV_THREADS_PER_GROUP = (
+    QWEN36_27B_PROFILE.apple_silicon.projection_threads_per_group
+)
+QWEN36_DELTANET_THREADS_PER_GROUP = (
+    QWEN36_27B_PROFILE.apple_silicon.deltanet_threads_per_group
+)
 
 
 def get_qwen36_kernel_library() -> MetalKernelLibrary:

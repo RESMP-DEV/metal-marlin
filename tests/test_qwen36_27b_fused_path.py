@@ -12,6 +12,9 @@ from metal_marlin import launch_tracing
 from metal_marlin.kernels.qwen36_27b import (
     FEATURE_FLAG,
     QWEN36_27B_PROFILE,
+    QWEN36_DELTANET_THREADS_PER_GROUP,
+    QWEN36_INT4_GEMV_THREADS_PER_GROUP,
+    QWEN36_PROJECTION_THREADS_PER_GROUP,
     REQUIRED_KERNELS,
     PackedInt4Matrix,
     _ensure_matrix,
@@ -44,7 +47,7 @@ from metal_marlin.qwen36_27b_artifact import (
     expected_tensor_shape,
     write_manifest,
 )
-from metal_marlin.qwen36_27b_profile import MODEL_ID
+from metal_marlin.qwen36_27b_profile import MODEL_ID, shape_contract_payload
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SHADER_PATH = REPO_ROOT / "src" / "qwen36_27b_decode.metal"
@@ -211,6 +214,24 @@ def test_feature_flag_runtime_decision() -> None:
     enabled = decide_runtime_path(_config(), env={FEATURE_FLAG: "1"})
     assert enabled.enabled is True
     assert "fused path selected" in enabled.reason
+
+
+def test_qwen36_profile_records_apple_silicon_performance_contract() -> None:
+    contract = QWEN36_27B_PROFILE.apple_silicon
+
+    assert contract.simdgroup_size == 32
+    assert contract.preferred_group_size == QWEN36_27B_PROFILE.group_size
+    assert contract.fp32_accumulation is True
+    assert contract.target_command_buffers_per_token == 1
+    assert QWEN36_PROJECTION_THREADS_PER_GROUP == contract.projection_threads_per_group
+    assert QWEN36_INT4_GEMV_THREADS_PER_GROUP == contract.projection_threads_per_group
+    assert QWEN36_DELTANET_THREADS_PER_GROUP == contract.deltanet_threads_per_group
+    assert any("FP32 accumulators" in rule for rule in contract.rules)
+
+    payload = shape_contract_payload()
+    perf = payload["apple_silicon_performance"]
+    assert perf["fp32_accumulation"] is True
+    assert perf["keep_weights_compressed"] is True
 
 
 def test_runtime_decision_rejects_35b_a3b_shape() -> None:

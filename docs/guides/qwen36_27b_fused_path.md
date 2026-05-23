@@ -15,6 +15,30 @@ The fused runtime remains opt-in:
 METAL_MARLIN_QWEN36_27B_MEGAKERNEL=1 uv run pytest tests/test_qwen36_27b_fused_path.py -q
 ```
 
+## Apple Silicon Performance Contract
+
+The fused path records its hardware assumptions in
+`QWEN36_27B_PROFILE.apple_silicon` so benchmark scripts and generated shape
+contracts carry the same policy as the shaders:
+
+- Use FP32 accumulators for dequantized dot products, reductions, softmax
+  statistics, and DeltaNet recurrent state math.  Apple GPUs have strong FP32
+  throughput, and this path values stable decode math over fragile FP16-only
+  accumulation.
+- Keep int4 weights packed as `qweight[(K / 8), N]` with
+  `scales/zeros[ceil(K / 128), N]`; do not dequantize whole matrices into FP16
+  staging buffers during decode.
+- Prefer launch consolidation: Q/K/V/Beta fanout, gate/up, residual epilogues,
+  DeltaNet updates, and LM-head work should fuse until memory traffic or
+  register pressure becomes the measured limit.
+- Assume 32-wide simdgroups.  The current projection GEMV lanes use 64 threads
+  per threadgroup, while the DeltaNet update path uses 128 threads per
+  threadgroup to cover key/value blocks with block-parallel reductions.
+- Compile Metal pipelines once per process, keep scratch buffers reusable, and
+  target one command buffer per generated token for the model-shaped skeleton.
+- Treat template-weight block skeletons as launch evidence only.  Quality claims
+  require per-layer artifacts plus generation or perplexity parity.
+
 ## Artifact Layout
 
 The fused path accepts the qwenmetal int4 layout only through

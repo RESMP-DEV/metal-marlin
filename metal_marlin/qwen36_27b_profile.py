@@ -20,6 +20,36 @@ FEATURE_FLAG = "METAL_MARLIN_QWEN36_27B_MEGAKERNEL"
 
 
 @dataclass(frozen=True)
+class AppleSiliconDecodeProfile:
+    """Hardware assumptions used by the Qwen3.6 fused decode path."""
+
+    simdgroup_size: int = 32
+    preferred_group_size: int = 128
+    int4_pack_factor: int = 8
+    projection_threads_per_group: int = 64
+    deltanet_threads_per_group: int = 128
+    fp32_accumulation: bool = True
+    keep_weights_compressed: bool = True
+    compile_pipelines_once: bool = True
+    target_command_buffers_per_token: int = 1
+    rules: tuple[str, ...] = (
+        "Use FP32 accumulators for dequantized dot products, reductions, softmax "
+        "statistics, and recurrent state math; Apple Silicon FP32 throughput is "
+        "strong enough that the accuracy win usually beats half-accumulation drift.",
+        "Keep int4 weights packed in qweight[(K / 8), N] and dequantize in "
+        "registers instead of materializing FP16 matrices during decode.",
+        "Fuse projection fanout, epilogues, residuals, and recurrent updates until "
+        "launch overhead or memory traffic stops being the bottleneck.",
+        "Use 32-wide simdgroup reductions and tune threadgroups around register "
+        "pressure before increasing threadgroup memory.",
+        "Compile Metal pipelines once per process and encode the Qwen3.6 token path "
+        "into as few command buffers as correctness allows.",
+        "Treat template-weight skeleton benchmarks as launch evidence only; quality "
+        "claims require per-layer artifacts and generation or perplexity parity.",
+    )
+
+
+@dataclass(frozen=True)
 class Qwen36DeltaNetProfile:
     key_heads: int = 16
     value_heads: int = 48
@@ -89,6 +119,7 @@ class Qwen36ModelProfile:
     delta: Qwen36DeltaNetProfile = Qwen36DeltaNetProfile()
     attention: Qwen36FullAttentionProfile = Qwen36FullAttentionProfile()
     dense_mlp: Qwen36DenseMLPProfile = Qwen36DenseMLPProfile()
+    apple_silicon: AppleSiliconDecodeProfile = AppleSiliconDecodeProfile()
 
     @property
     def full_attention_layer_indices(self) -> list[int]:
@@ -181,6 +212,7 @@ def shape_contract_payload(profile: Qwen36ModelProfile = QWEN36_27B_PROFILE) -> 
             "num_full_attention_layers": profile.num_full_attention_layers,
             "num_linear_attention_layers": profile.num_linear_attention_layers,
             "full_attention_layer_indices": profile.full_attention_layer_indices,
+            "apple_silicon_performance": asdict(profile.apple_silicon),
         }
     )
     return payload
@@ -223,4 +255,3 @@ def validate_supported_profile(profile: Qwen36ModelProfile) -> None:
             "hidden_size=5120, layers=64, interval=4, dense intermediate=17408, "
             "DeltaNet heads=(16 key, 48 value), full attention=(24 Q, 4 KV, head_dim=256)."
         )
-
