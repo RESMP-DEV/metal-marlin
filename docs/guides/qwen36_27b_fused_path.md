@@ -135,10 +135,12 @@ METAL_MARLIN_QWEN36_27B_MEGAKERNEL=1 metal-marlin serve /path/to/model \
   --qwen36-artifact-manifest agent_workspace/qwen36_27b/artifacts/prototype_block_layer0/manifest.json
 ```
 
-`/v1/models/{model_id}` reports `qwen36_27b_fused.enabled` and the fallback
-reason.  The unfused/Trellis path remains the active correctness reference
-unless that status is eligible and later generation wiring explicitly consumes
-the fused wrappers.
+`/v1/models/{model_id}` reports `qwen36_27b_fused.enabled`, the fallback
+reason, and structured coverage fields (`coverage_kind`, `coverage_layers`,
+and `coverage_tensors`) so callers do not need to parse the reason string.  The
+unfused/Trellis path remains the active correctness reference unless that
+status is eligible and later generation wiring explicitly consumes the fused
+wrappers.
 
 ## Runtime Boundary
 
@@ -154,8 +156,8 @@ unless all of the following are true:
   `uint4_asym`, `packed_k_major_u32`, `group_major_f16`, and group size 128.
 - The manifest satisfies either template coverage, where every required role is
   present exactly once, or full-layer coverage, where each of the 64 layers has
-  the layer-local roles required by its linear/full-attention cadence and the
-  global roles are present once.
+  exactly the layer-local roles required by its linear/full-attention cadence
+  and the global roles are present once.
 - The metallib checksum manifest is fresh and every Qwen3.6-27B kernel symbol
   is available.
 

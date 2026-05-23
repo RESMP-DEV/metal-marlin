@@ -97,6 +97,9 @@ def get_qwen36_kernel_library() -> MetalKernelLibrary:
 class RuntimeDecision:
     enabled: bool
     reason: str
+    coverage_kind: ManifestCoverageKind | None = None
+    coverage_layers: int | None = None
+    coverage_tensors: int | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +240,9 @@ def decide_fused_artifact_path(
     return RuntimeDecision(
         True,
         f"dense Qwen3.6-27B fused artifact path selected ({coverage.kind})",
+        coverage_kind=coverage.kind,
+        coverage_layers=coverage.layers,
+        coverage_tensors=coverage.tensors,
     )
 
 

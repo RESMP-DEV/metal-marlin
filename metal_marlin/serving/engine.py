@@ -1100,6 +1100,9 @@ class ServingEngine:
                 "enabled": self._qwen36_fused_decision.enabled,
                 "reason": self._qwen36_fused_decision.reason,
                 "artifact_manifest": self.config.qwen36_27b_artifact_manifest,
+                "coverage_kind": self._qwen36_fused_decision.coverage_kind,
+                "coverage_layers": self._qwen36_fused_decision.coverage_layers,
+                "coverage_tensors": self._qwen36_fused_decision.coverage_tensors,
             },
         }
 
