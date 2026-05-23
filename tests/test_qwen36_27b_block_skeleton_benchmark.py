@@ -9,6 +9,7 @@ from benchmarks.bench_qwen36_27b_block_skeleton import (
     kernel_counts_from_names,
     make_summary,
     manifest_tensor_lookup,
+    parse_args,
     wrapper_command_buffers_from_kernel_names,
 )
 from metal_marlin.kernels.qwen36_27b import (
@@ -198,3 +199,10 @@ def test_launch_budget_gate_rejects_command_buffer_regression() -> None:
 
     with pytest.raises(ValueError, match="command-buffer budget exceeded"):
         assert_launch_budget(summary, max_command_buffers_per_token=1)
+
+
+def test_parse_args_supports_skipping_lm_head_for_bottleneck_measurement() -> None:
+    args = parse_args(["--runner", "direct", "--skip-lm-head", "--skip-mlp"])
+
+    assert args.skip_lm_head is True
+    assert args.skip_mlp is True

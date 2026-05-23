@@ -20,6 +20,8 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 ### Changed
 - Parallelized the Qwen3.6-27B int4 projection and DeltaNet update kernels and
   aligned the dispatch/test coverage with the new threadgroup launch shapes.
+- Added a direct benchmark option to skip LM-head dispatches for block-body
+  bottleneck measurement.
 
 ## [Unreleased] - 2026-02-10
 

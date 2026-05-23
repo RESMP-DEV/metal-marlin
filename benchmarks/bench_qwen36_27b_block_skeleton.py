@@ -632,7 +632,14 @@ def _next_hidden_buffer(buffers: _DirectBuffers, current):
     return buffers.hidden_b if current is buffers.hidden_a else buffers.hidden_a
 
 
-def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
+def _run_one_token_direct(
+    buffers: _DirectBuffers,
+    token_position: int,
+    hidden,
+    *,
+    include_lm_head: bool = True,
+    include_mlp: bool = True,
+):
     profile = QWEN36_27B_PROFILE
     linear_index = 0
     full_index = 0
@@ -826,6 +833,9 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
             full_index += 1
 
         hidden = next_hidden
+        if not include_mlp:
+            continue
+
         residual = hidden
         _emit(
             KERNEL_RMSNORM,
@@ -875,6 +885,9 @@ def _run_one_token_direct(buffers: _DirectBuffers, token_position: int, hidden):
         (256, 1, 1),
         [hidden, buffers.final_norm, buffers.norm],
     )
+    if not include_lm_head:
+        return hidden
+
     lm_head = buffers.weights.tensor("lm_head")
     _emit(
         KERNEL_LM_HEAD,
@@ -899,6 +912,8 @@ def run_direct_benchmark(
     decode_tokens: int,
     warmup_tokens: int,
     max_context: int,
+    skip_lm_head: bool = False,
+    skip_mlp: bool = False,
 ) -> Qwen36BlockSkeletonSummary:
     if decode_tokens <= 0:
         raise ValueError("--decode-tokens must be > 0")
@@ -913,14 +928,26 @@ def run_direct_benchmark(
 
     for token_position in range(warmup_tokens):
         with lib.batch_dispatch(wait=True):
-            hidden = _run_one_token_direct(buffers, token_position, hidden)
+            hidden = _run_one_token_direct(
+                buffers,
+                token_position,
+                hidden,
+                include_lm_head=not skip_lm_head,
+                include_mlp=not skip_mlp,
+            )
 
     launch_tracing.enable_for_testing()
     launch_tracing.reset()
     start = time.perf_counter()
     for offset in range(decode_tokens):
         with lib.batch_dispatch(wait=True):
-            hidden = _run_one_token_direct(buffers, warmup_tokens + offset, hidden)
+            hidden = _run_one_token_direct(
+                buffers,
+                warmup_tokens + offset,
+                hidden,
+                include_lm_head=not skip_lm_head,
+                include_mlp=not skip_mlp,
+            )
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return make_summary(
         manifest_path=str(manifest_path),
@@ -1042,6 +1069,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Use direct Metal buffers or the public Python wrapper path.",
     )
     parser.add_argument(
+        "--skip-lm-head",
+        action="store_true",
+        help="Direct runner only: omit LM-head logits and argmax to isolate block-body cost.",
+    )
+    parser.add_argument(
+        "--skip-mlp",
+        action="store_true",
+        help="Direct runner only: omit dense MLP blocks to isolate attention/DeltaNet cost.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Print the expected launch plan without loading weights or running MPS kernels.",
@@ -1076,8 +1113,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             decode_tokens=args.decode_tokens,
             warmup_tokens=args.warmup_tokens,
             max_context=args.max_context,
+            skip_lm_head=args.skip_lm_head,
+            skip_mlp=args.skip_mlp,
         )
     else:
+        if args.skip_lm_head or args.skip_mlp:
+            raise ValueError("--skip-lm-head and --skip-mlp are only supported with --runner direct")
         summary = run_wrapper_benchmark(
             args.manifest,
             decode_tokens=args.decode_tokens,
