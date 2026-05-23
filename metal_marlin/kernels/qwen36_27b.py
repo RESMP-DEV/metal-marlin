@@ -83,6 +83,10 @@ _INT4_DTYPES = {torch.int32}
 if hasattr(torch, "uint32"):
     _INT4_DTYPES.add(torch.uint32)
 
+QWEN36_PROJECTION_THREADS_PER_GROUP = 16
+QWEN36_INT4_GEMV_THREADS_PER_GROUP = 256
+QWEN36_DELTANET_THREADS_PER_GROUP = 128
+
 
 def get_qwen36_kernel_library() -> MetalKernelLibrary:
     """Return a Qwen3.6-27B library that dispatches from the tracked metallib."""
@@ -407,7 +411,7 @@ def dispatch_qkvb_projection(
         lib,
         KERNEL_QKVB,
         (total_cols, 1, 1),
-        (64, 1, 1),
+        (QWEN36_PROJECTION_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -461,7 +465,7 @@ def dispatch_attention_qkv_projection(
         lib,
         KERNEL_ATTENTION_QKV,
         (total_cols, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -504,7 +508,7 @@ def dispatch_linear_az_projection(
         lib,
         KERNEL_LINEAR_AZ,
         (total_cols, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -546,7 +550,7 @@ def dispatch_deltanet_update(
         lib,
         KERNEL_DELTANET_UPDATE,
         (deltanet_blocks, 1, 1),
-        (128, 1, 1),
+        (QWEN36_DELTANET_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -670,7 +674,7 @@ def dispatch_linear_attention(
             lib,
             KERNEL_QKVB,
             (total_cols, 1, 1),
-            (64, 1, 1),
+            (QWEN36_PROJECTION_THREADS_PER_GROUP, 1, 1),
             qkvb_buffers,
             wait=False,
         )
@@ -686,7 +690,7 @@ def dispatch_linear_attention(
             lib,
             KERNEL_DELTANET_UPDATE,
             (deltanet_blocks, 1, 1),
-            (128, 1, 1),
+            (QWEN36_DELTANET_THREADS_PER_GROUP, 1, 1),
             deltanet_buffers,
             wait=False,
         )
@@ -723,7 +727,7 @@ def dispatch_linear_o_residual(
         lib,
         KERNEL_LINEAR_OUT,
         (profile.hidden_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -769,7 +773,7 @@ def dispatch_dense_gate_up_silu(
         lib,
         KERNEL_DENSE_GATE_UP,
         (profile.dense_mlp.intermediate_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -810,7 +814,7 @@ def dispatch_dense_down_residual(
         lib,
         KERNEL_DENSE_DOWN,
         (profile.hidden_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -1036,7 +1040,7 @@ def dispatch_attention_o_residual(
         lib,
         KERNEL_ATTENTION_OUT,
         (profile.hidden_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
@@ -1070,7 +1074,7 @@ def dispatch_lm_head_logits(
         lib,
         KERNEL_LM_HEAD,
         (profile.vocab_size, 1, 1),
-        (64, 1, 1),
+        (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
     )
