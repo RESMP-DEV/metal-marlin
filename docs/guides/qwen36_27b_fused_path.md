@@ -129,6 +129,22 @@ manifest into Metal buffers, keeps intermediate activations out of Python
 `--runner wrapper` is retained only as a comparison against the public Python
 wrapper surface.
 
+Use the direct-only profiling switches to keep performance work honest:
+
+```bash
+uv run python benchmarks/bench_qwen36_27b_block_skeleton.py \
+  --runner direct --decode-tokens 4 --warmup-tokens 1 --max-context 5
+uv run python benchmarks/bench_qwen36_27b_block_skeleton.py \
+  --runner direct --decode-tokens 4 --warmup-tokens 1 --max-context 5 \
+  --skip-lm-head --skip-mlp
+```
+
+On this local run after porting the lane-parallel prototype GEMV pattern, the
+full template-weight skeleton measured about 8.9 tok/s steady-state, while the
+no-MLP/no-LM-head profile measured about 23 tok/s.  That makes dense MLP GEMV
+the next optimization target; the launch path is already at one command buffer
+per token.
+
 The serving stack accepts the same manifest as an opt-in status surface:
 
 ```bash
