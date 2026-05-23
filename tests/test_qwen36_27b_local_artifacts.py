@@ -7,6 +7,9 @@ import pytest
 from metal_marlin.qwen36_27b_validation import (
     default_block_layer0_manifest_path,
     default_layer0_manifest_path,
+    validate_layer0_full_attention_artifacts,
+    validate_layer0_linear_block_artifacts,
+    validate_layer0_lm_head_artifacts,
     validate_layer0_mlp_artifacts,
     validate_layer0_qkvb_artifacts,
 )
@@ -48,5 +51,47 @@ def test_optional_layer0_block_mlp_artifacts_match_fused_kernels() -> None:
         )
 
     result = validate_layer0_mlp_artifacts(manifest)
+
+    result.assert_within(atol=0.08, rtol=0.02)
+
+
+def test_optional_layer0_block_full_attention_artifacts_match_fused_kernels() -> None:
+    if os.environ.get("METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS") != "1":
+        pytest.skip("set METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS=1")
+    manifest = default_block_layer0_manifest_path()
+    if not manifest.exists():
+        pytest.skip(
+            f"local Qwen3.6-27B layer-0 block artifact manifest missing: {manifest}"
+        )
+
+    result = validate_layer0_full_attention_artifacts(manifest)
+
+    result.assert_within(atol=0.08, rtol=0.02)
+
+
+def test_optional_layer0_block_linear_artifacts_match_fused_kernels() -> None:
+    if os.environ.get("METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS") != "1":
+        pytest.skip("set METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS=1")
+    manifest = default_block_layer0_manifest_path()
+    if not manifest.exists():
+        pytest.skip(
+            f"local Qwen3.6-27B layer-0 block artifact manifest missing: {manifest}"
+        )
+
+    result = validate_layer0_linear_block_artifacts(manifest)
+
+    result.assert_within(atol=0.08, rtol=0.02)
+
+
+def test_optional_layer0_lm_head_artifact_matches_fused_logits() -> None:
+    if os.environ.get("METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS") != "1":
+        pytest.skip("set METAL_MARLIN_QWEN36_27B_VALIDATE_LOCAL_ARTIFACTS=1")
+    manifest = default_block_layer0_manifest_path()
+    if not manifest.exists():
+        pytest.skip(
+            f"local Qwen3.6-27B layer-0 block artifact manifest missing: {manifest}"
+        )
+
+    result = validate_layer0_lm_head_artifacts(manifest)
 
     result.assert_within(atol=0.08, rtol=0.02)

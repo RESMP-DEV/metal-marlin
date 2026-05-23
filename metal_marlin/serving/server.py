@@ -257,6 +257,7 @@ def run_server(
     num_kv_blocks: int = 512,
     block_size: int = 16,
     metrics_port: int | None = None,
+    qwen36_27b_artifact_manifest: str | None = None,
 ):
     """Start the OpenAI-compatible API server.
 
@@ -270,6 +271,7 @@ def run_server(
         num_kv_blocks: Number of KV cache blocks to allocate
         block_size: Number of tokens per KV cache block
         metrics_port: Dedicated port for Prometheus metrics (default: None, served on main port)
+        qwen36_27b_artifact_manifest: Optional fused artifact manifest for Qwen3.6-27B
     """
     logger.debug("run_server called with model_path=%s, host=%s, port=%s", model_path, host, port)
     import signal
@@ -283,6 +285,7 @@ def run_server(
         enable_batching=enable_batching,
         num_kv_blocks=num_kv_blocks,
         block_size=block_size,
+        qwen36_27b_artifact_manifest=qwen36_27b_artifact_manifest,
     )
 
     # Start metrics exporter on separate port if requested

@@ -161,6 +161,38 @@ kernel void qwen36_27b_int4_attention_qkv(device const half *x [[buffer(0)]],
   }
 }
 
+kernel void qwen36_27b_int4_linear_az(device const half *x [[buffer(0)]],
+                                      device const uint *a_qweight [[buffer(1)]],
+                                      device const half *a_scales [[buffer(2)]],
+                                      device const half *a_zeros [[buffer(3)]],
+                                      device const uint *z_qweight [[buffer(4)]],
+                                      device const half *z_scales [[buffer(5)]],
+                                      device const half *z_zeros [[buffer(6)]],
+                                      device half *a_out [[buffer(7)]],
+                                      device half *z_out [[buffer(8)]],
+                                      device const uint *params [[buffer(9)]],
+                                      uint gid [[thread_position_in_grid]]) {
+  const uint group_size = params[0];
+  const uint total_cols = params[1];
+  if (gid >= total_cols) {
+    return;
+  }
+
+  if (gid < Q36_DELTA_BETA_FEATURES) {
+    a_out[gid] = half(q36_int4_dot(x, a_qweight, a_scales, a_zeros,
+                                   Q36_HIDDEN, Q36_DELTA_BETA_FEATURES, gid,
+                                   group_size));
+    return;
+  }
+
+  const uint col = gid - Q36_DELTA_BETA_FEATURES;
+  if (col < Q36_DELTA_V_FEATURES) {
+    z_out[col] = half(q36_int4_dot(x, z_qweight, z_scales, z_zeros,
+                                   Q36_HIDDEN, Q36_DELTA_V_FEATURES, col,
+                                   group_size));
+  }
+}
+
 kernel void qwen36_27b_deltanet_update(device const half *q [[buffer(0)]],
                                        device const half *k [[buffer(1)]],
                                        device const half *v [[buffer(2)]],
@@ -239,6 +271,24 @@ kernel void qwen36_27b_deltanet_interval4(device const half *q [[buffer(0)]],
     output += float(q[qk_base + key_col]) * next_state;
   }
   y[gid] = half(output);
+}
+
+kernel void qwen36_27b_linear_o_residual(device const half *linear_out [[buffer(0)]],
+                                         device const uint *out_qweight [[buffer(1)]],
+                                         device const half *out_scales [[buffer(2)]],
+                                         device const half *out_zeros [[buffer(3)]],
+                                         device const half *residual [[buffer(4)]],
+                                         device half *out [[buffer(5)]],
+                                         device const uint *params [[buffer(6)]],
+                                         uint gid [[thread_position_in_grid]]) {
+  if (gid >= Q36_HIDDEN) {
+    return;
+  }
+  const uint group_size = params[0];
+  const float projected = q36_int4_dot(linear_out, out_qweight, out_scales,
+                                       out_zeros, Q36_DELTA_V_FEATURES,
+                                       Q36_HIDDEN, gid, group_size);
+  out[gid] = half(float(residual[gid]) + projected);
 }
 
 kernel void qwen36_27b_dense_gate_up_silu(device const half *x [[buffer(0)]],
@@ -480,6 +530,21 @@ kernel void qwen36_27b_attention_o_residual(device const half *attn_out [[buffer
                                        Q36_ATTN_O_FEATURES, Q36_HIDDEN, gid,
                                        group_size);
   out[gid] = half(float(residual[gid]) + projected);
+}
+
+kernel void qwen36_27b_lm_head_logits(device const half *hidden [[buffer(0)]],
+                                      device const uint *lm_qweight [[buffer(1)]],
+                                      device const half *lm_scales [[buffer(2)]],
+                                      device const half *lm_zeros [[buffer(3)]],
+                                      device half *logits [[buffer(4)]],
+                                      device const uint *params [[buffer(5)]],
+                                      uint gid [[thread_position_in_grid]]) {
+  if (gid >= Q36_VOCAB) {
+    return;
+  }
+  const uint group_size = params[0];
+  logits[gid] = half(q36_int4_dot(hidden, lm_qweight, lm_scales, lm_zeros,
+                                  Q36_HIDDEN, Q36_VOCAB, gid, group_size));
 }
 
 kernel void qwen36_27b_argmax_f16(device const half *logits [[buffer(0)]],

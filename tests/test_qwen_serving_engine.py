@@ -19,12 +19,22 @@ from unittest.mock import patch
 
 import pytest
 
+from metal_marlin.qwen36_27b_artifact import (
+    REQUIRED_TENSOR_ROLES,
+    Int4TensorArtifact,
+    Qwen36ArtifactManifest,
+    expected_tensor_shape,
+    write_manifest,
+)
+from metal_marlin.qwen36_27b_profile import FEATURE_FLAG, MODEL_ID
 from metal_marlin.serving.engine import (
     DELTANET_LAYER_TYPES,
     MOE_EXPERT_COUNTS,
     MOE_INTERMEDIATE_KEYS,
     QWEN_DELTANET_MODEL_NAME_PATTERNS,
     QWEN_DELTANET_MODEL_TYPES,
+    EngineConfig,
+    ServingEngine,
     _detect_model_format,
     _get_config_value,
     _has_deltanet_layers,
@@ -32,7 +42,6 @@ from metal_marlin.serving.engine import (
     _is_qwen_deltanet_family,
     _normalize_model_name,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -1071,3 +1080,99 @@ class TestQwenDeltanetFullConfigRoundTrip:
         assert _detect_model_format(str(tmp_path)) == "mmfp4"
         # GLM should NOT be detected as Qwen DeltaNet family
         assert _is_qwen_deltanet_family(glm47_flash_config) is False
+
+
+def _qwen36_27b_config() -> dict:
+    return {
+        "_name_or_path": MODEL_ID,
+        "model_type": "qwen3_5",
+        "text_config": {
+            "model_type": "qwen3_5_text",
+            "hidden_size": 5120,
+            "num_hidden_layers": 64,
+            "vocab_size": 248320,
+            "max_position_embeddings": 262144,
+            "full_attention_interval": 4,
+            "linear_num_key_heads": 16,
+            "linear_num_value_heads": 48,
+            "linear_key_head_dim": 128,
+            "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4,
+            "num_attention_heads": 24,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "partial_rotary_factor": 0.25,
+            "intermediate_size": 17408,
+        },
+    }
+
+
+def _write_qwen36_manifest(path: Path) -> Path:
+    tensors = []
+    for role in REQUIRED_TENSOR_ROLES:
+        in_features, out_features = expected_tensor_shape(role)
+        tensors.append(
+            Int4TensorArtifact(
+                role=role,
+                layer_index=0 if role != "lm_head" else None,
+                qweight=f"{role}.qweight.u32.bin",
+                scales=f"{role}.scales.f16.bin",
+                zeros=f"{role}.zeros.f16.bin",
+                in_features=in_features,
+                out_features=out_features,
+            )
+        )
+    return write_manifest(Qwen36ArtifactManifest(tensors=tensors), path)
+
+
+class TestQwen36FusedServingSelection:
+    def test_serving_model_info_reports_qwen_fused_fallback(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        logger.info("running test_serving_model_info_reports_qwen_fused_fallback")
+        monkeypatch.setenv("METAL_MARLIN_MOCK_MODEL", "1")
+        monkeypatch.delenv(FEATURE_FLAG, raising=False)
+        _write_config(tmp_path, _qwen36_27b_config())
+        manifest_path = _write_qwen36_manifest(tmp_path / "manifest.json")
+
+        engine = ServingEngine(
+            EngineConfig(
+                model_path=str(tmp_path),
+                qwen36_27b_artifact_manifest=str(manifest_path),
+            )
+        )
+
+        fused = engine.get_model_info()["qwen36_27b_fused"]
+        assert fused["enabled"] is False
+        assert FEATURE_FLAG in fused["reason"]
+        assert fused["artifact_manifest"] == str(manifest_path)
+        assert fused["coverage_kind"] is None
+        assert fused["coverage_layers"] is None
+        assert fused["coverage_tensors"] is None
+
+    def test_serving_model_info_reports_qwen_fused_eligible(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        logger.info("running test_serving_model_info_reports_qwen_fused_eligible")
+        monkeypatch.setenv("METAL_MARLIN_MOCK_MODEL", "1")
+        monkeypatch.setenv(FEATURE_FLAG, "1")
+        _write_config(tmp_path, _qwen36_27b_config())
+        manifest_path = _write_qwen36_manifest(tmp_path / "manifest.json")
+
+        engine = ServingEngine(
+            EngineConfig(
+                model_path=str(tmp_path),
+                qwen36_27b_artifact_manifest=str(manifest_path),
+            )
+        )
+
+        fused = engine.get_model_info()["qwen36_27b_fused"]
+        assert fused["enabled"] is True
+        assert "fused artifact path selected" in fused["reason"]
+        assert fused["coverage_kind"] == "template"
+        assert fused["coverage_layers"] == 1
+        assert fused["coverage_tensors"] == len(REQUIRED_TENSOR_ROLES)

@@ -87,6 +87,7 @@ reports/
 benchmarks/*
 !benchmarks/continuous_perf_tracking.py
 !benchmarks/baseline_perf.json
+!benchmarks/bench_qwen36_27b_block_skeleton.py
 
 # Debug/temporary scripts (created during development, not for release)
 scripts/debug_*.py

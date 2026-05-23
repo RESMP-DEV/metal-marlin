@@ -13,6 +13,9 @@ from .kernels.qwen36_27b import (
     dispatch_attention_qkv_projection,
     dispatch_dense_down_residual,
     dispatch_dense_gate_up_silu,
+    dispatch_linear_az_projection,
+    dispatch_linear_o_residual,
+    dispatch_lm_head_logits,
     dispatch_qkvb_projection,
     load_packed_int4_matrix,
 )
@@ -37,6 +40,12 @@ FULL_ATTENTION_ROLES: tuple[TensorRole, ...] = (
     "full_attn_v",
     "full_attn_o",
 )
+LINEAR_BLOCK_ROLES: tuple[TensorRole, ...] = (
+    "linear_attn_a",
+    "linear_attn_z",
+    "linear_attn_out",
+)
+LM_HEAD_ROLES: tuple[TensorRole, ...] = ("lm_head",)
 
 
 @dataclass(frozen=True)
@@ -124,6 +133,58 @@ class Layer0FullAttentionValidation:
                     f"max_abs_error={result.max_abs_error:.6g} > {atol}, "
                     f"max_rel_error={result.max_rel_error:.6g} > {rtol}"
                 )
+
+
+@dataclass(frozen=True)
+class Layer0LinearBlockValidation:
+    manifest_path: Path
+    hidden_l2: float
+    linear_out_l2: float
+    results: tuple[ArtifactParityResult, ...]
+
+    @property
+    def max_abs_error(self) -> float:
+        return max((result.max_abs_error for result in self.results), default=0.0)
+
+    @property
+    def max_rel_error(self) -> float:
+        return max((result.max_rel_error for result in self.results), default=0.0)
+
+    def assert_within(self, *, atol: float, rtol: float) -> None:
+        for result in self.results:
+            if result.max_abs_error > atol and result.max_rel_error > rtol:
+                raise AssertionError(
+                    f"{result.role} parity failed: "
+                    f"max_abs_error={result.max_abs_error:.6g} > {atol}, "
+                    f"max_rel_error={result.max_rel_error:.6g} > {rtol}"
+                )
+
+
+@dataclass(frozen=True)
+class Layer0LmHeadValidation:
+    manifest_path: Path
+    hidden_l2: float
+    result: ArtifactParityResult
+
+    @property
+    def max_abs_error(self) -> float:
+        return self.result.max_abs_error
+
+    @property
+    def max_rel_error(self) -> float:
+        return self.result.max_rel_error
+
+    @property
+    def results(self) -> tuple[ArtifactParityResult, ...]:
+        return (self.result,)
+
+    def assert_within(self, *, atol: float, rtol: float) -> None:
+        if self.result.max_abs_error > atol and self.result.max_rel_error > rtol:
+            raise AssertionError(
+                f"{self.result.role} parity failed: "
+                f"max_abs_error={self.result.max_abs_error:.6g} > {atol}, "
+                f"max_rel_error={self.result.max_rel_error:.6g} > {rtol}"
+            )
 
 
 def default_layer0_manifest_path() -> Path:
@@ -484,4 +545,141 @@ def validate_layer0_full_attention_artifacts(
         hidden_l2=float(torch.linalg.vector_norm(hidden_cpu).item()),
         attn_out_l2=float(torch.linalg.vector_norm(attn_out_cpu).item()),
         results=projection_results + (out_result,),
+    )
+
+
+def validate_layer0_linear_block_artifacts(
+    manifest_path: str | Path | None = None,
+    *,
+    max_columns_per_role: int = 8,
+) -> Layer0LinearBlockValidation:
+    """Validate layer-0 A/Z and linear-output qmi4 artifacts against fused wrappers."""
+
+    if not torch.backends.mps.is_available():
+        raise RuntimeError("MPS is required for fused Qwen3.6-27B artifact validation")
+    staleness = get_staleness_details()
+    if staleness["is_stale"]:
+        raise RuntimeError(f"metallib is stale: {staleness['reason']}")
+
+    path = (
+        Path(manifest_path)
+        if manifest_path is not None
+        else default_block_layer0_manifest_path()
+    )
+    if not path.exists():
+        raise FileNotFoundError(path)
+    base_dir = path.parent
+    by_role = _artifact_by_role(path, LINEAR_BLOCK_ROLES, "layer-0 linear block")
+    matrices = {
+        role: load_packed_int4_matrix(artifact, base_dir, device="mps")
+        for role, artifact in by_role.items()
+    }
+
+    profile = QWEN36_27B_PROFILE
+    hidden_cpu = torch.linspace(
+        -0.75,
+        0.75,
+        profile.hidden_size,
+        dtype=torch.float32,
+    )
+    hidden = hidden_cpu.to(dtype=torch.float16, device="mps")
+    projected = dispatch_linear_az_projection(
+        hidden,
+        matrices["linear_attn_a"],
+        matrices["linear_attn_z"],
+    )
+    actual_by_role = {
+        "linear_attn_a": projected.a,
+        "linear_attn_z": projected.z,
+    }
+    hidden_reference = hidden_cpu.to(dtype=torch.float16)
+    projection_results = tuple(
+        _compare_role(
+            role,
+            hidden_reference,
+            matrices[role],
+            actual_by_role[role],
+            max_columns=max_columns_per_role,
+        )
+        for role in LINEAR_BLOCK_ROLES[:2]
+    )
+
+    linear_out_cpu = torch.linspace(
+        -0.5,
+        0.5,
+        profile.delta.v_features,
+        dtype=torch.float32,
+    )
+    linear_out = linear_out_cpu.to(dtype=torch.float16, device="mps")
+    out = dispatch_linear_o_residual(
+        linear_out,
+        matrices["linear_attn_out"],
+        hidden,
+    )
+    out_columns = _sample_columns(profile.hidden_size, max_columns_per_role)
+    out_expected = hidden_reference.float()[list(out_columns)] + _reference_columns(
+        linear_out_cpu.to(dtype=torch.float16),
+        matrices["linear_attn_out"],
+        out_columns,
+    )
+    out_result = _compare_expected_columns(
+        "linear_attn_out",
+        out_columns,
+        out_expected.to(dtype=torch.float16).float(),
+        out,
+    )
+
+    return Layer0LinearBlockValidation(
+        manifest_path=path,
+        hidden_l2=float(torch.linalg.vector_norm(hidden_cpu).item()),
+        linear_out_l2=float(torch.linalg.vector_norm(linear_out_cpu).item()),
+        results=projection_results + (out_result,),
+    )
+
+
+def validate_layer0_lm_head_artifacts(
+    manifest_path: str | Path | None = None,
+    *,
+    max_columns_per_role: int = 8,
+) -> Layer0LmHeadValidation:
+    """Validate the imported layer-0 LM head artifact against fused logits."""
+
+    if not torch.backends.mps.is_available():
+        raise RuntimeError("MPS is required for fused Qwen3.6-27B artifact validation")
+    staleness = get_staleness_details()
+    if staleness["is_stale"]:
+        raise RuntimeError(f"metallib is stale: {staleness['reason']}")
+
+    path = (
+        Path(manifest_path)
+        if manifest_path is not None
+        else default_block_layer0_manifest_path()
+    )
+    if not path.exists():
+        raise FileNotFoundError(path)
+    base_dir = path.parent
+    by_role = _artifact_by_role(path, LM_HEAD_ROLES, "LM head")
+    matrix = load_packed_int4_matrix(by_role["lm_head"], base_dir, device="mps")
+
+    profile = QWEN36_27B_PROFILE
+    hidden_cpu = torch.linspace(
+        -0.75,
+        0.75,
+        profile.hidden_size,
+        dtype=torch.float32,
+    )
+    hidden = hidden_cpu.to(dtype=torch.float16, device="mps")
+    logits = dispatch_lm_head_logits(hidden, matrix)
+    result = _compare_role(
+        "lm_head",
+        hidden_cpu.to(dtype=torch.float16),
+        matrix,
+        logits,
+        max_columns=max_columns_per_role,
+    )
+
+    return Layer0LmHeadValidation(
+        manifest_path=path,
+        hidden_l2=float(torch.linalg.vector_norm(hidden_cpu).item()),
+        result=result,
     )

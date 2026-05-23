@@ -15,6 +15,7 @@ from typing import Any
 
 from ..inference.mmfp4_pipeline import MMFP4Pipeline
 from ..inference.pipeline import MarlinPipeline
+from ..kernels.qwen36_27b import decide_fused_artifact_path
 from .continuous_batch import BatchScheduler, KVCacheManager, SchedulerConfig
 from .openai_schemas import (
     ChatCompletionChunk,
@@ -365,6 +366,18 @@ def _detect_model_format(model_path: str) -> str:
     return "marlin"
 
 
+def _load_config_dict(model_path: str) -> dict[str, Any] | None:
+    path = Path(model_path)
+    config_path = path / "config.json"
+    if not config_path.exists():
+        return None
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _normalize_model_name(model_path: str) -> str:
     """Normalize model name for API compatibility.
 
@@ -465,6 +478,7 @@ class EngineConfig:
     block_size: int = 16
     use_paged_attention: bool = True
     use_cpp_serving: bool = True  # Use C++ serving path when available
+    qwen36_27b_artifact_manifest: str | None = None
 
 
 class ServingEngine:
@@ -489,6 +503,10 @@ class ServingEngine:
 
         model_format = _detect_model_format(config.model_path)
         self._model_format = model_format
+        self._qwen36_fused_decision = decide_fused_artifact_path(
+            _load_config_dict(config.model_path),
+            config.qwen36_27b_artifact_manifest,
+        )
 
         if use_mock:
             self.pipeline = _MockPipeline(model_name)
@@ -1078,6 +1096,11 @@ class ServingEngine:
                 "format": self._model_format,
             },
             "memory_usage_mb": memory_mb,
+            "qwen36_27b_fused": {
+                "enabled": self._qwen36_fused_decision.enabled,
+                "reason": self._qwen36_fused_decision.reason,
+                "artifact_manifest": self.config.qwen36_27b_artifact_manifest,
+            },
         }
 
     def get_latency_stats(self) -> dict:

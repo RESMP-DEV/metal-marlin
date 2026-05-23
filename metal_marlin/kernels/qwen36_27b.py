@@ -22,12 +22,18 @@ from ..metal_dispatch import (
     Metal,
     MetalKernelLibrary,
     dispatch_kernel,
-    get_default_library,
     mps_tensor_to_metal_buffer,
     require_mps,
 )
-from ..metallib_loader import get_kernel_from_metallib
-from ..qwen36_27b_artifact import Int4TensorArtifact, TensorRole, expected_tensor_shape
+from ..metallib_loader import get_kernel_from_metallib, get_staleness_details
+from ..qwen36_27b_artifact import (
+    Int4TensorArtifact,
+    ManifestCoverageKind,
+    TensorRole,
+    artifact_coverage,
+    expected_tensor_shape,
+    read_manifest,
+)
 from ..qwen36_27b_profile import (
     FEATURE_FLAG,
     QWEN36_27B_PROFILE,
@@ -37,10 +43,13 @@ from ..qwen36_27b_profile import (
 )
 
 logger = logging.getLogger(__name__)
+_qwen36_kernel_library: MetalKernelLibrary | None = None
 
 KERNEL_QKVB = "qwen36_27b_int4_qkvb"
+KERNEL_LINEAR_AZ = "qwen36_27b_int4_linear_az"
 KERNEL_DELTANET_UPDATE = "qwen36_27b_deltanet_update"
 KERNEL_DELTANET_INTERVAL = "qwen36_27b_deltanet_interval4"
+KERNEL_LINEAR_OUT = "qwen36_27b_linear_o_residual"
 KERNEL_DENSE_GATE_UP = "qwen36_27b_dense_gate_up_silu"
 KERNEL_DENSE_DOWN = "qwen36_27b_dense_down_residual"
 KERNEL_RMSNORM = "qwen36_27b_rmsnorm_hidden"
@@ -49,12 +58,15 @@ KERNEL_ATTENTION_QKV = "qwen36_27b_int4_attention_qkv"
 KERNEL_ATTENTION_CACHE = "qwen36_27b_attention_cache_write"
 KERNEL_ATTENTION_DECODE = "qwen36_27b_attention_decode"
 KERNEL_ATTENTION_OUT = "qwen36_27b_attention_o_residual"
+KERNEL_LM_HEAD = "qwen36_27b_lm_head_logits"
 KERNEL_ARGMAX = "qwen36_27b_argmax_f16"
 
 REQUIRED_KERNELS = (
     KERNEL_QKVB,
+    KERNEL_LINEAR_AZ,
     KERNEL_DELTANET_UPDATE,
     KERNEL_DELTANET_INTERVAL,
+    KERNEL_LINEAR_OUT,
     KERNEL_DENSE_GATE_UP,
     KERNEL_DENSE_DOWN,
     KERNEL_RMSNORM,
@@ -63,12 +75,22 @@ REQUIRED_KERNELS = (
     KERNEL_ATTENTION_CACHE,
     KERNEL_ATTENTION_DECODE,
     KERNEL_ATTENTION_OUT,
+    KERNEL_LM_HEAD,
     KERNEL_ARGMAX,
 )
 
 _INT4_DTYPES = {torch.int32}
 if hasattr(torch, "uint32"):
     _INT4_DTYPES.add(torch.uint32)
+
+
+def get_qwen36_kernel_library() -> MetalKernelLibrary:
+    """Return a Qwen3.6-27B library that dispatches from the tracked metallib."""
+
+    global _qwen36_kernel_library
+    if _qwen36_kernel_library is None:
+        _qwen36_kernel_library = MetalKernelLibrary()
+    return _qwen36_kernel_library
 
 
 @dataclass(frozen=True)
@@ -153,6 +175,12 @@ class FullAttentionProjectionOutput:
     v: torch.Tensor
 
 
+@dataclass(frozen=True)
+class LinearAzProjectionOutput:
+    a: torch.Tensor
+    z: torch.Tensor
+
+
 def feature_enabled(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
     return source.get(FEATURE_FLAG) == "1"
@@ -170,6 +198,46 @@ def decide_runtime_path(
     if not is_qwen36_27b_config(config):
         return RuntimeDecision(False, "config is not dense Qwen3.6-27B")
     return RuntimeDecision(True, "dense Qwen3.6-27B fused path selected")
+
+
+def decide_fused_artifact_path(
+    config: dict[str, Any] | None,
+    artifact_manifest_path: str | Path | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    require_fresh_metallib: bool = True,
+    require_kernel_symbols: bool = True,
+    library: Any | None = None,
+) -> RuntimeDecision:
+    """Return whether the artifact-backed Qwen3.6-27B fused path is usable."""
+
+    base_decision = decide_runtime_path(config, env=env)
+    if not base_decision.enabled:
+        return base_decision
+    if artifact_manifest_path is None:
+        return RuntimeDecision(False, "missing artifact manifest")
+
+    path = Path(artifact_manifest_path)
+    try:
+        manifest = read_manifest(path)
+        coverage = artifact_coverage(manifest)
+    except (OSError, ValueError, TypeError) as exc:
+        return RuntimeDecision(False, f"invalid artifact manifest: {exc}")
+
+    if require_fresh_metallib:
+        staleness = get_staleness_details()
+        if staleness["is_stale"]:
+            return RuntimeDecision(False, f"metallib is stale: {staleness['reason']}")
+
+    if require_kernel_symbols:
+        missing = sorted(missing_kernel_symbols(library=library))
+        if missing:
+            return RuntimeDecision(False, f"missing Qwen3.6-27B kernels: {missing}")
+
+    return RuntimeDecision(
+        True,
+        f"dense Qwen3.6-27B fused artifact path selected ({coverage.kind})",
+    )
 
 
 def available_kernel_symbols(library: Any | None = None) -> set[str]:
@@ -290,7 +358,7 @@ def dispatch_qkvb_projection(
 ) -> QkvbProjectionOutput:
     """Run the fused Q/K/V/Beta int4 projection for one decode token."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
     q = _ensure_matrix(q, "linear_attn_q")
@@ -351,7 +419,7 @@ def dispatch_attention_qkv_projection(
 ) -> FullAttentionProjectionOutput:
     """Run fused full-attention Q/K/V int4 projections for one decode token."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
     q = _ensure_matrix(q, "full_attn_q")
@@ -394,6 +462,49 @@ def dispatch_attention_qkv_projection(
     return FullAttentionProjectionOutput(q=q_out, k=k_out, v=v_out)
 
 
+def dispatch_linear_az_projection(
+    hidden: torch.Tensor,
+    a: PackedInt4Matrix,
+    z: PackedInt4Matrix,
+    *,
+    lib: MetalKernelLibrary | None = None,
+    wait: bool = True,
+) -> LinearAzProjectionOutput:
+    """Run fused linear-attention A/Z int4 projections for one decode token."""
+    require_mps()
+    lib = get_qwen36_kernel_library() if lib is None else lib
+    profile = QWEN36_27B_PROFILE
+    hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
+    a = _ensure_matrix(a, "linear_attn_a")
+    z = _ensure_matrix(z, "linear_attn_z")
+
+    a_out = torch.empty(profile.delta.beta_features, dtype=torch.float16, device=hidden.device)
+    z_out = torch.empty(profile.delta.v_features, dtype=torch.float16, device=hidden.device)
+    total_cols = profile.delta.beta_features + profile.delta.v_features
+    buffers = [
+        _buffer(hidden, lib),
+        _buffer(a.qweight, lib),
+        _buffer(a.scales, lib),
+        _buffer(a.zeros, lib),
+        _buffer(z.qweight, lib),
+        _buffer(z.scales, lib),
+        _buffer(z.zeros, lib),
+        _buffer(a_out, lib, copy_back=True),
+        _buffer(z_out, lib, copy_back=True),
+        _params([profile.group_size, total_cols], lib),
+    ]
+    launch_tracing.record_dispatch(KERNEL_LINEAR_AZ, total_cols=total_cols)
+    dispatch_kernel(
+        lib,
+        KERNEL_LINEAR_AZ,
+        ((total_cols + 63) // 64, 1, 1),
+        (64, 1, 1),
+        buffers,
+        wait=wait,
+    )
+    return LinearAzProjectionOutput(a=a_out, z=z_out)
+
+
 def dispatch_deltanet_update(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -406,7 +517,7 @@ def dispatch_deltanet_update(
 ) -> torch.Tensor:
     """Run one Qwen3.6-27B DeltaNet update/readout."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     q = _ensure_mps_half_vector(q, "q", profile.delta.q_features)
     k = _ensure_mps_half_vector(k, "k", profile.delta.k_features)
@@ -446,7 +557,7 @@ def dispatch_deltanet_interval4(
 ) -> torch.Tensor:
     """Run the three-linear-layer interval DeltaNet update/readout kernel."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     layers = 3
     q = _ensure_mps_half_vector(q, "q", layers * profile.delta.q_features)
@@ -495,7 +606,7 @@ def dispatch_linear_attention(
 ) -> torch.Tensor:
     """Run fused projection plus DeltaNet update in one command buffer."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
     q = _ensure_matrix(q, "linear_attn_q")
@@ -570,6 +681,43 @@ def dispatch_linear_attention(
     return y
 
 
+def dispatch_linear_o_residual(
+    linear_out: torch.Tensor,
+    out_proj: PackedInt4Matrix,
+    residual: torch.Tensor,
+    *,
+    lib: MetalKernelLibrary | None = None,
+    wait: bool = True,
+) -> torch.Tensor:
+    """Run linear-attention output projection and residual add."""
+    require_mps()
+    lib = get_qwen36_kernel_library() if lib is None else lib
+    profile = QWEN36_27B_PROFILE
+    linear_out = _ensure_mps_half_vector(linear_out, "linear_out", profile.delta.v_features)
+    residual = _ensure_mps_half_vector(residual, "residual", profile.hidden_size)
+    out_proj = _ensure_matrix(out_proj, "linear_attn_out")
+    out = torch.empty(profile.hidden_size, dtype=torch.float16, device=linear_out.device)
+    buffers = [
+        _buffer(linear_out, lib),
+        _buffer(out_proj.qweight, lib),
+        _buffer(out_proj.scales, lib),
+        _buffer(out_proj.zeros, lib),
+        _buffer(residual, lib),
+        _buffer(out, lib, copy_back=True),
+        _params([profile.group_size], lib),
+    ]
+    launch_tracing.record_dispatch(KERNEL_LINEAR_OUT, hidden_size=profile.hidden_size)
+    dispatch_kernel(
+        lib,
+        KERNEL_LINEAR_OUT,
+        ((profile.hidden_size + 63) // 64, 1, 1),
+        (64, 1, 1),
+        buffers,
+        wait=wait,
+    )
+    return out
+
+
 def dispatch_dense_gate_up_silu(
     hidden: torch.Tensor,
     gate: PackedInt4Matrix,
@@ -580,7 +728,7 @@ def dispatch_dense_gate_up_silu(
 ) -> torch.Tensor:
     """Run fused dense MLP gate/up projection plus SiLU activation."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
     gate = _ensure_matrix(gate, "mlp_gate")
@@ -626,7 +774,7 @@ def dispatch_dense_down_residual(
 ) -> torch.Tensor:
     """Run dense MLP down projection and residual add."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     intermediate = _ensure_mps_half_vector(
         intermediate,
@@ -667,7 +815,7 @@ def dispatch_linear_rmsnorm_gated(
 ) -> torch.Tensor:
     """Run Qwen3.6-27B linear-attention gated RMSNorm."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     x = _ensure_mps_half_vector(x, "x", profile.delta.v_features)
     gate = _ensure_mps_half_vector(gate, "gate", profile.delta.v_features)
@@ -703,7 +851,7 @@ def dispatch_rmsnorm_hidden(
 ) -> torch.Tensor:
     """Run the Qwen3.6-27B hidden-size RMSNorm kernel."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
     weight = _ensure_mps_half_vector(weight, "weight", profile.hidden_size)
@@ -737,7 +885,7 @@ def dispatch_attention_cache_write(
 ) -> None:
     """Write one full-attention K/V projection into cache buffers."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     k = _ensure_mps_half_vector(k, "k", profile.attention.kv_features)
     v = _ensure_mps_half_vector(v, "v", profile.attention.kv_features)
@@ -790,7 +938,7 @@ def dispatch_attention_decode(
 ) -> torch.Tensor:
     """Run the full-attention decode helper for one token."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     q_proj = _ensure_mps_half_vector(q_proj, "q_proj", profile.attention.q_features)
     k_proj = _ensure_mps_half_vector(k_proj, "k_proj", profile.attention.kv_features)
@@ -856,7 +1004,7 @@ def dispatch_attention_o_residual(
 ) -> torch.Tensor:
     """Run full-attention output projection and residual add."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     profile = QWEN36_27B_PROFILE
     attn_out = _ensure_mps_half_vector(attn_out, "attn_out", profile.attention.o_features)
     residual = _ensure_mps_half_vector(residual, "residual", profile.hidden_size)
@@ -883,10 +1031,44 @@ def dispatch_attention_o_residual(
     return out
 
 
+def dispatch_lm_head_logits(
+    hidden: torch.Tensor,
+    lm_head: PackedInt4Matrix,
+    *,
+    lib: MetalKernelLibrary | None = None,
+    wait: bool = True,
+) -> torch.Tensor:
+    """Run Qwen3.6-27B int4 LM head projection."""
+    require_mps()
+    lib = get_qwen36_kernel_library() if lib is None else lib
+    profile = QWEN36_27B_PROFILE
+    hidden = _ensure_mps_half_vector(hidden, "hidden", profile.hidden_size)
+    lm_head = _ensure_matrix(lm_head, "lm_head")
+    logits = torch.empty(profile.vocab_size, dtype=torch.float16, device=hidden.device)
+    buffers = [
+        _buffer(hidden, lib),
+        _buffer(lm_head.qweight, lib),
+        _buffer(lm_head.scales, lib),
+        _buffer(lm_head.zeros, lib),
+        _buffer(logits, lib, copy_back=True),
+        _params([profile.group_size], lib),
+    ]
+    launch_tracing.record_dispatch(KERNEL_LM_HEAD, vocab_size=profile.vocab_size)
+    dispatch_kernel(
+        lib,
+        KERNEL_LM_HEAD,
+        ((profile.vocab_size + 63) // 64, 1, 1),
+        (64, 1, 1),
+        buffers,
+        wait=wait,
+    )
+    return logits
+
+
 def dispatch_argmax(logits: torch.Tensor, *, lib: MetalKernelLibrary | None = None) -> torch.Tensor:
     """Run the Qwen3.6-27B vocabulary argmax kernel."""
     require_mps()
-    lib = get_default_library() if lib is None else lib
+    lib = get_qwen36_kernel_library() if lib is None else lib
     logits = _ensure_mps_half_vector(logits, "logits", QWEN36_27B_PROFILE.vocab_size)
     token = torch.empty(1, dtype=torch.int32, device=logits.device)
     buffers = [_buffer(logits, lib), _buffer(token, lib, copy_back=True)]

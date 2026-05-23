@@ -2169,7 +2169,7 @@ class MetalDispatcher:
             self.begin_encode()
             buffer = self._buffer_b if self._ping_pong else self._buffer_a
 
-        pipeline = self._lib.get_pipeline(function_name)
+        pipeline = self._lib.get_function(function_name)
         encoder = buffer["encoder"]
 
         encoder.setComputePipelineState_(pipeline)
@@ -3496,7 +3496,7 @@ def dispatch_kernel(
         None if wait=True or in batch mode, otherwise the command buffer.
     """
     logger.debug("dispatch_kernel called with lib=%s, function_name=%s, grid=%s", lib, function_name, grid)
-    pipeline = lib.get_pipeline(function_name)
+    pipeline = lib.get_function(function_name)
 
     # Check for _CopyBackBuffer in buffers (requires Python path for copy-back)
     copy_back: list[_CopyBackBuffer] = []

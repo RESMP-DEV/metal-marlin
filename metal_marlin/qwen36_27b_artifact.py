@@ -32,6 +32,52 @@ TensorRole = Literal[
     "mlp_down",
     "lm_head",
 ]
+ManifestTensorKey = tuple[int | None, TensorRole]
+ManifestCoverageKind = Literal["template", "full_layers"]
+
+REQUIRED_TENSOR_ROLES: tuple[TensorRole, ...] = (
+    "linear_attn_q",
+    "linear_attn_k",
+    "linear_attn_v",
+    "linear_attn_beta",
+    "linear_attn_a",
+    "linear_attn_z",
+    "linear_attn_out",
+    "full_attn_q",
+    "full_attn_k",
+    "full_attn_v",
+    "full_attn_o",
+    "mlp_gate",
+    "mlp_up",
+    "mlp_down",
+    "lm_head",
+)
+LINEAR_ATTENTION_TENSOR_ROLES: tuple[TensorRole, ...] = (
+    "linear_attn_q",
+    "linear_attn_k",
+    "linear_attn_v",
+    "linear_attn_beta",
+    "linear_attn_a",
+    "linear_attn_z",
+    "linear_attn_out",
+)
+FULL_ATTENTION_TENSOR_ROLES: tuple[TensorRole, ...] = (
+    "full_attn_q",
+    "full_attn_k",
+    "full_attn_v",
+    "full_attn_o",
+)
+DENSE_MLP_TENSOR_ROLES: tuple[TensorRole, ...] = (
+    "mlp_gate",
+    "mlp_up",
+    "mlp_down",
+)
+GLOBAL_TENSOR_ROLES: tuple[TensorRole, ...] = ("lm_head",)
+LAYER_LOCAL_TENSOR_ROLES: tuple[TensorRole, ...] = (
+    LINEAR_ATTENTION_TENSOR_ROLES
+    + FULL_ATTENTION_TENSOR_ROLES
+    + DENSE_MLP_TENSOR_ROLES
+)
 
 
 ROLE_SHAPES: dict[str, tuple[int, int]] = {
@@ -126,6 +172,22 @@ class Int4TensorArtifact:
             raise ValueError("qweight layout requires in_features divisible by 8")
         if self.group_size <= 0 or self.group_size % 8 != 0:
             raise ValueError("group_size must be a positive multiple of 8")
+        if self.group_size != QWEN36_27B_PROFILE.group_size:
+            raise ValueError(
+                f"{self.role} requires group_size={QWEN36_27B_PROFILE.group_size}"
+            )
+        if self.dtype != "uint4_asym":
+            raise ValueError(f"{self.role} expected dtype=uint4_asym, got {self.dtype}")
+        if self.qweight_layout != "packed_k_major_u32":
+            raise ValueError(
+                f"{self.role} expected qweight_layout=packed_k_major_u32, "
+                f"got {self.qweight_layout}"
+            )
+        if self.metadata_layout != "group_major_f16":
+            raise ValueError(
+                f"{self.role} expected metadata_layout=group_major_f16, "
+                f"got {self.metadata_layout}"
+            )
         if self.layer_index is not None and not 0 <= self.layer_index < QWEN36_27B_PROFILE.num_hidden_layers:
             raise ValueError(f"layer_index out of range: {self.layer_index}")
 
@@ -141,8 +203,25 @@ class Qwen36ArtifactManifest:
     def validate(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema_version: {self.schema_version}")
+        if self.model_id != MODEL_ID:
+            raise ValueError(f"unsupported model_id: {self.model_id}")
         for tensor in self.tensors:
             tensor.validate()
+
+
+@dataclass(frozen=True)
+class Qwen36ArtifactCoverage:
+    kind: ManifestCoverageKind
+    layers: int
+    tensors: int
+
+    @property
+    def is_template(self) -> bool:
+        return self.kind == "template"
+
+    @property
+    def is_full_layers(self) -> bool:
+        return self.kind == "full_layers"
 
 
 def write_manifest(manifest: Qwen36ArtifactManifest, path: str | Path) -> Path:
@@ -169,6 +248,152 @@ def read_manifest(path: str | Path) -> Qwen36ArtifactManifest:
     return manifest
 
 
+def manifest_tensor_index(
+    manifest: Qwen36ArtifactManifest,
+) -> dict[ManifestTensorKey, Int4TensorArtifact]:
+    """Index artifacts by ``(layer_index, role)`` and reject duplicates."""
+
+    manifest.validate()
+    index: dict[ManifestTensorKey, Int4TensorArtifact] = {}
+    for tensor in manifest.tensors:
+        key = (tensor.layer_index, tensor.role)
+        if key in index:
+            raise ValueError(
+                f"manifest has duplicate tensor for layer={tensor.layer_index} "
+                f"role={tensor.role}"
+            )
+        index[key] = tensor
+    return index
+
+
+def expected_roles_for_layer(layer_index: int) -> tuple[TensorRole, ...]:
+    """Return the concrete tensor roles required by one Qwen3.6-27B layer."""
+
+    if not 0 <= layer_index < QWEN36_27B_PROFILE.num_hidden_layers:
+        raise ValueError(f"layer_index out of range: {layer_index}")
+    attention_roles = (
+        FULL_ATTENTION_TENSOR_ROLES
+        if layer_index in QWEN36_27B_PROFILE.full_attention_layer_indices
+        else LINEAR_ATTENTION_TENSOR_ROLES
+    )
+    return attention_roles + DENSE_MLP_TENSOR_ROLES
+
+
+def tensors_for_layer(
+    manifest: Qwen36ArtifactManifest,
+    layer_index: int,
+    roles: tuple[TensorRole, ...] | None = None,
+) -> dict[TensorRole, Int4TensorArtifact]:
+    """Return required role artifacts for one concrete layer index."""
+
+    if not 0 <= layer_index < QWEN36_27B_PROFILE.num_hidden_layers:
+        raise ValueError(f"layer_index out of range: {layer_index}")
+    required_roles = expected_roles_for_layer(layer_index) if roles is None else roles
+    index = manifest_tensor_index(manifest)
+    result: dict[TensorRole, Int4TensorArtifact] = {}
+    missing: list[TensorRole] = []
+    for role in required_roles:
+        tensor = index.get((layer_index, role))
+        if tensor is None:
+            missing.append(role)
+        else:
+            result[role] = tensor
+    if missing:
+        raise ValueError(f"manifest missing roles for layer {layer_index}: {missing}")
+    return result
+
+
+def validate_required_roles_for_layer(
+    manifest: Qwen36ArtifactManifest,
+    layer_index: int,
+    roles: tuple[TensorRole, ...] | None = None,
+) -> None:
+    """Ensure a layered manifest has all required roles for one layer."""
+
+    tensors_for_layer(manifest, layer_index, roles)
+
+
+def validate_full_layer_coverage(manifest: Qwen36ArtifactManifest) -> None:
+    """Ensure a manifest covers every concrete layer plus global tensors."""
+
+    manifest.validate()
+    manifest_tensor_index(manifest)
+
+    template_layer_roles = sorted(
+        tensor.role
+        for tensor in manifest.tensors
+        if tensor.layer_index is None and tensor.role in LAYER_LOCAL_TENSOR_ROLES
+    )
+    if template_layer_roles:
+        raise ValueError(
+            "full-layer manifest has template layer-local roles: "
+            f"{template_layer_roles}"
+        )
+
+    for layer_index in range(QWEN36_27B_PROFILE.num_hidden_layers):
+        expected_roles = set(expected_roles_for_layer(layer_index))
+        actual_layer_roles = {
+            tensor.role
+            for tensor in manifest.tensors
+            if tensor.layer_index == layer_index and tensor.role in LAYER_LOCAL_TENSOR_ROLES
+        }
+        unexpected = sorted(actual_layer_roles - expected_roles)
+        if unexpected:
+            raise ValueError(
+                f"manifest has unexpected roles for layer {layer_index}: {unexpected}"
+            )
+        validate_required_roles_for_layer(manifest, layer_index)
+    for role in GLOBAL_TENSOR_ROLES:
+        count = sum(1 for tensor in manifest.tensors if tensor.role == role)
+        if count == 0:
+            raise ValueError(f"manifest missing global role: {role}")
+        if count > 1:
+            raise ValueError(f"manifest has duplicate global role: {role}")
+
+
+def artifact_coverage(manifest: Qwen36ArtifactManifest) -> Qwen36ArtifactCoverage:
+    """Classify whether a manifest is template-only or full-layer coverage."""
+
+    try:
+        validate_required_roles(manifest)
+    except ValueError as template_exc:
+        try:
+            validate_full_layer_coverage(manifest)
+        except ValueError as full_exc:
+            raise ValueError(
+                "manifest does not satisfy template or full-layer coverage: "
+                f"template={template_exc}; full_layers={full_exc}"
+            ) from full_exc
+        return Qwen36ArtifactCoverage(
+            kind="full_layers",
+            layers=QWEN36_27B_PROFILE.num_hidden_layers,
+            tensors=len(manifest.tensors),
+        )
+    return Qwen36ArtifactCoverage(
+        kind="template",
+        layers=1,
+        tensors=len(manifest.tensors),
+    )
+
+
 def expected_tensor_shape(role: TensorRole) -> tuple[int, int]:
     return ROLE_SHAPES[role]
 
+
+def validate_required_roles(
+    manifest: Qwen36ArtifactManifest,
+    roles: tuple[TensorRole, ...] = REQUIRED_TENSOR_ROLES,
+) -> None:
+    """Ensure a manifest has exactly one artifact for each required role."""
+
+    manifest.validate()
+    counts: dict[TensorRole, int] = {role: 0 for role in roles}
+    for tensor in manifest.tensors:
+        if tensor.role in counts:
+            counts[tensor.role] += 1
+    missing = [role for role, count in counts.items() if count == 0]
+    duplicated = [role for role, count in counts.items() if count > 1]
+    if missing:
+        raise ValueError(f"manifest missing required roles: {missing}")
+    if duplicated:
+        raise ValueError(f"manifest has duplicate required roles: {duplicated}")

@@ -241,6 +241,8 @@ def chat(
               help="Tokens per KV cache block (only with --enable-batching)")
 @click.option("--metrics-port", default=None, type=int,
               help="Dedicated port for Prometheus metrics (default: served on main port at /metrics)")
+@click.option("--qwen36-artifact-manifest", default=None, type=str,
+              help="Optional Qwen3.6-27B fused artifact manifest.")
 def serve(
     model_path: str,
     host: str,
@@ -251,6 +253,7 @@ def serve(
     num_kv_blocks: int,
     block_size: int,
     metrics_port: int | None,
+    qwen36_artifact_manifest: str | None,
 ):
     """Start OpenAI-compatible API server.
 
@@ -291,6 +294,7 @@ def serve(
             num_kv_blocks=num_kv_blocks,
             block_size=block_size,
             metrics_port=metrics_port,
+            qwen36_27b_artifact_manifest=qwen36_artifact_manifest,
         )
     except KeyboardInterrupt:
         click.echo("\nServer stopped.")

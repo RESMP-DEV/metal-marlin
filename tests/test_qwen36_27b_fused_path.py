@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -13,22 +15,35 @@ from metal_marlin.kernels.qwen36_27b import (
     REQUIRED_KERNELS,
     PackedInt4Matrix,
     _ensure_matrix,
+    decide_fused_artifact_path,
     decide_runtime_path,
     dispatch_argmax,
     dispatch_attention_cache_write,
     dispatch_attention_decode,
+    dispatch_attention_o_residual,
+    dispatch_attention_qkv_projection,
     dispatch_deltanet_interval4,
     dispatch_deltanet_update,
     dispatch_dense_down_residual,
     dispatch_dense_gate_up_silu,
     dispatch_linear_attention,
+    dispatch_linear_az_projection,
+    dispatch_linear_o_residual,
     dispatch_linear_rmsnorm_gated,
+    dispatch_lm_head_logits,
     dispatch_qkvb_projection,
     dispatch_rmsnorm_hidden,
     missing_kernel_symbols,
 )
 from metal_marlin.metallib_loader import get_staleness_details
-from metal_marlin.qwen36_27b_artifact import expected_tensor_shape
+from metal_marlin.qwen36_27b_artifact import (
+    REQUIRED_TENSOR_ROLES,
+    Int4TensorArtifact,
+    Qwen36ArtifactManifest,
+    expected_roles_for_layer,
+    expected_tensor_shape,
+    write_manifest,
+)
 from metal_marlin.qwen36_27b_profile import MODEL_ID
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +154,55 @@ def _deltanet_reference(
     return y, next_state.reshape(-1)
 
 
+def _manifest_for_all_roles() -> Qwen36ArtifactManifest:
+    tensors = []
+    for role in REQUIRED_TENSOR_ROLES:
+        in_features, out_features = expected_tensor_shape(role)
+        tensors.append(
+            Int4TensorArtifact(
+                role=role,
+                layer_index=0 if role != "lm_head" else None,
+                qweight=f"{role}.qweight.u32.bin",
+                scales=f"{role}.scales.f16.bin",
+                zeros=f"{role}.zeros.f16.bin",
+                in_features=in_features,
+                out_features=out_features,
+            )
+        )
+    return Qwen36ArtifactManifest(tensors=tensors)
+
+
+def _manifest_for_full_layers() -> Qwen36ArtifactManifest:
+    tensors = []
+    for layer_index in range(QWEN36_27B_PROFILE.num_hidden_layers):
+        for role in expected_roles_for_layer(layer_index):
+            in_features, out_features = expected_tensor_shape(role)
+            tensors.append(
+                Int4TensorArtifact(
+                    role=role,
+                    layer_index=layer_index,
+                    qweight=f"layer{layer_index}.{role}.qweight.u32.bin",
+                    scales=f"layer{layer_index}.{role}.scales.f16.bin",
+                    zeros=f"layer{layer_index}.{role}.zeros.f16.bin",
+                    in_features=in_features,
+                    out_features=out_features,
+                )
+            )
+    in_features, out_features = expected_tensor_shape("lm_head")
+    tensors.append(
+        Int4TensorArtifact(
+            role="lm_head",
+            layer_index=None,
+            qweight="lm_head.qweight.u32.bin",
+            scales="lm_head.scales.f16.bin",
+            zeros="lm_head.zeros.f16.bin",
+            in_features=in_features,
+            out_features=out_features,
+        )
+    )
+    return Qwen36ArtifactManifest(tensors=tensors)
+
+
 def test_feature_flag_runtime_decision() -> None:
     disabled = decide_runtime_path(_config(), env={})
     assert disabled.enabled is False
@@ -157,6 +221,89 @@ def test_runtime_decision_rejects_35b_a3b_shape() -> None:
     decision = decide_runtime_path(config, env={FEATURE_FLAG: "1"})
     assert decision.enabled is False
     assert decision.reason == "config is not dense Qwen3.6-27B"
+
+
+def test_fused_artifact_runtime_decision_requires_valid_manifest(tmp_path: Path) -> None:
+    missing = decide_fused_artifact_path(
+        _config(),
+        None,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+    )
+    assert missing.enabled is False
+    assert missing.reason == "missing artifact manifest"
+    assert missing.coverage_kind is None
+    assert missing.coverage_layers is None
+    assert missing.coverage_tensors is None
+
+    manifest_path = tmp_path / "manifest.json"
+    template_manifest = _manifest_for_all_roles()
+    write_manifest(template_manifest, manifest_path)
+    enabled = decide_fused_artifact_path(
+        _config(),
+        manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+    )
+    assert enabled.enabled is True
+    assert "fused artifact path selected (template)" in enabled.reason
+    assert enabled.coverage_kind == "template"
+    assert enabled.coverage_layers == 1
+    assert enabled.coverage_tensors == len(template_manifest.tensors)
+
+    full_manifest_path = tmp_path / "full_manifest.json"
+    full_manifest = _manifest_for_full_layers()
+    write_manifest(full_manifest, full_manifest_path)
+    full_enabled = decide_fused_artifact_path(
+        _config(),
+        full_manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+    )
+    assert full_enabled.enabled is True
+    assert "fused artifact path selected (full_layers)" in full_enabled.reason
+    assert full_enabled.coverage_kind == "full_layers"
+    assert full_enabled.coverage_layers == QWEN36_27B_PROFILE.num_hidden_layers
+    assert full_enabled.coverage_tensors == len(full_manifest.tensors)
+
+
+def test_fused_artifact_runtime_decision_rejects_missing_roles(tmp_path: Path) -> None:
+    manifest = _manifest_for_all_roles()
+    manifest_path = tmp_path / "manifest.json"
+    write_manifest(replace(manifest, tensors=manifest.tensors[:-1]), manifest_path)
+
+    decision = decide_fused_artifact_path(
+        _config(),
+        manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+    )
+
+    assert decision.enabled is False
+    assert "missing required roles" in decision.reason
+
+
+def test_fused_artifact_runtime_decision_rejects_bad_layout(tmp_path: Path) -> None:
+    manifest = _manifest_for_all_roles()
+    first = replace(manifest.tensors[0], qweight_layout="transposed")
+    manifest_path = tmp_path / "manifest.json"
+    payload = asdict(replace(manifest, tensors=[first, *manifest.tensors[1:]]))
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    decision = decide_fused_artifact_path(
+        _config(),
+        manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+    )
+
+    assert decision.enabled is False
+    assert "qweight_layout" in decision.reason
 
 
 def test_matrix_validation_uses_profile_shapes() -> None:
@@ -219,6 +366,138 @@ def test_launch_budget_records_two_dispatches_for_linear_attention_block() -> No
     launch_tracing.reset()
 
 
+def test_launch_budget_records_two_dispatches_for_full_attention_projection_path() -> None:
+    _require_fresh_mps_metallib()
+    profile = QWEN36_27B_PROFILE
+    hidden = torch.ones((profile.hidden_size,), dtype=torch.float16, device="mps")
+    scale = 1.0 / profile.hidden_size
+
+    launch_tracing.enable_for_testing()
+    launch_tracing.reset()
+    projected = dispatch_attention_qkv_projection(
+        hidden,
+        _filled_int4_shape(
+            profile.hidden_size,
+            profile.attention.q_features,
+            1,
+            scale,
+        ),
+        _filled_int4_shape(
+            profile.hidden_size,
+            profile.attention.kv_features,
+            1,
+            scale,
+        ),
+        _filled_int4_shape(
+            profile.hidden_size,
+            profile.attention.kv_features,
+            1,
+            scale,
+        ),
+    )
+    out = dispatch_attention_o_residual(
+        torch.ones((profile.attention.o_features,), dtype=torch.float16, device="mps"),
+        _filled_int4_shape(
+            profile.attention.o_features,
+            profile.hidden_size,
+            1,
+            1.0 / profile.attention.o_features,
+        ),
+        hidden,
+    )
+
+    assert launch_tracing.dispatch_count() == 2
+    assert launch_tracing.kernel_names() == [
+        "qwen36_27b_int4_attention_qkv",
+        "qwen36_27b_attention_o_residual",
+    ]
+    torch.testing.assert_close(
+        projected.q.cpu().float(),
+        torch.ones((profile.attention.q_features,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    torch.testing.assert_close(
+        projected.k.cpu().float(),
+        torch.ones((profile.attention.kv_features,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    torch.testing.assert_close(
+        projected.v.cpu().float(),
+        torch.ones((profile.attention.kv_features,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    torch.testing.assert_close(
+        out.cpu().float(),
+        torch.full((profile.hidden_size,), 2.0, dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    launch_tracing.reset()
+
+
+def test_launch_budget_records_two_dispatches_for_linear_projection_tail() -> None:
+    _require_fresh_mps_metallib()
+    profile = QWEN36_27B_PROFILE
+    hidden = torch.ones((profile.hidden_size,), dtype=torch.float16, device="mps")
+    scale = 1.0 / profile.hidden_size
+
+    launch_tracing.enable_for_testing()
+    launch_tracing.reset()
+    projected = dispatch_linear_az_projection(
+        hidden,
+        _filled_int4_shape(
+            profile.hidden_size,
+            profile.delta.beta_features,
+            1,
+            scale,
+        ),
+        _filled_int4_shape(
+            profile.hidden_size,
+            profile.delta.v_features,
+            1,
+            scale,
+        ),
+    )
+    out = dispatch_linear_o_residual(
+        torch.ones((profile.delta.v_features,), dtype=torch.float16, device="mps"),
+        _filled_int4_shape(
+            profile.delta.v_features,
+            profile.hidden_size,
+            1,
+            1.0 / profile.delta.v_features,
+        ),
+        hidden,
+    )
+
+    assert launch_tracing.dispatch_count() == 2
+    assert launch_tracing.kernel_names() == [
+        "qwen36_27b_int4_linear_az",
+        "qwen36_27b_linear_o_residual",
+    ]
+    torch.testing.assert_close(
+        projected.a.cpu().float(),
+        torch.ones((profile.delta.beta_features,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    torch.testing.assert_close(
+        projected.z.cpu().float(),
+        torch.ones((profile.delta.v_features,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    torch.testing.assert_close(
+        out.cpu().float(),
+        torch.full((profile.hidden_size,), 2.0, dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
+    launch_tracing.reset()
+
+
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS not available")
 def test_metallib_has_no_missing_qwen36_symbols_when_built() -> None:
     _require_fresh_mps_metallib()
@@ -236,6 +515,27 @@ def test_argmax_dispatch_matches_torch_reference_on_mps() -> None:
     token = dispatch_argmax(logits)
 
     assert token.cpu().item() == torch.argmax(logits.cpu()).item()
+
+
+def test_lm_head_logits_dispatch_matches_uniform_int4_reference_on_mps() -> None:
+    _require_fresh_mps_metallib()
+    profile = QWEN36_27B_PROFILE
+    hidden = torch.ones((profile.hidden_size,), dtype=torch.float16, device="mps")
+    lm_head = _filled_int4_shape(
+        profile.hidden_size,
+        profile.vocab_size,
+        1,
+        1.0 / profile.hidden_size,
+    )
+
+    logits = dispatch_lm_head_logits(hidden, lm_head)
+
+    torch.testing.assert_close(
+        logits.cpu().float(),
+        torch.ones((profile.vocab_size,), dtype=torch.float32),
+        rtol=5e-3,
+        atol=7e-4,
+    )
 
 
 def test_qkvb_projection_dispatch_matches_uniform_int4_reference_on_mps() -> None:
