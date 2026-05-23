@@ -89,6 +89,7 @@ QWEN36_PROJECTION_THREADS_PER_GROUP = (
 QWEN36_INT4_GEMV_THREADS_PER_GROUP = (
     QWEN36_27B_PROFILE.apple_silicon.projection_threads_per_group
 )
+QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP = 4
 QWEN36_DELTANET_THREADS_PER_GROUP = (
     QWEN36_27B_PROFILE.apple_silicon.deltanet_threads_per_group
 )
@@ -774,11 +775,15 @@ def dispatch_dense_gate_up_silu(
     launch_tracing.record_dispatch(
         KERNEL_DENSE_GATE_UP,
         intermediate_size=profile.dense_mlp.intermediate_size,
+        columns_per_threadgroup=QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
     )
+    grid_cols = (
+        profile.dense_mlp.intermediate_size + QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP - 1
+    ) // QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP
     dispatch_kernel(
         lib,
         KERNEL_DENSE_GATE_UP,
-        (profile.dense_mlp.intermediate_size, 1, 1),
+        (grid_cols, 1, 1),
         (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,
@@ -815,11 +820,18 @@ def dispatch_dense_down_residual(
         _buffer(out, lib, copy_back=True),
         _params([profile.group_size], lib),
     ]
-    launch_tracing.record_dispatch(KERNEL_DENSE_DOWN, hidden_size=profile.hidden_size)
+    launch_tracing.record_dispatch(
+        KERNEL_DENSE_DOWN,
+        hidden_size=profile.hidden_size,
+        columns_per_threadgroup=QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
+    )
+    grid_cols = (
+        profile.hidden_size + QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP - 1
+    ) // QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP
     dispatch_kernel(
         lib,
         KERNEL_DENSE_DOWN,
-        (profile.hidden_size, 1, 1),
+        (grid_cols, 1, 1),
         (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
         buffers,
         wait=wait,

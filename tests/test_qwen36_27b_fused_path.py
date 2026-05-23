@@ -13,6 +13,7 @@ from metal_marlin.kernels.qwen36_27b import (
     FEATURE_FLAG,
     QWEN36_27B_PROFILE,
     QWEN36_DELTANET_THREADS_PER_GROUP,
+    QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
     QWEN36_INT4_GEMV_THREADS_PER_GROUP,
     QWEN36_PROJECTION_THREADS_PER_GROUP,
     REQUIRED_KERNELS,
@@ -226,6 +227,9 @@ def test_qwen36_profile_records_apple_silicon_performance_contract() -> None:
     assert QWEN36_PROJECTION_THREADS_PER_GROUP == contract.projection_threads_per_group
     assert QWEN36_INT4_GEMV_THREADS_PER_GROUP == contract.projection_threads_per_group
     assert QWEN36_DELTANET_THREADS_PER_GROUP == contract.deltanet_threads_per_group
+    assert QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP == 4
+    assert QWEN36_27B_PROFILE.dense_mlp.intermediate_size % 4 == 0
+    assert QWEN36_27B_PROFILE.hidden_size % 4 == 0
     assert any("FP32 accumulators" in rule for rule in contract.rules)
 
     payload = shape_contract_payload()

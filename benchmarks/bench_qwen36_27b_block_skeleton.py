@@ -42,6 +42,7 @@ from metal_marlin.kernels.qwen36_27b import (  # noqa: E402
     KERNEL_QKVB,
     KERNEL_RMSNORM,
     QWEN36_DELTANET_THREADS_PER_GROUP,
+    QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
     QWEN36_INT4_GEMV_THREADS_PER_GROUP,
     QWEN36_PROJECTION_THREADS_PER_GROUP,
     dispatch_argmax,
@@ -850,7 +851,12 @@ def _run_one_token_direct(
         up_weight = buffers.weights.tensor("mlp_up", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_GATE_UP,
-            (profile.dense_mlp.intermediate_size, 1, 1),
+            (
+                (profile.dense_mlp.intermediate_size + QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP - 1)
+                // QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
+                1,
+                1,
+            ),
             (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
             [
                 buffers.norm,
@@ -868,7 +874,12 @@ def _run_one_token_direct(
         down_weight = buffers.weights.tensor("mlp_down", layer_index=layer_index)
         _emit(
             KERNEL_DENSE_DOWN,
-            (profile.hidden_size, 1, 1),
+            (
+                (profile.hidden_size + QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP - 1)
+                // QWEN36_DENSE_MLP_COLUMNS_PER_THREADGROUP,
+                1,
+                1,
+            ),
             (QWEN36_INT4_GEMV_THREADS_PER_GROUP, 1, 1),
             [
                 buffers.intermediate,

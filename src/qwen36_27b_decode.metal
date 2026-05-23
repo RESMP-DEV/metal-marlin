@@ -89,6 +89,106 @@ inline float q36_threadgroup_sum(float value,
   return partial[0];
 }
 
+inline float4 q36_threadgroup_sum4(float4 value,
+                                   threadgroup float *partial0,
+                                   threadgroup float *partial1,
+                                   threadgroup float *partial2,
+                                   threadgroup float *partial3,
+                                   uint lane,
+                                   uint lanes) {
+  partial0[lane] = value.x;
+  partial1[lane] = value.y;
+  partial2[lane] = value.z;
+  partial3[lane] = value.w;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (uint stride = lanes >> 1u; stride > 0u; stride >>= 1u) {
+    if (lane < stride) {
+      partial0[lane] += partial0[lane + stride];
+      partial1[lane] += partial1[lane + stride];
+      partial2[lane] += partial2[lane + stride];
+      partial3[lane] += partial3[lane + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+  }
+  return float4(partial0[0], partial1[0], partial2[0], partial3[0]);
+}
+
+inline float4 q36_int4_dot_g128_lane4(device const half *x,
+                                      device const uint *qweight,
+                                      device const half *scales,
+                                      device const half *zeros,
+                                      uint in_features,
+                                      uint out_features,
+                                      uint out_col0,
+                                      uint lane,
+                                      uint lanes) {
+  float4 acc = float4(0.0f, 0.0f, 0.0f, 0.0f);
+  const uint out_col1 = out_col0 + 1u;
+  const uint out_col2 = out_col0 + 2u;
+  const uint out_col3 = out_col0 + 3u;
+  const uint packed_rows = in_features >> 3u;
+  for (uint packed_k = lane; packed_k < packed_rows; packed_k += lanes) {
+    const uint row_offset = packed_k * out_features;
+    const uint group = packed_k >> 4u;
+    const uint meta_offset = group * out_features;
+    const uint packed0 = qweight[row_offset + out_col0];
+    const uint packed1 = qweight[row_offset + out_col1];
+    const uint packed2 = qweight[row_offset + out_col2];
+    const uint packed3 = qweight[row_offset + out_col3];
+    const float scale0 = float(scales[meta_offset + out_col0]);
+    const float scale1 = float(scales[meta_offset + out_col1]);
+    const float scale2 = float(scales[meta_offset + out_col2]);
+    const float scale3 = float(scales[meta_offset + out_col3]);
+    const float zero0 = float(zeros[meta_offset + out_col0]);
+    const float zero1 = float(zeros[meta_offset + out_col1]);
+    const float zero2 = float(zeros[meta_offset + out_col2]);
+    const float zero3 = float(zeros[meta_offset + out_col3]);
+    const uint base_k = packed_k << 3u;
+
+    const float x0 = float(x[base_k + 0u]);
+    acc.x += x0 * q36_dequant_u4((packed0 >> 0u) & 0xFu, scale0, zero0);
+    acc.y += x0 * q36_dequant_u4((packed1 >> 0u) & 0xFu, scale1, zero1);
+    acc.z += x0 * q36_dequant_u4((packed2 >> 0u) & 0xFu, scale2, zero2);
+    acc.w += x0 * q36_dequant_u4((packed3 >> 0u) & 0xFu, scale3, zero3);
+    const float x1 = float(x[base_k + 1u]);
+    acc.x += x1 * q36_dequant_u4((packed0 >> 4u) & 0xFu, scale0, zero0);
+    acc.y += x1 * q36_dequant_u4((packed1 >> 4u) & 0xFu, scale1, zero1);
+    acc.z += x1 * q36_dequant_u4((packed2 >> 4u) & 0xFu, scale2, zero2);
+    acc.w += x1 * q36_dequant_u4((packed3 >> 4u) & 0xFu, scale3, zero3);
+    const float x2 = float(x[base_k + 2u]);
+    acc.x += x2 * q36_dequant_u4((packed0 >> 8u) & 0xFu, scale0, zero0);
+    acc.y += x2 * q36_dequant_u4((packed1 >> 8u) & 0xFu, scale1, zero1);
+    acc.z += x2 * q36_dequant_u4((packed2 >> 8u) & 0xFu, scale2, zero2);
+    acc.w += x2 * q36_dequant_u4((packed3 >> 8u) & 0xFu, scale3, zero3);
+    const float x3 = float(x[base_k + 3u]);
+    acc.x += x3 * q36_dequant_u4((packed0 >> 12u) & 0xFu, scale0, zero0);
+    acc.y += x3 * q36_dequant_u4((packed1 >> 12u) & 0xFu, scale1, zero1);
+    acc.z += x3 * q36_dequant_u4((packed2 >> 12u) & 0xFu, scale2, zero2);
+    acc.w += x3 * q36_dequant_u4((packed3 >> 12u) & 0xFu, scale3, zero3);
+    const float x4 = float(x[base_k + 4u]);
+    acc.x += x4 * q36_dequant_u4((packed0 >> 16u) & 0xFu, scale0, zero0);
+    acc.y += x4 * q36_dequant_u4((packed1 >> 16u) & 0xFu, scale1, zero1);
+    acc.z += x4 * q36_dequant_u4((packed2 >> 16u) & 0xFu, scale2, zero2);
+    acc.w += x4 * q36_dequant_u4((packed3 >> 16u) & 0xFu, scale3, zero3);
+    const float x5 = float(x[base_k + 5u]);
+    acc.x += x5 * q36_dequant_u4((packed0 >> 20u) & 0xFu, scale0, zero0);
+    acc.y += x5 * q36_dequant_u4((packed1 >> 20u) & 0xFu, scale1, zero1);
+    acc.z += x5 * q36_dequant_u4((packed2 >> 20u) & 0xFu, scale2, zero2);
+    acc.w += x5 * q36_dequant_u4((packed3 >> 20u) & 0xFu, scale3, zero3);
+    const float x6 = float(x[base_k + 6u]);
+    acc.x += x6 * q36_dequant_u4((packed0 >> 24u) & 0xFu, scale0, zero0);
+    acc.y += x6 * q36_dequant_u4((packed1 >> 24u) & 0xFu, scale1, zero1);
+    acc.z += x6 * q36_dequant_u4((packed2 >> 24u) & 0xFu, scale2, zero2);
+    acc.w += x6 * q36_dequant_u4((packed3 >> 24u) & 0xFu, scale3, zero3);
+    const float x7 = float(x[base_k + 7u]);
+    acc.x += x7 * q36_dequant_u4((packed0 >> 28u) & 0xFu, scale0, zero0);
+    acc.y += x7 * q36_dequant_u4((packed1 >> 28u) & 0xFu, scale1, zero1);
+    acc.z += x7 * q36_dequant_u4((packed2 >> 28u) & 0xFu, scale2, zero2);
+    acc.w += x7 * q36_dequant_u4((packed3 >> 28u) & 0xFu, scale3, zero3);
+  }
+  return acc;
+}
+
 inline float q36_int4_dot(device const half *x,
                           device const uint *qweight,
                           device const half *scales,
@@ -433,24 +533,37 @@ kernel void qwen36_27b_dense_gate_up_silu(device const half *x [[buffer(0)]],
                                           device const half *up_zeros [[buffer(6)]],
                                           device half *intermediate [[buffer(7)]],
                                           device const uint *params [[buffer(8)]],
-                                          uint out_col [[threadgroup_position_in_grid]],
+                                          uint out_col_pair [[threadgroup_position_in_grid]],
                                           uint lane [[thread_index_in_threadgroup]],
                                           uint lanes [[threads_per_threadgroup]]) {
-  threadgroup float gate_partial[256];
-  threadgroup float up_partial[256];
-  if (out_col >= Q36_MLP_INTERMEDIATE) {
+  threadgroup float col0_partial[256];
+  threadgroup float col1_partial[256];
+  threadgroup float col2_partial[256];
+  threadgroup float col3_partial[256];
+  const uint out_col0 = out_col_pair << 2u;
+  const uint out_col1 = out_col0 + 1u;
+  const uint out_col2 = out_col0 + 2u;
+  const uint out_col3 = out_col0 + 3u;
+  if (out_col0 >= Q36_MLP_INTERMEDIATE) {
     return;
   }
-  const float gate_acc = q36_int4_dot_g128_lane(
+  const float4 gate_acc = q36_int4_dot_g128_lane4(
       x, gate_qweight, gate_scales, gate_zeros, Q36_HIDDEN,
-      Q36_MLP_INTERMEDIATE, out_col, lane, lanes);
-  const float gate = q36_threadgroup_sum(gate_acc, gate_partial, lane, lanes);
-  const float up_acc = q36_int4_dot_g128_lane(
+      Q36_MLP_INTERMEDIATE, out_col0, lane, lanes);
+  const float4 gate = q36_threadgroup_sum4(
+      gate_acc, col0_partial, col1_partial, col2_partial, col3_partial, lane,
+      lanes);
+  const float4 up_acc = q36_int4_dot_g128_lane4(
       x, up_qweight, up_scales, up_zeros, Q36_HIDDEN,
-      Q36_MLP_INTERMEDIATE, out_col, lane, lanes);
-  const float up = q36_threadgroup_sum(up_acc, up_partial, lane, lanes);
+      Q36_MLP_INTERMEDIATE, out_col0, lane, lanes);
+  const float4 up = q36_threadgroup_sum4(
+      up_acc, col0_partial, col1_partial, col2_partial, col3_partial, lane,
+      lanes);
   if (lane == 0u) {
-    intermediate[out_col] = half(q36_silu(gate) * up);
+    intermediate[out_col0] = half(q36_silu(gate.x) * up.x);
+    intermediate[out_col1] = half(q36_silu(gate.y) * up.y);
+    intermediate[out_col2] = half(q36_silu(gate.z) * up.z);
+    intermediate[out_col3] = half(q36_silu(gate.w) * up.w);
   }
 }
 
@@ -461,19 +574,31 @@ kernel void qwen36_27b_dense_down_residual(device const half *intermediate [[buf
                                            device const half *residual [[buffer(4)]],
                                            device half *out [[buffer(5)]],
                                            device const uint *params [[buffer(6)]],
-                                           uint out_col [[threadgroup_position_in_grid]],
+                                           uint out_col_pair [[threadgroup_position_in_grid]],
                                            uint lane [[thread_index_in_threadgroup]],
                                            uint lanes [[threads_per_threadgroup]]) {
-  threadgroup float partial[256];
-  if (out_col >= Q36_HIDDEN) {
+  threadgroup float out0_partial[256];
+  threadgroup float out1_partial[256];
+  threadgroup float out2_partial[256];
+  threadgroup float out3_partial[256];
+  const uint out_col0 = out_col_pair << 2u;
+  const uint out_col1 = out_col0 + 1u;
+  const uint out_col2 = out_col0 + 2u;
+  const uint out_col3 = out_col0 + 3u;
+  if (out_col0 >= Q36_HIDDEN) {
     return;
   }
-  const float acc = q36_int4_dot_g128_lane(
+  const float4 acc = q36_int4_dot_g128_lane4(
       intermediate, down_qweight, down_scales, down_zeros,
-      Q36_MLP_INTERMEDIATE, Q36_HIDDEN, out_col, lane, lanes);
-  const float down = q36_threadgroup_sum(acc, partial, lane, lanes);
+      Q36_MLP_INTERMEDIATE, Q36_HIDDEN, out_col0, lane, lanes);
+  const float4 down = q36_threadgroup_sum4(
+      acc, out0_partial, out1_partial, out2_partial, out3_partial, lane,
+      lanes);
   if (lane == 0u) {
-    out[out_col] = half(float(residual[out_col]) + down);
+    out[out_col0] = half(float(residual[out_col0]) + down.x);
+    out[out_col1] = half(float(residual[out_col1]) + down.y);
+    out[out_col2] = half(float(residual[out_col2]) + down.z);
+    out[out_col3] = half(float(residual[out_col3]) + down.w);
   }
 }
 

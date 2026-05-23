@@ -169,6 +169,14 @@ no-MLP/no-LM-head profile measured about 23 tok/s.  That makes dense MLP GEMV
 the next optimization target; the launch path is already at one command buffer
 per token.
 
+The dense MLP kernels now use a Qwen3.6-specific four-output-column threadgroup
+tile for `gate/up` and `down`.  This assumes the tracked Apple Silicon profile
+dimensions (`intermediate_size=17408`, `hidden_size=5120`) remain divisible by
+four, keeps weights compressed, and avoids fallback edge branches in the hot
+kernel.  On the same local MPS direct skeleton with `--skip-lm-head`, this moved
+the 4-token timing from 9.23 tok/s to 13.60 tok/s while preserving one command
+buffer per token.
+
 The serving stack accepts the same manifest as an opt-in status surface:
 
 ```bash
