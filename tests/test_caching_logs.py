@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 import torch
 
+logger = logging.getLogger(__name__)
+
 try:
     from metal_marlin.trellis.model import TrellisMoEMLP
     from metal_marlin.trellis.testing import create_mock_moe_mlp

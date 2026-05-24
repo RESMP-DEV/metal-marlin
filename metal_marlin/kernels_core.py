@@ -538,7 +538,7 @@ kernel void marlin_gemm_fp4(
                         if (b_col < N && k_pack_idx < k_packs) {
                             uint32_t packed = B_packed[k_pack_idx * N + b_col];
                             float scale = scales[group_idx * N + b_col];
-                            dequant_u4x8(packed, scale, dequant_vals);
+                            dequant_fp4x8(packed, (half)scale, dequant_vals);
                         } else {
                             for (uint v = 0; v < 8; ++v)
                                 dequant_vals[v] = half(0.0h);

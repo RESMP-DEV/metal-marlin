@@ -33,6 +33,8 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
   aligned the dispatch/test coverage with the new threadgroup launch shapes.
 - Added a direct benchmark option to skip LM-head dispatches for block-body
   bottleneck measurement.
+- Added static MPS buffer reuse and CPU-prepared bit-group payloads for Trellis
+  mixed-BPW dispatch while keeping tuple-scoped fallback deterministic.
 
 ### Fixed
 - Preserved generated tokens when streaming mocks and real generate paths differ
@@ -42,6 +44,8 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 - Accepted both packed-weight orientations in the MMFP4 expert MLP CPU fallback
   and sanitized non-finite TrellisLinear fallback outputs without changing the
   public output dtype.
+- Corrected buffer-pool accounting, paged-cache COW accounting, FP4 dequant
+  dispatch, and block-sparse attention fallback behavior for local Metal runs.
 
 ## [Unreleased] - 2026-02-10
 

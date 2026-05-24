@@ -107,7 +107,9 @@ def _compiled_router_forward(
         - indices: Selected expert indices [batch, top_k]
         - weights: Normalized routing weights [batch, top_k]
     """
-    logger.info("_compiled_router_forward starting")
+    router_weight = getattr(router, "weight", None)
+    if router_weight is not None and x.dtype != router_weight.dtype:
+        x = x.to(router_weight.dtype)
     logits = router(x)
     weights, indices = torch.topk(
         F.softmax(logits, dim=-1, dtype=torch.float16),
@@ -772,6 +774,18 @@ class TrellisMoEMLP(nn.Module):
         # Prepare contiguous expert weights for fast dispatch
         self._prepare_expert_weights()
 
+        # Per-bit-group cached buffers for mixed precision dispatch.
+        # _bit_group_buffers is the legacy same-bit-width cache; _bit_group_cache
+        # is keyed by full (gate, up, down) bit tuples for the unified path.
+        self._bit_group_buffers: dict[int, tuple[CachedWeightBuffers, list[int]]] | None = None
+        self._bit_group_cache: (
+            dict[
+                tuple[int, int, int],
+                tuple[list[int], CachedWeightBuffers | dict[str, torch.Tensor | None] | None],
+            ]
+            | None
+        ) = None
+
         # Initialize _lib to None before _build_bit_group_cache which checks it
         self._lib: MetalKernelLibrary | None = None
         self._async_cmd_manager: AsyncCommandBufferManager | None = None
@@ -802,18 +816,6 @@ class TrellisMoEMLP(nn.Module):
         # Buffer validity tracking for cache invalidation
         self._buffer_version: int = 0
         self._weights_hash: int | None = None
-
-        # Per-bit-group cached buffers for mixed precision dispatch
-        # Maps bit_width -> (CachedWeightBuffers, expert_indices_in_group)
-        self._bit_group_buffers: dict[int,
-                                      tuple[CachedWeightBuffers, list[int]]] | None = None
-
-        # Bit-group cache for unified dispatch by (gate, up, down) bit tuple
-        # Maps bit_tuple -> (expert_indices, unified_cached_buffers)
-        # For GLM-4.7-Flash, ~6 unique bit tuples across 64 experts enable grouped dispatch
-        self._bit_group_cache: (
-            dict[tuple[int, int, int], tuple[list[int], CachedWeightBuffers]] | None
-        ) = None
 
         # Timing instrumentation (disabled by default for performance)
         # Set _track_timing = True to enable timing stats collection
@@ -1059,11 +1061,109 @@ class TrellisMoEMLP(nn.Module):
                 groups[bit_tuple] = []
             groups[bit_tuple].append(i)
 
-        # Store only indices - buffers created lazily in _ensure_bit_group_buffers
-        self._bit_group_cache = {
-            bit_tuple: (expert_indices, None)
-            for bit_tuple, expert_indices in groups.items()
-        }
+        max_cpu_payload_bytes = 512 * 1024 * 1024
+        bit_group_cache: dict[
+            tuple[int, int, int],
+            tuple[list[int], dict[str, torch.Tensor | None]],
+        ] = {}
+
+        def tensor_bytes(tensor: torch.Tensor) -> int:
+            return tensor.numel() * tensor.element_size()
+
+        for bit_tuple, expert_indices in groups.items():
+            group_experts = [self.experts[i] for i in expert_indices]
+            source_tensors = [
+                tensor
+                for expert in group_experts
+                for tensor in (
+                    expert.gate_proj.packed_indices,
+                    expert.gate_proj.scales,
+                    expert.gate_proj.su,
+                    expert.gate_proj.sv,
+                    expert.up_proj.packed_indices,
+                    expert.up_proj.scales,
+                    expert.up_proj.su,
+                    expert.up_proj.sv,
+                    expert.down_proj.packed_indices,
+                    expert.down_proj.scales,
+                    expert.down_proj.su,
+                    expert.down_proj.sv,
+                )
+            ]
+            payload_bytes = sum(tensor_bytes(tensor) for tensor in source_tensors)
+
+            if payload_bytes > max_cpu_payload_bytes:
+                bit_group_cache[bit_tuple] = (
+                    expert_indices,
+                    {
+                        "gate_weights": None,
+                        "grid": group_experts[0].gate_proj.grid.cpu().half(),
+                    },
+                )
+                continue
+
+            try:
+                gate_weights = torch.stack(
+                    [e.gate_proj.packed_indices for e in group_experts], dim=0
+                )
+                up_weights = torch.stack(
+                    [e.up_proj.packed_indices for e in group_experts], dim=0
+                )
+                down_weights = torch.stack(
+                    [e.down_proj.packed_indices for e in group_experts], dim=0
+                )
+                bit_group_cache[bit_tuple] = (
+                    expert_indices,
+                    {
+                        "gate_weights": gate_weights.cpu().permute(0, 2, 1, 3).contiguous(),
+                        "gate_scales": torch.stack(
+                            [e.gate_proj.scales for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "up_weights": up_weights.cpu().permute(0, 2, 1, 3).contiguous(),
+                        "up_scales": torch.stack(
+                            [e.up_proj.scales for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "down_weights": down_weights.cpu().permute(0, 2, 1, 3).contiguous(),
+                        "down_scales": torch.stack(
+                            [e.down_proj.scales for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "gate_su": torch.stack(
+                            [e.gate_proj.su for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "gate_sv": torch.stack(
+                            [e.gate_proj.sv for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "up_su": torch.stack(
+                            [e.up_proj.su for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "up_sv": torch.stack(
+                            [e.up_proj.sv for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "down_su": torch.stack(
+                            [e.down_proj.su for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "down_sv": torch.stack(
+                            [e.down_proj.sv for e in group_experts], dim=0
+                        ).cpu().half(),
+                        "grid": group_experts[0].gate_proj.grid.cpu().half(),
+                    },
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to build CPU bit-group payload for %s: %s. "
+                    "Falling back to deferred buffer creation.",
+                    bit_tuple,
+                    e,
+                )
+                bit_group_cache[bit_tuple] = (
+                    expert_indices,
+                    {
+                        "gate_weights": None,
+                        "grid": group_experts[0].gate_proj.grid.cpu().half(),
+                    },
+                )
+
+        self._bit_group_cache = bit_group_cache
 
         logger.debug(
             f"Built bit-group cache: {len(groups)} unique bit tuples "
@@ -2681,6 +2781,15 @@ class TrellisMoEMLP(nn.Module):
             use_fp32_acc=self._get_optimal_use_fp32_acc(),
         )
 
+        if output.shape[0] == x.shape[0] * self.num_experts_per_tok:
+            sort_order = torch.argsort(selected_experts.reshape(-1), stable=True)
+            batch_indices = sort_order // self.num_experts_per_tok
+            output_accum = torch.zeros(
+                x.shape[0], self.hidden_dim, dtype=torch.float32, device=x.device
+            )
+            output_accum.index_add_(0, batch_indices, output.float())
+            output = output_accum.half()
+
         output.add_(self.shared_expert(x))
         return output
 
@@ -2707,7 +2816,7 @@ class TrellisMoEMLP(nn.Module):
         if not hasattr(self, '_bit_group_cache') or self._bit_group_cache is None:
             return
 
-        from .moe_dispatch import CachedWeightBuffers
+        from .moe_dispatch import CachedWeightBuffers, create_cached_weight_buffers_from_cpu
 
         global_buffers = self._cached_weight_buffers
 
@@ -2724,6 +2833,38 @@ class TrellisMoEMLP(nn.Module):
             # Skip empty groups
             if not expert_indices:
                 continue
+
+            if isinstance(existing_buffers, dict):
+                if existing_buffers.get("gate_weights") is not None and all(
+                    value is not None for value in existing_buffers.values()
+                ):
+                    cpu_payload = {
+                        key: value
+                        for key, value in existing_buffers.items()
+                        if value is not None
+                    }
+                    try:
+                        group_buffers = create_cached_weight_buffers_from_cpu(
+                            device=self._get_lib().device,
+                            **cpu_payload,
+                        )
+                        self._bit_group_cache[bit_tuple] = (
+                            expert_indices,
+                            group_buffers,
+                        )
+                        logger.debug(
+                            "Created copied bit-group buffers: %s, num_experts=%d",
+                            bit_tuple,
+                            len(expert_indices),
+                        )
+                        continue
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to create copied buffers for %s: %s. "
+                            "Trying zero-copy fallback.",
+                            bit_tuple,
+                            e,
+                        )
 
             # Check if experts are contiguous (required for zero-copy slicing)
             is_contiguous = (
@@ -2855,6 +2996,40 @@ class TrellisMoEMLP(nn.Module):
         # Dispatch only missing groups via fallback path and merge into output_accum.
         if missing_groups:
             cached_buffers = self._get_cached_buffers()
+            if isinstance(cached_buffers, CachedWeightBuffers):
+                fallback_cached_buffers: CachedWeightBuffers | None = cached_buffers
+                fallback_weights = {
+                    "gate_weights": cached_buffers.gate_weights,
+                    "gate_scales": cached_buffers.gate_scales,
+                    "up_weights": cached_buffers.up_weights,
+                    "up_scales": cached_buffers.up_scales,
+                    "down_weights": cached_buffers.down_weights,
+                    "down_scales": cached_buffers.down_scales,
+                    "gate_su": cached_buffers.gate_su,
+                    "gate_sv": cached_buffers.gate_sv,
+                    "up_su": cached_buffers.up_su,
+                    "up_sv": cached_buffers.up_sv,
+                    "down_su": cached_buffers.down_su,
+                    "down_sv": cached_buffers.down_sv,
+                    "grid": cached_buffers.grid,
+                }
+            else:
+                fallback_cached_buffers = None
+                fallback_weights = {
+                    "gate_weights": getattr(self, "gate_weights_stacked", None),
+                    "gate_scales": getattr(self, "gate_scales_stacked", None),
+                    "up_weights": getattr(self, "up_weights_stacked", None),
+                    "up_scales": getattr(self, "up_scales_stacked", None),
+                    "down_weights": getattr(self, "down_weights_stacked", None),
+                    "down_scales": getattr(self, "down_scales_stacked", None),
+                    "gate_su": getattr(self, "gate_su_stacked", None),
+                    "gate_sv": getattr(self, "gate_sv_stacked", None),
+                    "up_su": getattr(self, "up_su_stacked", None),
+                    "up_sv": getattr(self, "up_sv_stacked", None),
+                    "down_su": getattr(self, "down_su_stacked", None),
+                    "down_sv": getattr(self, "down_sv_stacked", None),
+                    "grid": getattr(self, "grid", None),
+                }
             buffer_pool = self._get_buffer_pool()
             lib = self._get_lib()
 
@@ -2874,19 +3049,19 @@ class TrellisMoEMLP(nn.Module):
                 group_output = dispatch_moe_trellis_swiglu(
                     lib,
                     activations=x[batch_indices],
-                    gate_weights=cached_buffers.gate_weights,
-                    gate_scales=cached_buffers.gate_scales,
-                    up_weights=cached_buffers.up_weights,
-                    up_scales=cached_buffers.up_scales,
-                    down_weights=cached_buffers.down_weights,
-                    down_scales=cached_buffers.down_scales,
-                    gate_su=cached_buffers.gate_su,
-                    gate_sv=cached_buffers.gate_sv,
-                    up_su=cached_buffers.up_su,
-                    up_sv=cached_buffers.up_sv,
-                    down_su=cached_buffers.down_su,
-                    down_sv=cached_buffers.down_sv,
-                    grid=cached_buffers.grid,
+                    gate_weights=fallback_weights["gate_weights"],
+                    gate_scales=fallback_weights["gate_scales"],
+                    up_weights=fallback_weights["up_weights"],
+                    up_scales=fallback_weights["up_scales"],
+                    down_weights=fallback_weights["down_weights"],
+                    down_scales=fallback_weights["down_scales"],
+                    gate_su=fallback_weights["gate_su"],
+                    gate_sv=fallback_weights["gate_sv"],
+                    up_su=fallback_weights["up_su"],
+                    up_sv=fallback_weights["up_sv"],
+                    down_su=fallback_weights["down_su"],
+                    down_sv=fallback_weights["down_sv"],
+                    grid=fallback_weights["grid"],
                     expert_ids=selected_experts[batch_indices, slot_indices].unsqueeze(
                         1),
                     expert_probs=routing_weights[batch_indices, slot_indices].unsqueeze(
@@ -2896,7 +3071,7 @@ class TrellisMoEMLP(nn.Module):
                     num_experts=len(self.experts),
                     top_k=1,
                     bits=bit_tuple,
-                    cached_buffers=cached_buffers,
+                    cached_buffers=fallback_cached_buffers,
                     buffer_pool=buffer_pool,
                     use_fp32_acc=self._get_optimal_use_fp32_acc(),
                 )

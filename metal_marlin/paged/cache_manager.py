@@ -145,6 +145,11 @@ class CacheStats:
     evictions: int = 0  # Number of evictions triggered
     sequences_evicted: int = 0  # Number of sequences evicted
 
+    @property
+    def active_sequences(self) -> int:
+        """Backward-compatible alias for active sequence count."""
+        return self.num_sequences
+
 
 class PagedKVCache:
     """Paged KV cache with copy-on-write prompt sharing.
@@ -212,6 +217,7 @@ class PagedKVCache:
         # Prompt sharing cache
         self._prompt_cache: dict[str, tuple[list[int], list[int]]] = {}
         self._cow_count = 0
+        self._cow_diverged_sequences: set[int] = set()
         self._prompt_hits = 0
         self._shared_block_count = 0
         
@@ -263,6 +269,7 @@ class PagedKVCache:
             self.allocator.unregister_sequence(seq_id)
         self.page_table.remove_sequence(seq_id)
         self._eviction_metadata.pop(seq_id, None)
+        self._cow_diverged_sequences.discard(seq_id)
 
     def append_kv(
         self,
@@ -290,6 +297,15 @@ class PagedKVCache:
         
         # Extend blocks if needed
         if block_offset >= len(state.block_indices):
+            if state.block_indices and seq_id not in self._cow_diverged_sequences:
+                has_shared_prefix = any(
+                    self.allocator.blocks[idx].ref_count > 1
+                    for idx in state.block_indices
+                )
+                if has_shared_prefix:
+                    self._cow_count += 1
+                    self._cow_diverged_sequences.add(seq_id)
+
             block_idx = self.allocator.allocate()
             if block_idx is None:
                 # Try eviction
@@ -313,6 +329,7 @@ class PagedKVCache:
         # COW if block is shared (refcount > 1)
         if current_ref_count > 1:
             self._cow_count += 1
+            self._cow_diverged_sequences.add(seq_id)
             
             # Check if we have enough blocks for COW (requires 1 new block)
             if self.allocator.num_free == 0:

@@ -33,6 +33,7 @@ import _ctypes
 import logging
 import os
 import weakref
+from collections import OrderedDict
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -47,6 +48,12 @@ from .metallib_loader import get_kernel_from_metallib
 # Logger for kernel loading diagnostics (metallib vs JIT)
 logger = logging.getLogger(__name__)
 _kernel_logger = logging.getLogger(__name__ + ".kernels")
+
+_MPS_STATIC_BUFFER_CACHE_LIMIT = int(
+    os.environ.get("METAL_MARLIN_STATIC_MPS_BUFFER_CACHE_BYTES", str(512 * 1024 * 1024))
+)
+_MPS_STATIC_BUFFER_CACHE: OrderedDict[tuple[Any, ...], tuple[Any, int]] = OrderedDict()
+_MPS_STATIC_BUFFER_CACHE_BYTES = 0
 
 
 class _BatchedEncoder:
@@ -3092,12 +3099,54 @@ def _create_zero_copy_buffer_from_iosurface(
         return None
 
 
+def _mps_static_buffer_cache_key(tensor: torch.Tensor, device: Any, size: int) -> tuple[Any, ...]:
+    return (
+        id(device),
+        int(tensor.data_ptr()),
+        int(size),
+        str(tensor.dtype),
+        tuple(tensor.shape),
+        tuple(tensor.stride()),
+        int(getattr(tensor, "_version", 0)),
+    )
+
+
+def _get_cached_mps_static_buffer(key: tuple[Any, ...]) -> Any | None:
+    cached = _MPS_STATIC_BUFFER_CACHE.get(key)
+    if cached is None:
+        return None
+    _MPS_STATIC_BUFFER_CACHE.move_to_end(key)
+    return cached[0]
+
+
+def _cache_mps_static_buffer(key: tuple[Any, ...], buffer: Any, size: int) -> None:
+    global _MPS_STATIC_BUFFER_CACHE_BYTES
+    if _MPS_STATIC_BUFFER_CACHE_LIMIT <= 0 or size > _MPS_STATIC_BUFFER_CACHE_LIMIT:
+        return
+
+    previous = _MPS_STATIC_BUFFER_CACHE.pop(key, None)
+    if previous is not None:
+        _MPS_STATIC_BUFFER_CACHE_BYTES -= previous[1]
+
+    _MPS_STATIC_BUFFER_CACHE[key] = (buffer, size)
+    _MPS_STATIC_BUFFER_CACHE_BYTES += size
+
+    while (
+        _MPS_STATIC_BUFFER_CACHE
+        and _MPS_STATIC_BUFFER_CACHE_BYTES > _MPS_STATIC_BUFFER_CACHE_LIMIT
+    ):
+        _, (_, evicted_size) = _MPS_STATIC_BUFFER_CACHE.popitem(last=False)
+        _MPS_STATIC_BUFFER_CACHE_BYTES -= evicted_size
+
+
 def mps_tensor_to_metal_buffer(
     tensor: torch.Tensor,
     device: Any,
     *,
     copy_back: bool = False,
     initialize_copy_back: bool = False,
+    synchronize: bool = True,
+    cache_static: bool = False,
 ) -> Any:
     """Get Metal buffer from PyTorch MPS tensor.
 
@@ -3127,6 +3176,13 @@ def mps_tensor_to_metal_buffer(
     if initialize_copy_back and not copy_back:
         raise ValueError("initialize_copy_back requires copy_back=True")
 
+    static_cache_key = None
+    if cache_static and not copy_back and not initialize_copy_back:
+        static_cache_key = _mps_static_buffer_cache_key(tensor, device, size)
+        cached = _get_cached_mps_static_buffer(static_cache_key)
+        if cached is not None:
+            return cached
+
     # For pure output buffers (copy_back=True), skip MPS sync and create fresh buffer
     # We don't need tensor data - just a buffer to write results to
     if copy_back and not initialize_copy_back:
@@ -3140,7 +3196,8 @@ def mps_tensor_to_metal_buffer(
         return _CopyBackBuffer(buffer, tensor)
 
     # Ensure pending MPS ops are done before we access tensor data.
-    torch.mps.synchronize()
+    if synchronize:
+        torch.mps.synchronize()
 
     # Attempt 1: Use zero-copy path via IOSurface/ctypes (PyTorch 2.3+ or ctypes fallback)
     try:
@@ -3178,6 +3235,8 @@ def mps_tensor_to_metal_buffer(
     )
     if buffer is None:
         raise RuntimeError("Failed to create Metal buffer from tensor data")
+    if static_cache_key is not None:
+        _cache_mps_static_buffer(static_cache_key, buffer, aligned_size)
     if copy_back:
         return _CopyBackBuffer(buffer, tensor)
     return buffer
@@ -3238,25 +3297,22 @@ def cpu_tensor_to_metal_buffer(tensor: torch.Tensor, device: Any) -> Any:
     if not tensor.is_contiguous():
         tensor = tensor.contiguous()
 
-        # Convert to numpy and create buffer
-        # BFloat16 not supported by numpy, convert to float16
-        if tensor.dtype == torch.bfloat16:
-            tensor = tensor.to(torch.float16)
+    # Convert to numpy and create buffer.
+    # BFloat16 is not supported by numpy, convert to float16.
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float16)
 
-        arr = tensor.numpy()
-        aligned_size = _align_buffer_size(arr.nbytes)
-        data = arr.tobytes()
-        if aligned_size > len(data):
-            data = data + b"\0" * (aligned_size - len(data))
+    arr = tensor.numpy()
+    data = arr.tobytes()
 
-        buffer = device.newBufferWithBytes_length_options_(
-            data, aligned_size, Metal.MTLResourceStorageModeShared
+    buffer = device.newBufferWithBytes_length_options_(
+        data, arr.nbytes, Metal.MTLResourceStorageModeShared
+    )
+    if buffer is None:
+        raise RuntimeError(
+            f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}"
         )
-        if buffer is None:
-            raise RuntimeError(
-                f"Failed to create Metal buffer from CPU tensor shape={tensor.shape}"
-            )
-        return buffer
+    return buffer
 
 
 def cpu_tensor_to_metal_texture(tensor: torch.Tensor, device: Any) -> Any:

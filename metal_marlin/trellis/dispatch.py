@@ -566,15 +566,17 @@ def dispatch_gemm_trellis_decode(
     sv = sv.float().contiguous()
 
     # Allocate output
-    output = torch.zeros(M, N, dtype=torch.float16, device="mps")
+    output = torch.empty(M, N, dtype=torch.float16, device="mps")
 
     # Create Metal buffers
-    A_buf = mps_tensor_to_metal_buffer(A, device)
-    packed_indices_buf = mps_tensor_to_metal_buffer(packed_indices, device)
-    scales_buf = mps_tensor_to_metal_buffer(scales, device)
-    grid_buf = mps_tensor_to_metal_buffer(grid, device)
-    su_buf = mps_tensor_to_metal_buffer(su, device)
-    sv_buf = mps_tensor_to_metal_buffer(sv, device)
+    A_buf = mps_tensor_to_metal_buffer(A, device, synchronize=False)
+    packed_indices_buf = mps_tensor_to_metal_buffer(
+        packed_indices, device, synchronize=False, cache_static=True
+    )
+    scales_buf = mps_tensor_to_metal_buffer(scales, device, synchronize=False, cache_static=True)
+    grid_buf = mps_tensor_to_metal_buffer(grid, device, synchronize=False, cache_static=True)
+    su_buf = mps_tensor_to_metal_buffer(su, device, synchronize=False, cache_static=True)
+    sv_buf = mps_tensor_to_metal_buffer(sv, device, synchronize=False, cache_static=True)
     output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create separate buffers for each constant parameter
@@ -749,12 +751,17 @@ def dispatch_gemm_trellis_packed(
     Returns:
         Output matrix [M, N] float16, MPS tensor
     """
-    logger.info("dispatch_gemm_trellis_packed called with lib=%s, A=%s, packed_indices=%s, scales=%s", lib, A, packed_indices, scales)
+    logger.debug("dispatch_gemm_trellis_packed called with lib=%s, A=%s, packed_indices=%s, scales=%s", lib, A, packed_indices, scales)
     require_mps()
 
     device = lib.device
     M = A.shape[0]
     n_levels = grid.shape[0]
+
+    if M <= 16:
+        return dispatch_gemm_trellis_decode(
+            lib, A, packed_indices, scales, grid, su, sv, K, N, bits, group_size
+        )
 
     # Ensure proper types and contiguity
     A = A.contiguous()
@@ -765,15 +772,17 @@ def dispatch_gemm_trellis_packed(
     sv = sv.float().contiguous()
 
     # Allocate output
-    output = torch.zeros(M, N, dtype=torch.float16, device="mps")
+    output = torch.empty(M, N, dtype=torch.float16, device="mps")
 
     # Create Metal buffers
-    A_buf = mps_tensor_to_metal_buffer(A, device)
-    packed_indices_buf = mps_tensor_to_metal_buffer(packed_indices, device)
-    scales_buf = mps_tensor_to_metal_buffer(scales, device)
-    grid_buf = mps_tensor_to_metal_buffer(grid, device)
-    su_buf = mps_tensor_to_metal_buffer(su, device)
-    sv_buf = mps_tensor_to_metal_buffer(sv, device)
+    A_buf = mps_tensor_to_metal_buffer(A, device, synchronize=False)
+    packed_indices_buf = mps_tensor_to_metal_buffer(
+        packed_indices, device, synchronize=False, cache_static=True
+    )
+    scales_buf = mps_tensor_to_metal_buffer(scales, device, synchronize=False, cache_static=True)
+    grid_buf = mps_tensor_to_metal_buffer(grid, device, synchronize=False, cache_static=True)
+    su_buf = mps_tensor_to_metal_buffer(su, device, synchronize=False, cache_static=True)
+    sv_buf = mps_tensor_to_metal_buffer(sv, device, synchronize=False, cache_static=True)
     output_buf = mps_tensor_to_metal_buffer(output, device, copy_back=True)
 
     # Create separate buffers for each constant parameter

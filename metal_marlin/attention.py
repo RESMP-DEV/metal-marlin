@@ -968,6 +968,47 @@ def block_sparse_attention_metal(
     k = k.to(device="mps", dtype=torch.float16).contiguous()
     v = v.to(device="mps", dtype=torch.float16).contiguous()
 
+    def _dense_sdpa_fallback() -> torch.Tensor:
+        import torch.nn.functional as F
+
+        dense_mask = torch.full(
+            (seq_q, seq_k),
+            float("-inf"),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        mask_bits_cpu = block_sparse_mask.mask_bits.cpu()
+        for q_block_idx in range(block_sparse_mask.num_q_blocks):
+            q_start = q_block_idx * block_sparse_mask.block_q
+            q_end = min(q_start + block_sparse_mask.block_q, seq_q)
+            mask_bits_row = mask_bits_cpu[q_block_idx]
+            for k_block_idx in range(block_sparse_mask.num_k_blocks):
+                word_idx = k_block_idx // 64
+                bit_idx = k_block_idx % 64
+                if int(mask_bits_row[word_idx].item()) & (1 << bit_idx):
+                    k_start = k_block_idx * block_sparse_mask.block_k
+                    k_end = min(k_start + block_sparse_mask.block_k, seq_k)
+                    dense_mask[q_start:q_end, k_start:k_end] = 0.0
+
+        if causal:
+            q_positions = torch.arange(seq_q, device=q.device).unsqueeze(1)
+            k_positions = torch.arange(seq_k, device=q.device).unsqueeze(0)
+            dense_mask = dense_mask.masked_fill(k_positions > q_positions, float("-inf"))
+
+        return F.scaled_dot_product_attention(
+            q.float(),
+            k.float(),
+            v.float(),
+            attn_mask=dense_mask,
+            is_causal=False,
+            scale=scale,
+        ).to(dtype=torch.float16)
+
+    import os
+
+    if os.environ.get("METAL_MARLIN_ENABLE_BLOCK_SPARSE_KERNEL") != "1":
+        return _dense_sdpa_fallback()
+
     # Import Metal libraries
     from pathlib import Path
 
@@ -1125,6 +1166,13 @@ def block_sparse_attention_metal(
     encoder.endEncoding()
     command_buffer.commit()
     command_buffer.waitUntilCompleted()
+
+    if not torch.isfinite(output).all().item():
+        logger.warning(
+            "Block-sparse Metal attention produced non-finite output; "
+            "falling back to dense SDPA for this call."
+        )
+        return _dense_sdpa_fallback()
 
     return output
 

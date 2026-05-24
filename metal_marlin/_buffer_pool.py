@@ -449,6 +449,7 @@ class MetalBufferPool:
                 self._metrics.cache_hits += 1
                 self._metrics.update_smoothed_hit_rate(True)
                 self._metrics.current_pooled -= tracked.size
+                self._metrics.current_allocated += tracked.size
 
                 if not self._pools[pool_size]:
                     del self._pools[pool_size]
@@ -586,9 +587,17 @@ class MetalBufferPool:
             # Update metrics
             self._metrics.releases += 1
             self._metrics.current_pooled += tracked.size
-            self._metrics.current_allocated -= tracked.size
+            self._metrics.current_allocated = max(
+                0, self._metrics.current_allocated - tracked.size
+            )
             self._metrics.peak_pooled = max(self._metrics.peak_pooled,
                                             self._metrics.current_pooled)
+
+            if self._max_pool_size > 0:
+                while self._metrics.current_pooled > self._max_pool_size:
+                    evicted = self._evict_one()
+                    if evicted is None:
+                        break
 
     def _evict_one(self) -> TrackedBuffer | None:
         """Evict one low-priority buffer. Returns evicted buffer or None."""
@@ -611,7 +620,6 @@ class MetalBufferPool:
 
                         # Update metrics
                         self._metrics.current_pooled -= tracked.size
-                        self._metrics.current_allocated -= tracked.size
                         self._metrics.evictions += 1
                         self._metrics.bytes_evicted += tracked.size
 
@@ -788,6 +796,8 @@ class MetalBufferPool:
             "buffer_count": buffer_count,
             "total_allocated_bytes": self._metrics.current_allocated,
             "total_pooled_bytes": self._metrics.current_pooled,
+            "current_allocated_bytes": self._metrics.current_allocated,
+            "current_pooled_bytes": self._metrics.current_pooled,
             "allocation_count": self._alloc_count,
             "eviction_count": self._metrics.evictions,
             "size_distribution": size_distribution,
