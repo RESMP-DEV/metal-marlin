@@ -26,6 +26,13 @@ try:
     import requests
     from openai import AsyncOpenAI, OpenAI
 except ImportError as e:
+    if "pytest" in sys.modules:
+        import pytest
+
+        pytest.skip(
+            f"optional E2E validation dependencies are missing: {e}",
+            allow_module_level=True,
+        )
     print(f"❌ Missing dependencies: {e}")
     print("Install with: uv add requests openai")
     sys.exit(1)
