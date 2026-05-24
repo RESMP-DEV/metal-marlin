@@ -35,6 +35,7 @@ typedef NSUInteger MTLResourceOptions;
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <type_traits>

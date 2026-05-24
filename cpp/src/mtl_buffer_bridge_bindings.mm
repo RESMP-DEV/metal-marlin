@@ -170,7 +170,7 @@ NB_MODULE(_mtl_buffer_bridge, m) {
         std::vector<std::pair<uintptr_t, size_t>> results;
         results.reserve(buffers.size());
         
-        for (auto& obj : buffers) {
+        for (nb::handle obj : buffers) {
             try {
                 id<MTLBuffer> buffer = extract_mtl_buffer(nb::cast<nb::object>(obj));
                 void* contents = buffer.contents;

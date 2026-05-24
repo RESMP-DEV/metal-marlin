@@ -47,6 +47,8 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
   public output dtype.
 - Corrected buffer-pool accounting, paged-cache COW accounting, FP4 dequant
   dispatch, and block-sparse attention fallback behavior for local Metal runs.
+- Fixed native bridge CMake source selection and nanobind handle iteration so
+  the local Metal bridge configure path stays buildable.
 
 ## [Unreleased] - 2026-02-10
 

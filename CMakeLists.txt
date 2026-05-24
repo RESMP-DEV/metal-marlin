@@ -79,6 +79,7 @@ find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 
 # Source files
 file(GLOB CPP_SOURCES "cpp/src/*.cpp" "cpp/src/*.mm")
+list(FILTER CPP_SOURCES EXCLUDE REGEX ".*/sampling_ops\\.mm$")
 set(ALL_SOURCES ${CPP_SOURCES})
 
 # Create the nanobind module
