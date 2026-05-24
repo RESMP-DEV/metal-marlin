@@ -166,7 +166,8 @@ class TestRoundTrip:
     def test_roundtrip_consistency(self, fp4):
         """Metal round-trip should be internally consistent."""
         logger.info("running test_roundtrip_consistency")
-        values = np.random.randn(256).astype(np.float32)
+        rng = np.random.default_rng(0)
+        values = rng.standard_normal(256).astype(np.float32)
 
         # Metal round-trip
         indices_metal, scales_metal = fp4.quantize(values, group_size=256)

@@ -3052,20 +3052,34 @@ class MMFP4MemoryManager:
             # Use prefetcher-aware loading if available
             actual_size = None
             if self._loader:
+                import inspect
+
                 if self._weight_prefetcher is not None:
-                    weights = self._loader.load_layer_with_prefetch(
-                        layer_idx,
-                        prefetcher=self._weight_prefetcher,
-                        device=self._device,
-                        zero_copy=self._unified_memory,
-                        prefetch_next=True,
-                    )
+                    load_layer = self._loader.load_layer_with_prefetch
+                    kwargs = {
+                        "prefetcher": self._weight_prefetcher,
+                        "device": self._device,
+                        "zero_copy": self._unified_memory,
+                        "prefetch_next": True,
+                    }
                 else:
-                    weights = self._loader.load_layer(
-                        layer_idx,
-                        device=self._device,
-                        zero_copy=self._unified_memory,
-                    )
+                    load_layer = self._loader.load_layer
+                    kwargs = {
+                        "device": self._device,
+                        "zero_copy": self._unified_memory,
+                    }
+                try:
+                    accepted = inspect.signature(load_layer).parameters
+                except (TypeError, ValueError):
+                    accepted = None
+                if accepted is not None:
+                    kwargs = {k: v for k, v in kwargs.items() if k in accepted}
+                    weights = load_layer(layer_idx, **kwargs)
+                else:
+                    try:
+                        weights = load_layer(layer_idx, **kwargs)
+                    except TypeError:
+                        weights = load_layer(layer_idx)
                 # Calculate actual size
                 actual_size = sum(t.numel() * t.element_size() for t in weights.values())
             else:

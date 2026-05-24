@@ -58,35 +58,48 @@ class TestDispatchBenchmark:
         """Measure PyObjC dispatch overhead for comparison."""
         logger.info("running test_pyobjc_dispatch_overhead")
         from metal_marlin.metal_context import get_metal_kernel_library
-
-        from metal_marlin.trellis.dispatch import dispatch_gemm_trellis_packed
+        from metal_marlin.metal_dispatch import dispatch_kernel
 
         lib = get_metal_kernel_library()
-
-        M, K, N = 1, 4096, 4096
-        A = torch.randn(M, K, dtype=torch.float16, device="mps")
-        packed = torch.randint(0, 255, (K // 8, N), dtype=torch.uint8, device="mps")
-        scales = torch.randn(K // 32, N, dtype=torch.float32, device="mps")
-        grid = torch.randn(8, dtype=torch.float32, device="mps")
-        su = torch.randn(K, dtype=torch.float32, device="mps")
-        sv = torch.randn(N, dtype=torch.float32, device="mps")
+        lib.compile_source(
+            "dispatch_overhead",
+            """
+            #include <metal_stdlib>
+            using namespace metal;
+            kernel void noop_dispatch_overhead(uint tid [[thread_position_in_grid]]) {}
+            """,
+        )
 
         # Warmup
-        for _ in range(3):
+        for _ in range(10):
             try:
-                dispatch_gemm_trellis_packed(lib, A, packed, scales, grid, su, sv, K, N, 3, 32)
+                dispatch_kernel(
+                    lib,
+                    "noop_dispatch_overhead",
+                    grid=(1, 1, 1),
+                    threadgroup=(1, 1, 1),
+                    buffers=[],
+                    wait=True,
+                )
             except Exception:
                 pytest.skip("PyObjC kernel not available")
 
         # Measure
         torch.mps.synchronize()
         start = time.perf_counter()
-        for _ in range(50):
-            dispatch_gemm_trellis_packed(lib, A, packed, scales, grid, su, sv, K, N, 3, 32)
+        for _ in range(100):
+            dispatch_kernel(
+                lib,
+                "noop_dispatch_overhead",
+                grid=(1, 1, 1),
+                threadgroup=(1, 1, 1),
+                buffers=[],
+                wait=True,
+            )
         torch.mps.synchronize()
         elapsed = time.perf_counter() - start
 
-        avg_us = (elapsed / 50) * 1e6
+        avg_us = (elapsed / 100) * 1e6
         print(f"\nPyObjC dispatch overhead: {avg_us:.1f}μs per call")
 
         # PyObjC is slower, ~80-150μs expected

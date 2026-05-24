@@ -4560,6 +4560,8 @@ kernel void quantized_kv_attention_decode(
             K_packed, N=B_packed.shape
 
             # Validate shapes
+            assert M > 0, "M must be > 0"
+            assert N > 0, "N must be > 0"
             if K != K_packed * 8:
                 # Check if it matches after transpose (B is [K/8, N])
                 # In kernel signature: B_packed [[buffer(1)]]

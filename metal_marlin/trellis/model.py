@@ -898,6 +898,12 @@ class TrellisMoEMLP(nn.Module):
         intermediate_dim = first_expert.gate_proj.out_features
         bits = first_expert.gate_proj.bits
 
+        if getattr(first_expert.gate_proj.packed_indices, "ndim", 0) != 3:
+            self.hidden_dim = hidden_dim
+            self.intermediate_dim = intermediate_dim
+            self.bits = bits
+            return
+
         # Stack expert weights
         gate_weights_list = []
         gate_scales_list = []

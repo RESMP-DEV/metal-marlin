@@ -34,7 +34,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any
+from typing import Any, ClassVar
 
 import Metal
 
@@ -321,6 +321,19 @@ class MetalBufferPool:
     _MERGE_RATIO = 2.0  # Merge pools where larger/smaller <= this ratio
     _DEFRAG_INTERVAL = 1000  # Auto-defrag after this many allocations
     _MIN_DEFRAG_INTERVAL_SEC = 5.0  # Minimum seconds between auto-defrags
+    _instance: ClassVar[MetalBufferPool | None] = None
+
+    @classmethod
+    def get_instance(cls, device: Any | None = None) -> MetalBufferPool:
+        """Return a process-wide compatibility singleton."""
+        logger.debug("get_instance called with device=%s", device)
+        if cls._instance is None:
+            if device is None:
+                device = Metal.MTLCreateSystemDefaultDevice()
+            if device is None:
+                raise RuntimeError("No Metal device available for MetalBufferPool")
+            cls._instance = cls(device)
+        return cls._instance
 
     def __init__(
         self,
@@ -504,6 +517,15 @@ class MetalBufferPool:
 
         return buffer
 
+    def acquire(
+        self,
+        size: int,
+        priority: BufferPriority | int = BufferPriority.NORMAL,
+    ) -> Any:
+        """Compatibility alias for get()."""
+        logger.debug("acquire called with size=%s, priority=%s", size, priority)
+        return self.get(size, BufferPriority(priority))
+
     def get_weight(self, size: int) -> Any:
         """Get buffer for weight storage (PINNED, never evicted)."""
         logger.debug("get_weight called with size=%s", size)
@@ -571,13 +593,15 @@ class MetalBufferPool:
         tracked = self._tracked.get(buf_id)
         return tracked.priority if tracked is not None else None
 
-    def release(self, buf: Any) -> None:
+    def release(self, buf: Any, priority: BufferPriority | int | None = None) -> None:
         """Return buffer to pool for reuse."""
         logger.debug("release called with buf=%s", buf)
         buf_id = id(buf)
         tracked = self._tracked.get(buf_id)
         if tracked is None:
             return
+        if priority is not None:
+            tracked.priority = BufferPriority(priority)
         tracked.ref_count = max(0, tracked.ref_count - 1)
         if tracked.ref_count == 0:
             now = time.monotonic()
@@ -598,6 +622,21 @@ class MetalBufferPool:
                     evicted = self._evict_one()
                     if evicted is None:
                         break
+
+    def clear(self) -> None:
+        """Release all pooled and tracked buffer references."""
+        logger.debug("clear called")
+        self._pools.clear()
+        self._tracked.clear()
+        self._backing.clear()
+        self._alloc_count = 0
+        self._last_defrag_time = 0.0
+        self.reset_metrics()
+
+    def get_metrics(self) -> BufferPoolMetrics:
+        """Compatibility accessor for metrics."""
+        logger.debug("get_metrics called")
+        return self.metrics
 
     def _evict_one(self) -> TrackedBuffer | None:
         """Evict one low-priority buffer. Returns evicted buffer or None."""

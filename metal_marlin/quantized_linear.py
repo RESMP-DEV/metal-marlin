@@ -1,8 +1,8 @@
 import logging
-import torch
 import torch.nn as nn
+import torch
 
-from .metal_dispatch import MetalKernelLibrary
+from .metal_dispatch import get_default_library
 from .quantized_loader import QuantizedTensor
 
 
@@ -31,7 +31,7 @@ class QuantizedLinear(nn.Module):
         self.hadamard = quantized_weight.hadamard_matrix
 
         # Get Metal kernel library
-        self._lib = MetalKernelLibrary.get_instance()
+        self._lib = get_default_library()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [batch, seq, in_features]

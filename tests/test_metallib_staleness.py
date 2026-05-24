@@ -10,6 +10,9 @@ import pytest
 import metal_marlin.metallib_loader as metallib_loader
 
 
+logger = logging.getLogger(__name__)
+
+
 def _write_shader(path: Path, contents: str) -> Path:
     logger.info("_write_shader called with path=%s, contents=%s", path, contents)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -240,7 +240,8 @@ def test_individual_bit_width_parity_fp16(bits):
         experts=[expert],
         shared_expert=None,
         num_experts_per_tok=1,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     x = torch.randn(4, hidden_dim, dtype=torch.float16, device=device)
@@ -279,7 +280,8 @@ def test_mixed_2_3_4_bit_vs_pure_4bit(mixed_bit_experts_fixture, pure_4bit_exper
         experts=experts_mixed,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     layer_4bit = TrellisMoEMLP(
@@ -287,7 +289,8 @@ def test_mixed_2_3_4_bit_vs_pure_4bit(mixed_bit_experts_fixture, pure_4bit_exper
         experts=experts_4bit,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Generate test inputs
@@ -317,7 +320,8 @@ def test_mixed_bpw_vs_fp16_reference(mixed_bit_experts_fixture):
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Create FP16 reference
@@ -351,7 +355,8 @@ def test_token_level_output_consistency(mixed_bit_experts_fixture):
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Create a single token
@@ -460,7 +465,8 @@ def test_expert_routing_decision_consistency(mixed_bit_experts_fixture):
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Generate multiple inputs
@@ -485,7 +491,8 @@ def test_expert_routing_decision_consistency(mixed_bit_experts_fixture):
             experts=experts_4bit,
             shared_expert=None,
             num_experts_per_tok=2,
-            use_mixed_bpw_optimizations=True
+            use_mixed_bpw_optimizations=True,
+            eager_buffers=False,
         )
         
         # Compute output with 4-bit layer
@@ -520,7 +527,8 @@ def test_mixed_bpw_regression_detection():
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=top_k,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Create FP16 reference
@@ -581,7 +589,8 @@ def test_perplexity_comparison_smoke():
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     # Create a simple language modeling head
@@ -642,7 +651,8 @@ def test_edge_cases():
             experts=experts,
             shared_expert=None,
             num_experts_per_tok=2,
-            use_mixed_bpw_optimizations=True
+            use_mixed_bpw_optimizations=True,
+            eager_buffers=False,
         )
         
         x = torch.randn(2, hidden_dim, dtype=torch.float16, device=device)
@@ -662,7 +672,8 @@ def test_edge_cases():
         experts=[expert],
         shared_expert=None,
         num_experts_per_tok=1,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     x = torch.randn(1, hidden_dim, dtype=torch.float16, device=device)
@@ -680,7 +691,8 @@ def test_edge_cases():
         experts=experts,
         shared_expert=None,
         num_experts_per_tok=2,
-        use_mixed_bpw_optimizations=True
+        use_mixed_bpw_optimizations=True,
+        eager_buffers=False,
     )
     
     x = torch.randn(128, hidden_dim, dtype=torch.float16, device=device)

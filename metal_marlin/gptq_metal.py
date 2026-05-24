@@ -1042,7 +1042,7 @@ class GPTQMetal:
         # 1. Environment variable force fallback (highest priority)
         if GPTQMetal._should_force_torch_matmul():
             logger.debug("GPTQMetal: Force fallback via METAL_MARLIN_GPTQ_FORCE_TORCH_MATMUL=1")
-            H_forced = GPTQMetal._torch_hessian_matmul(X, normalize=normalize)
+            H_forced = self._torch_hessian_matmul(X, normalize=normalize)
             self._validate_hessian_output_contract(H_forced, in_features=in_features)
             return H_forced
 
@@ -1056,7 +1056,7 @@ class GPTQMetal:
             logger.debug("GPTQMetal: Metal dispatch failed, proceeding with torch fallback.")
 
         # 3. Fallback path for ineligibility or Metal kernel failure
-        H_fallback = GPTQMetal._torch_hessian_matmul(X, normalize=normalize)
+        H_fallback = self._torch_hessian_matmul(X, normalize=normalize)
         self._validate_hessian_output_contract(H_fallback, in_features=in_features)
         return H_fallback
 

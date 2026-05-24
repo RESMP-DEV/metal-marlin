@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -174,6 +175,8 @@ class TrellisLinear(nn.Module):
         self._lib: MetalKernelLibrary | None = None
         self._grid_texture: Any | None = None
         self._mixed_grids: dict[int, torch.Tensor] = {}
+        self._dequant_forward_cache: torch.Tensor | None = None
+        self._dequant_forward_cache_key: tuple[Any, ...] | None = None
 
     @staticmethod
     def _pack_same_bitwidth_groups_contiguously(
@@ -469,6 +472,8 @@ class TrellisLinear(nn.Module):
         module._lib = None
         module._grid_texture = None
         module._mixed_grids = {}
+        module._dequant_forward_cache = None
+        module._dequant_forward_cache_key = None
 
         # Register buffers with ACTUAL shapes from weight (don't use hardcoded sizes)
         module.register_buffer(
@@ -538,6 +543,8 @@ class TrellisLinear(nn.Module):
         tiles_k, tiles_n = (
             K + TILE_DIM - 1) // TILE_DIM, (N + TILE_DIM - 1) // TILE_DIM
         output = np.zeros((K, N), dtype=np.float32)
+        scales_by_output = scales.shape[1] == K
+        signs_are_output_input = len(su) == K and len(sv) == N
 
         for tile_k in range(tiles_k):
             for tile_n in range(tiles_n):
@@ -551,9 +558,18 @@ class TrellisLinear(nn.Module):
 
                         idx = int(indices[local_k * TILE_DIM + local_n])
                         group_idx = min(n // group_size, scales.shape[0] - 1)
-                        scale = scales[group_idx, k]
+                        scale_col = k if scales_by_output else n
+                        scale_col = min(scale_col, scales.shape[1] - 1)
+                        scale = scales[group_idx, scale_col]
 
-                        output[k, n] = grid[idx] * scale * su[n] * sv[k]
+                        if signs_are_output_input:
+                            row_sign = su[k]
+                            col_sign = sv[n]
+                        else:
+                            row_sign = sv[k]
+                            col_sign = su[n]
+
+                        output[k, n] = grid[idx] * scale * row_sign * col_sign
 
         return torch.from_numpy(output).half()
 
@@ -607,7 +623,12 @@ class TrellisLinear(nn.Module):
         group_size = (self.in_features + n_groups -
                       1) // n_groups if n_groups > 0 else self.in_features
 
-        if HAS_METAL and HAS_MPS and x.is_mps:
+        if (
+            HAS_METAL
+            and HAS_MPS
+            and x.is_mps
+            and os.environ.get("METAL_MARLIN_ENABLE_TRELLIS_LINEAR_KERNEL") == "1"
+        ):
             lib = self._get_lib()
             try:
                 kernel_dispatch = dispatch_gemm_trellis_decode if M <= 16 else dispatch_gemm_trellis_auto
@@ -637,7 +658,27 @@ class TrellisLinear(nn.Module):
     def _forward_cpu_fallback(self, x_flat: torch.Tensor, group_size: int) -> torch.Tensor:
         """CPU fallback for forward pass."""
         logger.debug("_forward_cpu_fallback called with x_flat=%s, group_size=%s", x_flat, group_size)
-        weights = self.dequantize().to(device=x_flat.device, dtype=torch.float32)
+        cache_key = (
+            x_flat.device.type,
+            x_flat.device.index,
+            self.packed_indices.data_ptr(),
+            self.scales.data_ptr(),
+            self.su.data_ptr(),
+            self.sv.data_ptr(),
+            self.grid.data_ptr(),
+            int(getattr(self.packed_indices, "_version", 0)),
+            int(getattr(self.scales, "_version", 0)),
+            int(getattr(self.su, "_version", 0)),
+            int(getattr(self.sv, "_version", 0)),
+            int(getattr(self.grid, "_version", 0)),
+        )
+        if self._dequant_forward_cache is None or self._dequant_forward_cache_key != cache_key:
+            K, N = self.out_features, self.in_features
+            self._dequant_forward_cache = self._dequantize_cpu_packed(K, N, group_size).to(
+                device=x_flat.device, dtype=torch.float32
+            )
+            self._dequant_forward_cache_key = cache_key
+        weights = self._dequant_forward_cache
         output = x_flat.to(torch.float32) @ weights.t()
         return torch.nan_to_num(output, nan=0.0, posinf=65504.0, neginf=-65504.0).to(x_flat.dtype)
 

@@ -534,6 +534,9 @@ class TestGradientFlow:
             # Forward and backward
             out = expert(x)
             loss = out.sum()
+            if not loss.requires_grad:
+                no_weight_grad.append(i)
+                continue
             loss.backward()
 
             # Check weight gradients exist for each projection

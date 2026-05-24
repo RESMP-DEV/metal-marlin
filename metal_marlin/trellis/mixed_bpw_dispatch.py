@@ -1182,12 +1182,14 @@ class MixedBPWMoEDispatcher:
 
         batch_size = gathered_states.shape[0]
 
-        # Get cached pre-stacked weights (builds cache on first call)
-        cache = self._get_or_build_bit_width_cache(bit_width, expert_weights, expert_scales)
-        cached_buffers = cache.cached_weight_buffers
-
         # Try to use batched Metal dispatch if available
         try:
+            # Get cached pre-stacked weights (builds cache on first call).
+            # Synthetic tests and compact tiled fixtures may not use the
+            # flattened gate/up/down layout expected by this cache; those cases
+            # should fall through to the shape-agnostic fallback below.
+            cache = self._get_or_build_bit_width_cache(bit_width, expert_weights, expert_scales)
+            cached_buffers = cache.cached_weight_buffers
             lib = self.get_lib()
 
             # Resolve global expert IDs aligned with token_indices.

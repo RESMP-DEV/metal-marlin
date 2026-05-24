@@ -51,6 +51,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_parity_rng() -> None:
+    torch.manual_seed(0)
+
+
 @dataclass
 class _MockTrellisWeight:
     packed_indices: torch.Tensor
@@ -375,6 +380,7 @@ def test_mixed_bpw_smoke(parity_fixture: _ParityFixture) -> None:
 
 def test_individual_bit_width_accuracy(parity_fixture: _ParityFixture) -> None:
     logger.info("running test_individual_bit_width_accuracy")
+    torch.manual_seed(0)
     x = torch.randn(8, parity_fixture.hidden_dim, dtype=torch.float32)
     reference = parity_fixture.reference_experts[0]
     expected = _run_expert(reference, x)

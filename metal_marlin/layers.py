@@ -106,6 +106,7 @@ if HAS_TORCH and torch is not None:
                     bias=bias if not isinstance(bias, bool) else None,
                     group_size=group_size,
                 )
+            self._dequant_cache: dict[tuple[str, str], torch.Tensor] = {}
 
         def _init_from_dims(
             self,
@@ -193,7 +194,7 @@ if HAS_TORCH and torch is not None:
                 Output tensor [*, out_features]
             """
             # Dequantize weights and perform matmul
-            weight_fp16 = self._dequantize_fp4()
+            weight_fp16 = self._dequantize_fp4(device=x.device)
             # Cast input to match weight dtype
             x_fp16 = x.to(weight_fp16.dtype)
 
@@ -203,7 +204,7 @@ if HAS_TORCH and torch is not None:
                 pad_size = self._padded_in - self._actual_in
                 x_fp16 = torch.nn.functional.pad(x_fp16, (0, pad_size))
 
-            bias = self.bias.to(weight_fp16.dtype) if self.bias is not None else None
+            bias = self.bias.to(device=x.device, dtype=weight_fp16.dtype) if self.bias is not None else None
             out = torch.nn.functional.linear(x_fp16, weight_fp16, None)
 
             # Slice output if padded
@@ -285,37 +286,38 @@ if HAS_TORCH and torch is not None:
             # 4. Reshape back
             return flat_out.reshape(*batch_shape, self.out_features)
 
-        def _dequantize_fp4(self) -> torch.Tensor:
+        def _dequantize_fp4(self, device: torch.device | str | None = None) -> torch.Tensor:
             """Dequantize packed FP4 weights to FP16.
 
             Returns:
                 Dequantized weight tensor [out_features, in_features]
             """
+            target_device = torch.device(device) if device is not None else self.weight_packed.device
+            cache_key = (str(target_device), str(self.weight_packed.device))
+            cached = self._dequant_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
             K = self._padded_in
             N = self._padded_out
-            device = self.weight_packed.device
-            dtype = torch.float16
 
-            # Unpack FP4 nibbles from uint32
-            # weight_packed shape: [K, N//8]
-            weight_fp16 = torch.zeros(K, N, dtype=dtype, device=device)
+            import numpy as np
 
-            # E2M1 FP4 dequantization values (all 16 nibble patterns)
-            e2m1_values = self._get_e2m1_table().to(device)
+            packed = self.weight_packed.detach().cpu().numpy().astype(np.uint32, copy=False)
+            shifts = (np.arange(8, dtype=np.uint32) * 4).reshape(1, 1, 8)
+            nibbles = ((packed[:, :, None] >> shifts) & np.uint32(0xF)).reshape(K, N)
 
-            for k in range(K):
-                for n_block in range(N // 8):
-                    word = self.weight_packed[k, n_block].item()
-                    for i in range(8):
-                        nibble = (word >> (i * 4)) & 0xF
-                        n_idx = n_block * 8 + i
-                        # Apply scale
-                        scale_k = k // self.group_size
-                        scale = self.scales[scale_k, n_idx]
-                        weight_fp16[k, n_idx] = e2m1_values[nibble] * scale
+            e2m1_values = self._get_e2m1_table().cpu().numpy().astype(np.float32, copy=False)
+            values = e2m1_values[nibbles]
 
-            # Transpose to [N, K] for nn.functional.linear
-            return weight_fp16.T
+            scales = self.scales.detach().cpu().numpy().astype(np.float32, copy=False)
+            scales = np.repeat(scales, self.group_size, axis=0)[:K, :N]
+            weight_fp16_np = (values * scales).astype(np.float16, copy=False)
+
+            # Transpose to [N, K] for nn.functional.linear.
+            weight_fp16 = torch.from_numpy(weight_fp16_np.T.copy()).to(target_device)
+            self._dequant_cache[cache_key] = weight_fp16
+            return weight_fp16
 
         @staticmethod
         def _get_e2m1_table() -> torch.Tensor:

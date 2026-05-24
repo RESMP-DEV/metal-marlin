@@ -165,7 +165,7 @@ def test_mixed_bpw_dispatch_cpp_fallback(mixed_bpw_config, mixed_bpw_weights):
 
     try:
         # Import C++ extension to verify it's available
-        from metal_marlin import _cpp_ext
+        _cpp_ext = pytest.importorskip("metal_marlin._cpp_ext")
 
         assert hasattr(_cpp_ext, "dispatch_mixed_bpw_moe"), (
             "C++ dispatch function not available"
@@ -209,7 +209,7 @@ def test_mixed_bpw_dispatch_cpp_fallback(mixed_bpw_config, mixed_bpw_weights):
 def test_mixed_bpw_config_cpp_integration(mixed_bpw_config):
     """Test that Python and C++ MoEConfig can interoperate."""
     logger.info("running test_mixed_bpw_config_cpp_integration")
-    from metal_marlin import _cpp_ext
+    _cpp_ext = pytest.importorskip("metal_marlin._cpp_ext")
 
     # Create Python config
     py_config = mixed_bpw_config
@@ -280,7 +280,7 @@ def test_mixed_bpw_stats_tracking(mixed_bpw_config, mixed_bpw_weights):
 def test_mixed_bpw_bit_width_grouping(mixed_bpw_config, mixed_bpw_weights):
     """Test that experts are correctly grouped by bit-width."""
     logger.info("running test_mixed_bpw_bit_width_grouping")
-    from metal_marlin import _cpp_ext
+    _cpp_ext = pytest.importorskip("metal_marlin._cpp_ext")
 
     config = mixed_bpw_config
     num_experts = config.num_experts

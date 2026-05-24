@@ -72,7 +72,7 @@ class CompressedKVCacheMLA:
             max_seq_len=8192,
             device=torch.device("mps"),
             block_size=64,
-            quantize_mode="int8",  # default: int8 (or METAL_MARLIN_KV_QUANT)
+        quantize_mode="int8",  # opt in directly, or use the factory/env default
         )
 
         # INT8 quantization halves KV cache memory (~30GB → ~15GB for 8192 tokens).
@@ -96,7 +96,7 @@ class CompressedKVCacheMLA:
         device: torch.device,
         dtype: torch.dtype = torch.float16,
         block_size: int = 64,
-        quantize_mode: str = KV_QUANT_MODE,
+        quantize_mode: str = "none",
         prefetch_enabled: bool = True,
         threadgroup_cache_size: int = 4,
     ):
@@ -128,14 +128,16 @@ class CompressedKVCacheMLA:
         )
         self.compression_ratio = self.standard_kv_dim / self.cache_dim
 
-        # Memory Pool: [num_layers, num_blocks, block_size, cache_dim]
+        # Memory Pool: [num_layers, num_blocks, block_size, storage_dim].
+        # FP4 packs two compressed-KV elements per byte.
         # Single contiguous tensor for efficient prefetching
         self.num_blocks = (max_batch_size * max_seq_len + block_size - 1) // block_size
+        self.storage_dim = (self.cache_dim + 1) // 2 if self.quantize_mode == "fp4" else self.cache_dim
 
         # Allocate pool with appropriate dtype based on quantization mode
         pool_dtype = self._get_pool_dtype()
         self.kv_cache_pool = torch.zeros(
-            (self.num_layers, self.num_blocks, self.block_size, self.cache_dim),
+            (self.num_layers, self.num_blocks, self.block_size, self.storage_dim),
             dtype=pool_dtype,
             device=self.device,
         )
@@ -399,13 +401,15 @@ class CompressedKVCacheMLA:
 
         if self.quantize_mode == "fp8":
             # Dequantize FP8
-            int8_data = compressed_kv.to(torch.int8) - 128
+            int8_data = compressed_kv.to(torch.int8)
             dequantized = int8_data.to(self.dtype) * scale
-            # Expand scale to match dimensions
-            return dequantized.unsqueeze(-1)
+            return dequantized
         elif self.quantize_mode == "fp4":
             # Dequantize FP4 (unpack 2 int4 values)
             packed = compressed_kv
+            squeeze_batch = packed.dim() == 2
+            if squeeze_batch:
+                packed = packed.unsqueeze(0)
             batch, seq, packed_dim = packed.shape
             dim = packed_dim * 2
             unpacked = torch.zeros(batch, seq, dim, dtype=self.dtype, device=self.device)
@@ -416,11 +420,12 @@ class CompressedKVCacheMLA:
                 unpacked[:, :, i * 2] = val1.to(self.dtype) * scale
                 if i * 2 + 1 < dim:
                     unpacked[:, :, i * 2 + 1] = val2.to(self.dtype) * scale
-            return unpacked
+            unpacked = unpacked[..., : self.cache_dim]
+            return unpacked.squeeze(0) if squeeze_batch else unpacked
         elif self.quantize_mode == "int8":
             # Dequantize INT8
             dequantized = compressed_kv.to(self.dtype) * scale
-            return dequantized.unsqueeze(-1)
+            return dequantized
         else:
             return compressed_kv
 
@@ -496,10 +501,12 @@ class CompressedKVCacheMLA:
                 If None, prefetches all active blocks.
         """
         logger.debug("prefetch_layer_async called with layer_idx=%s, block_indices=%s", layer_idx, block_indices)
-        if not self.prefetch_enabled or layer_idx >= self.num_layers:
+        if not self.prefetch_enabled:
             return
 
         self.stats.prefetch_count += 1
+        if layer_idx >= self.num_layers:
+            return
 
         if block_indices is None:
             # Prefetch all active blocks for this layer

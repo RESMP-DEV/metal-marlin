@@ -1722,8 +1722,8 @@ class MetalKernelLibrary:
         _kernel_logger.debug(f"[jit] {function_name}")
         return self.get_pipeline(function_name, library_name)
 
-    def _get_metal_buffer(self, tensor: torch.Tensor) -> Any:
-        """Get MTLBuffer from MPS tensor (zero-copy)."""
+    def _get_metal_buffer(self, tensor: torch.Tensor, *, copy_back: bool = False) -> Any:
+        """Get MTLBuffer from MPS tensor using the shared interop helper."""
         logger.debug("_get_metal_buffer called with tensor=%s", tensor)
         require_mps()
 
@@ -1733,18 +1733,7 @@ class MetalKernelLibrary:
         if not tensor.is_contiguous():
             tensor = tensor.contiguous()
 
-        # Use tensor.data_ptr() to get buffer address for zero-copy interop.
-        ptr = tensor.data_ptr()
-        size = tensor.numel() * tensor.element_size()
-
-        buffer = self._device.newBufferWithBytesNoCopy_length_options_deallocator_(
-            ptr, size, Metal.MTLResourceStorageModeShared, None
-        )
-
-        if buffer is None:
-            raise RuntimeError("Failed to create Metal buffer from tensor")
-
-        return buffer
+        return mps_tensor_to_metal_buffer(tensor, self._device, copy_back=copy_back)
 
     def _dispatch(
         self,
@@ -1763,7 +1752,7 @@ class MetalKernelLibrary:
         buffer_idx = 0
         texture_idx = 0
 
-        buffers: list[Any] = []
+        copy_back: list[_CopyBackBuffer] = []
         for arg in args:
             if isinstance(arg, (int, np.integer)):
                 const = np.array([int(arg)], dtype=np.uint32)
@@ -1775,8 +1764,14 @@ class MetalKernelLibrary:
             elif hasattr(arg, "textureType"):
                 encoder.setTexture_atIndex_(arg, texture_idx)
                 texture_idx += 1
+            elif isinstance(arg, _CopyBackBuffer):
+                encoder.setBuffer_offset_atIndex_(arg.buffer, 0, buffer_idx)
+                copy_back.append(arg)
+                buffer_idx += 1
+            elif isinstance(arg, _TensorBackedMetalBuffer):
+                encoder.setBuffer_offset_atIndex_(arg.buffer, 0, buffer_idx)
+                buffer_idx += 1
             elif hasattr(arg, "buffer"):
-                # Handle _CopyBackBuffer and similar wrappers
                 encoder.setBuffer_offset_atIndex_(arg.buffer, 0, buffer_idx)
                 buffer_idx += 1
             else:
@@ -1790,6 +1785,8 @@ class MetalKernelLibrary:
         encoder.endEncoding()
         command_buffer.commit()
         command_buffer.waitUntilCompleted()
+        for item in copy_back:
+            _copy_buffer_to_tensor(item.buffer, item.tensor)
 
     def fp4_gemm(
         self,
@@ -1837,7 +1834,7 @@ class MetalKernelLibrary:
         input_buf = self._get_metal_buffer(input)
         weight_buf = self._get_metal_buffer(weight)
         scales_buf = self._get_metal_buffer(scales)
-        output_buf = self._get_metal_buffer(output)
+        output_buf = self._get_metal_buffer(output, copy_back=True)
 
         # Compute grid dimensions (match marlin_gemm.metal)
         grid_m = (M + TILE_M - 1) // TILE_M
@@ -1914,7 +1911,7 @@ class MetalKernelLibrary:
         weight_buf = self._get_metal_buffer(weight)
         scales_buf = self._get_metal_buffer(scales)
         zeros_buf = self._get_metal_buffer(zeros)
-        output_buf = self._get_metal_buffer(output)
+        output_buf = self._get_metal_buffer(output, copy_back=True)
 
         grid_m = (M + TILE_M - 1) // TILE_M
         grid_n = (N + TILE_N - 1) // TILE_N
@@ -1983,7 +1980,7 @@ class MetalKernelLibrary:
         input_buf = self._get_metal_buffer(input)
         weight_buf = self._get_metal_buffer(weight)
         scales_buf = self._get_metal_buffer(scales)
-        output_buf = self._get_metal_buffer(output)
+        output_buf = self._get_metal_buffer(output, copy_back=True)
 
         grid_m = (M + TILE_M - 1) // TILE_M
         grid_n = (N + TILE_N - 1) // TILE_N

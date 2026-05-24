@@ -273,9 +273,9 @@ def apply_hadamard_rotation(
     else:
         block_decomp = _get_block_diagonal_decomposition(block_size)
         if block_decomp is None:
-             raise ValueError(
-                f"block_size {block_size} not supported. Must be power of 2 or "
-                "decomposable into 128, 64, 32 blocks."
+            raise ValueError(
+                "block_size must be power of 2 or decomposable into 128, 64, "
+                f"32 blocks, got {block_size}."
             )
 
     if axis not in (0, 1):

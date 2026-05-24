@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import os
 import struct
 import sys
 import time
@@ -156,7 +157,9 @@ def _group_tokens_mixed_bpw_primary_gpu(
             top_k=top_k,
             num_experts=num_experts,
         )
-        return group_tokens_by_expert_full(expert_ids, num_experts)
+        return group_tokens_by_expert_full(
+            expert_ids.detach().cpu(), num_experts, use_gpu=False
+        )
 
     if expert_ids.device.type != "mps" or expert_probs.device.type != "mps":
         _record_mixed_bpw_grouping_fallback(
@@ -190,6 +193,21 @@ def _group_tokens_mixed_bpw_primary_gpu(
                 f"invalid sorted_expert_indices size={dispatch_info.sorted_expert_indices.numel()} "
                 f"expected={total_assignments}"
             )
+        if total_assignments > 0:
+            token_min = int(dispatch_info.sorted_token_indices.min().item())
+            token_max = int(dispatch_info.sorted_token_indices.max().item())
+            slot_min = int(dispatch_info.sorted_expert_indices.min().item())
+            slot_max = int(dispatch_info.sorted_expert_indices.max().item())
+            if token_min < 0 or token_max >= batch_size:
+                raise RuntimeError(
+                    f"invalid sorted_token_indices range=[{token_min}, {token_max}] "
+                    f"expected within [0, {batch_size})"
+                )
+            if slot_min < 0 or slot_max >= top_k:
+                raise RuntimeError(
+                    f"invalid sorted_expert_indices range=[{slot_min}, {slot_max}] "
+                    f"expected within [0, {top_k})"
+                )
 
         _bump_mixed_bpw_grouping_counter("grouping_gpu_primary_success_total")
         return dispatch_info
@@ -201,7 +219,14 @@ def _group_tokens_mixed_bpw_primary_gpu(
             top_k=top_k,
             num_experts=num_experts,
         )
-        return group_tokens_by_expert_full(expert_ids, num_experts)
+        return group_tokens_by_expert_full(
+            expert_ids.detach().cpu(), num_experts, use_gpu=False
+        )
+
+
+def _get_available_moe_kernels_from_inventory(_lib: MetalKernelLibrary) -> None:
+    """Compatibility hook for callers that probe external MoE kernel inventories."""
+    return None
 
 
 def prepare_fairway_grouped_inputs(
@@ -1728,18 +1753,34 @@ def dispatch_moe_trellis_swiglu(
     device = lib.device
     batch_size = activations.shape[0]
 
-    # Sort tokens by expert for coalesced memory access
-    # Flatten expert_ids from [batch, top_k] to [batch * top_k] and sort by expert_id
-    expert_ids_flat = expert_ids.view(-1)
-    sort_order = torch.argsort(expert_ids_flat, stable=True)
+    dispatch_info = _group_tokens_mixed_bpw_primary_gpu(
+        expert_ids=expert_ids,
+        expert_probs=expert_probs,
+        num_experts=num_experts,
+    )
+    sorted_token_indices = dispatch_info.sorted_token_indices
+    sorted_expert_indices = dispatch_info.sorted_expert_indices
 
-    # Reorder tensors by expert grouping
-    activations_sorted = activations[sort_order // top_k]
-    expert_ids_sorted = expert_ids_flat[sort_order]
-    expert_probs_sorted = expert_probs.view(-1)[sort_order]
+    activations_sorted = activations[sorted_token_indices]
+    expert_ids_sorted = expert_ids[
+        sorted_token_indices.to(device=expert_ids.device)
+        if expert_ids.device.type != "mps"
+        else sorted_token_indices,
+        sorted_expert_indices.to(device=expert_ids.device)
+        if expert_ids.device.type != "mps"
+        else sorted_expert_indices,
+    ]
+    expert_probs_sorted = expert_probs[
+        sorted_token_indices.to(device=expert_probs.device)
+        if expert_probs.device.type != "mps"
+        else sorted_token_indices,
+        sorted_expert_indices.to(device=expert_probs.device)
+        if expert_probs.device.type != "mps"
+        else sorted_expert_indices,
+    ]
 
-    # Expanded batch size for flattened expert dispatch
-    n = batch_size * top_k
+    # Expanded batch size for flattened expert dispatch.
+    n = int(dispatch_info.sorted_token_indices.numel())
 
     # Get buffers (fast path with pool avoids contiguous/dtype copies)
     if buffer_pool is not None:
@@ -1923,7 +1964,11 @@ def dispatch_moe_trellis_swiglu(
         )
         # Schedule copy from fp32 output to fp16
         output_fp16.copy_(output_tensor)
-        return output_fp16
+        combined = torch.zeros(
+            batch_size, hidden_dim, dtype=output_fp16.dtype, device=output_fp16.device
+        )
+        combined.index_add_(0, sorted_token_indices.to(device=output_fp16.device), output_fp16)
+        return combined
 
     cmd_buf = dispatch_kernel(
         lib,
@@ -1936,7 +1981,9 @@ def dispatch_moe_trellis_swiglu(
     
     # Schedule copy from fp32 output to fp16
     output_fp16.copy_(output_tensor)
-    return output_fp16
+    combined = torch.zeros(batch_size, hidden_dim, dtype=output_fp16.dtype, device=output_fp16.device)
+    combined.index_add_(0, sorted_token_indices.to(device=output_fp16.device), output_fp16)
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -2688,32 +2735,42 @@ def dispatch_moe_per_bit_tuple(
         group_expert_probs = expert_probs[batch_indices, slot_indices].unsqueeze(1)
 
         # Primary path: grouped fairway dispatch for this active tuple.
-        # Fallback path: preserve previous dispatch_moe_trellis_swiglu behavior.
-        try:
-            sorted_token_ids, expert_offsets, sorted_probs = prepare_fairway_grouped_inputs(
-                expert_ids=group_expert_ids,
-                expert_probs=group_expert_probs,
-                num_experts=num_experts,
-            )
-            group_output = dispatch_moe_trellis_swiglu_grouped_fairway(
-                lib=lib,
-                activations=group_activations,
-                sorted_token_ids=sorted_token_ids,
-                expert_offsets=expert_offsets,
-                sorted_probs=sorted_probs,
-                cached_buffers=cached_buffers,
-                bit_tuple=bit_tuple,
-                hidden_dim=hidden_dim,
-                intermediate_dim=intermediate_dim,
-                num_experts=num_experts,
-                buffer_pool=buffer_pool,
-            )
-        except Exception as exc:
-            logger.debug(
-                "grouped fairway dispatch failed for bits=%s, falling back to legacy path: %s",
-                bit_tuple,
-                exc,
-            )
+        # Keep it opt-in because a failed Metal dispatch can leave invalid work queued
+        # before Python fallback has a chance to recover.
+        if os.environ.get("METAL_MARLIN_ENABLE_GROUPED_FAIRWAY") == "1":
+            try:
+                sorted_token_ids, expert_offsets, sorted_probs = prepare_fairway_grouped_inputs(
+                    expert_ids=group_expert_ids,
+                    expert_probs=group_expert_probs,
+                    num_experts=num_experts,
+                )
+                group_output = dispatch_moe_trellis_swiglu_grouped_fairway(
+                    lib=lib,
+                    activations=group_activations,
+                    sorted_token_ids=sorted_token_ids,
+                    expert_offsets=expert_offsets,
+                    sorted_probs=sorted_probs,
+                    cached_buffers=cached_buffers,
+                    bit_tuple=bit_tuple,
+                    hidden_dim=hidden_dim,
+                    intermediate_dim=intermediate_dim,
+                    num_experts=num_experts,
+                    buffer_pool=buffer_pool,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "grouped fairway dispatch failed for bits=%s, falling back to legacy path: %s",
+                    bit_tuple,
+                    exc,
+                )
+                group_output = _dispatch_legacy_per_tuple(
+                    group_activations=group_activations,
+                    group_expert_ids=group_expert_ids,
+                    group_expert_probs=group_expert_probs,
+                    bit_tuple=bit_tuple,
+                    cached_buffers=cached_buffers,
+                )
+        else:
             group_output = _dispatch_legacy_per_tuple(
                 group_activations=group_activations,
                 group_expert_ids=group_expert_ids,
