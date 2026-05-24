@@ -30,6 +30,7 @@ Note:
 from __future__ import annotations
 
 import _ctypes
+import ctypes
 import logging
 import os
 import weakref
@@ -54,6 +55,12 @@ _MPS_STATIC_BUFFER_CACHE_LIMIT = int(
 )
 _MPS_STATIC_BUFFER_CACHE: OrderedDict[tuple[Any, ...], tuple[Any, int]] = OrderedDict()
 _MPS_STATIC_BUFFER_CACHE_BYTES = 0
+_ENABLE_MPS_PTR_NOCOPY = os.environ.get("METAL_MARLIN_ENABLE_MPS_PTR_NOCOPY") == "1"
+_PYBUF_READ = 0x100
+_PYBUF_WRITE = 0x200
+_PY_MEMORYVIEW_FROM_MEMORY = ctypes.pythonapi.PyMemoryView_FromMemory
+_PY_MEMORYVIEW_FROM_MEMORY.restype = ctypes.py_object
+_PY_MEMORYVIEW_FROM_MEMORY.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t, ctypes.c_int]
 
 
 class _BatchedEncoder:
@@ -2946,6 +2953,23 @@ class _CopyBackBuffer:
         self.tensor = tensor
 
 
+class _TensorBackedMetalBuffer:
+    """MTLBuffer wrapper that keeps a tensor-backed memoryview alive."""
+
+    __slots__ = ("buffer", "tensor", "view")
+
+    def __init__(self, buffer: Any, tensor: torch.Tensor, view: memoryview) -> None:
+        logger.debug(
+            "initializing %s with buffer=%s, tensor=%s", type(self).__name__, buffer, tensor
+        )
+        self.buffer = buffer
+        self.tensor = tensor
+        self.view = view
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.buffer, name)
+
+
 def _torch_dtype_to_numpy(dtype: torch.dtype) -> np.dtype:
     logger.debug("_torch_dtype_to_numpy called with dtype=%s", dtype)
     mapping = {
@@ -3099,6 +3123,30 @@ def _create_zero_copy_buffer_from_iosurface(
         return None
 
 
+def _create_zero_copy_buffer_from_tensor_ptr(
+    device: Any,
+    tensor: torch.Tensor,
+    size: int,
+    *,
+    writable: bool = False,
+) -> _TensorBackedMetalBuffer | None:
+    """Create a no-copy MTLBuffer over a PyTorch MPS tensor data pointer."""
+    try:
+        ptr = int(tensor.data_ptr())
+        if ptr == 0:
+            return None
+        flags = _PYBUF_WRITE if writable else _PYBUF_READ
+        view = _PY_MEMORYVIEW_FROM_MEMORY(ctypes.c_void_p(ptr), size, flags)
+        buffer = device.newBufferWithBytesNoCopy_length_options_deallocator_(
+            view, size, Metal.MTLResourceStorageModeShared, None
+        )
+        if buffer is None:
+            return None
+        return _TensorBackedMetalBuffer(buffer, tensor, view)
+    except Exception:
+        return None
+
+
 def _mps_static_buffer_cache_key(tensor: torch.Tensor, device: Any, size: int) -> tuple[Any, ...]:
     return (
         id(device),
@@ -3182,6 +3230,15 @@ def mps_tensor_to_metal_buffer(
         cached = _get_cached_mps_static_buffer(static_cache_key)
         if cached is not None:
             return cached
+
+    if _ENABLE_MPS_PTR_NOCOPY:
+        zero_copy_buffer = _create_zero_copy_buffer_from_tensor_ptr(
+            device, tensor, size, writable=copy_back or initialize_copy_back
+        )
+        if zero_copy_buffer is not None:
+            if static_cache_key is not None:
+                _cache_mps_static_buffer(static_cache_key, zero_copy_buffer, size)
+            return zero_copy_buffer
 
     # For pure output buffers (copy_back=True), skip MPS sync and create fresh buffer
     # We don't need tensor data - just a buffer to write results to
@@ -3557,10 +3614,16 @@ def dispatch_kernel(
     # Check for _CopyBackBuffer in buffers (requires Python path for copy-back)
     copy_back: list[_CopyBackBuffer] = []
     has_copy_back = False
+    dispatch_buffers: list[Any] = []
     for buf in buffers:
         if isinstance(buf, _CopyBackBuffer):
             has_copy_back = True
             copy_back.append(buf)
+            dispatch_buffers.append(buf.buffer)
+        elif isinstance(buf, _TensorBackedMetalBuffer):
+            dispatch_buffers.append(buf.buffer)
+        else:
+            dispatch_buffers.append(buf)
 
     # Try FastPath when:
     # - Not in batch mode (batch mode uses shared encoder)
@@ -3572,7 +3635,7 @@ def dispatch_kernel(
         if fast_path.available:
             try:
                 return fast_path.dispatch(
-                    function_name, grid, threadgroup, buffers, offsets, wait
+                    function_name, grid, threadgroup, dispatch_buffers, offsets, wait
                 )
             except Exception:
                 # Fall back to Python path on any error
@@ -3593,12 +3656,9 @@ def dispatch_kernel(
     encoder.setComputePipelineState_(pipeline)
 
     # Bind buffers
-    for i, buf in enumerate(buffers):
+    for i, buf in enumerate(dispatch_buffers):
         offset = offsets[i] if offsets is not None else 0
-        if isinstance(buf, _CopyBackBuffer):
-            encoder.setBuffer_offset_atIndex_(buf.buffer, offset, i)
-        else:
-            encoder.setBuffer_offset_atIndex_(buf, offset, i)
+        encoder.setBuffer_offset_atIndex_(buf, offset, i)
 
     # Bind textures
     if textures:

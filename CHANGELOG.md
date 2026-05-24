@@ -33,8 +33,9 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
   aligned the dispatch/test coverage with the new threadgroup launch shapes.
 - Added a direct benchmark option to skip LM-head dispatches for block-body
   bottleneck measurement.
-- Added static MPS buffer reuse and CPU-prepared bit-group payloads for Trellis
-  mixed-BPW dispatch while keeping tuple-scoped fallback deterministic.
+- Added static and tensor-backed no-copy MPS buffer reuse plus CPU-prepared
+  bit-group payloads for Trellis mixed-BPW dispatch while keeping tuple-scoped
+  fallback deterministic.
 
 ### Fixed
 - Preserved generated tokens when streaming mocks and real generate paths differ
