@@ -9,7 +9,7 @@ import torch
 # Add contrib/metal_marlin to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
 
-from metal_marlin.memory.mmfp4_memory import (
+from metal_marlin.memory.memory_pressure import (
     MemoryPressureConfig,
     _global_monitor_lock,
     get_global_memory_pressure_monitor,
@@ -27,11 +27,11 @@ class TestMemoryPressure(unittest.TestCase):
         self.loader.load_tensor.return_value = torch.zeros(1)
         
         # Reset global monitor
-        import metal_marlin.memory.mmfp4_memory as mm
+        import metal_marlin.memory.memory_pressure as mm
         with mm._global_monitor_lock:
             mm._global_pressure_monitor = None
 
-    @patch('metal_marlin.memory.mmfp4_memory.psutil.virtual_memory')
+    @patch('metal_marlin.memory.memory_pressure.psutil.virtual_memory')
     def test_pressure_critical(self, mock_vm):
         # Mock critical memory (e.g. 100MB free)
         logger.info("running test_pressure_critical")
@@ -50,7 +50,7 @@ class TestMemoryPressure(unittest.TestCase):
         futures = prefetcher.prefetch(['tensor1'])
         self.assertEqual(len(futures), 0)
         
-    @patch('metal_marlin.memory.mmfp4_memory.psutil.virtual_memory')
+    @patch('metal_marlin.memory.memory_pressure.psutil.virtual_memory')
     def test_pressure_normal(self, mock_vm):
         # Mock normal memory (e.g. 8GB free)
         logger.info("running test_pressure_normal")

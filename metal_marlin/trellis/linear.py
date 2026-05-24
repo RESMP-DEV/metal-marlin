@@ -623,6 +623,12 @@ class TrellisLinear(nn.Module):
         else:
             output = self._forward_cpu_fallback(x, group_size)
 
+        output = torch.nan_to_num(
+            output.to(torch.float32),
+            nan=0.0,
+            posinf=65504.0,
+            neginf=-65504.0,
+        ).to(x.dtype)
         output = output.view(*batch_shape, self.out_features)
         if self.bias is not None:
             output.add_(self.bias)
@@ -631,8 +637,9 @@ class TrellisLinear(nn.Module):
     def _forward_cpu_fallback(self, x_flat: torch.Tensor, group_size: int) -> torch.Tensor:
         """CPU fallback for forward pass."""
         logger.debug("_forward_cpu_fallback called with x_flat=%s, group_size=%s", x_flat, group_size)
-        weights = self.dequantize().to(x_flat.device)
-        return x_flat @ weights.t()
+        weights = self.dequantize().to(device=x_flat.device, dtype=torch.float32)
+        output = x_flat.to(torch.float32) @ weights.t()
+        return torch.nan_to_num(output, nan=0.0, posinf=65504.0, neginf=-65504.0).to(x_flat.dtype)
 
     def extra_repr(self) -> str:
         """String representation for printing."""

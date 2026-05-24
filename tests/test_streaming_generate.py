@@ -15,7 +15,7 @@ while _parent.name != "metal_marlin" and _parent.parent != _parent:
 if _parent.name == "metal_marlin":
     sys.path.insert(0, str(_parent.parent))
 
-from contrib.metal_marlin.metal_marlin.inference.mmfp4_pipeline import (
+from metal_marlin.inference.mmfp4_pipeline import (
     MMFP4Pipeline,
     StreamingOutput,
 )
@@ -45,6 +45,10 @@ class MockModel:
         logger.debug("generate called with input_ids=%s", input_ids)
         streamer = kwargs.get("streamer")
         if streamer:
+            # Transformers streamers receive the prompt before generated tokens.
+            # The pipeline sets skip_prompt=True, so this keeps the mock aligned
+            # with the real generate() contract.
+            streamer.put(input_ids)
             # Simulate generating 5 tokens
             for i in range(5):
                 # token_ids must be a tensor
@@ -112,9 +116,8 @@ class TestStreamingGenerate(unittest.TestCase):
         full_text = "".join([o.text for o in outputs])
         self.assertTrue("t10" in full_text)
         
-        # Verify optimization: check if token counts match
-        total_tokens = sum(o.token_count for o in outputs)
-        self.assertEqual(total_tokens, 5) # We simulated 5 tokens
+        # The final event carries the cumulative emitted count.
+        self.assertEqual(outputs[-1].token_count, 5)
 
 if __name__ == "__main__":
     unittest.main()

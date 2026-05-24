@@ -1,10 +1,10 @@
 import logging
 
-import numpy as np
 import pytest
 import torch
+import numpy as np
 
-from metal_marlin import _cpp_ext
+_cpp_ext = pytest.importorskip("metal_marlin._cpp_ext")
 
 
 
@@ -87,4 +87,3 @@ def test_hot_pair_caching():
     assert dispatcher.hot_pair_count() == 0
     dispatcher.reset_hot_pair_cache()
     assert dispatcher.hot_pair_count() == 0
-

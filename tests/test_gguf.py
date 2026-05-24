@@ -22,6 +22,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+logger = logging.getLogger(__name__)
+
 # Add metal_marlin package to path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -870,6 +872,3 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
-
-
-logger = logging.getLogger(__name__)

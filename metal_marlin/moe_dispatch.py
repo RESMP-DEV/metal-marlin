@@ -1395,19 +1395,38 @@ def _fused_expert_mlp(
     gate_up_dequant = unpack_fp4_to_fp16(gate_up_packed, gate_up_scales)  # [hidden, 2*intermediate]
     down_dequant = unpack_fp4_to_fp16(down_packed, down_scales)  # [intermediate, hidden]
 
-    # Compute gate+up projection
-    gate_up_output = torch.matmul(x.to(torch.float32), gate_up_dequant.T.to(torch.float32))  # [batch, 2*intermediate]
+    # Compute gate+up projection. Callers may pass either row-packed
+    # [2*intermediate, hidden/8] weights or kernel-layout [hidden/8,
+    # 2*intermediate] weights, so choose the multiply orientation from shape.
+    x_f32 = x.to(torch.float32)
+    gate_up_f32 = gate_up_dequant.to(torch.float32)
+    if gate_up_f32.shape[0] == hidden_size:
+        gate_up_output = torch.matmul(x_f32, gate_up_f32)
+    elif gate_up_f32.shape[1] == hidden_size:
+        gate_up_output = torch.matmul(x_f32, gate_up_f32.T)
+    else:
+        raise ValueError(
+            "gate_up_dequant shape is incompatible with hidden size: "
+            f"{tuple(gate_up_f32.shape)} vs hidden={hidden_size}"
+        )
 
     # Split and apply SwiGLU
+    intermediate_size = gate_up_output.shape[1] // 2
     gate = gate_up_output[:, :intermediate_size]
     up = gate_up_output[:, intermediate_size:]
     activated = F.silu(gate) * up
 
     # Down projection
-    # down_dequant: [intermediate, hidden]
-    # activated: [batch, intermediate]
-    # output: [batch, hidden]
-    output = torch.matmul(activated, down_dequant.to(torch.float32))  # [batch, hidden]
+    down_f32 = down_dequant.to(torch.float32)
+    if down_f32.shape[0] == activated.shape[1]:
+        output = torch.matmul(activated, down_f32)
+    elif down_f32.shape[1] == activated.shape[1]:
+        output = torch.matmul(activated, down_f32.T)
+    else:
+        raise ValueError(
+            "down_dequant shape is incompatible with activated size: "
+            f"{tuple(down_f32.shape)} vs activated={activated.shape[1]}"
+        )
 
     return output.to(x.dtype)
 

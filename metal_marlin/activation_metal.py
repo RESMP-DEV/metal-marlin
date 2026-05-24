@@ -76,8 +76,8 @@ def gelu_metal(x: torch.Tensor) -> torch.Tensor:
     if not HAS_TORCH:
         raise RuntimeError("PyTorch is required for activation functions")
 
-    # Use PyTorch's native implementation (optimized for MPS)
-    return torch.nn.functional.gelu(x)
+    # Match the tanh approximation used by transformer MLP kernels.
+    return torch.nn.functional.gelu(x, approximate="tanh")
 
 
 def relu_metal(x: torch.Tensor) -> torch.Tensor:

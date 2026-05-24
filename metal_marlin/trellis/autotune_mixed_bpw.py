@@ -34,7 +34,8 @@ import json
 import logging
 import statistics
 import time
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +65,17 @@ BATCH_STRATEGIES = ["per_expert", "per_bitwidth", "hybrid"]
 DEVICE_TYPES = ["m1", "m2", "m3", "m4", "unknown"]
 
 
+def _kernel_name_for_variant(variant: str, use_fp32_acc: bool = False) -> str:
+    base = "moe_trellis_mixed_swiglu"
+    if variant == "decode":
+        base = f"{base}_decode"
+    elif variant in {"prefill", "large_batch"}:
+        base = f"{base}_{variant}"
+    if use_fp32_acc:
+        base = f"{base}_fp32acc"
+    return base
+
+
 @dataclass
 class KernelConfig:
     """Configuration for a specific kernel variant.
@@ -77,15 +89,27 @@ class KernelConfig:
         bit_width: Quantization bit width this config targets.
     """
 
-    tile_size_m: int
-    tile_size_n: int
-    num_simdgroups: int
-    kernel_variant: str
-    batch_strategy: str
-    bit_width: int
+    tile_size_m: int = 64
+    tile_size_n: int = 64
+    num_simdgroups: int | None = None
+    kernel_variant: str = "base"
+    batch_strategy: str = "hybrid"
+    bit_width: int = 4
+    kernel_name: str | None = None
+    simdgroups: int | None = None
+    use_fp32_acc: bool = False
 
     def __post_init__(self):
         """Validate configuration after initialization."""
+        if self.num_simdgroups is None:
+            self.num_simdgroups = self.simdgroups or 8
+        if self.simdgroups is None:
+            self.simdgroups = self.num_simdgroups
+        if self.kernel_name is None:
+            self.kernel_name = _kernel_name_for_variant(
+                self.kernel_variant,
+                self.use_fp32_acc,
+            )
         if self.kernel_variant not in KERNEL_VARIANTS:
             raise ValueError(
                 f"Invalid kernel_variant: {self.kernel_variant}. "
@@ -141,13 +165,26 @@ class BenchmarkResult:
     """
 
     config: KernelConfig
-    batch_size: int
-    hidden_dim: int
-    latency_ms: float
-    throughput: float
-    memory_bytes: int
-    success: bool
+    batch_size: int = 0
+    hidden_dim: int = 0
+    latency_ms: float = 0.0
+    throughput: float = 0.0
+    memory_bytes: int = 0
+    success: bool = True
     error_msg: str = ""
+    throughput_gbps: float = 0.0
+    memory_footprint_mb: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.throughput_gbps and not self.throughput:
+            self.throughput = self.throughput_gbps
+        elif self.throughput and not self.throughput_gbps:
+            self.throughput_gbps = self.throughput
+
+        if self.memory_footprint_mb and not self.memory_bytes:
+            self.memory_bytes = int(self.memory_footprint_mb * 1024 * 1024)
+        elif self.memory_bytes and not self.memory_footprint_mb:
+            self.memory_footprint_mb = self.memory_bytes / (1024 * 1024)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -161,7 +198,39 @@ class BenchmarkResult:
             "memory_bytes": self.memory_bytes,
             "success": self.success,
             "error_msg": self.error_msg,
+            "throughput_gbps": self.throughput_gbps,
+            "memory_footprint_mb": self.memory_footprint_mb,
         }
+
+
+def _new_lookup_table() -> defaultdict[int, defaultdict[int, dict[tuple[int, ...], KernelConfig]]]:
+    return defaultdict(lambda: defaultdict(dict))
+
+
+def _new_adaptation_timings() -> defaultdict[str, list[float]]:
+    return defaultdict(list)
+
+
+@dataclass
+class AutotuneConfig:
+    """Runtime autotune state and defaults for mixed-BPW kernels."""
+
+    device_name: str
+    device_family: str
+    tile_size_mapping: dict[int, int] = field(
+        default_factory=lambda: {2: 128, 3: 96, 4: 64, 8: 64}
+    )
+    simdgroup_mapping: dict[int, int] = field(
+        default_factory=lambda: {2: 16, 3: 8, 4: 8, 8: 4}
+    )
+    lookup_table: defaultdict[int, defaultdict[int, dict[tuple[int, ...], KernelConfig]]] = field(
+        default_factory=_new_lookup_table
+    )
+    adaptation_timings: defaultdict[str, list[float]] = field(
+        default_factory=_new_adaptation_timings
+    )
+    adaptation_history_len: int = 100
+    adaptation_enabled: bool = True
 
 
 @dataclass
@@ -230,6 +299,8 @@ class MixedBPWAutoTuner:
     def __init__(
         self,
         device: str | None = None,
+        device_name: str | None = None,
+        config_path: str | Path | None = None,
         warmup_iterations: int = 5,
         benchmark_iterations: int = 20,
         enable_online_adaptation: bool = True,
@@ -244,9 +315,27 @@ class MixedBPWAutoTuner:
             enable_online_adaptation: Enable online adaptation during inference.
             history_length: Number of runtime samples to keep for adaptation.
         """
-        # Detect device type if not specified
-        logger.debug("initializing %s with device=%s, warmup_iterations=%s, benchmark_iterations=%s, enable_online_adaptation=%s, history_length=%s", type(self).__name__, device, warmup_iterations, benchmark_iterations, enable_online_adaptation, history_length)
-        self.device = device or self._detect_device_type()
+        logger.debug(
+            "initializing %s with device=%s, device_name=%s, warmup_iterations=%s, "
+            "benchmark_iterations=%s, enable_online_adaptation=%s, history_length=%s",
+            type(self).__name__,
+            device,
+            device_name,
+            warmup_iterations,
+            benchmark_iterations,
+            enable_online_adaptation,
+            history_length,
+        )
+        self.device_family = self._normalize_device_family(device_name or device)
+        self.device = self.device_family.lower()
+        self.device_name = device_name or device or self._detect_device_name()
+        self.config_path = Path(config_path) if config_path is not None else None
+        self.config = AutotuneConfig(
+            device_name=self.device_name,
+            device_family=self.device_family,
+            adaptation_history_len=history_length,
+            adaptation_enabled=enable_online_adaptation,
+        )
 
         # Benchmarking parameters
         self.warmup_iterations = warmup_iterations
@@ -258,6 +347,7 @@ class MixedBPWAutoTuner:
 
         # Storage for benchmark results and optimized configs
         self.benchmark_results: list[BenchmarkResult] = []
+        self._benchmark_results = self.benchmark_results
         self.optimized_configs: dict[tuple[int, int, int], OptimizedConfig] = {}
 
         # Online adaptation history: (batch_size, bit_width, hidden_dim) -> list of (config_id, latency_ms)
@@ -266,7 +356,7 @@ class MixedBPWAutoTuner:
         # Profile registry for kernel timing
         self.profile_registry = _ProfileRegistry()
 
-        logger.info(f"Initialized MixedBPWAutoTuner for device: {self.device}")
+        logger.info(f"Initialized MixedBPWAutoTuner for device: {self.device_name}")
 
     @staticmethod
     def _detect_device_type() -> str:
@@ -301,6 +391,24 @@ class MixedBPWAutoTuner:
         except Exception as e:
             logger.warning(f"Failed to detect device type: {e}, defaulting to 'unknown'")
             return "unknown"
+
+    @staticmethod
+    def _detect_device_name() -> str:
+        device_type = MixedBPWAutoTuner._detect_device_type()
+        if device_type == "unknown":
+            return "Unknown"
+        return device_type.upper()
+
+    @staticmethod
+    def _normalize_device_family(device_name: str | None) -> str:
+        if not device_name:
+            detected = MixedBPWAutoTuner._detect_device_type()
+            return detected.upper() if detected != "unknown" else "Unknown"
+        normalized = device_name.upper()
+        for family in ("M1", "M2", "M3", "M4"):
+            if family in normalized:
+                return family
+        return "Unknown"
 
     def generate_configs(
         self,
@@ -340,6 +448,60 @@ class MixedBPWAutoTuner:
 
         logger.info(f"Generated {len(configs)} configurations for bit widths: {bit_widths}")
         return configs
+
+    def _get_kernel_name(
+        self,
+        kernel_variant: str,
+        use_fp32_acc: bool,
+        simdgroups: int,
+    ) -> str:
+        """Compatibility helper for tests and older callers."""
+        del simdgroups
+        return _kernel_name_for_variant(kernel_variant, use_fp32_acc)
+
+    def _generate_configs(
+        self,
+        bit_widths: list[int],
+        use_decode: bool = True,
+        use_prefill: bool = True,
+    ) -> list[KernelConfig]:
+        """Generate compatibility KernelConfig objects for selected bit widths."""
+        variants = ["base"]
+        if use_decode:
+            variants.append("decode")
+        if use_prefill:
+            variants.append("prefill")
+
+        configs: list[KernelConfig] = []
+        for bit_width in bit_widths:
+            base_tile = self.config.tile_size_mapping.get(bit_width, 64)
+            tile_sizes = sorted({max(32, base_tile // 2), base_tile, max(base_tile, 96)})
+            for tile_size in tile_sizes:
+                for simdgroups in {4, self.config.simdgroup_mapping.get(bit_width, 8), 16}:
+                    for variant in variants:
+                        configs.append(
+                            KernelConfig(
+                                kernel_name=self._get_kernel_name(variant, False, simdgroups),
+                                tile_size_m=tile_size,
+                                tile_size_n=tile_size,
+                                simdgroups=simdgroups,
+                                kernel_variant=variant,
+                                bit_width=bit_width,
+                            )
+                        )
+        return configs
+
+    def _create_synthetic_input(
+        self,
+        batch_size: int,
+        hidden_dim: int,
+        out_dim: int,
+        device: str = "cpu",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Create synthetic FP16 input/output tensors for autotune probes."""
+        input_tensor = torch.randn(batch_size, hidden_dim, dtype=torch.float16, device=device)
+        output_tensor = torch.empty(batch_size, out_dim, dtype=torch.float16, device=device)
+        return input_tensor, output_tensor
 
     def benchmark_config(
         self,
@@ -709,46 +871,128 @@ class MixedBPWAutoTuner:
 
     def _find_nearest_key(
         self,
-        target_key: tuple[int, int, int],
-    ) -> tuple[int, int, int] | None:
-        """Find the nearest configuration key to the target.
-
-        Bit width is heavily prioritized as different bit widths require
-        different kernel implementations. Batch size is next most important.
-        Hidden dimension is least important as kernels can often work with
-        different hidden dims with similar performance.
-
-        Args:
-            target_key: (batch_size, bit_width, hidden_dim) to find nearest for.
-
-        Returns:
-            Nearest key, or None if no configurations exist.
-        """
+        target_key: tuple[int, int, int] | int,
+        keys: set[int] | None = None,
+    ) -> tuple[int, int, int] | int | None:
+        """Find nearest lookup-table key or nearest scalar compatibility key."""
         logger.debug("_find_nearest_key called with target_key=%s", target_key)
+        if keys is not None:
+            if not keys:
+                return None
+            target = int(target_key)
+            return min(keys, key=lambda key: (abs(key - target), key))
+
         if not self.optimized_configs:
+            return None
+
+        if not isinstance(target_key, tuple):
             return None
 
         target_batch, target_bit, target_hidden = target_key
 
-        # Calculate distance to each key
-        def distance(key):
-            logger.debug("distance called with key=%s", key)
+        def distance(key: tuple[int, int, int]) -> float:
             batch, bit, hidden = key
-            # Bit width is MOST important (must match or close)
-            # Use exponential penalty for bit width mismatch
             bit_diff = abs(bit - target_bit) * 1000
-            # Batch size is next important
             batch_diff = abs(batch - target_batch) * 100
-            # Hidden dimension is least important
-            # Use relative difference as a fraction
-            if hidden > 0 and target_hidden > 0:
-                hidden_diff = abs(hidden - target_hidden) * 0.1
-            else:
-                hidden_diff = 0
+            hidden_diff = abs(hidden - target_hidden) * 0.1 if hidden and target_hidden else 0
             return bit_diff + batch_diff + hidden_diff
 
-        nearest = min(self.optimized_configs.keys(), key=distance)
-        return nearest
+        return min(self.optimized_configs.keys(), key=distance)
+
+    def select_kernel(
+        self,
+        batch_size: int,
+        hidden_dim: int,
+        bit_widths: list[int],
+        fallback_to_default: bool = True,
+    ) -> KernelConfig | None:
+        """Select a configured kernel for a workload."""
+        bit_tuple = tuple(sorted(bit_widths))
+        lookup_table = self.config.lookup_table
+
+        if batch_size in lookup_table:
+            hidden_table = lookup_table[batch_size]
+            if hidden_dim in hidden_table and bit_tuple in hidden_table[hidden_dim]:
+                return hidden_table[hidden_dim][bit_tuple]
+
+        nearest_batch = self._find_nearest_key(batch_size, set(lookup_table.keys()))
+        if isinstance(nearest_batch, int):
+            hidden_table = lookup_table[nearest_batch]
+            nearest_hidden = self._find_nearest_key(hidden_dim, set(hidden_table.keys()))
+            if isinstance(nearest_hidden, int):
+                bit_table = hidden_table[nearest_hidden]
+                if bit_tuple in bit_table:
+                    return bit_table[bit_tuple]
+
+        if not fallback_to_default:
+            return None
+
+        bit_width = min(bit_widths) if bit_widths else 4
+        tile_size = self.config.tile_size_mapping.get(bit_width, 64)
+        simdgroups = self.config.simdgroup_mapping.get(bit_width, 8)
+        variant = "decode" if batch_size == 1 else "base"
+        return KernelConfig(
+            kernel_name=self._get_kernel_name(variant, False, simdgroups),
+            tile_size_m=tile_size,
+            tile_size_n=tile_size,
+            simdgroups=simdgroups,
+            kernel_variant=variant,
+            bit_width=bit_width,
+        )
+
+    def record_latency(
+        self,
+        kernel_name: str,
+        batch_size: int,
+        latency_ms: float,
+        hidden_dim: int | None = None,
+        bit_widths: list[int] | None = None,
+    ) -> None:
+        """Record runtime latency for online selection adaptation."""
+        if hidden_dim is None or bit_widths is None:
+            key = f"{kernel_name}_bs{batch_size}"
+        else:
+            key = (
+                f"{kernel_name}_bs{batch_size}_hd{hidden_dim}_"
+                f"bits{tuple(sorted(bit_widths))}"
+            )
+
+        timings = self.config.adaptation_timings[key]
+        timings.append(latency_ms)
+        history_len = self.config.adaptation_history_len
+        if len(timings) > history_len:
+            del timings[:-history_len]
+
+    def adapt_selection(
+        self,
+        batch_size: int,
+        hidden_dim: int,
+        bit_widths: list[int],
+    ) -> KernelConfig | None:
+        """Return a selected config once enough latency samples exist."""
+        bit_tuple = tuple(sorted(bit_widths))
+        for key, timings in self.config.adaptation_timings.items():
+            if (
+                f"_bs{batch_size}_hd{hidden_dim}_bits{bit_tuple}" in key
+                and len(timings) >= 5
+            ):
+                return self.select_kernel(
+                    batch_size,
+                    hidden_dim,
+                    bit_widths,
+                    fallback_to_default=False,
+                )
+        return None
+
+    def clear_adaptation_history(self) -> None:
+        self.config.adaptation_timings.clear()
+
+    def reset(self) -> None:
+        self.config.lookup_table.clear()
+        self.config.adaptation_timings.clear()
+        self.benchmark_results.clear()
+        self.optimized_configs.clear()
+        self.online_history.clear()
 
     def record_online_sample(
         self,
@@ -857,76 +1101,99 @@ class MixedBPWAutoTuner:
 
                 self.optimized_configs[lookup_key] = updated
 
-    def export_config(self, path: str) -> None:
-        """Export optimized configurations to JSON file.
-
-        Args:
-            path: Path to output JSON file.
-        """
+    def export_config(self, path: str | Path) -> str:
+        """Export runtime lookup state to JSON and return the serialized string."""
         logger.info("export_config called with path=%s", path)
+        lookup_table: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
+        for batch_size, hidden_table in self.config.lookup_table.items():
+            batch_entry: dict[str, dict[str, dict[str, Any]]] = {}
+            for hidden_dim, bit_table in hidden_table.items():
+                batch_entry[str(hidden_dim)] = {
+                    ",".join(map(str, bits)): config.to_dict()
+                    for bits, config in bit_table.items()
+                }
+            lookup_table[str(batch_size)] = batch_entry
+
         output = {
             "device": self.device,
-            "tuner_params": {
-                "warmup_iterations": self.warmup_iterations,
-                "benchmark_iterations": self.benchmark_iterations,
-                "enable_online_adaptation": self.enable_online_adaptation,
-                "history_length": self.history_length,
-            },
+            "device_name": self.device_name,
+            "device_family": self.device_family,
+            "adaptation_enabled": self.config.adaptation_enabled,
+            "lookup_table": lookup_table,
+            "adaptation_timings": dict(self.config.adaptation_timings),
             "optimized_configs": {
                 f"{key[0]}_{key[1]}_{key[2]}": config.to_dict()
                 for key, config in self.optimized_configs.items()
             },
         }
 
-        with open(path, "w") as f:
-            json.dump(output, f, indent=2)
+        json_str = json.dumps(output, indent=2)
+        Path(path).write_text(json_str)
+        return json_str
 
-        logger.info(f"Exported {len(self.optimized_configs)} configs to {path}")
-
-    def load_config(self, path: str) -> None:
-        """Load optimized configurations from JSON file.
-
-        Args:
-            path: Path to JSON configuration file.
-        """
+    @classmethod
+    def load_config(cls, path: str | Path) -> MixedBPWAutoTuner:
+        """Load a tuner from an exported JSON configuration."""
         logger.info("load_config called with path=%s", path)
-        with open(path) as f:
-            data = json.load(f)
-
-        # Verify device compatibility
-        if "device" in data and data["device"] != self.device:
-            logger.warning(
-                f"Loading config from device {data['device']} "
-                f"on device {self.device}. Results may not be optimal."
-            )
-
-        # Load optimized configs
-        if "optimized_configs" in data:
-            for key_str, config_dict in data["optimized_configs"].items():
-                batch_size, bit_width, hidden_dim = map(int, key_str.split("_"))
-                config = OptimizedConfig(**config_dict)
-                self.optimized_configs[(batch_size, bit_width, hidden_dim)] = config
-
-        logger.info(
-            f"Loaded {len(self.optimized_configs)} configs from {path} "
-            f"(source device: {data.get('device', 'unknown')})"
+        data = json.loads(Path(path).read_text())
+        tuner = cls(
+            device_name=data.get("device_name"),
+            config_path=path,
+            enable_online_adaptation=data.get("adaptation_enabled", True),
         )
 
-    def get_stats(self) -> dict[str, Any]:
-        """Get statistics about the auto-tuner.
+        tuner.device = data.get("device", tuner.device)
+        tuner.device_family = data.get("device_family", tuner.device_family)
+        tuner.config.device_family = tuner.device_family
+        tuner.config.adaptation_enabled = data.get("adaptation_enabled", True)
 
-        Returns:
-            Dictionary with tuner statistics.
-        """
-        logger.debug("get_stats called")
+        for batch_str, hidden_table in data.get("lookup_table", {}).items():
+            batch_size = int(batch_str)
+            for hidden_str, bit_table in hidden_table.items():
+                hidden_dim = int(hidden_str)
+                for bit_str, config_dict in bit_table.items():
+                    bits = tuple(int(bit) for bit in bit_str.split(",") if bit)
+                    tuner.config.lookup_table[batch_size][hidden_dim][bits] = KernelConfig(
+                        **config_dict
+                    )
+
+        for key, values in data.get("adaptation_timings", {}).items():
+            tuner.config.adaptation_timings[key].extend(float(value) for value in values)
+
+        for key_str, config_dict in data.get("optimized_configs", {}).items():
+            batch_size, bit_width, hidden_dim = map(int, key_str.split("_"))
+            tuner.optimized_configs[(batch_size, bit_width, hidden_dim)] = OptimizedConfig(
+                **config_dict
+            )
+
+        return tuner
+
+    def get_statistics(self) -> dict[str, Any]:
+        """Get statistics about the auto-tuner."""
+        lookup_entries = sum(
+            len(bit_table)
+            for hidden_table in self.config.lookup_table.values()
+            for bit_table in hidden_table.values()
+        )
+        adaptation_samples = sum(len(values) for values in self.config.adaptation_timings.values())
         return {
             "device": self.device,
-            "num_benchmarked_configs": len(self.benchmark_results),
-            "num_optimized_configs": len(self.optimized_configs),
+            "device_name": self.device_name,
+            "device_family": self.device_family,
+            "config_path": str(self.config_path) if self.config_path is not None else "",
+            "total_benchmarks": len(self.benchmark_results),
+            "lookup_table_entries": lookup_entries,
+            "adaptation_enabled": self.config.adaptation_enabled,
+            "adaptation_samples": adaptation_samples,
+            "active_adaptation_keys": len(self.config.adaptation_timings),
             "num_online_samples": sum(len(samples) for samples in self.online_history.values()),
             "successful_benchmarks": sum(1 for r in self.benchmark_results if r.success),
             "failed_benchmarks": sum(1 for r in self.benchmark_results if not r.success),
         }
+
+    def get_stats(self) -> dict[str, Any]:
+        """Backward-compatible statistics alias."""
+        return self.get_statistics()
 
 
 def get_optimal_config(
@@ -957,9 +1224,23 @@ def get_optimal_config(
         logger.warning(f"Config file not found: {config_path}")
         return None
 
-    tuner = MixedBPWAutoTuner()
-    tuner.load_config(str(config_path))
-    return tuner.get_optimal_config(batch_size, bit_width, hidden_dim)
+    tuner = MixedBPWAutoTuner.load_config(str(config_path))
+    optimized = tuner.get_optimal_config(batch_size, bit_width, hidden_dim)
+    if optimized is not None:
+        return KernelConfig(
+            tile_size_m=optimized.tile_size_m,
+            tile_size_n=optimized.tile_size_n,
+            num_simdgroups=optimized.num_simdgroups,
+            kernel_variant=optimized.kernel_variant,
+            batch_strategy=optimized.batch_strategy,
+            bit_width=optimized.bit_width,
+        )
+    return tuner.select_kernel(
+        batch_size,
+        hidden_dim,
+        [bit_width],
+        fallback_to_default=False,
+    )
 
 
 def HAS_METAL_AVAILABLE() -> bool:

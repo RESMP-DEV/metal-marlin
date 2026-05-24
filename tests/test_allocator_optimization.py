@@ -2,7 +2,7 @@
 import logging
 import unittest
 
-from contrib.metal_marlin.metal_marlin.paged.allocator import (
+from metal_marlin.paged.allocator import (
     MultimodalBlockAllocator,
     TokenModality,
 )

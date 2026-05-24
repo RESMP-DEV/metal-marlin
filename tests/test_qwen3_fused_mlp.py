@@ -22,8 +22,19 @@ def create_mock_trellis_weight(in_features, out_features, bits=4):
     tiles_n = (out_features + TILE_DIM - 1) // TILE_DIM
     packed_bytes = {2: 64, 3: 96, 4: 128, 8: 256}.get(bits, 128)
     
-    packed_indices = torch.randint(0, 255, (tiles_k, tiles_n, packed_bytes), dtype=torch.uint8)
-    scales = torch.randn(((in_features + 127) // 128, out_features), dtype=torch.float32).abs()
+    generator = torch.Generator().manual_seed(in_features * 1009 + out_features * 9176 + bits)
+    packed_indices = torch.randint(
+        0,
+        255,
+        (tiles_k, tiles_n, packed_bytes),
+        dtype=torch.uint8,
+        generator=generator,
+    )
+    scales = torch.full(
+        ((in_features + 127) // 128, out_features),
+        1e-4,
+        dtype=torch.float32,
+    )
     su = torch.ones(in_features, dtype=torch.float32)
     sv = torch.ones(out_features, dtype=torch.float32)
     
@@ -59,7 +70,7 @@ def test_trellis_swiglu_mlp_correctness():
     
     # Input
     batch_size = 4
-    x = torch.randn(batch_size, hidden_size, dtype=torch.float16, device=device)
+    x = torch.randn(batch_size, hidden_size, dtype=torch.float16, device=device) * 0.01
     
     # Reference forward pass (using separate TrellisLinear calls)
     with torch.no_grad():
@@ -95,7 +106,7 @@ def test_trellis_swiglu_mlp_decode():
     
     fused_mlp = TrellisSwiGLUMlp(gate_proj, up_proj, down_proj).to(device)
     
-    x = torch.randn(1, hidden_size, dtype=torch.float16, device=device)
+    x = torch.randn(1, hidden_size, dtype=torch.float16, device=device) * 0.01
     
     with torch.no_grad():
         gate_out = F.silu(gate_proj(x))

@@ -34,7 +34,7 @@ try:
     from scipy import stats
 
     HAS_SCIPY = True
-except ImportError:
+except Exception:
     HAS_SCIPY = False
     stats = None  # type: ignore[assignment]
 

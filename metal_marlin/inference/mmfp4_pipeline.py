@@ -2126,6 +2126,7 @@ class MMFP4Pipeline:
                 queue: asyncio.Queue,
                 loop: asyncio.AbstractEventLoop,
                 skip_prompt: bool = False,
+                prompt_ids: list[int] | None = None,
                 batch_size: int = 10,  # Number of tokens to buffer
                 **decode_kwargs: Any,
             ):
@@ -2134,6 +2135,7 @@ class MMFP4Pipeline:
                 self.queue = queue
                 self.loop = loop
                 self.skip_prompt = skip_prompt
+                self.prompt_ids = prompt_ids or []
                 self.decode_kwargs = decode_kwargs
                 self.next_tokens_are_prompt = True
                 self.batch_size = batch_size
@@ -2152,17 +2154,22 @@ class MMFP4Pipeline:
 
             def put(self, value: torch_typing.Tensor) -> None:
                 logger.debug("put called with value=%s", value)
-                if self.skip_prompt and self.next_tokens_are_prompt:
-                    self.next_tokens_are_prompt = False
-                    return
-
                 if len(value.shape) > 1 and value.shape[0] > 1:
                     # Not supporting batch size > 1 in generation
                     return
                 if len(value.shape) > 1:
                     value = value[0]
 
-                self.token_ids_buffer.extend(_tensor_to_int_list_cpu(value))
+                token_ids = _tensor_to_int_list_cpu(value)
+                if self.skip_prompt and self.next_tokens_are_prompt:
+                    self.next_tokens_are_prompt = False
+                    prompt_len = len(self.prompt_ids)
+                    if prompt_len and token_ids[:prompt_len] == self.prompt_ids:
+                        token_ids = token_ids[prompt_len:]
+                    if not token_ids:
+                        return
+
+                self.token_ids_buffer.extend(token_ids)
 
                 if len(self.token_ids_buffer) >= self.batch_size:
                     self._flush_buffer()
@@ -2177,6 +2184,7 @@ class MMFP4Pipeline:
             queue=token_queue,
             loop=loop,
             skip_prompt=True,
+            prompt_ids=_tensor_to_int_list_cpu(input_ids.reshape(-1)),
             skip_special_tokens=True,
         )
 

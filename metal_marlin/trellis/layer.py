@@ -137,6 +137,10 @@ class TrellisDenseMLP(nn.Module):
         )
 
 
+class TrellisSwiGLUMlp(TrellisDenseMLP):
+    """Compatibility name for the dense SwiGLU MLP implementation."""
+
+
 class TrellisFusedDenseMLP(nn.Module):
     """Dense MLP with fused gate+up projection for better performance.
 

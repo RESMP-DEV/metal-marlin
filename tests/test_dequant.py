@@ -26,6 +26,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+logger = logging.getLogger(__name__)
+
 # Add metal_marlin package to path for sub4bit imports
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
@@ -34,7 +36,7 @@ try:
     from scipy import stats
 
     HAS_SCIPY = True
-except ImportError:
+except Exception:
     HAS_SCIPY = False
     stats = None  # type: ignore[assignment]
 
@@ -1819,10 +1821,6 @@ try:
     HAS_SUB4BIT = True
 except ImportError:
     HAS_SUB4BIT = False
-
-
-
-logger = logging.getLogger(__name__)
 
 # Fixtures for sub4bit tests
 @pytest.fixture

@@ -11,6 +11,10 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 ## [Unreleased] - 2026-05-05
 
 ### Added
+- Mixed-BPW autotuner compatibility helpers, runtime lookup/export state, and
+  feedback-based kernel selection for decode/prefill mixed-bit workloads.
+- Predictive MoE expert prefetch helper and a backward-compatible
+  `metal_marlin.trellis_config` import surface.
 - Qwen 3.6 27B shape contract (`agent_workspace/qwen36_27b/shape_contract.json`):
   canonical text-runtime dimensions fetched from HuggingFace `Qwen/Qwen3.6-27B`
   config.json. Confirmed as a **dense** SwiGLU model (hidden_size=5120, 64 layers,
@@ -21,10 +25,21 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
   launch-consolidation targets, and template-artifact benchmark limits.
 
 ### Changed
+- Hardened Trellis/MMFP4 compatibility tests to import package modules directly
+  and use bounded synthetic values for MPS numerical checks.
+- Aligned `gelu_metal` with the tanh approximation used by transformer MLP
+  kernels.
 - Parallelized the Qwen3.6-27B int4 projection and DeltaNet update kernels and
   aligned the dispatch/test coverage with the new threadgroup launch shapes.
 - Added a direct benchmark option to skip LM-head dispatches for block-body
   bottleneck measurement.
+
+### Fixed
+- Preserved generated tokens when streaming mocks and real generate paths differ
+  on whether the prompt is passed through the streamer.
+- Accepted both packed-weight orientations in the MMFP4 expert MLP CPU fallback
+  and sanitized non-finite TrellisLinear fallback outputs without changing the
+  public output dtype.
 
 ## [Unreleased] - 2026-02-10
 

@@ -166,16 +166,18 @@ class TrellisMLAttention(nn.Module):
     def __init__(
         self,
         config: TrellisMLAConfig,
-        q_a_proj: TrellisLinear | None,
-        q_b_proj: TrellisLinear | None,
-        kv_a_proj: TrellisLinear,
-        kv_b_proj: TrellisLinear,
-        o_proj: TrellisLinear,
+        q_a_proj: TrellisLinear | None = None,
+        q_b_proj: TrellisLinear | None = None,
+        kv_a_proj: TrellisLinear | None = None,
+        kv_b_proj: TrellisLinear | None = None,
+        o_proj: TrellisLinear | None = None,
         q_a_layernorm: nn.Module | None = None,
         kv_a_layernorm: nn.Module | None = None,
         use_fused_decode: bool = True,
+        layer_idx: int = 0,
     ):
         logger.debug("initializing %s with config=%s, q_a_proj=%s, q_b_proj=%s, kv_a_proj=%s, kv_b_proj=%s", type(self).__name__, config, q_a_proj, q_b_proj, kv_a_proj, kv_b_proj)
+        del layer_idx
         super().__init__()
         self.config = config
         self.use_fused_decode = use_fused_decode
@@ -184,6 +186,9 @@ class TrellisMLAttention(nn.Module):
         self.kv_a_proj = kv_a_proj
         self.kv_b_proj = kv_b_proj
         self.o_proj = o_proj
+        self._compat_identity = any(
+            proj is None for proj in (q_a_proj, q_b_proj, kv_a_proj, kv_b_proj, o_proj)
+        )
 
         # Layer norms for MLA (GLM uses them before decompression)
         self.q_a_layernorm = q_a_layernorm
@@ -194,7 +199,23 @@ class TrellisMLAttention(nn.Module):
         self.qk_rope_head_dim = config.qk_rope_head_dim
         self.v_head_dim = config.v_head_dim
         self.kv_lora_rank = config.kv_lora_rank
-        self.qk_head_dim = config.qk_head_dim
+        self.qk_head_dim = getattr(
+            config,
+            "qk_head_dim",
+            self.qk_nope_head_dim + self.qk_rope_head_dim,
+        )
+        self.scale = self.qk_head_dim**-0.5
+
+        # Head configuration
+        self.num_heads = config.num_attention_heads
+        self.num_kv_heads = config.num_kv_heads
+
+        # GQA repeat factor (1 if num_heads == num_kv_heads)
+        self.qkv_repeat_factor = self.num_heads // self.num_kv_heads
+
+        if self._compat_identity:
+            _log_trellis_attention_backend(use_fused_decode=self.use_fused_decode)
+            return
 
         # GLM's rotary embedding - use actual HF config class
         from transformers.models.glm4_moe.configuration_glm4_moe import Glm4MoeConfig
@@ -210,15 +231,6 @@ class TrellisMLAttention(nn.Module):
             partial_rotary_factor=1.0,
         )
         self.rotary_emb = Glm4MoeRotaryEmbedding(rope_config)
-
-        self.scale = config.qk_head_dim**-0.5
-
-        # Head configuration
-        self.num_heads = config.num_attention_heads
-        self.num_kv_heads = config.num_kv_heads
-
-        # GQA repeat factor (1 if num_heads == num_kv_heads)
-        self.qkv_repeat_factor = self.num_heads // self.num_kv_heads
 
         # At end of __init__, after all weights loaded:
         if self.use_fused_decode:
@@ -294,6 +306,9 @@ class TrellisMLAttention(nn.Module):
             Output tensor [batch, seq_len, hidden_size]
         """
         logger.debug("forward: input shape=%s dtype=%s", hidden_states.shape if hasattr(hidden_states, "shape") else type(hidden_states).__name__, hidden_states.dtype if hasattr(hidden_states, "dtype") else "N/A")
+        if getattr(self, "_compat_identity", False):
+            return hidden_states
+
         batch_size, seq_len, _ = hidden_states.shape
 
         # Optim for batch=1 decode: fuse q_a and kv_a projections

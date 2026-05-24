@@ -34,8 +34,7 @@ def test_mmfp4_moe_balance_loss():
     print(f"SUCCESS: MMFP4MoE.balance_loss computed: {model.balance_loss.item()}")
 
 def test_mmfp4_fused_moe_balance_loss():
-    print("
-Testing MMFP4FusedMoE balance_loss...")
+    print("\nTesting MMFP4FusedMoE balance_loss...")
     model = MMFP4FusedMoE(
         n_experts=8,
         n_experts_per_tok=2,
@@ -64,9 +63,7 @@ if __name__ == "__main__":
     try:
         test_mmfp4_moe_balance_loss()
         test_mmfp4_fused_moe_balance_loss()
-        print("
-All tests passed!")
+        print("\nAll tests passed!")
     except Exception as e:
-        print(f"
-An error occurred: {e}")
+        print(f"\nAn error occurred: {e}")
         exit(1)

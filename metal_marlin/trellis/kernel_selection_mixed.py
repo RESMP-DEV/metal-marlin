@@ -36,7 +36,8 @@ from __future__ import annotations
 import random
 import logging
 import time
-from collections import Counter
+from collections import Counter, deque
+from typing import Callable
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ SPECIALIZED_DECODE_KERNELS = {
 # --- New kernel names for mixed-BPW scenarios ---
 FAST_2BIT_KERNEL = "moe_trellis_fast_2bit_swiglu"
 MIXED_BPW_KERNEL = "moe_trellis_mixed_bpw_swiglu"
+FAST_2BIT_FAMILY = "fast_2bit"
+MIXED_BPW_FAMILY = "mixed_bpw"
+STANDARD_FAMILY = "standard"
 
 
 class KernelFeedback:
@@ -266,3 +270,186 @@ def get_kernel_for_batch_size(
     if use_fp32_acc:
         return "moe_trellis_swiglu_fp32acc", TILE_SIZES["base"]
     return "moe_trellis_swiglu_large_batch", TILE_SIZES["large_batch"]
+
+
+class MixedKernelSelector:
+    """Stateful mixed-BPW kernel selector with runtime feedback."""
+
+    def __init__(self, history_len: int = 128, initial_exploration_rate: float = 0.05) -> None:
+        self.history_len = history_len
+        self.exploration_rate = initial_exploration_rate
+        self.timings: dict[tuple[str, int], deque[float]] = {}
+        self.total_selections = 0
+        self.ab_tests_run = 0
+        self.correct_ab_selections = 0
+
+    def select_kernel(
+        self,
+        batch_size: int,
+        active_expert_bits: list[int],
+        use_fp32_acc: bool = False,
+        available_kernels: set[str] | None = None,
+        gpu_memory_pressure: float = 0.0,
+        expert_activation_pattern: dict[str, float] | None = None,
+        benchmark_kernel: Callable[[str], float] | None = None,
+    ) -> tuple[str, dict[str, object]]:
+        """Select a kernel using heuristics, feedback, and optional A/B timing."""
+        self.total_selections += 1
+        baseline_kernel = self._standard_kernel(batch_size, use_fp32_acc)
+        heuristic_kernel, heuristic_family = self._heuristic_kernel(batch_size, active_expert_bits)
+        info: dict[str, object] = {
+            "baseline_kernel": baseline_kernel,
+            "heuristic_family": heuristic_family,
+            "reason": "heuristic",
+        }
+
+        if use_fp32_acc and batch_size == 1:
+            heuristic_kernel = baseline_kernel
+            heuristic_family = STANDARD_FAMILY
+            info["heuristic_family"] = heuristic_family
+
+        if gpu_memory_pressure > 0.8:
+            return "moe_trellis_swiglu", {**info, "reason": "memory_pressure"}
+
+        if expert_activation_pattern and expert_activation_pattern.get("top_expert_share", 0.0) >= 0.85:
+            return baseline_kernel, {**info, "reason": "activation_pattern_skewed"}
+
+        feedback_kernel = self._best_feedback_kernel(batch_size, available_kernels)
+        if feedback_kernel is not None and feedback_kernel != heuristic_kernel:
+            return feedback_kernel, {**info, "reason": "feedback_optimization"}
+
+        if available_kernels is not None and heuristic_kernel not in available_kernels:
+            fallback = self._available_fallback(available_kernels)
+            return fallback, {**info, "reason": "availability_fallback"}
+
+        if (
+            benchmark_kernel is not None
+            and available_kernels
+            and random.random() < self.exploration_rate
+        ):
+            candidates = sorted(k for k in available_kernels if k != heuristic_kernel)
+            if candidates:
+                challenger = random.choice(candidates)
+                winner, ab_info = self._run_ab_test(
+                    heuristic_kernel,
+                    challenger,
+                    batch_size,
+                    benchmark_kernel,
+                )
+                return winner, {**info, "reason": "ab_testing_runtime", "ab_test": ab_info}
+
+        return heuristic_kernel, info
+
+    def record_timing(
+        self,
+        kernel_name: str,
+        batch_size: int,
+        latency_ms: float,
+        selection_reason: str | None = None,
+    ) -> None:
+        """Record observed kernel latency for later feedback selection."""
+        del selection_reason
+        key = (kernel_name, batch_size)
+        if key not in self.timings:
+            self.timings[key] = deque(maxlen=self.history_len)
+        self.timings[key].append(latency_ms)
+
+    def get_statistics(self) -> dict[str, object]:
+        accuracy = (
+            self.correct_ab_selections / self.ab_tests_run if self.ab_tests_run else 0.0
+        )
+        return {
+            "total_selections": self.total_selections,
+            "ab_tests_run": self.ab_tests_run,
+            "selection_accuracy": accuracy,
+            "tracked_kernels": len(self.timings),
+        }
+
+    def reset_history(self) -> None:
+        self.timings.clear()
+        self.total_selections = 0
+        self.ab_tests_run = 0
+        self.correct_ab_selections = 0
+
+    def set_exploration_rate(self, rate: float) -> None:
+        if not 0.0 <= rate <= 1.0:
+            raise ValueError("exploration rate must be in [0, 1]")
+        self.exploration_rate = rate
+
+    @staticmethod
+    def _standard_kernel(batch_size: int, use_fp32_acc: bool = False) -> str:
+        return get_kernel_for_batch_size(batch_size, use_fp32_acc)[0]
+
+    def _heuristic_kernel(
+        self,
+        batch_size: int,
+        active_expert_bits: list[int],
+    ) -> tuple[str, str]:
+        counts = Counter(active_expert_bits)
+        total = max(1, len(active_expert_bits))
+        is_decode = batch_size == 1
+
+        if counts.get(2, 0) / total > 0.5:
+            return self._standard_kernel(batch_size), FAST_2BIT_FAMILY
+
+        if {2, 3, 4}.issubset(counts):
+            if is_decode:
+                return "moe_trellis_mixed_swiglu_decode", MIXED_BPW_FAMILY
+            return "moe_trellis_mixed_swiglu", MIXED_BPW_FAMILY
+
+        return self._standard_kernel(batch_size), STANDARD_FAMILY
+
+    def _best_feedback_kernel(
+        self,
+        batch_size: int,
+        available_kernels: set[str] | None,
+    ) -> str | None:
+        best_kernel = None
+        best_latency = float("inf")
+        for (kernel_name, recorded_batch), latencies in self.timings.items():
+            if recorded_batch != batch_size or not latencies:
+                continue
+            if available_kernels is not None and kernel_name not in available_kernels:
+                continue
+            avg_latency = sum(latencies) / len(latencies)
+            if avg_latency < best_latency:
+                best_latency = avg_latency
+                best_kernel = kernel_name
+        return best_kernel
+
+    @staticmethod
+    def _available_fallback(available_kernels: set[str]) -> str:
+        preferred = [
+            "moe_trellis_swiglu",
+            "moe_trellis_swiglu_decode",
+            "moe_trellis_swiglu_prefill4",
+        ]
+        for kernel_name in preferred:
+            if kernel_name in available_kernels:
+                return kernel_name
+        return sorted(available_kernels)[0]
+
+    def _run_ab_test(
+        self,
+        heuristic_kernel: str,
+        challenger: str,
+        batch_size: int,
+        benchmark_kernel: Callable[[str], float],
+    ) -> tuple[str, dict[str, object]]:
+        heuristic_latency = benchmark_kernel(heuristic_kernel)
+        challenger_latency = benchmark_kernel(challenger)
+        self.record_timing(heuristic_kernel, batch_size, heuristic_latency, "ab_testing")
+        self.record_timing(challenger, batch_size, challenger_latency, "ab_testing")
+
+        winner = heuristic_kernel if heuristic_latency <= challenger_latency else challenger
+        self.ab_tests_run += 1
+        if winner == heuristic_kernel:
+            self.correct_ab_selections += 1
+
+        return winner, {
+            "heuristic": heuristic_kernel,
+            "challenger": challenger,
+            "winner": winner,
+            "heuristic_latency_ms": heuristic_latency,
+            "challenger_latency_ms": challenger_latency,
+        }
