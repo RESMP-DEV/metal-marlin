@@ -429,6 +429,15 @@ def fused_scaled_dot_product_attention(
     if scale is None:
         scale = 1.0 / math.sqrt(q.shape[-1])
 
+    if mask is None:
+        return torch.nn.functional.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=causal,
+            scale=scale,
+        )
+
     if mask is None and causal:
         batch, heads, seq_q, _ = q.shape
         seq_k = k.shape[2]

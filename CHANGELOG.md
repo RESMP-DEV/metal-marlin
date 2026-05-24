@@ -37,6 +37,8 @@ This file tracks AlphaHENG-local changes, operator-facing behavior changes, and 
 ### Fixed
 - Preserved generated tokens when streaming mocks and real generate paths differ
   on whether the prompt is passed through the streamer.
+- Routed unmasked attention through PyTorch SDPA directly while preserving causal
+  handling.
 - Accepted both packed-weight orientations in the MMFP4 expert MLP CPU fallback
   and sanitized non-finite TrellisLinear fallback outputs without changing the
   public output dtype.
