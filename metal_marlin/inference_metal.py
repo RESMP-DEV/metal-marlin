@@ -675,6 +675,59 @@ class MetalKVCache:
 
 
 # ---------------------------------------------------------------------------
+# MetalMLP
+# ---------------------------------------------------------------------------
+
+
+class MetalMLP(nn.Module):
+    """SwiGLU feed-forward block using Metal-backed quantized projections."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        bits: Literal[2, 4, 8] = 4,
+        group_size: int = 128,
+    ):
+        logger.debug(
+            "initializing %s with hidden_size=%s, intermediate_size=%s, bits=%s, group_size=%s",
+            type(self).__name__,
+            hidden_size,
+            intermediate_size,
+            bits,
+            group_size,
+        )
+        super().__init__()
+        self.gate_proj = MetalQuantizedLinear(
+            hidden_size,
+            intermediate_size,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+        self.up_proj = MetalQuantizedLinear(
+            hidden_size,
+            intermediate_size,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+        self.down_proj = MetalQuantizedLinear(
+            intermediate_size,
+            hidden_size,
+            bits=bits,
+            group_size=group_size,
+            bias=False,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Apply gated feed-forward projection."""
+        gate = F.silu(self.gate_proj(hidden_states))
+        up = self.up_proj(hidden_states)
+        return self.down_proj(gate * up)
+
+
+# ---------------------------------------------------------------------------
 # MetalMoELayer
 # ---------------------------------------------------------------------------
 

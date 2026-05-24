@@ -215,6 +215,7 @@ class PersistentKVCache:
 
 if TYPE_CHECKING:
     import torch as torch_typing
+    from ..speculative.mmfp4_draft import MMFP4DraftModel
 
 
 

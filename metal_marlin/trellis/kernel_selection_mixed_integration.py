@@ -66,6 +66,8 @@ import logging
 
 import torch
 
+from metal_marlin.metal_dispatch import get_default_library
+
 
 
 logger = logging.getLogger(__name__)
@@ -312,6 +314,7 @@ def example_usage_in_model():
     # This is pseudocode showing the integration pattern
 
     # Initialize dispatcher (once per model)
+    metal_lib = get_default_library()
     dispatcher = MixedBpwMoEDispatcher(
         lib=metal_lib,  # Your MetalKernelLibrary instance
         expert_bit_metadata={

@@ -40,6 +40,8 @@ import numpy as np
 
 from metal_marlin._compat import HAS_MPS, HAS_PYOBJC_METAL, Metal, torch
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
@@ -723,9 +725,6 @@ class VisionMetal:
 
         Common preprocessing step before resize/normalize for images loaded
         from JPEG/PNG files.
-
-
-logger = logging.getLogger(__name__)
 
         Args:
             image: Input image as uint8 tensor of any shape

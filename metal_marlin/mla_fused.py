@@ -176,6 +176,7 @@ def _require_mps() -> None:
 def _mla_fused_decode_numpy(
     hidden: np.ndarray,
     q_a_weights: np.ndarray,
+    q_b_weights: np.ndarray,
     kv_a_weights: np.ndarray,
     kv_b_weights: np.ndarray,
     o_weights: np.ndarray,
@@ -194,7 +195,7 @@ def _mla_fused_decode_numpy(
     # Step 1: Compute Q via two-stage projection
     q_latent = hidden @ q_a_weights.T  # [B, S, q_lora_rank]
     q = q_latent.reshape(batch * seq_q, params.q_lora_rank)
-    q = q @ q_weights.T  # [B*S, num_heads * head_dim]
+    q = q @ q_b_weights.T  # [B*S, num_heads * head_dim]
     q = q.reshape(batch, seq_q, params.num_heads, params.head_dim)
     
     # Step 2: Compute KV via two-stage projection

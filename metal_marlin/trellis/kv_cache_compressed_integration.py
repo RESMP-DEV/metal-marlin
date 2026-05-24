@@ -49,6 +49,8 @@ import torch
 
 from .kv_cache_compressed import KV_QUANT_MODE
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .config import TrellisModelConfig
     from .kv_cache_compressed import CompressedKVCacheMLA
@@ -435,8 +437,6 @@ def estimate_memory_savings(
 
     Example:
         from metal_marlin.trellis.config import TrellisModelConfig
-
-logger = logging.getLogger(__name__)
 
         config = TrellisModelConfig.from_pretrained("THUDM/glm-4-9b-chat")
         stats = estimate_memory_savings(

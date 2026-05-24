@@ -24,7 +24,7 @@ import torch.nn.functional as F
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    pass
+    from metal_marlin.moe_dispatch import MoEDispatchInfo
 
 
 @dataclass

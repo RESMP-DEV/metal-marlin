@@ -2460,9 +2460,6 @@ if HAS_METAL and HAS_MPS:
             lib, device, np.array([top_k], dtype=np.uint32))
         num_experts_buf=_params_buffer(
             lib, device, np.array([num_experts], dtype=np.uint32))
-        group_buf=_params_buffer(
-            lib, device, np.array([group_size], dtype=np.uint32))
-
         tile_m=64
         tile_n=64
         threads_per_tg=128
@@ -2486,7 +2483,6 @@ if HAS_METAL and HAS_MPS:
                 intermediate_buf,
                 topk_buf,
                 num_experts_buf,
-                group_buf,
             ],
             wait=True,
         )

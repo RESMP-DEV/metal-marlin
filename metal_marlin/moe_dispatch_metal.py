@@ -38,6 +38,7 @@ import torch
 
 from ._compat import Metal
 from .metal_dispatch import (
+    dispatch_kernel,
     get_default_library,
     mps_tensor_to_metal_buffer,
     require_metal,

@@ -28,7 +28,7 @@ from torch import Tensor
 
 from ..kv_cache import KVCache
 from .draft import DraftModel, DraftOutput, EagleHead, NGramDraft, SmallModelDraft
-from .token_acceptance import TokenAcceptanceTracker, create_acceptance_report
+from .token_acceptance import AcceptanceResult, TokenAcceptanceTracker, create_acceptance_report
 from .verify import VerifyResult, verify_speculative
 
 if TYPE_CHECKING:

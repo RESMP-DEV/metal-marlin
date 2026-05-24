@@ -52,21 +52,13 @@ if TYPE_CHECKING:
         shape: tuple[int, ...]
         ndim: int
         device: Any
-        logger.debug("contiguous called")
         def contiguous(self) -> Tensor: ...
-        logger.debug("detach called")
         def detach(self) -> Tensor: ...
-        logger.debug("cpu called")
         def cpu(self) -> Tensor: ...
-        logger.debug("numpy called")
         def numpy(self) -> Any: ...
-        logger.debug("to called with dtype=%s", dtype)
         def to(self, dtype: Any) -> Tensor: ...
-        logger.debug("permute called")
         def permute(self, *dims: int) -> Tensor: ...
-        logger.debug("squeeze called")
         def squeeze(self) -> Tensor: ...
-        logger.debug("unsqueeze called with dim=%s", dim)
         def unsqueeze(self, dim: int) -> Tensor: ...
 
 from metal_marlin._compat import torch
@@ -80,7 +72,8 @@ except Exception:
     _vision_metal = None
     _has_vision_metal = False
 
-
+HAS_VISION_METAL = _has_vision_metal
+_VISION_METAL = _vision_metal
 
 logger = logging.getLogger(__name__)
 

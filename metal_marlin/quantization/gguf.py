@@ -205,28 +205,28 @@ class GGUFFile:
             return struct.unpack("<b", self._file.read(1))[0]
         elif value_type == GGUF_TYPE_UINT16:
             return struct.unpack("<H", self._file.read(2))[0]
-        elif value_type == GGML_TYPE_INT16:
+        elif value_type == GGUF_TYPE_INT16:
             return struct.unpack("<h", self._file.read(2))[0]
         elif value_type == GGUF_TYPE_UINT32:
             return struct.unpack("<I", self._file.read(4))[0]
-        elif value_type == GGML_TYPE_INT32:
+        elif value_type == GGUF_TYPE_INT32:
             return struct.unpack("<i", self._file.read(4))[0]
         elif value_type == GGUF_TYPE_UINT64:
             return struct.unpack("<Q", self._file.read(8))[0]
-        elif value_type == GGML_TYPE_INT64:
+        elif value_type == GGUF_TYPE_INT64:
             return struct.unpack("<q", self._file.read(8))[0]
-        elif value_type == GGML_TYPE_FLOAT32:
+        elif value_type == GGUF_TYPE_FLOAT32:
             return struct.unpack("<f", self._file.read(4))[0]
-        elif value_type == GGML_TYPE_BOOL:
+        elif value_type == GGUF_TYPE_BOOL:
             return struct.unpack("<?", self._file.read(1))[0]
-        elif value_type == GGML_TYPE_STRING:
+        elif value_type == GGUF_TYPE_STRING:
             str_len = struct.unpack("<Q", self._file.read(8))[0]
             return self._file.read(str_len).decode("utf-8")
-        elif value_type == GGML_TYPE_ARRAY:
+        elif value_type == GGUF_TYPE_ARRAY:
             value_len = struct.unpack("<Q", self._file.read(8))[0]
             elem_type = struct.unpack("<I", self._file.read(4))[0]
             return [self._read_value(elem_type) for _ in range(value_len)]
-        elif value_type == GGML_TYPE_UINT64_ARRAY:
+        elif value_type == GGUF_TYPE_UINT64_ARRAY:
             arr_len = struct.unpack("<Q", self._file.read(8))[0]
             return [struct.unpack("<Q", self._file.read(8))[0] for _ in range(arr_len)]
         else:

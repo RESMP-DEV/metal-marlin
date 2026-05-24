@@ -32,7 +32,7 @@ from __future__ import annotations
 import mmap
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from safetensors import safe_open
@@ -156,7 +156,7 @@ class MmapSafetensorsLoader:
 
         return tensor
 
-    def get_slice(self, name: str) -> TensorSlice:
+    def get_slice(self, name: str) -> Any:
         """Get a slice accessor for a tensor.
 
         Returns a lightweight object that can be used to access
