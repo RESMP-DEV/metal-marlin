@@ -294,6 +294,29 @@ def test_fused_artifact_runtime_decision_requires_valid_manifest(tmp_path: Path)
     assert full_enabled.coverage_layers == QWEN36_27B_PROFILE.num_hidden_layers
     assert full_enabled.coverage_tensors == len(full_manifest.tensors)
 
+    template_for_serving = decide_fused_artifact_path(
+        _config(),
+        manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+        require_full_layer_coverage=True,
+    )
+    assert template_for_serving.enabled is False
+    assert "serving requires full-layer coverage" in template_for_serving.reason
+    assert template_for_serving.coverage_kind == "template"
+
+    full_for_serving = decide_fused_artifact_path(
+        _config(),
+        full_manifest_path,
+        env={FEATURE_FLAG: "1"},
+        require_fresh_metallib=False,
+        require_kernel_symbols=False,
+        require_full_layer_coverage=True,
+    )
+    assert full_for_serving.enabled is True
+    assert full_for_serving.coverage_kind == "full_layers"
+
 
 def test_fused_artifact_runtime_decision_rejects_missing_roles(tmp_path: Path) -> None:
     manifest = _manifest_for_all_roles()

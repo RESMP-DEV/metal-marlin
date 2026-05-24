@@ -221,6 +221,7 @@ def decide_fused_artifact_path(
     env: Mapping[str, str] | None = None,
     require_fresh_metallib: bool = True,
     require_kernel_symbols: bool = True,
+    require_full_layer_coverage: bool = False,
     library: Any | None = None,
 ) -> RuntimeDecision:
     """Return whether the artifact-backed Qwen3.6-27B fused path is usable."""
@@ -237,6 +238,15 @@ def decide_fused_artifact_path(
         coverage = artifact_coverage(manifest)
     except (OSError, ValueError, TypeError) as exc:
         return RuntimeDecision(False, f"invalid artifact manifest: {exc}")
+
+    if require_full_layer_coverage and coverage.kind != "full_layers":
+        return RuntimeDecision(
+            False,
+            "artifact manifest is template-only; serving requires full-layer coverage",
+            coverage_kind=coverage.kind,
+            coverage_layers=coverage.layers,
+            coverage_tensors=coverage.tensors,
+        )
 
     if require_fresh_metallib:
         staleness = get_staleness_details()

@@ -94,6 +94,7 @@ class Qwen36BlockSkeletonSummary:
     runner: str
     decode_tokens: int
     warmup_tokens: int
+    generated_token_ids: tuple[int, ...]
     elapsed_ms: float
     decode_tok_per_s: float
     dispatch_count: int
@@ -245,6 +246,7 @@ def make_summary(
     warmup_tokens: int,
     elapsed_ms: float,
     kernel_names: Sequence[str],
+    generated_token_ids: Sequence[int] | None = None,
     command_buffers: int = 0,
     coverage_kind: ManifestCoverageKind | None = None,
     coverage_layers: int | None = None,
@@ -259,6 +261,7 @@ def make_summary(
         runner=runner,
         decode_tokens=decode_tokens,
         warmup_tokens=warmup_tokens,
+        generated_token_ids=tuple(generated_token_ids or ()),
         elapsed_ms=elapsed_ms,
         decode_tok_per_s=0.0 if elapsed_ms <= 0 else active_tokens / (elapsed_ms / 1000.0),
         dispatch_count=dispatch_count,
@@ -370,6 +373,24 @@ def _params_buffer(lib, values: Sequence[int], label: str):
         np.asarray(values, dtype=np.int32).tobytes(),
         label,
     )
+
+
+def _read_int32_buffer(buffer, count: int) -> list[int]:
+    import numpy as np
+
+    if count < 0:
+        raise ValueError("count must be non-negative")
+    if count == 0:
+        return []
+    contents = buffer.contents()
+    data = contents.as_buffer(count * np.dtype(np.int32).itemsize)
+    return [int(value) for value in np.frombuffer(data, dtype=np.int32, count=count).copy()]
+
+
+def _validate_token_id(token_id: int, vocab_size: int) -> int:
+    if token_id < 0 or token_id >= vocab_size:
+        raise RuntimeError(f"generated token id {token_id} is outside vocab size {vocab_size}")
+    return token_id
 
 
 @dataclass(frozen=True)
@@ -938,6 +959,7 @@ def run_direct_benchmark(
 
     buffers = _load_direct_buffers(manifest_path, max_context=max_context)
     lib = get_qwen36_kernel_library()
+    profile = QWEN36_27B_PROFILE
     hidden = buffers.hidden_a
 
     for token_position in range(warmup_tokens):
@@ -953,6 +975,7 @@ def run_direct_benchmark(
     launch_tracing.enable_for_testing()
     launch_tracing.reset()
     start = time.perf_counter()
+    generated_token_ids: list[int] = []
     for offset in range(decode_tokens):
         with lib.batch_dispatch(wait=True):
             hidden = _run_one_token_direct(
@@ -962,6 +985,9 @@ def run_direct_benchmark(
                 include_lm_head=not skip_lm_head,
                 include_mlp=not skip_mlp,
             )
+        if not skip_lm_head:
+            token_id = _read_int32_buffer(buffers.token, 1)[0]
+            generated_token_ids.append(_validate_token_id(token_id, profile.vocab_size))
     elapsed_ms = (time.perf_counter() - start) * 1000.0
     return make_summary(
         manifest_path=str(manifest_path),
@@ -970,6 +996,7 @@ def run_direct_benchmark(
         warmup_tokens=warmup_tokens,
         elapsed_ms=elapsed_ms,
         kernel_names=launch_tracing.kernel_names(),
+        generated_token_ids=generated_token_ids,
         command_buffers=decode_tokens,
         coverage_kind=buffers.weights.coverage_kind,
         coverage_layers=buffers.weights.coverage_layers,
@@ -1023,6 +1050,7 @@ def run_wrapper_benchmark(
     launch_tracing.reset()
     start = time.perf_counter()
     last_token = -1
+    generated_token_ids: list[int] = []
     for offset in range(decode_tokens):
         hidden, last_token = _run_one_token(
             hidden,
@@ -1033,6 +1061,7 @@ def run_wrapper_benchmark(
             warmup_tokens + offset,
             device=device,
         )
+        generated_token_ids.append(_validate_token_id(last_token, profile.vocab_size))
     if device == "mps":
         torch.mps.synchronize()
     elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -1045,6 +1074,7 @@ def run_wrapper_benchmark(
         warmup_tokens=warmup_tokens,
         elapsed_ms=elapsed_ms,
         kernel_names=kernel_names,
+        generated_token_ids=generated_token_ids,
         command_buffers=wrapper_command_buffers_from_kernel_names(kernel_names),
         coverage_kind=artifacts.coverage_kind,
         coverage_layers=artifacts.coverage_layers,

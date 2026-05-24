@@ -1152,12 +1152,12 @@ class TestQwen36FusedServingSelection:
         assert fused["coverage_layers"] is None
         assert fused["coverage_tensors"] is None
 
-    def test_serving_model_info_reports_qwen_fused_eligible(
+    def test_serving_model_info_rejects_template_qwen_fused_artifact(
         self,
         monkeypatch,
         tmp_path,
     ):
-        logger.info("running test_serving_model_info_reports_qwen_fused_eligible")
+        logger.info("running test_serving_model_info_rejects_template_qwen_fused_artifact")
         monkeypatch.setenv("METAL_MARLIN_MOCK_MODEL", "1")
         monkeypatch.setenv(FEATURE_FLAG, "1")
         _write_config(tmp_path, _qwen36_27b_config())
@@ -1171,8 +1171,8 @@ class TestQwen36FusedServingSelection:
         )
 
         fused = engine.get_model_info()["qwen36_27b_fused"]
-        assert fused["enabled"] is True
-        assert "fused artifact path selected" in fused["reason"]
+        assert fused["enabled"] is False
+        assert "serving requires full-layer coverage" in fused["reason"]
         assert fused["coverage_kind"] == "template"
         assert fused["coverage_layers"] == 1
         assert fused["coverage_tensors"] == len(REQUIRED_TENSOR_ROLES)

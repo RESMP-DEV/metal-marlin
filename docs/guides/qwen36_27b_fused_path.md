@@ -141,8 +141,9 @@ uv run python benchmarks/bench_qwen36_27b_block_skeleton.py \
 ```
 
 The benchmark reports wrapper-level dispatch counts, kernel counts, decode
-timing, and manifest coverage fields (`coverage_kind`, `coverage_layers`, and
-`coverage_tensors`) for the current fused skeleton.  It keeps
+timing, generated Metal argmax token IDs (`generated_token_ids`), and manifest
+coverage fields (`coverage_kind`, `coverage_layers`, and `coverage_tensors`) for
+the current fused skeleton.  It keeps
 `quality_claim=false` until generation or perplexity validation exists.  Template
 manifests report `template_weight_reuse=true`; full-layer manifests resolve
 concrete per-layer tensors and report `template_weight_reuse=false`.
@@ -189,7 +190,8 @@ reason, and structured coverage fields (`coverage_kind`, `coverage_layers`,
 and `coverage_tensors`) so callers do not need to parse the reason string.  The
 unfused/Trellis path remains the active correctness reference unless that
 status is eligible and later generation wiring explicitly consumes the fused
-wrappers.
+wrappers.  Serving requires a full-layer manifest; template manifests remain
+benchmark-only launch evidence.
 
 ## Runtime Boundary
 
@@ -207,6 +209,8 @@ unless all of the following are true:
   present exactly once, or full-layer coverage, where each of the 64 layers has
   exactly the layer-local roles required by its linear/full-attention cadence
   and the global roles are present once.
+- Serving calls require full-layer coverage; benchmark and validation calls may
+  still use template coverage for launch-path evidence.
 - The metallib checksum manifest is fresh and every Qwen3.6-27B kernel symbol
   is available.
 

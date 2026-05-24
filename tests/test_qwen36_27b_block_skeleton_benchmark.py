@@ -106,10 +106,13 @@ def test_benchmark_summary_is_explicitly_not_quality_claim() -> None:
             KERNEL_DELTANET_UPDATE,
             KERNEL_RMSNORM,
         ],
+        generated_token_ids=[42, 7],
         command_buffers=2,
     )
 
     assert summary.runner == "direct-metal-buffer"
+    assert summary.generated_token_ids == (42, 7)
+    assert summary.to_dict()["generated_token_ids"] == (42, 7)
     assert summary.decode_tok_per_s == 80.0
     assert summary.dispatch_count == 4
     assert summary.dispatches_per_token == 2.0
@@ -146,6 +149,20 @@ def test_benchmark_summary_reports_full_layer_coverage() -> None:
     assert summary.template_weight_reuse is False
     assert summary.quality_claim is False
     assert "generation/perplexity" in summary.notes
+
+
+def test_benchmark_summary_defaults_to_no_generated_tokens_when_lm_head_is_skipped() -> None:
+    summary = make_summary(
+        manifest_path=None,
+        runner="direct-metal-buffer",
+        decode_tokens=2,
+        warmup_tokens=0,
+        elapsed_ms=10.0,
+        kernel_names=[KERNEL_RMSNORM],
+        command_buffers=2,
+    )
+
+    assert summary.generated_token_ids == ()
 
 
 def test_manifest_tensor_lookup_uses_concrete_full_layer_weights() -> None:

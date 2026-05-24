@@ -508,6 +508,7 @@ class ServingEngine:
         self._qwen36_fused_decision = decide_fused_artifact_path(
             _load_config_dict(config.model_path),
             config.qwen36_27b_artifact_manifest,
+            require_full_layer_coverage=True,
         )
 
         if use_mock:
