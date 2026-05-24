@@ -17,6 +17,8 @@ from typing import Any
 from .._compat import HAS_TORCH, torch
 from .trace import ChromeTrace, TraceEvent
 
+logger = logging.getLogger(__name__)
+
 
 def _gpu_sync() -> None:
     """Synchronize GPU if torch MPS is available."""
@@ -439,8 +441,6 @@ def profile_kernel(
             result = marlin_gemm_fp4(A, B, scales)
 
         from metal_marlin.profiling import get_global_profiler
-
-logger = logging.getLogger(__name__)
 
         get_global_profiler().print_summary()
     """

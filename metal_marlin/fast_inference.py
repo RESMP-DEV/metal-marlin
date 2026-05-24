@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     import torch
 
 _logger = logging.getLogger(__name__)
+logger = _logger
 
 # Check if extension and torch are available
 _FAST_PATH_AVAILABLE = HAS_CPP_EXT and HAS_TORCH and _metal_dispatch_ext is not None

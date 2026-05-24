@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
 # Module-level logger
 _logger = logging.getLogger(__name__)
+logger = _logger
 
 # One-time init log tracking which attention backend the Trellis module uses
 _trellis_attention_backend_logged: bool = False

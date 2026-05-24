@@ -28,6 +28,7 @@ Note:
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
@@ -36,6 +37,8 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from .metal_dispatch import (
     HAS_METAL,

@@ -32,6 +32,7 @@ from ..quantization.trellis_codebook import TrellisCodebook
 _METAL_DEBUG = os.environ.get(
     "METAL_DEBUG", "").lower() in ("1", "true", "yes")
 _logger = logging.getLogger(__name__)
+logger = _logger
 if _METAL_DEBUG:
     logging.basicConfig(level=logging.DEBUG)
 

@@ -19,6 +19,8 @@ from .speculative.engine import (
     SpeculativeEngine,
 )
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from .kv_cache import KVCache
 
@@ -42,9 +44,6 @@ def generate_speculative(
     The target model verifies all K proposals in a single forward pass.
     Accepted tokens skip target decode steps; rejected tokens are resampled
     from the target's residual distribution.
-
-
-logger = logging.getLogger(__name__)
 
     Args:
         target_model: Main (expensive) language model to sample from.

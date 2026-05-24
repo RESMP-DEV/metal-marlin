@@ -19,6 +19,7 @@ from typing import Any
 from .._compat import HAS_TORCH, get_e2m1_torch_table, torch
 
 _logger = logging.getLogger(__name__)
+logger = _logger
 
 if HAS_TORCH and torch is not None:
     import torch.nn as nn

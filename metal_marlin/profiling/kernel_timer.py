@@ -7,6 +7,7 @@ from collections import defaultdict
 from contextlib import contextmanager
 
 _logger = logging.getLogger(__name__)
+logger = _logger
 _global_timer: KernelTimer | None = None
 
 class KernelTimer:

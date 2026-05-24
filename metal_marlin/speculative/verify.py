@@ -36,6 +36,8 @@ from torch import Tensor
 from ..kv_cache import KVCache
 from ..sampler import MetalSampler
 
+logger = logging.getLogger(__name__)
+
 # Global sampler cache for Metal-accelerated sampling
 _sampler: MetalSampler | None = None
 
@@ -198,9 +200,6 @@ def verify_eagle_tree(
 
     Eagle v3 generates drafts as a tree structure where multiple paths branch
     from common prefixes. This allows speculating on multiple possible
-
-logger = logging.getLogger(__name__)
-
     continuations and accepting whichever path the target model agrees with.
 
     The tree is represented by:

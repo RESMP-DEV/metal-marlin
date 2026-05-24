@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import logging
 
+logger = logging.getLogger(__name__)
+
 # Kernel selection thresholds optimized for M4 Max
 # These values are determined by benchmarks/bench_m4_kernel_selection.py
 M4_MAX_THRESHOLDS = {

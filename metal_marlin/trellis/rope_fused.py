@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from .linear import TrellisLinear
 
 _logger = logging.getLogger(__name__)
+logger = _logger
 _METAL_DEBUG = os.environ.get("METAL_DEBUG", "").lower() in ("1", "true", "yes")
 
 if HAS_METAL:

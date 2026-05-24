@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 
 _BATCH_TRACE_LOGGER = logging.getLogger("metal_marlin.batch_trace")
 _BATCH_TRACE_ENV_VAR = "METAL_MARLIN_TRACE_BATCH"
+logger = logging.getLogger(__name__)
 
 
 @dataclass

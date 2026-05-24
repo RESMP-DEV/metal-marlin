@@ -10,7 +10,10 @@ Key exports:
 - HAS_TORCH: Feature flag for runtime detection
 """
 
+import logging
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 # Always-available imports
 from ._compat import HAS_MPS, HAS_PYOBJC_METAL, HAS_TORCH
@@ -322,8 +325,6 @@ def _preload_metallib() -> None:
 
         lib = get_precompiled_library()
         if lib is not None:
-            import logging
-
             logging.getLogger(__name__).debug("Preloaded metallib")
     except Exception:
         pass  # Silently fall back to JIT
