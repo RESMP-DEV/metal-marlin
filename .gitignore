@@ -110,3 +110,6 @@ docs/api/
 
 # Metal shader archives (compiled)
 *.air
+
+# Local semantic-search index
+.sindexer/
